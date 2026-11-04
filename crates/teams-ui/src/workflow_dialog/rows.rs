@@ -4,6 +4,7 @@
 //! (its Overview) and Delete (Teams' question over the list). A click on the row opens its Overview. Edit, Turn off/on
 //! and Delete from the list come back to the list.
 use super::*;
+use gpui_component::Sizable as _;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 
 /// Power Automate's page of a workflow, where Teams' Manage leads.
@@ -69,6 +70,9 @@ impl WorkflowDialog {
 
     /// One workflow in the list.
     pub(super) fn workflow_row(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {
+        if self.app.is_some() {
+            return self.app_row(card, palette, cx);
+        }
         let scheduled = card.properties.get("definition").and_then(markup::recurrence_trigger);
         let state = match (card.enabled(), self.next_runs.get(&card.id)) {
             (true, Some(next)) => format!("Active: Next run: {next}"),
@@ -117,9 +121,7 @@ impl WorkflowDialog {
                         .child(Glyph::REPEAT.icon().size(px(14.0))),
                 )
             })
-            .when(acting, |row| {
-                row.child(div().px_2().child(gpui_component::spinner::Spinner::new()))
-            })
+            .when(acting, |row| row.child(div().px_2().child(Self::row_spinner(palette))))
             .when(
                 !acting && scheduled.is_some() && card.enabled() && !self.core.read_only(),
                 |row| {
@@ -144,11 +146,88 @@ impl WorkflowDialog {
             .into_any_element()
     }
 
+    /// A row of the Workflows app's lists: the name on the left, its state (with a mark, or a spinner while it is
+    /// turned off or on) and its "..." menu on the right; a click opens its Overview.
+    fn app_row(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {
+        let acting = self.acting.as_deref() == Some(card.id.as_str());
+        let opened = card.clone();
+        let id = format!("workflow-open-{}", card.id);
+        let state = if card.enabled() {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(Glyph::REFRESH.icon().size(px(14.0)).text_color(rgb(palette.brand)))
+                .child("Active")
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(Glyph::CIRCLE_MINUS.icon().size(px(14.0)))
+                .child("Inactive")
+        };
+        div()
+            .id(SharedString::from(id.clone()))
+            .debug_selector(move || id.clone())
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_5()
+            .min_h(px(88.0))
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(palette.hover)))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_flow(opened.clone(), cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(card.name.clone()),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "workflow-row-state".to_owned())
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(palette.muted_foreground))
+                    .map(|cell| {
+                        if acting {
+                            cell.child(Self::row_spinner(palette))
+                        } else {
+                            cell.child(state)
+                        }
+                    }),
+            )
+            .child(self.row_menu(card, cx))
+            .into_any_element()
+    }
+
+    /// The spinner a row shows while it is turned off or on, as Teams' ring: the kit's own draws by an icon path the
+    /// app's glyphs don't serve, so it turns the app's loader.
+    fn row_spinner(palette: Palette) -> AnyElement {
+        div()
+            .debug_selector(|| "workflow-row-spinner".to_owned())
+            .text_color(rgb(palette.brand))
+            .child(
+                gpui_component::spinner::Spinner::new()
+                    .icon(Glyph::LOADING.icon())
+                    .small(),
+            )
+            .into_any_element()
+    }
+
     fn row_menu(&self, card: &Card, cx: &Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
         let card = card.clone();
         let runnable = Self::runnable(&card);
         let read_only = self.core.read_only();
+        // the Workflows app's menu has no Manage
+        let manage = self.app.is_none();
         let id = format!("workflow-row-more-{}", card.id);
         selected_by(
             id.clone(),
@@ -180,9 +259,12 @@ impl WorkflowDialog {
                         if runnable {
                             menu = menu.item(item("run", Glyph::PLAY, "Run").on_click(act(RowAction::Run)));
                         }
+                        menu = menu.item(item("edit", Glyph::PENCIL, "Edit").on_click(act(RowAction::Edit)));
+                        if manage {
+                            menu =
+                                menu.item(item("manage", Glyph::OPEN_OUT, "Manage").on_click(act(RowAction::Manage)));
+                        }
                         menu = menu
-                            .item(item("edit", Glyph::PENCIL, "Edit").on_click(act(RowAction::Edit)))
-                            .item(item("manage", Glyph::OPEN_OUT, "Manage").on_click(act(RowAction::Manage)))
                             .item(
                                 item(
                                     "toggle",
@@ -293,10 +375,10 @@ impl WorkflowDialog {
 impl WorkflowDialog {
     /// Notes which list a row is acted on in, for the change to return to it.
     fn note_listing(&mut self) {
-        self.listing = if matches!(self.screen, Screen::Home) {
-            Listing::Home
-        } else {
-            Listing::Channel
+        self.listing = match self.screen {
+            Screen::Home => Listing::Home,
+            Screen::AllWorkflows => Listing::All,
+            _ => Listing::Channel,
         };
     }
 }

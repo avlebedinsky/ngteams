@@ -1174,6 +1174,12 @@ impl ChatView {
         &self.conversation
     }
 
+    /// Whether the chat shows no message at all once read (a conversation not started yet).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.loading.is_none() && self.loads > 0 && self.messages.is_empty() && self.unsettled.is_empty()
+    }
+
     /// The rows, the top first.
     #[must_use]
     pub fn items(&self) -> &[Item] {

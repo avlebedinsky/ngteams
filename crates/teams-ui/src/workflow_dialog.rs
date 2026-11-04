@@ -1,6 +1,9 @@
-//! Teams' channel Workflows modal, backed by the active account's first-party Power Automate service.
-//! The catalog, environments and workflows have separate loading/errors: an inaccessible service is never an empty list.
+//! Teams' channel Workflows modal, and the Workflows app's Home and Templates in the main window, backed by the active
+//! account's first-party Power Automate service. The catalog, environments and workflows have separate
+//! loading/errors: an inaccessible service is never an empty list.
+mod app;
 mod art;
+mod build;
 mod combo;
 mod connections;
 mod editor;
@@ -42,6 +45,9 @@ use form::{ConfigField, EditorMode};
 use model::Card;
 use run_inputs::RunField;
 
+pub use app::AppTab;
+pub use art::workflows as workflows_icon;
+
 /// Where a change's success leads: back to the list with a notice, to the changed workflow's Overview, staying on the
 /// Overview with the workflow read again (Rename, Turn off/on, as Teams does), or its owners read again.
 #[derive(Clone, Copy)]
@@ -67,13 +73,8 @@ enum Change {
 enum Listing {
     Channel,
     Home,
-}
-
-#[derive(Clone, Copy)]
-enum BuildKind {
-    Manual,
-    Scheduled,
-    Webhook,
+    /// The Workflows app's "Your workflows" page.
+    All,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -86,8 +87,16 @@ enum Tab {
 #[derive(Clone)]
 enum Screen {
     Browse,
+    /// The Workflows app's Home.
     Home,
-    Build,
+    /// The Workflows app's Templates.
+    Templates,
+    /// The Workflows app's "Your workflows", from Home's "See all".
+    AllWorkflows,
+    /// Build from scratch; `asking` while "Build in Power Automate" is asked over it.
+    Build {
+        asking: bool,
+    },
     Edit {
         flow: Option<Card>,
     },
@@ -113,11 +122,14 @@ struct Loading {
     workflows: bool,
 }
 
-/// The channel's native workflow manager. The Shell hosts it with its standard modal and focus restoration.
+/// The channel's native workflow manager, hosted by the Shell with its standard modal and focus restoration; or, made
+/// with [`WorkflowDialog::new_app`], the Workflows app's own pages in the main window.
 pub struct WorkflowDialog {
     core: Arc<dyn Core>,
-    team: Team,
-    channel: TeamChannel,
+    /// The team and channel the channel's dialog was opened from; none for the Workflows app.
+    place: Option<(Team, TeamChannel)>,
+    /// The Workflows app's own state (its gallery, filters and searches), when this is the app's page.
+    app: Option<app::AppState>,
     focus: FocusHandle,
     search: Entity<InputState>,
     name: Entity<InputState>,
@@ -183,6 +195,30 @@ impl WorkflowDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::with(core, Some((team, channel)), window, cx);
+        this.load_teams(window, cx);
+        this.refresh(cx);
+        this
+    }
+
+    /// The Workflows app's pages in the main window: its Home, Templates and "Your workflows", the card editor and
+    /// the Overview, with no channel it was opened from.
+    pub fn new_app(core: Arc<dyn Core>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::with(core, None, window, cx);
+        this.app = Some(app::AppState::new(window, cx));
+        this.screen = Screen::Home;
+        this.tab = Tab::Workflows;
+        this.load_teams(window, cx);
+        this.refresh(cx);
+        this
+    }
+
+    fn with(
+        core: Arc<dyn Core>,
+        place: Option<(Team, TeamChannel)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find templates"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Workflow name"));
         let definition = cx.new(|cx| TextareaState::new(window, cx).placeholder("Workflow definition"));
@@ -204,10 +240,10 @@ impl WorkflowDialog {
         ];
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let mut this = Self {
+        Self {
             core,
-            team,
-            channel,
+            place,
+            app: None,
             focus,
             search,
             name,
@@ -256,10 +292,22 @@ impl WorkflowDialog {
             next_runs: std::collections::HashMap::new(),
             scroll: gpui::ScrollHandle::new(),
             scrolled_for: None,
-        };
-        this.load_teams(window, cx);
-        this.refresh(cx);
-        this
+        }
+    }
+
+    /// Whether this is the Workflows app's page rather than the channel's dialog.
+    #[must_use]
+    pub fn is_app(&self) -> bool {
+        self.app.is_some()
+    }
+
+    /// Where Back, Cancel and a change made from the Overview lead: the channel dialog's list, or the app's tab.
+    fn start_screen(&self) -> Screen {
+        match &self.app {
+            Some(app) if app.tab == AppTab::Templates => Screen::Templates,
+            Some(_) => Screen::Home,
+            None => Screen::Browse,
+        }
     }
 
     /// Opens a template that the current catalog actually offered, for keyboard commands and deep links.
@@ -372,11 +420,14 @@ impl WorkflowDialog {
         cx.notify();
     }
 
-    /// Opens Workflows Home, as the footer's button does.
+    /// Workflows Home, as the dialog's footer button does: the dialog closes and the Workflows app opens in the main
+    /// window. In the app, its Home.
     pub fn show_home(&mut self, cx: &mut Context<Self>) {
-        self.screen = Screen::Home;
-        self.tab = Tab::Workflows;
-        cx.notify();
+        if self.app.is_some() {
+            self.show_tab(AppTab::Home, cx);
+        } else if !self.busy {
+            cx.emit(TeamDialogEvent::Workflows { see_all: false });
+        }
     }
 
     /// Refreshes both service sources. A generation rejects late results from an older refresh.
@@ -394,6 +445,27 @@ impl WorkflowDialog {
         self.error = None;
         self.tasks.clear();
         self.load_copilot_access(cx);
+        self.load_catalog(cx);
+        let environments = self.core.workflow_request(WorkflowRequest::Environments);
+        self.tasks
+            .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let answer = environments.await.unwrap_or(Err(WorkflowFailure::Connection));
+                let _ = this.update(cx, |this, cx| this.environments_read(generation, answer, cx));
+            }));
+        cx.notify();
+    }
+
+    /// The templates: the channel's catalog in the dialog; the app's two galleries in the app (read once, a refresh
+    /// of its workflows keeps them).
+    fn load_catalog(&mut self, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            self.loading.catalog = false;
+            if !matches!(app.home, app::Gallery::Ready(_)) || !matches!(app.all, app::Gallery::Ready(_)) {
+                self.load_gallery(cx);
+            }
+            return;
+        }
+        let generation = self.generation;
         let catalog = self.core.workflow_request(WorkflowRequest::Catalog);
         self.tasks
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -410,13 +482,6 @@ impl WorkflowDialog {
                     cx.notify();
                 });
             }));
-        let environments = self.core.workflow_request(WorkflowRequest::Environments);
-        self.tasks
-            .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                let answer = environments.await.unwrap_or(Err(WorkflowFailure::Connection));
-                let _ = this.update(cx, |this, cx| this.environments_read(generation, answer, cx));
-            }));
-        cx.notify();
     }
 
     fn environments_read(&mut self, generation: u64, answer: WorkflowResponse, cx: &mut Context<Self>) {
@@ -499,6 +564,7 @@ impl WorkflowDialog {
                         return;
                     }
                     this.loading.workflows = false;
+                    this.acting = None;
                     this.workflows_read(answer, append);
                     this.load_next_runs(cx);
                     cx.notify();

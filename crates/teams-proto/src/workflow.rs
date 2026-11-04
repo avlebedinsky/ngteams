@@ -26,6 +26,14 @@ pub const CONSENT_TOKEN_AUDIENCE: &str = "https://apihub.azure.com";
 pub enum WorkflowRequest {
     /// Teams' channel template catalog.
     Catalog,
+    /// The Workflows app's own template gallery: the templates filed under one gallery category
+    /// (`neptune_teams_pa_home` for its Home, `home_featured` for its Templates and its search), newest first as the
+    /// app asks, at most `top`, matching `search` when given. A public read, as the app makes it.
+    Gallery {
+        category: String,
+        search: Option<String>,
+        top: u32,
+    },
     /// Own Teams Copilot access settings, a captured read by POST.
     CopilotEligibility,
     /// Environments accessible to the signed-in actor.
@@ -160,6 +168,7 @@ impl WorkflowRequest {
         !matches!(
             self,
             Self::Catalog
+                | Self::Gallery { .. }
                 | Self::CopilotEligibility
                 | Self::Environments
                 | Self::Template { .. }
@@ -230,6 +239,25 @@ impl WorkflowRequest {
                 .with_query("$filter", "properties/categoryNames/any(x:x eq 'microsoftteams_channel') and properties/categoryNames/all(x:x ne 'reported')")
                 .with_query("useNewConfigUrl", "true")
                 .with_query("supportBigTiles", "true");
+        }
+        if let Self::Gallery { category, search, top } = self {
+            path.extend(["galleries", "public", "templates"].map(str::to_owned));
+            let endpoint = Endpoint::new(path)
+                .with_query(
+                    "$filter",
+                    format!(
+                        "properties/categoryNames/any(x:x eq '{}')",
+                        category.replace('\'', "''")
+                    ),
+                )
+                .with_query("$orderby", "publishedTime")
+                .with_query("$expand", "definition,connectionReferences.api.properties")
+                .with_query("$top", top.to_string())
+                .with_query("api-version", API_VERSION);
+            return match search {
+                Some(text) => endpoint.with_query("$search", text.clone()),
+                None => endpoint,
+            };
         }
         if let Self::Template { id } = self {
             path.extend([
@@ -415,7 +443,11 @@ impl WorkflowRequest {
     #[must_use]
     pub fn environment(&self) -> Option<&str> {
         match self {
-            Self::Catalog | Self::CopilotEligibility | Self::Environments | Self::Template { .. } => None,
+            Self::Catalog
+            | Self::Gallery { .. }
+            | Self::CopilotEligibility
+            | Self::Environments
+            | Self::Template { .. } => None,
             Self::LogicFlowsMetadata { environment }
             | Self::RunWithInputs { environment, .. }
             | Self::RunActions { environment, .. }

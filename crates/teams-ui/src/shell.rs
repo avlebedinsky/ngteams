@@ -96,6 +96,7 @@ use crate::view::status_text;
 
 mod channel_management;
 mod title_bar;
+mod workflows;
 
 pub use title_bar::{FocusSearch, GoBack, GoForward, History, RIGHT_WIDTH, SEARCH_MAX, TITLE_HEIGHT, ToggleListPane};
 
@@ -228,6 +229,8 @@ pub enum Main {
     JoinTeam,
     /// "More create team options", across both panes.
     CreateTeamMore,
+    /// The Workflows app, across both panes.
+    Workflows,
 }
 
 /// Where the account menu opens: over the rail's account, or under the title bar's avatar.
@@ -281,6 +284,8 @@ pub struct Shell {
     /// "Join a team", while it is shown.
     join_team: Option<(Entity<JoinTeam>, Subscription)>,
     create_team_more: Option<(Entity<CreateTeamMore>, Subscription)>,
+    /// The Workflows app, once it was opened: it keeps its tab and pages while another place is shown.
+    workflows: workflows::Place,
     /// A dialog of the team pages, while one is open.
     team_dialog: Option<(gpui::AnyView, Subscription)>,
     /// Where the keyboard was when a dialog opened (a team's line, its "..." menu's row, a page's row): it goes back
@@ -384,6 +389,7 @@ impl Shell {
             manage_team: None,
             join_team: None,
             create_team_more: None,
+            workflows: workflows::Place::default(),
             team_dialog: None,
             dialog_return: crate::keyboard::Return::default(),
             toast: None,
@@ -604,8 +610,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// The calendar is left for something else.
+    /// The calendar (or the Workflows app) is left for something else.
     fn hide_calendar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_workflows(cx);
         if self.calendar.read(cx).shown() {
             self.calendar
                 .update(cx, |calendar, cx| calendar.set_shown(false, window, cx));
@@ -1660,6 +1667,7 @@ impl Shell {
                 match event {
                     TeamDialogEvent::Closed => {}
                     TeamDialogEvent::MoreOptions => this.open_create_team_more(window, cx),
+                    TeamDialogEvent::Workflows { see_all } => this.open_workflows(*see_all, window, cx),
                     TeamDialogEvent::Created(team) => {
                         let (core, trace) = (Arc::clone(&this.core), Arc::clone(&this.trace));
                         let team = team.clone();
@@ -2105,7 +2113,10 @@ impl Shell {
     }
 
     fn show_chats_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.main, Main::Settings | Main::Calendar | Main::Search) {
+        if !matches!(
+            self.main,
+            Main::Settings | Main::Calendar | Main::Search | Main::Workflows
+        ) {
             return;
         }
         self.hide_calendar(window, cx);
@@ -2119,7 +2130,8 @@ impl Shell {
             | Main::TeamsPage
             | Main::ManageTeam(_)
             | Main::JoinTeam
-            | Main::CreateTeamMore => {
+            | Main::CreateTeamMore
+            | Main::Workflows => {
                 self.main = Main::Nothing;
                 cx.notify();
             }
@@ -2284,7 +2296,7 @@ impl Shell {
     }
 
     fn rail_view(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let chats = !matches!(self.main, Main::Settings | Main::Calendar);
+        let chats = !matches!(self.main, Main::Settings | Main::Calendar | Main::Workflows);
         div()
             .debug_selector(|| "rail".to_owned())
             .w(px(RAIL_WIDTH))
@@ -2313,6 +2325,7 @@ impl Shell {
                 cx,
                 Self::show_calendar,
             ))
+            .children(self.app_rail(palette, cx))
             .child(div().flex_1())
             .children(self.account_rail(palette, cx))
             .child(Self::rail_button(
@@ -2657,9 +2670,13 @@ impl Shell {
             },
             // the settings, the calendar, the search's results and "Join a team" are drawn across both panes (`body`), never
             // here
-            Main::Nothing | Main::Settings | Main::Calendar | Main::Search | Main::JoinTeam | Main::CreateTeamMore => {
-                pane.child(no_chat(palette)).into_any_element()
-            }
+            Main::Nothing
+            | Main::Settings
+            | Main::Calendar
+            | Main::Search
+            | Main::JoinTeam
+            | Main::CreateTeamMore
+            | Main::Workflows => pane.child(no_chat(palette)).into_any_element(),
         }
     }
 }
@@ -2794,6 +2811,7 @@ impl Render for Shell {
         let channel_dialog = self.channel_dialog_view();
         let team_dialog = self.team_dialog_view();
         let toast = self.toast_view(palette);
+        let more_apps = self.more_apps_view(palette, cx);
         let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
             div()
                 .absolute()
@@ -2844,6 +2862,7 @@ impl Render for Shell {
             .children(status_menu)
             .children(channel_dialog)
             .children(team_dialog)
+            .children(more_apps)
             .children(toast)
             .children(first_run)
     }
@@ -2903,6 +2922,11 @@ impl Shell {
         }
         if self.main == Main::CreateTeamMore
             && let Some(page) = self.create_team_more()
+        {
+            return page.clone().into_any_element();
+        }
+        if self.main == Main::Workflows
+            && let Some(page) = &self.workflows.app
         {
             return page.clone().into_any_element();
         }

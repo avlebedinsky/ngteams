@@ -57,6 +57,50 @@ async fn catalog_uses_exact_first_party_route_and_only_the_flow_audience() {
 }
 
 #[tokio::test]
+async fn the_apps_gallery_asks_for_one_category_newest_first_with_only_the_flow_audience() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/providers/Microsoft.ProcessSimple/galleries/public/templates"))
+        .and(query_param(
+            "$filter",
+            "properties/categoryNames/any(x:x eq 'home_featured')",
+        ))
+        .and(query_param("$orderby", "publishedTime"))
+        .and(query_param("$expand", "definition,connectionReferences.api.properties"))
+        .and(query_param("$top", "10"))
+        .and(query_param("$search", "webhook"))
+        .and(header("authorization", "Bearer synthetic-flow-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tokens = Arc::new(Tokens::default());
+    let request = WorkflowRequest::Gallery {
+        category: "home_featured".into(),
+        search: Some("webhook".into()),
+        top: 10,
+    };
+    assert!(!request.writes());
+    let response = transport(&server, Arc::clone(&tokens)).workflow(&request).await.unwrap();
+    assert_eq!(response, json!({"value": []}));
+    assert_eq!(*tokens.0.lock().unwrap(), ["https://service.flow.microsoft.com/"]);
+    // a quote in a category stays inside its string
+    let quoted = WorkflowRequest::Gallery {
+        category: "a'b".into(),
+        search: None,
+        top: 5,
+    }
+    .endpoint();
+    assert!(
+        quoted
+            .query()
+            .iter()
+            .any(|(key, value)| key == "$filter" && value == "properties/categoryNames/any(x:x eq 'a''b')")
+    );
+    assert!(!quoted.query().iter().any(|(key, _)| key == "$search"));
+}
+
+#[tokio::test]
 async fn denied_access_and_malformed_responses_do_not_become_empty_lists() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

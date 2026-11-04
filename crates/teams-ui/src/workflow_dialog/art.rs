@@ -1,7 +1,7 @@
-//! The app pictures Teams' Workflows dialog shows, taken from Microsoft's own (`assets/apps/`, scaled down): the
-//! Workflows app's icon in the dialog's header (the app catalog's large image) and each connector's icon on the card
-//! editor's chips (Power Automate's connector icons: `teams`, `planner`, `office365users`, `sharepointonline`,
-//! `office365`).
+//! The app pictures Teams' Workflows shows, taken from Microsoft's own (`assets/apps/`, scaled down to 64 px): the
+//! Workflows app's icon in the dialog's and the app page's header (the app catalog's large image) and each
+//! connector's icon on the template cards, the card editor's chips and the Templates tab's Filter (Power Automate's
+//! connector icons, by API name).
 use std::sync::{Arc, OnceLock};
 
 use gpui::{Image, ImageFormat};
@@ -11,7 +11,8 @@ fn png(cell: &'static OnceLock<Arc<Image>>, bytes: &'static [u8]) -> Arc<Image> 
 }
 
 /// The Workflows app's icon.
-pub(super) fn workflows() -> Arc<Image> {
+#[must_use]
+pub fn workflows() -> Arc<Image> {
     static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
     png(&IMAGE, include_bytes!("../../assets/apps/workflows.png"))
 }
@@ -22,17 +23,33 @@ pub(super) fn teams() -> Arc<Image> {
     png(&IMAGE, include_bytes!("../../assets/apps/teams.png"))
 }
 
+/// One icon, read once.
+macro_rules! icon {
+    ($file:literal) => {{
+        static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
+        png(&IMAGE, include_bytes!(concat!("../../assets/apps/", $file, ".png")))
+    }};
+}
+
 /// A connector's icon by its API name (`shared_planner`), Microsoft Teams' for one without its own.
 pub(super) fn connector(api: &str) -> Arc<Image> {
-    static PLANNER: OnceLock<Arc<Image>> = OnceLock::new();
-    static USERS: OnceLock<Arc<Image>> = OnceLock::new();
-    static SHAREPOINT: OnceLock<Arc<Image>> = OnceLock::new();
-    static OUTLOOK: OnceLock<Arc<Image>> = OnceLock::new();
     match api {
-        "shared_planner" => png(&PLANNER, include_bytes!("../../assets/apps/planner.png")),
-        "shared_office365users" => png(&USERS, include_bytes!("../../assets/apps/office365users.png")),
-        "shared_sharepointonline" => png(&SHAREPOINT, include_bytes!("../../assets/apps/sharepointonline.png")),
-        "shared_office365" => png(&OUTLOOK, include_bytes!("../../assets/apps/office365.png")),
+        "shared_planner" => icon!("planner"),
+        "shared_office365users" => icon!("office365users"),
+        "shared_sharepointonline" => icon!("sharepointonline"),
+        "shared_office365" => icon!("office365"),
+        "shared_rss" => icon!("rss"),
+        "shared_m365copilotv2" => icon!("m365copilotv2"),
+        "shared_visualstudioteamservices" => icon!("visualstudioteamservices"),
+        "shared_office365groups" => icon!("office365groups"),
+        "shared_pagerduty" => icon!("pagerduty"),
+        "shared_service-now" => icon!("service-now"),
+        "shared_conversionservice" => icon!("conversionservice"),
+        "shared_onenote" => icon!("onenote"),
+        "shared_github" => icon!("github"),
+        "shared_onedriveforbusiness" => icon!("onedriveforbusiness"),
+        "shared_jira" => icon!("jira"),
+        "shared_approvals" => icon!("approvals"),
         _ => teams(),
     }
 }

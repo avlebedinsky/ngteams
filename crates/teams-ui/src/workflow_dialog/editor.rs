@@ -4,18 +4,10 @@ use super::*;
 
 impl WorkflowDialog {
     pub(super) fn configure_template(&mut self, card: Card, window: &mut Window, cx: &mut Context<Self>) {
-        self.load_template(card.id, None, window, cx);
+        self.load_template(card.id, window, cx);
     }
 
-    pub(super) fn build(&mut self, kind: BuildKind, window: &mut Window, cx: &mut Context<Self>) {
-        let id = match kind {
-            BuildKind::Manual | BuildKind::Scheduled => "805739fdad754e799502b6379900922e",
-            BuildKind::Webhook => "d271a6f01c2545a28348d8f2cddf4c8f",
-        };
-        self.load_template(id.to_owned(), Some(kind), window, cx);
-    }
-
-    fn load_template(&mut self, id: String, kind: Option<BuildKind>, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_template(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -28,7 +20,7 @@ impl WorkflowDialog {
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let answer = reply.await.unwrap_or(Err(WorkflowFailure::Connection));
                 let _ = window.update(cx, |_, window, cx| {
-                    let _ = this.update(cx, |this, cx| this.template_read(generation, answer, kind, window, cx));
+                    let _ = this.update(cx, |this, cx| this.template_read(generation, answer, window, cx));
                 });
             }));
         cx.notify();
@@ -38,7 +30,6 @@ impl WorkflowDialog {
         &mut self,
         generation: u64,
         answer: WorkflowResponse,
-        kind: Option<BuildKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -48,21 +39,10 @@ impl WorkflowDialog {
         self.busy = false;
         match answer {
             Ok(value) => match Card::from_flow(&value) {
-                Some(card)
-                    if kind.is_none()
-                        && let Some(simple) = simple::Simple::open(&card, false) =>
-                {
+                Some(card) if let Some(simple) = simple::Simple::open(&card, false) => {
                     self.open_simple(simple, window, cx);
                 }
-                Some(mut card) => {
-                    if matches!(kind, Some(BuildKind::Manual)) {
-                        card.properties["definition"]["triggers"] = serde_json::json!({"manual": {"type": "Request", "kind": "Button", "inputs": {"schema": {"type": "object", "properties": {}}}}});
-                    }
-                    if kind.is_some() {
-                        "New channel workflow".clone_into(&mut card.name);
-                    }
-                    self.edit(card, false, window, cx);
-                }
+                Some(card) => self.edit(card, false, window, cx),
                 None => self.error = Some(model::problem(&WorkflowFailure::InvalidResponse).to_owned()),
             },
             Err(error) => self.error = Some(model::problem(&error).to_owned()),
@@ -94,11 +74,11 @@ impl WorkflowDialog {
         self.simple = None;
         self.error = None;
         let mut properties = serde_json::json!({"displayName": card.name, "definition": card.properties.get("definition"), "connectionReferences": card.properties.get("connectionReferences"), "state": card.properties.get("state").cloned().unwrap_or(Value::String("Stopped".to_owned()))});
-        if !existing {
+        if !existing && let Some((team, channel)) = &self.place {
             form::apply_channel(
                 &mut properties,
-                self.team.group_id.as_deref().unwrap_or(&self.team.id),
-                &self.channel.id,
+                team.group_id.as_deref().unwrap_or(&team.id),
+                &channel.id,
             );
         }
         self.prepare_bindings(&properties);
@@ -241,9 +221,16 @@ impl WorkflowDialog {
         cx.notify();
     }
 
+    /// A row's change keeps its spinner until the list is read again, as Teams' row does; any other ends it.
+    fn settle_row(&mut self, outcome: Outcome, done: bool) {
+        if !(matches!(outcome, Outcome::List) && done) {
+            self.acting = None;
+        }
+    }
+
     fn mutation_read(&mut self, answer: WorkflowResponse, outcome: Outcome, cx: &mut Context<Self>) {
         self.changing = None;
-        self.acting = None;
+        self.settle_row(outcome, answer.is_ok());
         match answer {
             // Teams shows the saved workflow's Overview after Save.
             Ok(value)
@@ -297,7 +284,7 @@ impl WorkflowDialog {
         self.screen = if matches!(outcome, Outcome::List) {
             self.list_screen()
         } else {
-            Screen::Browse
+            self.start_screen()
         };
         self.load_workflows(cx);
     }
@@ -412,12 +399,14 @@ impl WorkflowDialog {
                     "Configure workflow"
                 },
             ))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(format!("Destination: {} / {}", self.team.name, self.channel.name)),
-            )
+            .when_some(self.place.as_ref(), |view, (team, channel)| {
+                view.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(format!("Destination: {} / {}", team.name, channel.name)),
+                )
+            })
             .child("Workflow name")
             .child(selected_by("workflow-name", Input::new(&self.name)))
             .when(matches!(self.editor_mode, EditorMode::Form), |view| {
@@ -453,7 +442,7 @@ impl WorkflowDialog {
                             .label("Cancel")
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.screen = Screen::Browse;
+                                this.screen = this.start_screen();
                                 this.error = None;
                                 cx.notify();
                             })),

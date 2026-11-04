@@ -1,13 +1,17 @@
 //! The card editor's fields as Teams draws them, by kind: comboboxes (team, channel, time, time zone, a connector's
 //! list), a number (the weekly interval, "Enter a number between 1 and 71, with no decimals" when it isn't one), a date,
-//! the week's days as seven round toggles, a message box, a folder picker that browses a connector's folders ("Your
-//! folders", the app's name, then the folders browsed into), and a people picker (people as chips; typing searches the
-//! directory for names and addresses starting with the text). A connector's choices are read as Teams reads them: the
-//! operation's input definition names its dynamic list or folder tree, which the field's own connection answers.
+//! the week's days as seven round toggles, a message box with Teams' formatting bar, a folder picker that browses a
+//! connector's folders ("Your folders", the app's name, then the folders browsed into, Outlook's well-known ones
+//! first), and a people picker (people as chips; typing searches the directory for names and addresses starting with
+//! the text). A connector's choices are read as Teams reads them: the operation's input definition names its dynamic
+//! list or folder tree, which the field's own connection answers.
 use super::*;
 use gpui_component::Sizable as _;
 use gpui_component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use teams_proto::TeamPerson;
+
+use crate::editor::toolbar::FormatBar;
+use crate::editor::{Editor, EditorEvent, EnterMode};
 
 use super::combo::Combo;
 use super::markup::{self, Kind};
@@ -66,19 +70,22 @@ impl WorkflowDialog {
             }
             Kind::Message => {
                 let text = param.text().unwrap_or_default().trim_end().to_owned();
-                let area = cx.new(|cx| {
-                    TextareaState::new(window, cx)
-                        .placeholder("Add message")
-                        .default_value(text)
+                let editor = cx.new(|cx| {
+                    let mut editor = Editor::new(window, cx).placeholder("Add message");
+                    editor.set_enter_mode(EnterMode::NewLine, cx);
+                    editor.set_heights(Some(px(96.0)), Some(px(240.0)), cx);
+                    load_message(&mut editor, &text, cx);
+                    editor
                 });
+                let bar = cx.new(|cx| FormatBar::new(editor.clone(), cx).without_discard());
                 field
                     .subscriptions
-                    .push(cx.subscribe(&area, |_, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
+                    .push(cx.subscribe(&editor, |_, _, event: &EditorEvent, cx| {
+                        if matches!(event, EditorEvent::Changed) {
                             cx.notify();
                         }
                     }));
-                field.area = Some(area);
+                field.message = Some((editor, bar));
             }
             Kind::StartDate => {
                 let today = chrono::Local::now().date_naive();
@@ -320,6 +327,7 @@ impl WorkflowDialog {
                     }
                     if let Some(field) = this.simple.as_mut().and_then(|simple| simple.fields.get_mut(index)) {
                         field.choices = match answer.and_then(|value| model::rows(&value).map(choices)) {
+                            Ok(list) if tree => Choices::Ready(sorted_folders(list)),
                             Ok(list) => Choices::Ready(list),
                             Err(_) => Choices::Failed,
                         };
@@ -423,7 +431,7 @@ impl WorkflowDialog {
             .flex()
             .flex_col()
             .gap_8()
-            .px_12()
+            .when(self.app.is_none(), gpui::Styled::px_12)
             .pt_2()
             .child(
                 div()
@@ -451,14 +459,22 @@ impl WorkflowDialog {
                                     .child(heading),
                             ),
                     )
-                    .child(selected_by(
-                        "workflow-collapse-all",
-                        Button::new("workflow-collapse-all")
-                            .ghost()
-                            .small()
-                            .label(if simple.expanded { "Collapse all" } else { "Expand all" })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(selected_by(
+                                "workflow-collapse-all",
+                                Button::new("workflow-collapse-all")
+                                    .ghost()
+                                    .small()
+                                    .label(if simple.expanded { "Collapse all" } else { "Expand all" })
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
+                            ))
+                            // the Workflows app's editor keeps Save at its top right, with no footer
+                            .when(self.app.is_some(), |bar| bar.child(self.save_button(cx))),
+                    ),
             )
             .child(self.simple_card(simple, palette, cx))
             .into_any_element()
@@ -563,17 +579,36 @@ impl WorkflowDialog {
             Kind::Interval | Kind::Text => field.input.as_ref().map(|input| {
                 selected_by(format!("workflow-field-{}", param.id), Input::new(input)).into_any_element()
             })?,
-            Kind::Message => field.area.as_ref().map(|area| {
+            Kind::Message => field
+                .message
+                .as_ref()
+                .map(|(editor, bar)| Self::message_box(&param.id, editor, bar, palette))?,
+            Kind::StartDate => field.date.as_ref().map(|date| {
+                // Teams' calendar at the field's right: the kit draws its own by an icon path the app's glyphs
+                // don't serve, so the app's glyph sits in its place.
                 div()
-                    .h(px(130.0))
+                    .relative()
                     .child(selected_by(
                         format!("workflow-field-{}", param.id),
-                        Textarea::new(area).h(px(130.0)),
+                        DatePicker::new(date).w_full(),
                     ))
+                    .child(
+                        div()
+                            .debug_selector(|| "workflow-date-calendar".to_owned())
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(10.0))
+                            .flex()
+                            .items_center()
+                            .child(
+                                Glyph::CALENDAR
+                                    .icon()
+                                    .size(px(14.0))
+                                    .text_color(rgb(palette.muted_foreground)),
+                            ),
+                    )
                     .into_any_element()
-            })?,
-            Kind::StartDate => field.date.as_ref().map(|date| {
-                selected_by(format!("workflow-field-{}", param.id), DatePicker::new(date).w_full()).into_any_element()
             })?,
             Kind::WeekDays => Self::days(index, param, palette, cx),
             Kind::Folder => Self::folder_field(index, param, field, palette, cx),
@@ -968,32 +1003,10 @@ impl WorkflowDialog {
 
     /// The card editor's footer: Save and Back, as in Teams. Save stays off until every required field is filled.
     pub(super) fn simple_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let message_empty = self.simple.as_ref().is_some_and(|simple| {
-            simple.params.iter().zip(&simple.fields).any(|(param, field)| {
-                !param.optional
-                    && field
-                        .area
-                        .as_ref()
-                        .is_some_and(|area| area.read(cx).value().trim().is_empty())
-            })
-        });
-        let unready = self
-            .simple
-            .as_ref()
-            .is_none_or(|simple| simple.connecting() || !message_only(simple));
         div()
             .flex()
             .gap_2()
-            .child(selected_by(
-                "workflow-save",
-                Button::new("workflow-save")
-                    .primary()
-                    .min_w(px(96.0))
-                    .label(if self.busy { "Saving…" } else { "Save" })
-                    .loading(self.busy)
-                    .disabled(self.busy || unready || message_empty || self.uncertain.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.simple_save(cx))),
-            ))
+            .child(self.save_button(cx))
             .child(selected_by(
                 "workflow-edit-cancel",
                 Button::new("workflow-edit-cancel")
@@ -1005,6 +1018,116 @@ impl WorkflowDialog {
             ))
             .into_any_element()
     }
+
+    /// The card editor's Save: off until every required field is filled.
+    fn save_button(&self, cx: &Context<Self>) -> AnyElement {
+        let message_empty = self.simple.as_ref().is_some_and(|simple| {
+            simple.params.iter().zip(&simple.fields).any(|(param, field)| {
+                !param.optional
+                    && field
+                        .message
+                        .as_ref()
+                        .is_some_and(|(editor, _)| editor.read(cx).is_blank())
+            })
+        });
+        let unready = self
+            .simple
+            .as_ref()
+            .is_none_or(|simple| simple.connecting() || !message_only(simple));
+        selected_by(
+            "workflow-save",
+            Button::new("workflow-save")
+                .primary()
+                .min_w(px(96.0))
+                .label(if self.busy { "Saving" } else { "Save" })
+                .loading(self.busy)
+                .disabled(self.busy || unready || message_empty || self.uncertain.is_some())
+                .on_click(cx.listener(|this, _, _, cx| this.simple_save(cx))),
+        )
+        .into_any_element()
+    }
+}
+
+impl WorkflowDialog {
+    /// The message box as Teams' cards draw it: the formatting bar over the text, in one bordered box.
+    fn message_box(id: &str, editor: &Entity<Editor>, bar: &Entity<FormatBar>, palette: Palette) -> AnyElement {
+        let selector = format!("workflow-field-{id}");
+        div()
+            .debug_selector(move || selector.clone())
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.background))
+            .child(
+                div()
+                    .px_1()
+                    .py_0p5()
+                    .border_b_1()
+                    .border_color(rgb(palette.border))
+                    .child(bar.clone()),
+            )
+            .child(div().px_3().py_2().min_h(px(110.0)).child(editor.clone()))
+            .into_any_element()
+    }
+}
+
+/// Puts a kept message in the box: Teams' HTML with its formatting, or plain text.
+fn load_message(editor: &mut Editor, text: &str, cx: &mut Context<Editor>) {
+    if text.is_empty() {
+        return;
+    }
+    if text.contains('<') {
+        let rich = teams_proto::chat::parse_html(text);
+        if editor
+            .load(&rich.nodes, &std::collections::HashMap::<String, String>::new(), cx)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    editor.insert(text, cx);
+}
+
+/// What a message box sends: its plain text, as Teams sends an unformatted message, or the HTML of a formatted one.
+pub(super) fn message_value(editor: &Editor) -> Value {
+    let plain = editor.text();
+    if plain.trim().is_empty() {
+        return Value::Null;
+    }
+    match crate::compose::message_of(editor.doc(), &[]) {
+        Ok(Some(message)) if formatted(message.html()) => Value::String(message.html().to_owned()),
+        _ => Value::String(plain.trim_end().to_owned()),
+    }
+}
+
+/// Whether a message's HTML holds more than paragraphs and line breaks.
+fn formatted(html: &str) -> bool {
+    ["<p>", "</p>", "<br>", "<br/>", "<br />"]
+        .iter()
+        .fold(html.to_owned(), |text, tag| text.replace(tag, ""))
+        .contains('<')
+}
+
+/// Outlook's well-known folders, in the order Teams lists them before the others.
+const WELL_KNOWN_FOLDERS: [&str; 6] = ["Deleted Items", "Sent Items", "Outbox", "Inbox", "Drafts", "Junk Email"];
+
+/// A folder list as Teams shows it: Outlook's well-known folders first, in Teams' order, then the rest by name,
+/// ignoring case (SharePoint's `_catalogs` before `FormServerTemplates` before `images`).
+pub(super) fn sorted_folders(mut folders: Vec<Choice>) -> Vec<Choice> {
+    folders.sort_by(|a, b| {
+        let rank = |folder: &Choice| {
+            WELL_KNOWN_FOLDERS
+                .iter()
+                .position(|name| *name == folder.name)
+                .unwrap_or(WELL_KNOWN_FOLDERS.len())
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    folders
 }
 
 /// Whether the only fields left empty are message boxes, whose text the box holds until Save reads it.
@@ -1146,4 +1269,76 @@ fn people_names(people: &[Value]) -> String {
         .filter_map(|person| person.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(name: &str) -> Choice {
+        Choice {
+            value: name.to_owned(),
+            name: name.to_owned(),
+            full: name.to_owned(),
+            parent: true,
+            selection: Value::Null,
+        }
+    }
+
+    fn names(list: Vec<Choice>) -> Vec<String> {
+        list.into_iter().map(|choice| choice.name).collect()
+    }
+
+    #[test]
+    fn folders_list_outlooks_well_known_ones_first_then_by_name_ignoring_case() {
+        let outlook = [
+            "Archive",
+            "Conversation History",
+            "Deleted Items",
+            "Drafts",
+            "Inbox",
+            "Junk Email",
+            "Outbox",
+            "Sent Items",
+        ];
+        assert_eq!(
+            names(sorted_folders(outlook.iter().map(|name| folder(name)).collect())),
+            [
+                "Deleted Items",
+                "Sent Items",
+                "Outbox",
+                "Inbox",
+                "Drafts",
+                "Junk Email",
+                "Archive",
+                "Conversation History"
+            ]
+        );
+        let sharepoint = [
+            "images",
+            "_vti_pvt",
+            "Shared Documents",
+            "_cts",
+            "FormServerTemplates",
+            "_catalogs",
+        ];
+        assert_eq!(
+            names(sorted_folders(sharepoint.iter().map(|name| folder(name)).collect())),
+            [
+                "_catalogs",
+                "_cts",
+                "_vti_pvt",
+                "FormServerTemplates",
+                "images",
+                "Shared Documents"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_message_is_sent_plain_unless_formatted() {
+        assert!(!formatted("<p>Weekly reminder</p>"));
+        assert!(!formatted("<p>One</p><p>Two<br>three</p>"));
+        assert!(formatted("<p><strong>Weekly</strong> reminder</p>"));
+    }
 }

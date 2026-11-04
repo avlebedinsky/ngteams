@@ -21,6 +21,64 @@ impl Card {
         })
     }
 
+    /// A template of the Workflows app's own gallery (`galleries/public/templates`): its `name` and the
+    /// `properties` the gallery gives, with the definition and connections expanded.
+    pub fn from_gallery(value: &Value) -> Option<Self> {
+        let properties = value.get("properties")?;
+        Some(Self {
+            id: value.get("name")?.as_str()?.to_owned(),
+            name: properties.get("displayName")?.as_str()?.to_owned(),
+            description: properties
+                .get("description")
+                .or_else(|| properties.get("summary"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            properties: properties.clone(),
+        })
+    }
+
+    /// The gallery's categories of a template (`categoryNames`). The channel catalog's `categories` are display
+    /// names ("Notifications", "Productivity") that don't say its kind.
+    fn categories(&self) -> impl Iterator<Item = &str> {
+        self.properties
+            .get("categoryNames")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    }
+
+    /// Which of Teams' kinds of template this is, by its gallery category: its card's icon. A schedule is a
+    /// schedule; a template filed under updates and actions both shows as an update, as the app draws it.
+    pub fn kind(&self) -> TemplateKind {
+        // A card without its categories (the channel catalog's) takes them from the gallery's, by template id.
+        if self.categories().next().is_none() {
+            return if SCHEDULES.contains(&self.id.as_str()) {
+                TemplateKind::Schedule
+            } else {
+                TemplateKind::GetUpdates
+            };
+        }
+        if self.is_kind(TemplateKind::Schedule) {
+            TemplateKind::Schedule
+        } else if self.is_kind(TemplateKind::TakeAction) && !self.is_kind(TemplateKind::GetUpdates) {
+            TemplateKind::TakeAction
+        } else {
+            TemplateKind::GetUpdates
+        }
+    }
+
+    /// Whether the gallery files the template under `kind` (the Templates tab's Take action, Get updates and
+    /// Schedule).
+    pub fn is_kind(&self, kind: TemplateKind) -> bool {
+        self.categories().any(|category| match kind {
+            TemplateKind::Schedule => category == "schedule",
+            TemplateKind::GetUpdates => category == "get_updates",
+            TemplateKind::TakeAction => matches!(category, "take_actions" | "take_action"),
+        })
+    }
+
     pub fn from_flow(value: &Value) -> Option<Self> {
         let properties = value.get("properties")?;
         Some(Self {
@@ -62,9 +120,32 @@ impl Card {
                 })
     }
 
-    /// The connectors (`shared_teams`) a template's card shows the icons of, in the catalog's order.
+    /// The connectors (`shared_teams`) a template's card shows the icons of: the channel catalog's icons in its
+    /// order, or the gallery's connections in the reverse of theirs, as the Workflows app draws them.
     pub fn connectors(&self) -> Vec<&'static str> {
         let mut apps = Vec::new();
+        if let Some(references) = self.properties.get("connectionReferences").and_then(Value::as_object)
+            && self.properties.get("icons").is_none()
+        {
+            for reference in references.values().rev() {
+                let name = reference
+                    .pointer("/api/name")
+                    .or_else(|| reference.get("apiName"))
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        reference
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .and_then(|id| id.rsplit('/').next())
+                    });
+                if let Some(api) = name.and_then(known_connector)
+                    && !apps.contains(&api)
+                {
+                    apps.push(api);
+                }
+            }
+            return apps;
+        }
         for icon in self
             .properties
             .get("icons")
@@ -79,13 +160,12 @@ impl Card {
                 continue;
             };
             // The icon's folder names its connector.
-            let label = match icon.rsplit('/').nth(1) {
-                Some("teams") => "shared_teams",
-                Some("planner") => "shared_planner",
-                Some("sharepointonline") => "shared_sharepointonline",
-                Some("office365") => "shared_office365",
-                Some("office365users") => "shared_office365users",
-                _ => continue,
+            let Some(label) = icon
+                .rsplit('/')
+                .nth(1)
+                .and_then(|folder| known_connector(&format!("shared_{folder}")))
+            else {
+                continue;
             };
             if !apps.contains(&label) {
                 apps.push(label);
@@ -97,6 +177,41 @@ impl Card {
     pub fn enabled(&self) -> bool {
         self.properties.get("state").and_then(Value::as_str) == Some("Started")
     }
+}
+
+/// Teams' three kinds of template: Take action, Get updates and Schedule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateKind {
+    TakeAction,
+    GetUpdates,
+    Schedule,
+}
+
+/// The connectors whose icons and names the app knows, by API name, in the order the Templates tab's Filter lists
+/// them.
+pub const CONNECTORS: [(&str, &str); 17] = [
+    ("shared_teams", "Microsoft Teams"),
+    ("shared_office365users", "Office 365 Users"),
+    ("shared_planner", "Planner"),
+    ("shared_sharepointonline", "SharePoint"),
+    ("shared_office365", "Office 365 Outlook"),
+    ("shared_rss", "RSS"),
+    ("shared_m365copilotv2", "AI Workflows"),
+    ("shared_visualstudioteamservices", "Azure DevOps"),
+    ("shared_office365groups", "Office 365 Groups"),
+    ("shared_pagerduty", "PagerDuty"),
+    ("shared_service-now", "ServiceNow"),
+    ("shared_conversionservice", "Content Conversion"),
+    ("shared_onenote", "OneNote (Business)"),
+    ("shared_github", "GitHub"),
+    ("shared_onedriveforbusiness", "OneDrive for Business"),
+    ("shared_jira", "Jira"),
+    ("shared_approvals", "Standard approvals"),
+];
+
+/// A connector the app knows the icon and name of.
+pub fn known_connector(api: &str) -> Option<&'static str> {
+    CONNECTORS.iter().find(|(name, _)| *name == api).map(|(name, _)| *name)
 }
 
 fn ai_id(value: &Value) -> bool {
@@ -150,6 +265,61 @@ pub fn templates(value: &Value) -> Result<Vec<Card>, WorkflowFailure> {
         .collect::<Option<Vec<_>>>()
         .ok_or(WorkflowFailure::InvalidResponse)?;
     cards.sort_by_key(|card| FEATURED.iter().position(|id| *id == card.id).unwrap_or(FEATURED.len()));
+    Ok(cards)
+}
+
+/// Home's templates the gallery files under `schedule` (Follow up on a message, the weekly reminder, Schedule a reply,
+/// Schedule a meeting, Send yourself a reminder): the kind of a card whose answer carries no categories.
+const SCHEDULES: [&str; 5] = [
+    "34df10b7d2824b12a23f3a0c50869f99",
+    "805739fdad754e799502b6379900922e",
+    "8dfc20ec70f54efcbf3c18cf3e190035",
+    "402ac1c1290b4609827b83c671613e93",
+    "a045450ffe3e4b35b1d89ffb97db5658",
+];
+
+/// The Workflows app's Home: its own sixteen featured templates, in the order the app shows them (eight a page).
+const HOME_ORDER: [&str; 16] = [
+    "34df10b7d2824b12a23f3a0c50869f99",
+    "805739fdad754e799502b6379900922e",
+    "8f348e6a1ad64fe8bcb974b02585d987",
+    "511d104411f84d659018aed7d68a4c22",
+    "190c5a56070e4a8b802089be6455553e",
+    "b35fbd284547427cbb4e289d98dd63b4",
+    "d271a6f01c2545a28348d8f2cddf4c8f",
+    "8dfc20ec70f54efcbf3c18cf3e190035",
+    "402ac1c1290b4609827b83c671613e93",
+    "4289ec53edec430b8b760234bcc87267",
+    "d01492d9fdc74baeb5890d9c17186942",
+    "2f11110f8e7a4985b424d75fa992b00c",
+    "a045450ffe3e4b35b1d89ffb97db5658",
+    "34ac6c11796143e1807d6e16c4c28050",
+    "df8b1fb0c17e48a790df8515a1259170",
+    "45e229e1cd36483084bc8d2352b543d2",
+];
+
+/// The templates of a gallery answer in its own order, each once: what Find templates suggests.
+pub fn found(value: &Value) -> Result<Vec<Card>, WorkflowFailure> {
+    let mut cards = rows(value)?
+        .iter()
+        .map(Card::from_gallery)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(WorkflowFailure::InvalidResponse)?;
+    let mut seen = std::collections::HashSet::new();
+    cards.retain(|card| seen.insert(card.id.clone()));
+    Ok(cards)
+}
+
+/// The templates of a gallery answer, Home's own first in the app's order, then the rest in the gallery's (newest
+/// first), each once.
+pub fn gallery(value: &Value) -> Result<Vec<Card>, WorkflowFailure> {
+    let mut cards = found(value)?;
+    cards.sort_by_key(|card| {
+        HOME_ORDER
+            .iter()
+            .position(|id| *id == card.id)
+            .unwrap_or(HOME_ORDER.len())
+    });
     Ok(cards)
 }
 
@@ -266,6 +436,60 @@ mod tests {
         flow["properties"]["definition"]["actions"]["copilot"] =
             json!({"inputs":{"host":{"apiId":"/providers/Microsoft.PowerApps/apis/shared_m365copilotv2"}}});
         assert!(Card::from_flow(&flow).unwrap().is_ai());
+    }
+
+    #[test]
+    fn the_apps_gallery_puts_homes_templates_first_and_reads_kinds_and_apps() {
+        let entry = |id: &str, kinds: &[&str], apis: &[&str]| {
+            let references: serde_json::Map<String, Value> = apis
+                .iter()
+                .map(|api| ((*api).to_owned(), json!({"api": {"name": api}})))
+                .collect();
+            json!({"name": id, "properties": {"displayName": id, "description": "Synthetic.",
+                "categoryNames": kinds, "connectionReferences": references}})
+        };
+        let answer = json!({"value": [
+            entry("synthetic-newest", &["take_actions"], &["shared_teams", "shared_onenote"]),
+            entry("805739fdad754e799502b6379900922e", &["schedule"], &["shared_teams"]),
+            entry("synthetic-newest", &["take_actions"], &[]),
+            entry("34df10b7d2824b12a23f3a0c50869f99", &["schedule", "get_updates"], &["shared_teams", "shared_office365users"]),
+            entry("synthetic-both", &["take_action", "get_updates"], &["shared_teams"])
+        ]});
+        let cards = gallery(&answer).unwrap();
+        let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "34df10b7d2824b12a23f3a0c50869f99",
+                "805739fdad754e799502b6379900922e",
+                "synthetic-newest",
+                "synthetic-both"
+            ],
+            "Home's own first in Home's order, then the gallery's, each once"
+        );
+        assert_eq!(cards[0].kind(), TemplateKind::Schedule);
+        assert_eq!(cards[2].kind(), TemplateKind::TakeAction);
+        assert_eq!(
+            cards[3].kind(),
+            TemplateKind::GetUpdates,
+            "updates and actions both shows as an update"
+        );
+        assert!(cards[3].is_kind(TemplateKind::TakeAction));
+        assert_eq!(
+            cards[0].connectors(),
+            ["shared_office365users", "shared_teams"],
+            "the app draws the apps in reverse"
+        );
+        assert_eq!(cards[2].connectors(), ["shared_onenote", "shared_teams"]);
+        let catalog =
+            Card::from_template(&json!({"id":"805739fdad754e799502b6379900922e","name":"Weekly","description":"x"}))
+                .unwrap();
+        assert_eq!(
+            catalog.kind(),
+            TemplateKind::Schedule,
+            "a catalog card without categories"
+        );
+        assert!(gallery(&json!({"value": [{"name": "no-properties"}]})).is_err());
     }
 
     #[test]

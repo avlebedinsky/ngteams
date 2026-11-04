@@ -6,6 +6,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use std::sync::Arc;
 use teams_proto::WorkflowRequest;
 use teams_store::{Team, TeamChannel};
+use teams_ui::team_dialogs::TeamDialogEvent;
 use teams_ui::workflow_dialog::WorkflowDialog;
 
 #[path = "support/workflow_fixtures.rs"]
@@ -370,7 +371,7 @@ fn catalog_page(cx: &mut VisualTestContext, next: bool) {
 }
 
 #[test]
-fn discovery_paging_search_home_and_environment_changes_keep_the_selected_actor_scope() {
+fn discovery_paging_search_and_tabs_keep_the_selected_actor_scope() {
     let (rig, _view, cx) = managed_window();
     catalog_page(cx, true);
     assert!(bounds(cx, "workflow-template-synthetic-extra").is_some());
@@ -387,54 +388,48 @@ fn discovery_paging_search_home_and_environment_changes_keep_the_selected_actor_
         "no license is presented as no matching AI workflow"
     );
     click(cx, "workflow-tab-all");
-    click(cx, "workflow-home");
-    click(cx, "workflow-environment");
-    cx.simulate_keystrokes("down down enter");
-    cx.run_until_parked();
+    assert!(bounds(cx, "workflow-open-synthetic-flow").is_some());
     let requests = rig.core.workflow_requests.lock().unwrap();
-    assert!(
-        requests.iter().any(
-            |request| matches!(request, WorkflowRequest::List { environment } if environment == "Other-synthetic")
-        )
-    );
-    assert!(requests.iter().any(
-        |request| matches!(request, WorkflowRequest::Connections { environment } if environment == "Other-synthetic")
-    ));
+    assert!(requests.iter().all(|request| match request {
+        WorkflowRequest::List { environment } | WorkflowRequest::Connections { environment } => {
+            environment == "Default-synthetic"
+        }
+        _ => true,
+    }));
 }
 
 #[test]
-fn each_native_builder_uses_its_template_and_advanced_definition_edit_remains_optional() {
-    for (selector, expected) in [
-        ("workflow-build-manual", "805739fdad754e799502b6379900922e"),
-        ("workflow-build-scheduled", "805739fdad754e799502b6379900922e"),
-        ("workflow-build-webhook", "d271a6f01c2545a28348d8f2cddf4c8f"),
-    ] {
-        let (rig, _view, cx) = window();
-        click(cx, "workflow-build");
-        click(cx, selector);
-        assert!(
-            rig.core
-                .workflow_requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|request| matches!(request, WorkflowRequest::Template { id } if id == expected))
-        );
-        click(cx, "workflow-definition-toggle");
-        assert!(bounds(cx, "workflow-definition").is_some());
-        click(cx, "workflow-definition-toggle");
-        assert!(bounds(cx, "workflow-definition").is_none());
-        click(cx, "workflow-edit-cancel");
-        assert!(bounds(cx, "workflow-build").is_some());
-        assert!(
-            !rig.core
-                .workflow_requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(WorkflowRequest::writes)
-        );
-    }
+fn build_from_scratch_is_teams_builder_and_leads_to_power_automate_without_writing() {
+    let (rig, _view, cx) = window();
+    click(cx, "workflow-build");
+    assert!(bounds(cx, "workflow-builder").is_some());
+    assert!(bounds(cx, "workflow-build-trigger").is_some());
+    assert!(bounds(cx, "workflow-build-action").is_some());
+    click(cx, "workflow-build-trigger");
+    click(cx, "workflow-build-schedule");
+    assert!(
+        bounds(cx, "workflow-build-ask").is_some(),
+        "a choice asks to build in Power Automate"
+    );
+    click(cx, "workflow-build-cancel");
+    assert!(bounds(cx, "workflow-build-ask").is_none());
+    click(cx, "workflow-build-action");
+    click(cx, "workflow-build-power-automate");
+    click(cx, "workflow-build-go");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://make.powerautomate.com/environments/Default-synthetic/flows/new")
+    );
+    click(cx, "workflow-build-back");
+    assert!(bounds(cx, "workflow-build").is_some());
+    assert!(
+        !rig.core
+            .workflow_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(WorkflowRequest::writes)
+    );
 }
 
 #[test]
@@ -993,13 +988,28 @@ fn a_co_owner_search_finding_nobody_says_so_and_adds_nobody() {
 }
 
 #[test]
-fn workflows_home_lists_the_templates_and_every_workflow() {
+fn workflows_home_and_see_all_leave_the_dialog_for_the_workflows_app() {
     let rig = common::Rig::start();
     let cx = webhook_window(&rig);
+    let view = cx.update(|window, _| {
+        window
+            .root::<WorkflowDialog>()
+            .flatten()
+            .expect("the dialog is the window's root")
+            .clone()
+    });
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let kept = std::rc::Rc::clone(&asked);
+    let _watch = cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &TeamDialogEvent, _| {
+            if let TeamDialogEvent::Workflows { see_all } = event {
+                kept.borrow_mut().push(*see_all);
+            }
+        })
+    });
     click(cx, "workflow-home");
-    assert!(bounds(cx, "workflow-environment").is_some());
-    assert!(bounds(cx, "workflow-template-synthetic-webhook").is_some());
-    assert!(bounds(cx, "workflow-tab-all").is_some());
+    assert_eq!(*asked.borrow(), [false], "Workflows Home opens the app's Home");
+    assert!(bounds(cx, "workflow-environment").is_none());
 }
 
 /// Scrolls the dialog's page to its end, where the Owners are.

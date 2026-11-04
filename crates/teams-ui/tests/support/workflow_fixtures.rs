@@ -7,6 +7,7 @@ use teams_proto::{WorkflowRequest, WorkflowResponse};
 )]
 pub fn answer(request: &WorkflowRequest) -> WorkflowResponse {
     Ok(match request {
+        WorkflowRequest::Gallery { search, .. } => gallery(search.as_deref()),
         WorkflowRequest::Catalog => json!({"value": [
             {"id":"synthetic-template","icons":["https://static.powerapps.com/synthetic/teams/icon.png"],"name":"Automate weekly reminders and updates in a conversation","description":"Get weekly reminders and status updates automatically so nothing gets missed"},
             {"id":"synthetic-planner","icons":["https://static.powerapps.com/synthetic/teams/icon.png","https://static.powerapps.com/synthetic/planner/icon.png"],"name":"Notify a channel when Planner tasks are completed","description":"Celebrate progress by notifying a channel when a Planner task is marked as done"},
@@ -31,6 +32,98 @@ pub fn answer(request: &WorkflowRequest) -> WorkflowResponse {
         _ => Value::Null,
     })
 }
+
+/// The Workflows app's synthetic gallery, newest first: id, name, kinds and apps.
+const GALLERY: [(&str, &str, &[&str], &[&str]); 10] = [
+    (
+        "synthetic-webhook",
+        "Send webhook alerts to a channel",
+        &["get_updates"],
+        &["shared_teams"],
+    ),
+    (
+        "synthetic-template",
+        "Automate weekly reminders and updates in a conversation",
+        &["schedule"],
+        &["shared_teams"],
+    ),
+    (
+        "synthetic-planner",
+        "Notify a channel when Planner tasks are completed",
+        &["get_updates"],
+        &["shared_planner", "shared_office365users", "shared_teams"],
+    ),
+    (
+        "synthetic-follow",
+        "Follow up on a message",
+        &["schedule"],
+        &["shared_teams", "shared_office365users"],
+    ),
+    (
+        "synthetic-task",
+        "Create a Planner task from a message",
+        &["take_actions"],
+        &["shared_teams", "shared_planner"],
+    ),
+    (
+        "synthetic-rss",
+        "Post a channel message when a new RSS feed is published",
+        &["get_updates"],
+        &["shared_rss", "shared_teams"],
+    ),
+    (
+        "synthetic-note",
+        "Save a message to OneNote",
+        &["take_actions"],
+        &["shared_teams", "shared_onenote"],
+    ),
+    (
+        "synthetic-sharepoint",
+        "Notify a channel when SharePoint file or items change",
+        &["get_updates"],
+        &["shared_sharepointonline", "shared_teams"],
+    ),
+    (
+        "synthetic-email",
+        "Forward your emails to a channel",
+        &["get_updates"],
+        &["shared_office365", "shared_teams"],
+    ),
+    (
+        "synthetic-reminder",
+        "Send yourself a reminder",
+        &["schedule"],
+        &["shared_teams"],
+    ),
+];
+
+/// One gallery template as the gallery shapes it.
+fn gallery_entry(id: &str, name: &str, kinds: &[&str], apis: &[&str]) -> Value {
+    let references: serde_json::Map<String, Value> = apis
+        .iter()
+        .map(|api| {
+            let reference = json!({"api":{"name": api, "id": format!("/providers/Microsoft.PowerApps/apis/{api}")}});
+            ((*api).to_owned(), reference)
+        })
+        .collect();
+    json!({"name": id, "properties": {
+        "displayName": name,
+        "description": format!("{name}, synthetically, said at the length that needs more than the two lines a card shows."),
+        "categoryNames": kinds,
+        "connectionReferences": references
+    }})
+}
+
+/// The Workflows app's gallery ([`GALLERY`]); with `search`, the templates whose names hold it.
+pub fn gallery(search: Option<&str>) -> Value {
+    let shown: Vec<Value> = GALLERY
+        .iter()
+        .filter(|(_, name, _, _)| search.is_none_or(|text| name.to_lowercase().contains(&text.to_lowercase())))
+        .map(|(id, name, kinds, apis)| gallery_entry(id, name, kinds, apis))
+        .collect();
+    json!({"value": shown})
+}
+
 pub fn flow() -> Value {
     json!({"name":"synthetic-flow","properties":{"displayName":"Weekly channel reminder","description":"A synthetic workflow","state":"Started","definition":{"parameters":{"message":{"type":"String","defaultValue":"Weekly reminder"},"teams.group":{"type":"String","defaultValue":"synthetic-group"},"teams.channel":{"type":"String","defaultValue":"synthetic-channel"}},"triggers":{"manual":{"type":"Request","kind":"Button"}},"actions":{"post":{"type":"OpenApiConnection","inputs":{"host":{"apiId":"/providers/Microsoft.PowerApps/apis/shared_teams","connectionName":"shared_teams","operationId":"PostMessageToConversation"},"parameters":{"location":"Channel","body/recipient/groupId":"@parameters('teams.group')","body/recipient/channelId":"@parameters('teams.channel')","body/messageBody":"<p>Weekly reminder</p>"}}}}},"connectionReferences":{}}})
 }
@@ -104,6 +197,12 @@ pub fn webhook_flow(state: &str) -> Value {
         "creator": {"objectId": OWNER},
         "definition": webhook_template()["properties"]["definition"]
     }})
+}
+
+/// Another workflow of the account, off.
+pub fn stopped_flow() -> Value {
+    json!({"name":"synthetic-off","properties":{"displayName":"Synthetic stopped workflow","state":"Stopped",
+        "definition":{"triggers":{},"actions":{}}}})
 }
 
 /// The webhook workflow turned off.

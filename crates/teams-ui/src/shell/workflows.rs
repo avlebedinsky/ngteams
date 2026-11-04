@@ -1,0 +1,196 @@
+//! The Workflows app's places in the shell, as browser Teams has them: opened from the channel's Workflows ("Workflows
+//! Home", "See all") or from the rail's More apps flyout, it takes both panes; while it is shown, the rail shows it
+//! (chosen) under a separator, and it leaves the rail when another place is shown.
+use super::*;
+use crate::workflow_dialog::AppTab;
+use crate::workflows_app::WorkflowsApp;
+
+/// The rail's Workflows item: its outline glyph (Lucide's) and its caption.
+const WORKFLOWS: RailItem = RailItem {
+    icon: include_bytes!("../../assets/icons/workflow.svg"),
+    label: "Workflows",
+};
+
+/// The rail's More apps item.
+const MORE_APPS: RailItem = RailItem {
+    icon: include_bytes!("../../assets/icons/ellipsis.svg"),
+    label: "More apps",
+};
+
+/// The flyout's width, px.
+const FLYOUT_WIDTH: f32 = 300.0;
+
+/// The Workflows app's place in the shell: the app once it was opened (it keeps its tab and pages while another place
+/// is shown), and whether the rail's More apps flyout is open.
+#[derive(Default)]
+pub(super) struct Place {
+    pub(super) app: Option<Entity<WorkflowsApp>>,
+    pub(super) more_apps: bool,
+}
+
+impl Shell {
+    /// Opens the Workflows app across both panes: its Home, or with `see_all` its "Your workflows". The app keeps its
+    /// pages between visits.
+    pub fn open_workflows(&mut self, see_all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.workflows.more_apps = false;
+        let page = if let Some(page) = &self.workflows.app {
+            page.clone()
+        } else {
+            let parts = self.parts();
+            let page = cx.new(|cx| WorkflowsApp::new(parts, window, cx));
+            cx.observe(&page, |_, _, cx| cx.notify()).detach();
+            self.workflows.app = Some(page.clone());
+            page
+        };
+        if self.main != Main::Workflows {
+            self.trace.record(&TraceLine::new("workflows", "opened"));
+            self.hide_calendar(window, cx);
+            let before = std::mem::replace(&mut self.main, Main::Workflows);
+            if !matches!(before, Main::Settings | Main::Calendar | Main::Search) {
+                self.before_settings = before;
+            }
+            if let Some(chat) = &self.chat {
+                chat.update(cx, |chat, cx| chat.set_shown(false, cx));
+            }
+            self.close_switcher(window, cx);
+            self.close_search(cx);
+        }
+        page.update(cx, |page, cx| {
+            if see_all {
+                page.show_all_workflows(window, cx);
+            } else {
+                page.show_tab(AppTab::Home, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Opens or closes the rail's More apps flyout, as its button does.
+    pub fn toggle_more_apps(&mut self, cx: &mut Context<Self>) {
+        self.workflows.more_apps = !self.workflows.more_apps;
+        cx.notify();
+    }
+
+    /// The Workflows app, once it was opened.
+    #[must_use]
+    pub fn workflows(&self) -> Option<&Entity<WorkflowsApp>> {
+        self.workflows.app.as_ref()
+    }
+
+    /// The Workflows app is left for another place: its bot's chat is no longer shown.
+    pub(super) fn leave_workflows(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = &self.workflows.app {
+            page.update(cx, WorkflowsApp::hide);
+        }
+    }
+
+    /// The rail's More apps button and, while the app is shown, the Workflows item above it.
+    pub(super) fn app_rail(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut items = Vec::new();
+        if self.main == Main::Workflows {
+            items.push(
+                div()
+                    .mx_3()
+                    .my_1()
+                    .h(px(1.0))
+                    .bg(rgb(palette.border))
+                    .into_any_element(),
+            );
+            items.push(Self::rail_button(
+                "rail-workflows",
+                WORKFLOWS,
+                true,
+                palette,
+                cx,
+                |this, window, cx| this.open_workflows(false, window, cx),
+            ));
+        }
+        items.push(Self::rail_button(
+            "rail-more-apps",
+            MORE_APPS,
+            self.workflows.more_apps,
+            palette,
+            cx,
+            |this, _, cx| this.toggle_more_apps(cx),
+        ));
+        items
+    }
+
+    /// The More apps flyout beside the rail: the apps the app opens (Workflows), over a backdrop that closes it.
+    pub(super) fn more_apps_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.workflows.more_apps {
+            return None;
+        }
+        let row = div()
+            .id("more-apps-workflows")
+            .debug_selector(|| "more-apps-workflows".to_owned())
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |row| row.bg(rgb(palette.hover)))
+            .child(
+                div()
+                    .size(px(26.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(palette.border))
+                    .bg(rgb(0x00ff_ffff))
+                    .child(gpui::img(crate::workflow_dialog::workflows_icon()).size(px(18.0))),
+            )
+            .child("Workflows")
+            .on_click(cx.listener(|this, _, window, cx| this.open_workflows(false, window, cx)));
+        Some(
+            div()
+                .id("more-apps-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.workflows.more_apps = false;
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .id("more-apps")
+                        .debug_selector(|| "more-apps".to_owned())
+                        .absolute()
+                        .top(px(TITLE_HEIGHT + 8.0))
+                        .left(px(RAIL_WIDTH + 4.0))
+                        .w(px(FLYOUT_WIDTH))
+                        .p_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .bg(rgb(palette.surface))
+                        .shadow_lg()
+                        .occlude()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(palette.muted_foreground))
+                                .child("Apps"),
+                        )
+                        .child(row),
+                )
+                .into_any_element(),
+        )
+    }
+}

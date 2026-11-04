@@ -35,7 +35,7 @@ impl WorkflowDialog {
             .into_any_element()
     }
 
-    fn template_card(card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn template_card(card: &Card, height: f32, palette: Palette, cx: &Context<Self>) -> AnyElement {
         let selected = card.clone();
         let id = format!("workflow-template-{}", card.id);
         selected_by(
@@ -45,7 +45,7 @@ impl WorkflowDialog {
                 .w_full()
                 .min_w_0()
                 .p_0()
-                .h(px(175.0))
+                .h(px(height))
                 .child(
                     div()
                         .size_full()
@@ -59,7 +59,8 @@ impl WorkflowDialog {
                         .rounded_lg()
                         .border_1()
                         .border_color(rgb(palette.border))
-                        .bg(rgb(palette.background))
+                        .bg(rgb(palette.surface))
+                        .shadow_sm()
                         .child(
                             div()
                                 .flex()
@@ -67,35 +68,28 @@ impl WorkflowDialog {
                                 .min_w_0()
                                 .gap_3()
                                 .items_start()
-                                .child(
-                                    div()
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(rgb(palette.selected))
-                                        .text_color(rgb(palette.brand))
-                                        .child(
-                                            if card.name.to_lowercase().contains("weekly") {
-                                                Glyph::REPEAT
-                                            } else {
-                                                Glyph::BELL
-                                            }
-                                            .icon()
-                                            .size(px(22.0)),
-                                        ),
-                                )
+                                .child(Self::kind_mark(card))
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .whitespace_normal()
+                                        .line_clamp(2)
+                                        .text_ellipsis()
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(card.name.clone()),
                                 ),
                         )
                         .child(
+                            // Teams shows two lines of the description, cut with an ellipsis
                             div()
                                 .flex_1()
+                                .w_full()
+                                .min_w_0()
+                                .min_h_0()
                                 .whitespace_normal()
+                                .line_clamp(2)
+                                .text_ellipsis()
                                 .text_sm()
                                 .text_color(rgb(palette.muted_foreground))
                                 .child(card.description.clone()),
@@ -110,6 +104,26 @@ impl WorkflowDialog {
         .min_w_0()
         .overflow_hidden()
         .into_any_element()
+    }
+
+    /// The template's kind as Teams' cards mark it: a schedule's repeat on blue, an update's bell on green, an
+    /// action's pen on rose.
+    pub(super) fn kind_mark(card: &Card) -> gpui::Div {
+        let (glyph, tint, ink) = match card.kind() {
+            model::TemplateKind::Schedule => (Glyph::REPEAT, 0x00cf_e4fa, 0x0011_5ea3),
+            model::TemplateKind::GetUpdates => (Glyph::BELL, 0x00c9_eac5, 0x0011_5c1d),
+            model::TemplateKind::TakeAction => (Glyph::PENCIL, 0x00fb_d9d3, 0x00a1_2f12),
+        };
+        div()
+            .flex_none()
+            .size(px(34.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .bg(rgb(tint))
+            .text_color(rgb(ink))
+            .child(glyph.icon().size(px(18.0)))
     }
 
     /// The template's apps as Teams' cards show them: each connector's icon, at the card's bottom right.
@@ -135,10 +149,7 @@ impl WorkflowDialog {
                     Button::new("workflow-build")
                         .label("Build from scratch")
                         .icon(Glyph::PLUS.icon())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.screen = Screen::Build;
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.start_build(cx))),
                 ))
             })
             .into_any_element()
@@ -219,7 +230,7 @@ impl WorkflowDialog {
                 div()
                     .flex()
                     .gap_4()
-                    .children(row.iter().map(|card| Self::template_card(card, palette, cx))),
+                    .children(row.iter().map(|card| Self::template_card(card, 175.0, palette, cx))),
             );
         }
         section.into_any_element()
@@ -257,18 +268,18 @@ impl WorkflowDialog {
     }
 
     fn workflow_list(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        // The channel's dialog lists only the workflows that are on, as Teams' own reads do; Home lists every one.
-        let on_only = !matches!(self.screen, Screen::Home);
+        // The channel's dialog lists only the workflows that are on, as Teams' own reads do.
         let cards: Vec<_> = self
             .workflows
             .iter()
-            .filter(|card| !on_only || card.enabled())
-            .filter(|card| match self.tab {
-                Tab::Channel => {
-                    card.in_channel(self.team.group_id.as_deref().unwrap_or(&self.team.id), &self.channel.id)
+            .filter(|card| card.enabled())
+            .filter(|card| match (self.tab, &self.place) {
+                (Tab::Channel, Some((team, channel))) => {
+                    card.in_channel(team.group_id.as_deref().unwrap_or(&team.id), &channel.id)
                 }
-                Tab::Workflows => !card.is_ai(),
-                Tab::Ai => card.is_ai(),
+                (Tab::Channel, None) => false,
+                (Tab::Workflows, _) => !card.is_ai(),
+                (Tab::Ai, _) => card.is_ai(),
             })
             .collect();
         let mut list = div()
@@ -276,11 +287,12 @@ impl WorkflowDialog {
             .flex_col()
             .gap_4()
             .child(Self::workflows_heading(
-                on_only && !cards.is_empty() && !self.loading.workflows,
+                !cards.is_empty() && !self.loading.workflows,
                 cx,
             ))
             .child(self.tabs(cx));
-        if self.loading.workflows {
+        // a list read again keeps its rows (a row's change spins in its row until then)
+        if self.loading.workflows && self.workflows.is_empty() {
             return list
                 .child(state("Loading your workflows…", "", palette))
                 .into_any_element();
@@ -338,7 +350,7 @@ impl WorkflowDialog {
                     Button::new("workflow-see-all")
                         .ghost()
                         .label("See all")
-                        .on_click(cx.listener(|this, _, _, cx| this.show_home(cx))),
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(TeamDialogEvent::Workflows { see_all: true }))),
                 ))
             })
             .into_any_element()
@@ -382,10 +394,16 @@ impl WorkflowDialog {
         }
     }
 
-    fn body(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn body(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
         match &self.screen {
-            Screen::Home => self.home(palette, cx),
-            Screen::Build => Self::builder_choices(cx),
+            Screen::Home => self.app_home(palette, cx),
+            Screen::Templates => self.app_templates(palette, cx),
+            Screen::AllWorkflows => self.app_all_workflows(palette, cx),
+            Screen::DeleteListed(_) if self.app.is_some() => match self.listing {
+                Listing::All => self.app_all_workflows(palette, cx),
+                _ => self.app_home(palette, cx),
+            },
+            Screen::Build { .. } => self.build_view(palette, cx),
             Screen::Browse | Screen::DeleteListed(_) => div()
                 .flex()
                 .flex_col()
@@ -403,133 +421,13 @@ impl WorkflowDialog {
         }
     }
 
-    fn builder_choices(cx: &Context<Self>) -> AnyElement {
-        let choices = [
-            (
-                BuildKind::Manual,
-                "workflow-build-manual",
-                "When I run it",
-                "Post a message to this channel when you run the workflow.",
-            ),
-            (
-                BuildKind::Scheduled,
-                "workflow-build-scheduled",
-                "On a schedule",
-                "Choose when to post a recurring channel message.",
-            ),
-            (
-                BuildKind::Webhook,
-                "workflow-build-webhook",
-                "When a webhook arrives",
-                "Receive a webhook and post its card to this channel.",
-            ),
-        ];
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Build a workflow"),
-            )
-            .child("Choose a trigger, then configure its channel action and connected accounts.")
-            .children(choices.map(|(kind, id, name, description)| {
-                selected_by(
-                    id,
-                    Button::new(id)
-                        .outline()
-                        .w_full()
-                        .h(px(90.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(name)
-                                .child(div().text_sm().child(description)),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| this.build(kind, window, cx))),
-                )
-            }))
-            .into_any_element()
-    }
-
-    fn home(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Workflows Home"),
-            )
-            .child(self.environment_picker(cx))
-            .child(self.catalog(palette, cx))
-            .child(self.workflow_list(palette, cx))
-            .into_any_element()
-    }
-
-    fn environment_picker(&self, cx: &Context<Self>) -> AnyElement {
-        use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-        let environments = self.environments.clone();
-        let current = self.environment.clone();
-        let weak = cx.entity().downgrade();
-        let label = environments
-            .iter()
-            .find(|(id, _)| Some(id) == current.as_ref())
-            .map_or("Choose environment", |(_, name)| name.as_str())
-            .to_owned();
-        selected_by(
-            "workflow-environment",
-            Button::new("workflow-environment")
-                .outline()
-                .label(label)
-                .icon(Glyph::CHEVRON_DOWN.icon())
-                .dropdown_menu(move |menu, _, _| {
-                    environments
-                        .iter()
-                        .fold(menu.scrollable(true).max_h(px(260.0)), |menu, (id, name)| {
-                            let (id, name, weak) = (id.clone(), name.clone(), weak.clone());
-                            menu.item(
-                                PopupMenuItem::element(move |_, _| div().child(name.clone()))
-                                    .checked(current.as_ref() == Some(&id))
-                                    .on_click(move |_, _, cx| {
-                                        let _ = weak.update(cx, |this, cx| this.choose_environment(id.clone(), cx));
-                                    }),
-                            )
-                        })
-                }),
-        )
-        .into_any_element()
-    }
-
-    fn choose_environment(&mut self, environment: String, cx: &mut Context<Self>) {
-        if self.busy || self.environment.as_deref() == Some(&environment) {
-            return;
-        }
-        self.generation += 1;
-        self.tasks.clear();
-        self.environment = Some(environment);
-        self.workflows.clear();
-        self.connections.clear();
-        self.continuation = None;
-        self.load_workflows(cx);
-        self.load_connections(cx);
-        self.load_copilot_access(cx);
-        cx.notify();
-    }
-
     fn reconcile_button(cx: &Context<Self>) -> AnyElement {
         selected_by(
             "workflow-reconcile",
             Button::new("workflow-reconcile")
                 .label("Check current status")
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.screen = Screen::Browse;
+                    this.screen = this.start_screen();
                     this.refresh(cx);
                 })),
         )
@@ -538,7 +436,8 @@ impl WorkflowDialog {
 
     /// Teams' footer: Save and Back under the card editor, Back and Workflows Home under an Overview and its delete
     /// question, Workflows Home on the workflow list, and "Back to workflows" (to the list) on every other screen.
-    fn footer(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
+    /// Workflows Home leaves the dialog for the Workflows app in the main window.
+    pub(super) fn footer(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
         let footer = div()
             .flex()
             .items_center()
@@ -552,7 +451,7 @@ impl WorkflowDialog {
             return footer.child(self.simple_footer(cx)).into_any_element();
         }
         // Teams' Workflows Home leaves the channel's dialog for the Workflows app's own Home, hence its
-        // external-link icon; here that Home is the dialog's own page of every template and workflow.
+        // external-link icon.
         let home = matches!(
             self.screen,
             Screen::Browse | Screen::Detail(_) | Screen::Delete(_) | Screen::DeleteListed(_)
@@ -567,7 +466,7 @@ impl WorkflowDialog {
                         .label("Back")
                         .disabled(self.busy)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.screen = Screen::Browse;
+                            this.screen = this.start_screen();
                             this.error = None;
                             cx.notify();
                         })),
@@ -581,9 +480,12 @@ impl WorkflowDialog {
                     .label(if home { "Workflows Home" } else { "Back to workflows" })
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.screen = if home { Screen::Home } else { Screen::Browse };
-                        this.tab = Tab::Workflows;
                         this.error = None;
+                        if home && this.app.is_none() {
+                            this.show_home(cx);
+                            return;
+                        }
+                        this.screen = this.start_screen();
                         cx.notify();
                     })),
             ))
@@ -597,7 +499,9 @@ impl WorkflowDialog {
         let kind = match &self.screen {
             Screen::Browse | Screen::DeleteListed(_) => 0,
             Screen::Home => 1,
-            Screen::Build => 2,
+            Screen::Templates => 7,
+            Screen::AllWorkflows => 8,
+            Screen::Build { .. } => 2,
             Screen::Edit { .. } => 3,
             Screen::Detail(_) | Screen::Delete(_) => 4,
             Screen::RunDetails { .. } => 5,
@@ -611,7 +515,7 @@ impl WorkflowDialog {
 
     /// What went wrong, the check after an unknown outcome and notices, in sight above the footer however far down a
     /// long Overview is scrolled.
-    fn status(&self, cx: &Context<Self>) -> gpui::Div {
+    pub(super) fn status(&self, cx: &Context<Self>) -> gpui::Div {
         div()
             .px_6()
             .when_some(self.error.as_ref(), |view, error| {
@@ -634,6 +538,9 @@ impl Render for WorkflowDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
         self.top_of_a_new_screen();
+        if self.app.is_some() {
+            return self.app_page(palette, cx);
+        }
         div()
             .id("workflow-dialog")
             .debug_selector(|| "workflow-dialog".to_owned())
@@ -661,7 +568,7 @@ impl Render for WorkflowDialog {
                         cx.emit(TeamDialogEvent::Closed);
                     } else if !this.busy {
                         this.simple = None;
-                        this.screen = Screen::Browse;
+                        this.screen = this.start_screen();
                         this.error = None;
                         cx.notify();
                     }
@@ -682,13 +589,19 @@ impl Render for WorkflowDialog {
             )
             .child(self.status(cx))
             .child(self.footer(palette, cx))
-            .when_some(
-                match &self.screen {
-                    Screen::Delete(card) => Some(self.delete_prompt(card, false, palette, cx)),
-                    Screen::DeleteListed(card) => Some(self.delete_prompt(card, true, palette, cx)),
-                    _ => None,
-                },
-                gpui::ParentElement::child,
-            )
+            .children(self.prompt(palette, cx))
+            .into_any_element()
+    }
+}
+
+impl WorkflowDialog {
+    /// The question over the page: deleting a workflow, or building in Power Automate.
+    pub(super) fn prompt(&self, palette: Palette, cx: &Context<Self>) -> Option<AnyElement> {
+        match &self.screen {
+            Screen::Delete(card) => Some(self.delete_prompt(card, false, palette, cx)),
+            Screen::DeleteListed(card) => Some(self.delete_prompt(card, true, palette, cx)),
+            Screen::Build { asking: true } => Some(self.build_prompt(palette, cx)),
+            _ => None,
+        }
     }
 }

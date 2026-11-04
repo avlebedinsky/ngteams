@@ -94,10 +94,8 @@ flow, its triggers, connections, runs and `owners`, and resolves the owners' nam
   {"principal": {"id": <object id>, "displayName", "email", "type": "User"}}}]}`. Remove sends
   `DELETE …/flows/<flow>/owners/<object id>` with no question. The owners read answers each owner as
   `properties.principal` (`id`, `type`); the flow's `properties.creator.objectId` names who made it.
-- **Workflows Home** (external-link icon) closes the dialog and opens the Workflows app in Teams' main window: its
-  Home tab (Find templates, Build from scratch, Create a workflow, Your workflows with Refresh), beside Templates and
-  Chat (the Workflows bot's chat). The native client has no app pages, so its Workflows Home is the dialog's own page
-  of every template and workflow.
+- **Workflows Home** (external-link icon) closes the dialog and opens the Workflows app in Teams' main window
+  ([below](#the-workflows-app)), as the native client does too.
 - The channel's list: [below](#the-workflow-list-and-its-menu).
 
 The native client sends the same bodies on the classic Flow routes. Its co-owner and people searches use the engine's
@@ -156,7 +154,7 @@ resource key; a field without a label resource gets its kind's ("Start date", "T
 | `BuiltIn.Timezone` | Windows' zones (`Turkey Standard Time`, shown "(UTC+03:00) Istanbul"), the local one by default |
 | `BuiltIn.WeekDays` | seven round toggles S M T W T F S, the template's (Monday) by default; sent in week order into `schedule.weekDays` |
 | `Planner.GroupId`, `Planner.PlanId`, `SharePoint.Site`, `SharePoint.List`, `SharePoint.Library` | comboboxes of a connector's dynamic list; empty, with "No options available", until what they depend on is chosen |
-| `SharePoint.FolderPath`, `Outlook.MailFolderPath` | a folder picker: "Your folders", the app's name ("SharePoint", "Outlook") and the folders browsed into, then each folder (choose it, or its chevron to look inside) |
+| `SharePoint.FolderPath`, `Outlook.MailFolderPath` | a folder picker: "Your folders", the app's name ("SharePoint", "Outlook") and the folders browsed into, then each folder (choose it, or its chevron to look inside): Outlook's well-known ones first (Deleted Items, Sent Items, Outbox, Inbox, Drafts, Junk Email), then by name ignoring case (`_catalogs` before `FormServerTemplates` before `images`); the service lists them otherwise |
 | `Outlook.ToLine`, `Outlook.From` | people pickers ("Enter part of a name or email address to find people"): typing asks Graph for users and mail-enabled groups whose display name, mail or sign-in name starts with the text; the chosen show as chips; sent as their addresses joined by `;` |
 | `Outlook.SubjectFilter` | a text field |
 
@@ -201,9 +199,9 @@ Under "Your workflows", "Available in this channel" asks for the flows whose ope
 (`$filter=operations/any(…teams.groupId…teams.channelId…)`) and "Workflows" for those the account owns with
 `flowState=active`: both list only workflows that are on. A workflow turned off leaves the channel's list at once. A
 row is the name (semibold, grey) over "Active", or "Active: Next run: <when>" for a schedule, which also shows a
-recurrence mark and Run. "See all" (beside the heading while there are rows) leads to the Workflows app. With none:
-"Create an automation for your channel", "Pick one of our ready-to-go templates or build your own from scratch" and
-"View templates".
+recurrence mark and Run. "See all" (beside the heading while there are rows) leads to the Workflows app's "Your
+workflows". With none: "Create an automation for your channel", "Pick one of our ready-to-go templates or build your
+own from scratch" and "View templates".
 
 A click on a row opens its Overview. Its "..." menu holds Run (a schedule or a workflow started by hand), Edit, Manage,
 Turn off (Turn on), then Details, then Delete. Manage opens the workflow's page in Power Automate in a new browser tab,
@@ -211,6 +209,62 @@ Turn off (Turn on), then Details, then Delete. Manage opens the workflow's page 
 place, sends `stop` and reads the list again. Details is the Overview. Delete asks Teams' "Delete automation" question
 over the list (Delete spins while it goes) and the list stays. The native client opens Manage's page in the system
 browser.
+
+## The Workflows app
+
+Seen 2026-11-04 with `proto-lab run team-manage` steps, lab account a; the one workflow made from the app went to its
+lab-only team's General channel, was turned off and deleted, never run.
+
+The app opens in Teams' main window across the list and conversation panes: from the channel dialog's Workflows Home
+(Home) or "See all" ("Your workflows"), or from the rail's More apps flyout ("Search apps" over the apps, Workflows
+among them). While it is shown the rail shows it, chosen, under a separator; showing another place takes it off the
+rail. Its header is the app's icon on a white tile, "Workflows", the tabs Home, Templates and Chat, and a "..." menu
+(Reload app, Go to website, About, Share app). The app is Microsoft's own page
+(`automations.teams.cloud.microsoft/home`) in a frame; its reads go to the Power Platform hosts with the Flow token.
+
+- **Home**: "Find templates" and an outlined "Build from scratch"; "Create a workflow" with "All templates" (to the
+  Templates tab) and two arrows; eight template cards, four to a row; then "Your workflows" with "See all" (while it
+  lists any), Refresh and up to five rows. The cards are the gallery's `neptune_teams_pa_home` templates (sixteen, two
+  pages), in the app's own order (Follow up on a message, Automate weekly reminders, the Planner and SharePoint
+  channel notices, Forward your emails, new SharePoint files, Send webhook alerts to a channel, Schedule a reply,
+  then the second page). A card's mark is its kind, from its `categoryNames`: `schedule` a repeat on blue,
+  `get_updates` a bell on green, `take_actions` a pen on rose; its apps' icons sit at its bottom right in the reverse
+  of its `connectionReferences` order.
+- **Find templates**: typing asks the gallery `home_featured` with `$search` (top 10) and lists the first four names,
+  in the answer's order, under "Templates", then "Explore templates", which opens the Templates tab. A name opens its
+  template.
+- **Your workflows**: Teams reads the account's own workflows in every state (`$filter=properties/userType eq
+  'Owner'`, `flowState=all`, top 5 on Home); the native client lists the same from its full list. A row is the name
+  (semibold, grey) with "Active" (a blue sync mark) or "Inactive" (a filled grey circle with a bar) and "..." on the
+  right: Edit, Turn off (Turn on), Details, Delete; no Manage. Turn off replaces the state with a spinner until the
+  list is read again. With none: "Need more automation inspiration?", "Explore how our templates can automate your
+  repetitive tasks" and an illustration. "See all" is a page "Your workflows" with a back chevron, "Find workflows"
+  (suggesting the account's workflows by name under "Your workflows", or "We didn't find any matches"), the pills All,
+  Active, Inactive, Refresh and the rows.
+- **Templates**: Find templates and Build from scratch, the pills All, Take action, Get updates and Schedule (the
+  `take_actions`, `get_updates` and `schedule` categories), and Filter: a checklist of the apps the gallery's
+  templates use (Microsoft Teams, Office 365 Users, Planner, SharePoint, Office 365 Outlook, RSS, AI Workflows, …,
+  Standard approvals), each with its icon; "Filter (n)" while n are checked. The grid is the gallery's
+  `home_featured` templates (top 120): Home's sixteen first in Home's order, then the rest in the gallery's.
+- **A template** opens the channel dialog's card editor in the page, under "‹ Untitled workflow", "Collapse all"
+  and Save (no footer). With no channel to start from, the team field is empty ("Type or select a team") and the
+  channel field off; a SharePoint site has no default. Save goes to the Overview under "‹ Workflow details". A
+  template run from a message's More actions ("Follow up on a message") shows its instructions and a Save; the native
+  client opens those in its full editor.
+- **Build from scratch** shows "‹ Untitled workflow" with Save off, "Starts when" (Choose what starts this) and "Then
+  do this" (Choose what happens). Each opens Teams' choices: triggers On a schedule, SharePoint ›, Outlook ›,
+  Teams ›, Office 365 Groups ›, Azure DevOps ›; actions Teams ›, Outlook ›, SharePoint ›, Planner ›, Approvals ›,
+  Azure DevOps ›; each list ends with "Build with Power Automate to see more triggers" (actions). Choosing a trigger
+  fills a card of its fields (On a schedule: Interval, Frequency, Time, Day, Time zone). "Build with Power Automate"
+  asks "Build in Power Automate" ("You'll be taken to Power Automate to see the full catalog of triggers and actions
+  …"), and Go to Power Automate opens Power Automate's designer for a new flow
+  (`make.powerautomate.com/…/environments/~default/flows/new`) in a Teams dialog. The native client offers the same
+  choices, asks the same question for each and opens Power Automate's designer for a new workflow in the browser.
+- **Chat** is the account's 1:1 chat with the Workflows bot, `19:<account object id>_<the Workflows bot's app id>` in the 1:1 domain (`workflows_app::WORKFLOWS_BOT`),
+  posted to as any chat (no create call: the first message makes it). Before it, "You're starting a new conversation"
+  and "Type your first message below." over the message box. The bot answers anything with one message saying it
+  keeps you posted on workflow updates and can't respond to other requests; the chat then shows in the chat list as
+  "Workflows".
 
 ## Lifecycle routes
 
@@ -277,7 +331,10 @@ blocker. Opening the Teams modal would install an automation bot, which was bloc
 
 The service’s actual read catalogs, environments and connections were verified with the normal native auth client.
 The card editor's creation, edits, Rename, Turn off, deletion, the row menu and the connector lists were exercised live
-on the lab tenant (2026-11-04); running a workflow and Manage's page were not. The full editor's creation and running
+on the lab tenant (2026-11-04); running a workflow and Manage's page were not. The Workflows app's gallery reads (the
+classic route answered as the app's tenant-scoped twin does, `$search` too), a workflow made from the app with no team
+chosen, its row's Turn off and Delete, Build from scratch's choices and the bot's chat were exercised live in the
+native lab client the same day; Go to Power Automate's browser page was not opened. The full editor's creation and running
 were exercised against synthetic local services only.
 The advanced definition view preserves unsupported action types; a visual action graph and separate Copilot Actions
 session are not implemented.

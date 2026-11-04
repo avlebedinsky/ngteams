@@ -63,6 +63,9 @@ pub enum TeamDialogEvent {
     Gone { team: String, words: &'static str },
     /// "More create team options": a team from a template, another team or a group.
     MoreOptions,
+    /// The channel's Workflows asked for the Workflows app in the main window: its Home ("Workflows Home"), or its
+    /// "Your workflows" (`see_all`, the list's "See all").
+    Workflows { see_all: bool },
 }
 
 /// Whether `text` holds a link, as the bundle tells it for a team's name and description.

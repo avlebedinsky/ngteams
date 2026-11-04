@@ -7,6 +7,7 @@
 )]
 mod common;
 #[path = "support/workflow_fixtures.rs"]
+#[expect(dead_code, reason = "fixtures shared with the other workflow view tests")]
 mod fixtures;
 use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window, WindowOptions,
@@ -75,7 +76,6 @@ fn parent() -> SandboxResult {
             "webhook-off",
             "webhook-owners",
             "webhook-owner-search",
-            "home",
             "weekly",
             "weekly-bottom",
             "planner",
@@ -249,7 +249,6 @@ fn open_page(dialog: &Entity<WorkflowDialog>, page: &str, window: &mut Window, c
         | "webhook-off"
         | "webhook-owners"
         | "webhook-owner-search" => dialog.update(cx, |view, cx| view.open_workflow("synthetic-flow", cx)),
-        "home" => dialog.update(cx, WorkflowDialog::show_home),
         "weekly" | "weekly-bottom" => {
             dialog.update(cx, |view, cx| view.select_template("synthetic-template", window, cx));
         }

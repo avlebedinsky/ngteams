@@ -40,7 +40,8 @@ pub(super) struct Simple {
 pub(super) struct Field {
     pub(super) combo: Option<Combo>,
     pub(super) input: Option<Entity<InputState>>,
-    pub(super) area: Option<Entity<TextareaState>>,
+    /// A message box: its editor and Teams' formatting bar over it.
+    pub(super) message: Option<(Entity<crate::editor::Editor>, Entity<crate::editor::toolbar::FormatBar>)>,
     pub(super) date: Option<Entity<DatePickerState>>,
     pub(super) choices: Choices,
     /// A folder field's open list and the folders browsed into.
@@ -268,43 +269,60 @@ impl WorkflowDialog {
         cx.notify();
     }
 
-    /// Teams' defaults for a new workflow: the channel Workflows was opened from, a weekly interval of one, today,
-    /// the next five minutes, the local time zone, and the team's own SharePoint site.
+    /// Teams' defaults for a new workflow: the channel Workflows was opened from (none from the Workflows app, whose
+    /// team field starts empty), a weekly interval of one, today, the next five minutes, the local time zone, and
+    /// the team's own SharePoint site.
     fn default_fields(&self, simple: &mut Simple) {
         let now = chrono::Local::now().naive_local();
-        let group = self.team.group_id.clone().unwrap_or_else(|| self.team.id.clone());
+        let place = self.place.as_ref();
         for param in &mut simple.params {
             if !param.empty() {
                 continue;
             }
-            let (value, display) = match param.kind {
-                Kind::TeamsGroup => (Value::String(group.clone()), Some(self.team.name.clone())),
-                Kind::TeamsChannel => (Value::String(self.channel.id.clone()), Some(self.channel.name.clone())),
-                Kind::Interval => (Value::from(1), None),
-                Kind::StartDate => {
-                    let (value, shown) = markup::date_value(now.date());
-                    (Value::String(value), Some(shown))
+            let (value, display) = match (param.kind, place) {
+                (Kind::TeamsGroup, Some((team, _))) => (
+                    Value::String(team.group_id.clone().unwrap_or_else(|| team.id.clone())),
+                    Some(team.name.clone()),
+                ),
+                (Kind::TeamsChannel, Some((_, channel))) => {
+                    (Value::String(channel.id.clone()), Some(channel.name.clone()))
                 }
-                Kind::TimeOfDay => {
-                    let (hour, minute) = markup::default_time(now);
-                    (
-                        Value::String(format!("{hour:02}:{minute:02}")),
-                        Some(markup::clock_name(hour, minute)),
-                    )
-                }
-                Kind::TimeZone => {
-                    let (id, name) = zones::local();
-                    (Value::String(id.to_owned()), Some(name.to_owned()))
-                }
-                Kind::Choice if param.type_name == "SharePoint.Site" => match &self.team.about.site {
-                    Some(site) => (Value::String(site.clone()), Some(self.team.name.clone())),
+                (Kind::TeamsGroup | Kind::TeamsChannel, None) => continue,
+                (kind, _) => match self.default_value(kind, param, now) {
+                    Some(default) => default,
                     None => continue,
                 },
-                _ => continue,
             };
             param.value = value;
             param.display = display;
         }
+    }
+
+    /// The default of a field that doesn't name the channel.
+    fn default_value(&self, kind: Kind, param: &Param, now: chrono::NaiveDateTime) -> Option<(Value, Option<String>)> {
+        Some(match kind {
+            Kind::Interval => (Value::from(1), None),
+            Kind::StartDate => {
+                let (value, shown) = markup::date_value(now.date());
+                (Value::String(value), Some(shown))
+            }
+            Kind::TimeOfDay => {
+                let (hour, minute) = markup::default_time(now);
+                (
+                    Value::String(format!("{hour:02}:{minute:02}")),
+                    Some(markup::clock_name(hour, minute)),
+                )
+            }
+            Kind::TimeZone => {
+                let (id, name) = zones::local();
+                (Value::String(id.to_owned()), Some(name.to_owned()))
+            }
+            Kind::Choice if param.type_name == "SharePoint.Site" => {
+                let (team, _) = self.place.as_ref()?;
+                (Value::String(team.about.site.clone()?), Some(team.name.clone()))
+            }
+            _ => return None,
+        })
     }
 
     /// Shows each combobox's chosen name (once the teams are read, too).
@@ -496,13 +514,8 @@ impl WorkflowDialog {
             return;
         };
         for (param, field) in simple.params.iter_mut().zip(&simple.fields) {
-            if let Some(area) = &field.area {
-                let text = area.read(cx).value().to_string();
-                param.value = if text.trim().is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(text)
-                };
+            if let Some((editor, _)) = &field.message {
+                param.value = super::fields::message_value(editor.read(cx));
             }
         }
     }
@@ -525,15 +538,17 @@ impl WorkflowDialog {
                 ..
             }) => Screen::Detail(flow),
             Some(Simple { from_list: true, .. }) => self.list_screen(),
-            _ => Screen::Browse,
+            _ => self.start_screen(),
         };
         cx.notify();
     }
 
-    /// The list a change from a row's menu returns to: Workflows Home's, or the channel's.
+    /// The list a change from a row's menu returns to: the Workflows app's Home or its "Your workflows", or the
+    /// channel's.
     pub(super) fn list_screen(&self) -> Screen {
         match self.listing {
             Listing::Home => Screen::Home,
+            Listing::All => Screen::AllWorkflows,
             Listing::Channel => Screen::Browse,
         }
     }
