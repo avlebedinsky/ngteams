@@ -1,13 +1,18 @@
 ---
 name: teams-ui
-description: How to build and change the native Teams client's UI (crates/teams-ui, the GPUI + gpui-component views) so it looks and behaves like real Microsoft Teams and stays clean — icon buttons with tooltips instead of text buttons, structured settings pages, the app's palette and Teams' red/green, the kit's pitfalls, keeping test selectors, and checking the result in the UI sandbox screenshots before handing it over. Use it for ANY task that touches what the app shows or how it is used: a new view, button, menu, dialog, settings option, empty or error state, call control, theme or layout tweak, "make it look like Teams", "this looks raw/ugly", a UI bug in the personal build — even when the request only names a feature ("add pinned chats", "show who reacted") and the UI part is implied.
+description: Build or change ngteams' native Teams UI (Rust, GPUI + gpui-component) in Claude Code or Codex, matching Microsoft Teams and checking sandbox screenshots. Use for any change to what the app shows or how it is used, including views, controls, settings, calls, themes, layouts, UI bugs, and features with implied UI such as pinned chats or reactions.
 ---
 
 # Teams UI
 
 The app is meant to replace Microsoft Teams for daily use, so a view is done when it looks and behaves like the real
 client, not when it merely works. The user checks the personal build by hand, so every visible slip costs them a
-rebuild and a restart. CLAUDE.md's rules and design invariants apply to every UI change; this skill adds the UI side.
+rebuild and a restart. This skill applies in both Claude Code and Codex.
+
+Work from the repository root. Read `CLAUDE.md` explicitly if the host has not already loaded it; its project rules,
+checks and design invariants apply to every UI change, alongside applicable `AGENTS.md` and user instructions.
+This skill adds the UI side. The canonical copy is `.agents/skills/teams-ui/SKILL.md`; Claude discovers the same
+skill through the `.claude/skills/teams-ui` symlink. Keep updates in the shared copy.
 
 ## Before you build
 
@@ -126,7 +131,8 @@ rest of the checks follow CLAUDE.md's "Checks".
    settings page (Calls with made-up devices), appearance and chat in Teams Dark. A new surface gets a step in
    `STEPS` in `crates/ngteams/tests/ui_tour.rs`.
 2. Calls: `cargo test -p ngteams --test call_window` writes `ngteams-call-*.png` (incoming, connected, video).
-3. **Read the screenshots** (the Read tool shows images) and fix what looks off — alignment, clipped text, a control
+3. **Read the screenshots** using Claude Code's `Read` tool or Codex's `view_image` tool with the local image's
+   absolute path, and fix what looks off — alignment, clipped text, a control
    that looks disabled, a colour that vanished in dark mode. Say plainly what a still shot can't show (hover, open
    menus, animation) and that you haven't seen it.
 4. **The user's real chats** (a bug only real data shows, a layout with real names and long chats): run the installed

@@ -4,7 +4,7 @@ Apply these when working in ngteams. The repository's current `AGENTS.md`/`CLAUD
 project rules; this reference does not duplicate them.
 
 - Read `CLAUDE.md`, especially Checks, and any instructions applicable in the worker's worktree. For anything the app
-  shows, read and apply `.claude/skills/teams-ui/SKILL.md` even when a host cannot invoke it as a named skill.
+  shows, read and apply `.agents/skills/teams-ui/SKILL.md` even when a host cannot invoke it as a named skill.
 - Build the whole feature shown in the user's request/screenshots and the Teams reference. Obtain the needed
   permitted captures, reads, and lab runs. Disabled controls and placeholder messages count as unfinished work.
 - A task's quick checks include `cargo fmt --all`, `cargo check -p <touched-crate> --all-targets`, relevant focused
