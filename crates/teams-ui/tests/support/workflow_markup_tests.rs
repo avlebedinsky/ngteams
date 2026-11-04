@@ -249,3 +249,16 @@ fn the_local_zone_is_found_by_offset_and_city() {
     // the names carry standard offsets: Berlin by its standard +01:00, summer or not
     assert_eq!(by_offset(3600, Some("Berlin")).0, "W. Europe Standard Time");
 }
+
+#[test]
+fn a_known_system_zone_is_its_own_windows_zone() {
+    use super::super::zones::{TZDB, by_tzdb};
+    // no name shows New York or Chicago: by offset and city they'd be Bogota's and Guatemala's zones
+    assert_eq!(by_tzdb("America/New_York").map(|zone| zone.0), Some("Eastern Standard Time"));
+    assert_eq!(by_tzdb("America/Chicago").map(|zone| zone.0), Some("Central Standard Time"));
+    assert_eq!(by_tzdb("Europe/Berlin").map(|zone| zone.0), Some("W. Europe Standard Time"));
+    assert_eq!(by_tzdb("Mars/Olympus_Mons"), None);
+    for (tzdb, windows) in TZDB {
+        assert_eq!(by_tzdb(tzdb).map(|zone| zone.0), Some(windows), "{tzdb} names a zone Teams offers");
+    }
+}

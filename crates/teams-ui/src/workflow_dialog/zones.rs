@@ -175,19 +175,191 @@ pub(super) const ZONES: [(&str, &str); 136] = [
     ("Line Islands Standard Time", "(UTC+14:00) Kiritimati Island"),
 ];
 
-/// The local zone: by the system zone's city (`/etc/localtime`'s link, or `TZ`) among those with its standard offset
-/// (the names carry standard offsets: Berlin's is +01:00 in summer too).
+/// Each Windows zone's own tz database zone (CLDR's `windowsZones`, territory 001) and a few big cities' zones whose
+/// city no name shows: (tz database zone, Windows zone id).
+pub(super) const TZDB: [(&str, &str); 144] = [
+    ("Etc/GMT+12", "Dateline Standard Time"),
+    ("Etc/GMT+11", "UTC-11"),
+    ("America/Adak", "Aleutian Standard Time"),
+    ("Pacific/Honolulu", "Hawaiian Standard Time"),
+    ("Pacific/Marquesas", "Marquesas Standard Time"),
+    ("America/Anchorage", "Alaskan Standard Time"),
+    ("Etc/GMT+9", "UTC-09"),
+    ("America/Tijuana", "Pacific Standard Time (Mexico)"),
+    ("Etc/GMT+8", "UTC-08"),
+    ("America/Los_Angeles", "Pacific Standard Time"),
+    ("America/Vancouver", "Pacific Standard Time"),
+    ("America/Phoenix", "US Mountain Standard Time"),
+    ("America/Mazatlan", "Mountain Standard Time (Mexico)"),
+    ("America/Denver", "Mountain Standard Time"),
+    ("America/Edmonton", "Mountain Standard Time"),
+    ("America/Boise", "Mountain Standard Time"),
+    ("America/Guatemala", "Central America Standard Time"),
+    ("America/Chicago", "Central Standard Time"),
+    ("America/Winnipeg", "Central Standard Time"),
+    ("Pacific/Easter", "Easter Island Standard Time"),
+    ("America/Mexico_City", "Central Standard Time (Mexico)"),
+    ("America/Monterrey", "Central Standard Time (Mexico)"),
+    ("America/Regina", "Canada Central Standard Time"),
+    ("America/Bogota", "SA Pacific Standard Time"),
+    ("America/Lima", "SA Pacific Standard Time"),
+    ("America/Cancun", "Eastern Standard Time (Mexico)"),
+    ("America/New_York", "Eastern Standard Time"),
+    ("America/Toronto", "Eastern Standard Time"),
+    ("America/Detroit", "Eastern Standard Time"),
+    ("America/Port-au-Prince", "Haiti Standard Time"),
+    ("America/Havana", "Cuba Standard Time"),
+    ("America/Indianapolis", "US Eastern Standard Time"),
+    ("America/Indiana/Indianapolis", "US Eastern Standard Time"),
+    ("America/Asuncion", "Paraguay Standard Time"),
+    ("America/Halifax", "Atlantic Standard Time"),
+    ("America/Caracas", "Venezuela Standard Time"),
+    ("America/Cuiaba", "Central Brazilian Standard Time"),
+    ("America/La_Paz", "SA Western Standard Time"),
+    ("America/Santiago", "Pacific SA Standard Time"),
+    ("America/Grand_Turk", "Turks And Caicos Standard Time"),
+    ("America/St_Johns", "Newfoundland Standard Time"),
+    ("America/Araguaina", "Tocantins Standard Time"),
+    ("America/Sao_Paulo", "E. South America Standard Time"),
+    ("America/Cayenne", "SA Eastern Standard Time"),
+    ("America/Buenos_Aires", "Argentina Standard Time"),
+    ("America/Argentina/Buenos_Aires", "Argentina Standard Time"),
+    ("America/Godthab", "Greenland Standard Time"),
+    ("America/Nuuk", "Greenland Standard Time"),
+    ("America/Montevideo", "Montevideo Standard Time"),
+    ("America/Punta_Arenas", "Magallanes Standard Time"),
+    ("America/Miquelon", "Saint Pierre Standard Time"),
+    ("America/Bahia", "Bahia Standard Time"),
+    ("Etc/GMT+2", "UTC-02"),
+    ("Atlantic/Azores", "Azores Standard Time"),
+    ("Atlantic/Cape_Verde", "Cape Verde Standard Time"),
+    ("Etc/UTC", "UTC"),
+    ("Etc/GMT", "UTC"),
+    ("UTC", "UTC"),
+    ("Africa/Casablanca", "Morocco Standard Time"),
+    ("Europe/London", "GMT Standard Time"),
+    ("Europe/Dublin", "GMT Standard Time"),
+    ("Europe/Lisbon", "GMT Standard Time"),
+    ("Atlantic/Reykjavik", "Greenwich Standard Time"),
+    ("Europe/Berlin", "W. Europe Standard Time"),
+    ("Europe/Amsterdam", "W. Europe Standard Time"),
+    ("Europe/Zurich", "W. Europe Standard Time"),
+    ("Europe/Budapest", "Central Europe Standard Time"),
+    ("Europe/Prague", "Central Europe Standard Time"),
+    ("Europe/Paris", "Romance Standard Time"),
+    ("Europe/Brussels", "Romance Standard Time"),
+    ("Europe/Madrid", "Romance Standard Time"),
+    ("Europe/Warsaw", "Central European Standard Time"),
+    ("Africa/Lagos", "W. Central Africa Standard Time"),
+    ("Africa/Windhoek", "Namibia Standard Time"),
+    ("Asia/Amman", "Jordan Standard Time"),
+    ("Europe/Bucharest", "GTB Standard Time"),
+    ("Europe/Athens", "GTB Standard Time"),
+    ("Asia/Beirut", "Middle East Standard Time"),
+    ("Africa/Cairo", "Egypt Standard Time"),
+    ("Europe/Chisinau", "E. Europe Standard Time"),
+    ("Asia/Damascus", "Syria Standard Time"),
+    ("Asia/Hebron", "West Bank Standard Time"),
+    ("Africa/Johannesburg", "South Africa Standard Time"),
+    ("Europe/Kiev", "FLE Standard Time"),
+    ("Europe/Kyiv", "FLE Standard Time"),
+    ("Europe/Helsinki", "FLE Standard Time"),
+    ("Asia/Jerusalem", "Israel Standard Time"),
+    ("Europe/Kaliningrad", "Kaliningrad Standard Time"),
+    ("Africa/Tripoli", "Libya Standard Time"),
+    ("Asia/Baghdad", "Arabic Standard Time"),
+    ("Europe/Istanbul", "Turkey Standard Time"),
+    ("Asia/Riyadh", "Arab Standard Time"),
+    ("Europe/Minsk", "Belarus Standard Time"),
+    ("Europe/Moscow", "Russian Standard Time"),
+    ("Africa/Nairobi", "E. Africa Standard Time"),
+    ("Asia/Tehran", "Iran Standard Time"),
+    ("Asia/Dubai", "Arabian Standard Time"),
+    ("Europe/Astrakhan", "Astrakhan Standard Time"),
+    ("Asia/Baku", "Azerbaijan Standard Time"),
+    ("Europe/Samara", "Russia Time Zone 3"),
+    ("Indian/Mauritius", "Mauritius Standard Time"),
+    ("Europe/Saratov", "Saratov Standard Time"),
+    ("Asia/Tbilisi", "Georgian Standard Time"),
+    ("Europe/Volgograd", "Volgograd Standard Time"),
+    ("Asia/Yerevan", "Caucasus Standard Time"),
+    ("Asia/Kabul", "Afghanistan Standard Time"),
+    ("Asia/Tashkent", "West Asia Standard Time"),
+    ("Asia/Yekaterinburg", "Ekaterinburg Standard Time"),
+    ("Asia/Karachi", "Pakistan Standard Time"),
+    ("Asia/Calcutta", "India Standard Time"),
+    ("Asia/Kolkata", "India Standard Time"),
+    ("Asia/Colombo", "Sri Lanka Standard Time"),
+    ("Asia/Katmandu", "Nepal Standard Time"),
+    ("Asia/Kathmandu", "Nepal Standard Time"),
+    ("Asia/Bishkek", "Central Asia Standard Time"),
+    ("Asia/Dhaka", "Bangladesh Standard Time"),
+    ("Asia/Omsk", "Omsk Standard Time"),
+    ("Asia/Rangoon", "Myanmar Standard Time"),
+    ("Asia/Yangon", "Myanmar Standard Time"),
+    ("Asia/Bangkok", "SE Asia Standard Time"),
+    ("Asia/Barnaul", "Altai Standard Time"),
+    ("Asia/Hovd", "W. Mongolia Standard Time"),
+    ("Asia/Krasnoyarsk", "North Asia Standard Time"),
+    ("Asia/Novosibirsk", "N. Central Asia Standard Time"),
+    ("Asia/Tomsk", "Tomsk Standard Time"),
+    ("Asia/Shanghai", "China Standard Time"),
+    ("Asia/Irkutsk", "North Asia East Standard Time"),
+    ("Asia/Singapore", "Singapore Standard Time"),
+    ("Australia/Perth", "W. Australia Standard Time"),
+    ("Asia/Taipei", "Taipei Standard Time"),
+    ("Asia/Ulaanbaatar", "Ulaanbaatar Standard Time"),
+    ("Asia/Pyongyang", "North Korea Standard Time"),
+    ("Australia/Eucla", "Aus Central W. Standard Time"),
+    ("Asia/Chita", "Transbaikal Standard Time"),
+    ("Asia/Tokyo", "Tokyo Standard Time"),
+    ("Asia/Seoul", "Korea Standard Time"),
+    ("Asia/Yakutsk", "Yakutsk Standard Time"),
+    ("Australia/Adelaide", "Cen. Australia Standard Time"),
+    ("Australia/Darwin", "AUS Central Standard Time"),
+    ("Australia/Brisbane", "E. Australia Standard Time"),
+    ("Australia/Sydney", "AUS Eastern Standard Time"),
+    ("Pacific/Port_Moresby", "West Pacific Standard Time"),
+    ("Australia/Hobart", "Tasmania Standard Time"),
+    ("Pacific/Auckland", "New Zealand Standard Time"),
+];
+
+/// The local zone: the Windows zone of the system's tz database zone (`TZ`, or `/etc/localtime`'s link) when it is
+/// known, else by its city among the zones with its standard offset (the names carry standard offsets: Berlin's is
+/// +01:00 in summer too), else the first with that offset.
 pub(super) fn local() -> (&'static str, &'static str) {
-    let seconds = standard_offset();
-    let city = std::env::var("TZ")
+    let zone = system_zone();
+    if let Some(known) = zone.as_deref().and_then(by_tzdb) {
+        return known;
+    }
+    let city = zone
+        .as_deref()
+        .and_then(|zone| zone.rsplit('/').next().map(|city| city.replace('_', " ")));
+    by_offset(standard_offset(), city.as_deref())
+}
+
+/// The system's tz database zone, as `Area/City`.
+fn system_zone() -> Option<String> {
+    let zone = std::env::var("TZ")
         .ok()
+        .map(|zone| zone.trim_start_matches(':').to_owned())
         .or_else(|| {
             std::fs::read_link("/etc/localtime")
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned())
-        })
-        .and_then(|zone| zone.rsplit('/').next().map(|city| city.replace('_', " ")));
-    by_offset(seconds, city.as_deref())
+        })?;
+    let zone = zone.rsplit_once("zoneinfo/").map_or(zone.as_str(), |(_, zone)| zone);
+    let zone = zone
+        .strip_prefix("posix/")
+        .or_else(|| zone.strip_prefix("right/"))
+        .unwrap_or(zone);
+    Some(zone.to_owned())
+}
+
+/// The Windows zone, with its name, of a tz database zone the table knows.
+pub(super) fn by_tzdb(zone: &str) -> Option<(&'static str, &'static str)> {
+    let (_, windows) = TZDB.iter().find(|(tzdb, _)| *tzdb == zone)?;
+    ZONES.iter().find(|(id, _)| id == windows).copied()
 }
 
 /// The local zone's standard offset, seconds east of UTC: the smaller of its January and July offsets, as daylight
