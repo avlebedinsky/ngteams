@@ -1,4 +1,4 @@
-- Do the task's actual job first: the feature working end to end. The fence and CLAUDE.md's hard rules are already
+- Do the task's actual job first: the feature working end to end. The fence and AGENTS.md's hard rules are already
   built and settled; follow them, but don't add fence tightening, new denials or new guards the task doesn't ask for.
 - The lab accounts (a, b, c) are known bot accounts nobody outside contacts. Don't design, test or fix for an outsider
   calling, messaging or inviting them, beyond what the existing fence already does.

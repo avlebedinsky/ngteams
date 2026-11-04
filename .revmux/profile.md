@@ -14,7 +14,7 @@
 
 ## What a real failure looks like
 
-- **A fence escape (always critical).** A contacting write (CLAUDE.md's list: a message, edit, delete, reaction, call
+- **A fence escape (always critical).** A contacting write (AGENTS.md's list: a message, edit, delete, reaction, call
   start, join or answer, chat created, member added or removed, invite) actually leaves without passing the fence,
   on a path the change makes reachable. Also critical: anything that mints a `WritePermit` outside `Fence::check`;
   an `Unknown` treated as allowed; a chat admitted without its fresh, complete member read.
@@ -28,7 +28,7 @@
   without an explicit `Store::resend`; an older version overwrites a newer one; a field in a form no capture showed
   is read as absent, 0 or newer instead of kept as `Unknown`.
 - **A token trusted past its expiry**, or a credential handed to a third party (a bot, an app backend).
-- **A lab browser target resumed unarmed.** Arming order and close-or-kill containment are in `CLAUDE.md`. A breach
+- **A lab browser target resumed unarmed.** Arming order and close-or-kill containment are in `AGENTS.md`. A breach
   is never a flake.
 - **The feature doesn't work.** A call that doesn't connect, audio that doesn't flow, a view that shows the wrong
   state, a crash, a hang. This is the task's actual job and weighs as much as the fence.
@@ -69,7 +69,7 @@ These are minor at most, and only worth reporting when the fix is small.
 
 ## Where the rules live
 
-- `CLAUDE.md`: the hard rules (fence, allowances, native request policy, calls, captures and fixtures, live runs),
+- `AGENTS.md`: the hard rules (fence, allowances, native request policy, calls, captures and fixtures, live runs),
   the patterns, the lint rules and the gate.
 - `docs/protocol/*.md`: protocol notes in our own words. `endpoints.md` must gain or update a row in the same change
   that captures, maps, allowlists, uses or re-treats an endpoint.

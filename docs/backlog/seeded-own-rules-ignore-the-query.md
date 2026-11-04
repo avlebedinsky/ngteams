@@ -5,7 +5,7 @@ added: 2026-10-21
 ---
 # the sign-in window's rules let Entra's sign-in form out whatever its query
 
-The sign-in window (`teams-signin`) keeps default-deny rules of its own (`teams_signin::classify`, CLAUDE.md): reads,
+The sign-in window (`teams-signin`) keeps default-deny rules of its own (`teams_signin::classify`, AGENTS.md): reads,
 the Entra token endpoint in its two captured parameter sets (the request id alone, or with the broker's three
 parameters, each once and in its captured value forms), Teams' authz endpoints with no query, and Entra's sign-in form
 (`/*/GetCredentialType`, `/*/login`, `/kmsi`, `/*/kmsi`, `OwnKind::EntraSignIn`). The form still takes any query

@@ -1,9 +1,9 @@
 # ngteams dispatch conventions
 
-Apply these when working in ngteams. The repository's current `AGENTS.md`/`CLAUDE.md` and user instructions govern
+Apply these when working in ngteams. The repository's current `AGENTS.md` and user instructions govern
 project rules; this reference does not duplicate them.
 
-- Read `CLAUDE.md`, especially Checks, and any instructions applicable in the worker's worktree. For anything the app
+- Read `AGENTS.md`, especially Checks, and any instructions applicable in the worker's worktree. For anything the app
   shows, read and apply `.agents/skills/teams-ui/SKILL.md` even when a host cannot invoke it as a named skill.
 - Build the whole feature shown in the user's request/screenshots and the Teams reference. Obtain the needed
   permitted captures, reads, and lab runs. Disabled controls and placeholder messages count as unfinished work.
@@ -14,7 +14,7 @@ project rules; this reference does not duplicate them.
   or fixtures. Follow repository rules when deciding whether a failure is a flake. Stop and report a run that
   reaches someone outside the allowed lab contacts; never dismiss it as a flake.
   Fix every major finding, including immaterial and pre-existing ones; re-review fixes when their size warrants it.
-- Don't stop for rule questions: `CLAUDE.md` states what needs sign-off. Use background-command notifications or
+- Don't stop for rule questions: `AGENTS.md` states what needs sign-off. Use background-command notifications or
   session handles, never `pgrep -f` wait loops that can match their own command line.
 - If an existing CPU cap applies, propagate its quota into cargo jobs and test threads. Inspect the cap using its
   available tool/skill; do not require a missing `~/.claude/skills/cpu-cap` installation.

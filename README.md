@@ -8,7 +8,8 @@ scenario and bundle-analysis tool.
 The app has chats, rich-text compose, reactions, search, teams and channels, notifications and tray support,
 audio/video calls, and the calendar and meeting flows. Earlier milestone outcomes and measurements remain in
 [the acceptance records](docs/m3-acceptance.md) and [completed plans](docs/plans/completed/); they describe the code
-and live runs at those milestones, rather than today's commands. Current rules are in [CLAUDE.md](CLAUDE.md).
+and live runs at those milestones, rather than today's commands. Shared rules for Claude Code and Codex are in
+[AGENTS.md](AGENTS.md).
 
 The client also stages dropped files as private attachments, retains compose drafts while sends are pending,
 opens people search results as chats, and keeps unread badges in sync with read receipts. Editing message text
@@ -362,7 +363,7 @@ and mini bundle); the guard still scans them.
 
 ## Tests
 
-Choose checks for what the change can break; [CLAUDE.md](CLAUDE.md) defines the scope. Typical checks:
+Choose checks for what the change can break; [AGENTS.md](AGENTS.md) defines the scope. Typical checks:
 
 ```sh
 cargo fmt --all --check

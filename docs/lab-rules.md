@@ -1,6 +1,6 @@
 # The lab's rules in full
 
-[CLAUDE.md](../CLAUDE.md) carries the short form. The agent checks this rule before every live run of `ngteams` or
+[AGENTS.md](../AGENTS.md) carries the short form. The agent checks this rule before every live run of `ngteams` or
 `proto-lab`; the application does not enforce a lab roster or inspect `lab.toml`.
 
 **Lab accounts talk and call only each other, the echo service and the user's own account, both ways.** The rule is

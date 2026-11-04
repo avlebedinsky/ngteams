@@ -9,8 +9,9 @@ The app is meant to replace Microsoft Teams for daily use, so a view is done whe
 client, not when it merely works. The user checks the personal build by hand, so every visible slip costs them a
 rebuild and a restart. This skill applies in both Claude Code and Codex.
 
-Work from the repository root. Read `CLAUDE.md` explicitly if the host has not already loaded it; its project rules,
-checks and design invariants apply to every UI change, alongside applicable `AGENTS.md` and user instructions.
+Work from the repository root. Read `AGENTS.md` explicitly if the host has not already loaded it; its project rules,
+checks and design invariants apply to every UI change, alongside more specific directory instructions and user
+instructions.
 This skill adds the UI side. The canonical copy is `.agents/skills/teams-ui/SKILL.md`; Claude discovers the same
 skill through the `.claude/skills/teams-ui` symlink. Keep updates in the shared copy.
 
@@ -109,7 +110,7 @@ notifications, the README and the tests for the old name. Errors say what happen
   click the picker, then the row.
 - `Tooltip::new(text).action(&action, None)` shows a key on a plain `div`'s `.tooltip(..)` (needs
   `StatefulInteractiveElement`, so the div needs an `.id`).
-- Don't use the kit's Markdown/HTML views for message text (it is drawn only from sanitized `RichText`, CLAUDE.md's
+- Don't use the kit's Markdown/HTML views for message text (it is drawn only from sanitized `RichText`, AGENTS.md's
   design invariants), and don't call `ThemeRegistry::watch_dir`.
 
 ## Keep tests and the trace working
@@ -123,7 +124,7 @@ notifications, the README and the tests for the old name. Errors say what happen
 ## Check it rendered
 
 A change to what the app shows is checked by looking at it. Pick the shots that cover the surfaces you touched; the
-rest of the checks follow CLAUDE.md's "Checks".
+rest of the checks follow AGENTS.md's "Checks".
 
 1. `GPUI_SMOKE_REQUIRE=1 cargo test -p ngteams --test ui_tour` (run in the background; it builds and drives the app
    on the mock in the UI sandbox) writes `target/ui-shots/tour-*.png`: no chat, a chat with a message's actions (shown

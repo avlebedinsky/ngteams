@@ -6,7 +6,7 @@ and the protocol follow-ups those actions require. The outbox, transport and cal
 
 The same client also runs isolated lab accounts through `scripts/run-lab.sh`. Personal mode never reads
 `lab.toml`, and no separate policy or decision log is required for a send. Current agent authorization is in
-[CLAUDE.md](../CLAUDE.md); the unchanged lab reach rule and per-run check are in [lab-rules.md](lab-rules.md).
+[AGENTS.md](../AGENTS.md); the unchanged lab reach rule and per-run check are in [lab-rules.md](lab-rules.md).
 Earlier approvals and milestone implementations remain in [completed plans](plans/completed/) and acceptance
 records; obsolete proposal mechanisms are not instructions for the current client.
 

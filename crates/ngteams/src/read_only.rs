@@ -1,4 +1,4 @@
-//! The read-only mode (`ngteams --read-only`, or `TEAMS_READ_ONLY=1`; CLAUDE.md, "Agents run the personal build only
+//! The read-only mode (`ngteams --read-only`, or `TEAMS_READ_ONLY=1`; AGENTS.md, "Agents run the personal build only
 //! read-only"; `docs/personal-build.md`, "What agents may do"): the user's own account, looked at and navigated in a
 //! window of the UI sandbox, sending nothing that anyone sees or that changes the account. It is decided at the start
 //! and nothing turns it off while the app runs. `scripts/run-personal-read-only.sh` runs it.

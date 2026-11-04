@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the personal build (`crates/ngteams`, docs/personal-build.md) as a release and installs it under ~/.local, for
-# the user to run on their own desktop. **Agents run this script only when the user asks** (CLAUDE.md): it is the only
+# the user to run on their own desktop. **Agents run this script only when the user asks** (AGENTS.md): it is the only
 # thing that sets the install marker, without which `ngteams` refuses to start.
 #
 # - Requires the system's `wpewebkit` (2.54 or newer, README.md "WPE WebKit") for the sign-in window's page: the

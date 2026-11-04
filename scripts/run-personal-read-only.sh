@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the installed personal build (`ngteams`) in its read-only mode for an agent to look at the user's real chats
-# (CLAUDE.md, "Agents run the personal build only read-only"; docs/personal-build.md, "What agents may do"):
+# (AGENTS.md, "Agents run the personal build only read-only"; docs/personal-build.md, "What agents may do"):
 #
 # - a snapshot of the user's Teams files (`ngteams snapshot`: the accounts, the settings, the regions and a consistent
 #   copy of each store, read without writing it), so the user's own running `ngteams` is never touched;
