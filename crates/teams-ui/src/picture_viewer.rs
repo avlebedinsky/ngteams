@@ -683,7 +683,7 @@ pub fn file_name(time: i64, format: PastedFormat) -> String {
 }
 
 /// The user's downloads folder: `XDG_DOWNLOAD_DIR` (from the environment, else `user-dirs.dirs`), else `~/Downloads`.
-fn downloads() -> PathBuf {
+pub(crate) fn downloads() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR") {
         return PathBuf::from(dir);
@@ -711,7 +711,7 @@ pub fn user_dir(dirs: &str, key: &str, home: &Path) -> Option<PathBuf> {
 }
 
 /// `name` in `folder`, or with " (n)" before its extension when a file has it.
-fn free_name(folder: &Path, name: &str) -> PathBuf {
+pub(crate) fn free_name(folder: &Path, name: &str) -> PathBuf {
     let first = folder.join(name);
     if !first.exists() {
         return first;

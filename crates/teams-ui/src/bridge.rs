@@ -106,6 +106,17 @@ pub trait Core: Send + Sync + 'static {
     /// The size of a file a message carries, by its sharing link: asked for when a video's card is drawn, so the
     /// engine knows its download link before Play is pressed.
     fn file_size(&self, share_url: String) -> Reply<u64>;
+    /// What the meeting whose chat is `thread` left (its recordings and transcripts), as its recap lists it. A fake
+    /// without recaps answers that it can't be read.
+    fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
+        let _ = thread;
+        Reply::ready(Err(teams_core::EngineError::RecapUnread))
+    }
+    /// The `WebVTT` of the meeting transcript at `location` (a transcript content's).
+    fn meeting_transcript(&self, location: String) -> Reply<String> {
+        let _ = location;
+        Reply::ready(Err(teams_core::EngineError::RecapUnread))
+    }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -604,6 +615,14 @@ impl Core for EngineRequests {
 
     fn file_size(&self, share_url: String) -> Reply<u64> {
         EngineRequests::file_size(self, share_url)
+    }
+
+    fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
+        EngineRequests::meeting_contents(self, thread)
+    }
+
+    fn meeting_transcript(&self, location: String) -> Reply<String> {
+        EngineRequests::meeting_transcript(self, location)
     }
 
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {

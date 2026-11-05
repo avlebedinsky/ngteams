@@ -84,6 +84,10 @@ pub struct FakeCore {
     pub pictures: Mutex<HashMap<String, PictureBytes>>,
     /// The thumbnails `file_thumbnail` answers, by the file's sharing link.
     pub thumbnails: Mutex<HashMap<String, PictureBytes>>,
+    /// What `meeting_contents` answers, by the meeting's chat; any other chat's recap can't be read.
+    pub meeting_contents: Mutex<HashMap<String, Vec<teams_proto::MeetingContent>>>,
+    /// The `WebVTT` `meeting_transcript` answers, by the transcript's location; any other can't be read.
+    pub transcripts: Mutex<HashMap<String, String>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
@@ -707,6 +711,26 @@ impl Core for FakeCore {
 
     fn file_size(&self, _: String) -> Reply<u64> {
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
+
+    fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
+        locked(&self.asked).push("meeting_contents");
+        Reply::ready(
+            locked(&self.meeting_contents)
+                .get(&thread)
+                .cloned()
+                .ok_or(teams_core::EngineError::RecapUnread),
+        )
+    }
+
+    fn meeting_transcript(&self, location: String) -> Reply<String> {
+        locked(&self.asked).push("meeting_transcript");
+        Reply::ready(
+            locked(&self.transcripts)
+                .get(&location)
+                .cloned()
+                .ok_or(teams_core::EngineError::RecapUnread),
+        )
     }
 
     fn presence(&self, mri: String) -> Reply<Availability> {

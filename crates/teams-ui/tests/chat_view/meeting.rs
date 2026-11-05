@@ -3,14 +3,16 @@
 //! the transcript's card, who was invited or left as lines; none of them with an author row, and a thread never named
 //! as a sender, not even for a kind this build doesn't show. Every id, name and value here is made up.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::common::{LAB_A, LAB_B, Rig};
 use super::parts;
-use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use teams_store::Message;
 use teams_ui::ViewTrace;
-use teams_ui::chat_view::{Body, ChatView, EventCard, MessageItem};
+use teams_ui::chat_view::{Body, ChatView, ChatViewEvent, EventCard, MessageItem};
 use teams_ui::settings::Settings;
 use teams_ui::system_message::CardKind;
 
@@ -240,6 +242,7 @@ fn a_meeting_chat_shows_its_system_messages_as_teams_does() {
         ]
     );
     drawn_without_authors(cx);
+    view_recap_tells_the_shell(&view, cx);
 
     // the chat's name titles the meeting's cards
     cx.update(|_, cx| view.update(cx, |view, cx| view.set_title(Some("Weekly sync".into()), cx)));
@@ -257,7 +260,7 @@ fn a_meeting_chat_shows_its_system_messages_as_teams_does() {
 }
 
 /// Every system row is drawn centred without an author: no sender's name or avatar, never the thread's id; the cards
-/// as their kinds, a recording's and a transcript's with the link to Teams on the web.
+/// as their kinds, a recording's and a transcript's with "View recap" (the meeting's Recap tab, in the app).
 fn drawn_without_authors(cx: &mut VisualTestContext) {
     for id in ["1", "2", "4", "7", "11"] {
         assert!(
@@ -280,13 +283,35 @@ fn drawn_without_authors(cx: &mut VisualTestContext) {
             "card {id} drawn"
         );
     }
-    // a recording and a transcript open in Teams on the web; a meeting's card doesn't
-    assert!(cx.debug_bounds("open-on-the-web-9").is_some());
-    assert!(cx.debug_bounds("open-on-the-web-10").is_some());
+    // a recording and a transcript open the meeting's recap in the app, not Teams on the web; a meeting's card neither
+    assert!(cx.debug_bounds("view-recap-9").is_some());
+    assert!(cx.debug_bounds("view-recap-10").is_some());
+    assert!(cx.debug_bounds("open-on-the-web-9").is_none());
+    assert!(cx.debug_bounds("view-recap-8").is_none());
     assert!(cx.debug_bounds("open-on-the-web-8").is_none());
     assert!(cx.debug_bounds("unsupported-11").is_some());
     // the message among them keeps its author
     assert!(cx.debug_bounds("avatar-6").is_some());
+}
+
+/// "View recap" on the recording's card tells the shell to show the Recap tab.
+fn view_recap_tells_the_shell(view: &Entity<ChatView>, cx: &mut VisualTestContext) {
+    let told: Rc<RefCell<Vec<ChatViewEvent>>> = Rc::default();
+    let kept = Rc::clone(&told);
+    cx.update(|_, cx| {
+        cx.subscribe(view, move |_, event: &ChatViewEvent, _| {
+            kept.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    let button = cx.debug_bounds("view-recap-9").expect("View recap is drawn");
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(
+        matches!(told.borrow().as_slice(), [ChatViewEvent::OpenRecap(_)]),
+        "the recap asked for once: {:?}",
+        told.borrow()
+    );
 }
 
 /// The body of the message `id` as shown (a text message's, compared as itself).

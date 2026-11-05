@@ -16,6 +16,9 @@
 //!   browser.
 //! - The player lives as long as its card is drawn: a card scrolled away stops it. One plays at a time: starting one
 //!   pauses the others, as in Teams.
+//! - **In a meeting's recap** ([`crate::recap_view`]) the same player fills its column at 16:9 ([`VideoPlayer::filling`])
+//!   and is told where to play from ([`VideoPlayer::play_from`]: a transcript's paragraph clicked), the recap reading its
+//!   position to follow the transcript ([`VideoPlayer::position`]).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -175,6 +178,10 @@ pub struct VideoPlayer {
     bar: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The seek bar's place while it is dragged, as a fraction.
     dragging: Option<f32>,
+    /// It fills its box's width at 16:9 (a recap's player), not a card's fixed height.
+    fill: bool,
+    /// Where to go once the file opened: asked before the player had a place to seek in.
+    pending_seek: Option<Duration>,
     focus: FocusHandle,
     _woken: Task<()>,
 }
@@ -196,6 +203,7 @@ impl VideoPlayer {
             while woken.recv().await.is_ok() {
                 let alive = this.update(cx, |this, cx| {
                     this.status = *this.screen.status.lock().unwrap_or_else(PoisonError::into_inner);
+                    this.seek_when_open(cx);
                     cx.notify();
                 });
                 if alive.is_err() {
@@ -221,8 +229,45 @@ impl VideoPlayer {
             full_screen: FullScreen::default(),
             bar: Rc::new(Cell::new(None)),
             dragging: None,
+            fill: false,
+            pending_seek: None,
             focus: cx.focus_handle(),
             _woken: task,
+        }
+    }
+
+    /// The player of a recap: it fills its box's width at 16:9 rather than a card's height.
+    #[must_use]
+    pub fn filling(mut self) -> Self {
+        self.fill = true;
+        self
+    }
+
+    /// Where it plays, as last told; `None` before it was started.
+    #[must_use]
+    pub fn position(&self) -> Option<Duration> {
+        self.status.map(|status| status.position)
+    }
+
+    /// Plays from `at`: the file opened first when it wasn't (the place kept until it can be gone to), then played.
+    pub fn play_from(&mut self, at: Duration, cx: &mut Context<Self>) {
+        if self.player.is_none() {
+            self.pending_seek = Some(at);
+            self.toggle(cx);
+            return;
+        }
+        self.seek(Command::Seek(at), cx);
+        if !self.playing() {
+            self.toggle(cx);
+        }
+    }
+
+    /// Goes to the place asked for before the file was open, once it is.
+    fn seek_when_open(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.state(), Some(State::Playing | State::Paused | State::Buffering))
+            && let Some(at) = self.pending_seek.take()
+        {
+            self.seek(Command::Seek(at), cx);
         }
     }
 
@@ -422,12 +467,13 @@ impl Render for VideoPlayer {
             )
             .with_priority(100)
         });
-        div()
-            .debug_selector(move || format!("video-player-{id}"))
-            .w_full()
-            .h(px(PICTURE_HEIGHT))
-            .child(inline)
-            .children(overlay)
+        let shaped = div().debug_selector(move || format!("video-player-{id}")).w_full();
+        let shaped = if self.fill {
+            shaped.aspect_ratio(16.0 / 9.0)
+        } else {
+            shaped.h(px(PICTURE_HEIGHT))
+        };
+        shaped.child(inline).children(overlay)
     }
 }
 

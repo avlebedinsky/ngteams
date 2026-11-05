@@ -116,6 +116,12 @@ name = "meeting_window"
 harness = false
 
 [[test]]
+# a meeting chat's tabs (its Recap, with two recordings, their transcripts searched, a meeting transcribed only, and its
+# Shared tab) over the fake engine in the UI sandbox, screenshotted under `target/ui-shots/recap-*.png`
+name = "recap_window"
+harness = false
+
+[[test]]
 name = "workflow_window"
 harness = false
 

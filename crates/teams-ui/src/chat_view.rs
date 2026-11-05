@@ -199,6 +199,9 @@ pub const UNSHOWN_CONTENT: &str = "This message has content that can't be shown 
 /// The button beside [`UNSHOWN_CONTENT`] and [`UNSUPPORTED`] in a chat: it opens the chat in the web client
 /// (`teams_proto::chat::web_chat_link`). The channel view shows neither with it: no channel deep link was captured.
 pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
+
+/// A meeting chat's recording or transcript card's button: the meeting's Recap tab, as Teams' card opens it.
+pub const VIEW_RECAP: &str = "View recap";
 /// The divider at the read horizon.
 pub const NEW_MESSAGES: &str = "New messages";
 /// Older loads in a row that may bring nothing before rows near the top stop asking for more by themselves.
@@ -332,6 +335,9 @@ pub enum ChatViewEvent {
     },
     /// "More actions" → "Create workflows" on a message: the Workflows dialog for it.
     CreateWorkflows(crate::workflow_run::MessageRef),
+    /// A meeting chat's recording or transcript card's "View recap": the chat's Recap tab, at the card's recording (its
+    /// sharing link) when it is a recording's.
+    OpenRecap(Option<String>),
 }
 
 /// How far the conversation's older history is loaded.
@@ -2742,8 +2748,9 @@ impl ChatView {
             }
         }));
         let row = if item.body.is_system() {
+            let recap = self.recap_opener(item, cx);
             row.flex_col()
-                .child(system_row(item, &self.conversation, palette, clock::cycle(cx)))
+                .child(system_row(item, &self.conversation, palette, clock::cycle(cx), recap))
         } else {
             // someone else's message beside their avatar's column, Teams' way; the account's own to the right
             let avatar = (!item.own).then(|| self.avatar_column(item, palette, cx));
@@ -3769,7 +3776,13 @@ fn new_messages_row(palette: Palette) -> AnyElement {
 
 /// A system message's row, centred and with no author, as Teams draws it: a line (after its time, for a call's or a
 /// recording's), a card, or the placeholder of a kind this build doesn't show with the link to Teams on the web.
-fn system_row(item: &MessageItem, conversation: &str, palette: Palette, cycle: HourCycle) -> AnyElement {
+fn system_row(
+    item: &MessageItem,
+    conversation: &str,
+    palette: Palette,
+    cycle: HourCycle,
+    recap: Option<forwarded::OnOpen>,
+) -> AnyElement {
     let id = item.id.clone();
     let selector = move || format!("event-{id}");
     match &item.body {
@@ -3782,7 +3795,7 @@ fn system_row(item: &MessageItem, conversation: &str, palette: Palette, cycle: H
         )
         .debug_selector(selector)
         .into_any_element(),
-        Body::Card(card) => event_card(item, card, conversation, palette, cycle),
+        Body::Card(card) => event_card(item, card, conversation, palette, cycle, recap),
         Body::UnsupportedEvent(_) => centered_line(SharedString::default(), palette)
             .debug_selector(selector)
             .child(web_line(
@@ -3805,13 +3818,15 @@ fn time_of_day(ms: i64, cycle: HourCycle) -> String {
 }
 
 /// A system message's card, centred: its icon in a tinted circle, its title over its detail and time, and for a
-/// recording or a transcript the link that opens it in Teams on the web (this build plays and shows neither).
+/// recording or a transcript in a meeting's chat "View recap" (`recap`: the chat's Recap tab, where it plays), else
+/// the link that opens it in Teams on the web.
 fn event_card(
     item: &MessageItem,
     card: &EventCard,
     conversation: &str,
     palette: Palette,
     cycle: HourCycle,
+    recap: Option<forwarded::OnOpen>,
 ) -> AnyElement {
     let glyph = match card.kind {
         CardKind::MeetingStarted | CardKind::MeetingEnded => Glyph::VIDEO,
@@ -3849,17 +3864,7 @@ fn event_card(
                 .truncate()
                 .child(detail),
         );
-    let link = card.kind.opens_on_the_web().then(|| {
-        let link = web_chat_link(conversation);
-        let open = format!("open-on-the-web-{}", item.id);
-        div().debug_selector(move || open.clone()).flex_none().child(
-            Button::new(SharedString::from(format!("open-on-the-web-{}", item.id)))
-                .label(OPEN_ON_THE_WEB)
-                .ghost()
-                .with_size(Size::XSmall)
-                .on_click(move |_, _, cx| cx.open_url(&link)),
-        )
-    });
+    let action = card_action(item, card, conversation, recap);
     let selector = format!("event-card-{} {}", item.id, card.kind.name());
     div()
         .w_full()
@@ -3882,9 +3887,42 @@ fn event_card(
                 .bg(rgb(palette.surface))
                 .child(icon)
                 .child(text)
-                .children(link),
+                .children(action),
         )
         .into_any_element()
+}
+
+/// A recording's or a transcript's card's button: "View recap" in a meeting's chat (`recap`), else the link to Teams
+/// on the web; none on a meeting's start or end.
+fn card_action(
+    item: &MessageItem,
+    card: &EventCard,
+    conversation: &str,
+    recap: Option<forwarded::OnOpen>,
+) -> Option<gpui::Div> {
+    if let Some(open) = recap {
+        let selector = format!("view-recap-{}", item.id);
+        return Some(
+            div().debug_selector(move || selector.clone()).flex_none().child(
+                Button::new(SharedString::from(format!("view-recap-{}", item.id)))
+                    .label(VIEW_RECAP)
+                    .primary()
+                    .with_size(Size::XSmall)
+                    .on_click(open),
+            ),
+        );
+    }
+    card.kind.opens_on_the_web().then(|| {
+        let link = web_chat_link(conversation);
+        let open = format!("open-on-the-web-{}", item.id);
+        div().debug_selector(move || open.clone()).flex_none().child(
+            Button::new(SharedString::from(format!("open-on-the-web-{}", item.id)))
+                .label(OPEN_ON_THE_WEB)
+                .ghost()
+                .with_size(Size::XSmall)
+                .on_click(move |_, _, cx| cx.open_url(&link)),
+        )
+    })
 }
 
 /// A message's header, Teams' way: the sender's name (none on the account's own) and its time (on `cycle`'s clock),
@@ -3906,6 +3944,33 @@ fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle) -> AnyEle
         .child(time)
         .children(item.edited.then(edited_mark))
         .into_any_element()
+}
+
+/// What a meeting chat's recording or transcript card's "View recap" does: tells [`ChatViewEvent::OpenRecap`]. `None`
+/// for any other row, and in a chat that isn't a meeting's (its card keeps the link to Teams on the web).
+impl ChatView {
+    fn recap_opener(&self, item: &MessageItem, cx: &mut Context<Self>) -> Option<forwarded::OnOpen> {
+        let Body::Card(card) = &item.body else {
+            return None;
+        };
+        if !card.kind.opens_on_the_web() || !system_message::is_meeting_chat(&self.conversation) {
+            return None;
+        }
+        let recording = self
+            .messages
+            .iter()
+            .find(|message| message.id == item.id)
+            .and_then(
+                |message| match teams_proto::chat::chat_event(&message.message_type, &message.content) {
+                    Some(teams_proto::chat::ChatEvent::Recording(recording)) => recording.link,
+                    _ => None,
+                },
+            );
+        Some(Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+            cx.stop_propagation();
+            cx.emit(ChatViewEvent::OpenRecap(recording.clone()));
+        })))
+    }
 }
 
 /// The header of a forwarded message's card ([`forwarded::header`]); a click on the original's time tells

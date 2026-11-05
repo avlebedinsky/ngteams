@@ -95,8 +95,11 @@ use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
 mod channel_management;
+mod meeting_tabs;
 mod title_bar;
 mod workflows;
+
+pub use meeting_tabs::ChatTab;
 
 pub use title_bar::{FocusSearch, GoBack, GoForward, History, RIGHT_WIDTH, SEARCH_MAX, TITLE_HEIGHT, ToggleListPane};
 
@@ -261,6 +264,8 @@ pub struct Shell {
     sidebar: Entity<Sidebar>,
     /// The chat opened in the conversation pane.
     chat: Option<Entity<ChatView>>,
+    /// A meeting chat's tabs: the one shown, its Recap and Shared views.
+    meeting_tabs: meeting_tabs::MeetingTabs,
     /// Unsaved composers keep their text, reply and in-flight uploads when another chat is opened.
     drafts: std::collections::HashMap<String, Entity<crate::compose::Compose>>,
     /// The channel opened in the conversation pane, with the names its header shows.
@@ -363,8 +368,7 @@ impl Shell {
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
+        let focus = Self::focused(window, cx);
         let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
         Self {
@@ -377,6 +381,7 @@ impl Shell {
             sidebar,
             chat,
             drafts: std::collections::HashMap::new(),
+            meeting_tabs: meeting_tabs::MeetingTabs::default(),
             channel: None,
             channel_listed: false,
             channel_meetup: None,
@@ -423,6 +428,13 @@ impl Shell {
                 searched,
             ],
         }
+    }
+
+    /// The shell's focus, focused now: what is typed goes to the shell until a view takes it.
+    fn focused(window: &mut Window, cx: &mut Context<Self>) -> FocusHandle {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        focus
     }
 
     /// What the shell draws again as it changes: the settings (the first run's screen comes and goes with them), a
@@ -1962,6 +1974,7 @@ impl Shell {
         }
         self.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
         self.hide_calendar(window, cx);
+        self.reset_meeting_tabs(&id, cx);
         let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
         if shown != Some(true) {
             self.keep_draft(cx);
@@ -2037,6 +2050,7 @@ impl Shell {
                 this.run_workflow(flow.clone(), message.clone(), window, cx);
             }
             ChatViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
+            ChatViewEvent::OpenRecap(recording) => this.open_recap(recording.clone(), window, cx),
             ChatViewEvent::Action { .. } => {}
         })
     }
@@ -2639,15 +2653,20 @@ impl Shell {
                     presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
                 });
                 let call = self.call_header_button(cx);
-                // Teams' chat header: the chat's picture and name, the other member's presence, the call on the right
+                let tabs = self.meeting_tab_bar(id, palette, cx);
+                // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
+                // presence, the call on the right
                 let header = pane_header(face, name, palette)
+                    .children(tabs)
                     .children(presence)
                     .child(div().flex_1())
                     .children(call)
                     .debug_selector(|| "chat-header".to_owned());
-                pane.child(header)
-                    .child(div().flex_1().min_h_0().children(chat))
-                    .into_any_element()
+                let body = self.meeting_tab_body().map_or_else(
+                    || div().flex_1().min_h_0().children(chat),
+                    |tab| div().flex_1().min_h_0().child(tab),
+                );
+                pane.child(header).child(body).into_any_element()
             }
             Main::Channel(id) => {
                 let shown = self
