@@ -104,6 +104,7 @@ use teams_proto::chat::{
 use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction, counts_unread};
 
 use crate::bridge::Core;
+use crate::card_view::{CardState, CardsElement, ShownCards};
 use crate::clock::{self, HourCycle};
 use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
 use crate::files;
@@ -393,6 +394,8 @@ pub enum Body {
     TimedEvent(SharedString),
     /// A system message as a centred card (a meeting's start or end, a recording, a transcript).
     Card(Box<EventCard>),
+    /// A card a bot or a workflow posted, drawn as Teams draws it ([`crate::card_view`]).
+    Cards(ShownCards),
     /// A type this build doesn't show, by its name.
     Unsupported(String),
     /// A type this build doesn't show that the thread itself sent: its placeholder as a centred line, with no author
@@ -410,6 +413,7 @@ impl Body {
             Self::Event(_) => "event",
             Self::TimedEvent(_) => "timed-event",
             Self::Card(card) => card.kind.name(),
+            Self::Cards(_) => "cards",
             Self::Unsupported(_) => "unsupported",
             Self::UnsupportedEvent(_) => "unsupported-event",
         }
@@ -595,11 +599,15 @@ impl MessageItem {
     /// takes no write; edit and delete only on the account's own.
     #[must_use]
     pub fn actions(&self) -> Vec<MessageAction> {
-        if self.writes == ChatWrites::ReadOnly || !matches!(self.body, Body::Text(_)) {
+        if self.writes == ChatWrites::ReadOnly || !matches!(self.body, Body::Text(_) | Body::Cards(_)) {
             return Vec::new();
         }
         if self.writes == ChatWrites::AppReadOnly {
             return vec![MessageAction::Copy];
+        }
+        // a card is reacted to and copied; a reply's quote of one was never captured
+        if matches!(self.body, Body::Cards(_)) {
+            return vec![MessageAction::React, MessageAction::Copy];
         }
         let mut actions = vec![MessageAction::Reply, MessageAction::React, MessageAction::Copy];
         if self.own {
@@ -889,6 +897,8 @@ pub struct ChatView {
     shown: Visibility,
     /// Rendered text of the pending message posts, per row id.
     pending_rendered: HashMap<i64, Arc<Rendered>>,
+    /// What each message's cards show besides what they say: toggled elements, opened cards ([`CardState`]).
+    card_states: HashMap<String, CardState>,
     /// The newest message the account has read up to (its arrival time): the store's horizon, or the last receipt.
     read_upto: Option<i64>,
     /// The read receipt's wait, while one is due.
@@ -995,6 +1005,7 @@ impl ChatView {
             stored_posts: HashSet::new(),
             shown: Visibility::Shown,
             pending_rendered: HashMap::new(),
+            card_states: HashMap::new(),
             read_upto: None,
             receipt: None,
             receipts: 0,
@@ -1203,6 +1214,23 @@ impl ChatView {
     #[must_use]
     pub fn items(&self) -> &[Item] {
         &self.items
+    }
+
+    /// What message `id`'s cards are drawn with: their state, kept by the view, and their pictures' source.
+    fn card_hook(&self, id: &str, cx: &Context<Self>) -> CardHook {
+        let view = cx.entity().downgrade();
+        let key = id.to_owned();
+        CardHook {
+            state: self.card_states.get(id).cloned().unwrap_or_default(),
+            on_state: Rc::new(move |state, _, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.card_states.insert(key.clone(), state);
+                    cx.notify();
+                });
+            }),
+            source: rich_text::PictureSource::new(Arc::clone(&self.core)),
+            cycle: clock::cycle(cx),
+        }
     }
 
     /// What a click on a picture of message `id` calls: the viewer opened on it ([`Self::open_picture`]).
@@ -1584,6 +1612,13 @@ impl ChatView {
             .find(|item| item.id == message)
             .and_then(|item| match &item.body {
                 Body::Text(text) => Some(plain_text(&text.0)),
+                Body::Cards(cards) => Some(
+                    teams_proto::chat::card::plain_words(&cards.0)
+                        .iter()
+                        .map(|words| crate::card_view::expanded(words, clock::cycle(cx)))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
                 _ => None,
             });
         if let Some(text) = text {
@@ -2233,6 +2268,11 @@ impl ChatView {
         if is_text_type(&message.message_type) {
             return Some(Body::Text(RenderedText(self.rendered(message))));
         }
+        if message.message_type == teams_proto::chat::card::CARD_TYPE
+            && let Some(cards) = ShownCards::of(&message.content)
+        {
+            return Some(Body::Cards(cards));
+        }
         let kind = message.message_type.clone();
         Some(match self.system(message) {
             Some(SystemShown::Line(text)) => Body::Event(text.into()),
@@ -2732,6 +2772,19 @@ impl ChatView {
                 )
             })
             .map(|badge| badge.absolute().right(px(-2.0)).bottom(px(-2.0)));
+        // an app's avatar is its icon on a tile, as Teams draws the Workflows bot's
+        let face = if item
+            .sender
+            .as_deref()
+            .is_some_and(crate::workflows_app::is_workflows_bot)
+        {
+            crate::workflows_app::bot_avatar(AVATAR, palette).into_any_element()
+        } else {
+            item.face
+                .avatar(&item.sender_name, Size::Medium)
+                .size(px(AVATAR))
+                .into_any_element()
+        };
         let id = item.id.clone();
         column.pt(rems(HEADER_REMS)).child(
             div()
@@ -2740,7 +2793,7 @@ impl ChatView {
                 .size(px(AVATAR))
                 // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
                 // the initials half its width, too narrow for two)
-                .child(item.face.avatar(&item.sender_name, Size::Medium).size(px(AVATAR)))
+                .child(face)
                 .children(badge),
         )
     }
@@ -2770,6 +2823,7 @@ impl ChatView {
                     conversation: &self.conversation,
                     selection: &self.text_selection,
                     open: Some(Self::picture_opener(&item.id, cx)),
+                    cards: matches!(item.body, Body::Cards(_)).then(|| self.card_hook(&item.id, cx)),
                 },
                 highlighted,
                 palette,
@@ -3739,7 +3793,7 @@ fn system_row(item: &MessageItem, conversation: &str, palette: Palette, cycle: H
                 palette,
             ))
             .into_any_element(),
-        Body::Text(_) | Body::Deleted | Body::Unsupported(_) => div().into_any_element(),
+        Body::Text(_) | Body::Deleted | Body::Cards(_) | Body::Unsupported(_) => div().into_any_element(),
     }
 }
 
@@ -3945,6 +3999,16 @@ struct InChat<'a> {
     conversation: &'a str,
     selection: &'a TextSelection,
     open: Option<OpenPicture>,
+    /// A card message's: what its cards show and who is told when a click changes it.
+    cards: Option<CardHook>,
+}
+
+/// What a message's cards are drawn with in the chat ([`crate::card_view`]).
+struct CardHook {
+    state: CardState,
+    on_state: crate::card_view::OnState,
+    source: rich_text::PictureSource,
+    cycle: HourCycle,
 }
 
 fn bubble(
@@ -3977,6 +4041,18 @@ fn bubble(
             rich_text::render_selectable(&id, &text.0, palette, forward, Some(&scope))
         }
         Body::Deleted => muted(DELETED, palette),
+        Body::Cards(cards) => {
+            let drawn = CardsElement::new(item.id.clone(), cards.clone(), palette, HourCycle::Twelve)
+                .in_teams(Some(web_chat_link(chat.conversation)));
+            match &chat.cards {
+                Some(hook) => drawn
+                    .state(hook.state.clone(), Rc::clone(&hook.on_state))
+                    .source(Some(hook.source.clone()))
+                    .clock(hook.cycle),
+                None => drawn,
+            }
+            .into_any_element()
+        }
         Body::Unsupported(_) => web_line(
             &format!("unsupported-{}", item.id),
             UNSUPPORTED,
@@ -3994,7 +4070,9 @@ fn bubble(
         .min_w_0();
     // a message drawn bare (only an emoticon or a sticker, `Rendered::bare`) or of files alone has no bubble behind
     // it, as in Teams
-    let bare = matches!(&item.body, Body::Text(text) if text.0.bare || (text.0.blocks.is_empty() && files.is_some()));
+    let bare = matches!(&item.body, Body::Text(text) if text.0.bare || (text.0.blocks.is_empty() && files.is_some()))
+        // a card is its own surface
+        || matches!(&item.body, Body::Cards(_));
     let bubble = if bare {
         bubble
     } else {

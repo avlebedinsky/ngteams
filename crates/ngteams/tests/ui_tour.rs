@@ -116,7 +116,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 140] = [
+const STEPS: [Step; 5 + 142] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1006,6 +1006,24 @@ const STEPS: [Step; 5 + 140] = [
         });
         show_first_message(shell, cx);
     }),
+    // the Workflows bot's card in the "Lab alerts" chat (`seed_cards`), as Teams draws it: the app's tile beside it,
+    // the card on its own surface (columns with an icon, an emphasis container, facts, a picture, a separated footer
+    // with a link) and its buttons; first in Teams Dark, then in Teams Light
+    ("chat-card-dark", |shell, window, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+        if let Some(chat) = CARD_CHAT.get().cloned() {
+            shell.update(cx, |shell, cx| shell.open_chat(chat, window, cx));
+        }
+    }),
+    ("chat-card", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+    }),
     // a call b made and a answered, as the engine would tell it (`fake_call`: the mock's engine has no calls): its
     // own window over the main one (niri gives it the screen), b speaking on its video, the controls in its header
     ("call-window", |shell, _, cx| fake_call(shell, cx)),
@@ -1704,6 +1722,7 @@ impl MockLab {
         seed_own(&mock)?;
         seed_mentions(&mock)?;
         seed_forwards(&mock, &runtime)?;
+        seed_cards(&mock)?;
         let dir = tempfile::tempdir()?;
         let tokens = Arc::new(Tokens {
             token: mock.token(LAB_A).ok_or("the mock's token for a")?,
@@ -2223,6 +2242,96 @@ fn made_up_phone() -> image::RgbaImage {
     fill(94, 300, 66, 80, [200, 200, 210]);
     fill(14, 400, 226, 50, [90, 200, 210]);
     picture
+}
+
+/// The Workflows bot, as it posts its cards.
+const WORKFLOWS_BOT: &str = "28:358f0194-6b0e-4dd3-af35-c24fe8a9ec87";
+
+/// The "Lab alerts" chat `seed_cards` made, where the Workflows bot's card is.
+static CARD_CHAT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// A `RichText/Media_Card` content carrying the Adaptive Card `card`, as the chat service gives a bot's card.
+fn card_content(card: &serde_json::Value) -> SandboxResult<String> {
+    use base64::Engine as _;
+    let activity = serde_json::json!({
+        "type": "message/card",
+        "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": card}],
+    });
+    let b64 = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&activity)?);
+    Ok(format!(
+        "<URIObject type=\"SWIFT.1\">Card - access it on <a href=\"https://go.skype.com/cards.unsupported\">\
+         https://go.skype.com/cards.unsupported</a>. <Title>Card</Title><Swift b64=\"{b64}\"></Swift>\
+         <Description></Description></URIObject>"
+    ))
+}
+
+/// The Workflows bot's cards (made up): the webhook template's post in the team's channel (a bold title, its text,
+/// the separated footer naming who used the template with its "Get template" link), and a task card in a new "Lab
+/// alerts" chat of a and b (an icon beside a subtle line, an emphasis container framed and rounded, facts, a
+/// picture, a time function, a "View item" button with Teams' Open icon and a shown card's button).
+fn seed_cards(mock: &ChatServiceMock) -> SandboxResult {
+    let footer = serde_json::json!({"type": "Container", "separator": true, "items": [{
+        "type": "TextBlock", "size": "small", "weight": "lighter", "wrap": true,
+        "text": "Lab Aye used a Workflow template to send this card. [Get template](https://made-up.example.test/t)"
+    }]});
+    let post = serde_json::json!({
+        "type": "AdaptiveCard", "version": "1.2",
+        "body": [
+            {"type": "TextBlock", "text": "Test: made-up webhook check", "weight": "bolder", "wrap": true},
+            {"type": "TextBlock", "wrap": true,
+             "text": "This is a made-up test message. Cards moved to Needs a Person on the lab board will be announced here."},
+            footer,
+        ]
+    });
+    mock.add_message(
+        TEAM_CHANNEL,
+        (WORKFLOWS_BOT, "Workflows"),
+        "RichText/Media_Card",
+        &card_content(&post)?,
+    )
+    .ok_or("the channel's card refused")?;
+    let chat = mock.add_group("Lab alerts", &[LAB_A, LAB_B]).ok_or("no chat made")?;
+    let task = serde_json::json!({
+        "type": "AdaptiveCard", "version": "1.5",
+        "body": [
+            {"type": "ColumnSet", "columns": [
+                {"type": "Column", "width": "auto", "items": [
+                    {"type": "Image", "url": "https://made-up.example.test/icon.png",
+                     "width": "16px", "height": "16px"}
+                ]},
+                {"type": "Column", "width": "stretch", "items": [
+                    {"type": "TextBlock", "text": "Task created from message", "isSubtle": true, "wrap": true}
+                ]}
+            ]},
+            {"type": "Container", "style": "emphasis", "showBorder": true, "roundedCorners": true, "spacing": "small",
+             "items": [
+                {"type": "TextBlock", "text": "Lab Bee {{TIME(2026-01-01T12:00:00Z)}}", "wrap": true},
+                {"type": "TextBlock", "text": "Lab build reminder", "maxLines": 2, "wrap": true, "spacing": "small"}
+             ]},
+            {"type": "FactSet", "facts": [
+                {"title": "Task title", "value": "Lab build reminder"},
+                {"title": "Plan", "value": "Made-up lab plan"}
+            ]},
+            {"type": "TextBlock", "size": "medium", "weight": "bolder", "text": "Workflow Created", "wrap": true},
+            {"type": "TextBlock", "wrap": true,
+             "text": "1. Go to the message you want to run the workflow on.\r\n2. Select **More options** (**...**)."}
+        ],
+        "actions": [
+            {"type": "Action.OpenUrl", "title": "View item", "iconUrl": "icon:Open", "url": "https://made-up.example.test/item"},
+            {"type": "Action.ShowCard", "title": "Details", "card": {"type": "AdaptiveCard", "body": [
+                {"type": "TextBlock", "text": "Made-up details", "wrap": true}
+            ]}}
+        ]
+    });
+    mock.add_message(
+        &chat,
+        (WORKFLOWS_BOT, "Workflows"),
+        "RichText/Media_Card",
+        &card_content(&task)?,
+    )
+    .ok_or("the chat's card refused")?;
+    CARD_CHAT.set(chat).map_err(|_| "the card chat was set twice")?;
+    Ok(())
 }
 
 /// a's own message in the a–b chat, before b's, with a's heart on it: a's hover bar, and a's most used reactions

@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use chrono::Local;
@@ -42,6 +43,7 @@ use teams_proto::chat::{LinkPreview, MessageType, RichText, SharedFile, parse_ht
 use teams_store::Message;
 
 use crate::bridge::Core;
+use crate::card_view::{CardState, CardsElement, ShownCards};
 use crate::chat_view::{DELETED, MAX_SEEK, UNSHOWN_CONTENT, UNSUPPORTED, files_of, unshown_of};
 use crate::clock::{self, HourCycle};
 use crate::files;
@@ -126,6 +128,8 @@ pub enum Body {
     Event(SharedString),
     /// A meeting scheduled in the channel, drawn as Teams' meeting card ([`meeting_card`]).
     Meeting(MeetingCard),
+    /// A card a bot or a workflow posted, drawn as Teams draws it ([`crate::card_view`]).
+    Cards(ShownCards),
     Unsupported,
 }
 
@@ -187,6 +191,49 @@ pub struct Item {
     pub forwarded: Option<ForwardOrigin>,
 }
 
+/// What the threads are drawn with besides their items: the text selection, the "More options" menu, and what each
+/// message's cards show and where their pictures come from.
+struct Looks<'a> {
+    selection: &'a TextSelection,
+    menu: &'a workflows::Menu,
+    cards: &'a HashMap<String, CardState>,
+    core: &'a Arc<dyn Core>,
+    channel: &'a str,
+}
+
+impl Looks<'_> {
+    /// `item`'s cards, drawn, when it is a card message; a click that changes what they show is kept by the view. A
+    /// button that sends to the bot opens the message (in its thread `root`) in Teams on the web.
+    fn cards_of(
+        &self,
+        item: &Item,
+        root: &str,
+        palette: Palette,
+        cycle: HourCycle,
+        cx: &Context<ChannelView>,
+    ) -> Option<AnyElement> {
+        let Body::Cards(cards) = &item.body else {
+            return None;
+        };
+        let view = cx.entity().downgrade();
+        let key = item.id.clone();
+        let on_state: crate::card_view::OnState = Rc::new(move |state, _, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.card_states.insert(key.clone(), state);
+                cx.notify();
+            });
+        });
+        let link = teams_proto::workflow::MessageRun::link_to(self.channel, &item.id, Some(root));
+        Some(
+            CardsElement::new(format!("channel-{}", item.id), cards.clone(), palette, cycle)
+                .state(self.cards.get(&item.id).cloned().unwrap_or_default(), on_state)
+                .source(Some(rich_text::PictureSource::new(Arc::clone(self.core))))
+                .in_teams(Some(link))
+                .into_any_element(),
+        )
+    }
+}
+
 /// What one load read from the store.
 struct Read {
     messages: Vec<Message>,
@@ -240,6 +287,8 @@ pub struct ChannelView {
     place: Option<(SharedString, SharedString)>,
     /// A message's "More options" menu, while it is open, and the account's workflows it offers.
     menu: workflows::Menu,
+    /// What each message's cards show besides what they say: toggled elements, opened cards ([`CardState`]).
+    card_states: HashMap<String, CardState>,
     _observing: Subscription,
 }
 
@@ -290,6 +339,7 @@ impl ChannelView {
             ended_calls: HashSet::new(),
             place: None,
             menu: workflows::Menu::default(),
+            card_states: HashMap::new(),
             _observing: observing,
         };
         view.menu.read_only = view.core.read_only();
@@ -543,6 +593,11 @@ impl ChannelView {
             MessageType::RichTextHtml | MessageType::Text => return Some(Body::Text(self.rendered(message))),
             _ => {}
         }
+        if message.message_type == teams_proto::chat::card::CARD_TYPE
+            && let Some(cards) = ShownCards::of(&message.content)
+        {
+            return Some(Body::Cards(cards));
+        }
         if let Some(line) = self.meeting_call_line(message) {
             return Some(Body::Event(line.into()));
         }
@@ -672,11 +727,12 @@ impl ChannelView {
     fn thread_view(
         index: usize,
         thread: &Thread<Item>,
-        (selection, menu): (&TextSelection, &workflows::Menu),
+        looks: &Looks<'_>,
         palette: Palette,
         cycle: HourCycle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (selection, menu) = (looks.selection, looks.menu);
         let order = thread_order(thread);
         // the thread's post, by its id, whether or not the view holds the post itself ("Replies to an earlier post")
         let root = Some(thread.root.clone());
@@ -684,7 +740,8 @@ impl ChannelView {
             Some(post) => {
                 let scope = Scope::new(selection, post_key(order, post)).opening(picture_opener(&post.id, cx));
                 let more = menu.button(post, root.as_deref(), cx);
-                message_view(post, &scope, more, palette, cycle, cx)
+                let cards = looks.cards_of(post, &thread.root, palette, cycle, cx);
+                message_view(post, &scope, (more, cards), palette, cycle, cx)
             }
             None => div()
                 .debug_selector(move || format!("earlier-post-{index}"))
@@ -700,12 +757,13 @@ impl ChannelView {
             .map(|reply| {
                 let scope = Scope::new(selection, reply_key(order, reply)).opening(picture_opener(&reply.id, cx));
                 let more = menu.button(reply, root.as_deref(), cx);
+                let cards = looks.cards_of(reply, &thread.root, palette, cycle, cx);
                 div()
                     .pl_6()
                     .pt_1()
                     .border_t_1()
                     .border_color(rgb(palette.border))
-                    .child(message_view(reply, &scope, more, palette, cycle, cx))
+                    .child(message_view(reply, &scope, (more, cards), palette, cycle, cx))
                     .into_any_element()
             })
             .collect();
@@ -845,7 +903,7 @@ fn reply_key(thread: i64, reply: &Item) -> MessageKey {
 fn message_view(
     item: &Item,
     scope: &Scope,
-    more: Option<AnyElement>,
+    (more, cards): (Option<AnyElement>, Option<AnyElement>),
     palette: Palette,
     cycle: HourCycle,
     cx: &mut Context<ChannelView>,
@@ -895,6 +953,7 @@ fn message_view(
         Body::Deleted => muted(DELETED.into()),
         Body::Event(text) => muted(text.clone()),
         Body::Meeting(card) => meeting_card(&item.id, card, palette, cycle, cx),
+        Body::Cards(_) => cards.unwrap_or_else(|| div().into_any_element()),
         Body::Unsupported => muted(UNSUPPORTED.into()),
     };
     let (files, links) = match &item.body {
@@ -1156,7 +1215,14 @@ impl Render for ChannelView {
             .iter()
             .enumerate()
             .map(|(index, thread)| {
-                Self::thread_view(index, thread, (&self.text_selection, &self.menu), palette, cycle, cx)
+                let looks = Looks {
+                    selection: &self.text_selection,
+                    menu: &self.menu,
+                    cards: &self.card_states,
+                    core: &self.core,
+                    channel: &self.channel,
+                };
+                Self::thread_view(index, thread, &looks, palette, cycle, cx)
             })
             .collect();
         let posts = div()

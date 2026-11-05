@@ -81,6 +81,7 @@ pub mod call_stage;
 pub mod call_view;
 pub mod call_window;
 pub mod calls;
+pub mod card_view;
 pub mod channel_dialog;
 pub mod channel_management;
 pub mod channel_menu;

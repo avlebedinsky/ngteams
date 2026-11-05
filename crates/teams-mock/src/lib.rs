@@ -330,6 +330,45 @@ impl ChatServiceMock {
         true
     }
 
+    /// `from` (an app's bot too: `28:<app id>`, named `name`) posts a message of `message_type` with `content` to
+    /// `conversation`, stored as its newest entry as a read gives it back and queued for its members: a test's
+    /// stand-in for a post no client of the mock makes, such as a workflow's card in a channel. Its id, or `None` when
+    /// there is no such conversation.
+    #[must_use = "None says no message was added"]
+    pub fn add_message(
+        &self,
+        conversation: &str,
+        (from, name): (&str, &str),
+        message_type: &str,
+        content: &str,
+    ) -> Option<String> {
+        let mut world = self.lock();
+        let arrival = world.tick();
+        let sequence = world.conversation(conversation)?.next_sequence();
+        let message = serde_json::json!({
+            "sequenceId": sequence,
+            "conversationid": conversation,
+            "conversationLink": format!("{CHAT_BASE}/v1/users/ME/conversations/{conversation}"),
+            "type": "Message",
+            "id": arrival.to_string(),
+            "version": arrival.to_string(),
+            "clientmessageid": (9_000_000_000_000_000_000_u64 + arrival).to_string(),
+            "messagetype": message_type,
+            "contenttype": "Text",
+            "content": content,
+            "from": writes::contact(from),
+            "imdisplayname": name,
+            "composetime": world::iso_time(arrival, 7),
+            "originalarrivaltime": world::iso_time(arrival, 7),
+            "properties": {},
+        });
+        let stored = world.conversation_mut(conversation)?;
+        stored.messages.push(message.clone());
+        stored.version = arrival;
+        world.queue(conversation, from, EventKind::Message, &message);
+        Some(arrival.to_string())
+    }
+
     /// Adds a copy of the message of `conversation` that carries `client_message_id`, changed as `change` says, as
     /// the conversation's newest entry, the original kept as it is (a test's stand-in for a second entry of one
     /// message, one a client can't read, met by the same read as the readable one). `false` when there is no such

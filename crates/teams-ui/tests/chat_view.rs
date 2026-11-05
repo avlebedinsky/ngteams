@@ -15,6 +15,8 @@ mod common;
 #[path = "common/parts.rs"]
 mod parts;
 // the files a message carries, as cards
+#[path = "chat_view/cards.rs"]
+mod cards;
 #[path = "chat_view/files.rs"]
 mod files;
 // forwarded messages, in their card

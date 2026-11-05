@@ -541,6 +541,37 @@ screenshot of Teams.
   link the only thing it sends. That read's answer hasn't been seen live; a card whose picture can't be read is drawn
   without it.
 
+## Cards
+
+What a bot's or a workflow's card message is and how Teams draws it, seen 2026-11-05 in the web client as lab account
+a (the Workflows webhook template's post in a team's channel and the Workflows bot's chat), its stored message read
+for its shape only.
+
+- **The shape**: `messagetype` `RichText/Media_Card`, sent by the bot (`28:<app id>`, the Workflows bot's
+  `imdisplayname` "Workflows"). `content` is `<URIObject type="SWIFT.1" url_thumbnail="…">` whose text is a fallback
+  ("Card - access it on <link>.", `<Title>Card</Title>`) and whose `<Swift b64="…">` is the base64 JSON of a bot
+  activity: `type` `message/card`, `attachments` (each a `contentType` and a `content`), `channelData`, `entities`,
+  `timestamp`. The Workflows bot's attachments are Adaptive Cards (`application/vnd.microsoft.card.adaptive`,
+  `version` 1.0 to 1.5): `TextBlock`, `Image`, `ColumnSet`/`Column`, `Container` (`style` `emphasis`, `showBorder`,
+  `roundedCorners`, a `selectAction`), `isVisible: false` elements, `Action.OpenUrl` buttons (`iconUrl: icon:Open`), and
+  date functions in text (`{{TIME(<ISO time>)}}`). A post a workflow makes on someone's behalf carries
+  `properties.onbehalfof` (a list of `mri`, `displayName`, `mentionType: person`) and `properties.botMetadata` (the
+  workflow's id); the webhook template's own card ends in a separated container whose small, lighter text says who
+  used the template, with a "Get template" link (`teams.microsoft.com/l/task/<app id>?url=…`).
+- **How Teams draws it**: the sender's name ("Workflows") and time, the app's icon on a rounded tile with a border
+  as its avatar, and the card on its own surface (white in the light theme, bordered, rounded, a faint shadow, about
+  448 px wide), padded 16 px: a `TextBlock` at 14/20 px (`small` 12/16), `bolder` semibold, `lighter` light,
+  `isSubtle` muted; 12 px between elements, a separator a hairline across that gap; a date function written in the
+  reader's time zone ("9:15 PM"); an emphasis container grey with a border; an `Action.OpenUrl` an outlined button with
+  its icon. The chat list's preview line of a card is "Sent a card".
+- **Pictures**: the web client reads a card's picture straight from its link (a Teams CDN's here). The native client
+  asks the async gateway's thumbnail of it instead, as for a link preview's (`LinkPreviewPicture::card_picture_src`),
+  so it never reaches the picture's site; that read of a card picture hasn't been seen live.
+- **Buttons that send to the bot** (`Action.Submit`, `Action.Execute`, a hero card's `imBack`/`messageBack`): the web
+  client runs them as bot invokes that carry the account's token to the app's backend
+  (`docs/backlog/bot-invokes-and-message-extensions.md`), which the native client never sends; its button opens the
+  message in Teams on the web instead.
+
 ## Forwarded messages
 
 How a received forwarded message reads, from the personal build's debug log of 2026-10-28 (a sync page's and a

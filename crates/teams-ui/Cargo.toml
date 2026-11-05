@@ -47,6 +47,8 @@ toml.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+# a synthetic card message's Swift payload (`tests/chat_view/cards.rs`)
+base64.workspace = true
 # a call's id for the fake engine's call events (`CallId::for_tests`)
 teams-call = { workspace = true, features = ["test-support"] }
 # the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system

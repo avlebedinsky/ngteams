@@ -59,6 +59,22 @@ impl LinkPreviewPicture {
         })
     }
 
+    /// The `src` a card's picture (`picture`, an `http` or `https` link of at most 2048 bytes) is asked for by
+    /// (`crate::chat::card`): the async gateway's thumbnail of it, as a link preview's picture is read, so the reader's
+    /// client never reaches the picture's site. The host it names is a stand-in: the read goes to the account's own
+    /// gateway ([`Service::Ams`]), as every thumbnail read does. `None` for any other link.
+    #[must_use]
+    pub fn card_picture_src(picture: &str) -> Option<String> {
+        let picture = picture.trim();
+        let parsed = Url::parse(picture).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") || picture.len() > MAX_LINK {
+            return None;
+        }
+        let mut src = Url::parse("https://urlp.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail").ok()?;
+        src.query_pairs_mut().append_pair("url", picture);
+        Self::of(src.as_str()).map(|_| src.into())
+    }
+
     /// The page's picture the thumbnail is of.
     #[must_use]
     pub fn picture(&self) -> &str {

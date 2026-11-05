@@ -16,6 +16,7 @@
 //! says the message has content it can't show and never guesses at it), and an image's `src`, `itemtype`, `itemid` and size are kept on [`Image`] (a view asks the
 //! engine for a pasted picture's bytes or an emoticon's, never this crate).
 
+pub mod card;
 mod code;
 mod compose;
 mod event;

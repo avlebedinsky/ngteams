@@ -21,6 +21,29 @@ use crate::workflow_dialog::{AppTab, WorkflowDialog, workflows_icon};
 /// The Workflows bot's app id: its chat with the account is `19:<account>_<bot>@unq.gbl.spaces`, as Teams names it.
 pub const WORKFLOWS_BOT: &str = "358f0194-6b0e-4dd3-af35-c24fe8a9ec87";
 
+/// Whether `mri` is the Workflows bot's (`28:<its app id>`): what posts a workflow's cards.
+#[must_use]
+pub fn is_workflows_bot(mri: &str) -> bool {
+    mri.strip_prefix("28:") == Some(WORKFLOWS_BOT)
+}
+
+/// The Workflows bot's avatar, `side` px, as Teams draws an app's beside its messages: its icon on a rounded tile with
+/// a border, not a person's circle.
+#[must_use]
+pub fn bot_avatar(side: f32, palette: Palette) -> gpui::Div {
+    div()
+        .size(px(side))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .bg(rgb(palette.surface))
+        .child(gpui::img(workflows_icon()).size(px(side * 0.65)))
+}
+
 /// The account's chat with the Workflows bot.
 #[must_use]
 pub fn bot_chat(me: &str) -> Option<String> {

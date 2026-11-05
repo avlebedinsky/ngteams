@@ -1156,3 +1156,65 @@ fn a_reply_under_a_post_the_view_doesnt_hold_runs_a_workflow_with_its_post() {
     );
     assert_eq!(run.team.as_ref().map(|(team, _)| team.as_str()), Some(TEAM));
 }
+
+/// A workflow's card post (synthetic: the webhook template's shape, every word made up), in the channel as Teams draws
+/// it: the sender's name, the card on its surface with its title, and a button that sends to the bot opening the post
+/// in Teams on the web; never the placeholder.
+#[test]
+fn a_workflows_card_post_is_drawn_as_its_card() {
+    use base64::Engine as _;
+    let card = serde_json::json!({
+        "type": "message/card",
+        "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": {
+            "type": "AdaptiveCard",
+            "body": [
+                {"type": "TextBlock", "text": "Made-up webhook check", "weight": "bolder", "wrap": true},
+                {"type": "TextBlock", "text": "A made-up line.", "wrap": true}
+            ],
+            "actions": [{"type": "Action.Submit", "title": "Acknowledge"}]
+        }}]
+    });
+    let b64 = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&card).unwrap());
+    let id = "1760000500000";
+    let mut post = message(
+        id,
+        "28:358f0194-6b0e-4dd3-af35-c24fe8a9ec87",
+        &format!("<URIObject type=\"SWIFT.1\">Card<Swift b64=\"{b64}\"></Swift></URIObject>"),
+    );
+    post.message_type = "RichText/Media_Card".to_owned();
+    post.sender_name = Some("Workflows".to_owned());
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (mut messages, mut roots) = channel_store();
+    messages.insert(0, post);
+    roots.push((id.to_owned(), id.to_owned()));
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    let post = cx.update(|_, cx| {
+        view.read(cx)
+            .threads()
+            .iter()
+            .find(|thread| thread.root == id)
+            .and_then(|thread| thread.post.clone())
+            .expect("its post")
+    });
+    assert!(
+        matches!(post.body, teams_ui::channel_view::Body::Cards(_)),
+        "{:?}",
+        post.body
+    );
+    assert_eq!(post.sender_name.as_ref(), "Workflows");
+    assert!(
+        bounds(cx, &format!("card-channel-{id}-c0b0.")).is_some(),
+        "the card's title"
+    );
+    click(cx, &format!("card-channel-{id}-c0a0"));
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some(format!("https://teams.cloud.microsoft/l/message/{CHANNEL}/{id}?parentMessageId={id}").as_str())
+    );
+    assert_read_only(&rig, cx);
+}

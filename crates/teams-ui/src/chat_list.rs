@@ -233,11 +233,14 @@ fn first_line(text: &str) -> String {
 }
 
 /// A text message's first line with something in it, at most [`PREVIEW_CHARS`] characters: read from its sanitized
-/// rich text, or as it came for a `Text` message; [`DELETED`] for a deleted one.
+/// rich text, or as it came for a `Text` message; [`DELETED`] for a deleted one; Teams' "Sent a card" for a card
+/// ([`crate::card_view::SENT_A_CARD`]: its fallback text is never shown).
 #[must_use]
 pub fn message_line(message: &Message) -> String {
     if message.delete_time.is_some() {
         DELETED.to_owned()
+    } else if message.message_type == teams_proto::chat::card::CARD_TYPE {
+        crate::card_view::SENT_A_CARD.to_owned()
     } else if message.message_type == "Text" {
         // plain text: its `<` and `&` are the text's own
         first_line(&message.content)
@@ -968,6 +971,12 @@ fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
     match (row.kind, row.faces.as_slice()) {
         (RowKind::Meeting, _) => mark_avatar(Glyph::CALENDAR, palette.brand, palette.on_brand, "avatar-meeting"),
         (RowKind::Channel, _) => team_avatar(row.team.as_deref().unwrap_or_default(), palette),
+        // the Workflows bot's chat: the app's icon on its tile, as Teams draws an app's
+        (RowKind::OneToOne, _) if is_workflows_chat(&row.id) => div()
+            .debug_selector(|| "avatar-workflows".to_owned())
+            .flex_none()
+            .child(crate::workflows_app::bot_avatar(AVATAR, palette))
+            .into_any_element(),
         // a 1:1 chat whose other member has no presence: a bot or a service
         (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => {
             mark_avatar(Glyph::BOT, palette.hover, palette.muted_foreground, "avatar-bot")
@@ -989,6 +998,13 @@ fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
                 .into_any_element()
         }
     }
+}
+
+/// Whether `chat` is an account's chat with the Workflows bot (`19:<account>_<bot>@unq.gbl.spaces`).
+fn is_workflows_chat(chat: &str) -> bool {
+    chat.strip_suffix("@unq.gbl.spaces")
+        .and_then(|ids| ids.rsplit_once('_'))
+        .is_some_and(|(_, bot)| bot == crate::workflows_app::WORKFLOWS_BOT)
 }
 
 /// An avatar of one mark on a colour, its test selector `selector`: Teams' calendar on the brand colour for a

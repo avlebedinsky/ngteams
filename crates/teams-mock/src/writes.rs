@@ -326,7 +326,7 @@ fn is_message(messagetype: &str) -> bool {
 }
 
 /// A user's contact URL, the `from` of their messages as read.
-fn contact(mri: &str) -> String {
+pub(crate) fn contact(mri: &str) -> String {
     format!("{CHAT_BASE}/v1/users/ME/contacts/{mri}")
 }
 
