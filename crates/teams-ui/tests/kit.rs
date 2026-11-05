@@ -471,3 +471,33 @@ fn every_theme_has_a_frame_and_only_high_contrast_is_flat() {
         );
     }
 }
+
+/// WCAG's contrast ratio between two colours.
+fn contrast(a: u32, b: u32) -> f32 {
+    let (a, b) = (theme::luminance(a), theme::luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+#[test]
+fn a_theme_is_dark_by_its_background() {
+    for spec in &theme::THEMES {
+        assert_eq!(theme::palette_is_dark(spec.palette), spec.dark, "{}", spec.key);
+    }
+}
+
+#[test]
+fn a_group_s_initials_read_in_light_and_dark_themes_in_the_same_hue() {
+    for name in ["Lab A", "Lab B", "Project 1", "Outsider X", "Zed", ""] {
+        let (light_back, light_initial) = teams_ui::chat_list::initials_colour(name, false);
+        let (dark_back, dark_initial) = teams_ui::chat_list::initials_colour(name, true);
+        assert!(contrast(light_back, light_initial) >= 4.5, "{name} light");
+        assert!(contrast(dark_back, dark_initial) >= 4.5, "{name} dark");
+        assert!(theme::luminance(light_back) > 0.5, "{name}: a soft tint in a light theme");
+        assert!(theme::luminance(dark_back) < 0.05, "{name}: a deep tint in a dark one");
+        // on Teams Dark's list, the half doesn't glare: no brighter than the list's own text
+        assert!(
+            theme::luminance(dark_back) < theme::luminance(DARK_PALETTE.foreground),
+            "{name}"
+        );
+    }
+}

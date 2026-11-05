@@ -1014,7 +1014,7 @@ fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
         (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => {
             mark_avatar(Glyph::BOT, rgb(palette.hover).into(), palette.muted_foreground, "avatar-bot")
         }
-        (RowKind::Group, [left, right, ..]) => split_avatar(left, right).into_any_element(),
+        (RowKind::Group, [left, right, ..]) => split_avatar(left, right, theme::palette_is_dark(palette)).into_any_element(),
         _ => {
             let name = row.named.then(|| match row.kind {
                 // the initials of the account's own name, not of "(You)"
@@ -1083,20 +1083,20 @@ fn team_avatar(team: &str, palette: Palette) -> AnyElement {
 /// The gap between a split avatar's halves, px.
 const SPLIT_GAP: f32 = 1.0;
 
-/// A group chat's avatar as Teams splits it: two members, half each.
-fn split_avatar(left: &HalfFace, right: &HalfFace) -> Div {
+/// A group chat's avatar as Teams splits it: two members, half each, in a `dark` theme's colours or a light one's.
+fn split_avatar(left: &HalfFace, right: &HalfFace, dark: bool) -> Div {
     div()
         .debug_selector(|| "avatar-split".to_owned())
         .size(px(AVATAR))
         .flex_none()
         .flex()
         .gap(px(SPLIT_GAP))
-        .child(half(left, true))
-        .child(half(right, false))
+        .child(half(left, true, dark))
+        .child(half(right, false, dark))
 }
 
 /// One half of a split avatar: the member's picture, else the initial of their name on a colour of its own.
-fn half(face: &HalfFace, left: bool) -> AnyElement {
+fn half(face: &HalfFace, left: bool, dark: bool) -> AnyElement {
     let width = px((AVATAR - SPLIT_GAP) / 2.0);
     let radius = px(AVATAR / 2.0);
     if let Some(picture) = &face.picture {
@@ -1117,7 +1117,7 @@ fn half(face: &HalfFace, left: bool) -> AnyElement {
         .and_then(|name| name.chars().find(|c| c.is_alphanumeric()))
         .map(|c| c.to_uppercase().collect())
         .unwrap_or_default();
-    let (background, foreground) = initials_colour(face.name.as_deref().unwrap_or(""));
+    let (background, foreground) = initials_colour(face.name.as_deref().unwrap_or(""), dark);
     let half = div()
         .w(width)
         .h(px(AVATAR))
@@ -1145,12 +1145,24 @@ const INITIALS_COLOURS: [(u32, u32); 6] = [
     (0x00f7_e5c2, 0x0080_5c00),
 ];
 
-/// The colours of `name`'s initials, the same for the same name.
-fn initials_colour(name: &str) -> (u32, u32) {
+/// The same hues for a dark theme, as the kit draws a person's initials there: a deep tint, the initials light.
+const DARK_INITIALS_COLOURS: [(u32, u32); 6] = [
+    (0x004a_2a2e, 0x00f1_a6ad),
+    (0x0049_3324, 0x00f3_bd8f),
+    (0x001f_3550, 0x009c_c8f5),
+    (0x0024_402a, 0x00a6_db9f),
+    (0x0037_2a4f, 0x00c9_b1f2),
+    (0x0045_391c, 0x00e9_cf7d),
+];
+
+/// The colours of `name`'s initials in a `dark` theme or a light one, the same hue for the same name in both.
+#[must_use]
+pub fn initials_colour(name: &str, dark: bool) -> (u32, u32) {
     let sum = name
         .bytes()
         .fold(0_usize, |sum, byte| sum.wrapping_add(usize::from(byte)));
-    INITIALS_COLOURS[sum % INITIALS_COLOURS.len()]
+    let colours = if dark { &DARK_INITIALS_COLOURS } else { &INITIALS_COLOURS };
+    colours[sum % colours.len()]
 }
 
 /// The row's name and time (on `cycle`'s clock) over its preview and unread count (when it has either).

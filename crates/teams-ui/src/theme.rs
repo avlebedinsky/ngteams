@@ -454,6 +454,26 @@ pub fn frame(palette: Palette) -> gpui::Background {
     )
 }
 
+/// The relative luminance of `color` (WCAG's: 0 black, 1 white).
+#[must_use]
+pub fn luminance(color: u32) -> f32 {
+    let channel = |shift: u32| {
+        let value = f32::from(u8::try_from((color >> shift) & 0xff).unwrap_or(0)) / 255.0;
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+/// Whether a palette is a dark one: its background darker than the middle grey.
+#[must_use]
+pub fn palette_is_dark(palette: Palette) -> bool {
+    luminance(palette.background) < 0.18
+}
+
 /// The brand gradient, from the brand colour at `angle` into the accent.
 #[must_use]
 pub fn brand_gradient(palette: Palette, angle: f32) -> gpui::Background {
