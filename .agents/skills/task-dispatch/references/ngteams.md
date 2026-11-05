@@ -9,7 +9,7 @@ project rules; this reference does not duplicate them.
   permitted captures, reads, and lab runs. Disabled controls and placeholder messages count as unfinished work.
 - A task's quick checks include `cargo fmt --all`, `cargo check -p <touched-crate> --all-targets`, relevant focused
   tests, and the UI skill's screenshots where applicable. The landing helper also checks workspace compilation.
-  Task workers never run revmux or another multi-agent review; only the review pass does.
+  Task workers never run revmux or another multi-agent review of their own change; only the review pass does.
 - For code that needs it, the review pass runs the available revmux skill once, as one task directory over the whole
   frozen range (every task landed since the last successful pass), not once per task or commit. Run the checks that
   range needs: for example clippy, `scripts/lint-report.sh`, affected tests, and `fixture-guard` for documentation or

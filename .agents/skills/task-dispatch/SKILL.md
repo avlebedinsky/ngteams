@@ -146,11 +146,12 @@ preserve requested output and applications. Never infer ownership from an unrela
 
 When no task is running or eligible to start and new commits landed since `review_base`, freeze `<base>..<head>`
 for one review/check pass in its own worktree. Review that whole range, every task landed since the last successful
-pass, as one round (one revmux task directory), never a round per task or commit; the only further round re-reviews
-the pass's own fixes when their size warrants it. Don't repeat a failed pass endlessly: record the blocker and retain
-the base until resolved. Tasks waiting on the user needn't prevent reviewing landed work. Size review/checks to
-what changed, follow repository review requirements, and fix findings in scope. The review worker follows the same
-isolation, process cleanup, commit, and landing conventions. New tasks may land while it runs, outside its frozen range.
+pass, as one round (with revmux, one task directory), never a round per task or commit; the only further round
+re-reviews the pass's own fixes when their size warrants it. Don't repeat a failed pass endlessly: record the
+blocker and retain the base until resolved. Tasks waiting on the user needn't prevent reviewing landed work. Size
+review/checks to what changed, follow repository review requirements, and fix findings in scope. The review worker
+follows the same isolation, process cleanup, commit, and landing conventions. New tasks may land while it runs,
+outside its frozen range.
 
 The review report names the range, findings/fixes, checks and omissions, failures/outcomes, landed fix hashes, and
 stopped shells. Advance `review_base` only after success: to the last fix commit if only its fixes landed after
