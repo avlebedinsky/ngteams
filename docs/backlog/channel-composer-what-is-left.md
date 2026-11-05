@@ -1,0 +1,33 @@
+---
+worth: soon
+status: open
+where: crates/teams-ui/src/channel_view.rs, crates/teams-ui/src/chat_view/channel.rs, crates/teams-ui/src/compose.rs, crates/teams-core/src/engine.rs (`command`), docs/protocol/channels.md (Posting, replying and reacting in a channel)
+added: 2026-11-05
+---
+# A channel's compose box and threads: what Teams has that the app doesn't yet
+
+A team's channel now opens as Teams' threaded channel: its posts as a chat's messages with each post's replies summed
+up, "Message in <channel>" posting to the channel, a post's thread beside it whose "Reply in thread" box posts to the
+post's chain, and reactions, edits, deletes, copying and workflows as in a chat. What is left, each needing a capture
+or a read nobody has made yet:
+
+- **The writes' shapes, seen live.** The paths are the bundle's and the chat service's ids; the native writes ran only
+  against the mock. A `team-manage` run on a lab team whose people are only lab accounts (and the user's own account)
+  should post, reply in a thread and react in the web client, and a lab client do the same, before the personal build
+  relies on it. Look for anything the web client adds to a channel post (`subject`, `properties.announceViaEmail`, the
+  chain's `conversationid`) that the chat's `SendMessage` leaves out.
+- **Files in a channel.** Teams puts a channel's files in its team's SharePoint folder (`sharepointChannelDocsFolder`
+  on the channel's thread), not the account's OneDrive, and shares them with the team. The box offers no Attach in a
+  channel and the engine refuses a channel message with files until that upload and its permissions are captured.
+- **Mentions in a channel.** The box's picker offers a chat's stored members; a channel stores none, so it offers
+  nobody. Teams offers the team's people and the channel and the team themselves (`@channel`, `@team`).
+- **"Send to: thread and channel".** Teams' thread box can also post the reply to the channel; the app says "Send to:
+  thread only" and sends only to the thread until that write is captured.
+- **Typing and the read horizon.** A channel's box sends no typing and its view no read receipt (no capture showed a
+  channel's); Teams shows typing in a channel and moves the channel's horizon, which the channels' unread marks follow.
+- **The classic "Posts" layout.** Some channels still use Teams' Posts layout ("Post in channel", "Reply in thread"
+  under each post); the app draws every channel in the threaded layout. Which layout a channel has (CSA's `modality`?)
+  isn't read yet.
+- **The channel header.** Teams' header has the team's tile, the channel's name and its tabs (Conversation, Shared,
+  Page, Notes, +); the app's says "<team> › <channel>". The thread pane's header in Teams is "Threads › <thread>" with
+  a threads list behind "Threads" and a follow button; the app's says "Thread" with Close.

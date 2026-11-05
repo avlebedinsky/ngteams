@@ -1,159 +1,41 @@
-//! A team channel's posts and their reply chains (M2 Task 16), read-only: no composer, no message action, no read
-//! receipt. Nothing in this view writes; channel management uses its own engine actions, and channel posts have
-//! no composer or message actions here.
+//! A team channel (M2 Task 16), as Teams' channel shows it: its posts in a [`ChatView`] of the channel
+//! ([`Place::Channel`]: a post's replies summed up under it, its compose box "Message in <channel>" posting to the
+//! channel), and once a post's "Reply in thread" or its replies' summary is clicked, the post's thread in a pane beside
+//! them, a [`ChatView`] of the thread ([`Place::Thread`]: the post and its replies, its box "Reply in thread" posting to
+//! the post's chain) under Teams' pane header (its title, and Close). Reactions, edits, deletes, copying and workflows
+//! are the chat view's own, in both.
 //!
-//! - **From the store only.** The view asks the engine to sync the channel each time it is opened
-//!   ([`Core::sync_conversation`], [`ChannelView::sync`]: a channel other than a team's general one is in no
-//!   conversation list, so no catch-up reads it, and a sync that failed is tried again only so), then reads the store's newest messages ([`PAGE`] at first, a page more for each "Load older
-//!   posts") and the post each belongs to ([`Core::reply_roots`]), again each time the models say the channel changed
-//!   or someone it shows was named anew ([`crate::Chats::named_at`]: a profile read in the background).
-//!   Older history comes from the service when the store has no more ([`Core::load_older`]), until the store says the
-//!   whole history is stored ([`Core::history_complete`]).
-//! - **Threads** ([`arrange_threads`]): each post with its replies under it, the oldest post first; a message whose
-//!   post isn't recorded (read before posts were kept) is a post of its own; replies whose post the view doesn't hold
-//!   show under "Replies to an earlier post". Each message shows its sender's name ([`Core::person`]: their profile's,
-//!   else the name the message carried, else their MRI; none for the thread's own message, never its id), its time,
-//!   its rich text through our own renderer ([`crate::rich_text`]), "Edited", or "This message was deleted"; a system
-//!   message ([`crate::system_message`]: a call's start or end, a recording, a transcript) is a line in Teams' words, a
-//!   card's title and detail on one line; one Teams draws nothing for isn't shown, nor its thread when nothing under it
-//!   is (with replies, a placeholder stands for it). The thread's own events (`ThreadActivity/…`: people added or
-//!   gone, the channel renamed or its description changed, apps, tabs) are among them: the web client reads a
-//!   channel's posts with `filterSystemMessage=true` and tells those events only in the channel's info pane. Any other
-//!   type or shape is a placeholder that names no content. A forwarded message is drawn as in a chat
-//!   ([`crate::forwarded`]), its original's time a link to it, told as [`ChannelViewEvent::OpenOriginal`].
+//! - **Synced each time it is opened** ([`ChannelView::sync`], [`Core::sync_conversation`]): a channel other than a
+//!   team's general one is in no conversation list, so no catch-up reads it, and a sync that failed is tried again
+//!   only so. What it stores comes as the models' change, which the views read again on.
+//! - **Opened at a message** ([`ChannelView::reveal`], a search's hit): the posts at the message's thread's post, and
+//!   a reply's thread opened at it.
+//! - **What it tells** ([`ChannelViewEvent`]): a forward's original, a meeting card's Edit, and a workflow run or made
+//!   on a message, for the shell to carry out.
 //!
-//! What the view shows is traced (`channel-view shown`: the channel, its messages' ids in the order shown, each `post`
-//! or `reply`), never text or a name.
+//! What the views show is traced as theirs (`channel-view shown`, `thread-view shown`), and a thread's opening and
+//! closing (`channel-thread opened`/`closed`, its post's id), never text or a name.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::BuildHasher;
-use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::Local;
 use gpui::{
-    AnyElement, App, AsyncApp, ClipboardItem, Context, FocusHandle, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, WeakEntity, Window, div, rgb,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
-use gpui_component::Sizable as _;
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::Copy;
-use gpui_component::kbd::Kbd;
-use teams_proto::ScheduledMeeting;
-use teams_proto::chat::{LinkPreview, MessageType, RichText, SharedFile, parse_html};
-use teams_store::Message;
+use gpui_component::{Sizable as _, Size};
 
-use crate::bridge::Core;
-use crate::card_view::{CardState, CardsElement, ShownCards};
-use crate::chat_view::{DELETED, MAX_SEEK, UNSHOWN_CONTENT, UNSUPPORTED, files_of, unshown_of};
-use crate::clock::{self, HourCycle};
-use crate::files;
-use crate::forwarded::{self, ForwardOrigin, Original};
-use crate::icons::Spinning as _;
-use crate::link_preview;
-use crate::models::Models;
-use crate::people::{Face, Shown};
-use crate::picture_viewer::{self, OpenPicture, Viewed, Viewing};
-use crate::rich_text::{self, Mentions, Rendered};
-use crate::selection::{self, MessageKey, Scope, TextSelection};
-use crate::system_message::{self, Naming, Shown as SystemShown};
+use crate::chat_view::{ChatView, ChatViewEvent, Place};
+use crate::compose;
+use crate::forwarded::Original;
+use crate::icons::{Glyph, icon_button, selected_by};
+use crate::shell::ShellParts;
 use crate::theme::{self, Palette};
-use crate::trace::{TraceLine, ViewTrace};
+use crate::trace::TraceLine;
 
-mod workflows;
-
-/// Messages read from the store at first, and how many more each "Load older posts" reads.
-pub const PAGE: usize = 200;
-/// What a thread whose post the view doesn't hold says above its replies.
-pub const EARLIER_POST: &str = "Replies to an earlier post";
-/// The line under the posts: nothing can be written here.
-pub const READ_ONLY: &str = "Channels are read-only here";
-/// The type prefix of a thread's own events (`ThreadActivity/AddMember`, `ThreadActivity/TopicTopicUpdated`, …).
-const THREAD_EVENT: &str = "ThreadActivity/";
-
-/// A thread as arranged from the store's messages: its post's id, the post when it is held, and its replies, the
-/// oldest first.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Thread<T> {
-    pub root: String,
-    pub post: Option<T>,
-    pub replies: Vec<T>,
-}
-
-/// Arranges a channel's `messages` into threads by `roots` (message id → its post's id; a message without one is its
-/// own post): each post with its replies, the threads by their post's arrival (or, without the post, their oldest
-/// reply's), the replies by arrival. Control messages are left out.
-#[must_use]
-pub fn arrange_threads<S: BuildHasher>(
-    messages: Vec<Message>,
-    roots: &HashMap<String, String, S>,
-) -> Vec<Thread<Message>> {
-    let mut threads: BTreeMap<String, Thread<Message>> = BTreeMap::new();
-    for message in messages {
-        if MessageType::from(message.message_type.clone()).is_control() {
-            continue;
-        }
-        let root = roots.get(&message.id).cloned().unwrap_or_else(|| message.id.clone());
-        let thread = threads.entry(root.clone()).or_insert_with(|| Thread {
-            root: root.clone(),
-            post: None,
-            replies: Vec::new(),
-        });
-        if message.id == root {
-            thread.post = Some(message);
-        } else {
-            thread.replies.push(message);
-        }
-    }
-    let mut threads: Vec<Thread<Message>> = threads.into_values().collect();
-    for thread in &mut threads {
-        thread
-            .replies
-            .sort_by(|one, other| (one.arrival_time, &one.id).cmp(&(other.arrival_time, &other.id)));
-    }
-    threads.sort_by_key(|thread| {
-        thread
-            .post
-            .as_ref()
-            .or_else(|| thread.replies.first())
-            .map(|first| (first.arrival_time, first.id.clone()))
-    });
-    threads
-}
-
-/// What a message shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Body {
-    Text(Arc<Rendered>),
-    Deleted,
-    /// A system message's line, in Teams' words ([`crate::system_message`]): a thread's event, a call's or a
-    /// recording's state, or a card's title and detail.
-    Event(SharedString),
-    /// A meeting scheduled in the channel, drawn as Teams' meeting card ([`meeting_card`]).
-    Meeting(MeetingCard),
-    /// A card a bot or a workflow posted, drawn as Teams draws it ([`crate::card_view`]).
-    Cards(ShownCards),
-    Unsupported,
-}
-
-/// A meeting scheduled in the channel, as its post names it (`teams_proto::ScheduledMeeting`) and the channel's card shows
-/// it: its day, its title (struck through once a reply under it says it is cancelled), its times and location, and
-/// where it is ("<team> > <channel>").
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MeetingCard {
-    pub title: SharedString,
-    pub start_ms: i64,
-    pub end_ms: i64,
-    pub location: Option<SharedString>,
-    pub cancelled: bool,
-    /// The team's and the channel's names, when the view was given them ([`ChannelView::set_place`]).
-    pub place: Option<(SharedString, SharedString)>,
-    /// Its id on the team's calendar: what its Edit reads.
-    pub ical_uid: String,
-    /// The account scheduled it and it still stands: its organizer's Edit shows (not in the read-only mode).
-    pub editable: bool,
-}
+/// The thread pane's width, px: Teams' pane beside the channel.
+pub const THREAD_WIDTH: f32 = 440.0;
+/// The thread pane's title.
+pub const THREAD_TITLE: &str = "Thread";
 
 /// What the channel view tells its owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,206 +56,117 @@ pub enum ChannelViewEvent {
     CreateWorkflows(crate::workflow_run::MessageRef),
 }
 
-/// A message as the view shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Item {
-    pub id: String,
-    pub sender_name: SharedString,
-    pub arrival_time: i64,
-    pub edited: bool,
-    pub body: Body,
-    /// The files a text carries (`chat_view::files_of`), each drawn as its card under it (`crate::files`).
-    pub files: Vec<SharedFile>,
-    /// The previews of the links a text carries (`crate::link_preview::previews_of`), each drawn as its card under it.
-    pub links: Vec<LinkPreview>,
-    /// A text that carries a part this build can't show (`chat_view::unshown_of`: a file entry of a shape no message
-    /// showed, a card): shown with
-    /// [`UNSHOWN_CONTENT`] under it, never a guess at the part. No web button: no channel deep link was captured.
-    pub unshown: bool,
-    /// Where a forwarded message came from ([`crate::forwarded`]): its forward card's header, the original's time a
-    /// link to it ([`ChannelViewEvent::OpenOriginal`]).
-    pub forwarded: Option<ForwardOrigin>,
-}
-
-/// What the threads are drawn with besides their items: the text selection, the "More options" menu, and what each
-/// message's cards show and where their pictures come from.
-struct Looks<'a> {
-    selection: &'a TextSelection,
-    menu: &'a workflows::Menu,
-    cards: &'a HashMap<String, CardState>,
-    core: &'a Arc<dyn Core>,
-    channel: &'a str,
-}
-
-impl Looks<'_> {
-    /// `item`'s cards, drawn, when it is a card message; a click that changes what they show is kept by the view. A
-    /// button that sends to the bot opens the message (in its thread `root`) in Teams on the web.
-    fn cards_of(
-        &self,
-        item: &Item,
-        root: &str,
-        palette: Palette,
-        cycle: HourCycle,
-        cx: &Context<ChannelView>,
-    ) -> Option<AnyElement> {
-        let Body::Cards(cards) = &item.body else {
-            return None;
-        };
-        let view = cx.entity().downgrade();
-        let key = item.id.clone();
-        let on_state: crate::card_view::OnState = Rc::new(move |state, _, cx| {
-            let _ = view.update(cx, |this, cx| {
-                this.card_states.insert(key.clone(), state);
-                cx.notify();
-            });
-        });
-        let link = teams_proto::workflow::MessageRun::link_to(self.channel, &item.id, Some(root));
-        Some(
-            CardsElement::new(format!("channel-{}", item.id), cards.clone(), palette, cycle)
-                .state(self.cards.get(&item.id).cloned().unwrap_or_default(), on_state)
-                .source(Some(rich_text::PictureSource::new(Arc::clone(self.core))))
-                .in_teams(Some(link))
-                .into_any_element(),
-        )
-    }
-}
-
-/// What one load read from the store.
-struct Read {
-    messages: Vec<Message>,
-    roots: HashMap<String, String>,
-    /// More messages are stored than were read.
-    more_stored: bool,
-    history_complete: Option<bool>,
-    people: HashMap<String, Shown>,
+/// A post's thread, open beside the posts.
+struct Thread {
+    post: String,
+    view: Entity<ChatView>,
+    _events: Subscription,
 }
 
 /// The channel view (see the module docs).
 pub struct ChannelView {
-    core: Arc<dyn Core>,
-    models: Models,
-    trace: Arc<ViewTrace>,
+    parts: ShellParts,
     channel: String,
-    limit: usize,
-    threads: Vec<Thread<Item>>,
-    more_stored: bool,
-    history_complete: Option<bool>,
-    /// A text message's rich text, laid out once per id and version.
-    rendered: HashMap<String, (i64, Arc<Rendered>)>,
-    /// The channel's change the last load started at.
-    read_at: u64,
-    /// The models' revision the last load started at: a person shown named after it is read again.
-    people_at: u64,
-    /// The people the last load named (senders, and those a member event names).
-    people: Vec<String>,
-    loading: Option<Task<()>>,
-    dirty: bool,
-    loads: u64,
+    /// The channel's name, as its compose box says it ("Message in <channel>").
+    name: SharedString,
+    posts: Entity<ChatView>,
+    thread: Option<Thread>,
+    /// The team's and the channel's names, for a meeting card's line and a channel meeting's call.
+    place: Option<(SharedString, SharedString)>,
     /// The sync asked for on open, while it runs.
     syncing: Option<Task<()>>,
-    older: Option<Task<()>>,
-    scroll: ScrollHandle,
-    /// The view went to the newest posts after its first load with any.
-    placed: bool,
-    /// The thread to open at (its post's id, and the message in it), with the older pages read for it so far: a
-    /// search's hit ([`ChannelView::reveal`]).
-    reveal: Option<(String, String, u32)>,
-    traced: Option<Vec<(String, &'static str)>>,
-    /// The text selected with the mouse, in any of the posts and replies ([`crate::selection`]).
-    text_selection: TextSelection,
-    /// Takes the focus on a press in the posts, so Ctrl+C reaches the view.
-    focus: FocusHandle,
-    /// The calendar ids of the meetings whose cancellation the last load read: their cards are drawn cancelled.
-    cancelled: HashSet<String>,
-    /// The calls (`callId`) whose end the last load read: a channel meeting's post says it ended.
-    ended_calls: HashSet<String>,
-    /// The team's and the channel's names, for a meeting card's line.
-    place: Option<(SharedString, SharedString)>,
-    /// A message's "More options" menu, while it is open, and the account's workflows it offers.
-    menu: workflows::Menu,
-    /// What each message's cards show besides what they say: toggled elements, opened cards ([`CardState`]).
-    card_states: HashMap<String, CardState>,
-    _observing: Subscription,
+    /// A search's hit being looked up to open at.
+    revealing: Option<Task<()>>,
+    _posts: Subscription,
 }
 
+impl EventEmitter<ChannelViewEvent> for ChannelView {}
+
 impl ChannelView {
-    /// The view of `channel`: synced from the service at once, read from the store.
+    /// The view of `channel`, named `name` (empty when the list doesn't know it yet): synced from the service at once,
+    /// read from the store.
     pub fn new(
-        core: Arc<dyn Core>,
-        models: Models,
-        trace: Arc<ViewTrace>,
+        parts: ShellParts,
         channel: String,
+        name: SharedString,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let observing = cx.observe(&models.chats, |this: &mut Self, chats, cx| {
-            let due = {
-                let chats = chats.read(cx);
-                chats.changed_at(&this.channel) != this.read_at
-                    || this.people.iter().any(|mri| chats.named_at(mri) > this.people_at)
-            };
-            if due {
-                this.reload(cx);
-            }
-        });
-        let mut view = Self {
-            core,
-            models,
-            trace,
-            channel,
-            limit: PAGE,
-            threads: Vec::new(),
-            more_stored: false,
-            history_complete: None,
-            rendered: HashMap::new(),
-            read_at: 0,
-            people_at: 0,
-            people: Vec::new(),
-            loading: None,
-            dirty: false,
-            loads: 0,
-            syncing: None,
-            older: None,
-            scroll: ScrollHandle::new(),
-            placed: false,
-            reveal: None,
-            traced: None,
-            text_selection: TextSelection::default(),
-            focus: cx.focus_handle(),
-            cancelled: HashSet::new(),
-            ended_calls: HashSet::new(),
-            place: None,
-            menu: workflows::Menu::default(),
-            card_states: HashMap::new(),
-            _observing: observing,
+        let placeholder = compose::channel_placeholder(&name).into();
+        let posts = {
+            let (parts, channel) = (parts.clone(), channel.clone());
+            cx.new(|cx| ChatView::in_place(parts, channel, Place::Channel, placeholder, window, cx))
         };
-        view.menu.read_only = view.core.read_only();
+        let events = Self::follow(&posts, window, cx);
+        let mut view = Self {
+            parts,
+            channel,
+            name,
+            posts,
+            thread: None,
+            place: None,
+            syncing: None,
+            revealing: None,
+            _posts: events,
+        };
         view.sync(cx);
-        view.reload(cx);
         view
     }
 
-    /// The team's and the channel's names, as a meeting card's line shows them; read again when they change.
-    pub fn set_place(&mut self, team: SharedString, channel: SharedString, cx: &mut Context<Self>) {
-        let place = Some((team, channel)).filter(|(team, channel)| !team.is_empty() && !channel.is_empty());
-        if self.place != place {
-            self.place = place;
-            self.reload(cx);
-        }
+    /// Follows what a view of the channel tells: a post's thread opened here, the rest handed on.
+    fn follow(view: &Entity<ChatView>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(view, window, |this: &mut Self, _, event, window, cx| match event {
+            ChatViewEvent::OpenThread { post } => this.open_thread(post.clone(), window, cx),
+            ChatViewEvent::OpenOriginal(original) => cx.emit(ChannelViewEvent::OpenOriginal(original.clone())),
+            ChatViewEvent::EditMeeting { ical_uid } => cx.emit(ChannelViewEvent::EditMeeting {
+                ical_uid: ical_uid.clone(),
+            }),
+            ChatViewEvent::RunWorkflow { flow, message } => cx.emit(ChannelViewEvent::RunWorkflow {
+                flow: flow.clone(),
+                message: message.clone(),
+            }),
+            ChatViewEvent::CreateWorkflows(message) => cx.emit(ChannelViewEvent::CreateWorkflows(message.clone())),
+            ChatViewEvent::Action { .. } | ChatViewEvent::OpenRecap(_) => {}
+        })
     }
 
-    /// Asks the engine to sync the channel from the service, unless a sync it asked for still runs; the store is read
-    /// again once it is over. Each opening of the channel asks it, the view's first and any later one.
+    /// The team's and the channel's names, as a meeting card's line shows them; the compose box says the channel's.
+    pub fn set_place(&mut self, team: SharedString, channel: SharedString, cx: &mut Context<Self>) {
+        let place = Some((team, channel)).filter(|(team, channel)| !team.is_empty() && !channel.is_empty());
+        if self.place == place {
+            return;
+        }
+        self.place.clone_from(&place);
+        if let Some((team, channel)) = place {
+            if self.name != channel {
+                self.name = channel.clone();
+                let compose = self.posts.read(cx).compose().clone();
+                let placeholder = compose::channel_placeholder(&channel);
+                compose.update(cx, |compose, cx| {
+                    compose.in_channel(compose::Writes::Channel, placeholder, cx);
+                });
+            }
+            for view in self.views() {
+                let (team, channel) = (team.clone(), channel.clone());
+                view.update(cx, |view, cx| view.set_channel_place(team, channel, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Asks the engine to sync the channel from the service, unless a sync it asked for still runs. Each opening of
+    /// the channel asks it, the view's first and any later one.
     pub fn sync(&mut self, cx: &mut Context<Self>) {
         if self.syncing.is_some() {
             return;
         }
-        let (core, channel) = (Arc::clone(&self.core), self.channel.clone());
-        self.syncing = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        let (core, channel) = (Arc::clone(&self.parts.core), self.channel.clone());
+        self.syncing = Some(cx.spawn(async move |this, cx| {
             // what it stores comes as the models' change too; a failed sync leaves what the store holds shown
             let _ = core.sync_conversation(channel).await;
             let _ = this.update(cx, |view, cx| {
                 view.syncing = None;
-                view.reload(cx);
+                cx.notify();
             });
         }));
     }
@@ -383,903 +176,155 @@ impl ChannelView {
         &self.channel
     }
 
-    /// The threads shown, the oldest first.
-    #[must_use]
-    pub fn threads(&self) -> &[Thread<Item>] {
-        &self.threads
-    }
-
-    /// How many loads from the store have ended.
-    #[must_use]
-    pub fn loads(&self) -> u64 {
-        self.loads
-    }
-
     /// Whether the sync asked for on open still runs.
     #[must_use]
     pub fn syncing(&self) -> bool {
         self.syncing.is_some()
     }
 
-    /// Whether older posts may be loaded: the store holds more, or it doesn't say it holds the whole history.
+    /// The channel's posts.
     #[must_use]
-    pub fn has_older(&self) -> bool {
-        self.more_stored || self.history_complete != Some(true)
+    pub fn posts(&self) -> &Entity<ChatView> {
+        &self.posts
     }
 
-    /// Reads the store again (or once the running load ends).
-    pub fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.loading.is_some() {
-            self.dirty = true;
+    /// The thread open beside the posts: its post's id and its view.
+    #[must_use]
+    pub fn thread(&self) -> Option<(&str, &Entity<ChatView>)> {
+        self.thread.as_ref().map(|thread| (thread.post.as_str(), &thread.view))
+    }
+
+    /// The views shown: the posts, and the thread when one is open.
+    fn views(&self) -> Vec<Entity<ChatView>> {
+        std::iter::once(self.posts.clone())
+            .chain(self.thread.as_ref().map(|thread| thread.view.clone()))
+            .collect()
+    }
+
+    /// Opens post `post`'s thread beside the posts (in place of one open), its compose box focused, as Teams does; a
+    /// thread open already stays as it is.
+    pub fn open_thread(&mut self, post: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.as_ref().is_some_and(|thread| thread.post == post) {
             return;
         }
-        self.dirty = false;
-        let chats = self.models.chats.read(cx);
-        (self.read_at, self.people_at) = (chats.changed_at(&self.channel), chats.revision());
-        let (core, channel, limit) = (Arc::clone(&self.core), self.channel.clone(), self.limit);
-        self.loading = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let read = read(&*core, &channel, limit).await;
-            let _ = this.update(cx, |view, cx| view.loaded(read, cx));
-        }));
-    }
-
-    /// Opens the view at `message` in the thread of post `thread` (a search's hit): the thread scrolled to once a load
-    /// holds it, the older pages read for it while it is older than what is held (up to [`MAX_SEEK`] of them).
-    pub fn reveal(&mut self, thread: String, message: String, cx: &mut Context<Self>) {
-        self.reveal = Some((thread, message, 0));
-        self.placed = true;
-        if self.loading.is_none() && self.loads > 0 {
-            self.seek(cx);
-        }
-    }
-
-    /// Scrolls to the thread [`ChannelView::reveal`] asked for when it is shown, else reads an older page for it.
-    fn seek(&mut self, cx: &mut Context<Self>) {
-        let Some((thread, message, pages)) = self.reveal.take() else {
-            return;
+        self.parts.trace.record(
+            &TraceLine::new("channel-thread", "opened")
+                .conversation(&self.channel)
+                .messages([post.as_str()]),
+        );
+        let view = {
+            let (parts, channel, place) = (
+                self.parts.clone(),
+                self.channel.clone(),
+                Place::Thread { post: post.clone() },
+            );
+            cx.new(|cx| ChatView::in_place(parts, channel, place, compose::THREAD_PLACEHOLDER.into(), window, cx))
         };
-        let index = self.threads.iter().position(|shown| {
-            shown.root == thread || shown.post.iter().chain(&shown.replies).any(|item| item.id == message)
+        if let Some((team, channel)) = self.place.clone() {
+            view.update(cx, |view, cx| view.set_channel_place(team, channel, cx));
+        }
+        let compose = view.read(cx).compose().clone();
+        compose.update(cx, |compose, cx| compose.focus(window, cx));
+        let events = Self::follow(&view, window, cx);
+        self.thread = Some(Thread {
+            post,
+            view,
+            _events: events,
         });
-        if let Some(index) = index {
-            // the button for older posts comes first while there are any
-            let offset = usize::from(self.has_older());
-            self.scroll.scroll_to_item(index + offset);
-            self.trace.record(
-                &TraceLine::new("channel-view", "revealed")
+        cx.notify();
+    }
+
+    /// Closes the thread beside the posts.
+    pub fn close_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread) = self.thread.take() {
+            self.parts.trace.record(
+                &TraceLine::new("channel-thread", "closed")
                     .conversation(&self.channel)
-                    .messages([message.as_str()]),
+                    .messages([thread.post.as_str()]),
             );
             cx.notify();
-            return;
-        }
-        if self.has_older() && pages < MAX_SEEK {
-            self.reveal = Some((thread, message, pages + 1));
-            self.load_older(cx);
         }
     }
 
-    /// Shows a page more: the store's when it holds more, else the service's next older page read into it first.
-    pub fn load_older(&mut self, cx: &mut Context<Self>) {
-        if self.older.is_some() || !self.has_older() {
-            return;
+    /// Opens the view at `message` (which arrived at `arrival_time`) in the thread of post `thread` (a search's hit):
+    /// the posts at the post (read back through the service's older pages when the store doesn't hold it), and a
+    /// reply's thread opened at the reply.
+    pub fn reveal(
+        &mut self,
+        thread: String,
+        message: String,
+        arrival_time: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if message != thread {
+            self.open_thread(thread.clone(), window, cx);
+            if let Some(open) = &self.thread {
+                let message = message.clone();
+                open.view.update(cx, |view, cx| view.reveal(arrival_time, message, cx));
+            }
         }
-        self.limit += PAGE;
-        if self.more_stored {
-            self.reload(cx);
-            return;
-        }
-        let (core, channel) = (Arc::clone(&self.core), self.channel.clone());
-        self.older = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let _ = core.load_older(channel).await;
-            let _ = this.update(cx, |view, cx| {
-                view.older = None;
-                view.reload(cx);
+        // a post is where its arrival puts it; a reply's post came before it, at a time the store tells
+        let (core, channel) = (Arc::clone(&self.parts.core), self.channel.clone());
+        self.revealing = Some(cx.spawn(async move |this, cx| {
+            let at = if message == thread {
+                Some(arrival_time)
+            } else {
+                core.message(channel, thread.clone())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|post| post.arrival_time)
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.revealing = None;
+                if let Some(at) = at {
+                    this.posts.update(cx, |posts, cx| posts.reveal(at, thread, cx));
+                }
             });
         }));
     }
 
-    /// A load ended: its threads shown (a stopped engine's keep what is shown).
-    fn loaded(&mut self, read: Option<Read>, cx: &mut Context<Self>) {
-        self.loading = None;
-        self.loads += 1;
-        if let Some(read) = read {
-            self.more_stored = read.more_stored;
-            self.history_complete = read.history_complete;
-            self.people = read.people.keys().cloned().collect();
-            self.cancelled = read
-                .messages
-                .iter()
-                .filter_map(|message| ScheduledMeeting::of_properties(message.properties.as_deref()?))
-                .filter(|meeting| meeting.cancelled)
-                .map(|meeting| meeting.ical_uid)
-                .collect();
-            self.ended_calls = read
-                .messages
-                .iter()
-                .filter(|message| message.content.contains("<callEventType>callEnded</callEventType>"))
-                .filter_map(|message| xml_text(&message.content, "callId"))
-                .collect();
-            let threads = arrange_threads(read.messages, &read.roots);
-            self.threads = threads
-                .into_iter()
-                .filter_map(|thread| self.thread(thread, &read.people))
-                .collect();
-            self.trace_threads();
-            if !self.placed && !self.threads.is_empty() {
-                self.placed = true;
-                self.scroll.scroll_to_bottom();
-            }
-        }
-        cx.notify();
-        if self.dirty {
-            self.reload(cx);
-        } else if self.older.is_none() {
-            self.seek(cx);
-        }
-    }
-
-    /// A thread as shown; `None` when nothing of it is. A post Teams draws nothing for (a lone bot added, a call's end
-    /// with no length) takes its thread with it; with replies shown under it, its placeholder stands in its place, never
-    /// "Replies to an earlier post" (that is for a post the view doesn't hold).
-    fn thread(&mut self, thread: Thread<Message>, people: &HashMap<String, Shown>) -> Option<Thread<Item>> {
-        let replies: Vec<Item> = thread
-            .replies
-            .iter()
-            .filter_map(|reply| self.item(reply, people))
-            .collect();
-        let post = match thread.post {
-            None if replies.is_empty() => return None,
-            None => None,
-            Some(post) => match self.item(&post, people) {
-                Some(item) => Some(item),
-                None if replies.is_empty() => return None,
-                None => Some(Self::item_with(&post, Body::Unsupported, people, self.core.me())),
-            },
-        };
-        Some(Thread {
-            root: thread.root,
-            post,
-            replies,
-        })
-    }
-
-    /// A message as shown.
-    /// `None` for a system message Teams draws nothing for.
-    fn item(&mut self, message: &Message, people: &HashMap<String, Shown>) -> Option<Item> {
-        let body = self.body(message, people)?;
-        Some(Self::item_with(message, body, people, self.core.me()))
-    }
-
-    /// `message` showing `body`.
-    fn item_with(message: &Message, body: Body, people: &HashMap<String, Shown>, me: &str) -> Item {
-        let text = matches!(body, Body::Text(_));
-        let unshown = text && unshown_of(message).any();
-        let files = if text { files_of(message) } else { Vec::new() };
-        let links = if text {
-            link_preview::previews_of(message.properties.as_deref())
-        } else {
-            Vec::new()
-        };
-        let forwarded = text
-            .then(|| forwarded::forwarded_from(message.properties.as_deref()))
-            .flatten()
-            .map(|from| ForwardOrigin::of(&from, from.sender.as_deref().and_then(|sender| people.get(sender))));
-        // a thread's own message has no sender to name: never the thread's id
-        let from_thread = message.sender.as_deref().is_some_and(system_message::is_thread);
-        Item {
-            id: message.id.clone(),
-            sender_name: if from_thread {
-                SharedString::default()
-            } else {
-                sender_name(message, people, me)
-            },
-            arrival_time: message.arrival_time,
-            edited: message.edit_time.is_some() && message.delete_time.is_none(),
-            body,
-            files,
-            links,
-            unshown,
-            forwarded,
-        }
-    }
-
-    /// What a message shows: a system message as its line (a card's title and detail on one); `None` for one Teams
-    /// draws nothing for.
-    fn body(&mut self, message: &Message, people: &HashMap<String, Shown>) -> Option<Body> {
-        if message.delete_time.is_some() {
-            return Some(Body::Deleted);
-        }
-        if let Some(card) = self.meeting_card(message) {
-            return Some(Body::Meeting(card));
-        }
-        match MessageType::from(message.message_type.clone()) {
-            MessageType::RichTextHtml | MessageType::Text => return Some(Body::Text(self.rendered(message))),
-            _ => {}
-        }
-        if message.message_type == teams_proto::chat::card::CARD_TYPE
-            && let Some(cards) = ShownCards::of(&message.content)
-        {
-            return Some(Body::Cards(cards));
-        }
-        if let Some(line) = self.meeting_call_line(message) {
-            return Some(Body::Event(line.into()));
-        }
-        // the channel's own events: Teams' post list has them filtered out (its info pane tells them)
-        if message.message_type.starts_with(THREAD_EVENT) {
-            return None;
-        }
-        let names = ChannelNames {
-            people,
-            me: self.core.me(),
-        };
-        let shown = system_message::shown(
-            &message.message_type,
-            &message.content,
-            &self.channel,
-            message.sender.as_deref(),
-            &names,
+    /// The thread's pane: Teams' header (the title, and Close) over the thread's view.
+    fn thread_pane(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let thread = self.thread.as_ref()?;
+        let close = selected_by(
+            "channel-thread-close",
+            icon_button("channel-thread-close", Glyph::X, "Close thread")
+                .with_size(Size::Size(px(28.0)))
+                .on_click(cx.listener(|this, _, _, cx| this.close_thread(cx))),
         );
-        Some(match shown {
-            Some(SystemShown::Line(text) | SystemShown::TimedLine(text)) => Body::Event(text.into()),
-            Some(SystemShown::Card { title, detail, .. }) => Body::Event(
-                title
-                    .map_or_else(|| detail.clone(), |title| format!("{title}: {detail}"))
-                    .into(),
-            ),
-            Some(SystemShown::Nothing) => return None,
-            None => Body::Unsupported,
-        })
-    }
-
-    /// What a channel meeting's call post says, as Teams' card titles it: the meeting's title (the Meet now pre-join's
-    /// subject its post was given, else `Meeting in "<channel>"`), and "ended" once the call is over (the service turns
-    /// the post itself into the end); `None` for a post that isn't a meeting's call.
-    fn meeting_call_line(&self, message: &Message) -> Option<String> {
-        if message.message_type != "Event/Call" {
-            return None;
-        }
-        let properties: serde_json::Value = serde_json::from_str(message.properties.as_deref()?).ok()?;
-        let meeting: serde_json::Value = match properties.get("meeting")? {
-            serde_json::Value::String(text) => serde_json::from_str(text).ok()?,
-            object @ serde_json::Value::Object(_) => object.clone(),
-            _ => return None,
-        };
-        let titled = meeting
-            .get("meetingtitle")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(str::to_owned);
-        let title = titled.or_else(|| {
-            self.place
-                .as_ref()
-                .map(|(_, channel)| format!("Meeting in \"{channel}\""))
-        })?;
-        let ended = message.content.contains("<callEventType>callEnded</callEventType>")
-            || xml_text(&message.content, "callId").is_some_and(|call| self.ended_calls.contains(&call));
-        Some(if ended { format!("{title} ended") } else { title })
-    }
-
-    /// The meeting card a post of a meeting scheduled in the channel is drawn as; `None` for any other message (its
-    /// cancellation's reply is drawn as its text).
-    fn meeting_card(&self, message: &Message) -> Option<MeetingCard> {
-        let meeting =
-            ScheduledMeeting::of_properties(message.properties.as_deref()?).filter(|meeting| !meeting.cancelled)?;
-        let cancelled = self.cancelled.contains(&meeting.ical_uid);
-        let me = self.core.me().trim_start_matches("8:orgid:");
-        let editable = !cancelled && !self.core.read_only() && meeting.organized_by(me);
-        Some(MeetingCard {
-            title: meeting.title.into(),
-            start_ms: meeting.start_ms,
-            end_ms: meeting.end_ms,
-            location: meeting.location.map(SharedString::from),
-            cancelled,
-            place: self.place.clone(),
-            ical_uid: meeting.ical_uid,
-            editable,
-        })
-    }
-
-    /// A text message's rich text, laid out once per id and version.
-    fn rendered(&mut self, message: &Message) -> Arc<Rendered> {
-        if let Some((version, rendered)) = self.rendered.get(&message.id)
-            && *version == message.version
-        {
-            return Arc::clone(rendered);
-        }
-        let text = if message.message_type == MessageType::RichTextHtml.as_str() {
-            parse_html(&message.content)
-        } else {
-            RichText::plain(&message.content)
-        };
-        let mentions = Mentions::of_message(message, self.core.me());
-        let rendered = Arc::new(
-            rich_text::layout(&text, &mentions).with_source(rich_text::PictureSource::new(Arc::clone(&self.core))),
-        );
-        self.rendered
-            .insert(message.id.clone(), (message.version, Arc::clone(&rendered)));
-        rendered
-    }
-
-    /// Traces what the view shows, when it changed.
-    fn trace_threads(&mut self) {
-        let shown: Vec<(String, &'static str)> = self
-            .threads
-            .iter()
-            .flat_map(|thread| {
-                let post = thread.post.iter().map(|post| {
-                    let kind = if post.unshown { "unshown-post" } else { "post" };
-                    (post.id.clone(), kind)
-                });
-                let replies = thread.replies.iter().map(|reply| {
-                    let kind = if reply.unshown { "unshown-reply" } else { "reply" };
-                    (reply.id.clone(), kind)
-                });
-                post.chain(replies)
-            })
-            .collect();
-        if self.traced.as_ref() == Some(&shown) {
-            return;
-        }
-        let mut line = TraceLine::new("channel-view", "shown")
-            .conversation(&self.channel)
-            .messages(shown.iter().map(|(id, _)| id.as_str()));
-        for (_, kind) in &shown {
-            line = line.kind(kind);
-        }
-        self.trace.record(&line);
-        self.traced = Some(shown);
-    }
-
-    fn thread_view(
-        index: usize,
-        thread: &Thread<Item>,
-        looks: &Looks<'_>,
-        palette: Palette,
-        cycle: HourCycle,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (selection, menu) = (looks.selection, looks.menu);
-        let order = thread_order(thread);
-        // the thread's post, by its id, whether or not the view holds the post itself ("Replies to an earlier post")
-        let root = Some(thread.root.clone());
-        let post = match &thread.post {
-            Some(post) => {
-                let scope = Scope::new(selection, post_key(order, post)).opening(picture_opener(&post.id, cx));
-                let more = menu.button(post, root.as_deref(), cx);
-                let cards = looks.cards_of(post, &thread.root, palette, cycle, cx);
-                message_view(post, &scope, (more, cards), palette, cycle, cx)
-            }
-            None => div()
-                .debug_selector(move || format!("earlier-post-{index}"))
-                .italic()
-                .text_sm()
-                .text_color(rgb(palette.muted_foreground))
-                .child(EARLIER_POST)
-                .into_any_element(),
-        };
-        let replies: Vec<AnyElement> = thread
-            .replies
-            .iter()
-            .map(|reply| {
-                let scope = Scope::new(selection, reply_key(order, reply)).opening(picture_opener(&reply.id, cx));
-                let more = menu.button(reply, root.as_deref(), cx);
-                let cards = looks.cards_of(reply, &thread.root, palette, cycle, cx);
-                div()
-                    .pl_6()
-                    .pt_1()
-                    .border_t_1()
-                    .border_color(rgb(palette.border))
-                    .child(message_view(reply, &scope, (more, cards), palette, cycle, cx))
-                    .into_any_element()
-            })
-            .collect();
-        div()
-            .debug_selector(move || format!("thread-{index}"))
-            .mx_3()
-            .my_1()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(palette.border))
-            .bg(rgb(palette.surface))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(post)
-            .children(replies)
-            .into_any_element()
-    }
-}
-
-/// A message's sender as shown: "You" for the account, their profile's name, else the name the message carried, else
-/// the engine's other names, else their MRI.
-fn sender_name(message: &Message, people: &HashMap<String, Shown>, me: &str) -> SharedString {
-    let Some(sender) = message.sender.as_deref() else {
-        return "Unknown".into();
-    };
-    if sender == me {
-        return "You".into();
-    }
-    let shown = people.get(sender);
-    let carried = message
-        .sender_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty());
-    let profiled = shown
-        .filter(|shown| shown.profiled())
-        .and_then(|shown| shown.name.clone());
-    profiled
-        .or_else(|| carried.map(SharedString::from))
-        .or_else(|| shown.and_then(|shown| shown.name.clone()))
-        .unwrap_or_else(|| sender.to_owned().into())
-}
-
-/// How a system message names people in a channel: their name as the engine has it, else the one the event gives,
-/// else a placeholder; never an MRI.
-struct ChannelNames<'p> {
-    people: &'p HashMap<String, Shown>,
-    me: &'p str,
-}
-
-impl Naming for ChannelNames<'_> {
-    fn is_me(&self, mri: &str) -> bool {
-        mri == self.me
-    }
-
-    fn name(&self, mri: &str, carried: Option<&str>) -> String {
-        self.people
-            .get(mri)
-            .and_then(|shown| shown.name.as_ref())
-            .map(ToString::to_string)
-            .or_else(|| carried.map(str::to_owned))
-            .unwrap_or_else(|| crate::chat_list::unnamed(mri).to_owned())
-    }
-}
-
-/// One load: the newest `limit` messages, their posts, whether the history is whole, and the people they name.
-async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
-    let page = core.messages(channel.to_owned(), None, limit).await.ok()?;
-    let roots = core.reply_roots(channel.to_owned()).await.ok()?;
-    let history_complete = core.history_complete(channel.to_owned()).await.ok()?;
-    let mut wanted: HashSet<String> = HashSet::new();
-    for message in &page.messages {
-        wanted.extend(message.sender.iter().cloned());
-        let text = message.message_type == MessageType::RichTextHtml.as_str()
-            || message.message_type == MessageType::Text.as_str();
-        if !text && message.delete_time.is_none() {
-            wanted.extend(system_message::people(&message.message_type, &message.content));
-        }
-    }
-    wanted.remove(core.me());
-    // a forward's original sender, the account too: a forward names it by its name
-    wanted.extend(
-        page.messages
-            .iter()
-            .filter_map(|message| forwarded::forwarded_from(message.properties.as_deref())?.sender),
-    );
-    let mut people = HashMap::new();
-    for mri in wanted {
-        if let Ok(person) = core.person(mri.clone()).await {
-            people.insert(mri, Shown::of(person));
-        }
-    }
-    Some(Read {
-        more_stored: page.next.is_some(),
-        messages: page.messages,
-        roots: roots.into_iter().collect(),
-        history_complete,
-        people,
-    })
-}
-
-/// Where a thread stands among the view's threads, as [`arrange_threads`] orders them: its post's arrival, or without
-/// the post its oldest reply's.
-fn thread_order(thread: &Thread<Item>) -> i64 {
-    thread
-        .post
-        .as_ref()
-        .or_else(|| thread.replies.first())
-        .map_or(i64::MAX, |first| first.arrival_time)
-}
-
-/// A thread's post's place among the view's messages for the text selection: as the threads are shown, by what the
-/// post is rather than where it stands, so a selection held over a reload stays on its messages.
-fn post_key(thread: i64, post: &Item) -> MessageKey {
-    MessageKey::new((thread, i64::MIN), post.id.clone())
-}
-
-/// What a click on a picture of message `id` calls: the viewer opened on it ([`ChannelView::open_picture`]).
-fn picture_opener(id: &str, cx: &Context<ChannelView>) -> OpenPicture {
-    let view = cx.entity().downgrade();
-    let id = id.to_owned();
-    OpenPicture::new(move |src, _, cx| {
-        let _ = view.update(cx, |this, cx| this.open_picture(&id, src, cx));
-    })
-}
-
-/// A reply's place among the view's messages for the text selection: under its thread's post, by its arrival (as
-/// [`arrange_threads`] orders replies).
-fn reply_key(thread: i64, reply: &Item) -> MessageKey {
-    MessageKey::new((thread, reply.arrival_time), reply.id.clone())
-}
-
-/// A message: its sender's name and time (in Teams' words, on `cycle`'s clock) over its body, its text selectable in
-/// `scope`.
-fn message_view(
-    item: &Item,
-    scope: &Scope,
-    (more, cards): (Option<AnyElement>, Option<AnyElement>),
-    palette: Palette,
-    cycle: HourCycle,
-    cx: &mut Context<ChannelView>,
-) -> AnyElement {
-    let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
-    let header = div()
-        .flex()
-        .gap_2()
-        .items_center()
-        .text_sm()
-        // a thread's own message names no sender
-        .children((!item.sender_name.is_empty()).then(|| {
+        let header = crate::shell::pane_header(None, THREAD_TITLE, palette)
+            .child(div().flex_1())
+            .child(close)
+            .debug_selector(|| "channel-thread-header".to_owned());
+        Some(
             div()
-                .font_weight(gpui::FontWeight::BOLD)
-                .child(item.sender_name.clone())
-        }))
-        .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(time))
-        .children(item.edited.then(|| {
-            div()
-                .text_xs()
-                .text_color(rgb(palette.muted_foreground))
-                .child("Edited")
-        }))
-        .child(div().flex_1())
-        .children(more);
-    let muted = |text: SharedString| {
-        div()
-            .italic()
-            .text_color(rgb(palette.muted_foreground))
-            .child(text)
-            .into_any_element()
-    };
-    let forward = item.forwarded.as_ref().map(|origin| {
-        let open = origin.original.clone().map(|original| {
-            Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                cx.stop_propagation();
-                cx.emit(ChannelViewEvent::OpenOriginal(original.clone()));
-            })) as forwarded::OnOpen
-        });
-        forwarded::header(&item.id, origin, palette, cycle, open)
-    });
-    let body = match &item.body {
-        Body::Text(rendered) => {
-            let id = format!("channel-text-{}", item.id).into();
-            rich_text::render_selectable(&id, rendered, palette, forward, Some(scope))
-        }
-        Body::Deleted => muted(DELETED.into()),
-        Body::Event(text) => muted(text.clone()),
-        Body::Meeting(card) => meeting_card(&item.id, card, palette, cycle, cx),
-        Body::Cards(_) => cards.unwrap_or_else(|| div().into_any_element()),
-        Body::Unsupported => muted(UNSUPPORTED.into()),
-    };
-    let (files, links) = match &item.body {
-        Body::Text(rendered) => (
-            files::file_cards(&item.id, &item.files, rendered.source.as_ref(), palette),
-            link_preview::cards(&item.id, &item.links, rendered.source.as_ref(), palette),
-        ),
-        _ => (None, None),
-    };
-    let unshown = item.unshown.then(|| {
-        let id = item.id.clone();
-        div()
-            .debug_selector(move || format!("channel-unshown-{id}"))
-            .text_xs()
-            .child(muted(UNSHOWN_CONTENT.into()))
-    });
-    let id = item.id.clone();
-    let group = SharedString::from(format!("channel-message-{}", item.id));
-    div()
-        .debug_selector(move || format!("channel-message-{id}"))
-        .group(group)
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(header)
-        .child(body)
-        .children(links)
-        .children(files)
-        .children(unshown)
-        .into_any_element()
-}
-
-/// A meeting scheduled in the channel, as Teams' card draws it: the day's tile (its date over its month), the title, the
-/// day of the week and the times with the location, and "<team> > <channel>"; once cancelled, no tile, the title struck
-/// through and the date in full.
-fn meeting_card(
-    id: &str,
-    card: &MeetingCard,
-    palette: Palette,
-    cycle: HourCycle,
-    cx: &mut Context<ChannelView>,
-) -> AnyElement {
-    use chrono::TimeZone as _;
-    let local = |ms: i64| Local.timestamp_millis_opt(ms).single();
-    let (Some(start), Some(end)) = (local(card.start_ms), local(card.end_ms)) else {
-        return div().child(card.title.clone()).into_any_element();
-    };
-    let clock_of = |at: chrono::DateTime<Local>| at.format(cycle.time_of_day()).to_string();
-    let day = if card.cancelled {
-        start.format("%A, %b %-d").to_string()
-    } else {
-        start.format("%A").to_string()
-    };
-    let mut when = format!("{day}, {} - {}", clock_of(start), clock_of(end));
-    if let Some(location) = &card.location {
-        when.push_str("  |  ");
-        when.push_str(location);
-    }
-    let day_tile = div()
-        .w(gpui::px(36.0))
-        .flex_none()
-        .py_1()
-        .flex()
-        .flex_col()
-        .items_center()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .child(
-            div()
-                .font_weight(gpui::FontWeight::BOLD)
-                .child(start.format("%-d").to_string()),
-        )
-        .child(div().text_xs().child(start.format("%b").to_string().to_uppercase()));
-    let title = div().font_weight(gpui::FontWeight::BOLD).child(card.title.clone());
-    let title = if card.cancelled { title.line_through() } else { title };
-    let place = card
-        .place
-        .as_ref()
-        .map(|(team, channel)| place_line(team, channel, palette));
-    // its organizer's Edit, as Teams' card offers it: the meeting's details, to change or cancel it
-    let edit = card.editable.then(|| {
-        let ical_uid = card.ical_uid.clone();
-        let selector = format!("channel-meeting-edit-{id}");
-        crate::icons::selected_by(
-            &selector,
-            Button::new(SharedString::from(selector.clone()))
-                .icon(crate::icons::Glyph::PENCIL.icon())
-                .label("Edit")
-                .outline()
-                .small()
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(ChannelViewEvent::EditMeeting {
-                        ical_uid: ical_uid.clone(),
-                    });
-                })),
-        )
-    });
-    let id = id.to_owned();
-    div()
-        .debug_selector(move || format!("channel-meeting-card-{id}"))
-        .p_3()
-        .flex()
-        .gap_3()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .bg(rgb(palette.background))
-        .children((!card.cancelled).then_some(day_tile))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
+                .debug_selector(|| "channel-thread".to_owned())
+                .w(px(THREAD_WIDTH))
+                .flex_none()
+                .h_full()
                 .flex()
                 .flex_col()
-                .gap_1()
-                .child(title)
-                .child(div().text_xs().child(when))
-                .children(place),
+                .border_l_1()
+                .border_color(rgb(palette.border))
+                .bg(rgb(palette.background))
+                .child(header)
+                .child(div().flex_1().min_h_0().child(thread.view.clone()))
+                .into_any_element(),
         )
-        .children(edit.map(|edit| div().flex_none().child(edit)))
-        .into_any_element()
-}
-
-/// The text of the first `<tag>…</tag>` in a call post's `content`, trimmed; `None` when there is none or it is empty.
-fn xml_text(content: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let start = content.find(&open)? + open.len();
-    let end = start + content[start..].find(&format!("</{tag}>"))?;
-    Some(content[start..end].trim().to_owned()).filter(|text| !text.is_empty())
-}
-
-/// A meeting card's "<team> > <channel>": the team's tile, its name, a chevron and the channel's.
-fn place_line(team: &SharedString, channel: &SharedString, palette: Palette) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_xs()
-        .child(
-            div()
-                .size(gpui::px(14.0))
-                .rounded_sm()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(gpui::px(6.0))
-                .bg(rgb(crate::teams_list::team_colour(team)))
-                .text_color(rgb(palette.on_brand))
-                .child(crate::teams_list::initials(team)),
-        )
-        .child(team.clone())
-        .child(
-            crate::icons::Glyph::CHEVRON_RIGHT
-                .icon()
-                .size(gpui::px(12.0))
-                .text_color(rgb(palette.muted_foreground)),
-        )
-        .child(channel.clone())
-}
-
-impl gpui::EventEmitter<ChannelViewEvent> for ChannelView {}
-
-impl ChannelView {
-    /// Puts the text selected with the mouse on the clipboard, as plain text; whether there was any.
-    pub fn copy_selection(&self, cx: &mut App) -> bool {
-        let messages = self.threads.iter().flat_map(|thread| {
-            let order = thread_order(thread);
-            let post = thread.post.iter().map(move |post| (post_key(order, post), post));
-            let replies = thread.replies.iter().map(move |reply| (reply_key(order, reply), reply));
-            post.chain(replies).filter_map(|(key, item)| match &item.body {
-                Body::Text(rendered) => Some((key, &**rendered)),
-                _ => None,
-            })
-        });
-        let Some(text) = self.text_selection.text(messages) else {
-            return false;
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        true
-    }
-
-    /// The text selected with the mouse.
-    #[must_use]
-    pub fn text_selection(&self) -> &TextSelection {
-        &self.text_selection
-    }
-
-    /// Opens the picture `src` of message `message` in the picture viewer, with the channel's other pictures (its
-    /// threads' posts and replies, as shown) before and after it.
-    pub fn open_picture(&mut self, message: &str, src: &str, cx: &mut Context<Self>) {
-        let mut source = None;
-        let mut pictures = Vec::new();
-        let items = self
-            .threads
-            .iter()
-            .flat_map(|thread| thread.post.iter().chain(&thread.replies));
-        for item in items {
-            let Body::Text(rendered) = &item.body else { continue };
-            for picture in rendered.pictures() {
-                source = source.or_else(|| rendered.source.clone());
-                pictures.push(Viewed {
-                    src: picture.src.clone(),
-                    message: item.id.clone(),
-                    sender: item.sender_name.clone(),
-                    face: Face {
-                        named: true,
-                        picture: None,
-                    },
-                    time: item.arrival_time,
-                });
-            }
-        }
-        let at = pictures
-            .iter()
-            .position(|picture| picture.message == message && picture.src == src);
-        let (Some(source), Some(at)) = (source, at) else { return };
-        self.trace.record(
-            &TraceLine::new("channel-view", "picture opened")
-                .conversation(&self.channel)
-                .messages([message]),
-        );
-        picture_viewer::open(Viewing { source, pictures, at }, cx);
-    }
-
-    /// The right-click menu over the text selected with the mouse, while it is open: "Copy", with its key.
-    fn selection_menu(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let key = Kbd::binding_for_action_in(&Copy, &self.focus, window).map(Kbd::outline);
-        let view = cx.entity().downgrade();
-        selection::menu(&self.text_selection, palette, key, move |_, cx| {
-            let _ = view.update(cx, |this, cx| this.copy_selection(cx));
-        })
     }
 }
 
 impl Render for ChannelView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
-        let selection_menu = self.selection_menu(palette, window, cx);
-        let older = self.has_older().then(|| {
-            div().p_2().flex().justify_center().child(
-                Button::new("channel-older")
-                    .label("Load older posts")
-                    .ghost()
-                    .spinning(self.older.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))),
-            )
-        });
-        let empty = (self.threads.is_empty() && self.loads > 0 && !self.syncing()).then(|| {
-            div()
-                .p_3()
-                .text_sm()
-                .text_color(rgb(palette.muted_foreground))
-                .child("No posts to show")
-        });
-        let cycle = clock::cycle(cx);
-        let threads: Vec<AnyElement> = self
-            .threads
-            .iter()
-            .enumerate()
-            .map(|(index, thread)| {
-                let looks = Looks {
-                    selection: &self.text_selection,
-                    menu: &self.menu,
-                    cards: &self.card_states,
-                    core: &self.core,
-                    channel: &self.channel,
-                };
-                Self::thread_view(index, thread, &looks, palette, cycle, cx)
-            })
-            .collect();
-        let posts = div()
-            .id("channel-posts")
-            .track_scroll(&self.scroll)
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .children(older)
-            .children(empty)
-            .children(threads);
-        let note = div()
-            .debug_selector(|| "channel-read-only".to_owned())
-            .flex_none()
-            .px_3()
-            .py_2()
-            .border_t_1()
-            .border_color(rgb(palette.border))
-            .text_xs()
-            .text_color(rgb(palette.muted_foreground))
-            .child(READ_ONLY);
         div()
             .debug_selector(|| "channel-view".to_owned())
-            .track_focus(&self.focus)
-            // a press anywhere in the view lets the selected text go (a press on text then starts a new selection;
-            // Shift+click extends it) and takes the focus, so Ctrl+C reaches the view
-            .capture_any_mouse_down(cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                if event.button != MouseButton::Left {
-                    return;
-                }
-                this.focus.focus(window, cx);
-                if !event.modifiers.shift && this.text_selection.clear() {
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &Copy, _, cx| {
-                if !this.copy_selection(cx) {
-                    cx.propagate();
-                }
-            }))
             .size_full()
             .flex()
-            .flex_col()
             .bg(rgb(palette.background))
-            .child(posts)
-            .child(note)
-            .children(selection_menu)
-            .children(self.menu_overlay(palette, cx))
+            .child(div().flex_1().min_w_0().h_full().child(self.posts.clone()))
+            .children(self.thread_pane(palette, cx))
     }
 }

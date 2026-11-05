@@ -30,7 +30,7 @@ pub(crate) struct Account {
 pub(crate) enum Kind {
     OneToOne,
     Group,
-    /// A team channel or a notifications stream: listed and read, never written.
+    /// A team channel (written as a chat is, `Conversation::is_channel`) or a notifications stream (never written).
     ReadOnly,
 }
 
@@ -57,6 +57,14 @@ pub(crate) struct Conversation {
 impl Conversation {
     pub(crate) fn is_member(&self, mri: &str) -> bool {
         self.members.iter().any(|member| member == mri)
+    }
+
+    /// Whether it is a team's channel (its thread a `space` or a `topic`), which its members write in.
+    pub(crate) fn is_channel(&self) -> bool {
+        matches!(
+            self.entry["threadProperties"]["threadType"].as_str(),
+            Some("space" | "topic")
+        )
     }
 
     /// The message with `id`, if any.

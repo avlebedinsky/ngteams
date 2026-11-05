@@ -143,6 +143,31 @@ pub fn is_team_thread_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+/// What joins a channel's id to a post's in a reply chain's id (`docs/protocol/chat-service.md`, "Ids").
+const CHAIN_JOIN: &str = ";messageid=";
+
+/// The reply chain of post `post` (its message id, digits) in channel `channel` (a team's thread):
+/// `<channel>;messageid=<post>`, the conversation a reply in the post's thread is posted to, as the web client joins
+/// them. `None` for a channel or a post in another form.
+#[must_use]
+pub fn reply_chain_id(channel: &str, post: &str) -> Option<String> {
+    let post_reads = !post.is_empty() && post.bytes().all(|byte| byte.is_ascii_digit());
+    (is_team_thread_id(channel) && post_reads).then(|| format!("{channel}{CHAIN_JOIN}{post}"))
+}
+
+/// The channel and the post a reply chain's id names ([`reply_chain_id`]); `None` for any other id.
+#[must_use]
+pub fn reply_chain(id: &str) -> Option<(&str, &str)> {
+    let (channel, post) = id.split_once(CHAIN_JOIN)?;
+    reply_chain_id(channel, post).map(|_| (channel, post))
+}
+
+/// The conversation a message written to `id` is stored in: a reply chain's channel ([`reply_chain`]), else `id`.
+#[must_use]
+pub fn stored_conversation(id: &str) -> &str {
+    reply_chain(id).map_or(id, |(channel, _)| channel)
+}
+
 /// The prefix of a meeting chat's inner id.
 const MEETING_PREFIX: &str = "meeting_";
 

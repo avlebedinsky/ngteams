@@ -2,7 +2,7 @@
 //! then the list pane (the [`Sidebar`]: the [`ChatList`]'s chats and the [`TeamsList`]'s teams with their channels,
 //! M2 Task 16, in sections of one list), resizable by the handle on its right edge, then the conversation pane (the
 //! chat opened in a [`ChatView`] under its avatar and name, and a 1:1 chat's other member's presence, M2 Task 17; a
-//! channel opened in a [`ChannelView`] under its team's and its own name, read-only; with nothing open, what to do).
+//! channel opened in a [`ChannelView`] under its team's tile and its name; with nothing open, what to do).
 //! Settings take the place of both the list and the conversation pane, as in Teams (their pages are their own list);
 //! the rail's Chat leaves them for what they hid.
 //!
@@ -20,7 +20,7 @@
 //! The keyboard: Ctrl+Alt+Down and Ctrl+Alt+Up show the app's next and previous account ([`crate::accounts`]); Ctrl+K
 //! opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
-//! at its next start; a channel chosen there opens read-only, and a "Set status: …" command chosen there sets the
+//! at its next start; a channel chosen there opens as a channel, and a "Set status: …" command chosen there sets the
 //! account's status as the account menu does. Ctrl+E (and Ctrl+Shift+F) puts the keyboard in the title bar's search,
 //! Ctrl+Alt+G in its "go to" mode; its results take the place of the panes (`Main::Search`), and a message found opens
 //! its chat at the message ([`ChatView::reveal`]). What the
@@ -217,7 +217,7 @@ type ShellAction = fn(&mut Shell, &mut Context<Shell>);
 pub enum Main {
     Nothing,
     Chat(String),
-    /// A team's channel, read-only.
+    /// A team's channel.
     Channel(String),
     Settings,
     /// The calendar, across both panes.
@@ -1340,7 +1340,7 @@ impl Shell {
         self.channel.as_ref().map(|(view, _)| view)
     }
 
-    /// Opens team channel `id` read-only ([`Shell::open_channel`]), named as the Teams list names it, or as
+    /// Opens team channel `id` ([`Shell::open_channel`]), named as the Teams list names it, or as
     /// "Channel" when the list doesn't show it (the teams not read yet, or unreadable).
     pub fn open_channel_id(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = self.teams.read(cx).chosen(&id).unwrap_or(ChannelChosen {
@@ -1799,7 +1799,7 @@ impl Shell {
         })
     }
 
-    /// Opens a team's channel in the conversation pane, read-only; the chat it hides is kept (its draft stays) but
+    /// Opens a team's channel in the conversation pane; the chat it hides is kept (its draft stays) but
     /// isn't shown, so no read receipt goes for it. A channel is never kept as the selected chat. The switcher and the
     /// search close.
     pub fn open_channel(&mut self, chosen: ChannelChosen, window: &mut Window, cx: &mut Context<Self>) {
@@ -1820,9 +1820,8 @@ impl Shell {
                 view.update(cx, ChannelView::sync);
             }
         } else {
-            let (core, models, trace) = (Arc::clone(&self.core), self.models.clone(), Arc::clone(&self.trace));
-            let id = chosen.id.clone();
-            let view = cx.new(|cx| ChannelView::new(core, models, trace, id, cx));
+            let (parts, id, name) = (self.parts(), chosen.id.clone(), chosen.name.clone());
+            let view = cx.new(|cx| ChannelView::new(parts, id, name, window, cx));
             self.channel_events = Some(Self::follow_channel(&view, window, cx));
             self.channel = Some((view, chosen.clone()));
         }
@@ -1959,7 +1958,7 @@ impl Shell {
     }
 
     /// Opens a chat in the conversation pane and keeps it as the selected chat; the switcher closes. A team's channel
-    /// the Teams list shows opens read-only instead ([`Shell::open_channel`]), never in a chat view.
+    /// the Teams list shows opens as a channel instead ([`Shell::open_channel`]), never in a chat view.
     pub fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(chosen) = self.teams.read(cx).chosen(&id) {
             self.open_channel(chosen, window, cx);
@@ -2036,7 +2035,9 @@ impl Shell {
         if self.main == Main::Channel(target.conversation.clone()) {
             if let Some((channel, _)) = &self.channel {
                 let thread = target.thread.unwrap_or_else(|| target.message.clone());
-                channel.update(cx, |channel, cx| channel.reveal(thread, target.message, cx));
+                channel.update(cx, |channel, cx| {
+                    channel.reveal(thread, target.message, target.arrival_time, window, cx);
+                });
             }
             return;
         }
@@ -2057,7 +2058,8 @@ impl Shell {
             }
             ChatViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
             ChatViewEvent::OpenRecap(recording) => this.open_recap(recording.clone(), window, cx),
-            ChatViewEvent::Action { .. } => {}
+            // a chat has no channel's thread or meeting card
+            ChatViewEvent::Action { .. } | ChatViewEvent::OpenThread { .. } | ChatViewEvent::EditMeeting { .. } => {}
         })
     }
 
@@ -2677,18 +2679,13 @@ impl Shell {
                     .channel
                     .as_ref()
                     .filter(|(view, _)| view.read(cx).channel() == id.as_str());
-                let title = shown.map_or_else(
-                    || SharedString::from("Channel"),
-                    |(_, chosen)| {
-                        if chosen.team.is_empty() {
-                            SharedString::from("Channel")
-                        } else {
-                            format!("{} › {}", chosen.team, chosen.name).into()
-                        }
-                    },
+                // Teams' header: the team's tile, the channel's name; a channel the list doesn't know yet says so plainly
+                let (lead, title) = shown.filter(|(_, chosen)| !chosen.team.is_empty()).map_or_else(
+                    || (None, SharedString::from("Channel")),
+                    |(_, chosen)| (Some(team_tile(&chosen.team, palette)), chosen.name.clone()),
                 );
                 let join = self.channel_join_button(id, cx);
-                let header = pane_header(None, title, palette)
+                let header = pane_header_led(lead, title, palette)
                     .child(div().flex_1())
                     .children(join)
                     .debug_selector(|| "channel-header".to_owned());
@@ -2715,6 +2712,24 @@ impl Shell {
             | Main::Workflows => pane.child(no_chat(palette)).into_any_element(),
         }
     }
+}
+
+/// A team's tile, as Teams' channel header leads with it: its initials on its colour, rounded.
+fn team_tile(team: &str, palette: Palette) -> AnyElement {
+    div()
+        .debug_selector(|| "channel-header-team".to_owned())
+        .size(px(32.0))
+        .flex_none()
+        .rounded_md()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .bg(rgb(crate::teams_list::team_colour(team)))
+        .text_color(rgb(palette.on_brand))
+        .child(crate::teams_list::initials(team))
+        .into_any_element()
 }
 
 /// A row of a popup menu, its test selector `id`: an icon or mark, its words, maybe a check.
@@ -2788,7 +2803,12 @@ fn meet_menu_row(what: &'static str, glyph: Glyph, label: &'static str) -> Popup
 }
 
 /// A pane's header line.
-fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
+pub(crate) fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
+    pane_header_led(face.map(IntoElement::into_any_element), title, palette)
+}
+
+/// [`pane_header`] led by any element in the face's place: a channel's team tile.
+fn pane_header_led(lead: Option<AnyElement>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
     div()
         .h(px(48.0))
         .flex_none()
@@ -2799,7 +2819,7 @@ fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, palette: Pa
         .bg(rgb(palette.surface))
         .border_b_1()
         .border_color(rgb(palette.border))
-        .children(face)
+        .children(lead)
         .child(
             div()
                 .text_lg()

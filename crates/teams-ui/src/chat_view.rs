@@ -73,6 +73,15 @@
 //!   [`MAX_SEEK`] of them. Until the message is shown no read
 //!   receipt goes, and one already waiting is dropped.
 //!
+//! - **A team's channel** ([`Place::Channel`], [`ChatView::in_place`]) is drawn as Teams' channel: its posts as a
+//!   chat's messages, each post's replies summed up under it ([`Replies`]), its compose box "Message in <channel>"
+//!   posting to the channel; a post's "Reply in thread" (on the hover bar, in place of a chat's
+//!   quote) or its summary opens its thread beside it ([`ChatViewEvent::OpenThread`]), a view of its own
+//!   ([`Place::Thread`]: the post and its replies, its box "Reply in thread" posting to the post's chain). Reactions,
+//!   edits, deletes, copying and workflows work as in a chat; a channel sends no read receipt and no typing, and its
+//!   box takes no file (a channel's files go to its team's site). What a channel's messages are besides a chat's
+//!   (meeting cards, a channel meeting's call, the channel's own events) is [`channel`]'s.
+//!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds;
 //! `chat-view revealed`: the message opened at; `typing shown`/`cleared`; `outbox shown`: the rows shown and their
 //! states), never text or a name.
@@ -125,6 +134,11 @@ use crate::system_message::{self, CardKind, Naming, Shown as SystemShown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
+
+pub mod channel;
+
+use channel::{ChannelLooks, THREAD_EVENT};
+pub use channel::{MeetingCard, Place, Replies};
 
 actions!(
     teams_ui,
@@ -261,6 +275,8 @@ pub fn init(cx: &mut App) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageAction {
     Reply,
+    /// A channel's post: opens its thread, where a reply goes ([`Place::Thread`]).
+    ReplyInThread,
     React,
     /// The account's own message only.
     Edit,
@@ -275,6 +291,7 @@ impl MessageAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Reply => "Reply",
+            Self::ReplyInThread => "Reply in thread",
             Self::React => "React",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
@@ -288,6 +305,7 @@ impl MessageAction {
         match self {
             // Teams' quote mark: a reply quotes the message
             Self::Reply => Glyph::QUOTE,
+            Self::ReplyInThread => Glyph::THREAD,
             Self::React => Glyph::REACT,
             Self::Edit => Glyph::PENCIL,
             Self::Delete => Glyph::TRASH,
@@ -298,7 +316,7 @@ impl MessageAction {
     /// The action its key asks for on the selected message, for its button's tooltip.
     fn key_action(self) -> &'static dyn gpui::Action {
         match self {
-            Self::Reply => &ReplyToSelected,
+            Self::Reply | Self::ReplyInThread => &ReplyToSelected,
             Self::React => &ReactToSelected,
             Self::Edit => &EditSelected,
             Self::Delete => &DeleteSelected,
@@ -311,6 +329,7 @@ impl MessageAction {
     pub fn name(self) -> &'static str {
         match self {
             Self::Reply => "reply",
+            Self::ReplyInThread => "reply-in-thread",
             Self::React => "react",
             Self::Edit => "edit",
             Self::Delete => "delete",
@@ -338,6 +357,11 @@ pub enum ChatViewEvent {
     /// A meeting chat's recording or transcript card's "View recap": the chat's Recap tab, at the card's recording (its
     /// sharing link) when it is a recording's.
     OpenRecap(Option<String>),
+    /// A channel post's "Reply in thread" or its replies' summary: its thread, opened beside the channel.
+    OpenThread { post: String },
+    /// A channel meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`),
+    /// opened to change or cancel it (the shell's to open, as it knows the channel's team).
+    EditMeeting { ical_uid: String },
 }
 
 /// How far the conversation's older history is loaded.
@@ -402,6 +426,8 @@ pub enum Body {
     Card(Box<EventCard>),
     /// A card a bot or a workflow posted, drawn as Teams draws it ([`crate::card_view`]).
     Cards(ShownCards),
+    /// A meeting scheduled in a channel, drawn as Teams' meeting card ([`channel::meeting_card`]).
+    Meeting(Box<MeetingCard>),
     /// A type this build doesn't show, by its name.
     Unsupported(String),
     /// A type this build doesn't show that the thread itself sent: its placeholder as a centred line, with no author
@@ -420,6 +446,7 @@ impl Body {
             Self::TimedEvent(_) => "timed-event",
             Self::Card(card) => card.kind.name(),
             Self::Cards(_) => "cards",
+            Self::Meeting(_) => "meeting",
             Self::Unsupported(_) => "unsupported",
             Self::UnsupportedEvent(_) => "unsupported-event",
         }
@@ -486,6 +513,22 @@ pub struct MessageItem {
     pub writes: ChatWrites,
     /// Where it was forwarded from, when it is a forwarded message ([`crate::forwarded`]): its forward card's header.
     pub forwarded: Option<Box<ForwardOrigin>>,
+    /// Where it stands in a channel's threads: none in a chat.
+    pub thread: Threaded,
+    /// A channel post's replies, summed up under it ([`Place::Channel`]); none without any.
+    pub replies: Option<Box<Replies>>,
+}
+
+/// Where a message stands in a channel's threads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Threaded {
+    /// A chat's message: it is replied to with a quote ([`MessageAction::Reply`]).
+    #[default]
+    No,
+    /// A channel's post, in the channel's list: replied to in its thread ([`MessageAction::ReplyInThread`]).
+    Post,
+    /// A message in a post's thread (the post at its top, or a reply): what is written there is a reply already.
+    InThread,
 }
 
 /// Whether a chat takes the account's writes from this app.
@@ -605,17 +648,32 @@ impl MessageItem {
     /// takes no write; edit and delete only on the account's own.
     #[must_use]
     pub fn actions(&self) -> Vec<MessageAction> {
-        if self.writes == ChatWrites::ReadOnly || !matches!(self.body, Body::Text(_) | Body::Cards(_)) {
+        if self.writes == ChatWrites::ReadOnly
+            || !matches!(self.body, Body::Text(_) | Body::Cards(_) | Body::Meeting(_))
+        {
             return Vec::new();
         }
         if self.writes == ChatWrites::AppReadOnly {
             return vec![MessageAction::Copy];
         }
-        // a card is reacted to and copied; a reply's quote of one was never captured
-        if matches!(self.body, Body::Cards(_)) {
-            return vec![MessageAction::React, MessageAction::Copy];
+        // a channel's post is replied to in its thread, any post Teams lets the account react to
+        let reply = match self.thread {
+            Threaded::No => None,
+            Threaded::Post => Some(MessageAction::ReplyInThread),
+            Threaded::InThread => return self.thread_actions(),
+        };
+        // a card (or a channel's meeting) is reacted to and copied; a reply's quote of one was never captured
+        if matches!(self.body, Body::Cards(_) | Body::Meeting(_)) {
+            return reply
+                .into_iter()
+                .chain([MessageAction::React, MessageAction::Copy])
+                .collect();
         }
-        let mut actions = vec![MessageAction::Reply, MessageAction::React, MessageAction::Copy];
+        let mut actions = vec![
+            reply.unwrap_or(MessageAction::Reply),
+            MessageAction::React,
+            MessageAction::Copy,
+        ];
         if self.own {
             // a forward is the original's content: Teams offers no edit of it, and a write of one was never captured
             if !self.is_forward() {
@@ -624,6 +682,26 @@ impl MessageItem {
             actions.push(MessageAction::Delete);
         }
         actions
+    }
+
+    /// The actions of a message in a post's thread: no reply of its own (what is written there is one), else as a
+    /// chat's.
+    fn thread_actions(&self) -> Vec<MessageAction> {
+        let mut actions = vec![MessageAction::React, MessageAction::Copy];
+        if self.own && matches!(self.body, Body::Text(_)) {
+            if !self.is_forward() {
+                actions.push(MessageAction::Edit);
+            }
+            actions.push(MessageAction::Delete);
+        }
+        actions
+    }
+
+    /// Whether its "More options" lists the account's workflows that run from a message: a text of a conversation
+    /// that takes the account's writes, as Teams' menu offers them.
+    #[must_use]
+    pub fn offers_workflows(&self) -> bool {
+        self.writes == ChatWrites::Taken && matches!(self.body, Body::Text(_))
     }
 
     /// Whether its text holds a forwarded message's content (`rich_text::Block::Forward`).
@@ -816,6 +894,16 @@ pub struct ChatView {
     models: Models,
     trace: Arc<ViewTrace>,
     conversation: String,
+    /// A chat, a team's channel or a post's thread in one ([`Place`]).
+    place: Place,
+    /// A channel's messages' posts, by message id, as the store had them at the last load (a message without one is a
+    /// post of its own).
+    roots: HashMap<String, String>,
+    /// What a channel's messages say of each other, and where the channel is.
+    looks: ChannelLooks,
+    /// Where its compose box writes: a post's chain in its thread ([`Place::Thread`]), else the conversation. Its
+    /// message posts' rows name it.
+    writes_to: String,
     /// The messages held, the oldest first.
     messages: Vec<Message>,
     /// Per message id: the version its reactions were read at, and them.
@@ -939,6 +1027,28 @@ impl ChatView {
         Self::with_compose(parts, conversation, None, window, cx)
     }
 
+    /// The view of `channel` (a team's channel) as `place` shows it: its posts ([`Place::Channel`]) or one post's
+    /// thread ([`Place::Thread`]), with its compose box writing there, saying `placeholder` while it is empty.
+    pub fn in_place(
+        parts: ShellParts,
+        channel: String,
+        place: Place,
+        placeholder: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (writes, target) = match &place {
+            Place::Thread { post } => (
+                compose::Writes::Thread,
+                teams_proto::reply_chain_id(&channel, post).unwrap_or_else(|| channel.clone()),
+            ),
+            Place::Channel | Place::Chat => (compose::Writes::Channel, channel.clone()),
+        };
+        let compose = Self::compose_box(&parts, &target, window, cx);
+        compose.update(cx, |compose, cx| compose.in_channel(writes, placeholder, cx));
+        Self::build(parts, channel, place, compose, window, cx)
+    }
+
     pub(crate) fn with_compose(
         parts: ShellParts,
         conversation: String,
@@ -947,21 +1057,30 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Self {
         let compose = compose.unwrap_or_else(|| Self::compose_box(&parts, &conversation, window, cx));
-        let ShellParts {
-            core,
-            models,
-            settings,
-            trace,
-        } = parts;
+        Self::build(parts, conversation, Place::Chat, compose, window, cx)
+    }
+
+    fn build(
+        parts: ShellParts,
+        conversation: String,
+        place: Place,
+        compose: Entity<Compose>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let list = Self::following_list(cx);
-        let subscriptions = Self::subscriptions(&models, &compose, window, cx);
-        let seen = models.chats.read(cx).changed_at(&conversation);
-        let people_seen = models.chats.read(cx).revision();
+        let subscriptions = Self::subscriptions(&parts.models, &compose, window, cx);
+        let writes_to = writes_to(&conversation, &place);
+        let (seen, people_seen) = Self::seen_at(&parts.models, [&conversation, &writes_to], cx);
         let mut view = Self {
-            core,
-            models,
-            trace,
+            core: parts.core,
+            models: parts.models,
+            trace: parts.trace,
             conversation,
+            place,
+            roots: HashMap::new(),
+            looks: ChannelLooks::default(),
+            writes_to,
             messages: Vec::new(),
             reactions: HashMap::new(),
             next: None,
@@ -990,7 +1109,7 @@ impl ChatView {
             focus: cx.focus_handle(),
             traced: None,
             typing_traced: false,
-            settings,
+            settings: parts.settings,
             compose,
             file_drop: FileDrop::Idle,
             reacting: None,
@@ -1026,6 +1145,14 @@ impl ChatView {
         view.typing_changed(cx);
         view.sync_notes(cx);
         view
+    }
+
+    /// The models' revisions a new view starts at: its conversations' last change (the conversation's, and the chain a
+    /// thread writes to), and the last change of any.
+    fn seen_at(models: &Models, conversations: [&str; 2], cx: &App) -> (u64, u64) {
+        let chats = models.chats.read(cx);
+        let seen = conversations.map(|conversation| chats.changed_at(conversation));
+        (seen[0].max(seen[1]), chats.revision())
     }
 
     fn file_drop_target(cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
@@ -1115,7 +1242,13 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> [Subscription; 4] {
         let observing = cx.observe(&models.chats, |this: &mut Self, chats, cx| {
-            let at = chats.read(cx).changed_at(&this.conversation);
+            let at = {
+                let chats = chats.read(cx);
+                // a thread's message posts are rows of the post's chain
+                chats
+                    .changed_at(&this.conversation)
+                    .max(chats.changed_at(&this.writes_to))
+            };
             if at > this.seen {
                 this.seen = at;
                 this.window_due = true;
@@ -1208,6 +1341,45 @@ impl ChatView {
     #[must_use]
     pub fn conversation(&self) -> &str {
         &self.conversation
+    }
+
+    /// What the view shows: a chat, a team's channel or a post's thread in one.
+    #[must_use]
+    pub fn place(&self) -> &Place {
+        &self.place
+    }
+
+    /// The team's and the channel's names, as a channel meeting's card and call show them; drawn again when they
+    /// change.
+    pub fn set_channel_place(&mut self, team: SharedString, channel: SharedString, cx: &mut Context<Self>) {
+        let place = Some((team, channel)).filter(|(team, channel)| !team.is_empty() && !channel.is_empty());
+        if self.looks.place != place {
+            self.looks.place = place;
+            self.rebuild(cx);
+        }
+    }
+
+    /// The post a channel's message belongs to, as the last load read it: its own id for a post.
+    fn root_of<'m>(&'m self, message: &'m str) -> &'m str {
+        self.roots.get(message).map_or(message, String::as_str)
+    }
+
+    /// Whether the view shows `message`: a chat every one; a channel its posts; a thread its post and its replies.
+    fn shows(&self, message: &Message) -> bool {
+        match &self.place {
+            Place::Chat => true,
+            Place::Channel => self.root_of(&message.id) == message.id,
+            Place::Thread { post } => self.root_of(&message.id) == post,
+        }
+    }
+
+    /// The trace's name for the view.
+    fn trace_view(&self) -> &'static str {
+        match self.place {
+            Place::Chat => "chat-view",
+            Place::Channel => "channel-view",
+            Place::Thread { .. } => "thread-view",
+        }
     }
 
     /// Whether the chat shows no message at all once read (a conversation not started yet).
@@ -1457,7 +1629,7 @@ impl ChatView {
         self.list.pause_following_tail();
         self.list.scroll_to_reveal_item(index);
         self.trace.record(
-            &TraceLine::new("chat-view", "revealed")
+            &TraceLine::new(self.trace_view(), "revealed")
                 .conversation(&self.conversation)
                 .messages([message.as_str()]),
         );
@@ -1494,10 +1666,17 @@ impl ChatView {
     /// Chooses `action` on `message`, if the message offers it: told as [`ChatViewEvent::Action`], then carried out (a
     /// reply or an edit in the compose box, the quick reactions opened, the delete's confirmation asked).
     pub fn act(&mut self, action: MessageAction, message: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let offered = self
+        let actions = self
             .message_items()
             .find(|item| item.id == message)
-            .is_some_and(|item| item.actions().contains(&action));
+            .map(MessageItem::actions)
+            .unwrap_or_default();
+        // reply's key on a channel's post replies in its thread
+        let action = match action {
+            MessageAction::Reply if actions.contains(&MessageAction::ReplyInThread) => MessageAction::ReplyInThread,
+            action => action,
+        };
+        let offered = actions.contains(&action);
         if !offered {
             return;
         }
@@ -1511,6 +1690,9 @@ impl ChatView {
         self.options = None;
         match action {
             MessageAction::Reply => self.reply_to(message, window, cx),
+            MessageAction::ReplyInThread => cx.emit(ChatViewEvent::OpenThread {
+                post: message.to_owned(),
+            }),
             MessageAction::Edit => self.edit(message, window, cx),
             MessageAction::React => {
                 // the message the keys 1–4 act on is the one selected
@@ -1625,6 +1807,7 @@ impl ChatView {
                         .collect::<Vec<_>>()
                         .join("\n"),
                 ),
+                Body::Meeting(card) => Some(card.title.to_string()),
                 _ => None,
             });
         if let Some(text) = text {
@@ -1685,11 +1868,12 @@ impl ChatView {
 
     /// The chat message `message` as a workflow runs on it.
     fn message_ref(&self, message: &str) -> crate::workflow_run::MessageRef {
+        // a channel's message runs with its thread's post (its own id for a post), as Teams' channel menu runs it
         crate::workflow_run::MessageRef {
             conversation: self.conversation.clone(),
             id: message.to_owned(),
-            root: None,
-            in_channel: false,
+            root: self.place.in_channel().then(|| self.root_of(message).to_owned()),
+            in_channel: self.place.in_channel(),
             team: None,
         }
     }
@@ -1914,10 +2098,18 @@ impl ChatView {
             .iter()
             .map(|(id, (version, _))| (id.clone(), *version))
             .collect();
+        let (place, writes_to) = (self.place.clone(), self.writes_to.clone());
         self.loading = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let read = match load {
-                Load::Window => window(&*core, &conversation, oldest, first, &held, &find).await,
+                Load::Window => {
+                    let oldest = thread_oldest(&*core, &conversation, &place, oldest).await;
+                    window(&*core, &conversation, oldest, first, &held, &find).await
+                }
                 Load::Older => older(&*core, &conversation, oldest, next, &held).await,
+            };
+            let read = match read {
+                Ok(read) if place.in_channel() => Ok(in_channel(&*core, &conversation, &writes_to, read).await),
+                read => read,
             };
             let _ = this.update(cx, |view, cx| view.loaded(load, read, cx));
         }));
@@ -1955,7 +2147,11 @@ impl ChatView {
 
     fn take(&mut self, load: Load, read: Read) {
         if let Horizon::Read(horizon) = read.horizon {
-            self.horizon = horizon;
+            // a channel's post or a thread marks no "New messages": no read receipt moves its horizon here
+            self.horizon = horizon.filter(|_| !self.place.in_channel());
+        }
+        if let Some(roots) = read.roots {
+            self.roots = roots;
         }
         if let Some(outbox) = read.outbox {
             self.unsettled = outbox.unsettled;
@@ -2007,6 +2203,12 @@ impl ChatView {
                 messages.extend(std::mem::take(&mut self.messages));
                 self.messages = messages;
             }
+        }
+        // a thread holds its whole history once its post is held: nothing older is its
+        if let Place::Thread { post } = &self.place
+            && self.messages.iter().any(|message| &message.id == post)
+        {
+            self.history = History::Complete;
         }
         let held: HashSet<&str> = self.messages.iter().map(|message| message.id.as_str()).collect();
         self.reactions.retain(|id, _| held.contains(id.as_str()));
@@ -2271,6 +2473,18 @@ impl ChatView {
         if message.delete_time.is_some() {
             return Some(Body::Deleted);
         }
+        if self.place.in_channel() {
+            if let Some(card) = self.looks.meeting_card(message, self.core.me(), self.core.read_only()) {
+                return Some(Body::Meeting(Box::new(card)));
+            }
+            if let Some(line) = self.looks.meeting_call_line(message) {
+                return Some(Body::TimedEvent(line.into()));
+            }
+            // the channel's own events: Teams' post list has them filtered out (its info pane tells them)
+            if message.message_type.starts_with(THREAD_EVENT) {
+                return None;
+            }
+        }
         if is_text_type(&message.message_type) {
             return Some(Body::Text(RenderedText(self.rendered(message))));
         }
@@ -2373,6 +2587,12 @@ impl ChatView {
                 ChatWrites::Taken
             },
             forwarded,
+            thread: match self.place {
+                Place::Chat => Threaded::No,
+                Place::Channel => Threaded::Post,
+                Place::Thread { .. } => Threaded::InThread,
+            },
+            replies: None,
         })
     }
 
@@ -2384,11 +2604,15 @@ impl ChatView {
     /// The conversation's outbox rows the view knows, by id: this session's as last told and the store's that aren't
     /// sent (a row told sent stays sent).
     fn known_rows(&self, cx: &App) -> BTreeMap<i64, OutboxEntry> {
-        let mut rows: BTreeMap<i64, OutboxEntry> = self
-            .models
-            .chats
-            .read(cx)
+        let chats = self.models.chats.read(cx);
+        // a thread's message posts are rows of its post's chain
+        let chain = (self.writes_to != self.conversation)
+            .then(|| chats.outbox_rows(&self.writes_to))
+            .into_iter()
+            .flatten();
+        let mut rows: BTreeMap<i64, OutboxEntry> = chats
             .outbox_rows(&self.conversation)
+            .chain(chain)
             .map(|row| (row.id, row.clone()))
             .collect();
         for row in &self.unsettled {
@@ -2431,7 +2655,7 @@ impl ChatView {
         self.models
             .chats
             .read(cx)
-            .outbox_rows(&self.conversation)
+            .outbox_rows(&self.writes_to)
             .filter(|row| {
                 row.kind == OutboxKind::Send
                     && row.state == OutboxState::Sent
@@ -2454,6 +2678,7 @@ impl ChatView {
             .values()
             .filter(|row| {
                 row.kind == OutboxKind::Send
+                    && row.conversation_id.as_deref() == Some(self.writes_to.as_str())
                     && !held.contains(row.client_message_id.as_str())
                     && !self.stored_posts.contains(&row.id)
             })
@@ -2489,15 +2714,63 @@ impl ChatView {
         Some(RenderedText(rendered))
     }
 
+    /// A channel's posts' replies among `messages` (held, the oldest first), by post: how many (a reply Teams shows,
+    /// not deleted), who replied, the latest first, and when the last came. None outside a channel's posts.
+    fn replies_of(&self, messages: &[Message]) -> HashMap<String, Replies> {
+        let mut replies: HashMap<String, Replies> = HashMap::new();
+        if self.place != Place::Channel {
+            return replies;
+        }
+        // who each post's summary shows already, by MRI
+        let mut seen: HashSet<(&str, &str)> = HashSet::new();
+        for message in messages.iter().rev() {
+            let post = self.root_of(&message.id);
+            let shown = post != message.id
+                && message.delete_time.is_none()
+                && !MessageType::from(message.message_type.clone()).is_control()
+                && !message.message_type.starts_with(THREAD_EVENT);
+            if !shown {
+                continue;
+            }
+            let summary = replies.entry(post.to_owned()).or_insert_with(|| Replies {
+                count: 0,
+                people: Vec::new(),
+                last: message.arrival_time,
+            });
+            summary.count += 1;
+            let sender = message.sender.as_deref().unwrap_or_default();
+            if summary.people.len() < channel::REPLIERS && seen.insert((post, sender)) {
+                let (name, named) = self.sender_of(message);
+                let name = SharedString::from(name);
+                let picture = message
+                    .sender
+                    .as_deref()
+                    .and_then(|sender| self.shown(sender))
+                    .and_then(|shown| shown.picture.clone());
+                summary.people.push((name, Face { named, picture }));
+            }
+        }
+        replies
+    }
+
     /// Builds the rows again and tells the list which changed.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let now_ms = Utc::now().timestamp_millis();
         let known = self.known_rows(cx);
         let notes = self.message_notes(&known, now_ms);
         let messages = std::mem::take(&mut self.messages);
-        let rows: Vec<MessageItem> = messages
-            .iter()
+        if self.place.in_channel() {
+            self.looks.read(&messages);
+        }
+        let mut replies = self.replies_of(&messages);
+        let shown: Vec<&Message> = messages.iter().filter(|message| self.shows(message)).collect();
+        let rows: Vec<MessageItem> = shown
+            .into_iter()
             .filter_map(|message| self.item(message, &notes))
+            .map(|mut item| {
+                item.replies = replies.remove(&item.id).map(Box::new);
+                item
+            })
             .collect();
         self.messages = messages;
         let mut items = arrange(&self.conversation, rows, self.history, self.horizon, &Local);
@@ -2593,6 +2866,8 @@ impl ChatView {
             && self.seeking.is_none()
             && self.list.is_following_tail()
             && self.conversation != NOTES
+            // a channel's horizon isn't moved from here: no capture showed a channel's receipt
+            && !self.place.in_channel()
             && !self.core.read_only()
             && self.settings.read(cx).sends_read_receipts();
         if !wanted {
@@ -2653,7 +2928,7 @@ impl ChatView {
         if self.traced.as_ref() == Some(&shown) {
             return;
         }
-        let line = TraceLine::new("chat-view", "shown")
+        let line = TraceLine::new(self.trace_view(), "shown")
             .conversation(&self.conversation)
             .messages(shown.iter().map(|traced| traced.id.as_str()))
             .reacted(
@@ -2714,7 +2989,7 @@ impl ChatView {
         }
         let palette = theme::current(cx);
         match self.items.get(index) {
-            Some(Item::Top(history)) => top_row(*history, palette, cx),
+            Some(Item::Top(history)) => top_row(*history, &self.place, palette, cx),
             Some(Item::Day(day)) => day_row(*day, palette),
             Some(Item::NewMessages) => new_messages_row(palette),
             Some(Item::Message(item)) => {
@@ -2822,15 +3097,18 @@ impl ChatView {
         } else {
             column.items_start()
         };
+        let cycle = clock::cycle(cx);
         column
-            .children(item.header.then(|| header_line(item, palette, clock::cycle(cx))))
+            .children(item.header.then(|| header_line(item, palette, cycle)))
             .child(bubble_line(
                 item,
-                &InChat {
+                InChat {
                     conversation: &self.conversation,
                     selection: &self.text_selection,
                     open: Some(Self::picture_opener(&item.id, cx)),
                     cards: matches!(item.body, Body::Cards(_)).then(|| self.card_hook(&item.id, cx)),
+                    root: self.place.in_channel().then(|| self.root_of(&item.id)),
+                    meeting: Self::meeting_view(item, palette, cx),
                 },
                 highlighted,
                 palette,
@@ -2838,12 +3116,42 @@ impl ChatView {
                 forward,
             ))
             .children(footer_line(item, palette, cx))
+            .children(item.replies.as_ref().map(|replies| {
+                let post = item.id.clone();
+                let open: forwarded::OnOpen = Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(ChatViewEvent::OpenThread { post: post.clone() });
+                }));
+                channel::replies_line(&item.id, replies, palette, cycle, open)
+            }))
             .children(
                 item.outbox
                     .iter()
                     .map(|note| note_line(note, palette, cx))
                     .collect::<Vec<_>>(),
             )
+    }
+
+    /// A channel meeting's card, its organizer's Edit telling [`ChatViewEvent::EditMeeting`]; `None` for any other
+    /// message.
+    fn meeting_view(item: &MessageItem, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Body::Meeting(card) = &item.body else {
+            return None;
+        };
+        let ical_uid = card.ical_uid.clone();
+        let edit: forwarded::OnOpen = Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+            cx.stop_propagation();
+            cx.emit(ChatViewEvent::EditMeeting {
+                ical_uid: ical_uid.clone(),
+            });
+        }));
+        Some(channel::meeting_card(
+            &item.id,
+            card,
+            palette,
+            clock::cycle(cx),
+            Some(edit),
+        ))
     }
 
     /// What waits for the user's answer under the messages: the delete's confirmation, or the warning before "send
@@ -3037,7 +3345,13 @@ impl ChatView {
             .child(quick)
             .child(react_button(item, reacting, palette, cx))
             .children(edit)
-            .child(bar_button(item, MessageAction::Reply, cx))
+            // a chat's quote, a channel post's thread; none in a thread, where what is written is a reply
+            .children(
+                [MessageAction::Reply, MessageAction::ReplyInThread]
+                    .into_iter()
+                    .find(|action| actions.contains(action))
+                    .map(|action| bar_button(item, action, cx)),
+            )
             .child(self.options_button(item, cx));
         // over the bubble: its right edge the bubble's, its left never left of the bubble's
         let place = div()
@@ -3085,15 +3399,17 @@ impl ChatView {
             .map(|action| menu_entry(&message, action, palette, window, cx))
             .collect::<Vec<_>>();
         // Teams' workflows run on any message of a chat that takes the account's writes
-        let workflows = if actions.contains(&MessageAction::Reply) {
+        let offers_workflows = self
+            .message_items()
+            .find(|item| item.id == message)
+            .is_some_and(MessageItem::offers_workflows);
+        let workflows = if offers_workflows {
             self.message_workflows(cx)
         } else {
             Vec::new()
         };
-        let more = actions
-            .contains(&MessageAction::Reply)
-            .then(|| self.more_actions_list(&message, &workflows, palette, cx));
-        if actions.contains(&MessageAction::Reply) {
+        let more = offers_workflows.then(|| self.more_actions_list(&message, &workflows, palette, cx));
+        if offers_workflows {
             entries.extend(self.workflow_entries(&message, &workflows, palette, cx));
         }
         let menu = div()
@@ -3470,6 +3786,8 @@ struct Read {
     history: Option<History>,
     /// The account's writes and read horizon as the store has them now: read by every window load.
     outbox: Option<OutboxRead>,
+    /// A channel's messages' posts, by message id: read by every load of a channel's view ([`in_channel`]).
+    roots: Option<HashMap<String, String>>,
 }
 
 /// The account's writes in the conversation and its read horizon, as a window load read them.
@@ -3545,7 +3863,54 @@ async fn window(
         horizon,
         history: None,
         outbox: Some(outbox),
+        roots: None,
     })
+}
+
+/// Where a view of `conversation` in `place` writes: a thread's post's chain, else the conversation.
+fn writes_to(conversation: &str, place: &Place) -> String {
+    match place {
+        Place::Thread { post } => {
+            teams_proto::reply_chain_id(conversation, post).unwrap_or_else(|| conversation.to_owned())
+        }
+        Place::Chat | Place::Channel => conversation.to_owned(),
+    }
+}
+
+/// Where a thread's window load reads back to: its post, when the store has it and it is older than `oldest` (what is
+/// held); else `oldest`. Any other place's is `oldest`.
+async fn thread_oldest(
+    core: &dyn Core,
+    conversation: &str,
+    place: &Place,
+    oldest: Option<(i64, String)>,
+) -> Option<(i64, String)> {
+    let Place::Thread { post } = place else {
+        return oldest;
+    };
+    let Ok(Some(post)) = core.message(conversation.to_owned(), post.clone()).await else {
+        return oldest;
+    };
+    let at = (post.arrival_time, post.id);
+    Some(oldest.map_or(at.clone(), |held| held.min(at)))
+}
+
+/// What a channel's load reads besides a chat's: its messages' posts, and a thread's message posts not sent yet (rows
+/// of the post's chain, `writes_to`).
+async fn in_channel(core: &dyn Core, conversation: &str, writes_to: &str, mut read: Read) -> Read {
+    read.roots = core
+        .reply_roots(conversation.to_owned())
+        .await
+        .ok()
+        .map(|roots| roots.into_iter().collect());
+    if writes_to != conversation
+        && let Some(outbox) = &mut read.outbox
+    {
+        outbox
+            .unsettled
+            .extend(core.outbox_unsettled(writes_to.to_owned()).await.unwrap_or_default());
+    }
+    read
 }
 
 /// The older load: the store's next page; once the store has none, the service's next older page read into the store
@@ -3571,6 +3936,7 @@ async fn older(
                 horizon: Horizon::NotRead,
                 history: Some(history),
                 outbox: None,
+                roots: None,
             });
         }
         let Some((arrival_time, id)) = oldest else {
@@ -3590,6 +3956,7 @@ async fn older(
         horizon: Horizon::NotRead,
         history: None,
         outbox: None,
+        roots: None,
     })
 }
 
@@ -3731,7 +4098,13 @@ fn centered_line(text: impl Into<SharedString>, palette: Palette) -> gpui::Div {
 }
 
 /// The top row: how far the history is loaded; when no load will run by itself, a button to load again.
-fn top_row(history: History, palette: Palette, cx: &mut Context<ChatView>) -> AnyElement {
+fn top_row(history: History, place: &Place, palette: Palette, cx: &mut Context<ChatView>) -> AnyElement {
+    let label = match (place, history) {
+        // a thread opens with its post: nothing above it
+        (Place::Thread { .. }, _) => return div().into_any_element(),
+        (Place::Channel, History::Complete) => "This is the beginning of the channel",
+        _ => history.label(),
+    };
     let again = history.again().map(|label| {
         div().debug_selector(|| "load-older".to_owned()).child(
             Button::new("load-older-again")
@@ -3741,7 +4114,7 @@ fn top_row(history: History, palette: Palette, cx: &mut Context<ChatView>) -> An
                 .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))),
         )
     });
-    centered_line(history.label(), palette)
+    centered_line(label, palette)
         .gap_2()
         .items_center()
         .debug_selector(|| "history-top".to_owned())
@@ -3802,11 +4175,13 @@ fn system_row(
                 &format!("unsupported-{}", item.id),
                 UNSUPPORTED,
                 &item.id,
-                conversation,
+                web_chat_link(conversation),
                 palette,
             ))
             .into_any_element(),
-        Body::Text(_) | Body::Deleted | Body::Cards(_) | Body::Unsupported(_) => div().into_any_element(),
+        Body::Text(_) | Body::Deleted | Body::Cards(_) | Body::Meeting(_) | Body::Unsupported(_) => {
+            div().into_any_element()
+        }
     }
 }
 
@@ -4033,7 +4408,7 @@ fn mentions_me(item: &MessageItem) -> bool {
 /// header) and, for someone else's, the column right of it that holds Teams' "@" when it mentions the account.
 fn bubble_line(
     item: &MessageItem,
-    chat: &InChat<'_>,
+    chat: InChat<'_>,
     highlighted: bool,
     palette: Palette,
     bar: Option<AnyElement>,
@@ -4066,6 +4441,21 @@ struct InChat<'a> {
     open: Option<OpenPicture>,
     /// A card message's: what its cards show and who is told when a click changes it.
     cards: Option<CardHook>,
+    /// A channel's message's thread's post (its own id for a post): what a card's button opens in Teams on the web.
+    root: Option<&'a str>,
+    /// A channel meeting's card, drawn as the message's content ([`channel::meeting_card`]).
+    meeting: Option<AnyElement>,
+}
+
+impl InChat<'_> {
+    /// Where message `id` opens in Teams on the web: a chat's link, or in a channel the message's own (in its thread,
+    /// as a card's button opens it).
+    fn web_link(&self, id: &str) -> String {
+        match self.root {
+            Some(root) => teams_proto::workflow::MessageRun::link_to(self.conversation, id, Some(root)),
+            None => web_chat_link(self.conversation),
+        }
+    }
 }
 
 /// What a message's cards are drawn with in the chat ([`crate::card_view`]).
@@ -4078,7 +4468,7 @@ struct CardHook {
 
 fn bubble(
     item: &MessageItem,
-    chat: &InChat<'_>,
+    mut chat: InChat<'_>,
     highlighted: bool,
     palette: Palette,
     bar: Option<AnyElement>,
@@ -4112,9 +4502,9 @@ fn bubble(
                 .in_teams(Some(teams_proto::workflow::MessageRun::link_to(
                     chat.conversation,
                     &item.id,
-                    None,
+                    chat.root,
                 )));
-            match &chat.cards {
+            match chat.cards.take() {
                 Some(hook) => drawn
                     .state(hook.state.clone(), Rc::clone(&hook.on_state))
                     .source(Some(hook.source.clone()))
@@ -4123,11 +4513,12 @@ fn bubble(
             }
             .into_any_element()
         }
+        Body::Meeting(_) => chat.meeting.take().unwrap_or_else(|| div().into_any_element()),
         Body::Unsupported(_) => web_line(
             &format!("unsupported-{}", item.id),
             UNSUPPORTED,
             &item.id,
-            chat.conversation,
+            chat.web_link(&item.id),
             palette,
         ),
         Body::Event(_) | Body::TimedEvent(_) | Body::Card(_) | Body::UnsupportedEvent(_) => div().into_any_element(),
@@ -4141,8 +4532,8 @@ fn bubble(
     // a message drawn bare (only an emoticon or a sticker, `Rendered::bare`) or of files alone has no bubble behind
     // it, as in Teams
     let bare = matches!(&item.body, Body::Text(text) if text.0.bare || (text.0.blocks.is_empty() && files.is_some()))
-        // a card is its own surface
-        || matches!(&item.body, Body::Cards(_));
+        // a card (a channel meeting's too) is its own surface
+        || matches!(&item.body, Body::Cards(_) | Body::Meeting(_));
     let bubble = if bare {
         bubble
     } else {
@@ -4161,7 +4552,7 @@ fn bubble(
                     &format!("unshown-{}", item.id),
                     UNSHOWN_CONTENT,
                     &item.id,
-                    chat.conversation,
+                    chat.web_link(&item.id),
                     palette,
                 ))
                 .into_any_element()
@@ -4174,8 +4565,7 @@ fn bubble(
 /// `note` (the line under a message's text for a part no capture showed, [`UNSHOWN_CONTENT`], or a type's
 /// placeholder, [`UNSUPPORTED`]) and [`OPEN_ON_THE_WEB`], which opens the chat in the web client through GPUI's
 /// `open_url` (the portal or `xdg-open`; the sandbox's no-op opener in tests). Never for a deleted message.
-fn web_line(selector: &str, note: &'static str, id: &str, conversation: &str, palette: Palette) -> AnyElement {
-    let link = web_chat_link(conversation);
+fn web_line(selector: &str, note: &'static str, id: &str, link: String, palette: Palette) -> AnyElement {
     let selector = selector.to_owned();
     let open = format!("open-on-the-web-{id}");
     let button = Button::new(SharedString::from(open.clone()))

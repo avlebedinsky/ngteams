@@ -197,6 +197,12 @@ impl Editor {
         self
     }
 
+    /// Shows `placeholder` while it is empty from now on.
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     /// Sets what Enter does.
     pub fn set_enter_mode(&mut self, mode: EnterMode, cx: &mut Context<Self>) {
         self.enter = mode;

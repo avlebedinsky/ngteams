@@ -30,7 +30,8 @@
 //!   across the panes; a message found opens its chat at the message. [`search`] is its local part: the messages the
 //!   store holds.
 //! - [`teams_list`]: the sidebar's teams section, the account's teams and their channels (M2 Task 16); [`channel_view`] a
-//!   channel's posts with their reply chains, read-only: no composer, and no write a channel could take.
+//!   channel as Teams shows it: its posts in a chat view of the channel ([`chat_view::Place`]), a post's thread beside
+//!   them, both written to as a chat is.
 //! - [`calendar_view`]: the rail's Calendar, Teams' calendar app: the month and the account's calendars in its own
 //!   pane, the toolbar (Today, the arrows, the views: Day, Work week, Week, Month), the time grid or the month with the
 //!   account's events from the engine's calendar read, and an event's card with Join for a meeting whose call runs;

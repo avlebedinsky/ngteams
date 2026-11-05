@@ -439,7 +439,7 @@ fn the_chat_shown_in_the_focused_window_never_notifies() {
 }
 
 #[test]
-fn a_channel_opened_from_the_desktop_reuses_the_window_and_never_offers_a_composer() {
+fn a_channel_opened_from_the_desktop_reuses_the_window_with_its_box_posting_to_it() {
     let d = OnDesktop::start();
     d.rig.cx.update(|cx| {
         d.desktop
@@ -455,8 +455,8 @@ fn a_channel_opened_from_the_desktop_reuses_the_window_and_never_offers_a_compos
     visual.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    assert!(visual.debug_bounds("channel-read-only").is_some());
-    assert!(visual.debug_bounds("compose").is_none());
+    assert!(visual.debug_bounds("channel-view").is_some());
+    assert!(visual.debug_bounds("compose").is_some());
     d.rig.cx.update(|cx| {
         d.desktop.update(cx, |desktop, cx| {
             desktop.open_channel_of(LAB_A, CHANNEL.to_owned(), cx);

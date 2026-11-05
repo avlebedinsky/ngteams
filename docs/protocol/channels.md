@@ -120,12 +120,12 @@ info pane.
   channel, stayed missing for up to an hour.
 - **A channel's posts**: the chat service's message reads, as a chat's (`ChatReads::messages` and its links), on demand
   when the channel is opened (`EngineRequests::sync_conversation`), older pages on "Load older posts". A channel the
-  store doesn't know is read as a thread first (`topic` and `space` are both a channel, read-only). Each stored
+  store doesn't know is read as a thread first (`topic` and `space` are both a channel). Each stored
   message's post is kept beside it from its `conversationLink` (`Message::reply_root`, only when the link names that
   channel and the post is digits); a message without one is shown as a post of its own. The store's schema 9 started
   the general channels' syncs again, so their messages stored before get their posts.
-- **Not used**: one post's chain read (the channel's page holds the replies), the thread's members (a channel is
-  read-only: no member is stored for it), CSA's posts read and its update read.
+- **Not used**: one post's chain read (the channel's page holds the replies), the thread's members (no member is
+  stored for a channel), CSA's posts read and its update read.
 
 ## Creating a channel
 
@@ -217,13 +217,29 @@ A channel's creation and membership changes reach the team/channel's people. For
 them in its reach check. Native typed channel requests use the outbox; a browser capture hold can record the matching
 request without creating a channel. Neither path has a participant-policy classifier.
 
-## Channel reading and posting UI
+## Posting, replying and reacting in a channel
 
-The channel view has no composer or message actions, so the current UI does not offer ordinary channel posts,
-replies or reactions. It reads channel posts and reply roots as described above, and supports channel creation and
-meeting-specific operations such as `SetMeetingTitle`. This is the UI's current feature set, not a transport denial:
-generic typed chat requests no longer carry a fence permit. Any future channel-composer work must implement its UI
-and protocol behavior explicitly.
+A channel is written as a chat is, through the outbox's typed chat writes (`teams-core`'s `Command`), from the channel's
+compose boxes (`teams-ui`'s `chat_view` in its channel places, `channel_view`):
+
+- **A new post**: `SendMessage` to the channel, `POST v1/users/ME/conversations/<channel>/messages`, the message as a
+  chat's. The service names a post as its own chain's post (`conversationLink` `…;messageid=<its id>`), so it reads back
+  as a post.
+- **A reply in a post's thread**: `SendMessage` to the post's chain, `<channel>;messageid=<post>` (the id the web client
+  joins, [chat-service.md](chat-service.md#ids); `teams_proto::reply_chain_id`), `POST …/conversations/<chain>/messages`.
+  The engine takes one only under a stored post that isn't deleted. The reply comes back in the channel's messages
+  (`conversationid` the channel's, `conversationLink` naming the post), so the outbox looks for it, checks an unknown
+  outcome and syncs after the write in the channel (`teams_proto::stored_conversation`), never the chain.
+- **Edits, deletes and reactions** go to the message in the channel (`…/conversations/<channel>/messages/<id>…`), a
+  post's and a reply's alike, as a chat's.
+- **Not written**: typing (no capture showed a channel's), the read horizon (a channel's view sends no read receipt), a
+  file (Teams puts a channel's files in its team's SharePoint folder, which this client doesn't upload to; the engine
+  refuses a channel message with files) and Teams' "Send to: thread and channel" (a reply also posted to the channel,
+  a write no capture showed: the thread's box says "Send to: thread only").
+
+The web client's shapes for these writes weren't captured with a lab account yet; the paths are the bundle's and the
+chat service's ids, and the native writes run against the mock (`teams-mock`: a channel takes its members' posts, and
+a reply posted to a post's chain is stored with the channel's messages).
 
 ## Managing an existing channel
 

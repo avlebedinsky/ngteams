@@ -21,6 +21,9 @@ const SENT_KEYS: [&str; 4] = ["clientmessageid", "contenttype", "imdisplayname",
 /// back and answered 201 with its arrival time (its id) and a `Location`; typing (`Control/Typing`,
 /// `Control/ClearTyping`) is only an event, answered with an arrival time too.
 pub(crate) fn post(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTemplate {
+    if let Some((channel, post)) = chat.split_once(";messageid=") {
+        return reply(state, call, channel, post);
+    }
     if let Err(code) = writable(state, chat, &call.caller) {
         return status(code);
     }
@@ -44,15 +47,63 @@ pub(crate) fn post(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTe
         return status(400);
     }
     let arrival = state.tick();
-    let Some(message) = new_message(state, &call.caller, chat, &body, arrival) else {
+    let Some(mut message) = new_message(state, &call.caller, chat, &body, arrival) else {
         return status(400);
     };
+    // a channel's post names itself as its chain's post, as every channel message a read gave did
+    if state.conversation(chat).is_some_and(world::Conversation::is_channel) {
+        object(&mut message).insert(
+            "conversationLink".to_owned(),
+            json!(format!(
+                "{CHAT_BASE}/v1/users/ME/conversations/{chat};messageid={arrival}"
+            )),
+        );
+    }
     if let Some(conversation) = state.conversation_mut(chat) {
         conversation.messages.push(message.clone());
         conversation.version = arrival;
     }
     state.queue(chat, &call.caller, EventKind::Message, &message);
     let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{chat}/messages/{arrival}");
+    posted(state, arrival, Some(location))
+}
+
+/// `POST …/conversations/<channel>;messageid=<post>/messages`: a reply in a channel post's thread, posted to the
+/// post's chain (`docs/protocol/chat-service.md`, "Ids"), stored with the channel's messages as a read gives a reply
+/// back: the channel's `conversationid`, a `conversationLink` naming the post. 404 when the channel holds no such
+/// post.
+fn reply(state: &mut State, call: &Call<'_>, channel: &str, post: &str) -> ResponseTemplate {
+    if let Err(code) = writable(state, channel, &call.caller) {
+        return status(code);
+    }
+    if state
+        .conversation(channel)
+        .is_none_or(|conversation| !conversation.messages.iter().any(|message| message["id"] == post))
+    {
+        return status(404);
+    }
+    let Some(body) = call.object() else {
+        return status(400);
+    };
+    if !text(&body, "messagetype").is_some_and(is_message) || text(&body, "content").is_none() {
+        return status(400);
+    }
+    let arrival = state.tick();
+    let Some(mut message) = new_message(state, &call.caller, channel, &body, arrival) else {
+        return status(400);
+    };
+    object(&mut message).insert(
+        "conversationLink".to_owned(),
+        json!(format!(
+            "{CHAT_BASE}/v1/users/ME/conversations/{channel};messageid={post}"
+        )),
+    );
+    if let Some(conversation) = state.conversation_mut(channel) {
+        conversation.messages.push(message.clone());
+        conversation.version = arrival;
+    }
+    state.queue(channel, &call.caller, EventKind::Message, &message);
+    let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{channel};messageid={post}/messages/{arrival}");
     posted(state, arrival, Some(location))
 }
 
@@ -252,7 +303,8 @@ pub(crate) fn create_chat(state: &mut State, call: &Call<'_>) -> ResponseTemplat
 /// Whether `caller` may write to the chat `id`: a member, and not of a read-only conversation (403).
 fn writable(state: &State, id: &str, caller: &str) -> Result<(), u16> {
     let conversation = member_of(state, id, caller)?;
-    if conversation.kind == Kind::ReadOnly {
+    // a team's channel takes its members' posts, edits and reactions as a chat does; a stream takes none
+    if conversation.kind == Kind::ReadOnly && !conversation.is_channel() {
         Err(403)
     } else {
         Ok(())

@@ -169,7 +169,8 @@ impl Conversation {
         ConversationKind::of(&self.id, self.thread_property("threadType"))
     }
 
-    /// Whether the native client only reads it: anything but a 1:1 or a group chat.
+    /// Whether it is anything but a 1:1 or a group chat: the native client keeps no members of it, and writes to it only
+    /// as a channel (its posts and replies) when it is one.
     #[must_use]
     pub fn is_read_only(&self) -> bool {
         self.kind().is_read_only()
@@ -234,7 +235,8 @@ pub enum ConversationKind {
     /// `threadType` `chat` with a group chat's id (`19:<id>@thread.v2`, not a meeting's).
     Group,
     /// `threadType` `space`: a team, read as its general channel (its other channels in `topics`); or `topic`: one of
-    /// its other channels (M2 Task 16's probe read a standard channel's thread with that type). Read-only.
+    /// its other channels (M2 Task 16's probe read a standard channel's thread with that type). Its members aren't kept;
+    /// its posts, replies and reactions are written as a chat's.
     Channel,
     /// `threadType` `streamofnotifications`: the account's activity feed (`48:notifications`). Read-only.
     Notifications,

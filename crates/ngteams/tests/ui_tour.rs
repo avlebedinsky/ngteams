@@ -10,7 +10,7 @@
 //! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
 //! Dark and Light; a picture opened in the picture viewer, fitted and zoomed; the 12-hour time format and a chat's
 //! times on it; a group chat's presence; the "Chats" section's See more, what it brings and a chat opened from below
-//! the rows shown; a favourite channel opened from "Favorites"; forwarded messages; a call's own window, its participants' pane, beside the main window
+//! the rows shown; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, beside the main window
 //! with its in-call strip, and in Teams Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
 //! the app, never by screen coordinates.
@@ -65,6 +65,8 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 
 /// The mock's team.
 const TEAM: &str = "19:channel0001@thread.tacv2";
+/// The post of the mock's team channel (`channel-messages.json`) with replies under it.
+const CHANNEL_POST: &str = "1760000300000";
 /// Which mode the child runs in.
 const CHILD_ENV: &str = "NGTEAMS_TOUR_TEST";
 /// The child's view trace descriptor.
@@ -116,7 +118,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 142] = [
+const STEPS: [Step; 5 + 144] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -777,12 +779,32 @@ const STEPS: [Step; 5 + 142] = [
         }
     }),
     // the team's channel the mock's CSA lists as a's favourite, under "Favorites" with its team's mark, clicked there:
-    // opened read-only as a channel, its row highlighted
+    // opened as a channel, its row highlighted: its posts, a post's replies summed up under it, "Message in <channel>"
     ("favorite-channel", |shell, _, cx| {
         let list = shell.read(cx).list().clone();
         list.update(cx, |list, cx| list.open(TEAM_CHANNEL.to_owned(), cx));
     }),
+    // a post with replies under the pointer: Teams' bar, the quick reactions, react, reply in thread and more options
+    ("channel-post-hover", |shell, _, cx| {
+        if let Some(posts) = channel_posts(shell, cx) {
+            posts.update(cx, |posts, cx| posts.hover(Some(CHANNEL_POST.to_owned()), cx));
+        }
+    }),
+    // its "Reply in thread": the thread beside the posts, the post and its replies over "Reply in thread"
+    ("channel-thread", |shell, window, cx| {
+        if let Some(posts) = channel_posts(shell, cx) {
+            posts.update(cx, |posts, cx| posts.hover(None, cx));
+        }
+        if let Some(channel) = shell.read(cx).channel().cloned() {
+            channel.update(cx, |channel, cx| {
+                channel.open_thread(CHANNEL_POST.to_owned(), window, cx);
+            });
+        }
+    }),
     ("favorite-channel-menu", |shell, window, cx| {
+        if let Some(channel) = shell.read(cx).channel().cloned() {
+            channel.update(cx, teams_ui::ChannelView::close_thread);
+        }
         let at = shell
             .read(cx)
             .list()
@@ -1365,6 +1387,12 @@ fn hover_last(shell: &Entity<Shell>, own: bool, cx: &mut App) {
         chat.select(None, cx);
         chat.hover(message, cx);
     });
+}
+
+/// The posts' view of the channel the shell shows.
+fn channel_posts(shell: &Entity<Shell>, cx: &App) -> Option<Entity<teams_ui::ChatView>> {
+    let channel = shell.read(cx).channel()?;
+    Some(channel.read(cx).posts().clone())
 }
 
 /// Folds the favourites and the chats, so the teams' section shows.

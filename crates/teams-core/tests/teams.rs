@@ -15,10 +15,12 @@ use std::time::Duration;
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
-use teams_core::{NOTES, Outbox, Source};
+use teams_core::{Action, EngineError, NOTES, Outbox, Source};
 use teams_mock::{CHANNEL, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, TEAM_CHANNEL};
 use teams_proto::Mri;
+use teams_proto::chat::MessageText;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
+use teams_store::OutboxState;
 use teams_store::{ConversationKind, Store};
 
 /// How long a test waits for an event before it fails.
@@ -298,4 +300,81 @@ async fn notes_that_become_a_favourite_after_the_catch_up_are_synced_at_once() {
     assert!(stored.iter().any(|conversation| conversation.id == NOTES), "{stored:?}");
     assert_eq!(rig.requests_to(notes_path).await, 1);
     assert_eq!(rig.requests_to(CSA_PATH).await, 1);
+}
+
+#[tokio::test]
+async fn a_post_goes_to_the_channel_and_a_reply_to_its_posts_chain_both_stored_with_the_channel() {
+    let rig = rig(false, Duration::from_mins(5)).await;
+    let requests = rig.handle.requests();
+    requests.sync_conversation(TEAM_CHANNEL).await.unwrap();
+    let text = |words: &str| MessageText::plain(words).unwrap();
+    let posted = requests
+        .write(Action::Send {
+            conversation: TEAM_CHANNEL.to_owned(),
+            text: text("a new post"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(posted.state, OutboxState::Sent, "{posted:?}");
+    let post = posted.message_id.clone().expect("the post's id");
+    let chain = teams_proto::reply_chain_id(TEAM_CHANNEL, &post).unwrap();
+    let replied = requests
+        .write(Action::Send {
+            conversation: chain.clone(),
+            text: text("a reply in its thread"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replied.state, OutboxState::Sent, "{replied:?}");
+    assert_eq!(replied.conversation_id.as_deref(), Some(chain.as_str()));
+    let reply = replied.message_id.clone().expect("the reply's id");
+    // both in the channel's store, the reply under its post
+    let roots = requests.reply_roots(TEAM_CHANNEL).await.unwrap();
+    assert!(roots.contains(&(post.clone(), post.clone())), "{roots:?}");
+    assert!(roots.contains(&(reply.clone(), post.clone())), "{roots:?}");
+    assert!(requests.message(TEAM_CHANNEL, reply.clone()).await.unwrap().is_some());
+    // a reply under a post the store doesn't hold is refused before any row is made, and so is a file in a channel
+    let orphan = teams_proto::reply_chain_id(TEAM_CHANNEL, "1").unwrap();
+    let refused = requests
+        .write(Action::Send {
+            conversation: orphan,
+            text: text("no post"),
+        })
+        .await;
+    assert!(
+        matches!(refused, Err(EngineError::UnknownMessage { .. })),
+        "{refused:?}"
+    );
+    let site = teams_proto::DriveSite::from_web_url("https://madeup-my.sharepoint.com/personal/lab_a/").unwrap();
+    let file = teams_proto::UploadedFile::from_upload(
+        &site,
+        &serde_json::json!({
+            "id":"SyntheticFile","name":"demo.txt","size":3,
+            "webUrl":"https://madeup-my.sharepoint.com/personal/lab_a/Documents/demo.txt",
+            "parentReference":{"driveId":"synthetic-drive"},
+            "sharepointIds":{"listItemUniqueId":"00000000-0000-4000-8000-000000000001"}
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .unwrap();
+    for conversation in [TEAM_CHANNEL.to_owned(), chain.clone()] {
+        let refused = requests
+            .write(Action::Send {
+                conversation,
+                text: text("a file").with_files(vec![file.clone()]),
+            })
+            .await;
+        assert!(matches!(refused, Err(EngineError::Attachment { .. })), "{refused:?}");
+    }
+    // a reaction on the reply goes to the channel, as a chat's
+    let reacted = requests
+        .write(Action::React {
+            conversation: TEAM_CHANNEL.to_owned(),
+            message_id: reply,
+            key: "like".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reacted.state, OutboxState::Sent, "{reacted:?}");
 }

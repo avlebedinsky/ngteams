@@ -784,9 +784,9 @@ async fn a_post_made_for_a_test_reads_back_and_reaches_the_others_as_a_client_s_
         assert_eq!(from_c[0].resource["id"], id.as_str());
     }
     assert!(lab.mock.take_events(LAB_C).iter().all(|event| event.from != LAB_C));
-    // nobody posts where they aren't a member, nor to a read-only channel
+    // nobody posts where they aren't a member, nor to the notifications stream
     assert_eq!(lab.mock.post_as(LAB_C, AB_CHAT, "<p>no</p>"), None);
-    assert_eq!(lab.mock.post_as(LAB_A, CHANNEL, "<p>no</p>"), None);
+    assert_eq!(lab.mock.post_as(LAB_A, NOTIFICATIONS, "<p>no</p>"), None);
     Ok(())
 }
 
@@ -1030,7 +1030,14 @@ async fn writes_by_someone_who_may_not_make_them_change_nothing() -> TestResult 
     let a_message = message_path("1760000010000");
     let refusals = vec![
         Refusal::new("not a member", LAB_C, Method::POST, messages_path(AB_CHAT), body(), 403),
-        Refusal::new("a channel", LAB_A, Method::POST, messages_path(CHANNEL), body(), 403),
+        Refusal::new(
+            "the notifications stream",
+            LAB_A,
+            Method::POST,
+            messages_path(NOTIFICATIONS),
+            body(),
+            403,
+        ),
         Refusal::new(
             "someone else's edit",
             LAB_B,
@@ -1287,17 +1294,39 @@ async fn the_teams_other_channel_is_read_by_its_id_and_listed_for_nobody() -> Te
     assert_eq!(page["messages"], recorded["response"]["body"]["messages"]);
     let thread = lab.get(LAB_A, &format!("threads/{}", segment(TEAM_CHANNEL))).await?;
     assert_eq!(thread["properties"]["threadType"], "topic");
-    // read-only: a post is refused
-    let post = lab
-        .send(
-            LAB_A,
-            Method::POST,
-            &format!("users/ME/conversations/{}/messages", segment(TEAM_CHANNEL)),
-            Some(&json!({"content": "<p>no</p>", "messagetype": "RichText/Html", "contenttype": "Text"})),
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_channel_takes_a_post_and_a_reply_in_a_posts_thread_posted_to_its_chain() -> TestResult {
+    let lab = Lab::start().await?;
+    let message = json!({"content": "<p>hi</p>", "messagetype": "RichText/Html", "contenttype": "Text"});
+    let root = lab.post(LAB_A, TEAM_CHANNEL, &message).await?;
+    let chain = format!("{TEAM_CHANNEL};messageid={root}");
+    lab.post(LAB_B, &chain, &message).await?;
+    let page = lab
+        .get(
+            LAB_C,
+            &format!("users/ME/conversations/{}/messages?pageSize=200", segment(TEAM_CHANNEL)),
         )
         .await?;
-    assert_eq!(post.status, 403);
-    assert_eq!(lab.mock.post_as(LAB_B, TEAM_CHANNEL, "<p>no</p>"), None);
+    let newest = &page["messages"][0];
+    assert_eq!(newest["conversationid"], TEAM_CHANNEL);
+    assert!(
+        newest["conversationLink"]
+            .as_str()
+            .is_some_and(|link| link.ends_with(&format!(";messageid={root}"))),
+        "{newest}"
+    );
+    // a reply under no post the channel holds is refused, and so is a write to the notifications stream
+    let orphan = format!(
+        "users/ME/conversations/{}/messages",
+        segment(&format!("{TEAM_CHANNEL};messageid=1"))
+    );
+    let refused = lab.send(LAB_A, Method::POST, &orphan, Some(&message)).await?;
+    assert_eq!(refused.status, 404);
+    assert_eq!(lab.mock.post_as(LAB_A, NOTIFICATIONS, "<p>no</p>"), None);
+    assert!(lab.mock.post_as(LAB_B, TEAM_CHANNEL, "<p>yes</p>").is_some());
     Ok(())
 }
 

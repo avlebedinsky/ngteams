@@ -2,6 +2,7 @@
 
 use teams_proto::{
     Mri, is_chat_id, is_group_chat_id, is_meeting_chat_id, is_team_thread_id, one_to_one_id, one_to_one_pair,
+    reply_chain, reply_chain_id, stored_conversation,
 };
 
 const GUID_A: &str = "00000000-0000-4000-8000-00000000000a";
@@ -170,4 +171,30 @@ fn mris_keep_exact_identity_with_mail_normalization_explicit() {
     assert_eq!(value.mail_address(), None);
     assert!(Mri::new("28:bot").is_bot());
     assert!(!value.is_bot());
+}
+
+#[test]
+fn a_reply_chain_joins_a_channel_and_its_post_and_reads_back() {
+    let chain = reply_chain_id("19:abc@thread.tacv2", "1760000000000");
+    assert_eq!(chain.as_deref(), Some("19:abc@thread.tacv2;messageid=1760000000000"));
+    let chain = chain.unwrap_or_default();
+    assert_eq!(reply_chain(&chain), Some(("19:abc@thread.tacv2", "1760000000000")));
+    assert_eq!(stored_conversation(&chain), "19:abc@thread.tacv2");
+    assert_eq!(stored_conversation("19:abc@thread.tacv2"), "19:abc@thread.tacv2");
+    assert_eq!(stored_conversation(GROUP), GROUP);
+    for (channel, post) in [
+        ("19:abc@thread.tacv2", ""),
+        ("19:abc@thread.tacv2", "12a"),
+        (GROUP, "1"),
+        ("19:abc@thread.tacv2;messageid=1", "2"),
+    ] {
+        assert_eq!(reply_chain_id(channel, post), None, "{channel} {post}");
+    }
+    for id in [
+        "19:abc@thread.tacv2",
+        "19:abc@thread.tacv2;messageid=",
+        "19:abc@thread.v2;messageid=1",
+    ] {
+        assert_eq!(reply_chain(id), None, "{id}");
+    }
 }

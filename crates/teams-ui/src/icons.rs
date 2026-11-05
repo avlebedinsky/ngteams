@@ -112,6 +112,8 @@ impl Glyph {
     pub const LOG_OUT: Self = Self(include_bytes!("../assets/icons/log-out.svg"));
     pub const MAP_PIN: Self = Self(include_bytes!("../assets/icons/map-pin.svg"));
     pub const MESSAGE: Self = Self(include_bytes!("../assets/icons/message-square-text.svg"));
+    /// Teams' two speech bubbles: a channel post's "Reply in thread".
+    pub const THREAD: Self = Self(include_bytes!("../assets/icons/messages-square.svg"));
     pub const MIC: Self = Self(include_bytes!("../assets/icons/mic.svg"));
     pub const MIC_OFF: Self = Self(include_bytes!("../assets/icons/mic-off.svg"));
     pub const MINUS: Self = Self(include_bytes!("../assets/icons/minus.svg"));

@@ -562,13 +562,13 @@ impl Desktop {
         self.in_shell(cx, |shell, window, cx| shell.open_chat(id, window, cx));
     }
 
-    /// Opens team channel `id` of the first account in the window, read-only, shown first ([`Desktop::show`]).
+    /// Opens team channel `id` of the first account in the window, shown first ([`Desktop::show`]).
     pub fn open_channel(&mut self, id: String, cx: &mut Context<Self>) {
         let key = self.slots[0].key.clone();
         self.open_channel_of(&key, id, cx);
     }
 
-    /// Opens team channel `id` of account `key` in the window, read-only, that account shown.
+    /// Opens team channel `id` of account `key` in the window, that account shown.
     pub fn open_channel_of(&mut self, key: &str, id: String, cx: &mut Context<Self>) {
         self.switch(key, cx);
         self.in_shell(cx, |shell, window, cx| shell.open_channel_id(id, window, cx));

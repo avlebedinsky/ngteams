@@ -12,7 +12,7 @@
 //!   app's start until the push channel first goes down, then the moment it was last known to deliver before it last
 //!   went down (when its socket last heard from the service, as the engine tells it: a socket gone silent in a suspend
 //!   is noticed only later), less [`CLOCK_SKEW_MS`], since the service's times are compared with this machine's;
-//! - in a team's channel only a mention of the account notifies (channels are the sidebar's teams section's, read-only in M2).
+//! - in a team's channel only a mention of the account notifies (channels are the sidebar's teams section's).
 //!
 //! A mention of the account is marked as such ("… mentioned you"). Messages are gathered for [`GATHER`] before they
 //! are shown, so a catch-up's are seen together: up to [`SINGLES`] of one chat are shown one by one; more than that
@@ -24,7 +24,7 @@
 //! notifications are shown, and a chat opened or read while its messages were being looked at shows none of them.
 //!
 //! **Activating one** (its body, the `default` action) opens its chat: [`NotifierEvent::Open`], or for a team's
-//! channel (the stored conversation's kind when it was shown) [`NotifierEvent::OpenChannel`], read-only, which the
+//! channel (the stored conversation's kind when it was shown) [`NotifierEvent::OpenChannel`], which the
 //! [`Desktop`](crate::desktop::Desktop) acts on.
 //!
 //! **The path.** GPUI's own system notifications reach the bus, but can't replace or close a notification (their tag
@@ -172,7 +172,7 @@ impl AccountLabel {
 pub enum NotifierEvent {
     /// A notification was activated: open its chat.
     Open(String),
-    /// A notification of a team's channel was activated: open the channel, read-only (never in a chat view).
+    /// A notification of a team's channel was activated: open the channel (never in a chat view).
     OpenChannel(String),
 }
 

@@ -119,7 +119,7 @@ impl Compose {
     /// Files belong to new messages and replies; an existing message's files aren't edited here.
     #[must_use]
     pub fn accepts_files(&self) -> bool {
-        self.read_only.is_none() && !matches!(self.mode, super::Mode::Edit { .. })
+        self.read_only.is_none() && self.writes == super::Writes::Chat && !matches!(self.mode, super::Mode::Edit { .. })
     }
 
     #[must_use]

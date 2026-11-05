@@ -1067,7 +1067,8 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
 /// The conversation a row's message can be looked for in: a message post's.
 fn findable(row: &OutboxEntry) -> Option<&str> {
     if row.kind == OutboxKind::Send {
-        row.conversation_id.as_deref()
+        // a reply posted to a post's chain comes back in its channel (`teams_proto::reply_chain`)
+        row.conversation_id.as_deref().map(teams_proto::stored_conversation)
     } else {
         None
     }

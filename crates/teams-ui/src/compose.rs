@@ -38,6 +38,10 @@
 //!   searchable) over the box; the one picked goes in at the cursor, in place of the text selected, as if typed. It
 //!   is only text in the box: nothing is sent until the message is.
 //!
+//! - **A channel's box** ([`Compose::in_channel`]): "Message in <channel>" posting to the channel, or a post's
+//!   thread's "Reply in thread" posting to the post's chain, with Teams' "Send to: thread only" over its text. It
+//!   offers Format, Emoji and Send, no more: it sends no typing (no capture showed a channel's) and takes no file (a
+//!   channel's files go to its team's site, which this app doesn't upload to).
 //! - **Read-only** ([`Compose::is_read_only`]): in the app's read-only mode every box ([`READ_ONLY_APP`]), else the
 //!   account's own notes ([`teams_core::NOTES`]), which take no write from
 //!   this app (no write type is mapped to a `48:` stream), so their box shows [`READ_ONLY_NOTES`] in place of the text
@@ -426,6 +430,33 @@ pub const NO_APPS: &str = "Actions and apps aren't available in this app";
 /// What every box says in the app's read-only mode ([`crate::Core::read_only`]): nothing is sent from it.
 pub const READ_ONLY_APP: &str = "Read-only: this window sends nothing";
 
+/// What a channel's box says while it is empty ([`Compose::in_channel`]): "Message in <channel>", as Teams' does.
+#[must_use]
+pub fn channel_placeholder(channel: &str) -> String {
+    if channel.is_empty() {
+        "Message in this channel".to_owned()
+    } else {
+        format!("Message in {channel}")
+    }
+}
+
+/// What a thread's box says while it is empty: Teams' words.
+pub const THREAD_PLACEHOLDER: &str = "Reply in thread";
+
+/// Where a thread's reply goes, over its box: Teams' words. A reply goes only to its thread here (Teams' "Send to"
+/// also offers the channel, a write no capture showed).
+pub const SEND_TO_THREAD: &str = "thread only";
+
+/// Where a box writes: a chat, a team's channel (its posts), or one post's thread in a channel (its replies, written
+/// to the post's chain, `teams_proto::reply_chain_id`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Writes {
+    #[default]
+    Chat,
+    Channel,
+    Thread,
+}
+
 /// What the box tells its chat view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposeEvent {
@@ -485,6 +516,8 @@ pub struct Compose {
     /// The account's own notes: nothing is written there ([`READ_ONLY_NOTES`]).
     /// What a read-only box says in place of its text area; `None` for a box that writes.
     read_only: Option<&'static str>,
+    /// Where it writes ([`Compose::in_channel`]): a channel's box sends no typing and takes no file.
+    writes: Writes,
     /// The emoji picker, while it is open.
     emoji: Option<(Entity<ReactionPicker>, Subscription)>,
     /// Where the emoji button was last drawn, for the picker to open by.
@@ -522,8 +555,8 @@ async fn read_candidates(core: Arc<dyn Core>, conversation: String) -> Vec<Candi
 }
 
 impl Compose {
-    /// The box of `conversation`; traced as made (`compose opened`), so a live test can tell that no view it shows
-    /// made one (a channel's).
+    /// The box of `conversation`; traced as made (`compose opened`), so a live test can tell which conversations a
+    /// view made one for.
     pub fn new(parts: ComposeParts, conversation: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         parts
             .trace
@@ -584,6 +617,7 @@ impl Compose {
             candidates: None,
             reading: None,
             problem: None,
+            writes: Writes::Chat,
             emoji: None,
             emoji_at: Rc::default(),
             emoji_on_press: false,
@@ -591,6 +625,23 @@ impl Compose {
             _bar_events: bar_events,
             _presence: presence,
         }
+    }
+
+    /// The box made a channel's (`writes`: [`Writes::Channel`], its posts) or a post's thread's ([`Writes::Thread`],
+    /// its replies), saying `placeholder` while it is empty. It sends no typing (no capture showed a channel's) and
+    /// offers no file: a channel's files go to its team's site, which this app doesn't upload to.
+    pub fn in_channel(&mut self, writes: Writes, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.writes = writes;
+        let placeholder = placeholder.into();
+        self.editor
+            .update(cx, |editor, cx| editor.set_placeholder(placeholder, cx));
+        cx.notify();
+    }
+
+    /// Where the box writes.
+    #[must_use]
+    pub fn writes(&self) -> Writes {
+        self.writes
     }
 
     /// A chat keeps its editor alive while a local draft or upload remains, including across chat navigation.
@@ -858,7 +909,8 @@ impl Compose {
         let (action, kind) = match &self.mode {
             Mode::Edit { message_id, .. } => (
                 Action::Edit {
-                    conversation,
+                    // a thread's reply is edited where it is stored, its channel, never the post's chain
+                    conversation: teams_proto::stored_conversation(&conversation).to_owned(),
                     message_id: message_id.clone(),
                     text: built,
                 },
@@ -954,6 +1006,7 @@ impl Compose {
     /// Typing goes out (see the module docs) when it may.
     fn typed(&mut self, window: &Window, cx: &mut Context<Self>) {
         let wanted = self.settings.read(cx).sends_typing()
+            && self.writes == Writes::Chat
             && !matches!(self.mode, Mode::Edit { .. })
             && self.focused(window, cx)
             && self.holds_text(cx);
@@ -1293,15 +1346,18 @@ impl Compose {
             .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
             .child(self.format_button(palette, cx))
             .child(self.emoji_button(cx))
-            .child(selected_by(
-                "compose-attach",
-                icon_button_with_key("compose-attach", Glyph::PAPERCLIP, "Attach files", &AttachFiles)
-                    .with_size(Size::Size(px(TOOL)))
-                    .disabled(!self.accepts_files())
-                    .on_click(cx.listener(|this, _, window, cx| this.choose_files(window, cx))),
-            ))
-            .child(unavailable("compose-loop", Glyph::REPEAT, NO_LOOP))
-            .child(unavailable("compose-apps", Glyph::PLUS, NO_APPS))
+            .children((self.writes == Writes::Chat).then(|| {
+                selected_by(
+                    "compose-attach",
+                    icon_button_with_key("compose-attach", Glyph::PAPERCLIP, "Attach files", &AttachFiles)
+                        .with_size(Size::Size(px(TOOL)))
+                        .disabled(!self.accepts_files())
+                        .on_click(cx.listener(|this, _, window, cx| this.choose_files(window, cx))),
+                )
+            }))
+            // a channel's box offers only what works there
+            .children((self.writes == Writes::Chat).then(|| unavailable("compose-loop", Glyph::REPEAT, NO_LOOP)))
+            .children((self.writes == Writes::Chat).then(|| unavailable("compose-apps", Glyph::PLUS, NO_APPS)))
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
             .child(self.send_button(palette, cx))
             .into_any_element()
@@ -1355,6 +1411,7 @@ impl Compose {
             .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
             .text_color(rgb(palette.foreground));
+        let send_to = (self.writes == Writes::Thread).then(|| send_to_line(palette));
         if self.expanded || !self.attachments.is_empty() {
             return surface
                 .flex()
@@ -1363,6 +1420,7 @@ impl Compose {
                 .px_3()
                 .pt_2()
                 .pb(px(BOX_PADDING))
+                .children(send_to)
                 .children(self.expanded.then(|| self.format_bar.clone()))
                 .child(div().px_1().pt_1().child(self.editor.clone()))
                 .children(self.attachment_cards(palette, cx))
@@ -1370,14 +1428,10 @@ impl Compose {
                 .children(accent)
                 .into_any_element();
         }
-        surface
+        let line = div()
             .flex()
             .items_end()
             .gap_1()
-            .pl_3()
-            .pr_2()
-            .py(px(BOX_PADDING))
-            .overflow_hidden()
             .child(
                 div()
                     .flex_1()
@@ -1387,7 +1441,16 @@ impl Compose {
                     .py_1()
                     .child(self.editor.clone()),
             )
-            .child(self.toolbar(palette, cx))
+            .child(self.toolbar(palette, cx));
+        surface
+            .flex()
+            .flex_col()
+            .pl_3()
+            .pr_2()
+            .py(px(BOX_PADDING))
+            .overflow_hidden()
+            .children(send_to.map(gpui::Styled::pt_1))
+            .child(line)
             .children(accent)
             .into_any_element()
     }
@@ -1455,6 +1518,18 @@ impl Compose {
                 .into_any_element(),
         )
     }
+}
+
+/// Where a thread's reply goes, over its text, as Teams' box says it: "Send to:" and the thread, in the brand colour.
+fn send_to_line(palette: Palette) -> gpui::Div {
+    div()
+        .debug_selector(|| "compose-send-to".to_owned())
+        .flex()
+        .gap_1()
+        .text_sm()
+        .text_color(rgb(palette.brand))
+        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Send to:"))
+        .child(SEND_TO_THREAD)
 }
 
 /// The picker's Everyone, as the web client's: an outlined people icon where a person's picture would be, the name,

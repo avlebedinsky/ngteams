@@ -58,12 +58,13 @@
 //!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
 //!   loop's other work and the runtime's other tasks, told as [`Event::Indexed`] once it is over. A search in some
 //!   conversations only ([`EngineRequests::search_in`]) leaves the others out before it counts the hits.
-//! - **Teams and channels** (M2 Task 16, read-only): the account's teams with their channels
+//! - **Teams and channels** (M2 Task 16): the account's teams with their channels
 //!   ([`EngineRequests::teams`]), from the store, read from CSA in the background when the stored list is missing or
 //!   old ([`crate::teams`]), each change of the list told as [`Event::Teams`]; a channel's posts and replies synced
 //!   on demand like any conversation's ([`EngineRequests::sync_conversation`]: a channel other than a team's general
 //!   one is in no conversation list, so no catch-up reaches it), and the post each stored channel message belongs to
-//!   ([`EngineRequests::reply_roots`]). The channel view has no composer or message actions. A read whose
+//!   ([`EngineRequests::reply_roots`]). A post goes to its channel and a reply in its thread to the post's chain
+//!   (`teams_proto::reply_chain_id`), checked against the stored post and kept with the channel's messages. A read whose
 //!   favourites name the account's own notes ([`NOTES`]) while the store has none syncs them on the next tick: the
 //!   catch-up that runs before the first read of the teams (the first run, the first after the store kept favourites)
 //!   can't know them yet, and without a push channel's drop no other catch-up may come for a long time.
@@ -2248,7 +2249,21 @@ where
     /// The outbox command for `action`, checked against the store.
     fn command(&self, action: Action) -> Result<Command, EngineError> {
         Ok(match action {
-            Action::Send { conversation, text } => Command::Send { conversation, text },
+            Action::Send { conversation, text } => {
+                // a reply in a channel's thread goes to the post's chain: only under a stored post that stands
+                if let Some((channel, post)) = teams_proto::reply_chain(&conversation) {
+                    self.standing(channel, post)?;
+                }
+                // a channel's files go to its team's site, which this client doesn't upload to
+                if teams_proto::is_team_thread_id(teams_proto::stored_conversation(&conversation))
+                    && !text.files().is_empty()
+                {
+                    return Err(EngineError::Attachment {
+                        why: "Files can't be shared in a channel from this app.".to_owned(),
+                    });
+                }
+                Command::Send { conversation, text }
+            }
             Action::Edit {
                 conversation,
                 message_id,
@@ -2349,7 +2364,11 @@ where
             _ if row.state != OutboxState::Sent => None,
             OutboxKind::ReadReceipt => None,
             OutboxKind::CreateChat => row.message_id.clone(),
-            _ => row.conversation_id.clone(),
+            // a reply posted to a post's chain is stored with its channel's messages
+            _ => row
+                .conversation_id
+                .as_deref()
+                .map(|id| teams_proto::stored_conversation(id).to_owned()),
         };
         if let Some(conversation) = conversation
             && let Err(error) = self.catch_up.sync_messages(&mut self.store, &conversation).await

@@ -742,10 +742,12 @@ fn the_search_is_the_store_s_and_the_service_s_only_through_the_engine() {
     assert!(proto.contains("pub const SUBSTRATE_HOST: &str = \"substrate.office.com\";"));
 }
 
-/// Channel posts have no write route or composer. Channel management and account preferences use domain actions
-/// through Core; views neither construct protocol request builders nor send them.
+/// A channel's posts, replies and reactions are written as a chat's are: by the chat view and its compose box, through
+/// Core's outbox write (`Action`), never a channel write route of their own. The channel view and the teams list
+/// write nothing themselves; channel management and account preferences use domain actions through Core; views
+/// neither construct protocol request builders nor send them.
 #[test]
-fn channel_posts_have_no_write_route_and_views_reach_management_only_through_core() {
+fn channel_writes_go_only_through_the_chat_view_and_views_reach_management_only_through_core() {
     let proto = workspace_root().join("crates/teams-proto/src");
     let mut read = 0;
     for (path, text) in sources(&proto) {
@@ -757,16 +759,14 @@ fn channel_posts_have_no_write_route_and_views_reach_management_only_through_cor
         );
     }
     assert!(read >= 10, "teams-proto's sources were read ({read} files)");
-    for view in ["teams_list.rs", "channel_view.rs"] {
+    for (view, composes) in [("teams_list.rs", false), ("channel_view.rs", true)] {
         let text = fs::read_to_string(workspace_root().join("crates/teams-ui/src").join(view)).expect("UTF-8");
-        for writes in [
-            ".write(",
-            ".resend(",
-            ".transient(",
-            "MessageAction::",
-            "Compose",
-            "compose::",
-        ] {
+        let mut forbidden = vec![".write(", ".resend(", ".transient(", "MessageAction::"];
+        // the channel view makes its chat views' boxes say where they write; the list has none
+        if !composes {
+            forbidden.extend(["Compose", "compose::"]);
+        }
+        for writes in forbidden {
             assert!(!text.contains(writes), "{view} names {writes}");
         }
         for (at, _) in text.match_indices("Action::") {

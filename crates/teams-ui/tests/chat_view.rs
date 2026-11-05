@@ -361,6 +361,8 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         unshown: UnshownParts::default(),
         writes: ChatWrites::Taken,
         forwarded: None,
+        thread: teams_ui::chat_view::Threaded::No,
+        replies: None,
     }
 }
 

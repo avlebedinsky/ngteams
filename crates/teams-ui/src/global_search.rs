@@ -217,7 +217,7 @@ pub enum GlobalSearchEvent {
     OpenChat(String),
     /// Feedback for a person whose chat could not be opened.
     Toast(&'static str),
-    /// A team's channel, read-only.
+    /// A team's channel.
     OpenChannel(String),
     /// A chat at a message found.
     OpenMessage(HitTarget),

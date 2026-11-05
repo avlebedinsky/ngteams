@@ -21,9 +21,11 @@
 //! **The world** it starts with ([`ChatServiceMock::start`]): the lab accounts a, b and c and one outsider, x; the a–b
 //! 1:1 chat holding the messages of `messages.json` (an add-member event, plain, edited, quoted and deleted
 //! messages); an empty a–c chat (`conversations.json`); an empty a–x chat with the outsider; the a–b–c group chat of
-//! `thread-group.json`; and, in a's list only, a team channel and a's notifications stream (`conversations.json`),
-//! both read-only; the team's other channel, read-only, in nobody's list, holding the posts and replies of
-//! `channel-messages.json` (M2 Task 16). The ids are the constants below, made up (never a real tenant's).
+//! `thread-group.json`; and, in a's list only, a team channel and a's notifications stream (`conversations.json`), the
+//! stream read-only; the team's other channel, in nobody's list, holding the posts and replies of
+//! `channel-messages.json` (M2 Task 16). A channel takes its members' writes as a chat does, and a reply in a post's
+//! thread posted to the post's chain (`…/conversations/<channel>;messageid=<post>/messages`) is stored with the
+//! channel's messages, its `conversationLink` naming the post. The ids are the constants below, made up (never a real tenant's).
 //!
 //! **What it serves** (paths under [`CHAT_BASE`]):
 //! - reads: the conversation list (`GET v1/users/ME/conversations`, and the sync link it hands out, which names the
@@ -175,11 +177,11 @@ pub const AX_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000
 /// The a–b–c group chat of `thread-group.json`, empty.
 pub const ABC_CHAT: &str = "19:00000000000000000000000000000abc@thread.v2";
 
-/// A team channel in a's list: read-only. It is the team's id and its general channel's (`csa/teams.json`).
+/// A team channel in a's list. It is the team's id and its general channel's (`csa/teams.json`).
 pub const CHANNEL: &str = "19:channel0001@thread.tacv2";
 /// The team's other channel (`csa/teams.json`, and the team's `topics` in `conversations.json`): a, b and c are its
 /// members, it holds the posts and replies of `channel-messages.json`, it is in nobody's conversation list (the chat
-/// service lists a team's general channel only), and its thread is a `topic`. Read-only.
+/// service lists a team's general channel only), and its thread is a `topic`.
 pub const TEAM_CHANNEL: &str = "19:channel0002@thread.tacv2";
 /// a's notifications stream: read-only.
 pub const NOTIFICATIONS: &str = "48:notifications";

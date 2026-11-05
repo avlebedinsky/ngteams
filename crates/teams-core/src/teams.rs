@@ -21,7 +21,7 @@
 //!   ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)), which starts a read as asking for the
 //!   teams does.
 //! - **Writes**: creating and managing channels uses [`crate::channels`]. This module only reads and stores teams
-//!   and channel posts; the channel view offers no composer or message actions.
+//!   and channel posts; a channel's posts, replies and reactions are the outbox's writes, as a chat's.
 
 use std::collections::HashSet;
 use std::sync::Arc;

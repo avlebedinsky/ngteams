@@ -7,8 +7,8 @@
 //!   or, when the last read told failed ([`crate::Chats::teams_failed_at`]: `Event::Failed` during
 //!   [`teams_core::READING_TEAMS`]), that the teams can't be read; the engine tries again when the list asks after
 //!   its retry wait (after a catch-up, or the section unfolded again).
-//! - **Read-only.** A channel clicked is told as [`TeamsListEvent::Opened`]; the shell shows its posts in a
-//!   [`crate::ChannelView`], which offers no composer. A private channel's row carries Teams' lock.
+//! - **Opened.** A channel clicked is told as [`TeamsListEvent::Opened`]; the shell shows its posts in a
+//!   [`crate::ChannelView`], with its compose box and its threads. A private channel's row carries Teams' lock.
 //! - **A new channel.** A team's "Add channel" ([`crate::sidebar`]'s menu) is told as [`TeamsListEvent::AddChannel`]; the
 //!   shell shows the [`crate::channel_dialog`].
 //!

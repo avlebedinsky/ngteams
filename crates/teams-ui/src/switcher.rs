@@ -103,7 +103,7 @@ pub fn matches(query: &str, rows: &[(String, SharedString)]) -> Vec<(String, Sha
 pub enum SwitcherEvent {
     /// Open this chat.
     Open(String),
-    /// Open this team's channel, read-only.
+    /// Open this team's channel.
     OpenChannel(String),
     /// Close the switcher.
     Dismissed,
