@@ -159,6 +159,8 @@ log = "0.4.34"
 md-5 = "0.11.0"
 # decodes the chat service's encoded conversation IDs and request path segments
 percent-encoding = "2.3.2"
+# a meeting recording's DASH presentation (an MPD) read into its tracks: the version the tree already locks
+roxmltree = "0.21.1"
 # The async-io flavour GPUI's Linux platform takes too: its ashpd and zbus refuse to build with both `async-io` and
 # `tokio` on, and workspace builds unify features, so oo7's default `tokio` would break every workspace build with
 # GPUI in it. async-io runs its own reactor thread, so the futures still run under tokio.

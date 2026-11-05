@@ -186,6 +186,7 @@ fn a_paused_seek_shows_the_frame_there() {
     );
     // nothing was played while paused
     assert!(speaker.0.lock().unwrap().is_empty());
+    player.send(Command::Volume(0.5));
 }
 
 #[test]

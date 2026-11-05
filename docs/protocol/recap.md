@@ -51,8 +51,7 @@ browser and "Download as .vtt"). No value from it is copied here; the ids below 
   and no recording. A recording still processing isn't listed yet.
 - **The recording** is played by the web client in SharePoint's embedded player (Graph `POST
   drives/<drive>/items/<item>/preview`, the site's `_api/v2.0`/`v2.1` item reads with a SharePoint token,
-  `streamembed.aspx`). `ngteams` plays it as any shared video: Graph's item by the sharing link
-  (`shares/u!<link>/driveItem`, its download link) and the bytes at that link ([graph.md](graph.md#a-shared-files-content)).
+  `streamembed.aspx`), which streams it in DASH parts and never downloads it ([below](#streaming-a-recording)).
 - **The transcript's words**: the player reads `…/_api_cached/v2.1/drives/<drive>/items/<item>/cdnmedia/transcripts?…`
   (signed query, a compressed JSON); "Download as .vtt" reads
   `GET https://<tenant>-my.sharepoint.com/personal/<organizer>/_api/v2.1/drives/<drive>/items/<item>/media/transcripts/<id>/streamContent?is=1&applymediaedits=false`
@@ -65,13 +64,44 @@ browser and "Download as .vtt"). No value from it is copied here; the ids below 
   `https://teams.microsoft.com/l/meetingrecap?driveId&driveItemId&sitePath=<sharing link>&fileUrl=<the file's address>?web=1&threadId&organizerId&tenantId&callId&threadType=meeting&meetingType&subType=RecapSharingLink_RecapCore&recapType=RecordingAndTranscript`.
   **Watch in browser** opens the file's address with `?web=1&referrer=Teams.TEAMS-WEB&referrerScenario=RecapOpenInStreamButton.view`.
 
+## Streaming a recording
+
+A meeting recording's download is blocked for those who may only watch it (an attendee's view of another's meeting):
+its item's download link (`download.aspx`, the one Graph's `shares/…/driveItem` hands out) answers 403 "Access
+denied" with `x-ms-invokeapp: 1; RequireReadOnly`, whatever the token. The player streams it instead, as below; seen as
+the organizer in a lab capture of 2026-11-05 and a lab probe the same day (the organizer's own recording, read in the
+browser), the user's own account's debug log showing the download refused for an attendee.
+
+- **The presentation**: `GET <site>/_api/v2.1/drives/<drive>/items/<item>/content?format=dash` with the site's
+  SharePoint token, `prefer: noredirect` (the MPD itself rather than a redirect to it), `applymediaedits: true` and
+  `enablecdn`. With `enablecdn: 1` (the web player's) the MPD's parts are on SharePoint's CDN
+  (`_api_cached/v2.1/drives/<drive>/items/<item>/oneDrive.transcode?…`, read with `X-Authorization: Bearer <site
+  token>`), each part encrypted whole in AES-128-CBC (`ContentProtection` `urn:mpeg:dash:sea:2012`), its key from
+  `https://<region>-mediap.svc.ms/transform/VideoProtectionKey?…` or, as the web player takes it, from the
+  `EncKey` of the `g_fileInfo` the embed page (`streamembed.aspx`, posted the site token as `access_token`) holds.
+  With `enablecdn: 0` the MPD has no `ContentProtection` and its parts are the transform service's own, in the clear.
+- **The MPD**: static, one period, `BaseURL` `https://<region>-mediap.svc.ms/transform/`; an audio adaptation set
+  (`mp4a.40.2`, a representation `audcopy`) and a video one (`avc1`, `vcopy`: the recording's own streams, remuxed),
+  each a `SegmentTemplate` with a timescale (16000 for both in the capture), `initialization` and `media` addresses
+  (`videotranscode?provider=Spo&docId=<the item's address with a signature and its expiry>&…&part=initsegment` or
+  `part=mediasegment&segmentTime=$Time$`, `track=audio|video`, `quality=$RepresentationID$`) and a `SegmentTimeline`
+  of 6 s segments; `mediaPresentationDuration` the recording's length.
+- **A part**: `GET` of its address, no token or cookie (its `docId` signs it): fragmented MP4, an `ftyp` and `moov`
+  for an initialization segment, a `moof` (`tfhd` with the defaults, `tfdt`, `trun` of sizes) and its `mdat` for a
+  media segment.
+
 ## What `ngteams` does
 
 `teams_proto::recap` reads MCPS's answer (`MeetingContents`, `Service::Mcps`, the GTM `mcpService`) and the
 transcript's address (`TranscriptLocation`: only a personal site's, read with that site's token, as the chat-file
 upload's reads are); `teams_proto::transcript` reads the `WebVTT`. `teams_core::recap` makes both reads when the Recap
 tab asks; nothing is stored. The tab (`teams_ui::recap_view`) shows the parts, plays the recording, and draws the
-transcript beside it (no panes' pills: the transcript is the only pane); Share copies the recap link (without `fileUrl`, which only the item's own read gives), Watch in browser
+transcript beside it (no panes' pills: the transcript is the only pane). The recording is streamed
+(`teams_proto::recording`, `teams_core::recap`): the presentation with `enablecdn: 0`, an MPD with `ContentProtection`
+or parts off the transform service refused, each part read as the player (`teams_media::player::stream`) asks for it,
+demultiplexed there and decoded by `GStreamer`; a recording that can't be streamed is played from its download link as
+any shared video ([graph.md](graph.md#a-shared-files-content)) before the player says it can't be opened. Nothing of
+it is stored. Share copies the recap link (without `fileUrl`, which only the item's own read gives), Watch in browser
 opens the recording's sharing link (Stream's player). Left out, as no read backs them or they write: Share's
 recipients (a grant and a post), Delete recap content and the transcript's Delete, "Go to Meeting Recaps" (a Teams
 app), the attendance report (the organizer's reports), Notes (Loop), feedback, Download as .docx, and everything

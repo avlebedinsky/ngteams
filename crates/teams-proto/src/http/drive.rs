@@ -136,7 +136,31 @@ impl<C: Credentials> HttpTransport<C> {
         self.drive_read(transcript.site(), transcript.url()).await
     }
 
+    /// A meeting recording's DASH presentation, read on the personal site that holds it with that site's token and
+    /// the headers the web client's player asks it with ([`crate::RecordingManifest`],
+    /// [`crate::recording::MANIFEST_HEADERS`]); the answer is read by [`crate::recording::read_manifest`].
+    ///
+    /// # Errors
+    /// Returns transport, credentials, or unsuccessful service responses (a recording the account may not watch is a
+    /// 403 or 404).
+    pub async fn recording_manifest(&self, manifest: &crate::RecordingManifest) -> Result<Response, HttpError> {
+        let headers: Vec<(String, String)> = crate::recording::MANIFEST_HEADERS
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        self.drive_read_with(manifest.site(), manifest.url(), &headers).await
+    }
+
     async fn drive_read(&self, site: &DriveSite, url: &str) -> Result<Response, HttpError> {
+        self.drive_read_with(site, url, &[]).await
+    }
+
+    async fn drive_read_with(
+        &self,
+        site: &DriveSite,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<Response, HttpError> {
         let url = url::Url::parse(url).map_err(|_| HttpError::Refused(Refusal::NotAllowed))?;
         if DriveSite::from_web_url(url.as_str()).as_ref() != Some(site) {
             return Err(HttpError::Refused(Refusal::NotAllowed));
@@ -148,7 +172,7 @@ impl<C: Credentials> HttpTransport<C> {
             .await
             .map_err(HttpError::Credentials)?;
         let first = self
-            .send_as(reqwest::Method::GET, &url, &[], Auth::Bearer(&token), None)
+            .send_as(reqwest::Method::GET, &url, headers, Auth::Bearer(&token), None)
             .await?;
         let retry = match first.status() {
             401 => {
@@ -179,7 +203,7 @@ impl<C: Credentials> HttpTransport<C> {
             _ => false,
         };
         let answer = if retry {
-            self.send_as(reqwest::Method::GET, &url, &[], Auth::Bearer(&token), None)
+            self.send_as(reqwest::Method::GET, &url, headers, Auth::Bearer(&token), None)
                 .await?
         } else {
             first

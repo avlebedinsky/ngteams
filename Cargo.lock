@@ -8043,6 +8043,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "reqwest 0.13.5",
+ "roxmltree 0.21.1",
  "scraper",
  "serde",
  "serde_json",

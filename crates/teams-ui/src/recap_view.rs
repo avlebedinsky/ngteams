@@ -45,7 +45,7 @@ use crate::recap::{
     transcript_file_name,
 };
 use crate::theme::{self, Palette};
-use crate::video_player::{VideoPlayer, clock as offset};
+use crate::video_player::{Recording, VideoPlayer, clock as offset};
 
 /// How far a turn's paragraphs stand in from its speaker's initials: past them, under the name.
 const TURN_INDENT: f32 = 36.0;
@@ -374,7 +374,15 @@ impl RecapView {
         };
         let source = PictureSource::new(Arc::clone(&self.core));
         let id = format!("recap-{index}");
-        let player = cx.new(|cx| VideoPlayer::new(id, file, source, cx).filling());
+        let part = self.part()?;
+        let recording = part.drive_id.clone().zip(part.item_id.clone());
+        let player = cx.new(|cx| {
+            let player = VideoPlayer::new(id, file, source, cx).filling();
+            match recording {
+                Some((drive, item)) => player.streaming(Recording { drive, item }),
+                None => player,
+            }
+        });
         let watched = cx.observe(&player, |this, player, cx| this.follow(&player, cx));
         self.players.insert(link, (player.clone(), watched));
         Some(player)

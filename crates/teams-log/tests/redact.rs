@@ -236,6 +236,24 @@ fn a_call_follow_up_s_skypetoken_and_a_signed_link_s_key_are_redacted() {
 }
 
 #[test]
+fn a_recording_s_presentation_keeps_no_part_s_credential() {
+    // made up: an MPD's template as the transform service writes it, its signed item address and session in the query
+    let signed = "x".repeat(40);
+    let session = "y".repeat(40);
+    let mpd = format!(
+        "<SegmentTemplate media=\"videotranscode?provider=Spo&amp;docId=https%3a%2f%2fcontoso-my.sharepoint.com\
+         %2fitems%2fI%3fversion%3dPublished%26P4%3d{signed}&amp;PlaybackSessionData={session}&amp;part=mediasegment\" />"
+    );
+    let shown = redact::body(Some("application/dash+xml"), mpd.as_bytes());
+    assert!(!shown.contains(&signed) && !shown.contains(&session), "{shown}");
+    assert!(shown.contains("part=mediasegment"), "{shown}");
+    let link =
+        format!("https://westus1-mediap.svc.ms/transform/videotranscode?docId=a%26P4%3d{signed}&part=initsegment");
+    let shown = redact::url(&link);
+    assert!(!shown.contains(&signed), "{shown}");
+}
+
+#[test]
 fn a_file_thumbnail_s_pre_authenticated_link_keeps_no_credential() {
     // SharePoint's own pre-authenticated form: a short `tempauth` only its name catches
     let tempauth = format!("v1.{}", signature("t"));

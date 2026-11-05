@@ -1,0 +1,172 @@
+//! A meeting recording streamed through the engine, as the recap plays it: its DASH presentation read on its personal
+//! site and its parts at the transform service's addresses, served only on loopback. A recording that can't be watched,
+//! a presentation the player can't play and a part refused are unavailable; a read that failed on the way is unread.
+//! Every link, id and byte here is made up.
+
+#![cfg(test)]
+
+use std::future::{self, Future};
+use std::sync::Arc;
+
+use teams_auth::secrets::Secret;
+use teams_auth::token::TokenError;
+use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
+use teams_core::{EngineError, Outbox};
+use teams_mock::{CHAT_BASE, LAB_A};
+use teams_proto::{Author, Client, Credentials, HttpTransport, Mri};
+use teams_store::Store;
+use wiremock::matchers::{header, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const SHARE: &str = "https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUpRecording01";
+const MANIFEST: &str = "/personal/made_up_user_contoso_test/_api/v2.1/drives/b!madeup/items/ITEM1/content";
+const PART: &str = "/transform/videotranscode";
+
+const MPD: &str = r#"<MPD type="static" mediaPresentationDuration="PT0H0M12.000S" xmlns="urn:mpeg:DASH:schema:MPD:2011">
+  <BaseURL>https://madeupregion1-mediap.svc.ms/transform/</BaseURL>
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate timescale="1000" initialization="videotranscode?part=initsegment&amp;quality=$RepresentationID$" media="videotranscode?part=mediasegment&amp;quality=$RepresentationID$&amp;segmentTime=$Time$">
+        <SegmentTimeline><S t="0" d="6000" r="1" /></SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="vcopy" bandwidth="1" />
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+struct Tokens;
+
+impl Credentials for Tokens {
+    fn bearer(&self, _: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(Ok(Secret::new("synthetic-site-token")))
+    }
+
+    fn bearer_rejected(&self, audience: &str, _: &Secret) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        self.bearer(audience)
+    }
+}
+
+struct Rig {
+    server: MockServer,
+    handle: EngineHandle,
+    _dir: tempfile::TempDir,
+}
+
+async fn running_engine() -> Rig {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = Arc::new(Tokens);
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
+    let handle = engine::start(Parts {
+        calls: None,
+        store: Store::open(&dir.path().join("recording.sqlite")).unwrap(),
+        client: Arc::new(Client::new(http())),
+        outbox: Outbox::new(Arc::new(http()), Author::new(Mri::new(LAB_A), "Lab A")),
+        push: None,
+        options: EngineOptions::default(),
+        known_names: Vec::new(),
+    })
+    .unwrap();
+    Rig {
+        server,
+        handle,
+        _dir: dir,
+    }
+}
+
+async fn manifest_answers(server: &MockServer, response: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path(MANIFEST))
+        .and(query_param("format", "dash"))
+        .and(header("authorization", "Bearer synthetic-site-token"))
+        .and(header("enablecdn", "0"))
+        .respond_with(response)
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_recording_streams_as_its_presentation_and_parts() {
+    let rig = running_engine().await;
+    manifest_answers(
+        &rig.server,
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "application/dash+xml")
+            .set_body_string(MPD),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path(PART))
+        .and(query_param("part", "mediasegment"))
+        .and(query_param("segmentTime", "6000"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"made-up part".to_vec()))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    let presentation = rig
+        .handle
+        .recording_presentation(SHARE, "b!madeup", "ITEM1")
+        .await
+        .unwrap();
+    assert_eq!(presentation.duration_ms, 12_000);
+    let track = &presentation.tracks[0];
+    assert_eq!(track.segments.len(), 2);
+    let part = track.segment(1).unwrap();
+    assert_eq!(
+        rig.handle.recording_segment(part.clone()).await.unwrap(),
+        b"made-up part"
+    );
+    // a part refused (its address expired), then one whose read failed on the way
+    for (status, unavailable) in [(403, true), (500, false)] {
+        Mock::given(method("GET"))
+            .and(path(PART))
+            .respond_with(ResponseTemplate::new(status))
+            .up_to_n_times(1)
+            .mount(&rig.server)
+            .await;
+        let error = rig.handle.recording_segment(part.clone()).await.unwrap_err();
+        assert_eq!(matches!(error, EngineError::FileUnavailable), unavailable, "{error:?}");
+        assert_eq!(matches!(error, EngineError::FileUnread), !unavailable, "{error:?}");
+    }
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
+async fn a_recording_that_can_t_be_streamed_is_unavailable_and_a_failed_read_unread() {
+    let rig = running_engine().await;
+    // refused (an account that may not watch it), not an MPD, encrypted, then failed on the way
+    manifest_answers(&rig.server, ResponseTemplate::new(403)).await;
+    manifest_answers(&rig.server, ResponseTemplate::new(200).set_body_string("<html/>")).await;
+    manifest_answers(
+        &rig.server,
+        ResponseTemplate::new(200).set_body_string(MPD.replace(
+            "<SegmentTemplate",
+            r#"<ContentProtection schemeIdUri="urn:mpeg:dash:sea:2012" /><SegmentTemplate"#,
+        )),
+    )
+    .await;
+    manifest_answers(&rig.server, ResponseTemplate::new(500)).await;
+    for expected_unavailable in [true, true, true, false] {
+        let error = rig
+            .handle
+            .recording_presentation(SHARE, "b!madeup", "ITEM1")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            matches!(error, EngineError::FileUnavailable),
+            expected_unavailable,
+            "{error:?}"
+        );
+    }
+    // a link off a personal site, or an item that isn't one, is never asked for
+    for (link, item) in [("https://example.com/no-file", "ITEM1"), (SHARE, "ITEM/1")] {
+        assert!(matches!(
+            rig.handle.recording_presentation(link, "b!madeup", item).await,
+            Err(EngineError::FileUnavailable)
+        ));
+    }
+    let asked = rig.server.received_requests().await.unwrap().len();
+    assert_eq!(asked, 4);
+    rig.handle.shutdown();
+}

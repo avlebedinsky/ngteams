@@ -1,7 +1,8 @@
 //! A meeting chat's tabs, drawn on the real platform in the UI sandbox (`harness = false`: GPUI runs on the process's
 //! main thread), for their screenshots: the app's window over the fake engine (`common`), its store holding a made-up
 //! meeting chat whose recording's card offers "View recap"; its Recap (two recordings: Part 1 with its transcript,
-//! that transcript searched, Part 2), the Recap of a meeting transcribed and not recorded, and the Shared tab.
+//! that transcript searched, Part 2, Part 1's recording playing as the engine streams it and paused), the Recap of a
+//! meeting transcribed and not recorded, and the Shared tab.
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -39,9 +40,11 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 const CHILD_ENV: &str = "TEAMS_UI_RECAP_WINDOW_TEST";
 
 /// Each page and the themes it is shot in.
-const PAGES: [(&str, &[&str]); 6] = [
+const PAGES: [(&str, &[&str]); 8] = [
     ("chat", &[LIGHT_KEY]),
     ("recap", &[LIGHT_KEY, DARK_KEY]),
+    ("playing", &[LIGHT_KEY, DARK_KEY]),
+    ("paused", &[LIGHT_KEY]),
     ("transcript", &[LIGHT_KEY, DARK_KEY]),
     ("part-2", &[LIGHT_KEY]),
     ("transcript-only", &[LIGHT_KEY]),
@@ -148,6 +151,7 @@ fn seed(core: &FakeCore) {
     locked(&core.names).insert(me, "Ada Lab".to_owned());
     locked(&core.meeting_contents).insert(fixtures::MEETING.to_owned(), fixtures::recorded());
     locked(&core.meeting_contents).insert(fixtures::TRANSCRIPT_ONLY.to_owned(), fixtures::transcribed());
+    locked(&core.recordings).insert("ITEM1".to_owned());
     for item in ["ITEM1", "ITEM2", "ITEM9"] {
         locked(&core.transcripts).insert(fixtures::transcript_location(item), fixtures::VTT.to_owned());
         locked(&core.thumbnails).insert(fixtures::sharing_link(item), poster());
@@ -250,13 +254,30 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
         after_frames(window, 30, move |window, cx| {
             step(&shell, &page, window, cx);
             after_frames(window, 30, move |window, cx| {
+                let played = matches!(page.as_str(), "playing" | "paused");
                 then(&shell, &page, window, cx);
-                after_frames(window, 30, |_, _| say("ready"));
+                // a playing recording is shot a second on, its frames drawn as they come; a paused one with its
+                // controls, which show while it is paused
+                after_frames(window, if played { 60 } else { 30 }, move |window, cx| {
+                    last(&shell, &page, window, cx);
+                });
             });
         });
     })?;
     mem::forget((bridge, events));
     Ok(())
+}
+
+/// The page's last step: ready to be shot, a recording paused first on the page that shows it paused.
+fn last(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
+    if page != "paused" {
+        say("ready");
+        return;
+    }
+    if let Some(recap) = shell.read(cx).recap_view().cloned() {
+        recap.update(cx, teams_ui::recap_view::RecapView::pause);
+    }
+    after_frames(window, 20, |_, _| say("ready"));
 }
 
 /// Opens the page's tab.
@@ -280,6 +301,8 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
             recap.step_match(false, cx);
         }
         "part-2" => recap.select_part(1, cx),
+        // the recording streamed and played from half a second in, shot as it plays
+        "playing" | "paused" => recap.play_from(Duration::from_millis(500), cx),
         _ => {}
     });
 }

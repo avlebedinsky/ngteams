@@ -30,6 +30,8 @@ log = { workspace = true, features = ["max_level_debug", "release_max_level_debu
 percent-encoding.workspace = true
 # the transport's own HTTPS client: no proxy, no redirects, its services' bases
 reqwest.workspace = true
+# a meeting recording's DASH presentation, read into its tracks
+roxmltree.workspace = true
 # the chat service's message HTML, read into the typed rich-text model
 scraper.workspace = true
 # the chat service's answers, read into the message model (unknown fields kept)

@@ -21,8 +21,160 @@ fn a_picture_is_fitted_inside_its_box() {
     assert_eq!(fit.origin, point(px(50.0), px(20.0)));
 }
 
+include!("recording_parts.rs");
+
 #[derive(Default)]
 struct Files(Mutex<Vec<(String, u64, u64)>>);
+
+/// A fake engine that streams the made-up recording (item `ITEM1`), and refuses any other one's; counts the parts
+/// read, and reads files as [`Files`] does.
+#[derive(Default)]
+struct Recordings {
+    files: Files,
+    parts: Mutex<usize>,
+    presentation: Mutex<Option<Arc<teams_proto::Presentation>>>,
+}
+
+impl crate::inline::PictureEngine for Recordings {
+    fn me(&self) -> &'static str {
+        "8:orgid:00000000-0000-4000-8000-00000000000a"
+    }
+
+    fn message_picture(&self, _: String) -> teams_core::Reply<Option<teams_core::PictureBytes>> {
+        teams_core::Reply::ready(Ok(None))
+    }
+
+    fn reaction_animation(&self, _: String) -> teams_core::Reply<Option<teams_core::Strip>> {
+        teams_core::Reply::ready(Ok(None))
+    }
+
+    fn file_stream(&self, share: String, offset: u64, len: u64) -> teams_core::Reply<FileStream> {
+        self.files.file_stream(share, offset, len)
+    }
+
+    fn recording_presentation(
+        &self,
+        _: String,
+        drive: String,
+        item: String,
+    ) -> teams_core::Reply<Arc<teams_proto::Presentation>> {
+        if (drive.as_str(), item.as_str()) != ("b!drive1", "ITEM1") {
+            return teams_core::Reply::ready(Err(EngineError::FileUnavailable));
+        }
+        let presentation = made_up_presentation();
+        *self.presentation.lock().unwrap() = Some(Arc::clone(&presentation));
+        teams_core::Reply::ready(Ok(presentation))
+    }
+
+    fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> teams_core::Reply<Vec<u8>> {
+        *self.parts.lock().unwrap() += 1;
+        let presentation = self.presentation.lock().unwrap().clone().unwrap();
+        teams_core::Reply::ready(made_up_part(&presentation, &part).ok_or(EngineError::FileUnavailable))
+    }
+
+    fn engine(&self) -> *const () {
+        std::ptr::from_ref(self).cast()
+    }
+}
+
+fn recording(item: &str) -> Recording {
+    Recording {
+        drive: "b!drive1".to_owned(),
+        item: item.to_owned(),
+    }
+}
+
+#[test]
+fn a_recording_is_streamed_through_the_engine_and_played() {
+    let mut app = gpui::TestAppContext::single();
+    app.update(crate::window::init);
+    let engine = Arc::new(Recordings::default());
+    let source = PictureSource::of(engine.clone());
+    let (view, cx) = app.add_window_view(|_, cx| {
+        VideoPlayer::new("recap".to_owned(), movie_file(), source, cx)
+            .filling()
+            .streaming(recording("ITEM1"))
+    });
+    draw(cx);
+    click(cx, "video-play-recap");
+    wait_state(&view, cx, State::Playing);
+    let until = Instant::now() + Duration::from_secs(10);
+    while cx.update(|_, cx| view.read(cx).position()).unwrap_or_default() < Duration::from_millis(500) {
+        assert!(Instant::now() < until, "it doesn't move on");
+        draw(cx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cx.update(|_, cx| {
+        view.update(cx, |view, _| {
+            assert!(view.frame().is_some_and(|(_, shape)| shape == (320, 180)));
+            assert!((view.status.unwrap().duration.as_secs_f32() - 3.0).abs() < 0.1);
+            assert!(!view.streamed_failed);
+        });
+    });
+    // its parts came from the engine's stream, never from the file's download link
+    assert!(*engine.parts.lock().unwrap() >= 4);
+    assert!(engine.files.0.lock().unwrap().is_empty());
+    // paused, unless its 3 s already played to their end (a loaded machine)
+    click(cx, "video-play-recap");
+    let until = Instant::now() + Duration::from_secs(10);
+    while !matches!(
+        cx.update(|_, cx| view.read(cx).state()),
+        Some(State::Paused | State::Ended)
+    ) {
+        assert!(Instant::now() < until, "it doesn't pause");
+        draw(cx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_recording_that_can_t_be_streamed_plays_from_its_download_link() {
+    let mut app = gpui::TestAppContext::single();
+    app.update(crate::window::init);
+    let engine = Arc::new(Recordings::default());
+    let source = PictureSource::of(engine.clone());
+    let (view, cx) = app.add_window_view(|_, cx| {
+        VideoPlayer::new("fallback".to_owned(), movie_file(), source, cx).streaming(recording("ITEM2"))
+    });
+    draw(cx);
+    click(cx, "video-play-fallback");
+    wait_state(&view, cx, State::Playing);
+    assert!(cx.update(|_, cx| view.read(cx).streamed_failed));
+    assert!(!engine.files.0.lock().unwrap().is_empty());
+    assert_eq!(*engine.parts.lock().unwrap(), 0);
+}
+
+#[test]
+fn a_recording_s_parts_are_asked_of_the_engine_only_once_its_presentation_came() {
+    let engine = Arc::new(Recordings::default());
+    let parts = EngineParts {
+        source: PictureSource::of(engine.clone()),
+        link: "https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/ITEM1".to_owned(),
+        recording: recording("ITEM1"),
+        read: Mutex::new(None),
+    };
+    let abandon = Abandon::new();
+    assert_eq!(parts.part(0, Part::Init, &abandon), Err(SourceError::Unavailable));
+    let presentation = parts.presentation(&abandon).unwrap();
+    assert_eq!(presentation.duration, Duration::from_secs(3));
+    assert_eq!(presentation.tracks[0].kind, TrackKind::Audio);
+    assert_eq!(presentation.tracks[1].segments.len(), 3);
+    assert!(!parts.part(1, Part::Media(2), &abandon).unwrap().is_empty());
+    assert_eq!(parts.part(1, Part::Media(3), &abandon), Err(SourceError::Unavailable));
+    assert_eq!(parts.part(5, Part::Init, &abandon), Err(SourceError::Unavailable));
+    abandon.set();
+    assert_eq!(parts.part(1, Part::Init, &abandon), Err(SourceError::Stopped));
+    assert!(matches!(parts.presentation(&abandon), Err(SourceError::Stopped)));
+    let refused = EngineParts {
+        recording: recording("ITEM2"),
+        read: Mutex::new(None),
+        ..parts
+    };
+    assert!(matches!(
+        refused.presentation(&Abandon::new()),
+        Err(SourceError::Unavailable)
+    ));
+}
 
 impl crate::inline::PictureEngine for Files {
     fn me(&self) -> &'static str {
@@ -147,6 +299,45 @@ fn a_synthetic_movie_plays_pauses_and_seeks_without_opening_any_devices() {
     assert!(cx.update(|_, cx| view.read(cx).dragging.is_some()));
     cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::none());
     assert!(cx.update(|_, cx| view.read(cx).dragging.is_none()));
+}
+
+#[test]
+fn the_volume_slider_sets_how_loud_it_plays_and_unmutes_it() {
+    let mut app = gpui::TestAppContext::single();
+    app.update(crate::window::init);
+    let source = PictureSource::of(Arc::new(Files::default()));
+    let (view, cx) = app.add_window_view(|_, cx| VideoPlayer::new("loud".to_owned(), movie_file(), source, cx));
+    draw(cx);
+    click(cx, "video-play-loud");
+    wait_state(&view, cx, State::Playing);
+    assert!(
+        cx.debug_bounds("video-time-loud").is_some(),
+        "the time shows once the length is known"
+    );
+    click(cx, "video-mute-loud");
+    assert!(cx.update(|_, cx| view.read(cx).muted));
+    // the slider shows while the pointer is on the sound's button, or it is dragged
+    cx.update(|_, cx| view.update(cx, |view, _| view.volume.adjusting = true));
+    draw(cx);
+    let bar = cx.debug_bounds("video-volume-loud").unwrap();
+    let at = |fraction: f32| bar.origin + point(bar.size.width * fraction, bar.size.height * 0.5);
+    cx.simulate_mouse_down(at(0.25), MouseButton::Left, gpui::Modifiers::none());
+    let (level, muted) = cx.update(|_, cx| (view.read(cx).volume.level, view.read(cx).muted));
+    assert!((level - 0.25).abs() < 0.05, "{level}");
+    assert!(!muted, "a sound turned up is unmuted");
+    cx.simulate_mouse_move(at(0.75), MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_up(at(0.75), MouseButton::Left, gpui::Modifiers::none());
+    let (level, adjusting) = cx.update(|_, cx| (view.read(cx).volume.level, view.read(cx).volume.adjusting));
+    assert!((level - 0.75).abs() < 0.05, "{level}");
+    assert!(!adjusting);
+    // a player opened again takes the volume set
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.player = None;
+            view.open(cx);
+            assert!(view.player.is_some());
+        });
+    });
 }
 
 #[test]

@@ -117,6 +117,23 @@ pub trait Core: Send + Sync + 'static {
         let _ = location;
         Reply::ready(Err(teams_core::EngineError::RecapUnread))
     }
+    /// The DASH presentation of the meeting recording that is item `item` of drive `drive` on the personal site of
+    /// its sharing link `link`, as Teams' Recap player streams it: what a recap plays a recording by, its download
+    /// blocked or not. A fake without recordings answers that it can't be had.
+    fn recording_presentation(
+        &self,
+        link: String,
+        drive: String,
+        item: String,
+    ) -> Reply<Arc<teams_proto::Presentation>> {
+        let _ = (link, drive, item);
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
+    /// A part of a meeting recording's presentation, at its address.
+    fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {
+        let _ = part;
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -623,6 +640,19 @@ impl Core for EngineRequests {
 
     fn meeting_transcript(&self, location: String) -> Reply<String> {
         EngineRequests::meeting_transcript(self, location)
+    }
+
+    fn recording_presentation(
+        &self,
+        link: String,
+        drive: String,
+        item: String,
+    ) -> Reply<Arc<teams_proto::Presentation>> {
+        EngineRequests::recording_presentation(self, &link, &drive, &item)
+    }
+
+    fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {
+        EngineRequests::recording_segment(self, part)
     }
 
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {

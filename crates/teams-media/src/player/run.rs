@@ -33,9 +33,46 @@ struct Feed {
     refused: Mutex<bool>,
 }
 
+/// Where a playing pipeline's bytes come from, as the loop sees it: a file's cache ([`Feed`]) or a presentation's
+/// parts (`super::stream`).
+pub(super) trait Input: Send + Sync {
+    /// Stops every read: one waiting for the network gives up, so the pipeline's threads can stop.
+    fn close(&self);
+    /// A seek is coming: the read the pipeline waits on is let go.
+    fn interrupt(&self);
+    /// A read the pipeline waits on waits for the network.
+    fn waiting(&self) -> bool;
+    /// Why a read failed, when one did.
+    fn failed(&self) -> Option<SourceError>;
+    /// An element that would read the network was made, and kept from starting.
+    fn refused(&self) -> bool;
+}
+
+impl Input for Feed {
+    fn close(&self) {
+        self.cache.close();
+    }
+
+    fn interrupt(&self) {
+        self.cache.interrupt();
+    }
+
+    fn waiting(&self) -> bool {
+        self.waiting.load(Ordering::Relaxed)
+    }
+
+    fn failed(&self) -> Option<SourceError> {
+        *self.failed.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn refused(&self) -> bool {
+        *self.refused.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// The speaker the sound appsink plays on, opened at the first play; samples waiting for a whole 10 ms frame.
 #[derive(Default)]
-struct Sound {
+pub(super) struct Sound {
     speaker: Option<Box<dyn AudioSink>>,
     pending: Vec<f32>,
     /// The file's sound can't be decoded: no speaker is opened for it.
@@ -74,23 +111,8 @@ pub(super) fn run(
             return;
         }
     };
-    let mut playing = Playing {
-        pipeline,
-        feed,
-        sound,
-        setup: setup.clone(),
-        output: Arc::clone(output),
-        status,
-        wants_play: play,
-        loaded: false,
-        told: Instant::now(),
-        stalled_since: None,
-        format_unread: false,
-    };
-    playing.lead(commands);
-    // a read waiting for the network gives up, so the pipeline's threads can stop
-    playing.feed.cache.close();
-    let _ = playing.pipeline.set_state(gst::State::Null);
+    let mute = pipeline.clone();
+    Playing::new((pipeline, Some(mute)), feed, sound, setup, output, play).lead_to_end(commands);
 }
 
 /// `playbin` on `appsrc://`, its video to a BGRA appsink and its sound to a 48 kHz mono appsink, paused (prerolling).
@@ -99,8 +121,7 @@ fn pipeline(
     sound: &Arc<Mutex<Sound>>,
     output: &Arc<dyn PlayerOutput>,
 ) -> Result<gst::Element, Failure> {
-    gst::init().map_err(|_| Failure::NoCodec)?;
-    nothing_that_fetches_or_probes();
+    start_gstreamer()?;
     let total = feed.cache.total().map_err(failure_of)?;
     if let Some(index) = index_after_media(&feed.cache, total) {
         // the demuxer reads it before any frame: it arrives while `GStreamer` sets up and guesses the type
@@ -139,6 +160,13 @@ fn pipeline(
         .set_state(gst::State::Paused)
         .map_err(|_| Failure::Unsupported)?;
     Ok(playbin)
+}
+
+/// `GStreamer` started, with nothing plugged that it mustn't ([`nothing_that_fetches_or_probes`]).
+pub(super) fn start_gstreamer() -> Result<(), Failure> {
+    gst::init().map_err(|_| Failure::NoCodec)?;
+    nothing_that_fetches_or_probes();
+    Ok(())
 }
 
 /// Keeps playbin from plugging what it mustn't, done once a process on the registry's ranks (nothing is loaded for
@@ -249,7 +277,7 @@ fn set_up_source(source: &gst_app::AppSrc, feed: Arc<Feed>, total: u64) {
 }
 
 /// The video's appsink: BGRA frames (playbin converts to it), shown at their time, the paused first frame too.
-fn video_sink(output: &Arc<dyn PlayerOutput>) -> gst_app::AppSink {
+pub(super) fn video_sink(output: &Arc<dyn PlayerOutput>) -> gst_app::AppSink {
     let caps = gst::Caps::builder("video/x-raw").field("format", "BGRA").build();
     let sink = gst_app::AppSink::builder()
         .caps(&caps)
@@ -303,7 +331,7 @@ fn show(sample: &gst::Sample, output: &dyn PlayerOutput) {
 
 /// The sound's appsink: 48 kHz mono samples (playbin converts and resamples to them), in time, played on the speaker
 /// in 10 ms frames.
-fn audio_sink(sound: &Arc<Mutex<Sound>>) -> gst_app::AppSink {
+pub(super) fn audio_sink(sound: &Arc<Mutex<Sound>>) -> gst_app::AppSink {
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
         .field("rate", i32::try_from(SAMPLE_RATE).unwrap_or(48_000))
@@ -355,7 +383,7 @@ fn play(sound: &Mutex<Sound>, bytes: &[u8]) {
     }
 }
 
-fn failure_of(error: SourceError) -> Failure {
+pub(super) fn failure_of(error: SourceError) -> Failure {
     match error {
         SourceError::Unavailable => Failure::Unavailable,
         SourceError::Failed | SourceError::Stopped => Failure::Network,
@@ -363,9 +391,11 @@ fn failure_of(error: SourceError) -> Failure {
 }
 
 /// The playing pipeline and what the loop knows of it.
-struct Playing {
+pub(super) struct Playing {
     pipeline: gst::Element,
-    feed: Arc<Feed>,
+    input: Arc<dyn Input>,
+    /// The element whose `mute` mutes the sound and whose `volume` sets how loud it plays (none without a sound).
+    mute: Option<gst::Element>,
     sound: Arc<Mutex<Sound>>,
     setup: PlayerSetup,
     output: Arc<dyn PlayerOutput>,
@@ -383,6 +413,45 @@ struct Playing {
 }
 
 impl Playing {
+    /// The loop's state for `pipeline` (paused, prerolling) and the element that mutes its sound, reading from
+    /// `input`; played once loaded when `play`.
+    pub(super) fn new(
+        (pipeline, mute): (gst::Element, Option<gst::Element>),
+        input: Arc<dyn Input>,
+        sound: Arc<Mutex<Sound>>,
+        setup: &PlayerSetup,
+        output: &Arc<dyn PlayerOutput>,
+        play: bool,
+    ) -> Self {
+        Self {
+            pipeline,
+            input,
+            mute,
+            sound,
+            setup: setup.clone(),
+            output: Arc::clone(output),
+            status: Status {
+                state: State::Loading,
+                position: Duration::ZERO,
+                duration: Duration::ZERO,
+                sound: false,
+            },
+            wants_play: play,
+            loaded: false,
+            told: Instant::now(),
+            stalled_since: None,
+            format_unread: false,
+        }
+    }
+
+    /// Leads the pipeline until the player is dropped or fails, then stops its reads and the pipeline.
+    pub(super) fn lead_to_end(mut self, commands: &Receiver<Command>) {
+        self.lead(commands);
+        // a read waiting for the network gives up, so the pipeline's threads can stop
+        self.input.close();
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+
     /// The loop: the commands, then the bus; ends when the player is dropped or fails.
     fn lead(&mut self, commands: &Receiver<Command>) {
         let Some(bus) = self.pipeline.bus() else { return };
@@ -397,7 +466,7 @@ impl Playing {
             if let Some(message) = bus.timed_pop(gst::ClockTime::from_nseconds(nanos(POLL))) {
                 self.read(&message);
                 if matches!(self.status.state, State::Failed(_)) {
-                    self.feed.cache.close();
+                    self.input.close();
                     let _ = self.pipeline.set_state(gst::State::Null);
                     outlast(commands);
                     return;
@@ -439,7 +508,16 @@ impl Playing {
                     self.tell();
                 }
             }
-            Command::Muted(muted) => self.pipeline.set_property("mute", muted),
+            Command::Muted(muted) => {
+                if let Some(mute) = &self.mute {
+                    mute.set_property("mute", muted);
+                }
+            }
+            Command::Volume(level) => {
+                if let Some(mute) = &self.mute {
+                    mute.set_property("volume", if level.is_finite() { level.clamp(0.0, 1.0) } else { 1.0 });
+                }
+            }
         }
     }
 
@@ -468,7 +546,7 @@ impl Playing {
         } else {
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_NEAREST
         };
-        self.feed.cache.interrupt();
+        self.input.interrupt();
         let _ = self
             .pipeline
             .seek_simple(flags, gst::ClockTime::from_nseconds(nanos(at)));
@@ -498,8 +576,8 @@ impl Playing {
                 self.tell();
             }
             MessageView::Error(error) => {
-                let source = *self.feed.failed.lock().unwrap_or_else(PoisonError::into_inner);
-                let refused = *self.feed.refused.lock().unwrap_or_else(PoisonError::into_inner);
+                let source = self.input.failed();
+                let refused = self.input.refused();
                 let failure = match source {
                     Some(source) => failure_of(source),
                     None if refused || self.format_unread => Failure::Unsupported,
@@ -554,7 +632,7 @@ impl Playing {
             self.stalled_since = None;
             return;
         }
-        let waiting = self.feed.waiting.load(Ordering::Relaxed);
+        let waiting = self.input.waiting();
         let since = *self.stalled_since.get_or_insert_with(Instant::now);
         if !waiting {
             self.stalled_since = None;
@@ -605,10 +683,10 @@ fn failure_of_error(error: &gst::glib::Error) -> Failure {
 
 /// Waits for the player to be dropped (its commands end), taking nothing more: a failed player stays until then, so
 /// its owner keeps telling the failure.
-fn outlast(commands: &Receiver<Command>) {
+pub(super) fn outlast(commands: &Receiver<Command>) {
     while commands.recv().is_ok() {}
 }
 
-fn nanos(at: Duration) -> u64 {
+pub(super) fn nanos(at: Duration) -> u64 {
     u64::try_from(at.as_nanos()).unwrap_or(u64::MAX)
 }

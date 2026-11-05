@@ -5,11 +5,21 @@
 //!
 //! A read that fails, an answer in another shape, or a transcript address the app doesn't read is
 //! [`EngineError::RecapUnread`]: the view says so and offers to try again.
+//!
+//! A recording is streamed as Teams' Recap player streams it ([`teams_proto::recording`]): its DASH presentation read
+//! from the personal site that holds it, and its parts from the media transform service, each read when the player
+//! asks for it. That works whether or not the account may download the recording (an attendee's view of another's
+//! meeting is refused at the download link). A presentation refused or unreadable is [`EngineError::FileUnavailable`],
+//! as is a part refused; one whose read failed on the way is [`EngineError::FileUnread`].
 
 use std::sync::Arc;
 
+use teams_proto::recording::read_manifest;
 use teams_proto::transcript::{MAX_TRANSCRIPT, read_vtt};
-use teams_proto::{Client, Credentials, HttpTransport, MeetingContent, MeetingContents, TranscriptLocation};
+use teams_proto::{
+    Client, Credentials, HttpError, HttpTransport, MediaSegmentLink, MeetingContent, MeetingContents, Presentation,
+    RecordingManifest, TranscriptLocation,
+};
 
 use crate::engine::{EngineError, Responder};
 
@@ -32,6 +42,39 @@ impl<C: Credentials + 'static> Recaps<C> {
                 Err(error) => {
                     log::info!("a meeting's recap contents couldn't be read: {error}");
                     Err(EngineError::RecapUnread)
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// The DASH presentation of the recording `manifest` names, once it reads as one the player plays.
+    pub(crate) fn presentation(&self, manifest: RecordingManifest, reply: Responder<Arc<Presentation>>) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client.transport().recording_manifest(&manifest).await {
+                Ok(answer) => read_manifest(answer.body()).map(Arc::new).ok_or_else(|| {
+                    log::info!("a meeting recording's presentation isn't one the player plays");
+                    EngineError::FileUnavailable
+                }),
+                Err(error) => {
+                    log::info!("a meeting recording's presentation couldn't be read: {error}");
+                    Err(file_error(&error))
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// A part of a recording's presentation, at its address.
+    pub(crate) fn segment(&self, part: MediaSegmentLink, reply: Responder<Vec<u8>>) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client.transport().media_segment(&part).await {
+                Ok(answer) => Ok(answer.body().to_vec()),
+                Err(error) => {
+                    log::info!("a part of a meeting recording couldn't be read: {error}");
+                    Err(file_error(&error))
                 }
             };
             let _ = reply.send(answer);
@@ -61,5 +104,14 @@ impl<C: Credentials + 'static> Recaps<C> {
             };
             let _ = reply.send(answer);
         });
+    }
+}
+
+/// A recording's read that failed: refused or too large (it can't be had) or failed on the way (it may be read again).
+fn file_error(error: &HttpError) -> EngineError {
+    match error {
+        HttpError::Status(answer) if !matches!(answer.status(), 408 | 429 | 500..=599) => EngineError::FileUnavailable,
+        HttpError::Refused(_) | HttpError::BodyTooLarge => EngineError::FileUnavailable,
+        _ => EngineError::FileUnread,
     }
 }

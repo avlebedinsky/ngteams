@@ -20,8 +20,10 @@
 //!   [`Failure::NoCodec`]; a file that can't be had, [`Failure::Unavailable`]; one whose parts fail to arrive,
 //!   [`Failure::Network`].
 
+mod fmp4;
 mod run;
 pub mod source;
+pub mod stream;
 
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -31,6 +33,18 @@ use std::time::Duration;
 use crate::devices::{Devices, VideoFrame};
 
 pub use source::{Abandon, ByteSource, ByteStream, Cache, Pieces, SourceError};
+pub use stream::{Part, Presentation, SegmentSource, Span, Track, TrackKind};
+
+/// What a dropped player stops: its reads, so one waiting for the network gives up.
+trait Stop: Send + Sync {
+    fn stop(&self);
+}
+
+impl Stop for Cache {
+    fn stop(&self) {
+        self.close();
+    }
+}
 
 /// What a player is made with: the devices whose speaker plays the sound (none: it plays silently).
 #[derive(Clone, Default)]
@@ -96,6 +110,8 @@ pub enum Command {
     /// Goes to the key frame nearest this time (kept within the movie): what a seek bar asks, shown at once.
     SeekNear(Duration),
     Muted(bool),
+    /// How loud its sound plays, from 0 (silent) to 1 (as recorded); kept within them.
+    Volume(f64),
 }
 
 /// Where a player's frames and status go; called on `GStreamer`'s and the player's threads.
@@ -109,7 +125,7 @@ pub trait PlayerOutput: Send + Sync {
 /// A video file playing (see the module docs). Dropped, its thread stops its pipeline (not waited for).
 pub struct Player {
     commands: mpsc::Sender<Command>,
-    cache: Arc<Cache>,
+    reads: Arc<dyn Stop>,
     _thread: JoinHandle<()>,
 }
 
@@ -139,17 +155,39 @@ impl Player {
             .spawn(move || run::run(theirs, &setup, &output, &received, play));
         let Ok(thread) = spawned else {
             cache.close();
-            told.status(Status {
-                state: State::Failed(Failure::Internal),
-                position: Duration::ZERO,
-                duration: Duration::ZERO,
-                sound: false,
-            });
+            unstarted(told.as_ref());
             return None;
         };
         Some(Self {
             commands,
-            cache,
+            reads: cache,
+            _thread: thread,
+        })
+    }
+
+    /// Plays the presentation `source` reads in parts (`stream`: a meeting recording, as Teams' Recap player streams
+    /// it) on a thread of its own, as [`Player::open`] plays a file: played once opened when `play`, else paused on
+    /// its first frame; `None` when the thread can't be made (the output was told [`Failure::Internal`]).
+    #[must_use]
+    pub fn open_stream(
+        source: Arc<dyn SegmentSource>,
+        setup: PlayerSetup,
+        output: Arc<dyn PlayerOutput>,
+        play: bool,
+    ) -> Option<Self> {
+        let (commands, received) = mpsc::channel();
+        let streamed = Arc::new(stream::Streamed::default());
+        let (theirs, told) = (Arc::clone(&streamed), Arc::clone(&output));
+        let spawned = thread::Builder::new()
+            .name("video-player".into())
+            .spawn(move || stream::run(&theirs, &source, &setup, &output, &received, play));
+        let Ok(thread) = spawned else {
+            unstarted(told.as_ref());
+            return None;
+        };
+        Some(Self {
+            commands,
+            reads: streamed,
             _thread: thread,
         })
     }
@@ -162,8 +200,18 @@ impl Player {
 }
 
 impl Drop for Player {
-    /// Closes the cache (a read waiting for the network gives up), and the thread sees its commands end.
+    /// Stops its reads (one waiting for the network gives up), and the thread sees its commands end.
     fn drop(&mut self) {
-        self.cache.close();
+        self.reads.stop();
     }
+}
+
+/// Tells `output` the player couldn't start.
+fn unstarted(output: &dyn PlayerOutput) {
+    output.status(Status {
+        state: State::Failed(Failure::Internal),
+        position: Duration::ZERO,
+        duration: Duration::ZERO,
+        sound: false,
+    });
 }

@@ -6,9 +6,10 @@
 //!   own, streaming the file from the engine ([`Core::file_stream`](crate::bridge::Core::file_stream), through
 //!   the card's [`PictureSource`]: no view builds a request), played by `GStreamer`, each frame shown here through
 //!   GPUI's external surface, its sound on the speaker of the devices the app gave ([`set_playback`]).
-//! - **The controls**, as Teams' player has them: play/pause, back 10 s, forward 10 s, mute, "More options" (open in
-//!   the browser, download, copy link), full screen (the video over the whole window, the window full screen; Esc or
-//!   the button leaves it) and "Open in browser" (Stream's player, where Teams pops the video out). The seek bar seeks
+//! - **The controls**, as Teams' player has them: play/pause, back 10 s, forward 10 s, mute (its volume slider beside
+//!   it while the pointer is on it), the time (`0:10 / 1:52`), "More options" (open in the browser, download, copy link), full screen (the video over the whole
+//!   window, the window full screen; Esc or the button leaves it) and "Open in browser" (Stream's player, where Teams
+//!   pops the video out). The seek bar seeks
 //!   where it is clicked or dragged to, its tooltip the time. While it plays the controls show only while the pointer
 //!   is on the video; paused, always. Space plays or pauses, Left and Right go 10 s back or forward, M mutes.
 //! - **Its states**: loading and buffering show a spinner over the picture; a video that can't be played here (a
@@ -18,7 +19,12 @@
 //!   pauses the others, as in Teams.
 //! - **In a meeting's recap** ([`crate::recap_view`]) the same player fills its column at 16:9 ([`VideoPlayer::filling`])
 //!   and is told where to play from ([`VideoPlayer::play_from`]: a transcript's paragraph clicked), the recap reading its
-//!   position to follow the transcript ([`VideoPlayer::position`]).
+//!   position to follow the transcript ([`VideoPlayer::position`]). It streams the recording as Teams' Recap player
+//!   does ([`VideoPlayer::streaming`]): its DASH presentation and parts from the engine
+//!   ([`Core::recording_presentation`](crate::bridge::Core::recording_presentation)), played by the same `GStreamer`
+//!   player ([`Player::open_stream`]). That plays a recording whose download is blocked (an attendee's view of
+//!   another's meeting), which the file's download link refuses; a recording that can't be streamed (not processed
+//!   yet) is played from its download link, as any shared video, before the player says it can't be opened.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -40,7 +46,8 @@ use gpui_component::tooltip::Tooltip;
 use teams_core::{EngineError, FileStream};
 use teams_media::devices::{PixelFormat, VideoFrame};
 use teams_media::player::{
-    Abandon, ByteSource, ByteStream, Command, Failure, Player, PlayerOutput, PlayerSetup, SourceError, State, Status,
+    Abandon, ByteSource, ByteStream, Command, Failure, Part, Player, PlayerOutput, PlayerSetup, SegmentSource,
+    SourceError, Span, State, Status, Track, TrackKind,
 };
 use teams_proto::chat::{FileKind, SharedFile};
 
@@ -109,6 +116,85 @@ impl ByteStream for EngineStream {
     }
 }
 
+/// A meeting recording, where it is: the drive and the item that hold it (a recap part's), streamed by them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recording {
+    pub drive: String,
+    pub item: String,
+}
+
+/// A meeting recording's presentation and parts as the engine streams them, for the player's threads.
+struct EngineParts {
+    source: PictureSource,
+    /// The recording's sharing link: its personal site.
+    link: String,
+    recording: Recording,
+    /// The presentation as the engine read it: its parts' addresses.
+    read: Mutex<Option<Arc<teams_proto::Presentation>>>,
+}
+
+impl SegmentSource for EngineParts {
+    fn presentation(&self, abandon: &Abandon) -> Result<teams_media::player::Presentation, SourceError> {
+        let asked = self.source.engine().recording_presentation(
+            self.link.clone(),
+            self.recording.drive.clone(),
+            self.recording.item.clone(),
+        );
+        let presentation = match abandon.wait_for(asked) {
+            None => return Err(SourceError::Stopped),
+            Some(Ok(presentation)) => presentation,
+            Some(Err(error)) => return Err(source_error(&error)),
+        };
+        let played = played(&presentation);
+        *self.read.lock().unwrap_or_else(PoisonError::into_inner) = Some(presentation);
+        Ok(played)
+    }
+
+    fn part(&self, track: usize, part: Part, abandon: &Abandon) -> Result<Vec<u8>, SourceError> {
+        let link = {
+            let read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
+            let track = read.as_ref().and_then(|read| read.tracks.get(track));
+            match (track, part) {
+                (Some(track), Part::Init) => Some(track.init().clone()),
+                (Some(track), Part::Media(index)) => track.segment(index),
+                (None, _) => None,
+            }
+        };
+        let link = link.ok_or(SourceError::Unavailable)?;
+        match abandon.wait_for(self.source.engine().recording_segment(link)) {
+            None => Err(SourceError::Stopped),
+            Some(Ok(bytes)) => Ok(bytes),
+            Some(Err(error)) => Err(source_error(&error)),
+        }
+    }
+}
+
+/// The presentation as the player plays it: its length and its tracks' times.
+fn played(presentation: &teams_proto::Presentation) -> teams_media::player::Presentation {
+    teams_media::player::Presentation {
+        duration: Duration::from_millis(presentation.duration_ms),
+        tracks: presentation
+            .tracks
+            .iter()
+            .map(|track| Track {
+                kind: match track.kind {
+                    teams_proto::TrackKind::Audio => TrackKind::Audio,
+                    teams_proto::TrackKind::Video => TrackKind::Video,
+                },
+                timescale: track.timescale,
+                segments: track
+                    .segments
+                    .iter()
+                    .map(|segment| Span {
+                        start: segment.start,
+                        duration: segment.duration,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 fn source_error(error: &EngineError) -> SourceError {
     match error {
         EngineError::FileUnavailable => SourceError::Unavailable,
@@ -161,6 +247,26 @@ struct FullScreen {
     hooked: bool,
 }
 
+/// How loud it plays, and its slider.
+struct Volume {
+    /// From 0 (silent) to 1 (as recorded).
+    level: f32,
+    /// The slider is dragged.
+    adjusting: bool,
+    /// Where the slider was drawn, for a click's place on it.
+    bar: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Self {
+            level: 1.0,
+            adjusting: false,
+            bar: Rc::new(Cell::new(None)),
+        }
+    }
+}
+
 /// One card's player (see the module docs).
 pub struct VideoPlayer {
     /// The card's id: the message's and the file's place.
@@ -173,6 +279,7 @@ pub struct VideoPlayer {
     surface: Arc<PixelSurface>,
     drawn: Option<(u64, Arc<PixelFrame>)>,
     muted: bool,
+    volume: Volume,
     full_screen: FullScreen,
     /// Where the seek bar was drawn, for a click's place on it.
     bar: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -182,6 +289,10 @@ pub struct VideoPlayer {
     fill: bool,
     /// Where to go once the file opened: asked before the player had a place to seek in.
     pending_seek: Option<Duration>,
+    /// The meeting recording it streams (a recap's player), rather than its file's bytes.
+    recording: Option<Recording>,
+    /// The recording couldn't be streamed: it plays from its file's download link instead.
+    streamed_failed: bool,
     focus: FocusHandle,
     _woken: Task<()>,
 }
@@ -203,6 +314,7 @@ impl VideoPlayer {
             while woken.recv().await.is_ok() {
                 let alive = this.update(cx, |this, cx| {
                     this.status = *this.screen.status.lock().unwrap_or_else(PoisonError::into_inner);
+                    this.fall_back(cx);
                     this.seek_when_open(cx);
                     cx.notify();
                 });
@@ -226,11 +338,14 @@ impl VideoPlayer {
             surface: PixelSurface::new(),
             drawn: None,
             muted: false,
+            volume: Volume::default(),
             full_screen: FullScreen::default(),
             bar: Rc::new(Cell::new(None)),
             dragging: None,
             fill: false,
             pending_seek: None,
+            recording: None,
+            streamed_failed: false,
             focus: cx.focus_handle(),
             _woken: task,
         }
@@ -240,6 +355,13 @@ impl VideoPlayer {
     #[must_use]
     pub fn filling(mut self) -> Self {
         self.fill = true;
+        self
+    }
+
+    /// The player of a meeting recording: it streams `recording` as Teams' Recap player does (see the module docs).
+    #[must_use]
+    pub fn streaming(mut self, recording: Recording) -> Self {
+        self.recording = Some(recording);
         self
     }
 
@@ -302,31 +424,61 @@ impl VideoPlayer {
             pause_others(cx);
         }
         match &self.player {
-            None => {
-                let Some(share_url) = self.file.share_url.clone() else {
-                    return;
-                };
-                let bytes = Arc::new(EngineBytes {
-                    source: self.source.clone(),
-                    share_url,
-                });
-                let setup = cx
-                    .try_global::<Playback>()
-                    .map(|playback| playback.0.clone())
-                    .unwrap_or_default();
-                let output: Arc<dyn PlayerOutput> = self.screen.clone();
-                // a player whose thread couldn't be made told its failure to the screen already
-                self.player = Player::open(bytes, setup, output, true);
-                if self.muted
-                    && let Some(player) = &self.player
-                {
-                    player.send(Command::Muted(true));
-                }
-            }
+            None => self.open(cx),
             Some(player) if self.playing() => player.send(Command::Pause),
             Some(player) => player.send(Command::Play),
         }
         cx.notify();
+    }
+
+    /// Opens it and plays it: a recording streamed, else (or once its stream couldn't be had) the file's bytes.
+    fn open(&mut self, cx: &mut Context<Self>) {
+        let Some(share_url) = self.file.share_url.clone() else {
+            return;
+        };
+        let setup = cx
+            .try_global::<Playback>()
+            .map(|playback| playback.0.clone())
+            .unwrap_or_default();
+        let output: Arc<dyn PlayerOutput> = self.screen.clone();
+        // a player whose thread couldn't be made told its failure to the screen already
+        self.player = if let Some(recording) = self.recording.clone().filter(|_| !self.streamed_failed) {
+            let parts = Arc::new(EngineParts {
+                source: self.source.clone(),
+                link: share_url,
+                recording,
+                read: Mutex::new(None),
+            });
+            Player::open_stream(parts, setup, output, true)
+        } else {
+            let bytes = Arc::new(EngineBytes {
+                source: self.source.clone(),
+                share_url,
+            });
+            Player::open(bytes, setup, output, true)
+        };
+        if let Some(player) = &self.player {
+            if self.muted {
+                player.send(Command::Muted(true));
+            }
+            if self.volume.level < 1.0 {
+                player.send(Command::Volume(f64::from(self.volume.level)));
+            }
+        }
+    }
+
+    /// A recording whose stream can't be had (not processed yet, or refused) is played from its file's download link
+    /// instead, once; only when that fails too does the player say it can't be opened.
+    fn fall_back(&mut self, cx: &mut Context<Self>) {
+        if self.recording.is_none() || self.streamed_failed || self.state() != Some(State::Failed(Failure::Unavailable))
+        {
+            return;
+        }
+        self.streamed_failed = true;
+        self.player = None;
+        self.status = None;
+        *self.screen.status.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.open(cx);
     }
 
     /// Goes `back` or forward by [`SKIP`].
@@ -358,6 +510,23 @@ impl VideoPlayer {
             }
             cx.notify();
         }
+    }
+
+    /// Sets how loud it plays from the place `position` is on the volume slider; a sound turned up is unmuted.
+    fn set_volume_at(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(bar) = self.volume.bar.get() else {
+            return;
+        };
+        let width = f32::from(bar.size.width).max(1.0);
+        let level = (f32::from(position.x - bar.origin.x) / width).clamp(0.0, 1.0);
+        self.volume.level = level;
+        if let Some(player) = &self.player {
+            player.send(Command::Volume(f64::from(level)));
+        }
+        if self.muted && level > 0.0 {
+            self.toggle_mute(cx);
+        }
+        cx.notify();
     }
 
     fn toggle_mute(&mut self, cx: &mut Context<Self>) {
@@ -782,14 +951,116 @@ impl VideoPlayer {
                 Some("10"),
                 cx.listener(|this, _, _, cx| this.skip(false, cx)),
             ))
+            .child(self.sound(volume_glyph, volume_tip, cx))
+            .children(self.times())
+    }
+
+    /// The sound's button and, while the pointer is on it (or it is dragged), its volume slider, as Teams' player has
+    /// them.
+    fn sound(&self, glyph: Glyph, tip: &'static str, cx: &mut Context<Self>) -> Div {
+        let group = SharedString::from(format!("video-sound-{}", self.id));
+        let level = if self.muted { 0.0 } else { self.volume.level };
+        let bar = Rc::clone(&self.volume.bar);
+        let id = self.id.clone();
+        let slider = div()
+            .id("video-volume")
+            .debug_selector(move || format!("video-volume-{id}"))
+            .relative()
+            .h(px(14.0))
+            .w(px(64.0))
+            .ml_1()
+            .cursor_pointer()
+            .tooltip(|window, cx| Tooltip::new("Volume").build(window, cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.volume.adjusting = true;
+                    this.set_volume_at(event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if this.volume.adjusting && event.pressed_button == Some(MouseButton::Left) {
+                    this.set_volume_at(event.position, cx);
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::end_volume))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::end_volume))
+            .child(
+                canvas(move |bounds, _, _| bar.set(Some(bounds)), |_, (), _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(5.5))
+                    .h(px(3.0))
+                    .rounded_full()
+                    .bg(hsla(0.0, 0.0, 1.0, 0.35))
+                    .child(div().h_full().w(relative(level)).rounded_full().bg(gpui::rgb(ON_VIDEO))),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .left(relative(level))
+                    .ml(px(-5.0))
+                    .size(px(10.0))
+                    .rounded_full()
+                    .bg(gpui::rgb(ON_VIDEO)),
+            );
+        let shown = self.volume.adjusting;
+        div()
+            .group(group.clone())
+            .flex()
+            .items_center()
             .child(control(
-                id,
+                &self.id,
                 "mute",
-                volume_glyph,
-                volume_tip,
+                glyph,
+                tip,
                 None,
                 cx.listener(|this, _, _, cx| this.toggle_mute(cx)),
             ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .w(px(if shown { 72.0 } else { 0.0 }))
+                    .group_hover(group, |style| style.w(px(72.0)))
+                    .child(slider),
+            )
+    }
+
+    fn end_volume(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.volume.adjusting {
+            self.volume.adjusting = false;
+            cx.notify();
+        }
+    }
+
+    /// Where it plays and its length (`0:10 / 1:52`), as Teams' player shows them beside its sound's button, once its
+    /// length is known.
+    fn times(&self) -> Option<Div> {
+        let status = self.status.filter(|status| !status.duration.is_zero())?;
+        let id = self.id.clone();
+        Some(
+            div()
+                .debug_selector(move || format!("video-time-{id}"))
+                .pl_2()
+                .text_xs()
+                .text_color(gpui::rgb(ON_VIDEO))
+                .whitespace_nowrap()
+                .child(format!(
+                    "{} / {}",
+                    clock(status.position.min(status.duration)),
+                    clock(status.duration)
+                )),
+        )
     }
 
     /// "More options", full screen and the browser.

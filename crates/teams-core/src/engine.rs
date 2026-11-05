@@ -616,6 +616,13 @@ enum Request {
     MeetingContents(String, Responder<Vec<teams_proto::MeetingContent>>),
     /// A meeting transcript's `WebVTT`, by its address on its item ([`crate::recap`]).
     MeetingTranscript(String, Responder<String>),
+    /// A meeting recording's DASH presentation, by its item ([`crate::recap`]).
+    RecordingPresentation(
+        teams_proto::RecordingManifest,
+        Responder<Arc<teams_proto::Presentation>>,
+    ),
+    /// A part of a meeting recording's presentation ([`crate::recap`]).
+    RecordingSegment(teams_proto::MediaSegmentLink, Responder<Vec<u8>>),
     Write(Action, Responder<OutboxEntry>),
     /// A read receipt already queued while the engine waited on the service.
     SendQueued(i64, Responder<OutboxEntry>),
@@ -1369,6 +1376,26 @@ impl EngineRequests {
         self.ask(|reply| Request::MeetingTranscript(location, reply))
     }
 
+    /// The DASH presentation of the meeting recording that is item `item` of drive `drive` on the personal site `link`
+    /// is on (its sharing link), read now ([`crate::recap`]), as Teams' Recap player streams it: what the recap plays a
+    /// recording by, its download blocked or not. [`EngineError::FileUnavailable`] when the account can't watch it or
+    /// it can't be streamed (not processed yet, an answer the player can't play), [`EngineError::FileUnread`] when the
+    /// read failed on the way.
+    pub fn recording_presentation(&self, link: &str, drive: &str, item: &str) -> Reply<Arc<teams_proto::Presentation>> {
+        let Some(manifest) = teams_proto::RecordingManifest::of(link, drive, item) else {
+            return Reply::ready(Err(EngineError::FileUnavailable));
+        };
+        self.ask(|reply| Request::RecordingPresentation(manifest, reply))
+    }
+
+    /// A part (an initialization or a media segment) of a meeting recording's presentation
+    /// ([`Self::recording_presentation`]), read now ([`crate::recap`]): [`EngineError::FileUnavailable`] when it is
+    /// refused (its address expired: the presentation is read again), [`EngineError::FileUnread`] when the read failed
+    /// on the way.
+    pub fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {
+        self.ask(|reply| Request::RecordingSegment(part, reply))
+    }
+
     /// The size of the file a message carries, by its sharing link, as its item gives it ([`crate::file_content`]);
     /// its download link is kept for the reads that follow, so asking early spares the first read that wait.
     pub fn file_size(&self, share_url: impl Into<String>) -> Reply<u64> {
@@ -1880,6 +1907,8 @@ where
             Request::UploadFile(path, reply) => self.uploads.upload(path, reply),
             Request::MeetingContents(thread, reply) => self.recaps.contents(thread, reply),
             Request::MeetingTranscript(location, reply) => self.recaps.transcript(&location, reply),
+            Request::RecordingPresentation(manifest, reply) => self.recaps.presentation(manifest, reply),
+            Request::RecordingSegment(part, reply) => self.recaps.segment(part, reply),
             Request::Write(action, reply) => {
                 let _ = reply.send(self.logged_write(action).await);
             }

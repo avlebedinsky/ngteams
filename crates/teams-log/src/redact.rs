@@ -37,9 +37,10 @@ pub const OPAQUE_RUN: usize = 100;
 /// Header, JSON and form field names that always hold a credential, besides any name holding one of
 /// [`SECRET_WORDS`]: the bearer and cookie headers, Trouter's `connectparams` signature (`sig`, valid for days: a
 /// reconnect's credential), the registrar's push encryption key (`aesKey`), a SAS link's `sig`, a meeting's
-/// `passcode`, a SharePoint pre-authenticated link's `tempauth` (a file thumbnail's link Graph hands out), and a
-/// signed or keyed link's `key`, `apikey` or `api_key`.
-const SECRET_NAMES: [&str; 12] = [
+/// `passcode`, a SharePoint pre-authenticated link's `tempauth` (a file thumbnail's link Graph hands out), a signed or
+/// keyed link's `key`, `apikey` or `api_key`, and a meeting recording's part's signed item address (`docId`) and
+/// playback session (`PlaybackSessionData`), as the media transform service's addresses carry them.
+const SECRET_NAMES: [&str; 14] = [
     "authorization",
     "proxy-authorization",
     "cookie",
@@ -52,6 +53,8 @@ const SECRET_NAMES: [&str; 12] = [
     "key",
     "apikey",
     "api_key",
+    "docid",
+    "playbacksessiondata",
 ];
 
 /// Words a credential's name holds, wherever in the name (`X-Skypetoken`, `skypeToken`, `refresh_token`,

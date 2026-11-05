@@ -151,6 +151,21 @@ pub trait PictureEngine: Send + Sync {
         let _ = share_url;
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
+    /// As [`Core::recording_presentation`]; unavailable unless the engine streams recordings.
+    fn recording_presentation(
+        &self,
+        link: String,
+        drive: String,
+        item: String,
+    ) -> Reply<Arc<teams_proto::Presentation>> {
+        let _ = (link, drive, item);
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
+    /// As [`Core::recording_segment`]; unavailable unless the engine streams recordings.
+    fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {
+        let _ = part;
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
     /// As [`Core::reaction_animation`].
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>>;
     /// Which engine it is, for telling two sources apart.
@@ -179,6 +194,19 @@ impl PictureEngine for CoreEngine {
 
     fn file_size(&self, share_url: String) -> Reply<u64> {
         self.0.file_size(share_url)
+    }
+
+    fn recording_presentation(
+        &self,
+        link: String,
+        drive: String,
+        item: String,
+    ) -> Reply<Arc<teams_proto::Presentation>> {
+        self.0.recording_presentation(link, drive, item)
+    }
+
+    fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {
+        self.0.recording_segment(part)
     }
 
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>> {

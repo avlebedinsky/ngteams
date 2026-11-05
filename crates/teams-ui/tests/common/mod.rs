@@ -88,6 +88,9 @@ pub struct FakeCore {
     pub meeting_contents: Mutex<HashMap<String, Vec<teams_proto::MeetingContent>>>,
     /// The `WebVTT` `meeting_transcript` answers, by the transcript's location; any other can't be read.
     pub transcripts: Mutex<HashMap<String, String>>,
+    /// The meeting recordings `recording_presentation` streams (the made-up one, `support/recording_parts.rs`), by
+    /// their item; any other can't be had.
+    pub recordings: Mutex<HashSet<String>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
@@ -723,6 +726,20 @@ impl Core for FakeCore {
         )
     }
 
+    fn recording_presentation(&self, _: String, _: String, item: String) -> Reply<Arc<teams_proto::Presentation>> {
+        locked(&self.asked).push("recording_presentation");
+        if locked(&self.recordings).contains(&item) {
+            Reply::ready(Ok(made_up_presentation()))
+        } else {
+            Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+        }
+    }
+
+    fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {
+        // every streamed recording is the made-up one
+        Reply::ready(made_up_part(&made_up_presentation(), &part).ok_or(teams_core::EngineError::FileUnavailable))
+    }
+
     fn meeting_transcript(&self, location: String) -> Reply<String> {
         locked(&self.asked).push("meeting_transcript");
         Reply::ready(
@@ -1013,3 +1030,5 @@ impl Write for Written {
         Ok(())
     }
 }
+
+include!("../support/recording_parts.rs");

@@ -65,6 +65,10 @@ pub const MAX_BODY: usize = 4 * 1024 * 1024;
 /// message, a photo's original included, or a GIF at its full size; a longer one is [`HttpError::BodyTooLarge`].
 pub const MAX_PICTURE_BODY: usize = 24 * 1024 * 1024;
 
+/// The largest part of a meeting recording's presentation read ([`HttpTransport::media_segment`]), in bytes: a few
+/// seconds of a recording at a high bit rate; a longer one is [`HttpError::BodyTooLarge`].
+pub const MAX_SEGMENT_BODY: usize = 32 * 1024 * 1024;
+
 /// How long connecting may take.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1068,6 +1072,32 @@ impl<C: Credentials> HttpTransport<C> {
         self.exchange(outgoing).await
     }
 
+    /// Reads a part of a meeting recording's presentation (an initialization or a media segment) at its address on
+    /// the transform service ([`crate::MediaSegmentLink`]): a `GET` on [`Service::FileContent`] with no token of the
+    /// account's (the address carries its own credential), the address checked again before it goes
+    /// ([`crate::recording::is_media_link`]), with the one retry a 429 or 503 allows, as any read; its body up to
+    /// [`MAX_SEGMENT_BODY`].
+    ///
+    /// # Errors
+    /// As a read's: [`Refusal::NotAllowed`] for an address off the transform service, [`HttpError::Status`] for an
+    /// answer that isn't a success (an expired address's 401 or 403 among them: the caller reads the presentation
+    /// again).
+    pub async fn media_segment(&self, link: &crate::MediaSegmentLink) -> Result<Response, HttpError> {
+        let url = link.url();
+        if !crate::recording::is_media_link(url) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        let outgoing = Outgoing {
+            method: reqwest::Method::GET,
+            url,
+            service: Service::FileContent,
+            body: None,
+            headers: &[],
+            range: None,
+        };
+        self.exchange(outgoing).await
+    }
+
     /// Streams `len` bytes (at most [`MAX_STREAM`]) of a shared file from `offset`, at the download link Graph handed
     /// out for it: the [`HttpTransport::file_range`] `GET` (`Range: bytes=<first>-<last>`, no token of the account's,
     /// the link checked again before it goes), its answer handed back once its headers came and its body read part by
@@ -1699,8 +1729,11 @@ fn parse_mock_origin(origin: &str) -> Option<Url> {
 }
 
 /// The largest body read for a request to `url`: [`MAX_PICTURE_BODY`] from AMS's async gateway and Giphy's media host,
-/// [`MAX_BODY`] from anywhere else.
+/// [`MAX_SEGMENT_BODY`] from the media transform service, [`MAX_BODY`] from anywhere else.
 fn max_body(url: &Url) -> usize {
+    if url.host_str().is_some_and(crate::recording::is_media_host) {
+        return MAX_SEGMENT_BODY;
+    }
     if url
         .host_str()
         .is_some_and(|host| host.ends_with(AMS_HOST_SUFFIX) || host == GIPHY_HOST)

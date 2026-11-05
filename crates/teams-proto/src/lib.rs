@@ -35,6 +35,7 @@ mod own;
 mod post_read;
 mod read;
 pub mod recap;
+pub mod recording;
 mod recurrence;
 mod relay;
 mod request;
@@ -79,8 +80,8 @@ pub use giphy::{GiphyPicture, InlinePicture};
 pub use http::{
     AMS_HOST_SUFFIX, BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, EMOTICONS_HOST,
     Failure, FileBody, GIPHY_HOST, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY,
-    MAX_PICTURE_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, PROVISIONING_AUDIENCE, RELAY_HOST,
-    REQUEST_TIMEOUT, Refusal, STREAM_TIMEOUT, TROUTER_HOST,
+    MAX_PICTURE_BODY, MAX_RETRY_WAIT, MAX_SEGMENT_BODY, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, PROVISIONING_AUDIENCE,
+    RELAY_HOST, REQUEST_TIMEOUT, Refusal, STREAM_TIMEOUT, TROUTER_HOST,
 };
 pub use meeting::{MeetingCode, MeetingDetails, MeetingThread};
 #[cfg(feature = "test-support")]
@@ -102,6 +103,7 @@ pub use read::{
     TeamAbout, TeamsAnswer, object_id,
 };
 pub use recap::{MCPS_AUDIENCE, MeetingContent, MeetingContents, RecapPart, TranscriptLocation};
+pub use recording::{MediaSegmentLink, Presentation, PresentedTrack, RecordingManifest, TrackKind};
 pub use recurrence::{Pattern as RecurrencePattern, Recurrence, WeekIndex, Weekday};
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
 pub use request::Request;
