@@ -1,6 +1,6 @@
 ---
 name: task-dispatch
-description: Run a session as a task dispatcher in Claude Code or Codex. Send each incoming task to its own background agent, queue beyond the user's concurrency limit, isolate edits in git worktrees, track a resumable board and status page, and review landed work when the queue drains. Use for "agent per task", "dispatch these", "run tasks in parallel", "up to N agents", "resume the dispatch", or "continue dispatch", and subsequent tasks while dispatch mode is active. Reading or editing this skill alone does not activate dispatch mode.
+description: Run a session as a task dispatcher in Claude Code or Codex. Send each incoming task to its own background agent, queue beyond the user's concurrency limit, isolate edits in git worktrees, track a resumable board and status page, and review all landed work in one pass when the queue drains. Use for "agent per task", "dispatch these", "run tasks in parallel", "up to N agents", "resume the dispatch", or "continue dispatch", and subsequent tasks while dispatch mode is active. Reading or editing this skill alone does not activate dispatch mode.
 ---
 
 # Task dispatch
@@ -116,9 +116,10 @@ Give each worker a self-contained brief:
    assigned worktree and explicit reading of repository instructions when the host doesn't load them.
 2. State the complete expected behavior. Resolve reversible ambiguities reasonably and report choices. Return
    questions only for consequential missing decisions or required authorization. Apply relevant project skills.
-3. Run focused checks proportional to the change; ngteams specifics are in its reference. Use background shells
-   for long work, track handles/PIDs, and stop owned processes before handback. Preserve artifacts delivered to the
-   user and explicitly requested running applications. Don't kill other sessions' processes.
+3. Run focused checks proportional to the change; ngteams specifics are in its reference. Never run revmux or
+   another multi-agent review of the task's own change; the review pass covers it. Use background shells for long
+   work, track handles/PIDs, and stop owned processes before handback. Preserve artifacts delivered to the user and
+   explicitly requested running applications. Don't kill other sessions' processes.
 4. Commit editing work and land it with `<skill-dir>/scripts/land.sh` from the worktree, subject to existing user
    authorization and repository rules. This workflow doesn't override user restrictions on commit, merge, push,
    or review order. If landing is unavailable/unauthorized, preserve the branch and report it ready; don't mark it
@@ -144,7 +145,9 @@ they are. `--discard` is only for work the user explicitly dropped. Remove owned
 preserve requested output and applications. Never infer ownership from an unrelated process name.
 
 When no task is running or eligible to start and new commits landed since `review_base`, freeze `<base>..<head>`
-for one review/check pass in its own worktree. Don't repeat a failed pass endlessly: record the blocker and retain
+for one review/check pass in its own worktree. Review that whole range, every task landed since the last successful
+pass, as one round (one revmux task directory), never a round per task or commit; the only further round re-reviews
+the pass's own fixes when their size warrants it. Don't repeat a failed pass endlessly: record the blocker and retain
 the base until resolved. Tasks waiting on the user needn't prevent reviewing landed work. Size review/checks to
 what changed, follow repository review requirements, and fix findings in scope. The review worker follows the same
 isolation, process cleanup, commit, and landing conventions. New tasks may land while it runs, outside its frozen range.
