@@ -10,12 +10,13 @@
 //!   initials, name and time into the recording) with its paragraphs; the paragraph being spoken is highlighted and
 //!   kept in view while the recording plays, and a click on one plays the recording from there. Search finds the
 //!   paragraphs that hold its words ("1/3", Enter or the arrows go on, the match highlighted); Download saves the
-//!   `WebVTT` as Teams' "Download as .vtt" does.
+//!   `WebVTT` as Teams' "Download as .vtt" does. Its cues are also the recording's captions (the player's CC menu,
+//!   named by the transcript's language as its item's transcripts give it), synced to where it plays.
 //! - **Its states**: a spinner while the recap or a transcript is read; one that can't be read says so and offers to try
 //!   again, or Teams on the web; a meeting that left nothing says so.
 //!
-//! The engine reads everything ([`Core::meeting_contents`], [`Core::meeting_transcript`], the chat's stored messages
-//! for its shared files); no view builds a request.
+//! The engine reads everything ([`Core::meeting_contents`], [`Core::meeting_transcript`],
+//! [`Core::transcript_language`], the chat's stored messages for its shared files); no view builds a request.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use teams_proto::chat::SharedFile;
 use teams_proto::recap::{RecapPart, recap_link, recap_parts};
-use teams_proto::transcript::Turn;
+use teams_proto::transcript::{Cue, Turn, read_vtt};
 
 use crate::bridge::Core;
 use crate::clock;
@@ -45,7 +46,7 @@ use crate::recap::{
     transcript_file_name,
 };
 use crate::theme::{self, Palette};
-use crate::video_player::{Recording, VideoPlayer, clock as offset};
+use crate::video_player::{Captions, Recording, VideoPlayer, clock as offset};
 
 /// How far a turn's paragraphs stand in from its speaker's initials: past them, under the name.
 const TURN_INDENT: f32 = 36.0;
@@ -70,7 +71,12 @@ enum Contents {
 enum Read {
     Reading,
     Failed,
-    Shown { vtt: Arc<str>, transcript: Transcript },
+    Shown {
+        vtt: Arc<str>,
+        transcript: Transcript,
+        /// Its cues: the recording's captions.
+        cues: Arc<[Cue]>,
+    },
 }
 
 /// A meeting chat's Recap tab (see the module docs).
@@ -81,6 +87,8 @@ pub struct RecapView {
     contents: Contents,
     selected: usize,
     transcripts: HashMap<String, Read>,
+    /// Each transcript's language, by its address, once read (`None`: its item names none, or it couldn't be read).
+    languages: HashMap<String, Option<String>>,
     /// Each recording's player, by its sharing link (a part's place can change when the recap is read again).
     players: HashMap<String, (Entity<VideoPlayer>, Subscription)>,
     /// The paragraph being spoken, as last kept in view.
@@ -123,6 +131,7 @@ impl RecapView {
             contents: Contents::Reading,
             selected: 0,
             transcripts: HashMap::new(),
+            languages: HashMap::new(),
             players: HashMap::new(),
             spoken: None,
             wanted: None,
@@ -326,18 +335,21 @@ impl RecapView {
             return;
         }
         self.transcripts.insert(location.clone(), Read::Reading);
+        self.read_language(&location, cx);
         let reply = self.core.meeting_transcript(location.clone());
         cx.spawn(async move |this, cx| {
             let answer = reply.await;
             let _ = this.update(cx, |this, cx| {
-                let read = answer.ok().and_then(|vtt| Some((Transcript::of(&vtt)?, vtt))).map_or(
-                    Read::Failed,
-                    |(transcript, vtt)| Read::Shown {
+                let read = answer
+                    .ok()
+                    .and_then(|vtt| Some((Transcript::of(&vtt)?, read_vtt(&vtt)?, vtt)))
+                    .map_or(Read::Failed, |(transcript, cues, vtt)| Read::Shown {
                         vtt: vtt.into(),
                         transcript,
-                    },
-                );
+                        cues: cues.into(),
+                    });
                 this.transcripts.insert(location, read);
+                this.caption_players(cx);
                 // a search asked before the transcript came
                 if !this.query.is_empty() && this.search.is_none() {
                     let query = this.query.clone();
@@ -347,6 +359,44 @@ impl RecapView {
             });
         })
         .detach();
+    }
+
+    /// Reads the language of the transcript at `location` (once): what its captions are called.
+    fn read_language(&mut self, location: &str, cx: &mut Context<Self>) {
+        if self.languages.contains_key(location) {
+            return;
+        }
+        let reply = self.core.transcript_language(location.to_owned());
+        let location = location.to_owned();
+        cx.spawn(async move |this, cx| {
+            let language = reply.await.ok().flatten();
+            let _ = this.update(cx, |this, cx| {
+                this.languages.insert(location, language);
+                this.caption_players(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Hands each recording's player its transcript's cues as captions, once the transcript was read (with its
+    /// language, once that was read).
+    fn caption_players(&mut self, cx: &mut Context<Self>) {
+        let Some(parts) = self.parts() else { return };
+        let captioned: Vec<(Entity<VideoPlayer>, Captions)> = parts
+            .iter()
+            .filter_map(|part| {
+                let (player, _) = self.players.get(part.recording.as_ref()?)?;
+                let location = part.transcript.as_ref()?;
+                let Some(Read::Shown { cues, .. }) = self.transcripts.get(location) else {
+                    return None;
+                };
+                let language = self.languages.get(location).cloned().flatten();
+                Some((player.clone(), Captions::new(cues, language)))
+            })
+            .collect();
+        for (player, captions) in captioned {
+            player.update(cx, |player, cx| player.set_captions(Some(captions), cx));
+        }
     }
 
     /// The shown part's transcript, once read.
@@ -385,6 +435,7 @@ impl RecapView {
         });
         let watched = cx.observe(&player, |this, player, cx| this.follow(&player, cx));
         self.players.insert(link, (player.clone(), watched));
+        self.caption_players(cx);
         Some(player)
     }
 

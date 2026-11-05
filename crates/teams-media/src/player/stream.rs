@@ -26,7 +26,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
 use super::fmp4::{self, Codec, Sample, TrackInit};
-use super::run::{Input, Playing, Sound, audio_sink, failure_of, outlast, start_gstreamer, video_sink};
+use super::run::{Input, Playing, Sound, audio_sink, failure_of, outlast, start_gstreamer, tempo, video_sink};
 use super::source::{Abandon, SourceError};
 use super::{Command, Failure, PlayerOutput, PlayerSetup, State, Status};
 
@@ -281,6 +281,7 @@ pub(super) fn run(
         position: Duration::ZERO,
         duration: Duration::ZERO,
         sound: false,
+        rate: 1.0,
     };
     output.status(status);
     let sound = Arc::new(Mutex::new(Sound::default()));
@@ -363,7 +364,8 @@ fn rest(abandon: &Abandon, pause: Duration) -> bool {
 }
 
 /// The pipeline: per track an `appsrc` of its caps, `decodebin`, and its sink (the picture converted to BGRA; the
-/// sound converted, resampled and through a `volume`, whose `mute` and `volume` the commands set), paused; each
+/// sound through `scaletempo`, converted, resampled and through a `volume`, whose `mute` and `volume` the commands
+/// set), paused; each
 /// track's thread started.
 fn pipeline(
     streamed: &Arc<Streamed>,
@@ -383,12 +385,17 @@ fn pipeline(
             TrackKind::Audio => {
                 let volume = make("volume")?;
                 mute = Some(volume.clone());
-                vec![
+                // the decoder's samples converted for `scaletempo` (which keeps the pitch at another speed), then for
+                // the sink
+                let mut chain = vec![make("audioconvert")?];
+                chain.extend(tempo());
+                chain.extend([
                     make("audioconvert")?,
                     make("audioresample")?,
                     volume,
                     audio_sink(sound).upcast(),
-                ]
+                ]);
+                chain
             }
         };
         lanes.push(branch(&pipeline, &opened.init.codec, presentation.duration, &sink)?);

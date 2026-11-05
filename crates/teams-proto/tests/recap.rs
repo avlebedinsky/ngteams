@@ -6,7 +6,7 @@
 
 use teams_proto::recap::{
     ContentKind, MCPS_AUDIENCE, MeetingContent, MeetingContents, TranscriptLocation, recap_link, recap_parts,
-    recap_span,
+    recap_span, transcript_language,
 };
 use teams_proto::{Read as _, Service};
 
@@ -159,6 +159,38 @@ fn a_transcript_is_read_as_webvtt_on_its_personal_site() {
         "https://elsewhere.example/personal/lab_a/_api/v2.1/drives/d/items/i/media/transcripts/t/content".to_owned(),
     ] {
         assert_eq!(TranscriptLocation::of(&refused), None, "{refused}");
+    }
+}
+
+#[test]
+fn a_transcript_s_language_is_read_from_its_item_s_transcripts() {
+    let location = TranscriptLocation::of(&transcript_location("ITEM1", "t1")).expect("a location");
+    assert_eq!(location.id(), "t1");
+    assert_eq!(
+        location.languages_url(),
+        format!("{SITE}_api/v2.1/drives/b!drive1/items/ITEM1?select=media%2Ftranscripts&%24expand=media%2Ftranscripts")
+    );
+    // made up, in the shape the web client's player reads
+    let answer =
+        |transcripts: serde_json::Value| serde_json::json!({"media": {"transcripts": transcripts}}).to_string();
+    let both = answer(serde_json::json!([
+        {"id": "t0", "languageTag": "de-DE", "isDefault": true},
+        {"id": "t1", "languageTag": "en-US", "isDefault": false},
+    ]));
+    assert_eq!(transcript_language(both.as_bytes(), "t1").as_deref(), Some("en-US"));
+    // another id: the default one's
+    assert_eq!(transcript_language(both.as_bytes(), "t9").as_deref(), Some("de-DE"));
+    let no_default = answer(serde_json::json!([{"id": "t0", "languageTag": "de-DE"}]));
+    assert_eq!(transcript_language(no_default.as_bytes(), "t1"), None);
+    for refused in [
+        answer(serde_json::json!([{"id": "t1", "languageTag": "en US"}])),
+        answer(serde_json::json!([{"id": "t1", "languageTag": ""}])),
+        answer(serde_json::json!([{"id": "t1", "languageTag": "x".repeat(40)}])),
+        answer(serde_json::json!([{"id": "t1"}])),
+        serde_json::json!({"media": {}}).to_string(),
+        "not json".to_owned(),
+    ] {
+        assert_eq!(transcript_language(refused.as_bytes(), "t1"), None, "{refused}");
     }
 }
 

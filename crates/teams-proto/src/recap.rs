@@ -11,7 +11,9 @@
 //! - [`TranscriptLocation`] is where a transcript's `WebVTT` is read: the item's
 //!   `media/transcripts/<id>/streamContent?is=1&applymediaedits=false` on the personal site that holds it, with the
 //!   account's token for that site (the web client's own download of it, "Download as .vtt"). It is made only from a
-//!   transcript's `location` on a personal site ([`DriveSite`]); a transcript anywhere else is none.
+//!   transcript's `location` on a personal site ([`DriveSite`]); a transcript anywhere else is none. Its language (the
+//!   Recap player's captions menu names it) is read from the same item's transcripts
+//!   (`items/<item>?select=media/transcripts&$expand=media/transcripts`, [`transcript_language`]).
 //! - [`recap_parts`] pairs a meeting's recordings with their transcripts (by their item) into the parts the recap shows
 //!   (Teams' Part 1, Part 2), the earliest first; [`recap_link`] is the link Teams' Share → Copy link copies.
 
@@ -163,6 +165,10 @@ fn ticks_ms(text: &str) -> Option<i64> {
 pub struct TranscriptLocation {
     site: DriveSite,
     url: String,
+    /// The item's transcripts' address (their languages).
+    languages: String,
+    /// The transcript's id among them.
+    id: String,
 }
 
 impl TranscriptLocation {
@@ -221,7 +227,16 @@ impl TranscriptLocation {
             "{}_api/v2.1/drives/{drive}/items/{item}/media/transcripts/{id}/streamContent?is=1&applymediaedits=false",
             site.base()
         );
-        Some(Self { site, url })
+        let languages = format!(
+            "{}_api/v2.1/drives/{drive}/items/{item}?select=media%2Ftranscripts&%24expand=media%2Ftranscripts",
+            site.base()
+        );
+        Some(Self {
+            site,
+            url,
+            languages,
+            id: id.to_owned(),
+        })
     }
 
     /// The personal site the transcript is on: its token's audience.
@@ -235,6 +250,48 @@ impl TranscriptLocation {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    /// The address its item's transcripts are read at, as the web client's player reads them for their languages
+    /// ([`transcript_language`]).
+    #[must_use]
+    pub fn languages_url(&self) -> &str {
+        &self.languages
+    }
+
+    /// The transcript's id on its item.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// The longest language tag taken (BCP 47's longest in practice).
+const MAX_LANGUAGE_TAG: usize = 35;
+
+/// The language (a BCP 47 tag, `en-US`) of transcript `id` in the answer to its item's transcripts' read
+/// ([`TranscriptLocation::languages_url`]: `{media: {transcripts: [{id, languageTag, isDefault, …}]}}`): that
+/// transcript's, else the item's default one's; `None` when neither names one, or the tag isn't one.
+#[must_use]
+pub fn transcript_language(body: &[u8], id: &str) -> Option<String> {
+    fn tag_of(transcript: &Value) -> Option<&str> {
+        transcript.get("languageTag")?.as_str()
+    }
+    let answer: Value = serde_json::from_slice(body).ok()?;
+    let transcripts = answer.get("media")?.get("transcripts")?.as_array()?;
+    let tag = transcripts
+        .iter()
+        .find(|transcript| transcript.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(tag_of)
+        .or_else(|| {
+            transcripts
+                .iter()
+                .find(|transcript| transcript.get("isDefault").and_then(Value::as_bool) == Some(true))
+                .and_then(tag_of)
+        })?;
+    let fits = !tag.is_empty()
+        && tag.len() <= MAX_LANGUAGE_TAG
+        && tag.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    fits.then(|| tag.to_owned())
 }
 
 /// One part of a meeting's recap: a recording with its transcript, or a transcript of a meeting that wasn't recorded.

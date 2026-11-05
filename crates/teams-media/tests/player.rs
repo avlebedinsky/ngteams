@@ -161,6 +161,25 @@ fn a_movie_plays_to_its_end_with_its_frames_and_its_sound() {
     assert!(tone > 10.0 * amplitude_at(middle, 3_000.0));
 }
 
+/// Faster while it plays: the rest of the movie plays in about half its time, its sound still the tone.
+#[test]
+fn a_movie_plays_faster_as_it_plays() {
+    let (player, seen, speaker) = open(true);
+    seen.wait_for(State::Playing, Duration::from_secs(10));
+    let started = Instant::now();
+    player.send(Command::Rate(2.0));
+    seen.wait_for(State::Ended, Duration::from_secs(20));
+    assert!(
+        started.elapsed() < Duration::from_millis(1_700),
+        "{:?}",
+        started.elapsed()
+    );
+    let sound = speaker.0.lock().unwrap().clone();
+    assert!(sound.len() < 48_000 * 17 / 10, "{} samples", sound.len());
+    let tail = &sound[sound.len().saturating_sub(48_000 / 2)..];
+    assert!(amplitude_at(tail, 1_000.0) > 5.0 * amplitude_at(tail, 2_000.0));
+}
+
 #[test]
 fn a_paused_seek_shows_the_frame_there() {
     let (player, seen, speaker) = open(false);

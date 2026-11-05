@@ -43,6 +43,7 @@ impl Glyph {
     pub const HOUSE: Self = Self(include_bytes!("../assets/icons/house.svg"));
     pub const UPLOAD: Self = Self(include_bytes!("../assets/icons/arrow-up-from-line.svg"));
     pub const USER_PLUS: Self = Self(include_bytes!("../assets/icons/user-round-plus.svg"));
+    pub const CAPTIONS: Self = Self(include_bytes!("../assets/icons/captions.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
     pub const IMAGE: Self = Self(include_bytes!("../assets/icons/image.svg"));
     pub const IMAGE_PLUS: Self = Self(include_bytes!("../assets/icons/image-plus.svg"));

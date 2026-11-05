@@ -205,6 +205,59 @@ fn a_presentation_plays_to_its_end_with_its_frames_and_its_sound() {
     assert_eq!(source.presentation_reads.load(Ordering::SeqCst), 1);
 }
 
+/// Twice as fast, asked before it loaded: it plays its 3 s in about half the time, its sound handed to the speaker at
+/// the speaker's own pace (about 1.5 s of it) with the tone's pitch kept; a seek keeps the speed, and back at 1× it
+/// plays at its own pace again.
+#[test]
+fn a_presentation_plays_faster_its_sound_s_pitch_kept() {
+    let source = Arc::new(SlowParts::default());
+    let (player, seen, speaker) = open_with(source, false);
+    player.send(Command::Rate(2.0));
+    seen.wait_for(State::Paused, Duration::from_secs(10));
+    let started = Instant::now();
+    player.send(Command::Play);
+    seen.wait_for(State::Ended, Duration::from_secs(20));
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(2_500), "{took:?}");
+    assert!(took >= Duration::from_millis(1_300), "{took:?}");
+    let sound = speaker.0.lock().unwrap().clone();
+    assert!(
+        (48_000 * 12 / 10..48_000 * 2).contains(&sound.len()),
+        "{} samples",
+        sound.len()
+    );
+    let middle = &sound[48_000 / 4..48_000 * 3 / 4];
+    let tone = amplitude_at(middle, 1_000.0);
+    assert!(tone > 0.03, "{tone}");
+    assert!(tone > 5.0 * amplitude_at(middle, 2_000.0));
+    // a seek keeps the speed: the last 2 s play in about one
+    player.send(Command::Seek(Duration::from_secs(1)));
+    seen.wait_for(State::Paused, Duration::from_secs(10));
+    let started = Instant::now();
+    player.send(Command::Play);
+    seen.wait_for(State::Playing, Duration::from_secs(10));
+    seen.wait_for(State::Ended, Duration::from_secs(20));
+    assert!(
+        started.elapsed() < Duration::from_millis(1_800),
+        "{:?}",
+        started.elapsed()
+    );
+    // back at 1× (a rate past the slowest is kept to it, one that isn't a number is 1×)
+    player.send(Command::Rate(0.1));
+    player.send(Command::Rate(f64::NAN));
+    player.send(Command::Seek(Duration::from_secs(1)));
+    seen.wait_for(State::Paused, Duration::from_secs(10));
+    let started = Instant::now();
+    player.send(Command::Play);
+    seen.wait_for(State::Playing, Duration::from_secs(10));
+    seen.wait_for(State::Ended, Duration::from_secs(20));
+    assert!(
+        started.elapsed() >= Duration::from_millis(1_800),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 #[test]
 fn a_paused_seek_shows_the_frame_there_and_reads_from_its_segment() {
     let source = Arc::new(SlowParts::default());

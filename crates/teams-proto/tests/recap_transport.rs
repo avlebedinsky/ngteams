@@ -124,6 +124,34 @@ async fn a_transcript_is_read_on_its_personal_site_with_that_sites_token() {
 }
 
 #[tokio::test]
+async fn a_transcript_s_languages_are_read_on_its_personal_site_with_that_sites_token() {
+    let server = MockServer::start().await;
+    let tokens = Arc::new(FakeTokens::default());
+    let transport = transport(&server, &tokens);
+    Mock::given(method("GET"))
+        .and(path("/personal/lab_a/_api/v2.1/drives/b!drive1/items/ITEM1"))
+        .and(query_param("select", "media/transcripts"))
+        .and(query_param("$expand", "media/transcripts"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"media": {"transcripts": [{"id": "t1", "languageTag": "en-US"}]}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let location = TranscriptLocation::of(LOCATION).expect("a location");
+    let answer = transport
+        .meeting_transcript_languages(&location)
+        .await
+        .expect("the transcripts");
+    assert_eq!(
+        teams_proto::recap::transcript_language(answer.body(), location.id()).as_deref(),
+        Some("en-US")
+    );
+    assert_eq!(tokens.asked(), ["https://madeup-my.sharepoint.com"]);
+}
+
+#[tokio::test]
 async fn a_transcript_the_site_refuses_is_an_error() {
     let server = MockServer::start().await;
     let tokens = Arc::new(FakeTokens::default());

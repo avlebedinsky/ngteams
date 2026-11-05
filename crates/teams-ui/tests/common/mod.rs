@@ -750,6 +750,14 @@ impl Core for FakeCore {
         )
     }
 
+    fn transcript_language(&self, location: String) -> Reply<Option<String>> {
+        locked(&self.asked).push("transcript_language");
+        // every made-up transcript is in American English
+        Reply::ready(Ok(locked(&self.transcripts)
+            .contains_key(&location)
+            .then(|| "en-US".to_owned())))
+    }
+
     fn presence(&self, mri: String) -> Reply<Availability> {
         locked(&self.presence_asked).push(mri.clone());
         self.answer("presence", || {

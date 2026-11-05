@@ -616,6 +616,8 @@ enum Request {
     MeetingContents(String, Responder<Vec<teams_proto::MeetingContent>>),
     /// A meeting transcript's `WebVTT`, by its address on its item ([`crate::recap`]).
     MeetingTranscript(String, Responder<String>),
+    /// A meeting transcript's language, by its address on its item ([`crate::recap`]).
+    TranscriptLanguage(String, Responder<Option<String>>),
     /// A meeting recording's DASH presentation, by its item ([`crate::recap`]).
     RecordingPresentation(
         teams_proto::RecordingManifest,
@@ -1376,6 +1378,14 @@ impl EngineRequests {
         self.ask(|reply| Request::MeetingTranscript(location, reply))
     }
 
+    /// The language (a BCP 47 tag, `en-US`) of the meeting transcript at `location`, as its item's transcripts give
+    /// it, read now ([`crate::recap`]): the Recap player's captions menu names it. `None` when they name none;
+    /// [`EngineError::RecapUnread`] when it can't be read.
+    pub fn transcript_language(&self, location: impl Into<String>) -> Reply<Option<String>> {
+        let location = location.into();
+        self.ask(|reply| Request::TranscriptLanguage(location, reply))
+    }
+
     /// The DASH presentation of the meeting recording that is item `item` of drive `drive` on the personal site `link`
     /// is on (its sharing link), read now ([`crate::recap`]), as Teams' Recap player streams it: what the recap plays a
     /// recording by, its download blocked or not. [`EngineError::FileUnavailable`] when the account can't watch it or
@@ -1907,6 +1917,7 @@ where
             Request::UploadFile(path, reply) => self.uploads.upload(path, reply),
             Request::MeetingContents(thread, reply) => self.recaps.contents(thread, reply),
             Request::MeetingTranscript(location, reply) => self.recaps.transcript(&location, reply),
+            Request::TranscriptLanguage(location, reply) => self.recaps.language(&location, reply),
             Request::RecordingPresentation(manifest, reply) => self.recaps.presentation(manifest, reply),
             Request::RecordingSegment(part, reply) => self.recaps.segment(part, reply),
             Request::Write(action, reply) => {

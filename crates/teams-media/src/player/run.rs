@@ -11,7 +11,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
 use super::source::{Cache, SourceError};
-use super::{Command, Failure, PlayerOutput, PlayerSetup, State, Status};
+use super::{Command, Failure, PlayerOutput, PlayerSetup, RATES, State, Status};
 use crate::devices::{AudioFrame, AudioSink, FRAME_SAMPLES, PixelFormat, SAMPLE_RATE, VideoFrame};
 
 /// How long the loop waits on the bus before it looks at the commands again.
@@ -92,6 +92,7 @@ pub(super) fn run(
         position: Duration::ZERO,
         duration: Duration::ZERO,
         sound: false,
+        rate: 1.0,
     };
     output.status(status);
     let feed = Arc::new(Feed {
@@ -135,6 +136,9 @@ fn pipeline(
         .property("audio-sink", &audio)
         .build()
         .map_err(|_| Failure::NoCodec)?;
+    if let Some(tempo) = tempo() {
+        playbin.set_property("audio-filter", &tempo);
+    }
     let refused = Arc::clone(feed);
     playbin.connect("element-setup", false, move |values| {
         if let Some(element) = values.get(1).and_then(|value| value.get::<gst::Element>().ok())
@@ -160,6 +164,12 @@ fn pipeline(
         .set_state(gst::State::Paused)
         .map_err(|_| Failure::Unsupported)?;
     Ok(playbin)
+}
+
+/// The element that keeps the sound's pitch at another speed (`gst-plugins-good`'s `scaletempo`), when installed:
+/// without it a speed other than 1× would play the sound's samples faster than the speaker takes them.
+pub(super) fn tempo() -> Option<gst::Element> {
+    gst::ElementFactory::make("scaletempo").build().ok()
 }
 
 /// `GStreamer` started, with nothing plugged that it mustn't ([`nothing_that_fetches_or_probes`]).
@@ -390,6 +400,18 @@ pub(super) fn failure_of(error: SourceError) -> Failure {
     }
 }
 
+/// How far a player has loaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Load {
+    /// Its first preroll isn't done.
+    Prerolling,
+    /// Its first preroll is done (its length is known and it can seek), and the seek that sets a speed asked before
+    /// then is prerolling: it is played, or shown paused, once that is done.
+    SettingRate,
+    /// Loaded: it plays and seeks as asked.
+    Ready,
+}
+
 /// The playing pipeline and what the loop knows of it.
 pub(super) struct Playing {
     pipeline: gst::Element,
@@ -402,8 +424,8 @@ pub(super) struct Playing {
     status: Status,
     /// Asked to play (it plays once loaded).
     wants_play: bool,
-    /// The first preroll is done: the movie's length is known and it can seek.
-    loaded: bool,
+    /// How far it has loaded.
+    load: Load,
     told: Instant,
     /// Since when a read has waited for the network while playing (a stall is buffering after [`STALL`]).
     stalled_since: Option<Instant>,
@@ -435,9 +457,10 @@ impl Playing {
                 position: Duration::ZERO,
                 duration: Duration::ZERO,
                 sound: false,
+                rate: 1.0,
             },
             wants_play: play,
-            loaded: false,
+            load: Load::Prerolling,
             told: Instant::now(),
             stalled_since: None,
             format_unread: false,
@@ -480,20 +503,21 @@ impl Playing {
         match command {
             Command::Play => {
                 self.wants_play = true;
-                if self.loaded {
+                // played once the speed's seek prerolled, when one does
+                if self.load == Load::Ready {
                     self.play();
                 }
             }
             Command::Pause => {
                 self.wants_play = false;
-                if self.loaded && matches!(self.status.state, State::Playing | State::Buffering) {
+                if self.loaded() && matches!(self.status.state, State::Playing | State::Buffering) {
                     let _ = self.pipeline.set_state(gst::State::Paused);
                     self.status.state = State::Paused;
                     self.tell();
                 }
             }
             Command::Seek(at) | Command::SeekNear(at) => {
-                if self.loaded {
+                if self.loaded() {
                     // kept within the movie, once its length is known
                     let at = if self.status.duration.is_zero() {
                         at
@@ -518,6 +542,31 @@ impl Playing {
                     mute.set_property("volume", if level.is_finite() { level.clamp(0.0, 1.0) } else { 1.0 });
                 }
             }
+            Command::Rate(rate) => self.set_rate(rate),
+        }
+    }
+
+    /// Plays at `rate` (kept within [`RATES`]): a seek where it plays now, with the new rate, once it has loaded (until
+    /// then the rate is kept for its first play).
+    fn set_rate(&mut self, rate: f64) {
+        let (slowest, fastest) = (RATES[0], RATES[RATES.len() - 1]);
+        let rate = if rate.is_finite() {
+            rate.clamp(slowest, fastest)
+        } else {
+            1.0
+        };
+        if (rate - self.status.rate).abs() < f64::EPSILON {
+            return;
+        }
+        // every later seek keeps it
+        self.status.rate = rate;
+        self.tell();
+        if self.loaded() && self.status.state != State::Ended {
+            let at = self
+                .pipeline
+                .query_position::<gst::ClockTime>()
+                .map_or(self.status.position, |at| Duration::from_nanos(at.nseconds()));
+            self.seek_to(at, true);
         }
     }
 
@@ -547,25 +596,35 @@ impl Playing {
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_NEAREST
         };
         self.input.interrupt();
-        let _ = self
-            .pipeline
-            .seek_simple(flags, gst::ClockTime::from_nseconds(nanos(at)));
+        let _ = self.pipeline.seek(
+            self.status.rate,
+            flags,
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(nanos(at)),
+            gst::SeekType::None,
+            gst::ClockTime::NONE,
+        );
     }
 
     /// Takes one message of the bus.
     fn read(&mut self, message: &gst::Message) {
         use gst::MessageView;
         match message.view() {
-            MessageView::AsyncDone(_) if !self.loaded => {
-                self.loaded = true;
+            MessageView::AsyncDone(_) if self.load == Load::Prerolling => {
+                self.load = Load::Ready;
                 self.read_duration();
                 self.status.sound = self.setup.speaker.is_some();
-                if self.wants_play {
-                    self.play();
+                if (self.status.rate - 1.0).abs() >= f64::EPSILON {
+                    // a speed asked before it loaded: its seek prerolls before it plays
+                    self.load = Load::SettingRate;
+                    self.seek_to(Duration::ZERO, true);
                 } else {
-                    self.status.state = State::Paused;
-                    self.tell();
+                    self.start();
                 }
+            }
+            MessageView::AsyncDone(_) if self.load == Load::SettingRate => {
+                self.load = Load::Ready;
+                self.start();
             }
             MessageView::DurationChanged(_) => self.read_duration(),
             MessageView::Element(element) => self.missing_plugin(element.structure()),
@@ -587,6 +646,21 @@ impl Playing {
                 self.tell();
             }
             _ => {}
+        }
+    }
+
+    /// Its first preroll is done: its length is known and it can seek.
+    fn loaded(&self) -> bool {
+        self.load != Load::Prerolling
+    }
+
+    /// Loaded: played when asked to, else shown paused.
+    fn start(&mut self) {
+        if self.wants_play {
+            self.play();
+        } else {
+            self.status.state = State::Paused;
+            self.tell();
         }
     }
 

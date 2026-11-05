@@ -317,3 +317,40 @@ fn a_recap_that_held_nothing_is_read_again_when_shown_again() {
     click(cx, "chat-tab-recap");
     assert_eq!(asked(&rig, "meeting_contents"), 2);
 }
+
+#[test]
+fn each_part_s_recording_has_its_transcript_as_captions_named_by_its_language() {
+    let rig = rig(false);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chat_tab(ChatTab::Recap, window, cx)));
+    draw(cx);
+    // the transcript and its language read: the player's CC, its menu naming the language
+    assert_eq!(asked(&rig, "transcript_language"), 1);
+    assert!(cx.debug_bounds("video-captions-recap-0").is_some());
+    assert!(cx.debug_bounds("video-speed-recap-0").is_some());
+    assert!(cx.debug_bounds("video-settings-recap-0").is_some());
+    click(cx, "video-captions-recap-0");
+    assert!(cx.debug_bounds("video-captions-menu").is_some());
+    let player = |cx: &mut VisualTestContext, id: &str| {
+        cx.update(|_, cx| {
+            teams_ui::video_player::players(cx)
+                .into_iter()
+                .find(|player| player.read(cx).id() == id)
+        })
+        .expect("the part's player")
+    };
+    let first = player(cx, "recap-0");
+    assert!(cx.update(|_, cx| first.read(cx).captions().is_some()));
+    assert_eq!(
+        cx.update(|_, cx| first.read(cx).captions().map(teams_ui::video_player::Captions::label)),
+        Some("English (United States)".to_owned())
+    );
+    click(cx, "video-captions-on");
+    assert!(cx.update(|_, cx| teams_ui::video_player::CaptionStyle::current(cx).on));
+    // Part 2: its own transcript, its own captions, still on
+    click(cx, "recap-part-1");
+    assert_eq!(asked(&rig, "transcript_language"), 2);
+    let second = player(cx, "recap-1");
+    assert!(cx.update(|_, cx| second.read(cx).captions().is_some()));
+    assert!(cx.update(|_, cx| teams_ui::video_player::CaptionStyle::current(cx).on));
+}

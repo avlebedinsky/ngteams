@@ -170,3 +170,38 @@ async fn a_recording_that_can_t_be_streamed_is_unavailable_and_a_failed_read_unr
     assert_eq!(asked, 4);
     rig.handle.shutdown();
 }
+
+#[tokio::test]
+async fn a_transcript_s_language_is_read_from_its_item_s_transcripts() {
+    let rig = running_engine().await;
+    let location = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/_api/v2.1/drives/b!madeup/items/ITEM1/versions/current/media/transcripts/t1/content";
+    Mock::given(method("GET"))
+        .and(path(
+            "/personal/made_up_user_contoso_test/_api/v2.1/drives/b!madeup/items/ITEM1",
+        ))
+        .and(query_param("select", "media/transcripts"))
+        .and(header("authorization", "Bearer synthetic-site-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"media": {"transcripts": [{"id": "t1", "languageTag": "en-US", "isDefault": true}]}}),
+        ))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    assert_eq!(
+        rig.handle.transcript_language(location).await.unwrap().as_deref(),
+        Some("en-US")
+    );
+    // refused, and an address the app doesn't read
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&rig.server)
+        .await;
+    for location in [location, "https://example.com/no-transcript"] {
+        assert!(matches!(
+            rig.handle.transcript_language(location).await,
+            Err(EngineError::RecapUnread)
+        ));
+    }
+    assert_eq!(rig.server.received_requests().await.unwrap().len(), 2);
+    rig.handle.shutdown();
+}

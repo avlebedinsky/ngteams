@@ -1,6 +1,7 @@
 //! A meeting's recap, read when its Recap tab opens (`docs/protocol/recap.md`): what the meeting left, from MCPS
 //! ([`teams_proto::MeetingContents`]), and a transcript's `WebVTT`, from the personal site that holds it
-//! ([`teams_proto::TranscriptLocation`]), handed on as it came once it reads as a transcript. Nothing is stored and
+//! ([`teams_proto::TranscriptLocation`]), handed on as it came once it reads as a transcript, and its language, from its
+//! item's transcripts. Nothing is stored and
 //! nothing is written; the recording itself is played as any shared video is ([`crate::file_content`]).
 //!
 //! A read that fails, an answer in another shape, or a transcript address the app doesn't read is
@@ -14,6 +15,7 @@
 
 use std::sync::Arc;
 
+use teams_proto::recap::transcript_language;
 use teams_proto::recording::read_manifest;
 use teams_proto::transcript::{MAX_TRANSCRIPT, read_vtt};
 use teams_proto::{
@@ -99,6 +101,25 @@ impl<C: Credentials + 'static> Recaps<C> {
                 Ok(_) => Err(EngineError::RecapUnread),
                 Err(error) => {
                     log::info!("a meeting's transcript couldn't be read: {error}");
+                    Err(EngineError::RecapUnread)
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// The language of the transcript at `location` (a `TranscriptV2` content's), as its item's transcripts give it.
+    pub(crate) fn language(&self, location: &str, reply: Responder<Option<String>>) {
+        let Some(location) = TranscriptLocation::of(location) else {
+            let _ = reply.send(Err(EngineError::RecapUnread));
+            return;
+        };
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client.transport().meeting_transcript_languages(&location).await {
+                Ok(answer) => Ok(transcript_language(answer.body(), location.id())),
+                Err(error) => {
+                    log::info!("a meeting transcript's language couldn't be read: {error}");
                     Err(EngineError::RecapUnread)
                 }
             };

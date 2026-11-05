@@ -273,6 +273,7 @@ fn a_synthetic_movie_plays_pauses_and_seeks_without_opening_any_devices() {
                 position: Duration::from_secs(5),
                 duration: Duration::from_secs(30),
                 sound: false,
+                rate: 1.0,
             });
             view.skip(true, cx);
             assert_eq!(view.status.unwrap().position, Duration::ZERO);
@@ -464,6 +465,7 @@ fn the_frame_sink_accepts_only_packed_bgra_and_keeps_the_latest_frame_and_status
         position: Duration::from_secs(1),
         duration: Duration::from_secs(10),
         sound: false,
+        rate: 1.0,
     };
     screen.status(status);
     assert_eq!(*screen.status.lock().unwrap(), Some(status));
@@ -504,6 +506,7 @@ fn player_statuses_render_their_loading_and_failure_states_and_fullscreen_is_rev
             position: Duration::from_secs(5),
             duration: Duration::from_secs(30),
             sound: false,
+            rate: 1.0,
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -531,4 +534,248 @@ fn player_statuses_render_their_loading_and_failure_states_and_fullscreen_is_rev
             assert!(!view.full_screen.on);
         });
     });
+}
+
+/// Made-up captions over the made-up recording's 3 s: two cues, the second from 2 s.
+fn made_up_captions() -> Captions {
+    let cues = teams_proto::transcript::read_vtt(
+        "WEBVTT\n\nu/1-0\n00:00:00.000 --> 00:00:01.500\n<v Ada Lab>Hello everyone.</v>\n\n\
+         u/2-0\n00:00:02.000 --> 00:00:03.000\n<v Ada Lab>The second one.</v>",
+    )
+    .unwrap();
+    Captions::new(&cues, Some("en-US".to_owned()))
+}
+
+#[test]
+fn captions_follow_the_cues_and_are_named_by_their_language() {
+    let captions = made_up_captions();
+    assert_eq!(captions.at(Duration::from_millis(400)), Some("Hello everyone."));
+    assert_eq!(captions.at(Duration::from_millis(1_700)), None);
+    assert_eq!(captions.at(Duration::from_millis(2_500)), Some("The second one."));
+    assert_eq!(captions.at(Duration::from_secs(4)), None);
+    assert_eq!(captions.label(), "English (United States)");
+    assert_eq!(Captions::new(&[], Some("xx-YY".to_owned())).label(), "xx-YY");
+    assert_eq!(Captions::new(&[], None).label(), "On");
+    assert_eq!(language_name("de-de"), Some("German (Germany)"));
+    assert_eq!(rate_label(1.0), "1x");
+    assert_eq!(rate_label(1.5), "1.5x");
+    assert_eq!(rate_label(0.8), "0.8x");
+    let mut style = CaptionStyle {
+        on: true,
+        size: CaptionSize::Large,
+        color: CaptionColor::Purple,
+        transparent: true,
+    };
+    style.revert();
+    assert_eq!(
+        style,
+        CaptionStyle {
+            on: true,
+            ..CaptionStyle::default()
+        }
+    );
+    for color in CaptionColor::ALL {
+        let (words, background) = color.colors();
+        assert_ne!(words, background, "{}", color.label());
+    }
+}
+
+/// A recap's player (filling, streaming) with made-up captions, its caption style Teams' default.
+fn captioned(app: &mut gpui::TestAppContext) -> (Entity<VideoPlayer>, &mut gpui::VisualTestContext) {
+    app.update(crate::window::init);
+    app.update(|cx| cx.set_global(CaptionStyle::default()));
+    let engine = Arc::new(Recordings::default());
+    let source = PictureSource::of(engine);
+    let (view, cx) = app.add_window_view(|_, cx| {
+        let mut player = VideoPlayer::new("recap".to_owned(), movie_file(), source, cx)
+            .filling()
+            .streaming(recording("ITEM1"));
+        player.set_captions(Some(made_up_captions()), cx);
+        player
+    });
+    draw(cx);
+    (view, cx)
+}
+
+/// Where it plays, as its player would tell it.
+fn playing_at(view: &Entity<VideoPlayer>, position: Duration, cx: &mut gpui::VisualTestContext) {
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.status = Some(Status {
+                state: State::Playing,
+                position,
+                duration: Duration::from_secs(3),
+                sound: false,
+                rate: 1.0,
+            });
+            cx.notify();
+        });
+    });
+    draw(cx);
+}
+
+/// Waits until its player tells it plays at `rate`.
+fn wait_rate(view: &Entity<VideoPlayer>, cx: &mut gpui::VisualTestContext, rate: f64) {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        draw(cx);
+        let told = cx.update(|_, cx| view.read(cx).status.map(|status| status.rate));
+        if told.is_some_and(|told| (told - rate).abs() < f64::EPSILON) {
+            return;
+        }
+        assert!(Instant::now() < until, "told {told:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Turns captions on through the CC menu.
+fn turn_captions_on(view: &Entity<VideoPlayer>, cx: &mut gpui::VisualTestContext) {
+    click(cx, "video-captions-recap");
+    assert_eq!(cx.update(|_, cx| view.read(cx).menu()), Some(Menu::Captions));
+    assert!(cx.debug_bounds("video-captions-off").is_some());
+    click(cx, "video-captions-on");
+    assert_eq!(cx.update(|_, cx| view.read(cx).menu()), None);
+    assert!(cx.update(|_, cx| CaptionStyle::current(cx).on));
+}
+
+#[test]
+fn a_recap_s_captions_show_where_it_plays_once_turned_on() {
+    let mut app = gpui::TestAppContext::single();
+    let (view, cx) = captioned(&mut app);
+    // the recap's bar: captions, speed and settings in place of "More options"
+    for selector in ["video-captions-recap", "video-speed-recap", "video-settings-recap"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    assert!(cx.debug_bounds("video-more-recap").is_none());
+    turn_captions_on(&view, cx);
+    // where it plays, as its player tells it: shown while the first cue is spoken
+    let at = |position: Duration, cx: &mut gpui::VisualTestContext| playing_at(&view, position, cx);
+    let caption = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).caption(cx).map(str::to_owned));
+    at(Duration::from_millis(500), cx);
+    assert!(cx.debug_bounds("video-caption-recap").is_some());
+    assert_eq!(caption(cx), Some("Hello everyone.".to_owned()));
+    // between cues, none
+    at(Duration::from_millis(1_700), cx);
+    assert!(cx.debug_bounds("video-caption-recap").is_none());
+    // a seek: the cue spoken there, as soon as the bar shows its place
+    at(Duration::from_millis(2_200), cx);
+    assert_eq!(caption(cx), Some("The second one.".to_owned()));
+    // C turns them off, and on again
+    cx.simulate_keystrokes("c");
+    assert!(!cx.update(|_, cx| CaptionStyle::current(cx).on));
+    assert_eq!(caption(cx), None);
+    cx.simulate_keystrokes("c");
+    assert!(cx.update(|_, cx| CaptionStyle::current(cx).on));
+    // the menu's Off turns them off
+    click(cx, "video-captions-recap");
+    click(cx, "video-captions-off");
+    assert!(!cx.update(|_, cx| CaptionStyle::current(cx).on));
+}
+
+#[test]
+fn a_recap_plays_at_the_speed_chosen_and_keeps_it() {
+    let mut app = gpui::TestAppContext::single();
+    let (view, cx) = captioned(&mut app);
+    let rate = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).rate());
+    // chosen before it plays: kept for its first play
+    click(cx, "video-speed-recap");
+    assert_eq!(cx.update(|_, cx| view.read(cx).menu()), Some(Menu::Speed));
+    for selector in ["video-rate-0.8x", "video-rate-1x", "video-rate-1.2x", "video-rate-1.8x"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    click(cx, "video-rate-2x");
+    assert!((rate(cx) - 2.0).abs() < f64::EPSILON);
+    assert_eq!(cx.update(|_, cx| view.read(cx).menu()), None);
+    click(cx, "video-play-recap");
+    // its player is told the speed when it opens, and tells it back (teams-media's tests time the speed itself)
+    wait_rate(&view, cx, 2.0);
+    // and while it plays
+    wait_state(&view, cx, State::Playing);
+    click(cx, "video-speed-recap");
+    click(cx, "video-rate-1.5x");
+    wait_rate(&view, cx, 1.5);
+    cx.update(|_, cx| view.update(cx, VideoPlayer::pause));
+    // X and Z step through the speeds, none past the fastest or the slowest
+    cx.simulate_keystrokes("x x x");
+    assert!((rate(cx) - 2.0).abs() < f64::EPSILON);
+    for _ in 0..6 {
+        cx.simulate_keystrokes("z");
+    }
+    assert!((rate(cx) - 0.8).abs() < f64::EPSILON);
+    cx.simulate_keystrokes("x");
+    assert!((rate(cx) - 1.0).abs() < f64::EPSILON);
+    // its button opens and closes its menu; Esc closes it too
+    click(cx, "video-speed-recap");
+    click(cx, "video-speed-recap");
+    assert_eq!(cx.update(|_, cx| view.read(cx).menu()), None);
+    click(cx, "video-speed-recap");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(cx.update(|_, cx| view.read(cx).menu()), None);
+}
+
+#[test]
+fn the_settings_set_the_captions_look_and_show_the_quality_and_keys() {
+    let mut app = gpui::TestAppContext::single();
+    let (view, cx) = captioned(&mut app);
+    let style = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| CaptionStyle::current(cx));
+    let menu = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).menu());
+    click(cx, "video-settings-recap");
+    assert_eq!(menu(cx), Some(Menu::Settings(Page::Main)));
+    // no quality before a frame came
+    assert!(cx.debug_bounds("video-settings-quality").is_none());
+    click(cx, "video-settings-captions");
+    click(cx, "video-settings-size");
+    click(cx, "video-caption-size-large");
+    assert_eq!(style(cx).size, CaptionSize::Large);
+    assert_eq!(menu(cx), Some(Menu::Settings(Page::Captions)));
+    click(cx, "video-settings-color");
+    click(cx, "video-caption-color-purple-reverse");
+    assert_eq!(style(cx).color, CaptionColor::PurpleReverse);
+    click(cx, "video-settings-transparency");
+    assert!(style(cx).transparent);
+    click(cx, "video-settings-revert");
+    assert_eq!(style(cx), CaptionStyle::default());
+    click(cx, "video-menu-back");
+    click(cx, "video-settings-keys");
+    assert_eq!(menu(cx), Some(Menu::Settings(Page::Keys)));
+    // the gear closes its menu
+    click(cx, "video-settings-recap");
+    assert_eq!(menu(cx), None);
+    // a click on the picture closes a menu, and doesn't play
+    click(cx, "video-settings-recap");
+    click(cx, "video-screen-recap");
+    assert_eq!(menu(cx), None);
+    assert_eq!(cx.update(|_, cx| view.read(cx).state()), None);
+    // once a frame came, its quality: the picture's height
+    cx.update(|_, cx| {
+        view.read(cx).screen.frame(VideoFrame {
+            width: 320,
+            height: 180,
+            format: PixelFormat::Bgra,
+            stride: 1_280,
+            data: vec![0; 1_280 * 180],
+        });
+    });
+    click(cx, "video-settings-recap");
+    click(cx, "video-settings-quality");
+    click(cx, "video-quality-180");
+    assert_eq!(menu(cx), None);
+}
+
+#[test]
+fn a_chat_s_video_keeps_its_own_bar() {
+    let mut app = gpui::TestAppContext::single();
+    app.update(crate::window::init);
+    let source = PictureSource::of(Arc::new(Files::default()));
+    let (_view, cx) = app.add_window_view(|_, cx| {
+        let mut player = VideoPlayer::new("card".to_owned(), movie_file(), source, cx);
+        // captions alone don't make a chat's card a recap's player
+        player.set_captions(Some(made_up_captions()), cx);
+        player
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("video-more-card").is_some());
+    for selector in ["video-captions-card", "video-speed-card", "video-settings-card"] {
+        assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+    }
 }

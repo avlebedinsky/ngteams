@@ -136,6 +136,18 @@ impl<C: Credentials> HttpTransport<C> {
         self.drive_read(transcript.site(), transcript.url()).await
     }
 
+    /// A meeting transcript's item's transcripts, read on the personal site that holds it with that site's token: their
+    /// languages ([`crate::recap::transcript_language`]).
+    ///
+    /// # Errors
+    /// Returns transport, credentials, or unsuccessful service responses.
+    pub async fn meeting_transcript_languages(
+        &self,
+        transcript: &crate::TranscriptLocation,
+    ) -> Result<Response, HttpError> {
+        self.drive_read(transcript.site(), transcript.languages_url()).await
+    }
+
     /// A meeting recording's DASH presentation, read on the personal site that holds it with that site's token and
     /// the headers the web client's player asks it with ([`crate::RecordingManifest`],
     /// [`crate::recording::MANIFEST_HEADERS`]); the answer is read by [`crate::recording::read_manifest`].

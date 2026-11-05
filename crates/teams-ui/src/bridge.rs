@@ -117,6 +117,12 @@ pub trait Core: Send + Sync + 'static {
         let _ = location;
         Reply::ready(Err(teams_core::EngineError::RecapUnread))
     }
+    /// The language (a BCP 47 tag, `en-US`) of the meeting transcript at `location`, as its item's transcripts give it:
+    /// what the recap player's captions menu names. A fake without transcripts knows none.
+    fn transcript_language(&self, location: String) -> Reply<Option<String>> {
+        let _ = location;
+        Reply::ready(Ok(None))
+    }
     /// The DASH presentation of the meeting recording that is item `item` of drive `drive` on the personal site of
     /// its sharing link `link`, as Teams' Recap player streams it: what a recap plays a recording by, its download
     /// blocked or not. A fake without recordings answers that it can't be had.
@@ -640,6 +646,10 @@ impl Core for EngineRequests {
 
     fn meeting_transcript(&self, location: String) -> Reply<String> {
         EngineRequests::meeting_transcript(self, location)
+    }
+
+    fn transcript_language(&self, location: String) -> Reply<Option<String>> {
+        EngineRequests::transcript_language(self, location)
     }
 
     fn recording_presentation(

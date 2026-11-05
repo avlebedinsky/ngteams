@@ -13,6 +13,9 @@
 //!   pipeline can't flush while a read holds it), so the new place's bytes are asked for at once and have the network to
 //!   themselves. A seek bar's seek lands on the nearest key frame ([`Command::SeekNear`]: shown as soon as that frame
 //!   arrives, as a scrubbed player does); a skip lands exactly ([`Command::Seek`]).
+//! - **Speed** ([`Command::Rate`]): a seek at the place it plays with the new rate (every later seek keeps it), and the
+//!   sound through `scaletempo` (`gst-plugins-good`), which keeps its pitch and hands the speaker its samples at the
+//!   speaker's own pace.
 //! - **Its thread**: a [`Player`] runs on a thread of its own and is told what to do by [`Command`]s; it tells its
 //!   [`PlayerOutput`] each frame to show and its [`Status`]. Dropped, it stops: its cache is closed at once, so a read
 //!   waiting for the network gives up and the pipeline's threads end.
@@ -90,7 +93,7 @@ pub enum State {
 }
 
 /// The player's state as its output is told it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Status {
     pub state: State,
     pub position: Duration,
@@ -98,6 +101,8 @@ pub struct Status {
     pub duration: Duration,
     /// Whether its sound is played on a speaker.
     pub sound: bool,
+    /// How fast it plays ([`Command::Rate`]), as last asked of its pipeline.
+    pub rate: f64,
 }
 
 /// What the player is told.
@@ -112,7 +117,13 @@ pub enum Command {
     Muted(bool),
     /// How loud its sound plays, from 0 (silent) to 1 (as recorded); kept within them.
     Volume(f64),
+    /// How fast it plays, as Teams' player offers it ([`RATES`]): its picture and its sound together, the sound's pitch
+    /// kept; kept within [`RATES`]' first and last, and across seeks.
+    Rate(f64),
 }
+
+/// The speeds Teams' Recap player offers, from the slowest: 0.8× to 2×.
+pub const RATES: [f64; 6] = [0.8, 1.0, 1.2, 1.5, 1.8, 2.0];
 
 /// Where a player's frames and status go; called on `GStreamer`'s and the player's threads.
 pub trait PlayerOutput: Send + Sync {
@@ -213,5 +224,6 @@ fn unstarted(output: &dyn PlayerOutput) {
         position: Duration::ZERO,
         duration: Duration::ZERO,
         sound: false,
+        rate: 1.0,
     });
 }

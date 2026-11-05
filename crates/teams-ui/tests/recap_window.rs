@@ -1,8 +1,9 @@
 //! A meeting chat's tabs, drawn on the real platform in the UI sandbox (`harness = false`: GPUI runs on the process's
 //! main thread), for their screenshots: the app's window over the fake engine (`common`), its store holding a made-up
 //! meeting chat whose recording's card offers "View recap"; its Recap (two recordings: Part 1 with its transcript,
-//! that transcript searched, Part 2, Part 1's recording playing as the engine streams it and paused), the Recap of a
-//! meeting transcribed and not recorded, and the Shared tab.
+//! that transcript searched, Part 2, Part 1's recording playing as the engine streams it and paused; paused with its
+//! captions on, its speed menu at 1.5x, its settings and its caption settings open), the Recap of a meeting transcribed
+//! and not recorded, and the Shared tab.
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -33,6 +34,7 @@ use teams_core::ChatListing;
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{ChatTab, Shell, ShellParts};
 use teams_ui::theme::{Appearance, DARK_KEY, LIGHT_KEY};
+use teams_ui::video_player::{CaptionStyle, Menu, Page, players};
 use teams_ui::{Bridge, Core, Models, ViewTrace};
 use tokio::sync::mpsc;
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
@@ -40,11 +42,15 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 const CHILD_ENV: &str = "TEAMS_UI_RECAP_WINDOW_TEST";
 
 /// Each page and the themes it is shot in.
-const PAGES: [(&str, &[&str]); 8] = [
+const PAGES: [(&str, &[&str]); 12] = [
     ("chat", &[LIGHT_KEY]),
     ("recap", &[LIGHT_KEY, DARK_KEY]),
     ("playing", &[LIGHT_KEY, DARK_KEY]),
     ("paused", &[LIGHT_KEY]),
+    ("captions", &[LIGHT_KEY, DARK_KEY]),
+    ("speed", &[LIGHT_KEY]),
+    ("settings", &[LIGHT_KEY]),
+    ("caption-settings", &[LIGHT_KEY]),
     ("transcript", &[LIGHT_KEY, DARK_KEY]),
     ("part-2", &[LIGHT_KEY]),
     ("transcript-only", &[LIGHT_KEY]),
@@ -212,9 +218,25 @@ fn child(mode: &str) -> SandboxResult {
     Ok(())
 }
 
+/// Part 1's transcript with a cue spoken in the made-up recording's 3 s, for its captions.
+const CAPTIONED: &str = "WEBVTT\n\n\
+    u1/1-0\n00:00:00.300 --> 00:00:03.500\n<v Ada Lab>Hello everyone, this is the weekly sync.\n\
+    We look at the video player first.</v>\n\n";
+
+/// The pages that play Part 1's recording, then pause it.
+const PLAYED: [&str; 6] = ["playing", "paused", "captions", "speed", "settings", "caption-settings"];
+
 fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
     let core = Arc::new(FakeCore::default());
     seed(&core);
+    if page == "captions" {
+        let vtt = format!("{CAPTIONED}{}", fixtures::VTT.trim_start_matches("WEBVTT\n\n"));
+        locked(&core.transcripts).insert(fixtures::transcript_location("ITEM1"), vtt);
+        cx.set_global(CaptionStyle {
+            on: true,
+            ..CaptionStyle::default()
+        });
+    }
     let (events, received) = mpsc::unbounded_channel();
     let source = FakeEvents {
         events: received,
@@ -254,11 +276,16 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
         after_frames(window, 30, move |window, cx| {
             step(&shell, &page, window, cx);
             after_frames(window, 30, move |window, cx| {
-                let played = matches!(page.as_str(), "playing" | "paused");
+                // the pages with a menu or captions are paused sooner, in its 3 s
+                let frames = match page.as_str() {
+                    "playing" | "paused" => 60,
+                    page if PLAYED.contains(&page) => 15,
+                    _ => 30,
+                };
                 then(&shell, &page, window, cx);
                 // a playing recording is shot a second on, its frames drawn as they come; a paused one with its
                 // controls, which show while it is paused
-                after_frames(window, if played { 60 } else { 30 }, move |window, cx| {
+                after_frames(window, frames, move |window, cx| {
                     last(&shell, &page, window, cx);
                 });
             });
@@ -268,14 +295,29 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
     Ok(())
 }
 
-/// The page's last step: ready to be shot, a recording paused first on the page that shows it paused.
+/// The page's last step: ready to be shot, a recording paused first on the pages that show it paused, with the menu
+/// they show open.
 fn last(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
-    if page != "paused" {
+    if !PLAYED.contains(&page) || page == "playing" {
         say("ready");
         return;
     }
     if let Some(recap) = shell.read(cx).recap_view().cloned() {
         recap.update(cx, teams_ui::recap_view::RecapView::pause);
+    }
+    let menu = match page {
+        "speed" => Some(Menu::Speed),
+        "settings" => Some(Menu::Settings(Page::Main)),
+        "caption-settings" => Some(Menu::Settings(Page::Captions)),
+        _ => None,
+    };
+    if let Some(player) = players(cx).into_iter().find(|player| player.read(cx).id() == "recap-0") {
+        player.update(cx, |player, cx| {
+            if page == "speed" {
+                player.set_rate(1.5, cx);
+            }
+            player.show_menu(menu, cx);
+        });
     }
     after_frames(window, 20, |_, _| say("ready"));
 }
@@ -302,7 +344,7 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
         }
         "part-2" => recap.select_part(1, cx),
         // the recording streamed and played from half a second in, shot as it plays
-        "playing" | "paused" => recap.play_from(Duration::from_millis(500), cx),
+        page if PLAYED.contains(&page) => recap.play_from(Duration::from_millis(500), cx),
         _ => {}
     });
 }

@@ -7,9 +7,9 @@
 //!   the card's [`PictureSource`]: no view builds a request), played by `GStreamer`, each frame shown here through
 //!   GPUI's external surface, its sound on the speaker of the devices the app gave ([`set_playback`]).
 //! - **The controls**, as Teams' player has them: play/pause, back 10 s, forward 10 s, mute (its volume slider beside
-//!   it while the pointer is on it), the time (`0:10 / 1:52`), "More options" (open in the browser, download, copy link), full screen (the video over the whole
-//!   window, the window full screen; Esc or the button leaves it) and "Open in browser" (Stream's player, where Teams
-//!   pops the video out). The seek bar seeks
+//!   it while the pointer is on it), the time (`0:10 / 1:52`), "More options" (open in the browser, download, copy
+//!   link), full screen (the video over the whole window, the window full screen; Esc or the button leaves it) and
+//!   "Open in browser" (Stream's player, where Teams pops the video out). The seek bar seeks
 //!   where it is clicked or dragged to, its tooltip the time. While it plays the controls show only while the pointer
 //!   is on the video; paused, always. Space plays or pauses, Left and Right go 10 s back or forward, M mutes.
 //! - **Its states**: loading and buffering show a spinner over the picture; a video that can't be played here (a
@@ -25,6 +25,10 @@
 //!   player ([`Player::open_stream`]). That plays a recording whose download is blocked (an attendee's view of
 //!   another's meeting), which the file's download link refuses; a recording that can't be streamed (not processed
 //!   yet) is played from its download link, as any shared video, before the player says it can't be opened.
+//!   Its bar is Teams' Recap player's: in place of "More options", captions (CC: the transcript's words over the
+//!   picture, [`VideoPlayer::set_captions`]), the playback speed ("1x": 0.8x to 2x, its sound's pitch kept) and the
+//!   settings (caption settings, quality, keyboard shortcuts), each a menu over the picture (`menus`). C turns the
+//!   captions on or off, Z and X slow it down or speed it up.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -46,7 +50,7 @@ use gpui_component::tooltip::Tooltip;
 use teams_core::{EngineError, FileStream};
 use teams_media::devices::{PixelFormat, VideoFrame};
 use teams_media::player::{
-    Abandon, ByteSource, ByteStream, Command, Failure, Part, Player, PlayerOutput, PlayerSetup, SegmentSource,
+    Abandon, ByteSource, ByteStream, Command, Failure, Part, Player, PlayerOutput, PlayerSetup, RATES, SegmentSource,
     SourceError, Span, State, Status, Track, TrackKind,
 };
 use teams_proto::chat::{FileKind, SharedFile};
@@ -55,6 +59,12 @@ use crate::files::{COPY_LINK, DOWNLOAD, OPEN_IN_BROWSER, PICTURE_HEIGHT};
 use crate::icons::{Glyph, selected_by};
 use crate::inline::{PictureSource, PictureState, thumbnail};
 use crate::video::Picture;
+
+mod captions;
+mod menus;
+
+pub use captions::{Caption, CaptionColor, CaptionSize, CaptionStyle, Captions, language_name};
+pub use menus::{KEYS, Menu, Page, rate_label};
 
 /// How far back and forward the skip buttons go.
 pub const SKIP: Duration = Duration::from_secs(10);
@@ -293,6 +303,12 @@ pub struct VideoPlayer {
     recording: Option<Recording>,
     /// The recording couldn't be streamed: it plays from its file's download link instead.
     streamed_failed: bool,
+    /// How fast it plays (one of `teams_media::player::RATES`).
+    rate: f64,
+    /// Its transcript's words, shown over the picture when captions are on (a recap's player).
+    captions: Option<Captions>,
+    /// The menu open over the picture.
+    menu: Option<Menu>,
     focus: FocusHandle,
     _woken: Task<()>,
 }
@@ -346,6 +362,9 @@ impl VideoPlayer {
             pending_seek: None,
             recording: None,
             streamed_failed: false,
+            rate: 1.0,
+            captions: None,
+            menu: None,
             focus: cx.focus_handle(),
             _woken: task,
         }
@@ -363,6 +382,100 @@ impl VideoPlayer {
     pub fn streaming(mut self, recording: Recording) -> Self {
         self.recording = Some(recording);
         self
+    }
+
+    /// Its captions (a recap's player: its recording's transcript), or none.
+    pub fn set_captions(&mut self, captions: Option<Captions>, cx: &mut Context<Self>) {
+        if self.captions != captions {
+            self.captions = captions;
+            cx.notify();
+        }
+    }
+
+    /// Its captions, when it has them.
+    #[must_use]
+    pub fn captions(&self) -> Option<&Captions> {
+        self.captions.as_ref()
+    }
+
+    /// Its card's id (a recap part's player: `recap-<part>`).
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The caption shown now: captions on and a cue spoken where it plays.
+    #[must_use]
+    pub fn caption(&self, cx: &App) -> Option<&str> {
+        let at = self.position()?;
+        self.captions.as_ref().filter(|_| CaptionStyle::current(cx).on)?.at(at)
+    }
+
+    /// Turns captions on or off, for every player (see `captions`).
+    pub fn show_captions(&mut self, shown: bool, cx: &mut Context<Self>) {
+        CaptionStyle::change(cx, |style| style.on = shown);
+        cx.notify();
+    }
+
+    /// How fast it plays.
+    #[must_use]
+    pub fn rate(&self) -> f64 {
+        self.rate
+    }
+
+    /// Plays at `rate` (one of `RATES`), its picture and sound together; kept when it is opened later.
+    pub fn set_rate(&mut self, rate: f64, cx: &mut Context<Self>) {
+        self.rate = rate;
+        if let Some(player) = &self.player {
+            player.send(Command::Rate(rate));
+        }
+        cx.notify();
+    }
+
+    /// One speed `faster` or slower among `RATES` (none past the fastest or the slowest).
+    fn step_rate(&mut self, faster: bool, cx: &mut Context<Self>) {
+        let at = RATES
+            .iter()
+            .position(|rate| (rate - self.rate).abs() < f64::EPSILON)
+            .unwrap_or(1);
+        let next = if faster { at + 1 } else { at.wrapping_sub(1) };
+        if let Some(&rate) = RATES.get(next) {
+            self.set_rate(rate, cx);
+        }
+    }
+
+    /// The menu open over the picture.
+    #[must_use]
+    pub fn menu(&self) -> Option<Menu> {
+        self.menu
+    }
+
+    /// Opens `menu` over the picture (closing any other), or closes it.
+    pub fn show_menu(&mut self, menu: Option<Menu>, cx: &mut Context<Self>) {
+        self.menu = menu;
+        cx.notify();
+    }
+
+    /// Opens `menu`, or closes it when it is open (its button clicked again).
+    fn toggle_menu(&mut self, menu: Menu, window: &mut Window, cx: &mut Context<Self>) {
+        let open = match (self.menu, menu) {
+            (Some(Menu::Settings(_)), Menu::Settings(_)) => true,
+            (Some(open), menu) => open == menu,
+            (None, _) => false,
+        };
+        self.menu = (!open).then_some(menu);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// The height of the picture played (the recording's quality, "1080p"), once a frame came.
+    fn quality(&self) -> Option<u32> {
+        self.screen
+            .picture
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|picture| picture.height)
     }
 
     /// Where it plays, as last told; `None` before it was started.
@@ -463,6 +576,9 @@ impl VideoPlayer {
             }
             if self.volume.level < 1.0 {
                 player.send(Command::Volume(f64::from(self.volume.level)));
+            }
+            if (self.rate - 1.0).abs() >= f64::EPSILON {
+                player.send(Command::Rate(self.rate));
             }
         }
     }
@@ -587,6 +703,13 @@ impl VideoPlayer {
             "left" => self.skip(true, cx),
             "right" => self.skip(false, cx),
             "m" => self.toggle_mute(cx),
+            "c" if self.captions.is_some() => {
+                let on = CaptionStyle::current(cx).on;
+                self.show_captions(!on, cx);
+            }
+            "z" if self.fill => self.step_rate(false, cx),
+            "x" if self.fill => self.step_rate(true, cx),
+            "escape" if self.menu.is_some() => self.show_menu(None, cx),
             "escape" if self.full_screen.on => self.toggle_fullscreen(window, cx),
             _ => return,
         }
@@ -664,7 +787,12 @@ impl VideoPlayer {
         let group = SharedString::from(format!("video-screen-{id}"));
         let picture = self.picture(cx);
         let middle = self.middle();
+        let caption = self
+            .caption(cx)
+            .map(|text| captions::caption(&id, text, CaptionStyle::current(cx)));
         let controls = self.controls(&group, cx);
+        let shift = if self.file.open_link().is_some() { 0.0 } else { 32.0 };
+        let menu = self.menu_panel(shift, cx);
         div()
             .id(SharedString::from(format!("video-screen-{id}")))
             .debug_selector(move || format!("video-screen-{id}"))
@@ -683,12 +811,19 @@ impl VideoPlayer {
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, window, cx| {
                         window.focus(&this.focus, cx);
-                        this.toggle(cx);
+                        // a click outside an open menu closes it, as in Teams
+                        if this.menu.is_some() {
+                            this.show_menu(None, cx);
+                        } else {
+                            this.toggle(cx);
+                        }
                     }))
                     .child(picture),
             )
             .children(middle)
+            .children(caption)
             .child(controls)
+            .children(menu)
             .into_any_element()
     }
 
@@ -787,7 +922,7 @@ impl VideoPlayer {
 
     /// The seek bar and the buttons over the box's bottom, on a shade.
     fn controls(&mut self, group: &SharedString, cx: &mut Context<Self>) -> AnyElement {
-        let always = !self.playing() || self.dragging.is_some();
+        let always = !self.playing() || self.dragging.is_some() || self.menu.is_some();
         let bar = self.seek_bar(cx);
         let buttons = self.buttons(cx);
         div()
@@ -1063,7 +1198,7 @@ impl VideoPlayer {
         )
     }
 
-    /// "More options", full screen and the browser.
+    /// "More options" (a recap's: captions, the speed and the settings), full screen and the browser.
     fn right_buttons(&self, cx: &mut Context<Self>) -> Div {
         let id = &self.id;
         let (screen_glyph, screen_tip) = if self.full_screen.on {
@@ -1076,7 +1211,8 @@ impl VideoPlayer {
             .flex()
             .items_center()
             .gap_1()
-            .child(self.more())
+            .when(!self.fill, |buttons| buttons.child(self.more()))
+            .when(self.fill, |buttons| buttons.children(self.recap_buttons(cx)))
             .child(control(
                 id,
                 "fullscreen",
@@ -1097,6 +1233,44 @@ impl VideoPlayer {
                     },
                 )
             }))
+    }
+
+    /// A recap's captions (when it has them), speed and settings buttons, as Teams' Recap player has them.
+    fn recap_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let id = &self.id;
+        let open = self.menu;
+        let mut buttons = Vec::new();
+        if self.captions.is_some() {
+            buttons.push(menu_control(
+                id,
+                "captions",
+                Glyph::CAPTIONS.icon().size(px(18.0)).into_any_element(),
+                "Captions",
+                open == Some(Menu::Captions),
+                cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Captions, window, cx)),
+            ));
+        }
+        buttons.push(menu_control(
+            id,
+            "speed",
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(rate_label(self.rate))
+                .into_any_element(),
+            "Playback speed",
+            open == Some(Menu::Speed),
+            cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Speed, window, cx)),
+        ));
+        buttons.push(menu_control(
+            id,
+            "settings",
+            Glyph::SETTINGS.icon().size(px(18.0)).into_any_element(),
+            "Settings",
+            matches!(open, Some(Menu::Settings(_))),
+            cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Settings(Page::Main), window, cx)),
+        ));
+        buttons
     }
 
     /// "More options" on the video: the file's own actions, as the card's header offers them.
@@ -1176,6 +1350,54 @@ fn control(
                 .text_color(gpui::rgb(ON_VIDEO))
                 .child(mark)
         }))
+        .into_any_element()
+}
+
+/// A button that opens a menu over the picture (a recap's captions, speed and settings): its face in white, underlined
+/// while its menu is open, as Teams draws it; its test selector `video-<what>-<card>`.
+fn menu_control(
+    card: &str,
+    what: &'static str,
+    face: AnyElement,
+    tip: &'static str,
+    open: bool,
+    click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let selector = format!("video-{what}-{card}");
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .relative()
+        .h(px(28.0))
+        .min_w(px(28.0))
+        .px_1()
+        .rounded_md()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(gpui::rgb(ON_VIDEO))
+        .hover(|style| style.bg(hsla(0.0, 0.0, 1.0, 0.15)))
+        .when(!open, |button| {
+            button.tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            click(event, window, cx);
+        })
+        .child(face)
+        .when(open, |button| {
+            button.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-3.0))
+                    .h(px(2.0))
+                    .bg(gpui::rgb(ON_VIDEO)),
+            )
+        })
         .into_any_element()
 }
 
