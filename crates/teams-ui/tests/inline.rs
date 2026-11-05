@@ -186,3 +186,51 @@ fn a_picture_is_never_wider_than_the_width_there_is() {
         ((100.0, 40.0), (100.0, 40.0))
     );
 }
+
+#[test]
+fn an_emoticon_in_text_stands_on_the_bottom_of_the_text_s_font_as_teams_draws_it() {
+    use gpui::{point, px};
+    use inline::{INLINE_EMOTICON_REMS, LineMetrics, inline_emoticon_origin};
+
+    // Teams' 20 px beside its 14 px text
+    assert!((14.0 * INLINE_EMOTICON_REMS - 20.0).abs() < 1e-4);
+    // Teams' own line (Segoe UI at 14 px in a 20 px line): the emoticon's bottom its descent below the baseline, its
+    // top a little above the line, whatever its place's start
+    let teams = LineMetrics {
+        height: px(20.0),
+        ascent: px(15.1),
+        descent: px(3.5),
+        font_descent: px(3.5),
+    };
+    let origin = inline_emoticon_origin(point(px(100.0), px(40.0)), px(22.0), teams, px(20.0));
+    assert!(
+        (f32::from(origin.x) - 101.0).abs() < 1e-3,
+        "centred in its place: {origin:?}"
+    );
+    assert!((f32::from(origin.y) - 39.3).abs() < 1e-3, "{origin:?}");
+
+    // the app's taller line: the text centred in it, the emoticon on the text's baseline rather than the line's top
+    let app = LineMetrics {
+        height: px(22.65),
+        ascent: px(13.56),
+        descent: px(3.39),
+        font_descent: px(3.39),
+    };
+    let origin = inline_emoticon_origin(point(px(0.0), px(0.0)), px(20.0), app, px(20.0));
+    let baseline = (22.65 - 13.56 - 3.39) / 2.0 + 13.56;
+    assert!(
+        (f32::from(origin.y) + 20.0 - (baseline + 3.39)).abs() < 1e-3,
+        "{origin:?}"
+    );
+    // a fallback font that reaches further down (an emoji's) moves the baseline up, and the emoticon with it, still
+    // standing on the text's own font
+    let fallback = LineMetrics {
+        descent: px(5.0),
+        ..app
+    };
+    let raised = inline_emoticon_origin(point(px(0.0), px(0.0)), px(20.0), fallback, px(20.0));
+    assert!(
+        (f32::from(origin.y - raised.y) - (5.0 - 3.39) / 2.0).abs() < 1e-3,
+        "{raised:?}"
+    );
+}

@@ -116,7 +116,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 138] = [
+const STEPS: [Step; 5 + 140] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -676,10 +676,18 @@ const STEPS: [Step; 5 + 138] = [
     }),
     // the same once its pictures were read and decoded: the pasted picture, and c's GIF on one of its frames
     ("chat-pictures-read", |_, _, _| {}),
+    // scrolled to its top: b's lines under the pasted picture, emoticons inside them at the text's size, on its line
+    ("chat-pictures-emoticons", |shell, _, cx| show_first_message(shell, cx)),
+    // the same in a larger text size: the emoticons grow with the text and stay on its baseline
+    ("chat-pictures-emoticons-18", |shell, _, cx| {
+        set_font_size(shell, 18, cx);
+        show_first_message(shell, cx);
+    }),
     // b's phone screenshot, the chat's third picture, opened in the picture viewer's window as a click on it opens it:
     // fitted to the window, b's avatar, name and the time in its header, "3 of 3", the zoom, Download and Close, and
-    // Previous over the stage's left side, in Teams Dark
+    // Previous over the stage's left side, in Teams Dark (the text size back to the default)
     ("picture-viewer-dark", |shell, _, cx| {
+        set_font_size(shell, teams_ui::theme::FONT_SIZE, cx);
         if let Some(chat) = shell.read(cx).chat().cloned() {
             chat.update(cx, |chat, cx| chat.open_nth_picture(2, cx));
         }
@@ -1463,6 +1471,14 @@ fn show_first_message(shell: &Entity<Shell>, cx: &mut App) {
     }
 }
 
+/// Sets the app's text size to `size` px.
+fn set_font_size(shell: &Entity<Shell>, size: u16, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(|settings| settings.appearance.font_size = size, cx);
+    });
+}
+
 fn hover_none(shell: &Entity<Shell>, cx: &mut App) {
     if let Some(chat) = shell.read(cx).chat().cloned() {
         chat.update(cx, |chat, cx| chat.hover(None, cx));
@@ -1792,7 +1808,8 @@ fn emoticon(id: &str, alt: &str, side: u32) -> String {
 }
 
 /// b's two messages in the a–b–c chat as the ones Teams shows: a status line, a pasted picture of a dashboard (made up,
-/// served by the mock as AMS would) and two lines, the last ending in an emoticon; then a wave alone.
+/// served by the mock as AMS would) and three lines, the second ending in an emoticon and the third with two inside it;
+/// then a wave alone.
 fn seed_pictures(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
     let mut png = Vec::new();
     made_up_dashboard().write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
@@ -1802,8 +1819,11 @@ fn seed_pictures(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> S
          <p><img src=\"https://us-api.asm.skype.com/v1/objects/{PICTURE_OBJECT}/views/imgo\" \
          itemtype=\"http://schema.skype.com/AMSImage\" itemscope=\"png\" width=\"884\" height=\"228\" alt=\"image\" \
          id=\"x_{PICTURE_OBJECT}\" itemid=\"{PICTURE_OBJECT}\"></p>\r\n\
-         <p>12 made-up cards moved</p>\r\n<p>7 made-up cards added{}</p>",
-        emoticon("speechless", "\u{1f610}", 20)
+         <p>12 made-up cards moved</p>\r\n<p>7 made-up cards added{}</p>\r\n\
+         <p>Thanks!{} That is the whole made-up list {}</p>",
+        emoticon("speechless", "\u{1f610}", 20),
+        emoticon("laugh", "\u{1f606}", 20),
+        emoticon("wink", "\u{1f609}", 20)
     );
     mock.post_as(LAB_B, ABC_CHAT, &html).ok_or("b's picture refused")?;
     let wave = format!("<div>{}</div>", emoticon("1f44b_wavinghand", "\u{1f44b}", 58));

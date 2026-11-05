@@ -23,7 +23,10 @@
 //! - **A file's thumbnail** ([`thumbnail`]) is asked of the engine by the file's sharing link
 //!   ([`Core::file_thumbnail`]) and decoded and kept as a picture is; `crate::files` draws it on the file's card.
 //! - **Inline** ([`InlineText`]): an emoticon inside a paragraph keeps the place of a few spaces in the text, and is
-//!   drawn over them where the text's layout put them, so it flows and wraps with the text.
+//!   drawn over them where the text's layout put them, so it flows and wraps with the text. It is drawn as Teams draws
+//!   one inside text: [`INLINE_EMOTICON_REMS`] square (Teams' 20 px beside its 14 px text, so it follows the app's text
+//!   size), standing on the bottom of the text's font, its descent below the baseline (Teams' `vertical-align:
+//!   text-bottom`), however high the line is ([`inline_emoticon_origin`]); the line keeps its height.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -34,8 +37,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
-    InteractiveElement, IntoElement, LayoutId, ParentElement as _, Pixels, RenderImage, RenderOnce, SharedString, Size,
-    StatefulInteractiveElement as _, Style, Styled as _, TextLayout, Window, div, img, px, size,
+    InteractiveElement, IntoElement, LayoutId, ParentElement as _, Pixels, Point, RenderImage, RenderOnce,
+    SharedString, Size, StatefulInteractiveElement as _, Style, Styled as _, TextLayout, Window, div, img, px, size,
 };
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, Frame, ImageDecoder as _, Limits, RgbaImage, imageops};
@@ -65,6 +68,40 @@ const MAX_GIF_FRAME_ALLOC: u64 = 3 * 4 * (MAX_GIF_SIDE as u64) * (MAX_GIF_SIDE a
 
 /// The side an emoticon-only message's emoticons are drawn at (Teams' `animated-emoticon-58`).
 pub const LARGE_EMOTICON: Pixels = px(58.0);
+
+/// The side an emoticon inside text is drawn at, in the app's text size (its rem): Teams draws one 20 px square beside
+/// its 14 px text.
+pub const INLINE_EMOTICON_REMS: f32 = 20.0 / 14.0;
+
+/// The side an emoticon inside text is drawn at in `window` ([`INLINE_EMOTICON_REMS`]).
+#[must_use]
+pub fn inline_emoticon_side(window: &Window) -> Pixels {
+    window.rem_size() * INLINE_EMOTICON_REMS
+}
+
+/// The vertical metrics of the line of text an emoticon is drawn on ([`inline_emoticon_origin`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineMetrics {
+    /// The line's height.
+    pub height: Pixels,
+    /// The ascent its text was laid out with (the largest of the fonts the line draws with).
+    pub ascent: Pixels,
+    /// The descent its text was laid out with, as the ascent.
+    pub descent: Pixels,
+    /// The descent of the text's own font below the baseline: what the emoticon stands on.
+    pub font_descent: Pixels,
+}
+
+/// Where an emoticon `side` square is drawn in its place on a line of text, as Teams draws one (an inline block aligned
+/// `text-bottom`): its bottom the text's font's descent below the line's baseline (the text centred in the line's
+/// height by its laid-out ascent and descent, as GPUI draws it), centred in the place's width. `place` is the place's
+/// start on its line (at the line's top) and `width` its width there.
+#[must_use]
+pub fn inline_emoticon_origin(place: Point<Pixels>, width: Pixels, line: LineMetrics, side: Pixels) -> Point<Pixels> {
+    let baseline = (line.height - line.ascent - line.descent) / 2.0 + line.ascent;
+    let bottom = baseline + line.font_descent;
+    gpui::point(place.x + (width - side) / 2.0, place.y + bottom - side)
+}
 
 /// How long a picture whose read failed on the way is drawn as its fallback before it is asked for again.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -667,7 +704,8 @@ impl Shape {
 pub struct Emoticon {
     id: String,
     alt: Option<String>,
-    side: Pixels,
+    /// Its side; `None` for one inside text ([`inline_emoticon_side`]).
+    side: Option<Pixels>,
     animated: bool,
     source: Option<PictureSource>,
 }
@@ -678,15 +716,28 @@ impl Emoticon {
         Self {
             id: id.to_owned(),
             alt: alt.map(str::to_owned),
-            side,
+            side: Some(side),
             animated,
+            source,
+        }
+    }
+
+    /// One inside text: standing on its first frame, at the side Teams draws one there ([`inline_emoticon_side`]).
+    #[must_use]
+    pub fn inline(id: &str, alt: Option<&str>, source: Option<PictureSource>) -> Self {
+        Self {
+            id: id.to_owned(),
+            alt: alt.map(str::to_owned),
+            side: None,
+            animated: false,
             source,
         }
     }
 }
 
 impl RenderOnce for Emoticon {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let side = self.side.unwrap_or_else(|| inline_emoticon_side(window));
         let frames = self
             .source
             .as_ref()
@@ -696,16 +747,16 @@ impl RenderOnce for Emoticon {
             // first frame
             Some(frames) if self.animated => {
                 InteractiveElement::id(img(frames), ElementId::Name(format!("emoticon-{}", self.id).into()))
-                    .size(self.side)
+                    .size(side)
                     .flex_none()
                     .into_any_element()
             }
-            Some(frames) => img(frames).size(self.side).flex_none().into_any_element(),
-            None if reactions::catalog().get(&self.id).is_some() => reactions::emoji(&self.id, self.side),
+            Some(frames) => img(frames).size(side).flex_none().into_any_element(),
+            None if reactions::catalog().get(&self.id).is_some() => reactions::emoji(&self.id, side),
             None => div()
                 .flex_none()
-                .line_height(self.side)
-                .text_size(self.side * 0.8)
+                .line_height(side)
+                .text_size(side * 0.8)
                 .child(self.alt.unwrap_or_default())
                 .into_any_element(),
         }
@@ -779,19 +830,31 @@ impl Element for InlineText {
         cx: &mut App,
     ) {
         self.text.prepaint(window, cx);
-        let line_height = self.layout.line_height();
+        let height = self.layout.line_height();
+        let side = inline_emoticon_side(window);
+        let font = window.text_system().resolve_font(&window.text_style().font());
         for (place, emoticon) in &mut self.emoticons {
-            let Some(start) = self.layout.position_for_index(place.start) else {
+            let (Some(start), Some(line)) = (
+                self.layout.position_for_index(place.start),
+                self.layout.line_layout_for_index(place.start),
+            ) else {
                 continue;
             };
-            // the place's width on its line (a place the line wraps in takes the line height)
+            // the place's width on its line (a place the line wraps in takes the emoticon's side)
             let end = self
                 .layout
                 .position_for_index(place.end)
                 .filter(|end| end.y == start.y && end.x > start.x);
-            let width = end.map_or(line_height, |end| end.x - start.x);
-            let side = line_height;
-            let origin = gpui::point(start.x + (width - side) / 2.0, start.y);
+            let width = end.map_or(side, |end| end.x - start.x);
+            let laid = &line.unwrapped_layout;
+            let metrics = LineMetrics {
+                height,
+                ascent: laid.ascent,
+                descent: laid.descent,
+                // GPUI's platforms differ in the sign they give a font's descent
+                font_descent: window.text_system().descent(font, laid.font_size).abs(),
+            };
+            let origin = inline_emoticon_origin(start, width, metrics, side);
             emoticon.prepaint_as_root(origin, size(side, side).map(AvailableSpace::Definite), window, cx);
         }
     }

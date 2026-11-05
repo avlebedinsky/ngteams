@@ -1260,13 +1260,11 @@ fn text_block(draw: &Draw<'_>, path: &[usize], block: &TextBlock, place: Option<
             .emoticons
             .iter()
             .map(|emoticon| {
-                let drawn = Emoticon::new(
-                    &emoticon.id,
-                    emoticon.alt.as_deref(),
-                    px(20.0),
-                    false,
-                    draw.source.cloned(),
-                );
+                let drawn = Emoticon::inline(&emoticon.id, emoticon.alt.as_deref(), draw.source.cloned());
+                let drawn = div()
+                    .debug_selector(|| "rich-inline-emoticon".to_owned())
+                    .size_full()
+                    .child(drawn);
                 (emoticon.range.clone(), drawn.into_any_element())
             })
             .collect();

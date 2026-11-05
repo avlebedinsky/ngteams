@@ -940,6 +940,23 @@ fn an_emoticon_alone_is_drawn_large_and_one_in_text_at_the_text_s_height() {
     });
     let line = cx.debug_bounds("rich-text").expect("the line is drawn");
     assert!(line.size.height < px(40.0), "one line of text: {line:?}");
+    // Teams' 20 px beside its 14 px text, in the app's text size (to the pixel GPUI rounds a layout to), the line
+    // keeping its height; standing on the text's baseline, not hung from the line's top (where it is exactly is
+    // `inline`'s test: the test platform's font metrics are made up)
+    let (rem, line_height) = cx.update(|window, _| {
+        (
+            window.rem_size(),
+            window.text_style().line_height_in_pixels(window.rem_size()),
+        )
+    });
+    let drawn = cx.debug_bounds("rich-inline-emoticon").expect("the emoticon is drawn");
+    let side = rem * teams_ui::inline::INLINE_EMOTICON_REMS;
+    assert!(
+        (drawn.size.width - side).abs() <= px(1.0) && (drawn.size.height - side).abs() <= px(1.0),
+        "{drawn:?}"
+    );
+    assert_eq!(line.size.height, line_height, "the line keeps its height: {line:?}");
+    assert!(drawn.top() >= line.top() + px(2.0), "{drawn:?} on {line:?}");
 }
 
 /// A line, a pasted picture given `width` by `height` (its bytes twice as dense, as one pasted from a dense screen),
