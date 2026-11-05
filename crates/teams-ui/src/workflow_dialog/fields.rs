@@ -489,14 +489,16 @@ impl WorkflowDialog {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(selected_by(
-                                "workflow-collapse-all",
-                                Button::new("workflow-collapse-all")
-                                    .ghost()
-                                    .small()
-                                    .label(if simple.expanded { "Collapse all" } else { "Expand all" })
-                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
-                            ))
+                            .when(!simple.message_action, |bar| {
+                                bar.child(selected_by(
+                                    "workflow-collapse-all",
+                                    Button::new("workflow-collapse-all")
+                                        .ghost()
+                                        .small()
+                                        .label(if simple.expanded { "Collapse all" } else { "Expand all" })
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
+                                ))
+                            })
                             // the Workflows app's editor keeps Save at its top right, with no footer
                             .when(self.app.is_some(), |bar| bar.child(self.save_button(cx))),
                     ),
@@ -527,20 +529,22 @@ impl WorkflowDialog {
                     .items_start()
                     .justify_between()
                     .child(Self::chips(simple, palette))
-                    .child(selected_by(
-                        "workflow-card-toggle",
-                        icon_button(
+                    .when(!simple.message_action, |top| {
+                        top.child(selected_by(
                             "workflow-card-toggle",
-                            if simple.expanded {
-                                Glyph::CHEVRON_UP
-                            } else {
-                                Glyph::CHEVRON_DOWN
-                            },
-                            if simple.expanded { "Collapse" } else { "Expand" },
-                        )
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
-                    )),
+                            icon_button(
+                                "workflow-card-toggle",
+                                if simple.expanded {
+                                    Glyph::CHEVRON_UP
+                                } else {
+                                    Glyph::CHEVRON_DOWN
+                                },
+                                if simple.expanded { "Collapse" } else { "Expand" },
+                            )
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
+                        ))
+                    }),
             )
             .child(
                 div()
@@ -548,11 +552,16 @@ impl WorkflowDialog {
                     .font_weight(gpui::FontWeight::BOLD)
                     .child(simple.summary()),
             )
-            .child(
-                div()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(simple.description.clone()),
-            )
+            .when(!simple.message_action, |card| {
+                card.child(
+                    div()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(simple.description.clone()),
+                )
+            })
+            .when(simple.message_action, |card| {
+                card.child(super::message::instructions(&simple.template_name(), palette))
+            })
             .when(simple.expanded, |card| {
                 card.children((0..simple.params.len()).filter_map(|index| self.field_view(simple, index, palette, cx)))
             })
@@ -1080,7 +1089,7 @@ fn load_message(editor: &mut Editor, text: &str, cx: &mut Context<Editor>) {
     if text.is_empty() {
         return;
     }
-    if text.contains('<') {
+    if looks_like_html(text) {
         let rich = teams_proto::chat::parse_html(text);
         if editor
             .load(&rich.nodes, &std::collections::HashMap::<String, String>::new(), cx)
@@ -1090,6 +1099,54 @@ fn load_message(editor: &mut Editor, text: &str, cx: &mut Context<Editor>) {
         }
     }
     editor.insert(text, cx);
+}
+
+/// The tags a formatted message's HTML is made of: a kept message holding one is HTML; any other `<` (a plain
+/// "a < b", "<3") is text.
+const MESSAGE_TAGS: [&str; 30] = [
+    "p",
+    "br",
+    "b",
+    "i",
+    "u",
+    "s",
+    "strong",
+    "em",
+    "a",
+    "span",
+    "div",
+    "ul",
+    "ol",
+    "li",
+    "blockquote",
+    "pre",
+    "code",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "img",
+    "table",
+    "tr",
+    "td",
+    "th",
+    "hr",
+    "del",
+];
+
+/// Whether a kept message is HTML: it holds one of a formatted message's tags (`<p>`, `</strong>`, `<br/>`,
+/// `<a href=…>`), not merely a `<`.
+pub(super) fn looks_like_html(text: &str) -> bool {
+    text.match_indices('<').any(|(at, _)| {
+        let rest = &text[at + 1..];
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        let name: String = rest.chars().take_while(char::is_ascii_alphanumeric).collect();
+        let after = rest[name.len()..].chars().next();
+        MESSAGE_TAGS.contains(&name.to_ascii_lowercase().as_str())
+            && matches!(after, Some('>' | '/' | ' ' | '\t' | '\n'))
+    })
 }
 
 /// What a message box sends: its plain text, as Teams sends an unformatted message, or the HTML of a formatted one.
@@ -1185,7 +1242,11 @@ fn source(simple: &Simple, index: usize) -> Source {
     let Some(inputs) = simple.operations.get(&(api.to_owned(), operation.to_owned())) else {
         return Source::Operation((api.to_owned(), operation.to_owned()));
     };
-    let Some(input) = binding.path.last().and_then(|name| inputs.as_ref()?.get(name)) else {
+    let Some(input) = binding
+        .path
+        .last()
+        .and_then(|name| input_definition(inputs.as_ref()?, name))
+    else {
         return Source::None;
     };
     let tree = input.get("x-ms-dynamic-tree").is_some();
@@ -1204,6 +1265,16 @@ fn source(simple: &Simple, index: usize) -> Source {
         },
         None => Source::Waiting,
     }
+}
+
+/// An operation input's definition by the name a binding fills: a top-level one (`groupId`), or one inside the body
+/// (`body/groupId`, under `body.properties`), as Planner's Create a task names its group and plan.
+pub(super) fn input_definition<'a>(inputs: &'a Value, name: &str) -> Option<&'a Value> {
+    inputs.get(name).or_else(|| {
+        let mut parts = name.split('/');
+        let first = inputs.get(parts.next()?)?;
+        parts.try_fold(first, |node, part| node.get("properties")?.get(part))
+    })
 }
 
 /// The values a dynamic list or tree refers to, from the fields bound to the same action's inputs; `None` while a

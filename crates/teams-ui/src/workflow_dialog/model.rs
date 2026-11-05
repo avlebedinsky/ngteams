@@ -298,6 +298,34 @@ const HOME_ORDER: [&str; 16] = [
     "45e229e1cd36483084bc8d2352b543d2",
 ];
 
+/// The templates Teams' Workflows dialog for a message shows first, in its order: Follow up on a message, Schedule a
+/// reply, Create a Planner task from a message and Save a message to `OneNote`.
+const MESSAGE_ORDER: [&str; 4] = [
+    "34df10b7d2824b12a23f3a0c50869f99",
+    "8dfc20ec70f54efcbf3c18cf3e190035",
+    "45e229e1cd36483084bc8d2352b543d2",
+    "a1a169f259074d4db1fd325b597aaa1a",
+];
+
+/// The templates of the gallery as the Workflows dialog for a message lists them: the ones run from a message first,
+/// then the Workflows app's Home order, then the rest in the gallery's.
+pub fn message_gallery(value: &Value) -> Result<Vec<Card>, WorkflowFailure> {
+    let mut cards = found(value)?;
+    cards.sort_by_key(|card| {
+        MESSAGE_ORDER
+            .iter()
+            .position(|id| *id == card.id)
+            .or_else(|| {
+                HOME_ORDER
+                    .iter()
+                    .position(|id| *id == card.id)
+                    .map(|at| MESSAGE_ORDER.len() + at)
+            })
+            .unwrap_or(usize::MAX)
+    });
+    Ok(cards)
+}
+
 /// The templates of a gallery answer in its own order, each once: what Find templates suggests.
 pub fn found(value: &Value) -> Result<Vec<Card>, WorkflowFailure> {
     let mut cards = rows(value)?

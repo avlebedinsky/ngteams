@@ -170,7 +170,10 @@ token. `GET …/powerautomate/apis/<connector>/apiOperations/<operation>` (the b
 the operation's `inputsDefinition.properties`; the bound input's `x-ms-dynamic-list` (or `x-ms-dynamic-tree`) is posted
 back with the values it refers to, `POST …/apis/<connector>/connections/<connection>/listEnum` (or `listTree`) with
 `{"parameters": {…}, "dynamicInvocationDefinition": <it>}`; a `parameterReference` takes the value of the field bound
-to that input of the same action. A tree's browse adds the folder's `selectionState`. The answer is `value[]` of
+to that input of the same action. An input inside the action's body is named by its path (`body/groupId`): its
+definition is under `properties.body.properties`, and a list naming it refers to it so (Planner's Create a task:
+`ListGroupPlans` takes `{"groupId": {"parameterReference": "body/groupId"}}`). A tree's browse adds the folder's
+`selectionState`. The answer is `value[]` of
 `value` and `displayName`. The SharePoint site is the team's own by default, its `teamSiteInformation.sharepointSiteUrl`
 from the teams read (the connector's `GetDataSets` listed nothing in the lab); its list ends with "Enter a site URL".
 
@@ -249,8 +252,8 @@ rail. Its header is the app's icon on a white tile, "Workflows", the tabs Home, 
 - **A template** opens the channel dialog's card editor in the page, under "‹ Untitled workflow", "Collapse all"
   and Save (no footer). With no channel to start from, the team field is empty ("Type or select a team") and the
   channel field off; a SharePoint site has no default. Save goes to the Overview under "‹ Workflow details". A
-  template run from a message's More actions ("Follow up on a message") shows its instructions and a Save; the native
-  client opens those in its full editor.
+  template run from a message ("Follow up on a message") shows its instructions and a Save
+  ([below](#workflows-run-from-a-message)).
 - **Build from scratch** shows "‹ Untitled workflow" with Save off, "Starts when" (Choose what starts this) and "Then
   do this" (Choose what happens). Each opens Teams' choices: triggers On a schedule, SharePoint ›, Outlook ›,
   Teams ›, Office 365 Groups ›, Azure DevOps ›; actions Teams ›, Outlook ›, SharePoint ›, Planner ›, Approvals ›,
@@ -265,6 +268,78 @@ rail. Its header is the app's icon on a white tile, "Workflows", the tabs Home, 
   and "Type your first message below." over the message box. The bot answers anything with one message saying it
   keeps you posted on workflow updates and can't respond to other requests; the chat then shows in the chat list as
   "Workflows".
+
+## Workflows run from a message
+
+Seen 2026-11-05 with `proto-lab run team-manage` steps, lab account a, in its lab-only team's General channel (a the
+only member) and its 1:1 chat with b. Follow up on a message, Schedule a reply and Create a Planner task from a message
+were saved, run on a post and on a chat message, and deleted again with the plan made for them. The shots stay in the
+lab's capture dir.
+
+**The templates.** A gallery template whose markup's `automation.context.triggerType` is `messageAction` and whose
+`parameters` are empty (Follow up on a message, Schedule a reply to send at the perfect time) opens a card with no
+fields: its app chips, its title (the markup's `summary`; a literal one is shown as it is, "Schedule a message reply
+to send at the perfect time"), Teams' picture of a message's menu (`message-action.svg` from the Workflows app's own
+assets) and "After you create this workflow, start it from a message." with three steps: "Go to the message you want
+to run the workflow on.", "Select **More options**(···).", "Select **<template name>**, or find it under **More
+actions**." No chevron, no "Collapse all"; Save and Back. Save is the card editor's Save with nothing to fill: `POST
+…/flows` with `definition` (the template's, with `Do_Not_Remove_FlowIL` keeping the markup), `connectionReferences`,
+`displayName` and `templateName`; the workflow is created on. Teams sent it through the Workflows app's
+`automations.teams.cloud.dev.microsoft/api/TemplateILToFlow` first; the native client makes the same body itself.
+Create a Planner task from a message has two fields (a group with a plan, "Select a group that has an existing plan";
+"Plan to create the task in") and is the ordinary card editor; its title reads "Turn a Teams message into a task in
+<plan>". Each template's trigger is Microsoft Teams' "For a selected message" (`ForASelectedMessageV2`, `kind`
+`ApiConnection`) carrying its question card as `inputsAdaptiveCard`.
+
+**The Overview** of such a workflow has Turn off, Run, Edit (off when the kept markup names no field: Follow up,
+Schedule a reply) and "...", then "How to run this workflow after setup": the picture beside "Start this workflow
+directly from a message" and the same three steps naming the workflow. The row menu's Edit is off the same way.
+
+**The message's menu.** A message's "More options" lists the account's workflows run from a message once Teams has
+read them (placeholders first): in the menu's second group with the Workflows app's icon, up to three; the rest under
+"More actions" among the apps' message actions, above "Create workflows". Teams reorders them by use. "Create
+workflows" opens the Workflows dialog for that message: the gallery's `home_featured` templates with the ones run from
+a message first (Follow up, Schedule a reply, the Planner task, Save a message to OneNote, then Home's order), and
+"Your workflows" with the tab "For this channel message" ("For this chat message" in a chat) listing the workflows run
+from a message with a Run (play) button; the Overview's Run there shows the question card in the dialog with Run and
+Back.
+
+**Running one.** Choosing a workflow opens a dialog titled with its name over "Workflows via Power Automate" (a
+spinner while it loads) showing the trigger's question card: Follow up asks "Remind me about this message:", a
+required Date and Time and "Notes for reminder"; Schedule a reply "When do you want your reply to be sent?", Date,
+Time, "Notify myself when message is posted?" and the required Reply; the Planner task "Add a task", an optional due
+date and "Assign to (Optional)" people. Submit with a required one empty shows the card's `errorMessage` under it in
+red ("Please select a remind date"). Time is a combobox of half hours that also takes typing ("8:00 AM"). Submit
+turns off while it goes; the dialog then closes with nothing else shown. What follows is the service's: Follow up's
+reminder arrives as an Activity notification from the Workflows app ("Reminder for message sent by <name>"),
+Schedule a reply posts the reply in the thread as the account at the time chosen, and the Planner task appears in the
+plan with the message's text and link.
+
+Teams runs it through the Workflows bot, over the chat service's `POST v1/agents/<bot>/invoke`: `composeExtension/
+fetchCommands` (the message workflows, `runFlow/<flow resource id>`), `composeExtension/fetchTask` (the card, its
+Submit carrying `flowTriggerUri`) and `composeExtension/submitAction` (the answers, each a string: a date
+`2026-11-05`, a time `08:00`, a switch `"false"`, an empty answer left out). Each invoke carries a `userAadToken` for
+the bot. The bot then posts to the workflow's Logic Flows runtime trigger, `<runtime>/apim/logicflows/<flow>/
+triggers/manual/run?api-version=2016-06-01`, the body a run's trigger outputs show: `cardOutputs` (the answers by
+input id) and `teamsFlowRunContext` with `MessagePayload` (`Id`, `From.User` (`DisplayName`, `Id`: the object id) or
+`From.Application` for a bot's message, `Body` (`ContentType` `html`, `Content`, `PlainText`), `LinkToMessage`,
+`ReplyToId`: the post's id in a channel, none in a chat), `Id` (`f:<guid>`), `ChannelData` (`Team` (`Id`,
+`AadGroupId`) and `Channel` (`Id`) in a channel, none in a chat; `Tenant.Id`), `From` (the runner's MRI, name and
+object id), `Conversation` (`Id`, `IsGroup` true), `Locale`, `CommandContext` `message` and `LocalTimezone` (a Windows
+zone). A channel message's link names its post (`?parentMessageId=<post>`), a chat's its kind
+(`?context={"contextType":"chat"}`).
+
+The native client sends no token to the bot: it lists the workflows itself (the classic flow list's
+`definitionSummary.triggers[].swaggerOperationId`, on and in the environment the Workflows dialog uses), reads the
+workflow again for its card when the dialog opens, and on Submit (`WorkflowRequest::RunOnMessage`, one attempt
+through the outbox, refused read-only) the transport reads the workflow again, checks its one trigger is "For a
+selected message" with that name and that the answers fit its card, and posts the bot's body once to the same
+runtime trigger, found through the Logic Flows metadata, with its own API Hub token. The message's text and sender come
+from the store and the engine's profiles; `Tenant.Id` from the default environment's name. A people question
+(`choices.data` `graph.microsoft.com/users`) searches the directory as the co-owner search does; its answer is the
+chosen people's object ids joined by commas, which the Planner template splits at the commas to assign them. The
+native menu lists the first three workflows and the rest under "More actions", without Teams' reordering by use; the
+dialog's row Run and Overview Run open the run dialog in the Workflows dialog's place, rather than in it.
 
 ## Lifecycle routes
 
@@ -306,7 +381,8 @@ Every mutation reaches the engine's outbox and has one HTTP attempt, with no aut
 throttle or uncertain outcome. A read-only app refuses mutations before token lookup. The transport applies no global
 lab policy. Before a live lab run, the agent must establish the complete reach of any automation, including later
 notifications, under the current lab-contact rule. The card editor's templates were created, edited and deleted live
-by a lab account in a team whose only member it was; no workflow was run.
+by a lab account in a team whose only member it was; the three templates run from a message were also run on lab-only
+messages ([above](#workflows-run-from-a-message)).
 
 ## AI workflows
 
@@ -331,7 +407,10 @@ blocker. Opening the Teams modal would install an automation bot, which was bloc
 
 The service’s actual read catalogs, environments and connections were verified with the normal native auth client.
 The card editor's creation, edits, Rename, Turn off, deletion, the row menu and the connector lists were exercised live
-on the lab tenant (2026-11-04); running a workflow and Manage's page were not. The Workflows app's gallery reads (the
+on the lab tenant (2026-11-04); Manage's page was not. On 2026-11-05 the native lab client made Follow up on a
+message, Schedule a reply and Create a Planner task from a message from a post's "More actions" → "Create workflows"
+and ran each on that post in the lab-only team's General channel (the runtime answered 202 each time; the reply was
+posted in the thread at its time and the task made in the lab plan). The Workflows app's gallery reads (the
 classic route answered as the app's tenant-scoped twin does, `$search` too), a workflow made from the app with no team
 chosen, its row's Turn off and Delete, Build from scratch's choices and the bot's chat were exercised live in the
 native lab client the same day; Go to Power Automate's browser page was not opened. The full editor's creation and running

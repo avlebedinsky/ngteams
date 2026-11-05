@@ -33,6 +33,9 @@ impl WorkflowDialog {
                 view.child(heading("How to run this workflow after setup"))
                     .child(how_to_run(palette))
             })
+            .when(message::runs_from_message(card), |view| {
+                view.child(message::how_to_run(&card.name, palette))
+            })
             .child(self.inline_history(card, palette, cx))
             .child(self.owners_section(palette, cx))
             .into_any_element()
@@ -102,14 +105,14 @@ impl WorkflowDialog {
                     .disabled(locked)
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(&changing, cx))),
             ))
-            .children(Self::run_button(card, locked, cx))
+            .children(self.run_button(card, locked, cx))
             .child(selected_by(
                 "workflow-edit",
                 Button::new("workflow-edit")
                     .outline()
                     .icon(Glyph::PENCIL.icon())
                     .label("Edit")
-                    .disabled(locked)
+                    .disabled(locked || message::nothing_to_edit(card))
                     .on_click(cx.listener(move |this, _, window, cx| this.edit(editing.clone(), true, window, cx))),
             ))
             .child(selected_by(
@@ -316,10 +319,11 @@ impl WorkflowDialog {
 
     /// Teams' Run, after Turn off, for a workflow that can run now: a schedule runs at once; one started by hand asks
     /// for its inputs first.
-    fn run_button(card: &Card, locked: bool, cx: &Context<Self>) -> Option<AnyElement> {
-        if !Self::runnable(card) {
+    fn run_button(&self, card: &Card, locked: bool, cx: &Context<Self>) -> Option<AnyElement> {
+        if !Self::runnable(card) && !self.runs_on_message(card) {
             return None;
         }
+        let on_message = self.runs_on_message(card);
         let scheduled = card.properties.get("definition").and_then(markup::recurrence_trigger);
         let running = card.clone();
         Some(
@@ -332,6 +336,7 @@ impl WorkflowDialog {
                     .disabled(locked)
                     .on_click(cx.listener(move |this, _, window, cx| match &scheduled {
                         Some(trigger) => this.run_now(&running, trigger.clone(), cx),
+                        None if on_message => this.run_on_message(&running, cx),
                         None => this.prepare_run(&running, window, cx),
                     })),
             )

@@ -1381,8 +1381,11 @@ fn the_hover_bar_holds_the_quick_reactions_react_reply_and_more_options_in_teams
         Some("2")
     );
     let menu = cx.debug_bounds("message-menu").unwrap();
+    // under its button, its right edge the button's; a window too short for it (the menu ends in "More actions") keeps
+    // it inside the window
+    let height = cx.update(|window, _| window.viewport_size().height);
     assert!(
-        menu.origin.y >= more.bottom(),
+        (menu.right() - more.right()).abs() <= px(1.0) && (menu.origin.y >= more.bottom() || menu.bottom() <= height),
         "the menu under its button: {menu:?} under {more:?}"
     );
     assert!(x(cx, "action-copy") > px(0.0) && cx.debug_bounds("action-delete").is_some());

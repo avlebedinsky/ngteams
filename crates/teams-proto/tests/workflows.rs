@@ -81,7 +81,10 @@ async fn the_apps_gallery_asks_for_one_category_newest_first_with_only_the_flow_
         top: 10,
     };
     assert!(!request.writes());
-    let response = transport(&server, Arc::clone(&tokens)).workflow(&request).await.unwrap();
+    let response = transport(&server, Arc::clone(&tokens))
+        .workflow(&request)
+        .await
+        .unwrap();
     assert_eq!(response, json!({"value": []}));
     assert_eq!(*tokens.0.lock().unwrap(), ["https://service.flow.microsoft.com/"]);
     // a quote in a category stays inside its string
@@ -827,4 +830,203 @@ async fn a_connector_read_with_a_bad_name_sends_nothing() {
         assert!(transport.workflow(request).await.is_err(), "{request:?}");
     }
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+/// A synthetic workflow run from a message: Teams' "For a selected message" trigger with a two-field input card.
+fn message_flow() -> serde_json::Value {
+    let card = json!({"type":"AdaptiveCard","body":[
+        {"type":"TextBlock","text":"Synthetic question"},
+        {"type":"Input.Date","id":"when","isRequired":true},
+        {"type":"Input.Text","id":"note"}
+    ]});
+    json!({"name":"synthetic","properties":{"definition":{"triggers":{"manual":{
+        "type":"Request","kind":"ApiConnection",
+        "inputs":{"operationId":"ForASelectedMessageV2","parameters":{"inputsAdaptiveCard":card.to_string()}}
+    }}}}})
+}
+
+fn synthetic_message() -> teams_proto::MessageRun {
+    teams_proto::MessageRun {
+        id: "1001".into(),
+        reply_to: Some("1000".into()),
+        sender: teams_proto::MessageSender::User {
+            id: "00000000-0000-0000-0000-00000000000b".into(),
+            name: "Synthetic B".into(),
+        },
+        html: "<p>Synthetic post</p>".into(),
+        text: "Synthetic post".into(),
+        link: teams_proto::MessageRun::link_to("19:synthetic@thread.tacv2", "1001", Some("1000")),
+        conversation: "19:synthetic@thread.tacv2".into(),
+        team: Some(("19:synthetic@thread.tacv2".into(), "synthetic-group".into())),
+        tenant: Some("synthetic-tenant".into()),
+        actor: "8:orgid:00000000-0000-0000-0000-00000000000a".into(),
+        actor_name: "Synthetic A".into(),
+        actor_object_id: "00000000-0000-0000-0000-00000000000a".into(),
+        time_zone: "UTC".into(),
+    }
+}
+
+fn message_request(answers: &serde_json::Value) -> WorkflowRequest {
+    WorkflowRequest::RunOnMessage {
+        environment: "Default-synthetic".into(),
+        flow: "synthetic".into(),
+        trigger: "manual".into(),
+        answers: answers.as_object().cloned().unwrap_or_default(),
+        message: Box::new(synthetic_message()),
+    }
+}
+
+async fn mount_message_reads(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path(
+            "/providers/Microsoft.ProcessSimple/environments/Default-synthetic/flows/synthetic",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(message_flow()))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/providers/Microsoft.PowerApps/apis/shared_logicflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(logic_metadata(
+            "https://default-synthetic.00.common.synthetic.azure-apihub.net/apim/logicflows",
+        )))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_run_from_a_message_posts_the_bots_trigger_body_once_to_the_own_runtime() {
+    let server = MockServer::start().await;
+    mount_message_reads(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/apim/logicflows/synthetic/triggers/manual/run"))
+        .and(query_param("api-version", "2016-06-01"))
+        .and(header("authorization", "Bearer synthetic-runtime-token"))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tokens = Arc::new(Tokens::default());
+    let request = message_request(&json!({"when": "2026-01-02", "note": "Synthetic note"}));
+    assert!(request.writes());
+    assert_eq!(
+        transport(&server, tokens.clone()).workflow(&request).await,
+        Ok(serde_json::Value::Null)
+    );
+    let sent = server.received_requests().await.unwrap();
+    let run = sent.iter().find(|request| request.method.as_str() == "POST").unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&run.body).unwrap();
+    assert_eq!(
+        body["cardOutputs"],
+        json!({"when": "2026-01-02", "note": "Synthetic note"})
+    );
+    let context = &body["teamsFlowRunContext"];
+    assert_eq!(context["MessagePayload"]["Id"], "1001");
+    assert_eq!(context["MessagePayload"]["ReplyToId"], "1000");
+    assert_eq!(context["MessagePayload"]["From"]["User"]["DisplayName"], "Synthetic B");
+    assert_eq!(context["MessagePayload"]["Body"]["PlainText"], "Synthetic post");
+    assert_eq!(context["ChannelData"]["Team"]["AadGroupId"], "synthetic-group");
+    assert_eq!(context["ChannelData"]["Channel"]["Id"], "19:synthetic@thread.tacv2");
+    assert_eq!(context["From"]["AadObjectId"], "00000000-0000-0000-0000-00000000000a");
+    assert_eq!(context["CommandContext"], "message");
+    assert!(context["Id"].as_str().unwrap().starts_with("f:"));
+    assert_eq!(
+        *tokens.0.lock().unwrap(),
+        [
+            "https://service.flow.microsoft.com/",
+            "https://service.powerapps.com/",
+            "https://apihub.azure.com"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_run_from_a_message_refuses_answers_its_card_does_not_take() {
+    for answers in [
+        json!({"note": "missing the required date"}),
+        json!({"when": "2026-01-02", "other": "not an input of the card"}),
+        json!({"when": true}),
+    ] {
+        let server = MockServer::start().await;
+        mount_message_reads(&server).await;
+        let tokens = Arc::new(Tokens::default());
+        assert_eq!(
+            transport(&server, tokens.clone())
+                .workflow(&message_request(&answers))
+                .await,
+            Err(WorkflowFailure::InvalidInput)
+        );
+        assert!(
+            !tokens
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|aud| aud == "https://apihub.azure.com")
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_run_from_a_message_needs_a_selected_message_trigger_and_is_refused_read_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(input_flow()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let request = message_request(&json!({"when": "2026-01-02"}));
+    assert_eq!(
+        transport(&server, Arc::default()).workflow(&request).await,
+        Err(WorkflowFailure::InvalidInput)
+    );
+    let quiet = MockServer::start().await;
+    let tokens = Arc::new(Tokens::default());
+    assert_eq!(
+        transport(&quiet, tokens.clone()).read_only().workflow(&request).await,
+        Err(WorkflowFailure::ReadOnly)
+    );
+    assert!(tokens.0.lock().unwrap().is_empty());
+    assert!(quiet.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn a_chat_message_link_and_context_name_no_team() {
+    let mut message = synthetic_message();
+    message.reply_to = None;
+    message.team = None;
+    message.link = teams_proto::MessageRun::link_to("19:a_b@unq.gbl.spaces", "1001", None);
+    message.sender = teams_proto::MessageSender::App {
+        id: "synthetic-app".into(),
+        name: "Synthetic bot".into(),
+    };
+    let body = message.body(&serde_json::Map::new());
+    let context = &body["teamsFlowRunContext"];
+    assert_eq!(context["ChannelData"]["Team"], serde_json::Value::Null);
+    assert_eq!(context["ChannelData"]["Channel"], serde_json::Value::Null);
+    assert_eq!(context["MessagePayload"]["From"]["Application"]["Id"], "synthetic-app");
+    assert_eq!(context["MessagePayload"]["From"]["User"], serde_json::Value::Null);
+    assert!(
+        context["MessagePayload"]["LinkToMessage"]
+            .as_str()
+            .unwrap()
+            .ends_with("/1001?context=%7B%22contextType%22:%22chat%22%7D")
+    );
+}
+
+#[test]
+fn a_flow_summary_and_definition_tell_a_workflow_run_from_a_message() {
+    let flow = message_flow();
+    let definition = &flow["properties"]["definition"];
+    let (name, trigger) = teams_proto::workflow::message_trigger(definition).unwrap();
+    assert_eq!(name, "manual");
+    let card = teams_proto::workflow::input_card(trigger).unwrap();
+    assert_eq!(teams_proto::workflow::card_inputs(&card).len(), 2);
+    assert!(teams_proto::workflow::message_trigger(&input_flow()["properties"]["definition"]).is_none());
+    assert!(teams_proto::workflow::summary_runs_from_message(&json!({
+        "definitionSummary": {"triggers": [{"swaggerOperationId": "ForASelectedMessageV2"}]}
+    })));
+    assert!(!teams_proto::workflow::summary_runs_from_message(&json!({
+        "definitionSummary": {"triggers": [{"type": "Recurrence"}]}
+    })));
 }

@@ -83,6 +83,68 @@ impl Shell {
         page
     }
 
+    /// Runs a workflow on a message, as Teams' message menu does: its run dialog over the window, asking the questions
+    /// the workflow's trigger asks.
+    pub fn run_workflow(
+        &mut self,
+        flow: crate::workflow_dialog::FlowRef,
+        message: crate::workflow_run::MessageRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.core.read_only() {
+            return;
+        }
+        let message = self.with_team(message, cx);
+        let core = Arc::clone(&self.core);
+        let dialog = cx.new(|cx| crate::workflow_run::WorkflowRun::new(core, flow, message, window, cx));
+        self.show_team_dialog(&dialog, window, cx);
+    }
+
+    /// A message's "More actions" → "Create workflows": the Workflows dialog for that message, its templates run from a
+    /// message first and its list the workflows that run on it. A channel message's channel is where a channel
+    /// template starts.
+    pub fn open_message_workflows(
+        &mut self,
+        message: crate::workflow_run::MessageRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = self.with_team(message, cx);
+        let place = self.channel_place(&message, cx);
+        let core = Arc::clone(&self.core);
+        let dialog =
+            cx.new(|cx| crate::workflow_dialog::WorkflowDialog::new_for_message(core, place, message, window, cx));
+        self.show_team_dialog(&dialog, window, cx);
+    }
+
+    /// A channel message with its team's thread and group, as the teams list holds them.
+    fn with_team(&self, mut message: crate::workflow_run::MessageRef, cx: &App) -> crate::workflow_run::MessageRef {
+        if message.in_channel && message.team.is_none() {
+            message.team = self.channel_place(&message, cx).map(|(team, _)| {
+                let group = team.group_id.clone().unwrap_or_default();
+                (team.id, group)
+            });
+        }
+        message
+    }
+
+    /// The team and channel a channel message is in, as the teams list holds them.
+    fn channel_place(
+        &self,
+        message: &crate::workflow_run::MessageRef,
+        cx: &App,
+    ) -> Option<(teams_store::Team, teams_store::TeamChannel)> {
+        if !message.in_channel {
+            return None;
+        }
+        let teams = self.teams.read(cx).teams()?;
+        teams.iter().find_map(|team| {
+            let channel = team.channels.iter().find(|known| known.id == message.conversation)?;
+            Some((team.clone(), channel.clone()))
+        })
+    }
+
     /// Opens or closes the rail's More apps flyout, as its button does.
     pub fn toggle_more_apps(&mut self, cx: &mut Context<Self>) {
         self.workflows.more_apps = !self.workflows.more_apps;

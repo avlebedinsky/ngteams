@@ -254,11 +254,86 @@ fn the_local_zone_is_found_by_offset_and_city() {
 fn a_known_system_zone_is_its_own_windows_zone() {
     use super::super::zones::{TZDB, by_tzdb};
     // no name shows New York or Chicago: by offset and city they'd be Bogota's and Guatemala's zones
-    assert_eq!(by_tzdb("America/New_York").map(|zone| zone.0), Some("Eastern Standard Time"));
-    assert_eq!(by_tzdb("America/Chicago").map(|zone| zone.0), Some("Central Standard Time"));
-    assert_eq!(by_tzdb("Europe/Berlin").map(|zone| zone.0), Some("W. Europe Standard Time"));
+    assert_eq!(
+        by_tzdb("America/New_York").map(|zone| zone.0),
+        Some("Eastern Standard Time")
+    );
+    assert_eq!(
+        by_tzdb("America/Chicago").map(|zone| zone.0),
+        Some("Central Standard Time")
+    );
+    assert_eq!(
+        by_tzdb("Europe/Berlin").map(|zone| zone.0),
+        Some("W. Europe Standard Time")
+    );
     assert_eq!(by_tzdb("Mars/Olympus_Mons"), None);
     for (tzdb, windows) in TZDB {
-        assert_eq!(by_tzdb(tzdb).map(|zone| zone.0), Some(windows), "{tzdb} names a zone Teams offers");
+        assert_eq!(
+            by_tzdb(tzdb).map(|zone| zone.0),
+            Some(windows),
+            "{tzdb} names a zone Teams offers"
+        );
     }
+}
+
+#[test]
+fn a_kept_message_is_html_only_when_it_holds_a_formatted_messages_tag() {
+    use super::super::fields::looks_like_html;
+    for html in [
+        "<p>Weekly</p>",
+        "<strong>Note</strong> this",
+        "line<br/>break",
+        "<a href=\"x\">link</a>",
+    ] {
+        assert!(looks_like_html(html), "{html}");
+    }
+    for text in ["a < b", "<3 the team", "x<y and y>z", "<unknown>", "<"] {
+        assert!(!looks_like_html(text), "{text}");
+    }
+}
+
+#[test]
+fn a_bound_input_is_found_at_the_top_or_inside_the_body() {
+    use super::super::fields::input_definition;
+    let inputs = json!({
+        "groupId": {"x-ms-dynamic-list": {"operationId": "Top"}},
+        "body": {"type": "object", "properties": {"planId": {"x-ms-dynamic-list": {"operationId": "Inner"}}}}
+    });
+    assert_eq!(
+        input_definition(&inputs, "groupId").unwrap()["x-ms-dynamic-list"]["operationId"],
+        "Top"
+    );
+    assert_eq!(
+        input_definition(&inputs, "body/planId").unwrap()["x-ms-dynamic-list"]["operationId"],
+        "Inner"
+    );
+    assert!(input_definition(&inputs, "body/missing").is_none());
+}
+
+#[test]
+fn the_planner_task_from_a_message_card_has_teams_words() {
+    let markup = json!({"version":"1.0","automation":{"template":{
+        "id": "45e229e1cd36483084bc8d2352b543d2",
+        "parameters":[
+            {"id":"PlannerGroupId","typeName":"Planner.GroupId","mode":"input"},
+            {"id":"PlannerPlanId","typeName":"Planner.PlanId","mode":"input","dependencies":["PlannerGroupId"]}
+        ],
+        "editorBindings":[
+            {"parameterId":"PlannerGroupId","label":"${resources['x']}"},
+            {"parameterId":"PlannerPlanId","label":"${resources['x']}"}
+        ]
+    }}});
+    let mut params = params(&markup);
+    assert_eq!(params[0].label, "Select a group that has an existing plan");
+    assert_eq!(params[1].label, "Plan to create the task in");
+    assert_eq!(
+        summary("45e229e1cd36483084bc8d2352b543d2", "", &params),
+        "Turn a Teams message into a task in plan"
+    );
+    params[1].value = json!("synthetic-plan");
+    params[1].display = Some("Synthetic plan".to_owned());
+    assert_eq!(
+        summary("45e229e1cd36483084bc8d2352b543d2", "", &params),
+        "Turn a Teams message into a task in Synthetic plan"
+    );
 }

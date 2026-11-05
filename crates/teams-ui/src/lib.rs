@@ -140,6 +140,7 @@ pub mod video_player;
 pub mod view;
 pub mod window;
 pub mod workflow_dialog;
+pub mod workflow_run;
 pub mod workflows_app;
 
 pub use account_prompt::{AccountPrompt, AccountPromptEvent};

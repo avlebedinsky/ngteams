@@ -1061,3 +1061,58 @@ fn the_card_of_a_meeting_the_account_scheduled_opens_its_details_from_the_team_s
     cx.update(|_, cx| teams_ui::event_form::close(cx));
     cx.run_until_parked();
 }
+
+/// The service for a channel post's menu: one workflow run from a message, on.
+#[expect(clippy::unnecessary_wraps, reason = "a workflow handler answers a service result")]
+fn message_workflow_answer(request: &teams_proto::WorkflowRequest) -> teams_proto::WorkflowResponse {
+    use serde_json::json;
+    use teams_proto::WorkflowRequest;
+    let card = json!({"type":"AdaptiveCard","body":[{"type":"Input.Text","id":"note","label":"Note"}]}).to_string();
+    Ok(match request {
+        WorkflowRequest::Environments => {
+            json!({"value":[{"name":"Default-synthetic","properties":{"displayName":"Synthetic"}}]})
+        }
+        WorkflowRequest::List { .. } => json!({"value":[{"name":"synthetic-follow-flow","properties":{
+            "displayName":"Follow up on a message","state":"Started",
+            "definitionSummary":{"triggers":[{"swaggerOperationId":"ForASelectedMessageV2"}]}}}]}),
+        WorkflowRequest::Get { .. } => json!({"name":"synthetic-follow-flow","properties":{
+            "displayName":"Follow up on a message","state":"Started","definition":{"triggers":{"manual":{
+                "type":"Request","kind":"ApiConnection",
+                "inputs":{"operationId":"ForASelectedMessageV2","parameters":{"inputsAdaptiveCard": card}}}},"actions":{}}}}),
+        _ => json!({"value": []}),
+    })
+}
+
+#[test]
+fn a_posts_more_options_runs_a_workflow_on_it_or_opens_workflows_for_it() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    *rig.core.workflow_handler.lock().unwrap() = Some(message_workflow_answer);
+    let (messages, roots) = channel_store();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (_shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let more = format!("channel-more-{POST}");
+    let post = bounds(cx, &format!("channel-message-{POST}")).expect("the post is drawn");
+    cx.simulate_mouse_move(post.center(), None, Modifiers::none());
+    click(cx, &more);
+    assert!(bounds(cx, "channel-message-menu").is_some());
+    click(cx, "message-workflow-synthetic-follow-flow");
+    assert!(bounds(cx, "channel-message-menu").is_none(), "the menu closes");
+    assert!(bounds(cx, "workflow-run").is_some(), "the run dialog opens");
+    assert!(
+        bounds(cx, "workflow-run-input-note").is_some(),
+        "with the workflow's question"
+    );
+    click(cx, "workflow-run-close");
+    assert!(bounds(cx, "workflow-run").is_none());
+    cx.simulate_mouse_move(post.center(), None, Modifiers::none());
+    click(cx, &more);
+    click(cx, "message-more-actions");
+    click(cx, "message-create-workflows");
+    assert!(
+        bounds(cx, "workflow-dialog").is_some(),
+        "the Workflows dialog for the post"
+    );
+}

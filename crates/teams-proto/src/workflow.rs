@@ -3,7 +3,12 @@
 //! Paths are grounded in the current Teams reference and Microsoft's Power Automate client source; see
 //! `docs/protocol/workflows.md`. A request cannot choose an origin or a credential audience.
 mod inputs;
+mod message;
 pub use inputs::valid_trigger_inputs;
+pub use message::{
+    MessageRun, MessageSender, SELECTED_MESSAGE, answers_fit, card_inputs, input_card, message_trigger,
+    summary_runs_from_message,
+};
 
 use serde_json::Value;
 
@@ -48,6 +53,16 @@ pub enum WorkflowRequest {
         flow: String,
         trigger: String,
         inputs: Value,
+    },
+    /// A run of a workflow started from a message (Teams' "For a selected message" trigger) on `message`, with the
+    /// answers to the trigger's own input card. Its body goes to the authenticated Logic Flows runtime, as the
+    /// Workflows bot sends it there; the trigger and its card are read again and checked before the run.
+    RunOnMessage {
+        environment: String,
+        flow: String,
+        trigger: String,
+        answers: serde_json::Map<String, Value>,
+        message: Box<MessageRun>,
     },
     /// Connections in the chosen environment, never tenant-wide connection discovery.
     Connections { environment: String },
@@ -198,6 +213,7 @@ impl WorkflowRequest {
             | Self::AddOwner { .. }
             | Self::Run { .. }
             | Self::RunWithInputs { .. }
+            | Self::RunOnMessage { .. }
             | Self::ConnectionConsent { .. }
             | Self::WebhookAddress { .. }
             | Self::Choices { .. } => "POST",
@@ -213,7 +229,7 @@ impl WorkflowRequest {
     pub fn service(&self) -> Service {
         match self {
             Self::CopilotEligibility => Service::MiddleTier,
-            Self::RunWithInputs { .. } => Service::WorkflowRuntime,
+            Self::RunWithInputs { .. } | Self::RunOnMessage { .. } => Service::WorkflowRuntime,
             Self::LogicFlowsMetadata { .. }
             | Self::Connections { .. }
             | Self::CreateConnection { .. }
@@ -452,6 +468,7 @@ impl WorkflowRequest {
             | Self::Template { .. } => None,
             Self::LogicFlowsMetadata { environment }
             | Self::RunWithInputs { environment, .. }
+            | Self::RunOnMessage { environment, .. }
             | Self::RunActions { environment, .. }
             | Self::WebhookAddress { environment, .. }
             | Self::Page { environment, .. }

@@ -23,9 +23,10 @@ pub(super) fn local_time(stamp: &str) -> Option<String> {
 }
 
 impl WorkflowDialog {
-    /// Reads the next run of each scheduled workflow listed, as Teams' list shows it.
-    pub(super) fn load_next_runs(&mut self, cx: &mut Context<Self>) {
-        let cards = self.workflows.clone();
+    /// Reads the next run of each scheduled workflow listed, as Teams' list shows it: from `from` on, the rows a page
+    /// added ("Load more" reads only its own rows' next runs).
+    pub(super) fn load_next_runs(&mut self, from: usize, cx: &mut Context<Self>) {
+        let cards: Vec<Card> = self.workflows.iter().skip(from).cloned().collect();
         self.next_runs_of(&cards, cx);
     }
 
@@ -61,11 +62,21 @@ impl WorkflowDialog {
         }
     }
 
+    /// A schedule's next run as read; a read that failed or named none takes back the one shown before, which may
+    /// no longer hold.
     fn next_run_read(&mut self, generation: u64, flow: String, next: Option<String>, cx: &mut Context<Self>) {
-        if let Some(next) = next.filter(|_| self.generation == generation) {
-            self.next_runs.insert(flow, next);
-            cx.notify();
+        if self.generation != generation {
+            return;
         }
+        match next {
+            Some(next) => {
+                self.next_runs.insert(flow, next);
+            }
+            None => {
+                self.next_runs.remove(&flow);
+            }
+        }
+        cx.notify();
     }
 
     /// One workflow in the list.
@@ -123,7 +134,10 @@ impl WorkflowDialog {
             })
             .when(acting, |row| row.child(div().px_2().child(Self::row_spinner(palette))))
             .when(
-                !acting && scheduled.is_some() && card.enabled() && !self.core.read_only(),
+                !acting
+                    && (scheduled.is_some() || self.runs_on_message(card))
+                    && card.enabled()
+                    && !self.core.read_only(),
                 |row| {
                     let running = card.clone();
                     row.child(selected_by(
@@ -219,7 +233,8 @@ impl WorkflowDialog {
     fn row_menu(&self, card: &Card, cx: &Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
         let card = card.clone();
-        let runnable = Self::runnable(&card);
+        let runnable = Self::runnable(&card) || self.runs_on_message(&card);
+        let editable = !message::nothing_to_edit(&card);
         let read_only = self.core.read_only();
         // the Workflows app's menu has no Manage
         let manage = self.app.is_none();
@@ -254,7 +269,11 @@ impl WorkflowDialog {
                         if runnable {
                             menu = menu.item(item("run", Glyph::PLAY, "Run").on_click(act(RowAction::Run)));
                         }
-                        menu = menu.item(item("edit", Glyph::PENCIL, "Edit").on_click(act(RowAction::Edit)));
+                        menu = menu.item(
+                            item("edit", Glyph::PENCIL, "Edit")
+                                .disabled(!editable)
+                                .on_click(act(RowAction::Edit)),
+                        );
                         if manage {
                             menu =
                                 menu.item(item("manage", Glyph::OPEN_OUT, "Manage").on_click(act(RowAction::Manage)));
@@ -280,6 +299,30 @@ impl WorkflowDialog {
                 }),
         )
         .into_any_element()
+    }
+
+    /// Whether a workflow runs from a message and the dialog has a message to run it on.
+    pub(super) fn runs_on_message(&self, card: &Card) -> bool {
+        self.message.is_some() && card.enabled() && message::runs_from_message(card)
+    }
+
+    /// A workflow run from a message, on the message the dialog was opened from: its run dialog takes this one's
+    /// place.
+    pub(super) fn run_on_message(&mut self, card: &Card, cx: &mut Context<Self>) {
+        let (Some(message), Some(environment)) = (self.message.clone(), self.environment.clone()) else {
+            return;
+        };
+        if self.busy || self.core.read_only() {
+            return;
+        }
+        cx.emit(TeamDialogEvent::RunWorkflow {
+            flow: FlowRef {
+                environment,
+                id: card.id.clone(),
+                name: card.name.clone(),
+            },
+            message,
+        });
     }
 
     /// Whether Teams offers to run a workflow now: a schedule, or one started by hand.
@@ -341,6 +384,7 @@ impl WorkflowDialog {
                     self.acting = None;
                 }
             }
+            None if self.runs_on_message(card) => self.run_on_message(card, cx),
             None => self.prepare_run(card, window, cx),
         }
     }

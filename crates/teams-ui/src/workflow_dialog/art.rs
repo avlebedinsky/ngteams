@@ -53,3 +53,11 @@ pub(super) fn connector(api: &str) -> Arc<Image> {
         _ => teams(),
     }
 }
+
+/// Teams' picture of starting a workflow from a message (a message, its hover bar and its menu), as the Workflows
+/// app draws it on a message template's card and on such a workflow's Overview (its own `message-action.svg`, drawn
+/// at twice the card's size).
+pub(super) fn message_action() -> Arc<Image> {
+    static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
+    png(&IMAGE, include_bytes!("../../assets/apps/message-action.png"))
+}

@@ -142,7 +142,7 @@ pub use write::{
     EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
 
-pub use workflow::{Principal, WorkflowFailure, WorkflowRequest, WorkflowResponse};
+pub use workflow::{MessageRun, MessageSender, Principal, WorkflowFailure, WorkflowRequest, WorkflowResponse};
 
 /// Whether test-only transport origins are enabled in this build.
 #[must_use]

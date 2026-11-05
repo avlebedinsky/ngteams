@@ -401,7 +401,7 @@ const LEARN_MORE: &str = "https://go.microsoft.com/fwlink/?linkid=839912";
 
 /// The people a directory search found whose name or address starts with the text, as Teams' own search asks (Graph's
 /// `startswith` on the display name, mail and sign-in name): "ai2" finds AI2, not AI3.
-pub(super) fn starting_with(people: Vec<TeamPerson>, query: &str) -> Vec<TeamPerson> {
+pub(crate) fn starting_with(people: Vec<TeamPerson>, query: &str) -> Vec<TeamPerson> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return people;

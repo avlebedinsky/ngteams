@@ -152,6 +152,8 @@ pub const CONTEXT: &str = "ChatMessages";
 const QUICK_EMOJI: f32 = 20.0;
 /// A button of the hover bar, px: a quick reaction's or an action's square.
 const BAR_BUTTON: f32 = 28.0;
+/// The more-options menu's width while it lists workflows, as Teams' widens.
+const WORKFLOW_MENU_WIDTH: f32 = 300.0;
 /// The hover bar's padding and the gap between its buttons, px.
 const BAR_GAP: f32 = 2.0;
 /// The hover bar's more-options menu's width, px.
@@ -321,6 +323,14 @@ pub enum ChatViewEvent {
     /// A forwarded message's original time was clicked: the original is opened in the app when the account has its
     /// chat, else in Teams on the web.
     OpenOriginal(Original),
+    /// A workflow was chosen in a message's "More options" (or "More actions"): it runs on that message
+    /// ([`crate::workflow_run`]).
+    RunWorkflow {
+        flow: crate::workflow_dialog::FlowRef,
+        message: crate::workflow_run::MessageRef,
+    },
+    /// "More actions" → "Create workflows" on a message: the Workflows dialog for it.
+    CreateWorkflows(crate::workflow_run::MessageRef),
 }
 
 /// How far the conversation's older history is loaded.
@@ -859,6 +869,12 @@ pub struct ChatView {
     options: Option<String>,
     /// Where the open more-options menu's button was last drawn, in the window: the menu opens under it.
     options_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The message whose more-options menu shows its "More actions" list.
+    more_actions: Option<String>,
+    /// Where that list was last drawn: a click in it is not a click outside the menu.
+    more_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The account's workflows that run from a message, read each time a message's menu opens.
+    workflows: Option<Entity<crate::workflow_run::menu::MessageWorkflows>>,
     /// The message whose delete waits for its confirmation.
     deleting: Option<String>,
     /// The row whose "send again" waits for its confirmation (its message may have arrived).
@@ -969,6 +985,9 @@ impl ChatView {
             text_selection: TextSelection::default(),
             options: None,
             options_at: Rc::default(),
+            more_actions: None,
+            more_at: Rc::default(),
+            workflows: None,
             deleting: None,
             resending: None,
             unsettled: Vec::new(),
@@ -1602,7 +1621,70 @@ impl ChatView {
         } else {
             Some(message.to_owned())
         };
+        self.more_actions = None;
+        if self.options.is_some() && !self.core.read_only() {
+            self.read_workflows(cx);
+        }
         cx.notify();
+    }
+
+    /// Reads the account's workflows that run from a message again, as Teams does when a message's menu opens.
+    fn read_workflows(&mut self, cx: &mut Context<Self>) {
+        let workflows = if let Some(workflows) = &self.workflows {
+            workflows.clone()
+        } else {
+            let core = Arc::clone(&self.core);
+            let workflows = cx.new(|_| crate::workflow_run::menu::MessageWorkflows::new(core));
+            cx.observe(&workflows, |_, _, cx| cx.notify()).detach();
+            self.workflows = Some(workflows.clone());
+            workflows
+        };
+        workflows.update(cx, crate::workflow_run::menu::MessageWorkflows::refresh);
+    }
+
+    /// The chat message `message` as a workflow runs on it.
+    fn message_ref(&self, message: &str) -> crate::workflow_run::MessageRef {
+        crate::workflow_run::MessageRef {
+            conversation: self.conversation.clone(),
+            id: message.to_owned(),
+            root: None,
+            in_channel: false,
+            team: None,
+        }
+    }
+
+    /// Runs `flow` on `message`, as a workflow chosen in its menu.
+    pub fn run_workflow(&mut self, flow: crate::workflow_dialog::FlowRef, message: &str, cx: &mut Context<Self>) {
+        self.options = None;
+        self.more_actions = None;
+        let message = self.message_ref(message);
+        cx.emit(ChatViewEvent::RunWorkflow { flow, message });
+        cx.notify();
+    }
+
+    /// "Create workflows" on `message`.
+    pub fn create_workflows(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.options = None;
+        self.more_actions = None;
+        let message = self.message_ref(message);
+        cx.emit(ChatViewEvent::CreateWorkflows(message));
+        cx.notify();
+    }
+
+    /// Shows the open menu's "More actions" list, as its row does.
+    pub fn open_more_actions(&mut self, cx: &mut Context<Self>) {
+        if self.options.is_some() {
+            self.more_actions.clone_from(&self.options);
+            cx.notify();
+        }
+    }
+
+    /// The account's workflows that run from a message, as last read.
+    #[must_use]
+    pub fn message_workflows(&self, cx: &App) -> Vec<crate::workflow_dialog::FlowRef> {
+        self.workflows
+            .as_ref()
+            .map_or_else(Vec::new, |workflows| workflows.read(cx).flows().to_vec())
     }
 
     /// Asks the engine for the account's most used reactions, for the hover bar's quick reactions.
@@ -2936,15 +3018,32 @@ impl ChatView {
         };
         let at = self.options_at.get()?;
         let actions = self.message_items().find(|item| item.id == message)?.actions();
-        let entries = [MessageAction::Copy, MessageAction::Delete]
+        let mut entries = [MessageAction::Copy, MessageAction::Delete]
             .into_iter()
             .filter(|action| actions.contains(action))
             .map(|action| menu_entry(&message, action, palette, window, cx))
             .collect::<Vec<_>>();
+        // Teams' workflows run on any message of a chat that takes the account's writes
+        let workflows = if actions.contains(&MessageAction::Reply) {
+            self.message_workflows(cx)
+        } else {
+            Vec::new()
+        };
+        let more = actions
+            .contains(&MessageAction::Reply)
+            .then(|| self.more_actions_list(&message, &workflows, palette, cx));
+        if actions.contains(&MessageAction::Reply) {
+            entries.extend(self.workflow_entries(&message, &workflows, palette, cx));
+        }
         let menu = div()
             .id("message-menu")
             .debug_selector(|| "message-menu".to_owned())
-            .w(px(MENU_WIDTH))
+            // Teams' menu widens for the workflows' names
+            .w(px(if workflows.is_empty() {
+                MENU_WIDTH
+            } else {
+                WORKFLOW_MENU_WIDTH
+            }))
             .p_1()
             .flex()
             .flex_col()
@@ -2956,8 +3055,10 @@ impl ChatView {
             .shadow_lg()
             .occlude()
             .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                // a click on its own button toggles it there
-                if !at.contains(&event.position) {
+                // a click on its own button toggles it there; one in "More actions"' list is the menu's own
+                let in_list = this.more_actions.is_some()
+                    && this.more_at.get().is_some_and(|list| list.contains(&event.position));
+                if !at.contains(&event.position) && !in_list {
                     this.options = None;
                     cx.notify();
                 }
@@ -2969,7 +3070,15 @@ impl ChatView {
                     .anchor(gpui::Anchor::TopRight)
                     .position(at.bottom_right())
                     .snap_to_window_with_margin(px(8.0))
-                    .child(div().pt_1().child(menu)),
+                    .child(
+                        div()
+                            .pt_1()
+                            .flex()
+                            .items_end()
+                            .gap_1()
+                            .children(more.flatten())
+                            .child(menu),
+                    ),
             )
             .with_priority(1)
             .into_any_element(),
@@ -2978,6 +3087,74 @@ impl ChatView {
 }
 
 impl ChatView {
+    /// The menu's workflows group (the first [`crate::workflow_run::menu::MAIN_MENU`] workflows that run from a
+    /// message) and "More actions", after a hairline.
+    fn workflow_entries(
+        &self,
+        message: &str,
+        workflows: &[crate::workflow_dialog::FlowRef],
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::workflow_run::menu;
+        let mut entries = vec![menu::separator(palette)];
+        for flow in workflows.iter().take(menu::MAIN_MENU) {
+            let (flow_ref, message) = (flow.clone(), message.to_owned());
+            let view = cx.entity().downgrade();
+            entries.push(menu::workflow_row(flow, palette, move |_, _, cx| {
+                let _ = view.update(cx, |this, cx| this.run_workflow(flow_ref.clone(), &message, cx));
+            }));
+        }
+        let view = cx.entity().downgrade();
+        entries.push(menu::separator(palette));
+        let open = self.more_actions.as_deref() == Some(message);
+        let shown = message.to_owned();
+        entries.push(menu::more_actions_row(open, palette, move |_, _, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.more_actions = if this.more_actions.is_some() {
+                    None
+                } else {
+                    Some(shown.clone())
+                };
+                cx.notify();
+            });
+        }));
+        entries
+    }
+
+    /// "More actions"' list beside the menu, while it is open: the other workflows, then "Create workflows".
+    fn more_actions_list(
+        &self,
+        message: &str,
+        workflows: &[crate::workflow_dialog::FlowRef],
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::workflow_run::menu;
+        if self.more_actions.as_deref() != Some(message) {
+            return None;
+        }
+        let mut list = menu::panel("message-more-actions-menu", palette)
+            .relative()
+            .child(measured(&self.more_at));
+        let rest: Vec<_> = workflows.iter().skip(menu::MAIN_MENU).collect();
+        for flow in &rest {
+            let (flow_ref, message) = ((*flow).clone(), message.to_owned());
+            let view = cx.entity().downgrade();
+            list = list.child(menu::workflow_row(flow, palette, move |_, _, cx| {
+                let _ = view.update(cx, |this, cx| this.run_workflow(flow_ref.clone(), &message, cx));
+            }));
+        }
+        if !rest.is_empty() {
+            list = list.child(menu::separator(palette));
+        }
+        let (view, message) = (cx.entity().downgrade(), message.to_owned());
+        list = list.child(menu::create_row(palette, move |_, _, cx| {
+            let _ = view.update(cx, |this, cx| this.create_workflows(&message, cx));
+        }));
+        Some(list.into_any_element())
+    }
+
     /// The right-click menu over the text selected with the mouse, while it is open: "Copy", with its key.
     fn selection_menu(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = Kbd::binding_for_action(&CopySelected, Some(CONTEXT), window).map(Kbd::outline);

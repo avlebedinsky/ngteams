@@ -26,6 +26,18 @@ impl<C: Credentials> HttpTransport<C> {
         {
             return self.workflow_run_inputs(environment, flow, trigger, inputs).await;
         }
+        if let WorkflowRequest::RunOnMessage {
+            environment,
+            flow,
+            trigger,
+            answers,
+            message,
+        } = request
+        {
+            return self
+                .workflow_run_on_message(environment, flow, trigger, answers, message)
+                .await;
+        }
         if let WorkflowRequest::AuthorizeConnection { environment, .. } = request {
             return self.workflow_authorize_connection(request, environment).await;
         }

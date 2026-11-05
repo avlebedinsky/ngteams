@@ -57,6 +57,8 @@ use crate::system_message::{self, Naming, Shown as SystemShown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
+mod workflows;
+
 /// Messages read from the store at first, and how many more each "Load older posts" reads.
 pub const PAGE: usize = 200;
 /// What a thread whose post the view doesn't hold says above its replies.
@@ -154,6 +156,14 @@ pub enum ChannelViewEvent {
     /// A meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`), opened to
     /// change or cancel it (the shell's to open, as it knows the channel's team).
     EditMeeting { ical_uid: String },
+    /// A workflow was chosen in a post's or a reply's "More options" (or "More actions"): it runs on that message
+    /// ([`crate::workflow_run`]); the shell names its team.
+    RunWorkflow {
+        flow: crate::workflow_dialog::FlowRef,
+        message: crate::workflow_run::MessageRef,
+    },
+    /// "More actions" → "Create workflows" on a post or a reply: the Workflows dialog for it.
+    CreateWorkflows(crate::workflow_run::MessageRef),
 }
 
 /// A message as the view shows it.
@@ -228,6 +238,8 @@ pub struct ChannelView {
     ended_calls: HashSet<String>,
     /// The team's and the channel's names, for a meeting card's line.
     place: Option<(SharedString, SharedString)>,
+    /// A message's "More options" menu, while it is open, and the account's workflows it offers.
+    menu: workflows::Menu,
     _observing: Subscription,
 }
 
@@ -277,8 +289,10 @@ impl ChannelView {
             cancelled: HashSet::new(),
             ended_calls: HashSet::new(),
             place: None,
+            menu: workflows::Menu::default(),
             _observing: observing,
         };
+        view.menu.read_only = view.core.read_only();
         view.sync(cx);
         view.reload(cx);
         view
@@ -658,16 +672,18 @@ impl ChannelView {
     fn thread_view(
         index: usize,
         thread: &Thread<Item>,
-        selection: &TextSelection,
+        (selection, menu): (&TextSelection, &workflows::Menu),
         palette: Palette,
         cycle: HourCycle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let order = thread_order(thread);
+        let root = thread.post.as_ref().map(|post| post.id.clone());
         let post = match &thread.post {
             Some(post) => {
                 let scope = Scope::new(selection, post_key(order, post)).opening(picture_opener(&post.id, cx));
-                message_view(post, &scope, palette, cycle, cx)
+                let more = menu.button(post, root.as_deref(), cx);
+                message_view(post, &scope, more, palette, cycle, cx)
             }
             None => div()
                 .debug_selector(move || format!("earlier-post-{index}"))
@@ -682,12 +698,13 @@ impl ChannelView {
             .iter()
             .map(|reply| {
                 let scope = Scope::new(selection, reply_key(order, reply)).opening(picture_opener(&reply.id, cx));
+                let more = menu.button(reply, root.as_deref(), cx);
                 div()
                     .pl_6()
                     .pt_1()
                     .border_t_1()
                     .border_color(rgb(palette.border))
-                    .child(message_view(reply, &scope, palette, cycle, cx))
+                    .child(message_view(reply, &scope, more, palette, cycle, cx))
                     .into_any_element()
             })
             .collect();
@@ -827,6 +844,7 @@ fn reply_key(thread: i64, reply: &Item) -> MessageKey {
 fn message_view(
     item: &Item,
     scope: &Scope,
+    more: Option<AnyElement>,
     palette: Palette,
     cycle: HourCycle,
     cx: &mut Context<ChannelView>,
@@ -849,7 +867,9 @@ fn message_view(
                 .text_xs()
                 .text_color(rgb(palette.muted_foreground))
                 .child("Edited")
-        }));
+        }))
+        .child(div().flex_1())
+        .children(more);
     let muted = |text: SharedString| {
         div()
             .italic()
@@ -891,8 +911,10 @@ fn message_view(
             .child(muted(UNSHOWN_CONTENT.into()))
     });
     let id = item.id.clone();
+    let group = SharedString::from(format!("channel-message-{}", item.id));
     div()
         .debug_selector(move || format!("channel-message-{id}"))
+        .group(group)
         .flex()
         .flex_col()
         .gap_1()
@@ -1132,7 +1154,9 @@ impl Render for ChannelView {
             .threads
             .iter()
             .enumerate()
-            .map(|(index, thread)| Self::thread_view(index, thread, &self.text_selection, palette, cycle, cx))
+            .map(|(index, thread)| {
+                Self::thread_view(index, thread, (&self.text_selection, &self.menu), palette, cycle, cx)
+            })
             .collect();
         let posts = div()
             .id("channel-posts")
@@ -1181,5 +1205,6 @@ impl Render for ChannelView {
             .child(posts)
             .child(note)
             .children(selection_menu)
+            .children(self.menu_overlay(palette, cx))
     }
 }

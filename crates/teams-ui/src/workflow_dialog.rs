@@ -10,6 +10,7 @@ mod editor;
 mod fields;
 mod form;
 mod markup;
+mod message;
 mod model;
 mod overview;
 mod owners;
@@ -47,6 +48,14 @@ use run_inputs::RunField;
 
 pub use app::AppTab;
 pub use art::workflows as workflows_icon;
+pub use message::{FlowRef, message_workflows};
+pub(crate) use owners::starting_with;
+
+/// The local time zone's Windows id ("Turkey Standard Time"), as Teams names it to a workflow.
+#[must_use]
+pub fn local_time_zone() -> &'static str {
+    zones::local().0
+}
 
 /// Where a change's success leads: back to the list with a notice, to the changed workflow's Overview, staying on the
 /// Overview with the workflow read again (Rename, Turn off/on, as Teams does), or its owners read again.
@@ -128,6 +137,9 @@ pub struct WorkflowDialog {
     core: Arc<dyn Core>,
     /// The team and channel the channel's dialog was opened from; none for the Workflows app.
     place: Option<(Team, TeamChannel)>,
+    /// The message the dialog was opened from (a message's "More actions" → "Create workflows"): its templates are
+    /// the ones run from a message first, its list the workflows that run on it.
+    message: Option<crate::workflow_run::MessageRef>,
     /// The Workflows app's own state (its gallery, filters and searches), when this is the app's page.
     app: Option<app::AppState>,
     focus: FocusHandle,
@@ -205,6 +217,23 @@ impl WorkflowDialog {
         this
     }
 
+    /// Opens from a message's "More actions" → "Create workflows", as Teams' Workflows dialog for a message: the
+    /// templates run from a message first, and "For this channel message" (or "For this chat message") listing the
+    /// workflows that run on it. `place` is the channel of a channel message, which a channel template defaults to.
+    pub fn new_for_message(
+        core: Arc<dyn Core>,
+        place: Option<(Team, TeamChannel)>,
+        message: crate::workflow_run::MessageRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::with(core, place, window, cx);
+        this.message = Some(message);
+        this.load_teams(window, cx);
+        this.refresh(cx);
+        this
+    }
+
     /// The Workflows app's pages in the main window: its Home, Templates and "Your workflows", the card editor and
     /// the Overview, with no channel it was opened from.
     pub fn new_app(core: Arc<dyn Core>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -247,6 +276,7 @@ impl WorkflowDialog {
         Self {
             core,
             place,
+            message: None,
             app: None,
             focus,
             search,
@@ -299,6 +329,12 @@ impl WorkflowDialog {
             scroll: gpui::ScrollHandle::new(),
             scrolled_for: None,
         }
+    }
+
+    /// A listed schedule's next run as its row shows it ("11/9/2026 8:05:00 PM"), when one is shown.
+    #[must_use]
+    pub fn next_run(&self, flow: &str) -> Option<&str> {
+        self.next_runs.get(flow).map(String::as_str)
     }
 
     /// Whether this is the Workflows app's page rather than the channel's dialog.
@@ -472,7 +508,16 @@ impl WorkflowDialog {
             return;
         }
         let generation = self.generation;
-        let catalog = self.core.workflow_request(WorkflowRequest::Catalog);
+        let from_message = self.message.is_some();
+        let catalog = self.core.workflow_request(if from_message {
+            WorkflowRequest::Gallery {
+                category: "home_featured".to_owned(),
+                search: None,
+                top: 120,
+            }
+        } else {
+            WorkflowRequest::Catalog
+        });
         self.tasks
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let answer = catalog.await.unwrap_or(Err(WorkflowFailure::Connection));
@@ -481,7 +526,12 @@ impl WorkflowDialog {
                         return;
                     }
                     this.loading.catalog = false;
-                    match answer.and_then(|value| model::templates(&value)) {
+                    let read = if from_message {
+                        answer.and_then(|value| model::message_gallery(&value))
+                    } else {
+                        answer.and_then(|value| model::templates(&value))
+                    };
+                    match read {
                         Ok(cards) => this.catalog = cards,
                         Err(error) => this.catalog_error = Some(error),
                     }
@@ -575,8 +625,10 @@ impl WorkflowDialog {
                     }
                     this.loading.workflows = false;
                     this.acting = None;
+                    // a page read with "Load more" reads only its own rows' next runs
+                    let listed = if append { this.workflows.len() } else { 0 };
                     this.workflows_read(answer, append);
-                    this.load_next_runs(cx);
+                    this.load_next_runs(listed, cx);
                     cx.notify();
                 });
             }));

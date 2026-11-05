@@ -355,8 +355,11 @@ fn label(template: &str, param: &str, type_name: &str, labelled: bool) -> String
         ("805739fdad754e799502b6379900922e", "TeamsGroup") => Some("Select team"),
         ("805739fdad754e799502b6379900922e", "TeamsChannel") => Some("Select channel"),
         ("805739fdad754e799502b6379900922e", "TeamsMessageBody") => Some("Message content"),
-        ("8f348e6a1ad64fe8bcb974b02585d987", "PlannerGroupId") => Some("Select a group that has an existing plan"),
+        ("8f348e6a1ad64fe8bcb974b02585d987" | "45e229e1cd36483084bc8d2352b543d2", "PlannerGroupId") => {
+            Some("Select a group that has an existing plan")
+        }
         ("8f348e6a1ad64fe8bcb974b02585d987", "PlannerPlanId") => Some("Plan to monitor"),
+        ("45e229e1cd36483084bc8d2352b543d2", "PlannerPlanId") => Some("Plan to create the task in"),
         ("8f348e6a1ad64fe8bcb974b02585d987", "TeamsGroup") => Some("Team to notify"),
         ("8f348e6a1ad64fe8bcb974b02585d987", "TeamsChannel") => Some("Channel to notify"),
         ("511d104411f84d659018aed7d68a4c22", "SharePointSite") => Some("SharePoint site the list or library is in"),
@@ -449,6 +452,9 @@ pub(super) fn summary(template: &str, name: &str, params: &[Param]) -> String {
         ),
         "190c5a56070e4a8b802089be6455553e" => {
             format!("Forward the message to {channel} when the email meets your selected conditions")
+        }
+        "45e229e1cd36483084bc8d2352b543d2" => {
+            format!("Turn a Teams message into a task in {}", named("PlannerPlanId", "plan"))
         }
         "b35fbd284547427cbb4e289d98dd63b4" => format!(
             "Notify {channel} when a new file is uploaded or created within {}",

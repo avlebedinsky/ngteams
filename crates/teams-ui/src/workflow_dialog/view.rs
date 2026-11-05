@@ -237,8 +237,13 @@ impl WorkflowDialog {
     }
 
     fn tabs(&self, cx: &Context<Self>) -> AnyElement {
+        let first = match &self.message {
+            Some(message) if message.in_channel => "For this channel message",
+            Some(_) => "For this chat message",
+            None => "Available in this channel",
+        };
         let tabs = [
-            (Tab::Channel, "Available in this channel", "workflow-tab-channel"),
+            (Tab::Channel, first, "workflow-tab-channel"),
             (Tab::Workflows, "Workflows", "workflow-tab-all"),
             (Tab::Ai, "AI Workflows", "workflow-tab-ai"),
         ];
@@ -274,6 +279,7 @@ impl WorkflowDialog {
             .iter()
             .filter(|card| card.enabled())
             .filter(|card| match (self.tab, &self.place) {
+                (Tab::Channel, _) if self.message.is_some() => message::runs_from_message(card),
                 (Tab::Channel, Some((team, channel))) => {
                     card.in_channel(team.group_id.as_deref().unwrap_or(&team.id), &channel.id)
                 }

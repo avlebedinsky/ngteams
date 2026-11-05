@@ -26,6 +26,9 @@ pub(super) struct Simple {
     /// Edit was chosen in the workflow list's menu: Save and Back return to the list, as in Teams.
     pub(super) from_list: bool,
     pub(super) params: Vec<Param>,
+    /// A template run from a message (its markup's `context.triggerType` is `messageAction`): with no choices to make,
+    /// its card shows how to start it from a message instead of fields, as Teams' does.
+    pub(super) message_action: bool,
     bindings: Vec<markup::Binding>,
     pub(super) fields: Vec<Field>,
     pub(super) expanded: bool,
@@ -102,7 +105,11 @@ impl Simple {
         };
         let template = markup.pointer("/automation/template")?;
         let params = markup::params(&markup);
-        if params.is_empty() {
+        let message_action = markup
+            .pointer("/automation/context/triggerType")
+            .and_then(Value::as_str)
+            == Some("messageAction");
+        if params.is_empty() && !message_action {
             return None;
         }
         let references = properties.get("connectionReferences").cloned().unwrap_or(Value::Null);
@@ -142,6 +149,7 @@ impl Simple {
             bindings: markup::bindings(&markup),
             fields: Vec::new(),
             params,
+            message_action,
             definition,
             references,
             markup: markup.clone(),
@@ -159,7 +167,15 @@ impl Simple {
 
     /// The card's title as it reads now.
     pub(super) fn summary(&self) -> String {
-        markup::summary(&self.template, &self.title, &self.params)
+        // A summary the markup spells out rather than naming a resource is the card's title as it stands.
+        match self
+            .markup
+            .pointer("/automation/template/summary")
+            .and_then(Value::as_str)
+        {
+            Some(literal) if !literal.contains("${") && !literal.trim().is_empty() => literal.to_owned(),
+            _ => markup::summary(&self.template, &self.title, &self.params),
+        }
     }
 
     /// The team a channel field lists the channels of: the team field it depends on, else the card's first.
@@ -185,6 +201,11 @@ impl Simple {
                 *slot = link;
             }
         }
+    }
+
+    /// The template's own name ("Follow up on a message"): what a message's menu lists the workflow by.
+    pub(super) fn template_name(&self) -> String {
+        self.title.clone()
     }
 
     pub(super) fn connecting(&self) -> bool {
@@ -230,6 +251,11 @@ fn chip_rank(api: &str, definition: &Value) -> usize {
         .and_then(|id| id.rsplit('/').next());
     if trigger == Some(api) {
         return 0;
+    }
+    // a template run from a message: Microsoft Teams (its trigger's app) first, then the others as the template
+    // names them
+    if teams_proto::workflow::message_trigger(definition).is_some() {
+        return usize::from(api != "shared_teams");
     }
     match api {
         "shared_office365users" => 1,

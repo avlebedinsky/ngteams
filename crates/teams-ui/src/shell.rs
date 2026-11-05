@@ -1648,7 +1648,7 @@ impl Shell {
     }
 
     /// Shows `dialog` over everything; what it tells is acted on here.
-    fn show_team_dialog<D>(&mut self, dialog: &Entity<D>, window: &mut Window, cx: &mut Context<Self>)
+    pub(super) fn show_team_dialog<D>(&mut self, dialog: &Entity<D>, window: &mut Window, cx: &mut Context<Self>)
     where
         D: Render + EventEmitter<TeamDialogEvent>,
     {
@@ -1669,6 +1669,9 @@ impl Shell {
                     TeamDialogEvent::Closed => {}
                     TeamDialogEvent::MoreOptions => this.open_create_team_more(window, cx),
                     TeamDialogEvent::Workflows { see_all } => this.open_workflows(*see_all, window, cx),
+                    TeamDialogEvent::RunWorkflow { flow, message } => {
+                        this.run_workflow(flow.clone(), message.clone(), window, cx);
+                    }
                     TeamDialogEvent::Created(team) => {
                         let (core, trace) = (Arc::clone(&this.core), Arc::clone(&this.trace));
                         let team = team.clone();
@@ -2030,6 +2033,10 @@ impl Shell {
     fn follow_chat(chat: &Entity<ChatView>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         cx.subscribe_in(chat, window, |this: &mut Self, _, event, window, cx| match event {
             ChatViewEvent::OpenOriginal(original) => this.open_original(original.clone(), window, cx),
+            ChatViewEvent::RunWorkflow { flow, message } => {
+                this.run_workflow(flow.clone(), message.clone(), window, cx);
+            }
+            ChatViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
             ChatViewEvent::Action { .. } => {}
         })
     }
@@ -2039,6 +2046,10 @@ impl Shell {
         cx.subscribe_in(channel, window, |this: &mut Self, _, event, window, cx| match event {
             ChannelViewEvent::OpenOriginal(original) => this.open_original(original.clone(), window, cx),
             ChannelViewEvent::EditMeeting { ical_uid } => this.edit_channel_meeting(ical_uid.clone(), cx),
+            ChannelViewEvent::RunWorkflow { flow, message } => {
+                this.run_workflow(flow.clone(), message.clone(), window, cx);
+            }
+            ChannelViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
         })
     }
 

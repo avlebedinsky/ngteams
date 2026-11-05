@@ -66,6 +66,12 @@ pub enum TeamDialogEvent {
     /// The channel's Workflows asked for the Workflows app in the main window: its Home ("Workflows Home"), or its
     /// "Your workflows" (`see_all`, the list's "See all").
     Workflows { see_all: bool },
+    /// A workflow run from a message was chosen to run on the message the Workflows dialog was opened from: its run
+    /// dialog opens in the dialog's place.
+    RunWorkflow {
+        flow: crate::workflow_dialog::FlowRef,
+        message: crate::workflow_run::MessageRef,
+    },
 }
 
 /// Whether `text` holds a link, as the bundle tells it for a team's name and description.
