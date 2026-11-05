@@ -278,10 +278,16 @@ fn every_way_out_of_the_app_hides_the_bots_chat_and_coming_back_shows_it_again()
     ];
     for (place, leave) in leaves {
         shell.update_in(cx, leave);
-        assert!(!bot_chat_shown(&shell, cx), "the {place} hides the bot's chat: no read receipt goes");
+        assert!(
+            !bot_chat_shown(&shell, cx),
+            "the {place} hides the bot's chat: no read receipt goes"
+        );
         click(cx, "rail-more-apps");
         click(cx, "more-apps-workflows");
-        assert!(bot_chat_shown(&shell, cx), "back from the {place}, the app is on its Chat again");
+        assert!(
+            bot_chat_shown(&shell, cx),
+            "back from the {place}, the app is on its Chat again"
+        );
     }
 }
 
@@ -327,7 +333,10 @@ fn the_channels_workflows_reads_the_apps_list_again() {
     shell.update_in(cx, Shell::show_calendar);
     shell.update_in(cx, |shell, window, cx| shell.open_workflows(true, window, cx));
     cx.run_until_parked();
-    assert!(lists(&rig) > before, "a change made in the channel's dialog shows in the app");
+    assert!(
+        lists(&rig) > before,
+        "a change made in the channel's dialog shows in the app"
+    );
 }
 
 #[test]
