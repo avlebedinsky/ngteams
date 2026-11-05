@@ -125,8 +125,8 @@ What Teams v2's list shows above and in its "Chats" section, as the native clien
   `{{name}} (You)`) with the account's own picture and presence. Another personal account's folder held two team
   channels and no notes (items with `threadType` `topic`, ids `19:…@thread.tacv2`, channels of the answer's `teams`
   and in none of its `chats`): Teams lists a favourite channel there by its name, with its team's picture. The native
-  client shows one by the channel's name with its team's initial (no team picture is read), opened read-only as the
-  Teams list opens it; a favourite neither stored as a chat nor a channel of the stored teams is left out. `MutedChats` and `MeetingChats` were empty in every answer: the folders don't say which
+  client shows one by the channel's name with its team's initial (no team picture is read), opened as the Teams list
+  opens it, as a channel; a favourite neither stored as a chat nor a channel of the stored teams is left out. `MutedChats` and `MeetingChats` were empty in every answer: the folders don't say which
   chats are muted. The middle tier's user properties (`favorites`, `{"48:notes":1}`, and `selfChatSettings`) carry an
   older form of the same; the native client reads only the folder. Pinning, unpinning and reordering are CSA writes
   no capture shows; the native client sends none. Fixture: `tests/fixtures/csa/folders.json`.
@@ -316,8 +316,9 @@ every profile lookup; the account's display name since the lookups of lab accoun
   (`teams_proto::chat::Unshown`), and the native client shows the message's text with a line saying it has content
   that can't be shown here and a button that opens the chat in the web client (`l/chat/<chat>/0`, the id encoded as
   `abc-chat` encodes it), never a guess at it (M2 Task 23). A message
-  of a type the chat view doesn't show gets the same button under its placeholder. The read-only channel view shows
-  the line without the button: no channel deep link has been captured.
+  of a type the chat view doesn't show gets the same button under its placeholder. In a channel the button opens the
+  message's own link, naming its post (`l/message/<channel>/<id>?parentMessageId=<post>`, the link a workflow run on
+  it carries: `teams_proto::MessageRun::link_to`).
 
 ## System messages
 

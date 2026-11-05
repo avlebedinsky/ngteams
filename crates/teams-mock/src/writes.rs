@@ -47,25 +47,30 @@ pub(crate) fn post(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTe
         return status(400);
     }
     let arrival = state.tick();
-    let Some(mut message) = new_message(state, &call.caller, chat, &body, arrival) else {
+    let Some(message) = new_message(state, &call.caller, chat, &body, arrival) else {
         return status(400);
     };
-    // a channel's post names itself as its chain's post, as every channel message a read gave did
+    store(state, &call.caller, chat, None, message, arrival);
+    let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{chat}/messages/{arrival}");
+    posted(state, arrival, Some(location))
+}
+
+/// Stores `from`'s `message`, arrived at `arrival`, in `chat` and queues it, as a read gives it back: a team channel's
+/// message names its chain's post (`conversationLink` `…/<channel>;messageid=<post>`), the post `post` for a reply
+/// in its thread, its own id for a post, as every channel message a read gave did.
+fn store(state: &mut State, from: &str, chat: &str, post: Option<&str>, mut message: Value, arrival: u64) {
     if state.conversation(chat).is_some_and(world::Conversation::is_channel) {
+        let post = post.map_or_else(|| arrival.to_string(), str::to_owned);
         object(&mut message).insert(
             "conversationLink".to_owned(),
-            json!(format!(
-                "{CHAT_BASE}/v1/users/ME/conversations/{chat};messageid={arrival}"
-            )),
+            json!(format!("{CHAT_BASE}/v1/users/ME/conversations/{chat};messageid={post}")),
         );
     }
     if let Some(conversation) = state.conversation_mut(chat) {
         conversation.messages.push(message.clone());
         conversation.version = arrival;
     }
-    state.queue(chat, &call.caller, EventKind::Message, &message);
-    let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{chat}/messages/{arrival}");
-    posted(state, arrival, Some(location))
+    state.queue(chat, from, EventKind::Message, &message);
 }
 
 /// `POST …/conversations/<channel>;messageid=<post>/messages`: a reply in a channel post's thread, posted to the
@@ -89,20 +94,10 @@ fn reply(state: &mut State, call: &Call<'_>, channel: &str, post: &str) -> Respo
         return status(400);
     }
     let arrival = state.tick();
-    let Some(mut message) = new_message(state, &call.caller, channel, &body, arrival) else {
+    let Some(message) = new_message(state, &call.caller, channel, &body, arrival) else {
         return status(400);
     };
-    object(&mut message).insert(
-        "conversationLink".to_owned(),
-        json!(format!(
-            "{CHAT_BASE}/v1/users/ME/conversations/{channel};messageid={post}"
-        )),
-    );
-    if let Some(conversation) = state.conversation_mut(channel) {
-        conversation.messages.push(message.clone());
-        conversation.version = arrival;
-    }
-    state.queue(channel, &call.caller, EventKind::Message, &message);
+    store(state, &call.caller, channel, Some(post), message, arrival);
     let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{channel};messageid={post}/messages/{arrival}");
     posted(state, arrival, Some(location))
 }
@@ -124,10 +119,8 @@ pub(crate) fn post_text(state: &mut State, from: &str, chat: &str, html: &str) -
         "properties": {"mentions": "[]", "files": "[]", "formatVariant": "TEAMS"},
     });
     let message = new_message(state, from, chat, body.as_object()?, arrival)?;
-    let conversation = state.conversation_mut(chat)?;
-    conversation.messages.push(message.clone());
-    conversation.version = arrival;
-    state.queue(chat, from, EventKind::Message, &message);
+    state.conversation(chat)?;
+    store(state, from, chat, None, message, arrival);
     Some(arrival.to_string())
 }
 

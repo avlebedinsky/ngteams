@@ -1326,7 +1326,22 @@ async fn a_channel_takes_a_post_and_a_reply_in_a_posts_thread_posted_to_its_chai
     let refused = lab.send(LAB_A, Method::POST, &orphan, Some(&message)).await?;
     assert_eq!(refused.status, 404);
     assert_eq!(lab.mock.post_as(LAB_A, NOTIFICATIONS, "<p>no</p>"), None);
-    assert!(lab.mock.post_as(LAB_B, TEAM_CHANNEL, "<p>yes</p>").is_some());
+    // a member's post seeded by the mock is stored as a client's: its own chain's post
+    let seeded = lab.mock.post_as(LAB_B, TEAM_CHANNEL, "<p>yes</p>").ok_or("seeded")?;
+    let page = lab
+        .get(
+            LAB_C,
+            &format!("users/ME/conversations/{}/messages?pageSize=200", segment(TEAM_CHANNEL)),
+        )
+        .await?;
+    let newest = &page["messages"][0];
+    assert_eq!(newest["id"], seeded.as_str());
+    assert!(
+        newest["conversationLink"]
+            .as_str()
+            .is_some_and(|link| link.ends_with(&format!(";messageid={seeded}"))),
+        "{newest}"
+    );
     Ok(())
 }
 

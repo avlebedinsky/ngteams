@@ -1028,25 +1028,36 @@ impl ChatView {
     }
 
     /// The view of `channel` (a team's channel) as `place` shows it: its posts ([`Place::Channel`]) or one post's
-    /// thread ([`Place::Thread`]), with its compose box writing there, saying `placeholder` while it is empty.
+    /// thread ([`Place::Thread`]), with `compose` writing there: a [`Self::channel_box`], or one kept with its draft
+    /// while another thread or channel was shown.
     pub fn in_place(
         parts: ShellParts,
         channel: String,
         place: Place,
-        placeholder: SharedString,
+        compose: Entity<Compose>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (writes, target) = match &place {
-            Place::Thread { post } => (
-                compose::Writes::Thread,
-                teams_proto::reply_chain_id(&channel, post).unwrap_or_else(|| channel.clone()),
-            ),
-            Place::Channel | Place::Chat => (compose::Writes::Channel, channel.clone()),
-        };
-        let compose = Self::compose_box(&parts, &target, window, cx);
-        compose.update(cx, |compose, cx| compose.in_channel(writes, placeholder, cx));
         Self::build(parts, channel, place, compose, window, cx)
+    }
+
+    /// A new compose box for a view of `channel` in `place` ([`Self::in_place`]): the channel's posts' box, or a
+    /// post's thread's posting to the post's chain ([`writes_to`]), saying `placeholder` while it is empty.
+    pub fn channel_box<T: 'static>(
+        parts: &ShellParts,
+        channel: &str,
+        place: &Place,
+        placeholder: SharedString,
+        window: &mut Window,
+        cx: &mut Context<T>,
+    ) -> Entity<Compose> {
+        let writes = match place {
+            Place::Thread { .. } => compose::Writes::Thread,
+            Place::Channel | Place::Chat => compose::Writes::Channel,
+        };
+        let compose = Self::compose_box(parts, &writes_to(channel, place), window, cx);
+        compose.update(cx, |compose, cx| compose.in_channel(writes, placeholder, cx));
+        compose
     }
 
     pub(crate) fn with_compose(
@@ -1185,11 +1196,11 @@ impl ChatView {
     }
 
     /// The compose box of `conversation`, on the shell's parts.
-    fn compose_box(
+    fn compose_box<T: 'static>(
         parts: &ShellParts,
         conversation: &str,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<T>,
     ) -> Entity<Compose> {
         let compose_parts = ComposeParts {
             core: Arc::clone(&parts.core),
@@ -3868,7 +3879,7 @@ async fn window(
 }
 
 /// Where a view of `conversation` in `place` writes: a thread's post's chain, else the conversation.
-fn writes_to(conversation: &str, place: &Place) -> String {
+pub(crate) fn writes_to(conversation: &str, place: &Place) -> String {
     match place {
         Place::Thread { post } => {
             teams_proto::reply_chain_id(conversation, post).unwrap_or_else(|| conversation.to_owned())
@@ -4563,8 +4574,9 @@ fn bubble(
 }
 
 /// `note` (the line under a message's text for a part no capture showed, [`UNSHOWN_CONTENT`], or a type's
-/// placeholder, [`UNSUPPORTED`]) and [`OPEN_ON_THE_WEB`], which opens the chat in the web client through GPUI's
-/// `open_url` (the portal or `xdg-open`; the sandbox's no-op opener in tests). Never for a deleted message.
+/// placeholder, [`UNSUPPORTED`]) and [`OPEN_ON_THE_WEB`], which opens `link` (the chat, or a channel's message itself)
+/// in the web client through GPUI's `open_url` (the portal or `xdg-open`; the sandbox's no-op opener in tests). Never
+/// for a deleted message.
 fn web_line(selector: &str, note: &'static str, id: &str, link: String, palette: Palette) -> AnyElement {
     let selector = selector.to_owned();
     let open = format!("open-on-the-web-{id}");

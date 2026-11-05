@@ -25,7 +25,7 @@ use teams_core::{
 };
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C,
-    NOTIFICATIONS,
+    NOTIFICATIONS, TEAM_CHANNEL,
 };
 use teams_proto::Mri;
 use teams_proto::chat::{self, MessageText};
@@ -1181,6 +1181,41 @@ async fn the_outbox_check_finds_a_message_whose_answer_was_lost() {
     assert_eq!(sent.message_id.as_deref(), Some(found.id.as_str()));
     assert_eq!(found.sender.as_deref(), Some(LAB_A));
     assert_eq!(a.messages(AB_CHAT).len(), 6);
+}
+
+#[tokio::test]
+async fn the_outbox_check_finds_a_thread_reply_whose_answer_was_lost_in_its_channel() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    let mut a = Account::of(&mock, LAB_A);
+    let post = mock.post_as(LAB_B, TEAM_CHANNEL, "<p>a post</p>").unwrap();
+    a.catch_up.sync_messages(&mut a.store, TEAM_CHANNEL).await.unwrap();
+
+    // a reply posted to the post's chain comes back in the channel's messages, never the chain's
+    let chain = teams_proto::reply_chain_id(TEAM_CHANNEL, &post).unwrap();
+    a.fault(Fault::LoseAnswer);
+    let row = enqueue(&mut a.store, &send(&chain, "did my reply arrive")).unwrap();
+    let sent = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap();
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    assert_eq!(
+        posts(&mock).await,
+        std::slice::from_ref(&row.client_message_id),
+        "posted once"
+    );
+    let found = a
+        .store
+        .message_by_client_id(TEAM_CHANNEL, &row.client_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sent.message_id.as_deref(), Some(found.id.as_str()));
+    let roots = a.store.reply_roots(TEAM_CHANNEL).unwrap();
+    assert!(roots.contains(&(found.id.clone(), post.clone())), "{roots:?}");
+    assert!(
+        a.store
+            .message_by_client_id(&chain, &row.client_message_id)
+            .unwrap()
+            .is_none(),
+        "nothing kept under the chain"
+    );
 }
 
 #[tokio::test]

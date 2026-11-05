@@ -346,7 +346,7 @@ fn a_channel_clicked_opens_with_its_posts_their_replies_summed_up_and_a_box_post
             })
         })
         .collect();
-    // the latest replier first, each once
+    // both repliers (their order and each once: the next test)
     assert_eq!(
         summaries,
         [
@@ -371,6 +371,37 @@ fn a_channel_clicked_opens_with_its_posts_their_replies_summed_up_and_a_box_post
     assert!(bounds(cx, "replies-1760000400000").is_none());
     assert_nothing_written(&rig);
     assert_posts_traced(&written);
+}
+
+#[test]
+fn a_posts_replies_summary_names_the_latest_replier_first_and_each_once() {
+    let rig = rig();
+    let reply_by = |id: &str, sender: &str, name: &str| Message {
+        sender_name: Some(name.to_owned()),
+        ..message(id, sender, "<p>a reply</p>")
+    };
+    // newest first, as the store pages them: c replied, a replied, c replied again
+    let messages = vec![
+        reply_by("1760000300300", LAB_C, "Made-up C"),
+        reply_by("1760000300200", LAB_A, "Made-up A"),
+        reply_by("1760000300100", LAB_C, "Made-up C"),
+        reply_by(POST, LAB_B, "Made-up B"),
+    ];
+    let roots = messages
+        .iter()
+        .map(|message| (message.id.clone(), POST.to_owned()))
+        .collect();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view = posts(&shell, cx);
+    let [item] = rows(&view, cx).try_into().expect("one post");
+    let replies = item.replies.expect("its replies summed up");
+    assert_eq!(replies.count, 3);
+    let names: Vec<String> = replies.people.iter().map(|(name, _)| name.to_string()).collect();
+    assert_eq!(names, ["Made-up C", "Made-up A"]);
 }
 
 /// The trace has the channel's posts shown, by id, and no text or name.
@@ -463,6 +494,76 @@ fn a_posts_replies_summary_opens_its_thread_too() {
     assert_nothing_written(&rig);
 }
 
+/// Sends what `view`'s box holds, as Enter in it does.
+fn send_box(view: &Entity<ChatView>, cx: &mut VisualTestContext) {
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+}
+
+#[test]
+fn a_threads_draft_is_kept_while_another_thread_is_open_or_it_is_closed() {
+    let rig = rig();
+    let (shell, cx) = opened(&rig, Arc::new(ViewTrace::off()));
+    click(cx, &format!("replies-{POST}"));
+    cx.simulate_input("Half a reply");
+    // another post's thread takes the pane, then none
+    hover(cx, "1760000400000");
+    click(cx, "action-reply-in-thread");
+    assert_eq!(thread(&shell, cx).expect("a thread").0, "1760000400000");
+    click(cx, "channel-thread-close");
+    click(cx, &format!("replies-{POST}"));
+    let (_, view) = thread(&shell, cx).expect("the thread opens again");
+    send_box(&view, cx);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    let [Action::Send { conversation, text }] = actions.as_slice() else {
+        panic!("the kept reply: {actions:?}")
+    };
+    assert_eq!(conversation, &format!("{CHANNEL};messageid={POST}"));
+    assert_eq!(text.html(), "<p>Half a reply</p>");
+}
+
+#[test]
+fn a_channels_and_its_threads_drafts_are_kept_while_another_channel_is_shown() {
+    let rig = rig();
+    let (shell, cx) = opened(&rig, Arc::new(ViewTrace::off()));
+    let view = posts(&shell, cx);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+    cx.simulate_input("Half a post");
+    click(cx, &format!("replies-{POST}"));
+    cx.simulate_input("Half a reply");
+    // the team's general channel takes the pane, then this one again, with its thread opened again
+    click(cx, "channel-row-0");
+    let general = channel_view(&shell, cx);
+    assert_eq!(cx.update(|_, cx| general.read(cx).channel().to_owned()), TEAM);
+    click(cx, "channel-row-1");
+    assert!(thread(&shell, cx).is_none(), "a channel opens on its posts");
+    send_box(&posts(&shell, cx), cx);
+    click(cx, &format!("replies-{POST}"));
+    let (_, view) = thread(&shell, cx).expect("the thread opens again");
+    send_box(&view, cx);
+    let sent: Vec<(String, String)> = rig
+        .core
+        .actions
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|action| match action {
+            Action::Send { conversation, text } => (conversation.clone(), text.html().to_owned()),
+            other => panic!("only posts: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (CHANNEL.to_owned(), "<p>Half a post</p>".to_owned()),
+            (format!("{CHANNEL};messageid={POST}"), "<p>Half a reply</p>".to_owned())
+        ]
+    );
+}
+
 #[test]
 fn a_post_and_a_reply_take_the_accounts_reaction_in_the_channel_as_a_chats_message_does() {
     let rig = rig();
@@ -534,7 +635,10 @@ fn the_accounts_own_reply_edited_in_its_thread_is_saved_in_the_channel() {
     let (shell, cx) = opened(&rig, Arc::new(ViewTrace::off()));
     click(cx, &format!("replies-{POST}"));
     hover(cx, MINE);
+    assert!(bounds(cx, "compose-send-to").is_some());
     click(cx, "action-edit");
+    // an edit stays where the reply is: the box says no "Send to"
+    assert!(bounds(cx, "compose-send-to").is_none());
     cx.simulate_input(" again");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -617,6 +721,40 @@ fn a_reply_found_opens_its_posts_thread_at_it() {
             .iter()
             .any(|line| line["view"] == "thread-view" && line["change"] == "revealed")
     );
+}
+
+#[test]
+fn a_reply_found_under_a_post_older_than_the_store_holds_opens_the_posts_at_it_by_its_id() {
+    const OLD_POST: &str = "1759000000000";
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (messages, roots) = channel_store();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    rig.core.older.lock().unwrap().insert(
+        CHANNEL.to_owned(),
+        vec![vec![message(OLD_POST, LAB_C, "<p>old post</p>")]],
+    );
+    let written = Written::default();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
+    // the late reply, whose post the store doesn't hold: the post's id is its arrival time
+    let target = teams_ui::search::HitTarget {
+        conversation: CHANNEL.to_owned(),
+        message: "1760000400100".to_owned(),
+        arrival_time: 1_760_000_400_100,
+        thread: Some(OLD_POST.to_owned()),
+    };
+    shell.update_in(cx, |shell, window, cx| shell.open_message(target, window, cx));
+    cx.run_until_parked();
+    let (post, _) = thread(&shell, cx).expect("its thread opens");
+    assert_eq!(post, OLD_POST);
+    let revealed: Vec<serde_json::Value> = written
+        .lines()
+        .into_iter()
+        .filter(|line| line["view"] == "channel-view" && line["change"] == "revealed")
+        .collect();
+    assert_eq!(revealed.len(), 1, "{}", written.text());
+    assert_eq!(revealed[0]["messages"], serde_json::json!([OLD_POST]));
 }
 
 /// A thread event from the channel itself: `ThreadActivity/AddMember` adding a lone bot, which Teams draws nothing for.

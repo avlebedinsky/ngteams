@@ -23,8 +23,8 @@
 //!   kept for the run.
 //! - [`pictures`]: pictures pasted into messages, read from the account's AMS base when a view shows one, kept for
 //!   the run and cached on disk beside the store, so a later run shows them without reading them again.
-//! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store;
-//!   read-only, as a channel's posts are.
+//! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store; a
+//!   channel's posts, replies and reactions are the outbox's writes, as a chat's.
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
 //!   calling stack's socket, the outbox's call kind and the call's media (`teams-media`).
 //! - [`account`]: one account's engine, assembled with its session over the selected secret store, transports and

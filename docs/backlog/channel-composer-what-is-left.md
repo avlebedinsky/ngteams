@@ -11,11 +11,12 @@ up, "Message in <channel>" posting to the channel, a post's thread beside it who
 post's chain, and reactions, edits, deletes, copying and workflows as in a chat. What is left, each needing a capture
 or a read nobody has made yet:
 
-- **The writes' shapes, seen live.** The paths are the bundle's and the chat service's ids; the native writes ran only
-  against the mock. A `team-manage` run on a lab team whose people are only lab accounts (and the user's own account)
-  should post, reply in a thread and react in the web client, and a lab client do the same, before the personal build
-  relies on it. Look for anything the web client adds to a channel post (`subject`, `properties.announceViaEmail`, the
-  chain's `conversationid`) that the chat's `SendMessage` leaves out.
+- **The web client's shapes of the writes.** The native writes ran live from a lab client on a lab team whose only
+  person is that lab account: a post (201), a reply posted to the post's chain (201, read back under its post), a
+  reaction on each (200) and an edit of the reply (200). The web client's own requests weren't captured: a
+  `team-manage` run on such a team should post, reply in a thread and react in the web client, looking for anything it
+  adds to a channel post (`subject`, `properties.announceViaEmail`, the chain's `conversationid`) that the chat's
+  `SendMessage` leaves out.
 - **Files in a channel.** Teams puts a channel's files in its team's SharePoint folder (`sharepointChannelDocsFolder`
   on the channel's thread), not the account's OneDrive, and shares them with the team. The box offers no Attach in a
   channel and the engine refuses a channel message with files until that upload and its permissions are captured.
@@ -29,5 +30,8 @@ or a read nobody has made yet:
   under each post); the app draws every channel in the threaded layout. Which layout a channel has (CSA's `modality`?)
   isn't read yet.
 - **The channel header.** Teams' header has the team's tile, the channel's name and its tabs (Conversation, Shared,
-  Page, Notes, +); the app's says "<team> › <channel>". The thread pane's header in Teams is "Threads › <thread>" with
-  a threads list behind "Threads" and a follow button; the app's says "Thread" with Close.
+  Page, Notes, +); the app's has the tile and the name, no tabs. The thread pane's header in Teams is
+  "Threads › <thread>" with a threads list behind "Threads" and a follow button; the app's says "Thread" with Close.
+- **A new reply under an old post.** A post keeps its place, so a reply to a post older than the posts loaded (a page
+  of 50) shows nowhere until the posts are scrolled back to it; Teams' threads list (above) and its activity feed are
+  where such a reply is seen.

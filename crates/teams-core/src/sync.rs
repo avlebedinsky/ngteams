@@ -1238,7 +1238,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
 
     /// A chat's members, read as a thread when the list's `rosterVersion` is newer than the stored one, or there is
     /// none stored, or the list's can't be read (it may be newer). A list without one keeps the stored members.
-    /// Channels and other read-only conversations keep none.
+    /// Channels and the other conversations that are no chat keep none.
     async fn refresh_members(&self, store: &mut Store, listed: &chat::Conversation) -> Result<(), CatchUpError> {
         if listed.is_read_only() {
             return Ok(());

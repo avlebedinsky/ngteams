@@ -1089,6 +1089,23 @@ impl Shell {
         );
     }
 
+    /// The face of channel `id`'s team, as Teams' channel header leads with it: the team's picture once read, else its
+    /// initials on its colour (the Teams list's own [`TeamsList::avatar`]); none for a team the list doesn't hold.
+    fn team_face(&self, id: &str, palette: Palette, cx: &App) -> Option<AnyElement> {
+        let teams = self.teams.read(cx);
+        let team = teams
+            .teams()?
+            .iter()
+            .find(|team| team.channels.iter().any(|channel| channel.id == id))?;
+        Some(
+            div()
+                .debug_selector(|| "channel-header-team".to_owned())
+                .flex_none()
+                .child(teams.avatar(team, 32.0, false, palette))
+                .into_any_element(),
+        )
+    }
+
     /// The channel header's meeting button, as Teams' header has it once calls may go: Join while a meeting runs in the
     /// channel shown, else Meet now with its menu (Meet now).
     fn channel_join_button(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1820,8 +1837,9 @@ impl Shell {
                 view.update(cx, ChannelView::sync);
             }
         } else {
+            let drafts = self.channel_drafts(&chosen.id, cx);
             let (parts, id, name) = (self.parts(), chosen.id.clone(), chosen.name.clone());
-            let view = cx.new(|cx| ChannelView::new(parts, id, name, window, cx));
+            let view = cx.new(|cx| ChannelView::new(parts, id, name, drafts, window, cx));
             self.channel_events = Some(Self::follow_channel(&view, window, cx));
             self.channel = Some((view, chosen.clone()));
         }
@@ -2009,6 +2027,29 @@ impl Shell {
             chat.update(cx, |chat, cx| chat.set_shown(false, cx));
         }
         self.pause_meeting_tabs(cx);
+    }
+
+    /// Keeps the boxes holding a draft of the channel shown (its posts' and its threads'), which another channel's view
+    /// is about to replace, and gives back channel `id`'s kept ones, by the conversation each writes to.
+    fn channel_drafts(
+        &mut self,
+        id: &str,
+        cx: &App,
+    ) -> std::collections::HashMap<String, Entity<crate::compose::Compose>> {
+        self.drafts.retain(|_, compose| compose.read(cx).has_draft(cx));
+        if let Some((view, _)) = &self.channel {
+            self.drafts.extend(view.read(cx).drafts(cx));
+        }
+        // a channel's posts' box is kept by the channel, a thread's by its post's chain, stored in the channel
+        let keys: Vec<String> = self
+            .drafts
+            .keys()
+            .filter(|key| teams_proto::stored_conversation(key) == id)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| self.drafts.remove_entry(&key))
+            .collect()
     }
 
     fn keep_draft(&mut self, cx: &App) {
@@ -2682,7 +2723,7 @@ impl Shell {
                 // Teams' header: the team's tile, the channel's name; a channel the list doesn't know yet says so plainly
                 let (lead, title) = shown.filter(|(_, chosen)| !chosen.team.is_empty()).map_or_else(
                     || (None, SharedString::from("Channel")),
-                    |(_, chosen)| (Some(team_tile(&chosen.team, palette)), chosen.name.clone()),
+                    |(_, chosen)| (self.team_face(id, palette, cx), chosen.name.clone()),
                 );
                 let join = self.channel_join_button(id, cx);
                 let header = pane_header_led(lead, title, palette)
@@ -2712,24 +2753,6 @@ impl Shell {
             | Main::Workflows => pane.child(no_chat(palette)).into_any_element(),
         }
     }
-}
-
-/// A team's tile, as Teams' channel header leads with it: its initials on its colour, rounded.
-fn team_tile(team: &str, palette: Palette) -> AnyElement {
-    div()
-        .debug_selector(|| "channel-header-team".to_owned())
-        .size(px(32.0))
-        .flex_none()
-        .rounded_md()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_sm()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .bg(rgb(crate::teams_list::team_colour(team)))
-        .text_color(rgb(palette.on_brand))
-        .child(crate::teams_list::initials(team))
-        .into_any_element()
 }
 
 /// A row of a popup menu, its test selector `id`: an icon or mark, its words, maybe a check.

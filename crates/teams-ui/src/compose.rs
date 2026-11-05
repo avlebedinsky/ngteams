@@ -638,12 +638,6 @@ impl Compose {
         cx.notify();
     }
 
-    /// Where the box writes.
-    #[must_use]
-    pub fn writes(&self) -> Writes {
-        self.writes
-    }
-
     /// A chat keeps its editor alive while a local draft or upload remains, including across chat navigation.
     pub(crate) fn has_draft(&self, cx: &App) -> bool {
         !self.editor.read(cx).is_empty()
@@ -1411,7 +1405,9 @@ impl Compose {
             .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
             .text_color(rgb(palette.foreground));
-        let send_to = (self.writes == Writes::Thread).then(|| send_to_line(palette));
+        // an edit stays where its reply is: nothing is sent anywhere new
+        let send_to =
+            (self.writes == Writes::Thread && !matches!(self.mode, Mode::Edit { .. })).then(|| send_to_line(palette));
         if self.expanded || !self.attachments.is_empty() {
             return surface
                 .flex()

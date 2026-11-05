@@ -237,9 +237,12 @@ compose boxes (`teams-ui`'s `chat_view` in its channel places, `channel_view`):
   refuses a channel message with files) and Teams' "Send to: thread and channel" (a reply also posted to the channel,
   a write no capture showed: the thread's box says "Send to: thread only").
 
-The web client's shapes for these writes weren't captured with a lab account yet; the paths are the bundle's and the
-chat service's ids, and the native writes run against the mock (`teams-mock`: a channel takes its members' posts, and
-a reply posted to a post's chain is stored with the channel's messages).
+The native writes ran live on a lab team with one person (the lab account itself): the post answered 201 and read back
+naming itself as its chain's post; the reply posted to `<channel>;messageid=<post>/messages` answered 201 and read
+back in the channel's messages under its post; a reaction on each and the reply's edit, on the channel's message
+paths, answered 200. The web client's own shapes for these writes weren't captured yet (extra keys it may send are in
+the backlog); the mock (`teams-mock`) takes a channel's posts and stores a reply posted to a post's chain with the
+channel's messages, as the service did.
 
 ## Managing an existing channel
 

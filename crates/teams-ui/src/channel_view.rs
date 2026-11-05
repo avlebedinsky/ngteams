@@ -10,22 +10,26 @@
 //!   only so. What it stores comes as the models' change, which the views read again on.
 //! - **Opened at a message** ([`ChannelView::reveal`], a search's hit): the posts at the message's thread's post, and
 //!   a reply's thread opened at it.
+//! - **Drafts are kept** as a chat's are: a thread's box holding text, a reply or an upload is kept when its thread is
+//!   closed or another opens, and given back when that thread opens again; the shell keeps the channel's and its
+//!   threads' boxes ([`ChannelView::drafts`]) while another channel is shown and hands them back to its next view.
 //! - **What it tells** ([`ChannelViewEvent`]): a forward's original, a meeting card's Edit, and a workflow run or made
 //!   on a message, for the shell to carry out.
 //!
 //! What the views show is traced as theirs (`channel-view shown`, `thread-view shown`), and a thread's opening and
 //! closing (`channel-thread opened`/`closed`, its post's id), never text or a name.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::{Sizable as _, Size};
 
 use crate::chat_view::{ChatView, ChatViewEvent, Place};
-use crate::compose;
+use crate::compose::{self, Compose};
 use crate::forwarded::Original;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::shell::ShellParts;
@@ -71,6 +75,9 @@ pub struct ChannelView {
     name: SharedString,
     posts: Entity<ChatView>,
     thread: Option<Thread>,
+    /// Threads' boxes put away with a draft in them (their thread closed, or another opened), by the post's chain they
+    /// write to: given back when the thread opens again.
+    drafts: HashMap<String, Entity<Compose>>,
     /// The team's and the channel's names, for a meeting card's line and a channel meeting's call.
     place: Option<(SharedString, SharedString)>,
     /// The sync asked for on open, while it runs.
@@ -84,18 +91,23 @@ impl EventEmitter<ChannelViewEvent> for ChannelView {}
 
 impl ChannelView {
     /// The view of `channel`, named `name` (empty when the list doesn't know it yet): synced from the service at once,
-    /// read from the store.
+    /// read from the store. `drafts` are its boxes an earlier view of it kept ([`Self::drafts`]), by the conversation
+    /// they write to: the channel's posts' box, and its threads' by their posts' chains.
     pub fn new(
         parts: ShellParts,
         channel: String,
         name: SharedString,
+        mut drafts: HashMap<String, Entity<Compose>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let placeholder = compose::channel_placeholder(&name).into();
+        let compose = drafts.remove(&channel).unwrap_or_else(|| {
+            let placeholder = compose::channel_placeholder(&name).into();
+            ChatView::channel_box(&parts, &channel, &Place::Channel, placeholder, window, cx)
+        });
         let posts = {
             let (parts, channel) = (parts.clone(), channel.clone());
-            cx.new(|cx| ChatView::in_place(parts, channel, Place::Channel, placeholder, window, cx))
+            cx.new(|cx| ChatView::in_place(parts, channel, Place::Channel, compose, window, cx))
         };
         let events = Self::follow(&posts, window, cx);
         let mut view = Self {
@@ -104,6 +116,7 @@ impl ChannelView {
             name,
             posts,
             thread: None,
+            drafts,
             place: None,
             syncing: None,
             revealing: None,
@@ -212,13 +225,18 @@ impl ChannelView {
                 .conversation(&self.channel)
                 .messages([post.as_str()]),
         );
+        self.put_thread_away(cx);
+        let place = Place::Thread { post: post.clone() };
+        let compose = self
+            .drafts
+            .remove(&crate::chat_view::writes_to(&self.channel, &place))
+            .unwrap_or_else(|| {
+                let placeholder = compose::THREAD_PLACEHOLDER.into();
+                ChatView::channel_box(&self.parts, &self.channel, &place, placeholder, window, cx)
+            });
         let view = {
-            let (parts, channel, place) = (
-                self.parts.clone(),
-                self.channel.clone(),
-                Place::Thread { post: post.clone() },
-            );
-            cx.new(|cx| ChatView::in_place(parts, channel, place, compose::THREAD_PLACEHOLDER.into(), window, cx))
+            let (parts, channel) = (self.parts.clone(), self.channel.clone());
+            cx.new(|cx| ChatView::in_place(parts, channel, place, compose, window, cx))
         };
         if let Some((team, channel)) = self.place.clone() {
             view.update(cx, |view, cx| view.set_channel_place(team, channel, cx));
@@ -234,16 +252,55 @@ impl ChannelView {
         cx.notify();
     }
 
-    /// Closes the thread beside the posts.
+    /// Closes the thread beside the posts; its box's draft is kept for the thread's next opening.
     pub fn close_thread(&mut self, cx: &mut Context<Self>) {
-        if let Some(thread) = self.thread.take() {
+        if let Some(post) = self.put_thread_away(cx) {
             self.parts.trace.record(
                 &TraceLine::new("channel-thread", "closed")
                     .conversation(&self.channel)
-                    .messages([thread.post.as_str()]),
+                    .messages([post.as_str()]),
             );
             cx.notify();
         }
+    }
+
+    /// Takes the open thread away, keeping its box when it holds a draft: the thread's post, if one was open.
+    fn put_thread_away(&mut self, cx: &App) -> Option<String> {
+        self.drafts.retain(|_, compose| compose.read(cx).has_draft(cx));
+        let thread = self.thread.take()?;
+        let compose = thread.view.read(cx).compose().clone();
+        if compose.read(cx).has_draft(cx) {
+            let place = Place::Thread {
+                post: thread.post.clone(),
+            };
+            self.drafts
+                .insert(crate::chat_view::writes_to(&self.channel, &place), compose);
+        }
+        Some(thread.post)
+    }
+
+    /// The boxes holding a draft, by the conversation each writes to (the channel's posts' box by the channel, a
+    /// thread's by its post's chain): the shell keeps them while another channel is shown, for the channel's next view
+    /// ([`Self::new`]).
+    #[must_use]
+    pub fn drafts(&self, cx: &App) -> Vec<(String, Entity<Compose>)> {
+        let posts = (self.channel.clone(), self.posts.read(cx).compose().clone());
+        let open = self.thread.as_ref().map(|thread| {
+            let place = Place::Thread {
+                post: thread.post.clone(),
+            };
+            let target = crate::chat_view::writes_to(&self.channel, &place);
+            (target, thread.view.read(cx).compose().clone())
+        });
+        std::iter::once(posts)
+            .chain(open)
+            .chain(
+                self.drafts
+                    .iter()
+                    .map(|(target, compose)| (target.clone(), compose.clone())),
+            )
+            .filter(|(_, compose)| compose.read(cx).has_draft(cx))
+            .collect()
     }
 
     /// Opens the view at `message` (which arrived at `arrival_time`) in the thread of post `thread` (a search's hit):
@@ -264,7 +321,8 @@ impl ChannelView {
                 open.view.update(cx, |view, cx| view.reveal(arrival_time, message, cx));
             }
         }
-        // a post is where its arrival puts it; a reply's post came before it, at a time the store tells
+        // a post is where its arrival puts it; a reply's post came before it, at a time the store tells, or, for a post
+        // older than the store holds, its id does (a message's id is its arrival time, ms: docs/protocol/chat.md)
         let (core, channel) = (Arc::clone(&self.parts.core), self.channel.clone());
         self.revealing = Some(cx.spawn(async move |this, cx| {
             let at = if message == thread {
@@ -275,6 +333,7 @@ impl ChannelView {
                     .ok()
                     .flatten()
                     .map(|post| post.arrival_time)
+                    .or_else(|| thread.parse().ok())
             };
             let _ = this.update(cx, |this, cx| {
                 this.revealing = None;

@@ -24,7 +24,7 @@
 //!   presence. A team's channel is a favourite too, as Teams lists one ([`RowKind::Channel`]): named by the channel's
 //!   name, its team's initial on a rounded square for its avatar (as the Teams list marks the team), its newest post
 //!   for its preview, bold while it has unread posts (no count: Teams counts a channel's mentions, which the store
-//!   doesn't tell apart), and opened read-only as a channel. A favourite that is neither a stored chat nor a channel of
+//!   doesn't tell apart), and opened as a channel. A favourite that is neither a stored chat nor a channel of
 //!   the stored teams is left out.
 //! - **Names** (M2 Task 12): a 1:1 chat by the other member's name as the engine has it ([`Core::person`]: their
 //!   profile's, else their newest message's, else one the binary knew); a group or meeting chat by its topic, else its
