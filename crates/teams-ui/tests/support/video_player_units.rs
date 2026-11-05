@@ -27,12 +27,16 @@ include!("recording_parts.rs");
 struct Files(Mutex<Vec<(String, u64, u64)>>);
 
 /// A fake engine that streams the made-up recording (item `ITEM1`), and refuses any other one's; counts the parts
-/// read, and reads files as [`Files`] does.
+/// and the presentations read, and reads files as [`Files`] does. While `expired`, its parts are refused, as an expired
+/// address is, until the presentation is read again; while `refusing`, whatever the presentation.
 #[derive(Default)]
 struct Recordings {
     files: Files,
     parts: Mutex<usize>,
+    presentations: Mutex<usize>,
     presentation: Mutex<Option<Arc<teams_proto::Presentation>>>,
+    expired: Mutex<bool>,
+    refusing: Mutex<bool>,
 }
 
 impl crate::inline::PictureEngine for Recordings {
@@ -63,11 +67,16 @@ impl crate::inline::PictureEngine for Recordings {
         }
         let presentation = made_up_presentation();
         *self.presentation.lock().unwrap() = Some(Arc::clone(&presentation));
+        *self.presentations.lock().unwrap() += 1;
+        *self.expired.lock().unwrap() = false;
         teams_core::Reply::ready(Ok(presentation))
     }
 
     fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> teams_core::Reply<Vec<u8>> {
         *self.parts.lock().unwrap() += 1;
+        if *self.expired.lock().unwrap() || *self.refusing.lock().unwrap() {
+            return teams_core::Reply::ready(Err(EngineError::FileUnavailable));
+        }
         let presentation = self.presentation.lock().unwrap().clone().unwrap();
         teams_core::Reply::ready(made_up_part(&presentation, &part).ok_or(EngineError::FileUnavailable))
     }
@@ -145,6 +154,28 @@ fn a_recording_that_can_t_be_streamed_plays_from_its_download_link() {
 }
 
 #[test]
+fn a_recording_paused_while_its_stream_opens_stays_paused_from_its_download_link() {
+    let mut app = gpui::TestAppContext::single();
+    app.update(crate::window::init);
+    let engine = Arc::new(Recordings::default());
+    let source = PictureSource::of(engine.clone());
+    let (view, cx) = app.add_window_view(|_, cx| {
+        VideoPlayer::new("put-away".to_owned(), movie_file(), source, cx).streaming(recording("ITEM2"))
+    });
+    draw(cx);
+    // played, then put away (its part or tab left) before its stream's refusal was heard
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.toggle(cx);
+            view.pause(cx);
+        });
+    });
+    wait_state(&view, cx, State::Paused);
+    assert!(cx.update(|_, cx| view.read(cx).streamed_failed));
+    assert!(!engine.files.0.lock().unwrap().is_empty());
+}
+
+#[test]
 fn a_recording_s_parts_are_asked_of_the_engine_only_once_its_presentation_came() {
     let engine = Arc::new(Recordings::default());
     let parts = EngineParts {
@@ -174,6 +205,39 @@ fn a_recording_s_parts_are_asked_of_the_engine_only_once_its_presentation_came()
         refused.presentation(&Abandon::new()),
         Err(SourceError::Unavailable)
     ));
+}
+
+#[test]
+fn a_part_refused_as_its_address_expired_is_read_again_at_the_presentation_s_new_one() {
+    let engine = Arc::new(Recordings::default());
+    let parts = EngineParts {
+        source: PictureSource::of(engine.clone()),
+        link: "https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/ITEM1".to_owned(),
+        recording: recording("ITEM1"),
+        read: Mutex::new(None),
+    };
+    let abandon = Abandon::new();
+    parts.presentation(&abandon).unwrap();
+    assert!(!parts.part(1, Part::Media(0), &abandon).unwrap().is_empty());
+    assert_eq!(*engine.presentations.lock().unwrap(), 1);
+    // played or paused past its addresses' expiry: the presentation read again, the part asked for once more
+    *engine.expired.lock().unwrap() = true;
+    assert!(!parts.part(1, Part::Media(1), &abandon).unwrap().is_empty());
+    assert_eq!(*engine.presentations.lock().unwrap(), 2);
+    assert_eq!(*engine.parts.lock().unwrap(), 3);
+    // a part refused at any address: the presentation read again once, then the part can't be had
+    *engine.refusing.lock().unwrap() = true;
+    assert_eq!(parts.part(0, Part::Init, &abandon), Err(SourceError::Unavailable));
+    assert_eq!(*engine.presentations.lock().unwrap(), 3);
+    assert_eq!(*engine.parts.lock().unwrap(), 5);
+    // a presentation that no longer plays as the one played did isn't taken
+    let other = Arc::new(teams_proto::Presentation {
+        duration_ms: 1,
+        tracks: Vec::new(),
+    });
+    *parts.read.lock().unwrap() = Some(Arc::clone(&other));
+    assert_eq!(parts.read_again(&other, &abandon), Err(SourceError::Unavailable));
+    assert!(Arc::ptr_eq(parts.read.lock().unwrap().as_ref().unwrap(), &other));
 }
 
 impl crate::inline::PictureEngine for Files {
@@ -335,7 +399,7 @@ fn the_volume_slider_sets_how_loud_it_plays_and_unmutes_it() {
     cx.update(|_, cx| {
         view.update(cx, |view, cx| {
             view.player = None;
-            view.open(cx);
+            view.open(Asked::Play, cx);
             assert!(view.player.is_some());
         });
     });

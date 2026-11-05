@@ -123,7 +123,8 @@ tab asks; nothing is stored. The tab (`teams_ui::recap_view`) shows the parts, p
 transcript beside it (no panes' pills: the transcript is the only pane). The recording is streamed
 (`teams_proto::recording`, `teams_core::recap`): the presentation with `enablecdn: 0`, an MPD with `ContentProtection`
 or parts off the transform service refused, each part read as the player (`teams_media::player::stream`) asks for it,
-demultiplexed there and decoded by `GStreamer`; a recording that can't be streamed is played from its download link as
+demultiplexed there and decoded by `GStreamer` (a part refused, as one whose `docId` expired is, asked for once more at
+its address in the presentation read again); a recording that can't be streamed is played from its download link as
 any shared video ([graph.md](graph.md#a-shared-files-content)) before the player says it can't be opened. Nothing of
 it is stored. Share copies the recap link (without `fileUrl`, which only the item's own read gives), Watch in browser
 opens the recording's sharing link (Stream's player). The player's bar is the Recap player's

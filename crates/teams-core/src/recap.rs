@@ -1,8 +1,8 @@
 //! A meeting's recap, read when its Recap tab opens (`docs/protocol/recap.md`): what the meeting left, from MCPS
 //! ([`teams_proto::MeetingContents`]), and a transcript's `WebVTT`, from the personal site that holds it
 //! ([`teams_proto::TranscriptLocation`]), handed on as it came once it reads as a transcript, and its language, from its
-//! item's transcripts. Nothing is stored and
-//! nothing is written; the recording itself is played as any shared video is ([`crate::file_content`]).
+//! item's transcripts. Nothing is stored and nothing is written; the recording is streamed (below), and played from
+//! its download link as any shared video is ([`crate::file_content`]) only when it can't be streamed.
 //!
 //! A read that fails, an answer in another shape, or a transcript address the app doesn't read is
 //! [`EngineError::RecapUnread`]: the view says so and offers to try again.

@@ -145,37 +145,84 @@ struct EngineParts {
 
 impl SegmentSource for EngineParts {
     fn presentation(&self, abandon: &Abandon) -> Result<teams_media::player::Presentation, SourceError> {
-        let asked = self.source.engine().recording_presentation(
-            self.link.clone(),
-            self.recording.drive.clone(),
-            self.recording.item.clone(),
-        );
-        let presentation = match abandon.wait_for(asked) {
-            None => return Err(SourceError::Stopped),
-            Some(Ok(presentation)) => presentation,
-            Some(Err(error)) => return Err(source_error(&error)),
-        };
+        let presentation = self.ask(abandon)?;
         let played = played(&presentation);
         *self.read.lock().unwrap_or_else(PoisonError::into_inner) = Some(presentation);
         Ok(played)
     }
 
+    /// A part refused (its address's signed `docId` expired: a recording played or left paused long enough) is asked
+    /// for once more at its address in the presentation read again, unless another part's read did that meanwhile.
     fn part(&self, track: usize, part: Part, abandon: &Abandon) -> Result<Vec<u8>, SourceError> {
-        let link = {
-            let read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
-            let track = read.as_ref().and_then(|read| read.tracks.get(track));
-            match (track, part) {
-                (Some(track), Part::Init) => Some(track.init().clone()),
-                (Some(track), Part::Media(index)) => track.segment(index),
-                (None, _) => None,
+        let (read, link) = self.link(track, part)?;
+        match self.segment(link, abandon) {
+            Err(SourceError::Unavailable) => {
+                let current = self.read.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                if current.is_some_and(|current| Arc::ptr_eq(&current, &read)) {
+                    self.read_again(&read, abandon)?;
+                }
+                let (_, link) = self.link(track, part)?;
+                self.segment(link, abandon)
             }
+            answer => answer,
+        }
+    }
+}
+
+impl EngineParts {
+    /// The presentation, as the engine reads it now.
+    fn ask(&self, abandon: &Abandon) -> Result<Arc<teams_proto::Presentation>, SourceError> {
+        let asked = self.source.engine().recording_presentation(
+            self.link.clone(),
+            self.recording.drive.clone(),
+            self.recording.item.clone(),
+        );
+        match abandon.wait_for(asked) {
+            None => Err(SourceError::Stopped),
+            Some(Ok(presentation)) => Ok(presentation),
+            Some(Err(error)) => Err(source_error(&error)),
+        }
+    }
+
+    /// The presentation as last read, and the address of `part` of its track `track` in it.
+    fn link(
+        &self,
+        track: usize,
+        part: Part,
+    ) -> Result<(Arc<teams_proto::Presentation>, teams_proto::MediaSegmentLink), SourceError> {
+        let read = self
+            .read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or(SourceError::Unavailable)?;
+        let link = match (read.tracks.get(track), part) {
+            (Some(track), Part::Init) => Some(track.init().clone()),
+            (Some(track), Part::Media(index)) => track.segment(index),
+            (None, _) => None,
         };
         let link = link.ok_or(SourceError::Unavailable)?;
+        Ok((read, link))
+    }
+
+    /// The bytes at `link`.
+    fn segment(&self, link: teams_proto::MediaSegmentLink, abandon: &Abandon) -> Result<Vec<u8>, SourceError> {
         match abandon.wait_for(self.source.engine().recording_segment(link)) {
             None => Err(SourceError::Stopped),
             Some(Ok(bytes)) => Ok(bytes),
             Some(Err(error)) => Err(source_error(&error)),
         }
+    }
+
+    /// The presentation read again, its parts' addresses fresh; [`SourceError::Unavailable`] when it no longer plays
+    /// as `was` did (its tracks or their times changed: the player's places would be another presentation's).
+    fn read_again(&self, was: &teams_proto::Presentation, abandon: &Abandon) -> Result<(), SourceError> {
+        let presentation = self.ask(abandon)?;
+        if played(&presentation) != played(was) {
+            return Err(SourceError::Unavailable);
+        }
+        *self.read.lock().unwrap_or_else(PoisonError::into_inner) = Some(presentation);
+        Ok(())
     }
 }
 
@@ -257,6 +304,13 @@ struct FullScreen {
     hooked: bool,
 }
 
+/// What a player was last asked: to play (or to play once loaded), or to pause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    Play,
+    Pause,
+}
+
 /// How loud it plays, and its slider.
 struct Volume {
     /// From 0 (silent) to 1 (as recorded).
@@ -303,6 +357,8 @@ pub struct VideoPlayer {
     recording: Option<Recording>,
     /// The recording couldn't be streamed: it plays from its file's download link instead.
     streamed_failed: bool,
+    /// What it was last asked: what a player opened again in its place does.
+    asked: Asked,
     /// How fast it plays (one of `teams_media::player::RATES`).
     rate: f64,
     /// Its transcript's words, shown over the picture when captions are on (a recap's player).
@@ -362,6 +418,7 @@ impl VideoPlayer {
             pending_seek: None,
             recording: None,
             streamed_failed: false,
+            asked: Asked::Pause,
             rate: 1.0,
             captions: None,
             menu: None,
@@ -523,10 +580,8 @@ impl VideoPlayer {
 
     /// Pauses it while it plays or is loading to play (a recap's player its tab or part put away); nothing otherwise.
     pub fn pause(&mut self, cx: &mut Context<Self>) {
-        if self.playing()
-            && let Some(player) = &self.player
-        {
-            player.send(Command::Pause);
+        if self.playing() && self.player.is_some() {
+            self.ask(Asked::Pause);
             cx.notify();
         }
     }
@@ -536,16 +591,31 @@ impl VideoPlayer {
         if !self.playing() {
             pause_others(cx);
         }
-        match &self.player {
-            None => self.open(cx),
-            Some(player) if self.playing() => player.send(Command::Pause),
-            Some(player) => player.send(Command::Play),
+        if self.player.is_none() {
+            self.open(Asked::Play, cx);
+        } else if self.playing() {
+            self.ask(Asked::Pause);
+        } else {
+            self.ask(Asked::Play);
         }
         cx.notify();
     }
 
-    /// Opens it and plays it: a recording streamed, else (or once its stream couldn't be had) the file's bytes.
-    fn open(&mut self, cx: &mut Context<Self>) {
+    /// Tells its player to play or to pause, and keeps what it was asked.
+    fn ask(&mut self, asked: Asked) {
+        if let Some(player) = &self.player {
+            player.send(match asked {
+                Asked::Play => Command::Play,
+                Asked::Pause => Command::Pause,
+            });
+        }
+        self.asked = asked;
+    }
+
+    /// Opens it, played once loaded or paused on its first frame as `asked`: a recording streamed, else (or once its
+    /// stream couldn't be had) the file's bytes.
+    fn open(&mut self, asked: Asked, cx: &mut Context<Self>) {
+        let play = asked == Asked::Play;
         let Some(share_url) = self.file.share_url.clone() else {
             return;
         };
@@ -562,14 +632,15 @@ impl VideoPlayer {
                 recording,
                 read: Mutex::new(None),
             });
-            Player::open_stream(parts, setup, output, true)
+            Player::open_stream(parts, setup, output, play)
         } else {
             let bytes = Arc::new(EngineBytes {
                 source: self.source.clone(),
                 share_url,
             });
-            Player::open(bytes, setup, output, true)
+            Player::open(bytes, setup, output, play)
         };
+        self.asked = asked;
         if let Some(player) = &self.player {
             if self.muted {
                 player.send(Command::Muted(true));
@@ -584,17 +655,21 @@ impl VideoPlayer {
     }
 
     /// A recording whose stream can't be had (not processed yet, or refused) is played from its file's download link
-    /// instead, once; only when that fails too does the player say it can't be opened.
+    /// instead, once, from where the stream had got to, played or paused as it was last asked; only when that fails too
+    /// does the player say it can't be opened.
     fn fall_back(&mut self, cx: &mut Context<Self>) {
         if self.recording.is_none() || self.streamed_failed || self.state() != Some(State::Failed(Failure::Unavailable))
         {
             return;
         }
         self.streamed_failed = true;
+        if self.pending_seek.is_none() {
+            self.pending_seek = self.position().filter(|at| !at.is_zero());
+        }
         self.player = None;
         self.status = None;
         *self.screen.status.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        self.open(cx);
+        self.open(self.asked, cx);
     }
 
     /// Goes `back` or forward by [`SKIP`].
@@ -1455,10 +1530,8 @@ fn pause_others(cx: &mut Context<VideoPlayer>) {
             continue;
         }
         other.update(cx, |other, cx| {
-            if other.playing()
-                && let Some(player) = &other.player
-            {
-                player.send(Command::Pause);
+            if other.playing() && other.player.is_some() {
+                other.ask(Asked::Pause);
                 cx.notify();
             }
         });

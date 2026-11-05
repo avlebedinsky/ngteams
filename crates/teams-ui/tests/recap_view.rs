@@ -11,6 +11,7 @@ mod common;
 mod fixtures;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::Rig;
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
@@ -347,10 +348,23 @@ fn each_part_s_recording_has_its_transcript_as_captions_named_by_its_language() 
     );
     click(cx, "video-captions-on");
     assert!(cx.update(|_, cx| teams_ui::video_player::CaptionStyle::current(cx).on));
-    // Part 2: its own transcript, its own captions, still on
+    // Part 2: its own transcript (other words), its own captions, still on
+    locked(&rig.core.transcripts).insert(
+        fixtures::transcript_location("ITEM2"),
+        fixtures::VTT.replace("Today.", "Part two."),
+    );
     click(cx, "recap-part-1");
     assert_eq!(asked(&rig, "transcript_language"), 2);
     let second = player(cx, "recap-1");
-    assert!(cx.update(|_, cx| second.read(cx).captions().is_some()));
+    let said = |cx: &mut VisualTestContext, player: &Entity<teams_ui::video_player::VideoPlayer>| {
+        cx.update(|_, cx| {
+            player
+                .read(cx)
+                .captions()
+                .and_then(|captions| captions.at(Duration::from_secs(4)).map(str::to_owned))
+        })
+    };
+    assert_eq!(said(cx, &second).as_deref(), Some("Part two."));
+    assert_eq!(said(cx, &first).as_deref(), Some("Today."));
     assert!(cx.update(|_, cx| teams_ui::video_player::CaptionStyle::current(cx).on));
 }
