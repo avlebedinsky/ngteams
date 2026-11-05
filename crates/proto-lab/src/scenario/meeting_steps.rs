@@ -1,4 +1,5 @@
 //! Drives a lab meeting page through the scenario control socket and records its UI/network steps. The hold control installs explicit capture holds.
+//! `PROTO_LAB_FAKE_AUDIO` may name a WAV file the fake microphone plays instead of the burst tone.
 
 use std::path::PathBuf;
 
@@ -42,7 +43,11 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let alias = alias_of("PROTO_LAB_ACCOUNT", Alias::A);
     let peer = alias_of("PROTO_LAB_PEER", if alias == Alias::B { Alias::A } else { Alias::B });
-    let tone = write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
+    // `PROTO_LAB_FAKE_AUDIO` names a WAV the microphone plays instead of the tone (speech, for a transcript to hold)
+    let tone = match std::env::var_os("PROTO_LAB_FAKE_AUDIO").map(PathBuf::from) {
+        Some(wav) if wav.is_file() => wav,
+        _ => write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?,
+    };
     let session_options = SessionOptions {
         capture: Some(ScenarioName::MeetingSteps.as_str().to_owned()),
         capture_request_bodies: true,
