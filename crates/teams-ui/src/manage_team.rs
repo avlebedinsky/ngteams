@@ -761,7 +761,7 @@ impl ManageTeam {
                 let order = shown.clone();
                 keyboard::stop(
                     key.clone(),
-                    tab_button(key.clone(), tab.label(), chosen, palette)
+                    tab_button(key.clone(), tab.label(), chosen, palette, cx)
                         .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
                         .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                             this.tab_key(&order, tab, event, window, cx);

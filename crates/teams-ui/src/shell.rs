@@ -2756,9 +2756,8 @@ impl Shell {
 }
 
 impl Shell {
-    /// The call bar and the panes on one sheet floating on the frame: rounded, shadowed, its corners capped in the
-    /// frame's colour there (GPUI clips only to rectangles, so a pane drawn square to its corner would otherwise show
-    /// past the rounding). Flat and square, edged by a border, in a theme without depth.
+    /// The call bar and the panes on one sheet floating on the frame ([`crate::sheet`]), right of the rail and under
+    /// the title bar.
     fn sheet(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let panes = div()
             .relative()
@@ -2769,68 +2768,7 @@ impl Shell {
             .child(self.call_bar.clone())
             .child(div().flex_1().min_h_0().child(self.body(palette, cx)));
         let holder = div().flex_1().h_full().min_w_0();
-        if !palette.depth {
-            return holder.child(panes.border_l_1().border_t_1().border_color(rgb(palette.border)));
-        }
-        let viewport = window.viewport_size();
-        let size = (f32::from(viewport.width), f32::from(viewport.height));
-        let (left, top) = (RAIL_WIDTH, TITLE_HEIGHT);
-        let (right, bottom) = (size.0 - theme::SHEET_GAP, size.1 - theme::SHEET_GAP);
-        let caps = [
-            (SheetCorner::TopLeft, (left, top)),
-            (SheetCorner::TopRight, (right, top)),
-            (SheetCorner::BottomRight, (right, bottom)),
-            (SheetCorner::BottomLeft, (left, bottom)),
-        ]
-        .map(|(corner, at)| corner.cap(theme::frame_at(palette, size, at)));
-        holder.pr(px(theme::SHEET_GAP)).pb(px(theme::SHEET_GAP)).child(
-            panes
-                .rounded(px(theme::SHEET_RADIUS))
-                .shadow(theme::glow(palette, 0x0000_0000, 0.32, 28.0, 8.0))
-                .children(caps),
-        )
-    }
-}
-
-/// A corner of the sheet the panes float on.
-#[derive(Clone, Copy)]
-enum SheetCorner {
-    TopLeft,
-    TopRight,
-    BottomRight,
-    BottomLeft,
-}
-
-impl SheetCorner {
-    /// The frame's colour, `color`, filling this corner outside the sheet's rounding (see [`Shell::sheet`]).
-    fn cap(self, color: u32) -> AnyElement {
-        // each a square less the quarter circle the sheet's corner is drawn with
-        let (drawing, place): (&'static [u8], fn(gpui::Div) -> gpui::Div) = match self {
-            Self::TopLeft => (
-                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M0 0H12A12 12 0 0 0 0 12Z"/></svg>"#,
-                |cap| cap.top_0().left_0(),
-            ),
-            Self::TopRight => (
-                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M12 0V12A12 12 0 0 0 0 0Z"/></svg>"#,
-                |cap| cap.top_0().right_0(),
-            ),
-            Self::BottomRight => (
-                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M12 12H0A12 12 0 0 0 12 0Z"/></svg>"#,
-                |cap| cap.bottom_0().right_0(),
-            ),
-            Self::BottomLeft => (
-                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M0 12V0A12 12 0 0 0 12 12Z"/></svg>"#,
-                |cap| cap.bottom_0().left_0(),
-            ),
-        };
-        place(div().absolute().size(px(theme::SHEET_RADIUS)))
-            .child(
-                Icon::default()
-                    .data(drawing)
-                    .size(px(theme::SHEET_RADIUS))
-                    .text_color(rgb(color)),
-            )
-            .into_any_element()
+        crate::sheet::float(holder, panes, palette, window, (RAIL_WIDTH, TITLE_HEIGHT), false)
     }
 }
 

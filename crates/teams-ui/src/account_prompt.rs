@@ -168,15 +168,15 @@ impl Render for AccountPrompt {
         } else {
             self.problem.as_ref().map(|(problem, _)| problem.clone())
         };
-        div()
-            .debug_selector(|| "account-prompt".to_owned())
+        let card = div()
             .size_full()
             .p_8()
             .flex()
             .flex_col()
             .gap_4()
+            .rounded(px(theme::SHEET_RADIUS))
             .bg(rgb(palette.background))
-            .text_color(rgb(palette.foreground))
+            .shadow(theme::glow(palette, 0x0000_0000, 0.35, 32.0, 10.0))
             .child(
                 img(app_icon::image())
                     .debug_selector(|| "account-prompt-logo".to_owned())
@@ -214,7 +214,15 @@ impl Render for AccountPrompt {
                         .disabled(self.signing_in)
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 ),
-            )
+            );
+        // on the frame, the card rising in as the window opens
+        div()
+            .debug_selector(|| "account-prompt".to_owned())
+            .size_full()
+            .p(px(theme::SHEET_GAP * 2.0))
+            .bg(theme::frame(palette))
+            .text_color(rgb(palette.foreground))
+            .child(crate::motion::rise(card, "account-prompt-card", 12.0, cx))
     }
 }
 

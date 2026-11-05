@@ -480,9 +480,19 @@ impl CallBar {
             Some(chat) => format!("{caller} is calling in {}", self.chat_name(chat, cx)).into(),
             None => format!("{caller} is calling").into(),
         };
-        strip(palette)
+        let banner = strip(palette)
             .debug_selector(|| "call-banner".to_owned())
-            .child(call_mark(palette))
+            .bg(theme::gradient(
+                theme::mix(palette.surface, palette.brand, 0.12),
+                theme::mix(palette.surface, palette.accent, 0.12),
+                90.0,
+            ))
+            // rings spreading from the mark while it rings
+            .child(
+                call_mark(palette)
+                    .relative()
+                    .children(crate::motion::ripple("call-banner-mark", palette.accent, 32.0, cx)),
+            )
             .child(div().flex_1().font_weight(gpui::FontWeight::SEMIBOLD).child(text))
             .child(control(
                 "call-answer",
@@ -499,8 +509,9 @@ impl CallBar {
                 Look::Danger,
                 cx,
                 |this, cx| this.ask(Ask::Decline, cx),
-            ))
-            .into_any_element()
+            ));
+        // the strip comes in from above the panes as the call starts ringing
+        crate::motion::rise(banner, SharedString::from(format!("call-banner-{}", ringing.call.get())), -12.0, cx)
     }
 
     /// The in-call strip: the call's mark, who it is with and its state, and its controls.
@@ -526,7 +537,11 @@ impl CallBar {
         let title = call_title(active, |chat| self.chat_name(chat, cx));
         strip(palette)
             .debug_selector(|| "in-call".to_owned())
-            .bg(rgb(palette.selected))
+            .bg(theme::gradient(
+                palette.selected,
+                theme::mix(palette.selected, palette.accent, 0.18),
+                90.0,
+            ))
             .child(call_mark(palette))
             .child(
                 div()
@@ -697,8 +712,9 @@ fn call_mark(palette: Palette) -> gpui::Div {
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(rgb(palette.background))
-        .text_color(rgb(palette.brand))
+        .bg(theme::brand_gradient(palette, 135.0))
+        .shadow(theme::glow(palette, palette.brand, 0.4, 8.0, 2.0))
+        .text_color(rgb(palette.on_brand))
         .child(Glyph::PHONE.icon().size(px(16.0)))
 }
 

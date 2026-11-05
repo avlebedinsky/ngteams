@@ -48,22 +48,37 @@ pub(crate) fn card(active: &ActiveCall, palette: Palette, cx: &mut Context<CallS
             .right_0()
             .flex()
             .justify_center()
-            .child(
-                div()
+            .child({
+                // a card that drops in from above the stage as someone starts waiting, its top edge in the brand
+                // gradient
+                let card = div()
+                    .relative()
                     .w(px(CARD_WIDTH))
                     .p_3()
+                    .pt_4()
                     .flex()
                     .flex_col()
                     .gap_3()
                     .rounded_lg()
-                    .shadow_lg()
+                    .overflow_hidden()
+                    .shadow(crate::theme::glow(palette, palette.brand, 0.3, 24.0, 8.0))
                     .border_1()
                     .border_color(rgb(palette.border))
                     .bg(rgb(palette.surface))
                     .text_color(rgb(palette.foreground))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(3.0))
+                            .bg(crate::theme::brand_gradient(palette, 90.0)),
+                    )
                     .child(heading)
-                    .children(rows),
-            )
+                    .children(rows);
+                crate::motion::rise(card, "call-lobby-card", -12.0, cx)
+            })
             .into_any_element(),
     )
 }

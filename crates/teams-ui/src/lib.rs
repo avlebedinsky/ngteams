@@ -128,6 +128,7 @@ pub mod selection;
 pub mod sending;
 pub mod settings;
 pub mod settings_view;
+pub mod sheet;
 pub mod shared_view;
 pub mod shell;
 pub mod sidebar;

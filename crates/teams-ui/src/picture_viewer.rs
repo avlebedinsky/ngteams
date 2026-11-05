@@ -800,11 +800,20 @@ impl PictureViewer {
             .items_center()
             .justify_between()
             .gap_4()
+            .relative()
             .bg(rgb(palette.surface))
-            .border_b_1()
-            .border_color(rgb(palette.border))
             .child(div().flex_1().min_w_0().children(who))
             .child(self.actions(palette, window, cx))
+            // its foot in the brand gradient, where a border would be
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(2.0))
+                    .bg(theme::brand_gradient(palette, 90.0)),
+            )
             .into_any_element()
     }
 
@@ -906,7 +915,7 @@ impl PictureViewer {
                 let bounds = self.placement.bounds(*natural, stage);
                 let pans = self.placement.pans(*natural, stage);
                 // an id of its own, for a GIF to play
-                img(Arc::clone(image))
+                let image = img(Arc::clone(image))
                     .id(("picture-viewer-image", self.generation))
                     .debug_selector(|| "picture-viewer-image".to_owned())
                     .absolute()
@@ -914,8 +923,9 @@ impl PictureViewer {
                     .top(bounds.origin.y)
                     .w(bounds.size.width)
                     .h(bounds.size.height)
-                    .when(pans, gpui::Styled::cursor_grab)
-                    .into_any_element()
+                    .when(pans, gpui::Styled::cursor_grab);
+                // another picture fades in where it is placed
+                crate::motion::fade(image, ("picture-viewer-in", self.generation), cx)
             }
             Loaded::Reading => standing_in(Glyph::LOADING, None, palette),
             Loaded::Missing => standing_in(Glyph::FILE_IMAGE, Some("This image can't be shown."), palette),

@@ -1024,9 +1024,11 @@ impl SettingsView {
             let shown = page == self.page;
             let id: SharedString = format!("settings-page-{}", page.key()).into();
             let selector = id.to_string();
+            let mark = page_mark(&id, shown, palette, cx);
             div()
                 .debug_selector(move || selector.clone())
                 .id(id)
+                .relative()
                 .h(px(36.0))
                 .px_3()
                 .flex()
@@ -1036,8 +1038,14 @@ impl SettingsView {
                 .cursor_pointer()
                 .text_color(rgb(if shown { palette.brand } else { palette.foreground }))
                 .when(shown, |row| {
-                    row.bg(rgb(palette.selected)).font_weight(gpui::FontWeight::SEMIBOLD)
+                    row.bg(theme::gradient(
+                        palette.selected,
+                        theme::mix(palette.selected, palette.surface, 0.6),
+                        90.0,
+                    ))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                 })
+                .child(mark)
                 // where the keyboard is: the page shown, ringed while the column has the focus
                 .border_1()
                 .border_color(rgb(if shown && focused {
@@ -1151,6 +1159,22 @@ fn copied_note(model: &SettingsModel, palette: Palette) -> Option<AnyElement> {
     )
 }
 
+/// The page shown's mark in the page column: a bar in the brand gradient at its row's left edge, growing in as the page
+/// is chosen.
+fn page_mark(id: &SharedString, shown: bool, palette: Palette, cx: &App) -> AnyElement {
+    let mark = div()
+        .absolute()
+        .left_0()
+        .top(px(18.0))
+        .w(px(3.0))
+        .rounded_r_sm()
+        .bg(theme::brand_gradient(palette, 180.0));
+    crate::motion::toggle(mark, SharedString::from(format!("{id}-mark")), shown, cx, |mark, t| {
+        let height = 20.0 * t.max(0.0);
+        mark.h(px(height)).mt(px(-height / 2.0))
+    })
+}
+
 /// A titled box of rows, a hairline between each.
 fn group(title: Option<&'static str>, rows: Vec<AnyElement>, palette: Palette) -> AnyElement {
     let rows = rows.into_iter().enumerate().map(|(index, row)| {
@@ -1171,6 +1195,8 @@ fn group(title: Option<&'static str>, rows: Vec<AnyElement>, palette: Palette) -
                 .border_1()
                 .border_color(rgb(palette.border))
                 .bg(rgb(palette.surface))
+                // raised a little off the page
+                .shadow(theme::glow(palette, 0x0000_0000, 0.06, 10.0, 2.0))
                 .children(rows),
         )
         .into_any_element()
@@ -1478,8 +1504,8 @@ impl Render for SettingsView {
                     .min_w_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(
-                        div()
+                    .child({
+                        let page = div()
                             .w_full()
                             .max_w(px(PAGE_WIDTH))
                             .px_8()
@@ -1495,8 +1521,10 @@ impl Render for SettingsView {
                                     .child(self.page.title()),
                             )
                             .children(problems)
-                            .children(content),
-                    ),
+                            .children(content);
+                        // another page fades in from a little below
+                        crate::motion::rise(page, SharedString::from(format!("settings-in-{}", self.page.key())), 8.0, cx)
+                    }),
             )
     }
 }

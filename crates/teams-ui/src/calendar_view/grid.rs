@@ -334,7 +334,7 @@ fn day_header(date: NaiveDate, today: NaiveDate, palette: Palette, cx: &mut Cont
                     .left_0()
                     .right_0()
                     .h(px(3.0))
-                    .bg(rgb(palette.brand)),
+                    .bg(crate::theme::brand_gradient(palette, 90.0)),
             )
         })
         .cursor_pointer()
@@ -347,7 +347,20 @@ fn day_header(date: NaiveDate, today: NaiveDate, palette: Palette, cx: &mut Cont
             div()
                 .text_2xl()
                 .text_color(rgb(color))
-                .when(is_today, |number| number.font_weight(gpui::FontWeight::SEMIBOLD))
+                // today's number lit on a disc of the brand gradient
+                .when(is_today, |number| {
+                    number
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .size(px(36.0))
+                        .ml(px(-6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(crate::theme::brand_gradient(palette, 135.0))
+                        .shadow(crate::theme::glow(palette, palette.brand, 0.35, 10.0, 2.0))
+                        .text_color(rgb(palette.on_brand))
+                })
                 .child(date.day().to_string()),
         )
         .child(
@@ -568,8 +581,14 @@ fn chip(shown: Shown, all_day: bool, cycle: HourCycle, palette: Palette, cx: &mu
 fn event_face(look: Look, palette: Palette) -> gpui::Div {
     let face = div().rounded_md();
     match look {
+        // tinted from the brand colour into the accent, lifted a little off the grid
         Look::Busy | Look::Tentative => face
-            .bg(rgb(mix(palette.background, palette.brand, 220)))
+            .bg(crate::theme::gradient(
+                mix(palette.background, palette.brand, 220),
+                mix(palette.background, palette.accent, 200),
+                160.0,
+            ))
+            .shadow(crate::theme::glow(palette, palette.brand, 0.12, 6.0, 1.0))
             .hover(move |face| face.bg(rgb(mix(palette.background, palette.brand, 320)))),
         Look::Cancelled => face
             .bg(rgb(palette.background))
@@ -584,7 +603,7 @@ fn event_face(look: Look, palette: Palette) -> gpui::Div {
 fn edge(look: Look, palette: Palette) -> gpui::Div {
     let edge = div().w(px(4.0)).h_full().flex_none().rounded_l_md().overflow_hidden();
     match look {
-        Look::Busy => edge.bg(rgb(palette.brand)),
+        Look::Busy => edge.bg(crate::theme::brand_gradient(palette, 180.0)),
         Look::Cancelled => edge.bg(rgb(mix(palette.background, palette.brand, 400))),
         Look::Tentative => edge
             .flex()

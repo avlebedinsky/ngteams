@@ -502,7 +502,12 @@ impl CalendarView {
                 .flex()
                 .items_center()
                 .gap_2()
-                .bg(rgb(palette.brand))
+                // the split button lit as one: the brand colour running into the accent across both parts
+                .bg(crate::theme::gradient(
+                    palette.brand,
+                    crate::theme::mix(palette.brand, palette.accent, 0.6),
+                    90.0,
+                ))
                 .text_color(rgb(palette.on_brand))
                 .cursor_pointer()
                 .hover(move |part| part.bg(rgb(palette.brand_hover)))
@@ -537,7 +542,11 @@ impl CalendarView {
                 .h(px(32.0))
                 .px_2()
                 .rounded_r_md()
-                .bg(rgb(palette.brand))
+                .bg(crate::theme::gradient(
+                    crate::theme::mix(palette.brand, palette.accent, 0.6),
+                    palette.accent,
+                    90.0,
+                ))
                 .text_color(rgb(palette.on_brand))
                 .tooltip("More ways to schedule")
                 .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)))

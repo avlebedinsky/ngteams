@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -345,6 +346,25 @@ impl PrejoinView {
             )
     }
 
+    /// `content` on the card everything sits on, floating on the frame (a sheet, as the main window's panes are),
+    /// rising in as the window opens.
+    fn card(content: gpui::Div, palette: Palette, cx: &App) -> gpui::Div {
+        let card = div()
+            .w_full()
+            .max_w(px(948.0))
+            .p_6()
+            .rounded(px(theme::SHEET_RADIUS + 4.0))
+            .bg(rgb(palette.background))
+            .shadow(theme::glow(palette, 0x0000_0000, 0.35, 40.0, 12.0))
+            .when(!palette.depth, |card| card.border_1().border_color(rgb(palette.border)))
+            .child(content);
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(crate::motion::rise(card, "prejoin-card", 16.0, cx))
+    }
+
     /// A box of the audio's choices.
     fn audio_box(palette: Palette) -> gpui::Div {
         div()
@@ -649,7 +669,7 @@ impl Render for PrejoinView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.key_down(event, cx)))
             .size_full()
             .flex()
-            .bg(rgb(palette.background))
+            .bg(theme::frame(palette))
             .text_color(rgb(palette.foreground))
             .child(
                 div()
@@ -663,10 +683,8 @@ impl Render for PrejoinView {
                     .items_center()
                     .justify_center()
                     .p_6()
-                    .child(
+                    .child(Self::card(
                         div()
-                            .w_full()
-                            .max_w(px(900.0))
                             .flex()
                             .flex_col()
                             .gap_4()
@@ -674,7 +692,9 @@ impl Render for PrejoinView {
                             .child(div().flex().items_start().gap_4().children(camera).child(audio))
                             .children(refused)
                             .child(actions),
-                    ),
+                        palette,
+                        cx,
+                    )),
             )
             .children(effects)
     }

@@ -174,12 +174,25 @@ impl Shell {
                 .flex()
                 .items_center()
                 .cursor_pointer()
+                .relative()
                 .border_b_2()
-                .border_color(if chosen {
-                    rgb(palette.brand).into()
-                } else {
-                    gpui::Hsla::transparent_black()
-                })
+                .border_color(gpui::Hsla::transparent_black())
+                // the chosen tab's line in the brand gradient, growing out from its middle
+                .child(crate::motion::toggle(
+                    div()
+                        .absolute()
+                        .bottom(px(-2.0))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .bg(crate::theme::brand_gradient(palette, 90.0)),
+                    SharedString::from(format!("chat-tab-{key}-line")),
+                    chosen,
+                    cx,
+                    |line, t| {
+                        let inset = gpui::relative((1.0 - t.clamp(0.0, 1.0)) / 2.0);
+                        line.left(inset).right(inset)
+                    },
+                ))
                 .text_color(rgb(if chosen {
                     palette.foreground
                 } else {

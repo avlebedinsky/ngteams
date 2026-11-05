@@ -77,6 +77,8 @@ const ROSTER_WIDTH: f32 = 280.0;
 /// The avatar of the one the call rings (or ended with) and of a tile without video: the kit's large one (80 px),
 /// whose initials it sizes and centres (a custom size leaves them small, at its top left).
 const BIG_AVATAR: Size = Size::Large;
+/// [`BIG_AVATAR`]'s side, px (the kit's large avatar).
+const BIG_AVATAR_PX: f32 = 80.0;
 /// How long a call's end stays shown when the user does nothing.
 pub const AUTO_CLOSE: Duration = Duration::from_secs(8);
 
@@ -474,9 +476,8 @@ impl CallStage {
             .flex()
             .items_center()
             .gap_3()
-            .bg(rgb(palette.surface))
-            .border_b_1()
-            .border_color(rgb(palette.border))
+            // on the frame, as the main window's title bar is
+            .text_color(rgb(palette.on_frame))
             .child(
                 div()
                     .flex_1()
@@ -489,7 +490,7 @@ impl CallStage {
                             .debug_selector(|| "call-window-status".to_owned())
                             .truncate()
                             .text_xs()
-                            .text_color(rgb(palette.muted_foreground))
+                            .text_color(rgb(palette.on_frame).opacity(0.75))
                             .child(state),
                     ),
             )
@@ -540,7 +541,7 @@ impl CallStage {
             .gap_1()
             .child(roster)
             .child(self.more(palette, cx))
-            .child(div().w(px(1.0)).h(px(32.0)).mx_1().bg(rgb(palette.border)))
+            .child(div().w(px(1.0)).h(px(32.0)).mx_1().bg(rgb(palette.on_frame).opacity(0.25)))
             .children(camera)
             .child(
                 div()
@@ -590,12 +591,13 @@ impl CallStage {
             && self
                 .live(cx)
                 .is_some_and(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall);
-        let face = tool_face(Glyph::MORE, "More", palette);
+        let face = tool_face(Glyph::MORE, "More");
         selected_by(
             "call-more",
             Button::new("call-more")
                 .ghost()
                 .h(px(48.0))
+                .text_color(rgb(palette.on_frame))
                 .child(face)
                 .tooltip("More actions")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, window, cx| {
@@ -633,6 +635,7 @@ impl CallStage {
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
         self.settings.read(cx).devices()?;
+        let on_frame = theme::current(cx).on_frame;
         let model = self.settings.clone();
         let stage = cx.weak_entity();
         let effects = kinds == CAMERAS;
@@ -643,6 +646,7 @@ impl CallStage {
                     .ghost()
                     .xsmall()
                     .icon(Glyph::CHEVRON_DOWN.icon())
+                    .text_color(rgb(on_frame))
                     .tooltip(tip)
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, cx| {
                         let menu = device_items(menu, kinds, &model, cx);
@@ -683,7 +687,8 @@ impl CallStage {
             } else {
                 calls::status_text(active)
             };
-            calling(title, &state, palette)
+            let rings = crate::motion::ripple("call-calling", palette.accent, BIG_AVATAR_PX, cx);
+            calling(title, &state, palette, rings)
         } else {
             let selector = if active.view.participants.is_empty() {
                 "call-people"
@@ -694,7 +699,7 @@ impl CallStage {
                 .into_iter()
                 .map(|tile| {
                     let video = tile.video.and_then(|line| self.tiles.as_mut()?.fill(line, call));
-                    tile_view(tile, video, palette)
+                    tile_view(tile, video, palette, cx)
                 })
                 .collect();
             grid(selector, drawn)
@@ -709,7 +714,7 @@ impl CallStage {
             .p_3()
             .bg(rgb(palette.background))
             .child(body)
-            .child(self_view(active.view.speaking, own, palette))
+            .child(self_view(active.view.speaking, own, palette, cx))
             .children(lobby)
             .into_any_element()
     }
@@ -1020,7 +1025,7 @@ impl CallStage {
         match (ended, ended.and_then(|ended| ended.check)) {
             (Some(ended), Some(check)) => self.results_card(ended, check, palette, cx),
             (Some(ended), None) => self.end_view(ended, title, palette, cx),
-            (None, _) => calling(title, "Call ended", palette),
+            (None, _) => calling(title, "Call ended", palette, Vec::new()),
         }
     }
 
@@ -1146,6 +1151,24 @@ impl Render for CallStage {
         let refused = (live.is_some() || ended.as_ref().is_some_and(|ended| ended.check.is_none()))
             .then(|| self.refused(palette, cx))
             .flatten();
+        // the stage and what goes with it on a sheet floating on the frame, under the header
+        let panes = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(palette.background))
+            .children(refused)
+            .children(if self.caption_top { captions.take() } else { None })
+            .child(div().flex_1().min_h_0().child(body))
+            .children(captions);
+        let sheet = crate::sheet::float(
+            div().flex_1().min_h_0().w_full(),
+            panes,
+            palette,
+            window,
+            (0.0, HEADER_HEIGHT),
+            true,
+        );
         div()
             .debug_selector(|| "call-window".to_owned())
             .key_context(CONTEXT)
@@ -1159,13 +1182,10 @@ impl Render for CallStage {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(palette.background))
+            .bg(theme::frame(palette))
             .text_color(rgb(palette.foreground))
             .child(header)
-            .children(refused)
-            .children(if self.caption_top { captions.take() } else { None })
-            .child(div().flex_1().min_h_0().child(body))
-            .children(captions)
+            .child(sheet)
     }
 }
 
@@ -1288,8 +1308,10 @@ fn tool(
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .when(marked, |tool| tool.bg(rgb(palette.selected)))
-        .hover(move |tool| tool.bg(rgb(palette.hover)))
+        // on the frame: its ink, a lit chip while marked (muted, camera off, the people shown)
+        .text_color(rgb(palette.on_frame))
+        .when(marked, |tool| tool.bg(rgb(palette.on_frame).opacity(0.2)))
+        .hover(move |tool| tool.bg(rgb(palette.on_frame).opacity(0.12)))
         .tooltip(move |window, cx| {
             let tooltip = Tooltip::new(tip);
             match &action {
@@ -1298,23 +1320,23 @@ fn tool(
             }
         })
         .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
-        .child(tool_face(glyph, caption, palette))
+        .child(tool_face(glyph, caption))
         .into_any_element()
 }
 
-/// A toolbar control's face: its icon over its caption.
-fn tool_face(glyph: Glyph, caption: &'static str, palette: Palette) -> gpui::Div {
+/// A toolbar control's face: its icon over its caption, in the control's own text colour.
+fn tool_face(glyph: Glyph, caption: &'static str) -> gpui::Div {
     div()
         .flex()
         .flex_col()
         .items_center()
         .gap_0p5()
         .child(glyph.icon().size(px(20.0)))
-        .child(div().text_xs().text_color(rgb(palette.foreground)).child(caption))
+        .child(div().text_xs().child(caption))
 }
 
 /// The screen while the call rings (or once it ended): its avatar, who it is with and its state, centred.
-fn calling(title: &SharedString, state: &str, palette: Palette) -> AnyElement {
+fn calling(title: &SharedString, state: &str, palette: Palette, rings: Vec<AnyElement>) -> AnyElement {
     div()
         .debug_selector(|| "call-calling".to_owned())
         .size_full()
@@ -1323,7 +1345,13 @@ fn calling(title: &SharedString, state: &str, palette: Palette) -> AnyElement {
         .items_center()
         .justify_center()
         .gap_3()
-        .child(people::avatar(Some(title), None, BIG_AVATAR))
+        // `rings` spreading from who is called, while it rings or waits
+        .child(
+            div()
+                .relative()
+                .children(rings)
+                .child(people::avatar(Some(title), None, BIG_AVATAR)),
+        )
         .child(
             div()
                 .text_xl()
@@ -1412,7 +1440,7 @@ fn grid(selector: &'static str, tiles: Vec<AnyElement>) -> AnyElement {
 
 /// One tile: its video when a line shows it, else its initials; its name; a border in the brand colour while it
 /// speaks.
-fn tile_view(tile: StageTile, video: Option<AnyElement>, palette: Palette) -> AnyElement {
+fn tile_view(tile: StageTile, video: Option<AnyElement>, palette: Palette, cx: &App) -> AnyElement {
     let StageTile {
         selector,
         name,
@@ -1428,18 +1456,25 @@ fn tile_view(tile: StageTile, video: Option<AnyElement>, palette: Palette) -> An
             .child(people::avatar(Some(&name), None, BIG_AVATAR))
             .into_any_element()
     });
-    div()
+    let glow_id = SharedString::from(format!("{selector}-speaking"));
+    let tile = div()
         .debug_selector(move || selector.clone())
         .relative()
         .size_full()
         .rounded_lg()
         .overflow_hidden()
-        .bg(rgb(palette.rail))
+        // a dark tile with a hint of the brand colour from its top
+        .bg(theme::gradient(
+            theme::mix(palette.rail, palette.brand, 0.2),
+            palette.rail,
+            160.0,
+        ))
         .border_2()
         .border_color(rgb(if speaking { palette.brand } else { palette.rail }))
         .child(face)
-        .child(name_tag(name, speaking, palette))
-        .into_any_element()
+        .child(name_tag(name, speaking, palette));
+    // while its person speaks, a glow in the brand colour swells and settles round it
+    crate::motion::breathe(tile, glow_id, speaking, palette, cx)
 }
 
 /// A tile's name at its bottom left, with a speaker while it speaks.
@@ -1465,7 +1500,7 @@ fn name_tag(name: SharedString, speaking: bool, palette: Palette) -> gpui::Div {
 
 /// The account's own tile, floating at the stage's bottom right: its self view while the camera sends, else its mark;
 /// a border while it speaks.
-fn self_view(speaking: bool, video: Option<AnyElement>, palette: Palette) -> AnyElement {
+fn self_view(speaking: bool, video: Option<AnyElement>, palette: Palette, cx: &App) -> AnyElement {
     let face = video.unwrap_or_else(|| {
         div()
             .size_full()
@@ -1476,7 +1511,7 @@ fn self_view(speaking: bool, video: Option<AnyElement>, palette: Palette) -> Any
             .child(Glyph::USER.icon().size(px(32.0)))
             .into_any_element()
     });
-    div()
+    let own = div()
         .debug_selector(|| "call-participant-self".to_owned())
         .absolute()
         .bottom_5()
@@ -1488,10 +1523,10 @@ fn self_view(speaking: bool, video: Option<AnyElement>, palette: Palette) -> Any
         .bg(rgb(palette.surface))
         .border_2()
         .border_color(rgb(if speaking { palette.brand } else { palette.border }))
-        .shadow_md()
+        .when(!speaking, |own| own.shadow(theme::glow(palette, 0x0000_0000, 0.3, 18.0, 6.0)))
         .child(face)
-        .child(name_tag(SharedString::from("You"), speaking, palette))
-        .into_any_element()
+        .child(name_tag(SharedString::from("You"), speaking, palette));
+    crate::motion::breathe(own, "call-self-speaking", speaking, palette, cx)
 }
 
 /// One row of the participants' pane: the person's initials, name, and a speaker while they speak.

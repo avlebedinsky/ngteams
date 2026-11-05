@@ -828,6 +828,13 @@ impl Render for CalendarView {
         } else {
             self.time_grid(palette, cx)
         };
+        // another week, day or month fades in from a little below
+        let grid = crate::motion::rise(
+            grid,
+            gpui::SharedString::from(format!("calendar-grid-{:?}-{:?}", self.mode, self.span())),
+            8.0,
+            cx,
+        );
         let picker = self.picker_view(palette, cx);
         let card = self.card_view(palette, cx);
         let join_id = self.join_id_view(palette, cx);

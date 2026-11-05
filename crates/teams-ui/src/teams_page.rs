@@ -428,7 +428,7 @@ impl TeamsPage {
             let chosen = self.tab == tab;
             keyboard::stop(
                 key.clone(),
-                tab_button(key.clone(), tab.label(), chosen, palette)
+                tab_button(key.clone(), tab.label(), chosen, palette, cx)
                     .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
                     .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                         this.tab_key(tab, event, window, cx);
@@ -1067,24 +1067,44 @@ impl TeamsPage {
     }
 }
 
-/// A tab of a page's header: its word, a line under the chosen one.
-pub(crate) fn tab_button(id: String, label: &'static str, chosen: bool, palette: Palette) -> gpui::Stateful<gpui::Div> {
+/// A tab of a page's header: its word, a line under the chosen one in the brand gradient, growing out from its middle
+/// as the tab is chosen.
+pub(crate) fn tab_button(
+    id: String,
+    label: &'static str,
+    chosen: bool,
+    palette: Palette,
+    cx: &gpui::App,
+) -> gpui::Stateful<gpui::Div> {
     let selector = id.clone();
+    let line = div()
+        .absolute()
+        .bottom(px(-2.0))
+        .h(px(2.0))
+        .rounded_full()
+        .bg(crate::theme::brand_gradient(palette, 90.0));
+    let line = crate::motion::toggle(line, SharedString::from(format!("{id}-line")), chosen, cx, |line, t| {
+        let inset = gpui::relative((1.0 - t.clamp(0.0, 1.0)) / 2.0);
+        line.left(inset).right(inset)
+    });
     div()
         .id(SharedString::from(id))
         .debug_selector(move || selector.clone())
+        .relative()
         .h_full()
         .px_2()
         .flex()
         .items_center()
         .flex_none()
         .cursor_pointer()
+        // the line's room, kept whether it shows or not
         .border_b_2()
-        .border_color(rgb(if chosen { palette.brand } else { palette.background }))
+        .border_color(gpui::Hsla::transparent_black())
         .when(chosen, |tab| tab.font_weight(gpui::FontWeight::BOLD))
         .when(!chosen, |tab| tab.text_color(rgb(palette.muted_foreground)))
         .hover(move |tab| tab.text_color(rgb(palette.foreground)))
         .child(label)
+        .child(line)
 }
 
 /// A filter chip's face: a pill, tinted while chosen.

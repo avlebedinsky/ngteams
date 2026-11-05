@@ -1174,6 +1174,7 @@ fn card(palette: Palette) -> gpui::Div {
         .bg(rgb(palette.surface))
         .border_1()
         .border_color(rgb(palette.border))
+        .shadow(theme::glow(palette, 0x0000_0000, 0.28, 24.0, 6.0))
 }
 
 /// One of the form's rows: its icon, and what it holds over a line.
@@ -2077,7 +2078,8 @@ impl Render for EventForm {
             .flex()
             .flex_col()
             .gap_3()
-            .bg(rgb(palette.background))
+            // its cards float on the frame, as the main window's panes do
+            .bg(theme::frame(palette))
             .text_color(rgb(palette.foreground))
             .on_mouse_move(cx.listener(Self::dragged))
             .on_mouse_up(gpui::MouseButton::Left, cx.listener(|form, _, _, cx| form.end_drag(cx)))
