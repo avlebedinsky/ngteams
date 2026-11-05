@@ -1,6 +1,6 @@
 //! A call connects and a tone crosses both ways: the test call against the media controller's peer, a → b native on
 //! both ends, the invitation of a caller the mock plays (with a renegotiation either way), a running group call
-//! joined; mute; a call outliving its calling socket's reconnect.
+//! joined; mute (asked while its media is set up too); a call outliving its calling socket's reconnect.
 
 use std::time::Duration;
 
@@ -261,6 +261,64 @@ async fn a_muted_microphone_sends_silence_and_the_call_goes_on() {
     eprintln!("the peer heard a at {before:.3}, then muted at {muted:.4}");
     assert!(before > HEARD && muted < SILENT);
     assert_eq!(lab.sent_by(LAB_A).last().map(String::as_str), Some("leave"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mute_asked_while_its_media_is_set_up_holds_from_its_first_sample() {
+    let lab = Lab::start().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    // the relay's credentials come late: the media is still being set up when the mute is asked
+    lab.mock
+        .answer_next_after("GET", "/trap/tokens", Duration::from_secs(2))
+        .await;
+    let requests = a.handle.requests();
+    let start = requests.call(CallAction::TestCall { echo: Mri::new(ECHO) });
+    let told = a
+        .next(|event| match event {
+            Event::Call {
+                call,
+                status: CallStatus::Placing,
+            } => Some(*call),
+            _ => None,
+        })
+        .await;
+    assert_eq!(
+        requests
+            .call(CallAction::Mute {
+                call: told,
+                muted: true
+            })
+            .await
+            .unwrap(),
+        told,
+        "held for its media"
+    );
+    assert_eq!(start.await.unwrap(), told);
+    a.status(told, &CallStatus::Connected).await;
+    tokio::time::sleep(TALK).await;
+    // unmuted, the tone goes: the recording heard the call all along
+    requests
+        .call(CallAction::Mute {
+            call: told,
+            muted: false,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(TALK).await;
+    requests.call(CallAction::HangUp { call: told }).await.unwrap();
+    assert_eq!(a.ended(told).await, End::HungUp);
+    let id = lab.last_call();
+    let _ = lab.mock.close_peer(&id, LAB_A);
+    let recording = lab.mock.peer_recording(&id, LAB_A).unwrap();
+    let muted = heard_before(
+        &recording,
+        A_TONE,
+        Duration::from_secs(1),
+        TALK + Duration::from_millis(500),
+    );
+    let unmuted = heard(&recording, A_TONE, Duration::from_secs(1));
+    eprintln!("the peer heard a at {muted:.4} while muted, then at {unmuted:.3}");
+    assert!(muted < SILENT && unmuted > HEARD);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

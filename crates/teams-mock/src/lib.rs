@@ -109,7 +109,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 use wiremock::matchers::{any, method};
-use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 
 pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
 pub use channels::{ChannelWrite, NOT_ADDED};
@@ -370,6 +370,20 @@ impl ChatServiceMock {
         Mock::given(method(http_method))
             .and(PathEnds(path_end.to_owned()))
             .respond_with(ResponseTemplate::new(status).set_delay(delay))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Answers the next request of `http_method` whose path ends with `path_end` as the world would, held back for
+    /// `delay`: a service that is slow to answer (a call's relay credentials, while its media is being set up). Every
+    /// later request is answered at once.
+    pub async fn answer_next_after(&self, http_method: &str, path_end: &str, delay: std::time::Duration) {
+        let world = chatsvc::ChatService::new(Arc::clone(&self.state));
+        Mock::given(method(http_method))
+            .and(PathEnds(path_end.to_owned()))
+            .respond_with(move |request: &Request| world.respond(request).set_delay(delay))
             .up_to_n_times(1)
             .with_priority(1)
             .mount(&self.server)
