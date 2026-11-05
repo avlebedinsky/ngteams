@@ -562,6 +562,15 @@ pub fn heard_before(path: &Path, tone: Tone, stretch: Duration, before: Duration
     level_at(&samples[start..end], tone.hz)
 }
 
+/// The level of `tone` in the recording at `path` from its first sample for `stretch`: what was heard as the media
+/// began, however long the call took to end.
+pub fn heard_first(path: &Path, tone: Tone, stretch: Duration) -> f32 {
+    let samples = wav::read(path).unwrap();
+    let end = samples.len().min(usize::try_from(stretch.as_millis()).unwrap() * 48);
+    assert!(end >= 24_000, "{} holds {} samples", path.display(), samples.len());
+    level_at(&samples[..end], tone.hz)
+}
+
 /// Waits until `done` holds (a request the mock got is recorded a moment after its answer went).
 pub async fn wait_until(done: impl Fn() -> bool) {
     let deadline = tokio::time::Instant::now() + WAIT;

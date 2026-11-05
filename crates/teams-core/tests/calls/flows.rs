@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use crate::support::{A_TONE, B_TONE, Lab, PEER_TONE, TALK, heard, heard_before, wait_until};
+use crate::support::{A_TONE, B_TONE, Lab, PEER_TONE, TALK, heard, heard_before, heard_first, wait_until};
 use teams_core::{CallAction, CallStatus, End, Event, RegistrationReport};
 use teams_mock::{AB_CHAT, ABC_CHAT, ECHO, LAB_A, LAB_B, LAB_C, TIMED_OUT};
 use teams_proto::Mri;
@@ -310,12 +310,9 @@ async fn a_mute_asked_while_its_media_is_set_up_holds_from_its_first_sample() {
     let id = lab.last_call();
     let _ = lab.mock.close_peer(&id, LAB_A);
     let recording = lab.mock.peer_recording(&id, LAB_A).unwrap();
-    let muted = heard_before(
-        &recording,
-        A_TONE,
-        Duration::from_secs(1),
-        TALK + Duration::from_millis(500),
-    );
+    // muted from its first sample until the unmute, a TALK after Connected: measured from the start, not back from
+    // an end a slow hang-up may push later
+    let muted = heard_first(&recording, A_TONE, Duration::from_millis(1500));
     let unmuted = heard(&recording, A_TONE, Duration::from_secs(1));
     eprintln!("the peer heard a at {muted:.4} while muted, then at {unmuted:.3}");
     assert!(muted < SILENT && unmuted > HEARD);
