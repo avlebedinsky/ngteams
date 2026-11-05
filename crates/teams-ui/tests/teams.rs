@@ -1116,3 +1116,43 @@ fn a_posts_more_options_runs_a_workflow_on_it_or_opens_workflows_for_it() {
         "the Workflows dialog for the post"
     );
 }
+
+#[test]
+fn a_reply_under_a_post_the_view_doesnt_hold_runs_a_workflow_with_its_post() {
+    const EARLIER: &str = "1759000000000";
+    const REPLY: &str = "1760000400100";
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    *rig.core.workflow_handler.lock().unwrap() = Some(message_workflow_answer);
+    let (messages, roots) = channel_store();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (_shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let reply = bounds(cx, &format!("channel-message-{REPLY}")).expect("the reply is drawn");
+    cx.simulate_mouse_move(reply.center(), None, Modifiers::none());
+    click(cx, &format!("channel-more-{REPLY}"));
+    click(cx, "message-workflow-synthetic-follow-flow");
+    click(cx, "workflow-run-submit");
+    let requests = rig.core.workflow_requests.lock().unwrap().clone();
+    let run = requests
+        .iter()
+        .find_map(|request| match request {
+            teams_proto::WorkflowRequest::RunOnMessage { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("the run went");
+    assert_eq!(run.id, REPLY);
+    assert_eq!(
+        run.reply_to.as_deref(),
+        Some(EARLIER),
+        "the reply's post, though the view doesn't hold it"
+    );
+    assert_eq!(run.conversation, CHANNEL);
+    assert!(
+        run.link.ends_with(&format!("/{REPLY}?parentMessageId={EARLIER}")),
+        "a channel message's link: {}",
+        run.link
+    );
+    assert_eq!(run.team.as_ref().map(|(team, _)| team.as_str()), Some(TEAM));
+}

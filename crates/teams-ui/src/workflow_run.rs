@@ -143,7 +143,15 @@ impl WorkflowRun {
             }
             (Ok(_), Some((name, card)), Some(_)) => {
                 self.elements = card::elements(card.as_ref(), window, cx);
-                Stage::Ready { trigger: name }
+                if card::answerable(card.as_ref(), &self.elements) {
+                    Stage::Ready { trigger: name }
+                } else {
+                    // a required question the app can't draw: the run's check would refuse every Submit
+                    self.elements.clear();
+                    Stage::Failed(
+                        "This workflow asks something the app can't show yet. Run it from Teams on the web.".to_owned(),
+                    )
+                }
             }
         };
         self.context = context;
@@ -377,16 +385,25 @@ async fn message_context(core: &Arc<dyn Core>, environment: &str, message: &Mess
         }
         None => MessageSender::Unknown,
     };
-    let text = teams_proto::chat::parse_html(&stored.content)
-        .plain_text()
-        .trim()
-        .to_owned();
+    // a plain-text message is text whatever it holds ("a <b> tag"), as the chat shows it; its HTML is it escaped
+    let (html, text) = if stored.message_type == teams_proto::chat::MessageType::RichTextHtml.as_str() {
+        let text = teams_proto::chat::parse_html(&stored.content)
+            .plain_text()
+            .trim()
+            .to_owned();
+        (stored.content, text)
+    } else {
+        (
+            crate::notify::escape_markup(&stored.content),
+            stored.content.trim().to_owned(),
+        )
+    };
     Some(MessageRun {
         id: message.id.clone(),
         reply_to: message.root.clone(),
         sender,
         link: MessageRun::link_to(&message.conversation, &message.id, message.root.as_deref()),
-        html: stored.content,
+        html,
         text,
         conversation: message.conversation.clone(),
         team: message.team.clone(),
@@ -415,6 +432,10 @@ fn run_problem(error: &WorkflowFailure) -> &'static str {
     match error {
         WorkflowFailure::Connection => {
             "The connection dropped before Workflows answered, so the workflow may have started. Check its run history before you submit again."
+        }
+        // a gateway's 5xx may come after the run was taken
+        WorkflowFailure::Service(500..=599) => {
+            "Workflows didn't say whether the workflow started. Check its run history before you submit again."
         }
         WorkflowFailure::InvalidInput => "Check your answers and submit again.",
         WorkflowFailure::Changed => "This workflow changed. Close this and run it again.",

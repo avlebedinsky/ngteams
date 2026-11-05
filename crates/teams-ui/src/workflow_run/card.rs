@@ -73,12 +73,51 @@ enum Control {
     },
 }
 
-/// The card's elements, with their controls made.
+/// The card's elements, with their controls made: its body's, and those inside its containers (a `Container`'s
+/// `items`, a `ColumnSet`'s `columns`, a `Column`'s `items`) in their order, as the run's check finds its inputs
+/// ([`teams_proto::workflow::card_inputs`]).
 pub(super) fn elements(card: Option<&Value>, window: &mut Window, cx: &mut Context<WorkflowRun>) -> Vec<Element> {
-    let body = card.and_then(|card| card.get("body")).and_then(Value::as_array);
     let mut elements = Vec::new();
-    for item in body.into_iter().flatten() {
+    if let Some(body) = card.and_then(|card| card.get("body")) {
+        collect(body, &mut elements, window, cx);
+    }
+    elements
+}
+
+/// Whether every required question of `card` has a control among `elements`: one this build can't draw would leave
+/// the card unanswerable, as the run's check requires it.
+pub(super) fn answerable(card: Option<&Value>, elements: &[Element]) -> bool {
+    let Some(card) = card else {
+        return true;
+    };
+    teams_proto::workflow::card_inputs(card)
+        .into_iter()
+        .filter(|input| input.get("isRequired").and_then(Value::as_bool) == Some(true))
+        .filter_map(|input| input.get("id").and_then(Value::as_str))
+        .all(|id| {
+            elements
+                .iter()
+                .any(|element| matches!(element, Element::Input(input) if input.id == id))
+        })
+}
+
+/// The elements of `items` (one element or a list), containers' contents included.
+fn collect(items: &Value, elements: &mut Vec<Element>, window: &mut Window, cx: &mut Context<WorkflowRun>) {
+    let items: Vec<&Value> = match items {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(_) => vec![items],
+        _ => Vec::new(),
+    };
+    for item in items {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if !kind.starts_with("Input.") && kind != "TextBlock" {
+            for key in ["items", "columns"] {
+                if let Some(inner) = item.get(key) {
+                    collect(inner, elements, window, cx);
+                }
+            }
+            continue;
+        }
         if kind == "TextBlock" {
             let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
             if !text.is_empty() {
@@ -100,7 +139,6 @@ pub(super) fn elements(card: Option<&Value>, window: &mut Window, cx: &mut Conte
             elements.push(Element::Input(Box::new(input)));
         }
     }
-    elements
 }
 
 /// One `Input.*` element's question, when this build draws its kind.

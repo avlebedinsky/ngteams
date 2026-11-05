@@ -678,7 +678,8 @@ impl ChannelView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let order = thread_order(thread);
-        let root = thread.post.as_ref().map(|post| post.id.clone());
+        // the thread's post, by its id, whether or not the view holds the post itself ("Replies to an earlier post")
+        let root = Some(thread.root.clone());
         let post = match &thread.post {
             Some(post) => {
                 let scope = Scope::new(selection, post_key(order, post)).opening(picture_opener(&post.id, cx));

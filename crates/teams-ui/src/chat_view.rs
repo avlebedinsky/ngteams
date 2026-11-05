@@ -3106,7 +3106,10 @@ impl ChatView {
             }));
         }
         let view = cx.entity().downgrade();
-        entries.push(menu::separator(palette));
+        // one hairline between the groups when there are no workflows to list
+        if !workflows.is_empty() {
+            entries.push(menu::separator(palette));
+        }
         let open = self.more_actions.as_deref() == Some(message);
         let shown = message.to_owned();
         entries.push(menu::more_actions_row(open, palette, move |_, _, cx| {

@@ -200,12 +200,20 @@ fn run_window(
     Rc<RefCell<Vec<TeamDialogEvent>>>,
     &'static mut VisualTestContext,
 ) {
+    run_window_on(rig, answer, stored("1", LAB_B, "<p>Synthetic <b>post</b></p>"))
+}
+
+fn run_window_on(
+    rig: &common::Rig,
+    answer: fn(&WorkflowRequest) -> WorkflowResponse,
+    message: Message,
+) -> (
+    Entity<WorkflowRun>,
+    Rc<RefCell<Vec<TeamDialogEvent>>>,
+    &'static mut VisualTestContext,
+) {
     *rig.core.workflow_handler.lock().unwrap() = Some(answer);
-    rig.core
-        .messages
-        .lock()
-        .unwrap()
-        .insert(AB.to_owned(), vec![stored("1", LAB_B, "<p>Synthetic <b>post</b></p>")]);
+    rig.core.messages.lock().unwrap().insert(AB.to_owned(), vec![message]);
     rig.core
         .names
         .lock()
@@ -320,6 +328,79 @@ fn a_failed_run_keeps_the_dialog_and_says_so() {
         .filter(|request| matches!(request, WorkflowRequest::RunOnMessage { .. }))
         .count();
     assert_eq!(runs, 1, "a failed run is never sent again by itself");
+}
+
+/// As [`message_answer`], the workflow's questions inside a container and a column set, as the designer nests them.
+fn nested_answer(request: &WorkflowRequest) -> WorkflowResponse {
+    match request {
+        WorkflowRequest::Get { .. } => Ok(message_fixtures::message_flow(
+            message_fixtures::FOLLOW_FLOW,
+            "Follow up on a message",
+            &json!({"type":"AdaptiveCard","version":"1.3","body":[
+                {"type":"Container","items":[
+                    {"type":"TextBlock","text":"Synthetic heading"},
+                    {"type":"Input.Text","id":"note","label":"Note:","isRequired":true}
+                ]},
+                {"type":"ColumnSet","columns":[{"type":"Column","items":[
+                    {"type":"Input.Toggle","id":"tell","title":"Notify myself"}
+                ]}]}
+            ]}),
+        )),
+        other => message_answer(other),
+    }
+}
+
+/// As [`message_answer`], the workflow asking a required question of a kind the app doesn't draw.
+fn undrawn_answer(request: &WorkflowRequest) -> WorkflowResponse {
+    match request {
+        WorkflowRequest::Get { .. } => Ok(message_fixtures::message_flow(
+            message_fixtures::FOLLOW_FLOW,
+            "Follow up on a message",
+            &json!({"type":"AdaptiveCard","version":"1.3","body":[
+                {"type":"Container","items":[{"type":"Input.Rating","id":"stars","isRequired":true}]}
+            ]}),
+        )),
+        other => message_answer(other),
+    }
+}
+
+#[test]
+fn a_cards_nested_questions_are_asked_and_answered() {
+    let rig = common::Rig::start();
+    let (_view, _events, cx) = run_window(&rig, nested_answer);
+    assert!(
+        bounds(cx, "workflow-run-input-note").is_some(),
+        "the container's question"
+    );
+    assert!(bounds(cx, "workflow-run-input-tell").is_some(), "the column's question");
+    type_in(cx, "workflow-run-input-note", "Synthetic note");
+    click(cx, "workflow-run-submit");
+    let (answers, _) = sent_run(&rig);
+    assert_eq!(
+        Value::Object(answers),
+        json!({"note": "Synthetic note", "tell": "false"})
+    );
+}
+
+#[test]
+fn a_card_with_a_required_question_the_app_cant_draw_says_so_and_offers_no_submit() {
+    let rig = common::Rig::start();
+    let (_view, _events, cx) = run_window(&rig, undrawn_answer);
+    assert!(bounds(cx, "workflow-run-failed").is_some());
+    assert!(bounds(cx, "workflow-run-submit").is_none());
+}
+
+#[test]
+fn a_plain_text_message_goes_as_its_text_and_its_html_escaped() {
+    let rig = common::Rig::start();
+    let mut plain = stored("1", LAB_B, "a <b> tag & more");
+    plain.message_type = "Text".to_owned();
+    let (_view, _events, cx) = run_window_on(&rig, message_answer, plain);
+    type_in(cx, "workflow-run-input-note", "Synthetic note");
+    click(cx, "workflow-run-submit");
+    let (_, message) = sent_run(&rig);
+    assert_eq!(message.text, "a <b> tag & more");
+    assert_eq!(message.html, "a &lt;b&gt; tag &amp; more");
 }
 
 #[test]
