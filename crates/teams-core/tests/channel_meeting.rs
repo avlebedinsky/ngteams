@@ -351,21 +351,19 @@ async fn an_engine_that_makes_no_calls_refuses_every_call_action() {
         CallAction::JoinChannel {
             channel: CHANNEL.to_owned(),
         },
+        // a chat the store doesn't hold: no calling is said before the chat is read, as no chat could be called
+        // (an engine that calls refuses these as not a chat: `calls::failures`)
+        CallAction::Call {
+            chat: "19:unknown@thread.v2".to_owned(),
+        },
+        CallAction::Call {
+            chat: "19:someone_else-entirely@unq.gbl.spaces".to_owned(),
+        },
     ] {
         let refused = requests.call(action).await.unwrap_err();
         assert!(
             matches!(refused, EngineError::Call(CallActionError::NoCalling)),
             "{refused:?}"
-        );
-    }
-    for chat in ["19:unknown@thread.v2", "19:someone_else-entirely@unq.gbl.spaces"] {
-        let refused = requests
-            .call(CallAction::Call { chat: chat.to_owned() })
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(refused, EngineError::Call(CallActionError::NotAChat)),
-            "a chat the store doesn't hold: {refused:?}"
         );
     }
     let call = call_id();

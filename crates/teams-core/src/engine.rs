@@ -2362,7 +2362,8 @@ where
     // --- calls ---
 
     /// A call action ([`EngineRequests::call`]), handed to the calling ([`hand_call`]). The inbox hands one in the
-    /// same way while a catch-up's read waits.
+    /// same way while a catch-up's read waits. An engine without calling refuses every action as no calling, before
+    /// reading the chat it names: no chat could be called, so the chat's own refusal would mislead.
     fn call(&mut self, action: CallAction, asked: std::time::Instant, reply: Responder<CallId>) {
         if let Some(calls) = self.calls.as_ref().map(CallingTask::actions) {
             hand_call(&self.store, self.me(), &calls, action, asked, reply);

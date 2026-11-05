@@ -453,3 +453,24 @@ async fn a_test_call_whose_tenant_can_t_be_read_is_refused_and_sends_nothing() {
     assert_eq!(lab.attempts("/epconv").await, 0, "no start was sent");
     assert_eq!(a.microphones(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_from_a_chat_that_names_nobody_is_refused_as_not_a_chat_and_sends_nothing() {
+    let lab = Lab::start().await;
+    let a = lab.account(LAB_A, A_TONE).await;
+    // a group chat the store doesn't hold, and a 1:1 chat's id without the account in it
+    for chat in ["19:unknown@thread.v2", "19:someone_else-entirely@unq.gbl.spaces"] {
+        let refused = a
+            .handle
+            .requests()
+            .call(CallAction::Call { chat: chat.to_owned() })
+            .await;
+        assert!(
+            matches!(refused, Err(EngineError::Call(CallActionError::NotAChat))),
+            "{chat}: {refused:?}"
+        );
+    }
+    assert!(lab.mock.calls().is_empty(), "no start went");
+    assert_eq!(lab.attempts("/epconv").await, 0, "no start was sent");
+    assert_eq!(a.microphones(), 0);
+}
