@@ -419,3 +419,55 @@ fn the_app_s_window_draws_at_the_theme_s_font_size(cx: &mut TestAppContext) {
     cx.update(|cx| Theme::global_mut(cx).font_size = px(f32::from(FONT_SIZE) + 2.0));
     assert_eq!(rem_size(window, cx), px(f32::from(FONT_SIZE) + 2.0));
 }
+
+#[test]
+fn colours_mix_channel_by_channel_and_stay_in_range() {
+    assert_eq!(theme::mix(0x0000_0000, 0x00ff_ffff, 0.0), 0x0000_0000);
+    assert_eq!(theme::mix(0x0000_0000, 0x00ff_ffff, 1.0), 0x00ff_ffff);
+    assert_eq!(theme::mix(0x0000_0000, 0x00ff_8000, 0.5), 0x0080_4000);
+    assert_eq!(theme::mix(0x0010_2030, 0x0090_a0b0, 2.0), 0x0090_a0b0, "clamped to the far stop");
+    assert_eq!(theme::mix(0x0010_2030, 0x0090_a0b0, -1.0), 0x0010_2030, "and to the near one");
+}
+
+#[test]
+fn the_frame_s_gradient_runs_from_its_top_left_to_its_bottom_right() {
+    let size = (1280.0, 800.0);
+    let start = theme::gradient_t(theme::FRAME_ANGLE, size, (0.0, 0.0));
+    let middle = theme::gradient_t(theme::FRAME_ANGLE, size, (640.0, 400.0));
+    let end = theme::gradient_t(theme::FRAME_ANGLE, size, (1280.0, 800.0));
+    assert!(start < middle && middle < end, "{start} {middle} {end}");
+    assert!((middle - 0.5).abs() < 1e-4, "the centre is halfway: {middle}");
+    // straight down is the vertical axis alone, whatever the box's shape
+    assert!((theme::gradient_t(180.0, (300.0, 900.0), (10.0, 225.0)) - 0.25).abs() < 1e-4);
+    assert!((theme::gradient_t(90.0, (900.0, 300.0), (675.0, 10.0)) - 0.75).abs() < 1e-4);
+    assert_eq!(
+        theme::frame_at(LIGHT_PALETTE, size, (640.0, 400.0)),
+        theme::mix(LIGHT_PALETTE.frame_start, LIGHT_PALETTE.frame_end, middle)
+    );
+    // a diagonal point, as the sheet's top right cap sits: the shader's aspect correction (its short side stretched
+    // to the long one) decides it, so a correction inverted or applied to the wrong side moves it well off
+    let cap = theme::gradient_t(theme::FRAME_ANGLE, size, (1272.0, 48.0));
+    assert!((cap - 0.871).abs() < 0.002, "the top right cap at {cap}");
+    assert_eq!(
+        theme::frame_at(LIGHT_PALETTE, size, (1272.0, 48.0)),
+        theme::mix(LIGHT_PALETTE.frame_start, LIGHT_PALETTE.frame_end, cap)
+    );
+    // a tall box takes the correction on its other axis
+    let tall = theme::gradient_t(theme::FRAME_ANGLE, (800.0, 1280.0), (48.0, 1272.0));
+    assert!((tall - 0.7129).abs() < 0.002, "a tall box's bottom left at {tall}");
+}
+
+#[test]
+fn every_theme_has_a_frame_and_only_high_contrast_is_flat() {
+    for spec in &theme::THEMES {
+        assert_eq!(spec.palette.depth, spec.key != "high-contrast", "{}", spec.key);
+        assert_ne!(spec.palette.on_frame, spec.palette.frame_start, "{}", spec.key);
+        let flat = theme::frame(spec.palette) == rgb(spec.palette.frame_start).into();
+        assert_eq!(flat, spec.palette.frame_start == spec.palette.frame_end, "{}", spec.key);
+        assert!(
+            theme::glow(spec.palette, spec.palette.brand, 0.5, 8.0, 2.0).is_empty() != spec.palette.depth,
+            "{}",
+            spec.key
+        );
+    }
+}

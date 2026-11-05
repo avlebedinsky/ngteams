@@ -109,6 +109,7 @@ pub mod keyboard;
 pub mod link_preview;
 pub mod manage_team;
 pub mod models;
+pub mod motion;
 pub mod notify;
 pub mod own_presence;
 pub mod people;

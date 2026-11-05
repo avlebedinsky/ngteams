@@ -820,7 +820,9 @@ impl IntoElement for InlineText {
 
 impl Element for InlineText {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    /// Which emoticons were placed: one whose place the text's layout doesn't hold (cut off by a line clamp) isn't, and
+    /// isn't painted either (GPUI panics on painting an element it didn't prepaint).
+    type PrepaintState = Vec<bool>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -856,12 +858,13 @@ impl Element for InlineText {
         _layout: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Vec<bool> {
         self.text.prepaint(window, cx);
         let height = self.layout.line_height();
         let side = inline_emoticon_side(window);
         let font = window.text_system().resolve_font(&window.text_style().font());
-        for (place, emoticon) in &mut self.emoticons {
+        let mut placed = vec![false; self.emoticons.len()];
+        for ((place, emoticon), placed) in self.emoticons.iter_mut().zip(&mut placed) {
             let (Some(start), Some(line)) = (
                 self.layout.position_for_index(place.start),
                 self.layout.line_layout_for_index(place.start),
@@ -884,7 +887,9 @@ impl Element for InlineText {
             };
             let origin = inline_emoticon_origin(start, width, metrics, side);
             emoticon.prepaint_as_root(origin, size(side, side).map(AvailableSpace::Definite), window, cx);
+            *placed = true;
         }
+        placed
     }
 
     fn paint(
@@ -893,13 +898,15 @@ impl Element for InlineText {
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
         _layout: &mut (),
-        _prepaint: &mut (),
+        placed: &mut Vec<bool>,
         window: &mut Window,
         cx: &mut App,
     ) {
         self.text.paint(window, cx);
-        for (_, emoticon) in &mut self.emoticons {
-            emoticon.paint(window, cx);
+        for ((_, emoticon), placed) in self.emoticons.iter_mut().zip(placed.iter()) {
+            if *placed {
+                emoticon.paint(window, cx);
+            }
         }
     }
 }

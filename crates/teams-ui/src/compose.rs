@@ -64,9 +64,10 @@ use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EventEmitter, Global, InteractiveElement as _,
     IntoElement, KeyBinding, ParentElement as _, PathPromptOptions, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, actions, anchored, deferred, div,
-    prelude::FluentBuilder as _, px, rgb,
+    prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::Disableable as _;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Selectable as _, Sizable as _, Size};
 use teams_core::{Action, Availability, NOTES, Transient};
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
@@ -493,6 +494,8 @@ pub struct ComposeParts {
 
 /// The compose box (see the module docs).
 pub struct Compose {
+    /// The lit Send button's own focus (it is a solid face of ours, not the kit's button, so it keeps its own).
+    send_focus: gpui::FocusHandle,
     core: Arc<dyn Core>,
     settings: Entity<SettingsModel>,
     trace: Arc<ViewTrace>,
@@ -600,6 +603,7 @@ impl Compose {
             (conversation == NOTES).then_some(READ_ONLY_NOTES)
         };
         Self {
+            send_focus: cx.focus_handle(),
             core: parts.core,
             settings: parts.settings,
             trace: parts.trace,
@@ -1272,8 +1276,9 @@ impl Compose {
         )
     }
 
-    /// Send (Enter does the same; Ctrl+Enter expanded), as Teams draws it: a quiet icon, in the brand colour once the
-    /// box holds something to send and greyed while it holds nothing.
+    /// Send (Enter does the same; Ctrl+Enter expanded): the kit's icon button, greyed, while the box holds nothing to
+    /// send; once it holds something, a round button lit in the brand gradient that pops in, a button to the keyboard
+    /// and to assistive tools as the kit's is.
     fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty()) || !self.files_ready();
         let tip = match (matches!(self.mode, Mode::Edit { .. }), self.expanded) {
@@ -1282,18 +1287,45 @@ impl Compose {
             (false, false) => "Send (Enter)",
             (false, true) => "Send (Ctrl+Enter)",
         };
-        let glyph = Glyph::SEND
-            .icon()
-            .when(!empty, |icon| icon.text_color(rgb(palette.brand)));
-        selected_by(
-            "compose-send",
-            icon_button("compose-send", Glyph::SEND, tip)
-                .icon(glyph)
-                .with_size(Size::Size(px(TOOL)))
-                .disabled(empty)
-                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
-        )
-        .into_any_element()
+        if empty {
+            return selected_by(
+                "compose-send",
+                icon_button("compose-send", Glyph::SEND, tip)
+                    .with_size(Size::Size(px(TOOL)))
+                    .disabled(true),
+            )
+            .into_any_element();
+        }
+        // ready to go: lit in the brand gradient, a solid face of our own (the kit's coloured buttons are only tinted),
+        // popping in as the first character is typed
+        let button = div()
+            .debug_selector(|| "compose-send".to_owned())
+            .id("compose-send")
+            .size(px(TOOL))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .cursor_pointer()
+            .bg(theme::brand_gradient(palette, 135.0))
+            .shadow(theme::glow(palette, palette.brand, 0.4, 10.0, 2.0))
+            .text_color(rgb(palette.on_brand))
+            .hover(move |button| button.bg(theme::gradient(palette.brand_hover, palette.accent, 135.0)))
+            .active(move |button| button.bg(rgb(palette.brand_active)))
+            // what the kit's button gives its own: a button's role and name, a stop on Tab (Enter or Space on it
+            // clicks it), a ring while it has the keyboard
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(tip)
+            .track_focus(&self.send_focus)
+            .tab_stop(true)
+            .focus(move |button| button.border_2().border_color(rgb(palette.on_brand)))
+            .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+            .child(Glyph::SEND.icon().size(px(15.0)));
+        crate::motion::toggle(button, "compose-send-ready", true, cx, |button, t| {
+            button.opacity(t.clamp(0.0, 1.0)).mt(px(6.0 * (1.0 - t)))
+        })
     }
 
     /// The emoji button, its tooltip naming its key; the picker opens over the box by it.
@@ -1394,16 +1426,32 @@ impl Compose {
                 .bottom_0()
                 .h(px(2.0))
                 .rounded_b_md()
-                .bg(rgb(palette.brand))
+                .bg(theme::brand_gradient(palette, 90.0))
+        });
+        // the accent line grows out from the middle as the box takes the focus
+        let accent = accent.map(|accent| {
+            crate::motion::toggle(accent, "compose-accent-grow", true, cx, |accent, t| {
+                let inset = relative((1.0 - t.clamp(0.0, 1.0)) / 2.0);
+                accent.left(inset).right(inset)
+            })
         });
         let surface = div()
             .debug_selector(|| "compose-box".to_owned())
             .relative()
             .min_h(px(BOX_HEIGHT))
-            .rounded_md()
+            .rounded_lg()
             .border_1()
-            .border_color(rgb(palette.border))
+            .border_color(rgb(if focused {
+                theme::mix(palette.border, palette.brand, 0.45)
+            } else {
+                palette.border
+            }))
             .bg(rgb(palette.surface))
+            .shadow(if focused {
+                theme::glow(palette, palette.brand, 0.22, 18.0, 4.0)
+            } else {
+                theme::glow(palette, 0x0000_0000, 0.06, 8.0, 2.0)
+            })
             .text_color(rgb(palette.foreground));
         // an edit stays where its reply is: nothing is sent anywhere new
         let send_to =

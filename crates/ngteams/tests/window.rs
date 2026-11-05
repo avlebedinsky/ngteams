@@ -204,6 +204,29 @@ fn colour_share(png: &Path, color: u32) -> SandboxResult<f64> {
     Ok(f64::from(u32::try_from(near)?) / f64::from(u32::try_from(total)?))
 }
 
+/// The share of the screenshot drawn in the frame's gradient, each pixel within 8 per channel of the gradient's colour
+/// at its place.
+fn frame_share(png: &Path, palette: teams_ui::theme::Palette) -> SandboxResult<f64> {
+    let shot = image::open(png)?.to_rgb8();
+    #[expect(clippy::cast_precision_loss, reason = "a screenshot's size and places, well within f32")]
+    let size = (shot.width() as f32, shot.height() as f32);
+    let near = shot
+        .enumerate_pixels()
+        .filter(|(x, y, pixel)| {
+            #[expect(clippy::cast_precision_loss, reason = "a pixel's place, well within f32")]
+            let at = (*x as f32 + 0.5, *y as f32 + 0.5);
+            let wanted = teams_ui::theme::frame_at(palette, size, at).to_be_bytes();
+            pixel
+                .0
+                .iter()
+                .zip(&wanted[1..])
+                .all(|(&got, &want)| got.abs_diff(want) <= 8)
+        })
+        .count();
+    let total = u64::from(shot.width()) * u64::from(shot.height());
+    Ok(f64::from(u32::try_from(near)?) / f64::from(u32::try_from(total)?))
+}
+
 /// Where the offline runs' screenshots are kept: `target/ui-shots/`, never committed.
 fn shots_dir() -> io::Result<PathBuf> {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -253,8 +276,12 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
     let png = sandbox.screenshot("ngteams-window.png", true)?;
     fs::copy(&png, shots_dir()?.join("ngteams-window.png"))?;
     let palette = teams_ui::theme::LIGHT_PALETTE;
+    // the rail and the title bar: the frame's gradient, each pixel against the gradient's own colour there
+    let share = frame_share(&png, palette)?;
+    if share < 0.05 {
+        return Err(running.fail(&format!("the frame's gradient fills {share:.2} of the window")));
+    }
     for (region, color, least) in [
-        ("the rail", palette.rail, 0.02),
         ("the list", palette.surface, 0.1),
         ("the conversation pane", BACKGROUND, 0.2),
     ] {

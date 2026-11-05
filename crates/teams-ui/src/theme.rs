@@ -65,15 +65,28 @@ pub struct Palette {
     pub selected: u32,
     /// Selected text.
     pub selection: u32,
-    /// The left rail.
+    /// The kit's sidebar and title bar, and a call tile's backdrop (the app's own rail and title bar are drawn on the
+    /// frame).
     pub rail: u32,
     /// A mention of the account itself, and the mark beside a message that has one: Teams' orange.
     pub mention: u32,
+    /// The window's frame (the title bar and the rail, one surface the panes float on): a gradient from the top left
+    /// to the bottom right.
+    pub frame_start: u32,
+    pub frame_end: u32,
+    /// Icons and text on the frame.
+    pub on_frame: u32,
+    /// The brand gradient's second stop: the brand colour runs into it on the marks that carry it (the chosen row,
+    /// unread counts, the account's own messages, the send button).
+    pub accent: u32,
+    /// Whether the panes float on the frame as a rounded, shadowed sheet; off (High Contrast) everything stays flat
+    /// and square, edges drawn as borders.
+    pub depth: bool,
 }
 
 /// The light palette.
 pub const LIGHT_PALETTE: Palette = Palette {
-    background: 0x00f5_f5f5,
+    background: 0x00f3_f4fa,
     foreground: 0x0024_2424,
     muted_foreground: 0x0061_6161,
     surface: 0x00ff_ffff,
@@ -87,6 +100,11 @@ pub const LIGHT_PALETTE: Palette = Palette {
     selection: 0x00c5_cbfa,
     rail: 0x00eb_ebeb,
     mention: 0x00c4_3501,
+    frame_start: 0x003b_37b3,
+    frame_end: 0x0016_77cf,
+    on_frame: 0x00ff_ffff,
+    accent: 0x002b_88e8,
+    depth: true,
 };
 
 /// The dark palette.
@@ -105,6 +123,11 @@ pub const DARK_PALETTE: Palette = Palette {
     selection: 0x0044_4791,
     rail: 0x0014_1414,
     mention: 0x00e9_835e,
+    frame_start: 0x002c_2080,
+    frame_end: 0x000c_4688,
+    on_frame: 0x00ff_ffff,
+    accent: 0x005c_b2f7,
+    depth: true,
 };
 
 /// The high contrast palette (Teams' own: white on black, cyan and yellow marks).
@@ -123,6 +146,11 @@ pub const HIGH_CONTRAST_PALETTE: Palette = Palette {
     selection: 0x0047_4700,
     rail: 0x0000_0000,
     mention: 0x00ff_ff00,
+    frame_start: 0x0000_0000,
+    frame_end: 0x0000_0000,
+    on_frame: 0x00ff_ffff,
+    accent: 0x001a_ebff,
+    depth: false,
 };
 
 /// Solarized's light palette.
@@ -141,6 +169,11 @@ pub const SOLARIZED_LIGHT_PALETTE: Palette = Palette {
     selection: 0x00c9_dbe6,
     rail: 0x00e4_dcc5,
     mention: 0x00cb_4b16,
+    frame_start: 0x0007_3642,
+    frame_end: 0x000b_5d6b,
+    on_frame: 0x00fd_f6e3,
+    accent: 0x002a_a198,
+    depth: true,
 };
 
 /// Solarized's dark palette.
@@ -159,6 +192,11 @@ pub const SOLARIZED_DARK_PALETTE: Palette = Palette {
     selection: 0x001b_5a6e,
     rail: 0x0000_212b,
     mention: 0x00cb_4b16,
+    frame_start: 0x0000_1820,
+    frame_end: 0x000b_4a5c,
+    on_frame: 0x00ee_e8d5,
+    accent: 0x002a_a198,
+    depth: true,
 };
 
 /// Nord's palette.
@@ -177,6 +215,11 @@ pub const NORD_PALETTE: Palette = Palette {
     selection: 0x005e_81ac,
     rail: 0x0027_2c36,
     mention: 0x00d0_8770,
+    frame_start: 0x0025_2b37,
+    frame_end: 0x003a_5a73,
+    on_frame: 0x00ec_eff4,
+    accent: 0x00b4_8ead,
+    depth: true,
 };
 
 /// Dracula's palette.
@@ -195,6 +238,11 @@ pub const DRACULA_PALETTE: Palette = Palette {
     selection: 0x005a_5e7a,
     rail: 0x0021_222c,
     mention: 0x00ff_b86c,
+    frame_start: 0x002a_1f52,
+    frame_end: 0x005b_2352,
+    on_frame: 0x00f8_f8f2,
+    accent: 0x00ff_79c6,
+    depth: true,
 };
 
 /// A theme of the catalog.
@@ -296,6 +344,9 @@ pub struct Appearance {
     pub font_size: u16,
     /// The font family; `None`: the system's UI font.
     pub font_family: Option<String>,
+    /// Whether views move as they change (a chat fading in, a new message rising, a chosen row's mark growing);
+    /// off, every change shows at once.
+    pub animations: bool,
 }
 
 impl Default for Appearance {
@@ -307,6 +358,7 @@ impl Default for Appearance {
             dark_theme: DARK_KEY,
             font_size: FONT_SIZE,
             font_family: None,
+            animations: true,
         }
     }
 }
@@ -332,6 +384,108 @@ impl Appearance {
         let (low, high) = (i32::from(*FONT_SIZES.start()), i32::from(*FONT_SIZES.end()));
         u16::try_from(size.clamp(low, high)).unwrap_or(FONT_SIZE)
     }
+}
+
+/// The frame's gradient angle, degrees, as CSS measures it (0 points up, clockwise): from the top left to the bottom
+/// right.
+pub const FRAME_ANGLE: f32 = 120.0;
+/// The gap between the sheet the panes float on and the window's right and bottom edges, px.
+pub const SHEET_GAP: f32 = 8.0;
+/// The sheet's corner radius, px.
+pub const SHEET_RADIUS: f32 = 12.0;
+
+/// `from` mixed toward `to` by `t` (0: `from`, 1: `to`), channel by channel, as the GPU mixes a gradient's stops.
+#[must_use]
+pub fn mix(from: u32, to: u32, t: f32) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    [16_u32, 8, 0].iter().fold(0, |mixed, shift| {
+        let a = f32::from(u8::try_from((from >> shift) & 0xff).unwrap_or(0));
+        let b = f32::from(u8::try_from((to >> shift) & 0xff).unwrap_or(0));
+        // within 0..=255 by construction
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a channel within 0..=255")]
+        let channel = (a + (b - a) * t).round() as u32;
+        mixed | (channel << shift)
+    })
+}
+
+/// Where along a linear gradient at `angle` (degrees, as [`gpui::linear_gradient`] takes it) over a box of `size` the
+/// point `at` (from the box's top left) falls, 0 to 1: the GPU's own sum, so a colour drawn to meet the gradient
+/// matches it.
+#[must_use]
+pub fn gradient_t(angle: f32, size: (f32, f32), at: (f32, f32)) -> f32 {
+    let (width, height) = (size.0.max(1.0), size.1.max(1.0));
+    let radians = (angle % 360.0 - 90.0).to_radians();
+    let (mut x, mut y) = (radians.cos(), radians.sin());
+    if width > height {
+        y *= height / width;
+    } else {
+        x *= width / height;
+    }
+    let length = x.hypot(y).max(f32::EPSILON);
+    let along = ((at.0 - width / 2.0) * x + (at.1 - height / 2.0) * y) / length;
+    let t = if x.abs() > y.abs() {
+        (along + width / 2.0) / width
+    } else {
+        (along + height / 2.0) / height
+    };
+    t.clamp(0.0, 1.0)
+}
+
+/// The frame's colour at `at` in a window of `size`.
+#[must_use]
+pub fn frame_at(palette: Palette, size: (f32, f32), at: (f32, f32)) -> u32 {
+    mix(
+        palette.frame_start,
+        palette.frame_end,
+        gradient_t(FRAME_ANGLE, size, at),
+    )
+}
+
+/// The frame's background: its gradient, or its one colour when it has one.
+#[must_use]
+pub fn frame(palette: Palette) -> gpui::Background {
+    if palette.frame_start == palette.frame_end {
+        return gpui::rgb(palette.frame_start).into();
+    }
+    gpui::linear_gradient(
+        FRAME_ANGLE,
+        gpui::linear_color_stop(gpui::rgb(palette.frame_start), 0.0),
+        gpui::linear_color_stop(gpui::rgb(palette.frame_end), 1.0),
+    )
+}
+
+/// The brand gradient, from the brand colour at `angle` into the accent.
+#[must_use]
+pub fn brand_gradient(palette: Palette, angle: f32) -> gpui::Background {
+    gradient(palette.brand, palette.accent, angle)
+}
+
+/// A two-stop gradient at `angle`.
+#[must_use]
+pub fn gradient(from: u32, to: u32, angle: f32) -> gpui::Background {
+    if from == to {
+        return gpui::rgb(from).into();
+    }
+    gpui::linear_gradient(
+        angle,
+        gpui::linear_color_stop(gpui::rgb(from), 0.0),
+        gpui::linear_color_stop(gpui::rgb(to), 1.0),
+    )
+}
+
+/// A soft shadow of `color` under an element: the sheet's, a glow's. Nothing in a theme without depth.
+#[must_use]
+pub fn glow(palette: Palette, color: u32, alpha: f32, blur: f32, y: f32) -> Vec<gpui::BoxShadow> {
+    if !palette.depth {
+        return Vec::new();
+    }
+    vec![gpui::BoxShadow {
+        color: gpui::Hsla::from(gpui::rgb(color)).alpha(alpha),
+        offset: gpui::point(gpui::px(0.0), gpui::px(y)),
+        blur_radius: gpui::px(blur),
+        spread_radius: gpui::px(0.0),
+        inset: false,
+    }]
 }
 
 /// Whether a window's appearance is a dark one.
@@ -482,6 +636,8 @@ fn refresh(cx: &mut App) {
         spec_or(appearance.dark_theme, true)
     };
     cx.global_mut::<Current>().active = active;
+    // the kit's own motion (a menu or dialog coming in, a spinner) and GPUI's animations follow the setting too
+    cx.set_reduce_motion(!appearance.animations);
     Theme::global_mut(cx).light_theme = Rc::new(config(light, &appearance));
     Theme::global_mut(cx).dark_theme = Rc::new(config(dark, &appearance));
     Theme::change(active.mode(), None, cx);
@@ -525,6 +681,13 @@ pub fn mode(cx: &App) -> ThemeMode {
 #[must_use]
 pub fn active(cx: &App) -> &'static ThemeSpec {
     cx.try_global::<Current>().map_or(&THEMES[0], |current| current.active)
+}
+
+/// Whether views move as they change ([`Appearance::animations`]): on until [`init`] has run.
+#[must_use]
+pub fn animations(cx: &App) -> bool {
+    cx.try_global::<Current>()
+        .is_none_or(|current| current.appearance.animations)
 }
 
 /// The palette windows are drawn with now.

@@ -1133,10 +1133,7 @@ impl Render for GlobalSearch {
             .flex()
             .items_center()
             .gap_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(if focused { palette.brand } else { palette.border }))
-            .bg(rgb(if focused { palette.surface } else { palette.background }))
+            .map(|search| on_frame(search, focused, palette))
             .cursor_text()
             // Up, Down and Escape are the suggestions' while the box has the keyboard
             .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
@@ -1165,6 +1162,22 @@ impl Render for GlobalSearch {
             )
             .children(clear)
     }
+}
+
+/// The search box's face on the title bar's frame: nearly opaque so its text reads (in the panes' text colour, not
+/// the frame's), lit up in the brand colour while it has the keyboard.
+fn on_frame(search: gpui::Stateful<gpui::Div>, focused: bool, palette: Palette) -> gpui::Stateful<gpui::Div> {
+    search
+        .rounded_md()
+        .border_1()
+        .border_color(if focused {
+            rgb(palette.brand)
+        } else {
+            rgb(palette.on_frame).opacity(0.3)
+        })
+        .bg(rgb(palette.surface).opacity(if focused { 1.0 } else { 0.9 }))
+        .text_color(rgb(palette.foreground))
+        .when(focused, |search| search.shadow(theme::glow(palette, palette.accent, 0.45, 14.0, 0.0)))
 }
 
 /// A row's frame in the suggestions: highlighted when the keyboard is on it, its own clicks.

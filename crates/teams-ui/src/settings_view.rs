@@ -606,6 +606,18 @@ impl SettingsView {
                 ],
                 palette,
             ),
+            group(
+                Some("Motion"),
+                vec![row(
+                    "Play animations",
+                    Some("Fade chats in as they open and let new messages rise. Off, everything holds still, animated pictures too."),
+                    self.switch("animations", appearance.animations, |settings, on| {
+                        settings.appearance.animations = on;
+                    }),
+                    palette,
+                )],
+                palette,
+            ),
         ]
     }
 
@@ -1304,7 +1316,8 @@ fn pick_item(group: &'static str, pick: &Pick, palette: Palette) -> PopupMenuIte
     .on_click(move |_, _, cx| apply(cx))
 }
 
-/// A theme's preview: a small window in its own colours (the rail, the list with its chosen row, two messages).
+/// A theme's preview: a small window in its own colours (the frame with the rail's chosen mark, and on it the sheet
+/// of the list with its chosen row and two messages).
 fn theme_preview(spec: &ThemeSpec) -> gpui::Div {
     let colors = spec.palette;
     let bar = |width: f32| {
@@ -1314,13 +1327,51 @@ fn theme_preview(spec: &ThemeSpec) -> gpui::Div {
             .rounded_full()
             .bg(rgb(colors.muted_foreground))
     };
+    let list = div()
+        .w(px(38.0))
+        .h_full()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .p_1p5()
+        .bg(rgb(colors.surface))
+        .child(div().h(px(6.0)).rounded_sm().bg(rgb(colors.selected)))
+        .child(bar(24.0))
+        .child(bar(18.0));
+    let chat = div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .justify_end()
+        .gap_1()
+        .p_1p5()
+        .child(div().h(px(8.0)).w(px(36.0)).rounded_sm().bg(rgb(colors.surface)))
+        .child(
+            div().flex().justify_end().child(
+                div()
+                    .h(px(8.0))
+                    .w(px(30.0))
+                    .rounded_sm()
+                    .bg(theme::brand_gradient(colors, 90.0)),
+            ),
+        );
+    let sheet = div()
+        .flex_1()
+        .h_full()
+        .flex()
+        .overflow_hidden()
+        .bg(rgb(colors.background))
+        .when(colors.depth, |sheet| sheet.rounded_tl(px(4.0)))
+        .child(list)
+        .child(chat);
     div()
         .h(px(TILE_HEIGHT))
         .w_full()
         .flex()
         .overflow_hidden()
         .rounded_md()
-        .bg(rgb(colors.background))
+        .pt(px(8.0))
+        .bg(theme::frame(colors))
         .child(
             div()
                 .w(px(12.0))
@@ -1328,39 +1379,10 @@ fn theme_preview(spec: &ThemeSpec) -> gpui::Div {
                 .flex()
                 .flex_col()
                 .items_center()
-                .pt_2()
-                .bg(rgb(colors.rail))
-                .child(div().size(px(5.0)).rounded_full().bg(rgb(colors.brand))),
+                .pt_1()
+                .child(div().size(px(5.0)).rounded_full().bg(rgb(colors.on_frame))),
         )
-        .child(
-            div()
-                .w(px(38.0))
-                .h_full()
-                .flex()
-                .flex_col()
-                .gap_1p5()
-                .p_1p5()
-                .bg(rgb(colors.surface))
-                .child(div().h(px(6.0)).rounded_sm().bg(rgb(colors.selected)))
-                .child(bar(24.0))
-                .child(bar(18.0)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .gap_1()
-                .p_1p5()
-                .child(div().h(px(8.0)).w(px(36.0)).rounded_sm().bg(rgb(colors.surface)))
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .child(div().h(px(8.0)).w(px(30.0)).rounded_sm().bg(rgb(colors.brand))),
-                ),
-        )
+        .child(sheet)
 }
 
 /// A theme's tile: its preview, its name under it, the one set ringed in the brand colour. Its test selector is

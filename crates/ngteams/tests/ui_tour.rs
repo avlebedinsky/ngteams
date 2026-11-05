@@ -118,7 +118,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 144] = [
+const STEPS: [Step; 5 + 152] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -728,6 +728,28 @@ const STEPS: [Step; 5 + 144] = [
     ("chat-mixed-dark-read", |shell, _, cx| show_first_message(shell, cx)),
     // See more in Teams Dark, as the Teams it is drawn after
     ("chats-see-more-dark", |shell, _, cx| reveal_see_more(shell, cx)),
+    // the a–b chat in Teams Dark: the frame, the sheet, its own bubbles' tint and the reply's quote card
+    ("chat-ab-dark", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.show_chats(window, cx);
+            shell.open_chat(AB_CHAT.to_owned(), window, cx);
+        });
+        clear_compose(shell, window, cx);
+        show_chats_section(shell, cx);
+    }),
+    // the account menu over it, in Teams Dark
+    ("account-menu-dark", |shell, _, cx| shell.update(cx, Shell::toggle_status_menu)),
+    // the settings' General and Notifications pages in Teams Dark
+    ("settings-general-dark", |shell, _, cx| {
+        shell.update(cx, Shell::toggle_status_menu);
+        show_page(shell, Page::General, cx);
+    }),
+    ("settings-notifications-dark", |shell, _, cx| show_page(shell, Page::Notifications, cx)),
+    // the a–b chat in each other dark theme: each its own frame and accent
+    ("chat-nord", |shell, window, cx| show_chat_in_theme(shell, "nord", window, cx)),
+    ("chat-dracula", |shell, window, cx| show_chat_in_theme(shell, "dracula", window, cx)),
+    ("chat-solarized-dark", |shell, window, cx| show_chat_in_theme(shell, "solarized-dark", window, cx)),
+    ("chat-high-contrast", |shell, window, cx| show_chat_in_theme(shell, "high-contrast", window, cx)),
     // the 12-hour clock chosen, back in Teams Light: the setting, then the a–b chat's times
     ("settings-time-12-hour", |shell, _, cx| {
         let model = shell.read(cx).settings().clone();
@@ -1625,6 +1647,38 @@ fn show_page(shell: &Entity<Shell>, page: Page, cx: &mut App) {
     shell.update(cx, Shell::show_settings);
     let view = shell.read(cx).settings_view().clone();
     view.update(cx, |view, cx| view.show_page(page, cx));
+}
+
+/// The a–b chat shown in the catalog's theme `key`, whatever the system says.
+fn show_chat_in_theme(shell: &Entity<Shell>, key: &'static str, window: &mut Window, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(
+            |settings| {
+                settings.appearance.follow_system = false;
+                settings.appearance.theme = key;
+            },
+            cx,
+        );
+    });
+    shell.update(cx, |shell, cx| {
+        shell.show_chats(window, cx);
+        shell.open_chat(AB_CHAT.to_owned(), window, cx);
+    });
+    clear_compose(shell, window, cx);
+}
+
+/// The open chat's compose box back to empty and one line: the emoji picker closed, the draft and its formats gone.
+fn clear_compose(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    with_compose(shell, cx, |compose, cx| {
+        if compose.emoji_picker().is_some() {
+            compose.toggle_emoji(window, cx);
+        }
+        if compose.is_expanded() {
+            compose.toggle_expanded(window, cx);
+        }
+        compose.editor().update(cx, |editor, cx| editor.set_doc(teams_ui::editor::doc::Doc::default(), cx));
+    });
 }
 
 /// Scrolls the sidebar to the "Chats" section's See more.

@@ -39,7 +39,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StrikethroughStyle, Styled as _, UnderlineStyle, Window, div, px, rgb,
+    RenderOnce, SharedString, StrikethroughStyle, Styled as _, UnderlineStyle, Window, div, px, rgb,
 };
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
@@ -249,6 +249,8 @@ pub struct QuoteBlock {
     pub sender_name: Option<String>,
     /// The quoted message's id (a reply's).
     pub message_id: Option<String>,
+    /// When the quoted message was sent, ms since the epoch (a reply's, as the quote carries it).
+    pub time: Option<i64>,
     pub blocks: Vec<Block>,
 }
 
@@ -828,6 +830,7 @@ impl<'a> Builder<'a> {
         self.blocks.push(Block::Quote(QuoteBlock {
             sender_name: quote.sender_name.clone().filter(|name| !name.trim().is_empty()),
             message_id: quote.message_id.clone(),
+            time: quote.time.as_deref().and_then(|time| time.trim().parse().ok()),
             blocks: inner.finish(),
         }));
     }
@@ -1176,28 +1179,73 @@ fn list_block(draw: &Draw<'_>, path: &mut Vec<usize>, list: &ListBlock) -> AnyEl
         .into_any_element()
 }
 
+/// The width of a reply quote's left edge, in the brand gradient.
+const QUOTE_EDGE: f32 = 3.0;
+
+/// A quote as Teams draws a reply's: a card set off from its bubble (a shade darker, a hairline border, a thicker left
+/// edge, here in the brand gradient), the quoted message's sender and time over its text. A reply's text is held to
+/// two lines a paragraph; a plain quote's is drawn in full.
 fn quote_block(draw: &Draw<'_>, path: &mut Vec<usize>, quote: &QuoteBlock) -> AnyElement {
     let palette = draw.palette;
-    let header = quote.sender_name.clone().map(|name| {
+    let header = (quote.sender_name.is_some() || quote.time.is_some()).then(|| {
         div()
+            .flex()
+            .items_baseline()
+            .gap_2()
             .text_xs()
-            .font_weight(FontWeight::BOLD)
             .text_color(rgb(palette.muted_foreground))
-            .child(name)
+            .children(quote.sender_name.clone().map(|name| {
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(palette.foreground))
+                    .child(name)
+            }))
+            .children(quote.time.map(QuoteTime))
     });
     div()
         .debug_selector(|| "rich-quote".to_owned())
+        .relative()
         .my_1()
-        .pl_2()
-        .py_1()
-        .border_l_2()
+        .pl(px(QUOTE_EDGE + 10.0))
+        .pr_3()
+        .py_2()
+        .rounded_md()
+        .overflow_hidden()
+        .border_1()
         .border_color(rgb(palette.border))
-        .bg(rgb(palette.hover))
+        // a shade off the bubble whatever its colour: the foreground's own, faint
+        .bg(rgb(palette.foreground).opacity(0.07))
         .flex()
         .flex_col()
+        .gap_0p5()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(QUOTE_EDGE))
+                .bg(crate::theme::brand_gradient(palette, 180.0)),
+        )
         .children(header)
-        .children(blocks(draw, path, &quote.blocks))
+        // a reply's preview is held to two lines a paragraph, as Teams holds it; a plain quote (the Quote format) is drawn
+        // in full, as it was written
+        .child(
+            div()
+                .when(quote.message_id.is_some(), |body| body.line_clamp(2).text_ellipsis())
+                .children(blocks(draw, path, &quote.blocks)),
+        )
         .into_any_element()
+}
+
+/// A quoted message's time, on the clock the user chose (read as it is drawn, so a change of clock reaches it).
+#[derive(IntoElement)]
+struct QuoteTime(i64);
+
+impl RenderOnce for QuoteTime {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        div().child(crate::clock::full_time(self.0, &chrono::Local, crate::clock::cycle(cx)))
+    }
 }
 
 /// The width of a forward card's left edge, thicker than its other sides, as Teams draws it.

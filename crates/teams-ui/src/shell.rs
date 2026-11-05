@@ -2325,8 +2325,8 @@ impl Shell {
         self.search_box.update(cx, GlobalSearch::close_suggestions);
     }
 
-    /// A rail item as Teams draws it: its icon over a small caption, the chosen one in the brand colour with a mark on
-    /// its left edge.
+    /// A rail item on the frame: its icon over a small caption in the frame's ink, faded unless chosen; the chosen one
+    /// semibold on a lit chip with a mark on its left edge, both growing in as it is chosen.
     fn rail_button(
         id: &'static str,
         item: RailItem,
@@ -2335,19 +2335,30 @@ impl Shell {
         cx: &mut Context<Self>,
         on: fn(&mut Self, &mut Window, &mut Context<Self>),
     ) -> AnyElement {
-        let color = if chosen {
-            palette.brand
-        } else {
-            palette.muted_foreground
-        };
+        let ink = rgb(palette.on_frame);
+        // the chosen place: a lit chip behind its icon and a bar at the rail's edge, both growing in as the place is
+        // chosen and shrinking away as another is
+        let lit = div()
+            .absolute()
+            .top(px(2.0))
+            .bottom(px(2.0))
+            .left(px(6.0))
+            .right(px(6.0))
+            .rounded_lg();
+        let lit = crate::motion::toggle(lit, SharedString::from(format!("{id}-lit")), chosen, cx, move |lit, t| {
+            lit.bg(ink.opacity(0.18 * t.clamp(0.0, 1.2)))
+        });
         let mark = div()
             .absolute()
             .left_0()
-            .top(px(RAIL_ITEM_HEIGHT / 4.0))
+            .top(px(RAIL_ITEM_HEIGHT / 2.0))
             .w(px(3.0))
-            .h(px(RAIL_ITEM_HEIGHT / 2.0))
             .rounded_r_sm()
-            .when(chosen, |mark| mark.bg(rgb(palette.brand)));
+            .bg(ink);
+        let mark = crate::motion::toggle(mark, SharedString::from(format!("{id}-mark")), chosen, cx, |mark, t| {
+            let height = RAIL_ITEM_HEIGHT / 2.0 * t.max(0.0);
+            mark.h(px(height)).mt(px(-height / 2.0))
+        });
         div()
             .debug_selector(move || id.to_owned())
             .id(id)
@@ -2360,9 +2371,11 @@ impl Shell {
             .justify_center()
             .gap_0p5()
             .cursor_pointer()
-            .text_color(rgb(color))
-            .hover(move |style| style.bg(rgb(palette.hover)).text_color(rgb(palette.brand)))
+            .text_color(ink.opacity(if chosen { 1.0 } else { 0.72 }))
+            .when(chosen, |button| button.font_weight(gpui::FontWeight::SEMIBOLD))
+            .hover(move |style| style.text_color(ink))
             .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
+            .child(lit)
             .child(mark)
             .child(Icon::default().data(item.icon).size(px(RAIL_ICON)))
             .child(div().text_size(px(10.0)).child(item.label))
@@ -2380,9 +2393,7 @@ impl Shell {
             .flex_col()
             .gap_1()
             .py_2()
-            .bg(rgb(palette.rail))
-            .border_r_1()
-            .border_color(rgb(palette.border))
+            // on the frame, whose gradient the shell draws behind it
             .child(Self::rail_button(
                 "rail-chats",
                 RailItem::CHAT,
@@ -2452,10 +2463,14 @@ impl Shell {
                 .justify_center()
                 .rounded_full()
                 .border_1()
-                .border_color(rgb(palette.border))
-                .text_color(rgb(palette.muted_foreground))
+                .border_color(rgb(palette.on_frame).opacity(0.4))
+                .text_color(rgb(palette.on_frame).opacity(0.72))
                 .cursor_pointer()
-                .hover(move |style| style.bg(rgb(palette.hover)).text_color(rgb(palette.brand)))
+                .hover(move |style| {
+                    style
+                        .bg(rgb(palette.on_frame).opacity(0.15))
+                        .text_color(rgb(palette.on_frame))
+                })
                 .tooltip(|window, cx| Tooltip::new("Add an account").build(window, cx))
                 .on_click(move |_, _, cx| {
                     if let Some(accounts) = &accounts {
@@ -2511,28 +2526,7 @@ impl Shell {
                 dot
             }
         });
-        let badge = (!shown && unread > 0).then(|| {
-            div()
-                .debug_selector(move || format!("rail-account-{index}-unread"))
-                .absolute()
-                .top(px(-4.0))
-                .right(px(-6.0))
-                .min_w(px(16.0))
-                .h(px(16.0))
-                .px_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(rgb(theme::DANGER))
-                .text_color(rgb(0x00ff_ffff))
-                .text_size(px(10.0))
-                .child(SharedString::from(if unread > 99 {
-                    "99+".to_owned()
-                } else {
-                    unread.to_string()
-                }))
-        });
+        let badge = (!shown && unread > 0).then(|| account_unread(index, unread));
         let tip: SharedString = format!("{name}\n{detail}").into();
         div()
             .debug_selector({
@@ -2545,10 +2539,14 @@ impl Shell {
             .p(px(2.0))
             .rounded_full()
             .border_2()
-            .border_color(rgb(if shown { palette.brand } else { palette.rail }))
+            .border_color(if shown {
+                rgb(palette.on_frame).opacity(0.9)
+            } else {
+                rgb(palette.on_frame).opacity(0.0)
+            })
             .cursor_pointer()
             .when(signed_out, |avatar| avatar.opacity(0.45))
-            .when(shown && self.status_menu, |avatar| avatar.bg(rgb(palette.border)))
+            .when(shown && self.status_menu, |avatar| avatar.bg(rgb(palette.on_frame).opacity(0.3)))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.core.me() == key {
@@ -2713,6 +2711,8 @@ impl Shell {
                     || div().flex_1().min_h_0().children(chat),
                     |tab| div().flex_1().min_h_0().child(tab),
                 );
+                // another chat fades in from a little below
+                let body = crate::motion::rise(body, SharedString::from(format!("chat-in-{id}")), 10.0, cx);
                 pane.child(header).child(body).into_any_element()
             }
             Main::Channel(id) => {
@@ -2730,17 +2730,17 @@ impl Shell {
                     .child(div().flex_1())
                     .children(join)
                     .debug_selector(|| "channel-header".to_owned());
-                pane.child(header)
-                    .child(div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone())))
-                    .into_any_element()
+                let body = div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone()));
+                let body = crate::motion::rise(body, SharedString::from(format!("channel-in-{id}")), 10.0, cx);
+                pane.child(header).child(body).into_any_element()
             }
             Main::TeamsPage => match self.teams_page() {
                 Some(shown) => pane.child(shown.clone()).into_any_element(),
-                None => pane.child(no_chat(palette)).into_any_element(),
+                None => pane.child(no_chat(palette, cx)).into_any_element(),
             },
             Main::ManageTeam(_) => match self.manage_team() {
                 Some(shown) => pane.child(shown.clone()).into_any_element(),
-                None => pane.child(no_chat(palette)).into_any_element(),
+                None => pane.child(no_chat(palette, cx)).into_any_element(),
             },
             // the settings, the calendar, the search's results and "Join a team" are drawn across both panes (`body`), never
             // here
@@ -2750,8 +2750,87 @@ impl Shell {
             | Main::Search
             | Main::JoinTeam
             | Main::CreateTeamMore
-            | Main::Workflows => pane.child(no_chat(palette)).into_any_element(),
+            | Main::Workflows => pane.child(no_chat(palette, cx)).into_any_element(),
         }
+    }
+}
+
+impl Shell {
+    /// The call bar and the panes on one sheet floating on the frame: rounded, shadowed, its corners capped in the
+    /// frame's colour there (GPUI clips only to rectangles, so a pane drawn square to its corner would otherwise show
+    /// past the rounding). Flat and square, edged by a border, in a theme without depth.
+    fn sheet(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let panes = div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(palette.background))
+            .child(self.call_bar.clone())
+            .child(div().flex_1().min_h_0().child(self.body(palette, cx)));
+        let holder = div().flex_1().h_full().min_w_0();
+        if !palette.depth {
+            return holder.child(panes.border_l_1().border_t_1().border_color(rgb(palette.border)));
+        }
+        let viewport = window.viewport_size();
+        let size = (f32::from(viewport.width), f32::from(viewport.height));
+        let (left, top) = (RAIL_WIDTH, TITLE_HEIGHT);
+        let (right, bottom) = (size.0 - theme::SHEET_GAP, size.1 - theme::SHEET_GAP);
+        let caps = [
+            (SheetCorner::TopLeft, (left, top)),
+            (SheetCorner::TopRight, (right, top)),
+            (SheetCorner::BottomRight, (right, bottom)),
+            (SheetCorner::BottomLeft, (left, bottom)),
+        ]
+        .map(|(corner, at)| corner.cap(theme::frame_at(palette, size, at)));
+        holder.pr(px(theme::SHEET_GAP)).pb(px(theme::SHEET_GAP)).child(
+            panes
+                .rounded(px(theme::SHEET_RADIUS))
+                .shadow(theme::glow(palette, 0x0000_0000, 0.32, 28.0, 8.0))
+                .children(caps),
+        )
+    }
+}
+
+/// A corner of the sheet the panes float on.
+#[derive(Clone, Copy)]
+enum SheetCorner {
+    TopLeft,
+    TopRight,
+    BottomRight,
+    BottomLeft,
+}
+
+impl SheetCorner {
+    /// The frame's colour, `color`, filling this corner outside the sheet's rounding (see [`Shell::sheet`]).
+    fn cap(self, color: u32) -> AnyElement {
+        // each a square less the quarter circle the sheet's corner is drawn with
+        let (drawing, place): (&'static [u8], fn(gpui::Div) -> gpui::Div) = match self {
+            Self::TopLeft => (
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M0 0H12A12 12 0 0 0 0 12Z"/></svg>"#,
+                |cap| cap.top_0().left_0(),
+            ),
+            Self::TopRight => (
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M12 0V12A12 12 0 0 0 0 0Z"/></svg>"#,
+                |cap| cap.top_0().right_0(),
+            ),
+            Self::BottomRight => (
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M12 12H0A12 12 0 0 0 12 0Z"/></svg>"#,
+                |cap| cap.bottom_0().right_0(),
+            ),
+            Self::BottomLeft => (
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12"><path d="M0 12V0A12 12 0 0 0 12 12Z"/></svg>"#,
+                |cap| cap.bottom_0().left_0(),
+            ),
+        };
+        place(div().absolute().size(px(theme::SHEET_RADIUS)))
+            .child(
+                Icon::default()
+                    .data(drawing)
+                    .size(px(theme::SHEET_RADIUS))
+                    .text_color(rgb(color)),
+            )
+            .into_any_element()
     }
 }
 
@@ -2773,30 +2852,27 @@ pub(crate) fn menu_row(id: impl Into<SharedString>, palette: Palette) -> gpui::S
         .hover(move |row| row.bg(rgb(palette.hover)))
 }
 
-/// The conversation pane while no chat is open: what to do, and the key that finds a chat.
-fn no_chat(palette: Palette) -> gpui::Div {
-    div()
-        .size_full()
+/// The conversation pane while no chat is open: what to do, and the key that finds a chat; its mark, lit in the brand
+/// gradient, rises in.
+fn no_chat(palette: Palette, cx: &App) -> gpui::Div {
+    let mark = div()
+        .size(px(80.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme::brand_gradient(palette, 135.0))
+        .shadow(theme::glow(palette, palette.brand, 0.45, 32.0, 10.0))
+        .text_color(rgb(palette.on_brand))
+        .child(Glyph::MESSAGE.icon().size(px(34.0)));
+    let words = div()
         .flex()
         .flex_col()
         .items_center()
-        .justify_center()
-        .gap_3()
-        .text_color(rgb(palette.muted_foreground))
+        .gap_2()
         .child(
             div()
-                .size(px(72.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(rgb(palette.selected))
-                .text_color(rgb(palette.brand))
-                .child(Glyph::MESSAGE.icon().size(px(32.0))),
-        )
-        .child(
-            div()
-                .text_lg()
+                .text_xl()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgb(palette.foreground))
                 .child("No chat open"),
@@ -2809,7 +2885,17 @@ fn no_chat(palette: Palette) -> gpui::Div {
                 .child("Choose one from the list, or press")
                 .child(Kbd::new(gpui::Keystroke::parse("ctrl-k").unwrap_or_default()).outline())
                 .child("to find one"),
-        )
+        );
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_4()
+        .text_color(rgb(palette.muted_foreground))
+        .child(crate::motion::rise(mark, "no-chat-mark", 14.0, cx))
+        .child(crate::motion::rise(words, "no-chat-words", 6.0, cx))
 }
 
 /// A row of the channel header's Meet now menu.
@@ -2917,6 +3003,7 @@ impl Render for Shell {
             .size_full()
             .flex()
             .flex_col()
+            .bg(theme::frame(palette))
             .child(self.title_bar(palette, cx))
             .child(
                 div()
@@ -2925,16 +3012,7 @@ impl Render for Shell {
                     .w_full()
                     .flex()
                     .child(self.rail_view(palette, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(self.call_bar.clone())
-                            .child(div().flex_1().min_h_0().child(self.body(palette, cx))),
-                    ),
+                    .child(self.sheet(palette, window, cx)),
             )
             .children(suggestions)
             .children(switcher)
@@ -2945,6 +3023,30 @@ impl Render for Shell {
             .children(toast)
             .children(first_run)
     }
+}
+
+/// Another account's unread total on its avatar in the rail, its test selector `rail-account-<index>-unread`.
+fn account_unread(index: usize, unread: u64) -> gpui::Div {
+    div()
+        .debug_selector(move || format!("rail-account-{index}-unread"))
+        .absolute()
+        .top(px(-4.0))
+        .right(px(-6.0))
+        .min_w(px(16.0))
+        .h(px(16.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(theme::DANGER))
+        .text_color(rgb(0x00ff_ffff))
+        .text_size(px(10.0))
+        .child(SharedString::from(if unread > 99 {
+            "99+".to_owned()
+        } else {
+            unread.to_string()
+        }))
 }
 
 /// What the rail shows of one account, read before it is drawn.

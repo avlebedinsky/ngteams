@@ -71,7 +71,7 @@ use crate::people::{self, Picture, Shown};
 use crate::presence;
 use crate::presence_badge;
 use crate::system_message::{self, Preview};
-use crate::theme::Palette;
+use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
 /// The most chats the tray counts and the notifications look through.
@@ -914,9 +914,29 @@ impl ChatList {
         let selected = self.selected.as_deref() == Some(row.id.as_str());
         let id = row.id.clone();
         let background = if selected { palette.selected } else { palette.surface };
+        let element_id = format!("{selector}-{}", row.id);
+        // the chosen row's mark: a bar in the brand gradient at its left edge, growing in as the row is chosen
+        let mark = div()
+            .absolute()
+            .left_0()
+            .top(px(ROW_HEIGHT / 2.0))
+            .w(px(3.0))
+            .rounded_r_sm()
+            .bg(theme::gradient(palette.brand, palette.accent, 180.0));
+        let mark = crate::motion::toggle(
+            mark,
+            SharedString::from(format!("{element_id}-mark")),
+            selected,
+            cx,
+            |mark, t| {
+                let height = (ROW_HEIGHT - 20.0) * t.max(0.0);
+                mark.h(px(height)).mt(px(-height / 2.0))
+            },
+        );
         div()
-            .id(ElementId::Name(format!("{selector}-{}", row.id).into()))
+            .id(ElementId::Name(element_id.into()))
             .debug_selector(move || selector.clone())
+            .relative()
             .w_full()
             .h(px(ROW_HEIGHT))
             .when(more.is_none(), gpui::Styled::overflow_hidden)
@@ -924,9 +944,17 @@ impl ChatList {
             .flex()
             .items_center()
             .gap_3()
-            .bg(rgb(background))
+            .when(selected, |row| {
+                row.bg(theme::gradient(
+                    palette.selected,
+                    theme::mix(palette.selected, palette.surface, 0.6),
+                    90.0,
+                ))
+            })
+            .when(!selected, |row| row.bg(rgb(background)))
             .hover(move |style| style.bg(rgb(if selected { palette.selected } else { palette.hover })))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), cx)))
+            .child(mark)
             .child(self.avatar(row, background, palette, cx))
             .child(row_text(row, palette, clock::cycle(cx)))
             .children(more)
@@ -969,7 +997,12 @@ impl ChatList {
 /// initials of its name (not of an MRI), else a blank one.
 fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
     match (row.kind, row.faces.as_slice()) {
-        (RowKind::Meeting, _) => mark_avatar(Glyph::CALENDAR, palette.brand, palette.on_brand, "avatar-meeting"),
+        (RowKind::Meeting, _) => mark_avatar(
+            Glyph::CALENDAR,
+            theme::brand_gradient(palette, 135.0),
+            palette.on_brand,
+            "avatar-meeting",
+        ),
         (RowKind::Channel, _) => team_avatar(row.team.as_deref().unwrap_or_default(), palette),
         // the Workflows bot's chat: the app's icon on its tile, as Teams draws an app's
         (RowKind::OneToOne, _) if is_workflows_chat(&row.id) => div()
@@ -979,7 +1012,7 @@ fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
             .into_any_element(),
         // a 1:1 chat whose other member has no presence: a bot or a service
         (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => {
-            mark_avatar(Glyph::BOT, palette.hover, palette.muted_foreground, "avatar-bot")
+            mark_avatar(Glyph::BOT, rgb(palette.hover).into(), palette.muted_foreground, "avatar-bot")
         }
         (RowKind::Group, [left, right, ..]) => split_avatar(left, right).into_any_element(),
         _ => {
@@ -1009,13 +1042,13 @@ fn is_workflows_chat(chat: &str) -> bool {
 
 /// An avatar of one mark on a colour, its test selector `selector`: Teams' calendar on the brand colour for a
 /// meeting's chat, a bot's head on a quiet one for a bot.
-fn mark_avatar(mark: Glyph, background: u32, foreground: u32, selector: &'static str) -> AnyElement {
+fn mark_avatar(mark: Glyph, background: gpui::Background, foreground: u32, selector: &'static str) -> AnyElement {
     div()
         .debug_selector(move || selector.to_owned())
         .size(px(AVATAR))
         .flex_none()
         .rounded_full()
-        .bg(rgb(background))
+        .bg(background)
         .flex()
         .items_center()
         .justify_center()
@@ -1036,8 +1069,9 @@ fn team_avatar(team: &str, palette: Palette) -> AnyElement {
         .size(px(AVATAR))
         .flex_none()
         .rounded_lg()
-        .bg(rgb(palette.brand))
+        .bg(theme::brand_gradient(palette, 135.0))
         .text_color(rgb(palette.on_brand))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_size(px(AVATAR * 0.4))
         .flex()
         .items_center()
@@ -1148,10 +1182,17 @@ fn row_text(row: &ChatRow, palette: Palette, cycle: HourCycle) -> impl IntoEleme
     if row.unread > 0 && row.kind != RowKind::Channel {
         bottom = bottom.child(
             div()
-                .px_1()
-                .rounded_md()
+                .min_w(px(18.0))
+                .h(px(18.0))
+                .px_1p5()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
                 .text_xs()
-                .bg(rgb(palette.brand))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .bg(theme::brand_gradient(palette, 135.0))
+                .shadow(theme::glow(palette, palette.brand, 0.5, 8.0, 2.0))
                 .text_color(rgb(palette.on_brand))
                 .child(row.unread.to_string()),
         );

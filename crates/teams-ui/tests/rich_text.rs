@@ -238,6 +238,7 @@ fn a_reply_s_quote_names_its_sender_and_a_plain_quote_none() {
     };
     assert_eq!(reply.sender_name.as_deref(), Some("Lab Bee"));
     assert_eq!(reply.message_id.as_deref(), Some("1760000010000"));
+    assert_eq!(reply.time, Some(1_760_000_010_000), "its time, as the quote's itemid carries it");
     assert_eq!(
         reply.blocks,
         [Block::Text(TextBlock {
@@ -256,10 +257,50 @@ fn a_reply_s_quote_names_its_sender_and_a_plain_quote_none() {
         (
             plain.sender_name.as_ref(),
             plain.message_id.as_ref(),
+            plain.time,
             plain.blocks.len()
         ),
-        (None, None, 1)
+        (None, None, None, 1)
     );
+}
+
+/// Words enough to wrap well past two lines in the test window.
+fn long_words() -> String {
+    "a made-up sentence that keeps going so the quote wraps onto many lines ".repeat(30)
+}
+
+/// `content` drawn once in a test window; the drawn quote's bounds and the text's line height.
+fn quote_drawn(content: &str) -> (gpui::Bounds<gpui::Pixels>, gpui::Pixels) {
+    let rendered = Arc::new(laid_out(content));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    let (_, cx) = app.add_window_view(|_, _| Holder { rendered });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let quote = cx.debug_bounds("rich-quote").expect("the quote is drawn");
+    let line = cx.update(|window, _| window.text_style().line_height_in_pixels(window.rem_size()));
+    (quote, line)
+}
+
+#[test]
+fn a_reply_s_preview_is_held_to_two_lines_and_an_emoticon_cut_off_with_it_is_not_drawn() {
+    // the emoticon falls past the second line: cut off with its text, never placed, and so never painted (painting it
+    // unplaced panics)
+    let (quote, line) = quote_drawn(&format!(
+        "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"1760000010000\">\
+         <strong itemprop=\"mri\" itemid=\"{LAB_B}\">Lab Bee</strong><span itemprop=\"time\" \
+         itemid=\"1760000010000\"></span><p itemprop=\"preview\">{}{}</p></blockquote>",
+        long_words(),
+        emoticon("smile", "\u{1f642}", 20)
+    ));
+    // its header and two lines of text, with the card's padding
+    assert!(quote.size.height < line * 5.0, "{quote:?} at {line:?} a line");
+}
+
+#[test]
+fn a_plain_quote_is_drawn_in_full() {
+    let (quote, line) = quote_drawn(&format!("<blockquote><p>{}</p></blockquote>", long_words()));
+    assert!(quote.size.height > line * 4.0, "{quote:?} at {line:?} a line");
 }
 
 #[test]

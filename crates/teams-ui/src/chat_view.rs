@@ -3005,9 +3005,20 @@ impl ChatView {
             Some(Item::NewMessages) => new_messages_row(palette),
             Some(Item::Message(item)) => {
                 let item = item.clone();
-                self.message_row(&item, palette, cx)
+                let row = self.message_row(&item, palette, cx);
+                // someone else's newest message rises in (the account's own rose as it was sent, below)
+                if index + 1 == self.items.len() && !item.own {
+                    let id = SharedString::from(format!("message-in-{}", item.id));
+                    crate::motion::rise(div().w_full().child(row), id, 12.0, cx)
+                } else {
+                    row
+                }
             }
-            Some(Item::Pending(pending)) => pending_row(pending, &self.text_selection, palette, cx),
+            Some(Item::Pending(pending)) => {
+                let row = pending_row(pending, &self.text_selection, palette, cx);
+                let id = SharedString::from(format!("pending-in-{}", pending.created_at));
+                crate::motion::rise(div().w_full().child(row), id, 12.0, cx)
+            }
             None => div().into_any_element(),
         }
     }
@@ -4444,6 +4455,24 @@ fn bubble_line(
         .child(div().w(px(MARK_COLUMN)).flex_none().pt_1().pl_2().children(mark))
 }
 
+/// A bubble's face: the account's own in its tint running into the accent's, lifted on a faint glow of the brand
+/// colour; someone else's on the surface, lifted a little; the selected one in the selection's colour.
+fn bubble_surface(bubble: gpui::Div, own: bool, highlighted: bool, palette: Palette) -> gpui::Div {
+    match (highlighted, own) {
+        (true, _) => bubble.bg(rgb(palette.selection)),
+        (false, true) => bubble
+            .bg(theme::gradient(
+                palette.selected,
+                theme::mix(palette.selected, palette.accent, 0.12),
+                120.0,
+            ))
+            .shadow(theme::glow(palette, palette.brand, 0.14, 8.0, 2.0)),
+        (false, false) => bubble
+            .bg(rgb(palette.surface))
+            .shadow(theme::glow(palette, 0x0000_0000, 0.07, 6.0, 1.0)),
+    }
+}
+
 /// Where a message's bubble is drawn: its chat (for its links to Teams on the web), the view's text selection, and
 /// what a click on one of its pictures opens.
 struct InChat<'a> {
@@ -4485,11 +4514,6 @@ fn bubble(
     bar: Option<AnyElement>,
     forward: Option<AnyElement>,
 ) -> AnyElement {
-    let background = match (highlighted, item.own) {
-        (true, _) => palette.selection,
-        (false, true) => palette.selected,
-        (false, false) => palette.surface,
-    };
     let id: SharedString = format!("message-text-{}", item.id).into();
     let (files, links) = match &item.body {
         Body::Text(text) => (
@@ -4548,7 +4572,7 @@ fn bubble(
     let bubble = if bare {
         bubble
     } else {
-        bubble.px(px(BUBBLE_INSET)).py_2().rounded_lg().bg(rgb(background))
+        bubble_surface(bubble.px(px(BUBBLE_INSET)).py_2().rounded_lg(), item.own, highlighted, palette)
     };
     // the account's own keep Teams' margin on their left; someone else's reach the mark's column
     let bubble = if item.own { bubble.max_w(relative(0.8)) } else { bubble };
@@ -4762,12 +4786,43 @@ impl ChatView {
                 .debug_selector(|| "typing".to_owned())
                 .px_4()
                 .h(px(20.0))
+                .flex()
+                .items_center()
+                .gap_2()
                 .text_xs()
                 .italic()
                 .text_color(rgb(palette.muted_foreground))
+                .child(typing_dots(palette, cx))
                 .child(text)
         })
     }
+}
+
+/// Three dots in the brand colours beside "… is typing", bouncing one after another while animations play.
+fn typing_dots(palette: Palette, cx: &App) -> gpui::Div {
+    use gpui::AnimationExt as _;
+    let moving = crate::motion::on(cx);
+    let dots = [palette.brand, theme::mix(palette.brand, palette.accent, 0.5), palette.accent]
+        .into_iter()
+        .enumerate()
+        .map(move |(at, color)| {
+            let dot = div().size(px(5.0)).rounded_full().bg(rgb(color));
+            if !moving {
+                return dot.into_any_element();
+            }
+            #[expect(clippy::cast_precision_loss, reason = "a dot's place, 0 to 2")]
+            let delay = at as f32 * 0.16;
+            dot.with_animation(
+                SharedString::from(format!("typing-dot-{at}")),
+                gpui::Animation::new(std::time::Duration::from_millis(1100)).repeat(),
+                move |dot, t| {
+                    let lift = ((t - delay).rem_euclid(1.0) * std::f32::consts::TAU).sin().max(0.0);
+                    dot.opacity(0.4 + 0.6 * lift).mb(px(4.0 * lift))
+                },
+            )
+            .into_any_element()
+        });
+    div().h(px(12.0)).flex().items_end().gap(px(3.0)).children(dots)
 }
 
 impl Render for ChatView {
@@ -4839,7 +4894,12 @@ impl Render for ChatView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(palette.background))
+            // a faint wash of the accent toward the compose box
+            .bg(theme::gradient(
+                palette.background,
+                theme::mix(palette.background, palette.accent, 0.06),
+                180.0,
+            ))
             .child(messages)
             .children(typing)
             .children(self.confirmation(palette, cx))

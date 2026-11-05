@@ -53,6 +53,7 @@ fn changed() -> Settings {
             dark_theme: "high-contrast",
             font_size: 17,
             font_family: Some("Noto Sans".to_owned()),
+            animations: false,
         },
         time_format: TimeFormat::Twelve,
         accounts: [(
@@ -684,6 +685,7 @@ fn the_theme_follows_the_system_by_default_and_every_choice_of_how_the_app_looks
                     dark_theme: spec.key,
                     font_size: *theme::FONT_SIZES.end(),
                     font_family: Some("DejaVu Sans".to_owned()),
+                    animations: !follow_system,
                 },
                 ..Settings::default()
             };
@@ -730,6 +732,7 @@ fn a_theme_this_app_doesn_t_know_or_a_font_size_out_of_range_keeps_its_default()
         ("font_size = 14.5", "font_size"),
         ("font_family = \"\"", "font_family"),
         ("font_family = \"a\\nb\"", "font_family"),
+        ("animations = \"off\"", "animations"),
     ] {
         let (read, problems) = parse(bad).expect("TOML");
         assert_eq!(read, Settings::default(), "{bad}");

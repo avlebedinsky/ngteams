@@ -18,6 +18,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::Size;
+use gpui_component::button::Button;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable as _, Selectable as _};
@@ -220,11 +221,11 @@ impl Shell {
                     .flex_none()
                     .flex()
                     .justify_center()
-                    .child(Self::launcher(cx)),
+                    .child(Self::launcher(palette, cx)),
             )
-            .child(self.list_toggle(cx))
+            .child(self.list_toggle(palette, cx))
             .child(drag_area())
-            .child(self.history_buttons(cx))
+            .child(self.history_buttons(palette, cx))
             .pr_1();
         let center = div()
             .flex_1()
@@ -251,7 +252,7 @@ impl Shell {
             .justify_end()
             .gap_2()
             .pr_3()
-            .child(self.more_menu(cx))
+            .child(self.more_menu(palette, cx))
             .child(self.title_avatar(palette, cx));
         div()
             .debug_selector(|| "title-bar".to_owned())
@@ -260,9 +261,8 @@ impl Shell {
             .flex_none()
             .flex()
             .items_center()
-            .bg(rgb(palette.rail))
-            .border_b_1()
-            .border_color(rgb(palette.border))
+            // the frame's own: the shell draws its gradient behind the title bar and the rail
+            .text_color(rgb(palette.on_frame))
             .child(left)
             .child(center)
             .child(right)
@@ -270,9 +270,9 @@ impl Shell {
     }
 
     /// The app launcher: the app's own places, as Teams lists its apps.
-    fn launcher(cx: &mut Context<Self>) -> AnyElement {
+    fn launcher(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let shell = cx.weak_entity();
-        let button = icon_button("title-launcher", Glyph::GRIP, "Apps").dropdown_menu(move |menu, _, _| {
+        let button = on_frame(icon_button("title-launcher", Glyph::GRIP, "Apps"), palette, true).dropdown_menu(move |menu, _, _| {
             let place = |label: &'static str, glyph: Glyph, page: Option<Main>| {
                 let shell = shell.clone();
                 PopupMenuItem::new(label)
@@ -295,25 +295,30 @@ impl Shell {
     }
 
     /// The list pane's toggle.
-    fn list_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn list_toggle(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let tip = if self.list_shown {
             "Hide the list"
         } else {
             "Show the list"
         };
-        let button = icon_button_with_key("title-list-toggle", Glyph::PANEL_LEFT, tip, &ToggleListPane)
+        let button = icon_button_with_key("title-list-toggle", Glyph::PANEL_LEFT, tip, &ToggleListPane);
+        // hidden, it is chosen: the kit's chosen chip, its icon in the chip's own colour
+        let button = (if self.list_shown { on_frame(button, palette, true) } else { button })
             .selected(!self.list_shown)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_list_pane(cx)));
         selected_by("title-list-toggle", button).into_any_element()
     }
 
     /// Back and Forward.
-    fn history_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
-        let back = icon_button_with_key("title-back", Glyph::CHEVRON_LEFT, "Back", &GoBack)
-            .disabled(!self.history.can_go_back())
+    fn history_buttons(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let (can_back, can_forward) = (self.history.can_go_back(), self.history.can_go_forward());
+        let back = icon_button_with_key("title-back", Glyph::CHEVRON_LEFT, "Back", &GoBack);
+        let back = on_frame(back, palette, can_back)
+            .disabled(!can_back)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go_back(window, cx)));
-        let forward = icon_button_with_key("title-forward", Glyph::CHEVRON_RIGHT, "Forward", &GoForward)
-            .disabled(!self.history.can_go_forward())
+        let forward = icon_button_with_key("title-forward", Glyph::CHEVRON_RIGHT, "Forward", &GoForward);
+        let forward = on_frame(forward, palette, can_forward)
+            .disabled(!can_forward)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go_forward(window, cx)));
         div()
             .flex()
@@ -325,11 +330,11 @@ impl Shell {
     }
 
     /// "Settings and more": the settings, the zoom and the diagnostics.
-    fn more_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn more_menu(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let shell = cx.weak_entity();
         let size = self.settings.read(cx).settings().appearance.font_size;
         let zoom = u32::from(size) * 100 / u32::from(theme::FONT_SIZE);
-        let button = icon_button("title-more", Glyph::MORE, "Settings and more").dropdown_menu(move |menu, _, _| {
+        let button = on_frame(icon_button("title-more", Glyph::MORE, "Settings and more"), palette, true).dropdown_menu(move |menu, _, _| {
             let act = |label: SharedString, glyph: Glyph, run: fn(&mut Shell, &mut Window, &mut Context<Shell>)| {
                 let shell = shell.clone();
                 PopupMenuItem::new(label)
@@ -412,8 +417,8 @@ impl Shell {
             .p(px(2.0))
             .rounded_full()
             .cursor_pointer()
-            .hover(move |avatar| avatar.bg(rgb(palette.hover)))
-            .when(open, |avatar| avatar.bg(rgb(palette.border)))
+            .hover(move |avatar| avatar.bg(rgb(palette.on_frame).opacity(0.2)))
+            .when(open, |avatar| avatar.bg(rgb(palette.on_frame).opacity(0.3)))
             .when(failed, |avatar| avatar.border_1().border_color(rgb(theme::DANGER)))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -438,4 +443,12 @@ fn drag_area() -> gpui::Stateful<gpui::Div> {
                 window.start_window_move();
             }
         })
+}
+
+/// A title bar button drawn on the frame: its icon in the frame's own colour, faded while it can't be used. (The kit
+/// draws a ghost button's icon in the text colour of the panes, which vanishes on a dark frame; its hover and chosen
+/// faces stay the kit's, a light chip.)
+fn on_frame(button: Button, palette: Palette, usable: bool) -> Button {
+    let color = rgb(palette.on_frame);
+    button.text_color(if usable { color.opacity(0.92) } else { color.opacity(0.35) })
 }

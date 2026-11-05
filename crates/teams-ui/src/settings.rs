@@ -521,6 +521,7 @@ pub mod keys {
     pub const DARK_THEME: &str = "dark_theme";
     pub const FONT_SIZE: &str = "font_size";
     pub const FONT_FAMILY: &str = "font_family";
+    pub const ANIMATIONS: &str = "animations";
     pub const TIME_FORMAT: &str = "time_format";
     /// The other accounts' own settings: a table of tables, by the account's MRI.
     pub const ACCOUNTS: &str = "accounts";
@@ -619,7 +620,8 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         | keys::LIGHT_THEME
         | keys::DARK_THEME
         | keys::FONT_SIZE
-        | keys::FONT_FAMILY => take_appearance(&mut settings.appearance, key, value)?,
+        | keys::FONT_FAMILY
+        | keys::ANIMATIONS => take_appearance(&mut settings.appearance, key, value)?,
         keys::TIME_FORMAT => {
             settings.time_format = value
                 .as_str()
@@ -687,6 +689,12 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
         keys::FOLLOW_SYSTEM_THEME => {
             appearance.follow_system = value.as_bool().ok_or(Problem::BadValue {
                 key: keys::FOLLOW_SYSTEM_THEME,
+                why: "not true or false",
+            })?;
+        }
+        keys::ANIMATIONS => {
+            appearance.animations = value.as_bool().ok_or(Problem::BadValue {
+                key: keys::ANIMATIONS,
                 why: "not true or false",
             })?;
         }
@@ -848,6 +856,7 @@ fn render_appearance(appearance: &Appearance, table: &mut Table) {
         keys::FONT_SIZE.to_owned(),
         Value::Integer(i64::from(appearance.font_size)),
     );
+    table.insert(keys::ANIMATIONS.to_owned(), Value::Boolean(appearance.animations));
     if let Some(family) = &appearance.font_family {
         table.insert(keys::FONT_FAMILY.to_owned(), Value::String(family.clone()));
     }

@@ -171,7 +171,7 @@ impl Shell {
                     .mx_3()
                     .my_1()
                     .h(px(1.0))
-                    .bg(rgb(palette.border))
+                    .bg(rgb(palette.on_frame).opacity(0.25))
                     .into_any_element(),
             );
             items.push(Self::rail_button(
