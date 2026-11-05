@@ -13,9 +13,11 @@
 //! - **Threads the account can't read** ([`Unreadable`]): the list still brings threads the account left or was removed
 //!   from (their reads answer 403 `AclCheckFailed`) and threads deleted for good (404 `ThreadNotFound`). Such a
 //!   conversation isn't kept to be synced again: reading it again changes nothing, and if the account is added back the
-//!   list brings it with a newer version, which syncs it. A deleted one is forgotten ([`Store::forget_conversation`],
-//!   told as a change so the views drop it), but the account's own notes, whose 404 means none yet. Each is one `info`
-//!   line naming the status and the service's code, never its answer.
+//!   list brings it with a newer version, which syncs it. One no sync ever read is kept with a sync state that has no
+//!   link, so a full listing skips it too (its messages and its members) unless it shows a newer version or a later
+//!   last message. A deleted one is forgotten ([`Store::forget_conversation`], told as a change so the views drop it,
+//!   its writes still to go told failed and never sent), but the account's own notes, whose 404 means none yet. Each
+//!   is one `info` line naming the status and the service's code, never its answer.
 //! - **A conversation's messages** ([`CatchUp::sync_messages`]): the first read is the newest page, whose
 //!   `backwardLink` is kept for older history ([`CatchUp::load_older`]); every later one follows the conversation's
 //!   sync link, which brings what changed since (`docs/protocol/chat.md`, "Sync answers"). A gap is bounded by the
@@ -962,7 +964,9 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// One conversation of the list: kept, its messages synced when it is new or changed, then what the list says of
     /// it (its row, whether it is empty, its read horizon, its members) whether or not they synced. Messages that
     /// failed keep the conversation to be synced again before its new version is stored, so neither a later catch-up
-    /// nor a later listing of it skips them; but not when the account can't read it ([`Unreadable`]).
+    /// nor a later listing of it skips them; but not when the account can't read it ([`Unreadable`]). One known to be
+    /// unreadable ([`CatchUp::mark_unreadable`]) has neither its messages nor its members read until the list shows it
+    /// changed.
     async fn catch_up_conversation(
         &self,
         store: &mut Store,
@@ -974,11 +978,10 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             let added = store.upsert_conversation(&conversation_row(listed, 0))?;
             self.conversation_changed(&listed.id, added);
         }
-        let changed = match (&stored, version) {
-            (Some(stored), Some(version)) => version > stored.version,
-            _ => true,
-        };
-        let messages = if changed || store.sync_state(&listed.id)?.is_none() {
+        let state = store.sync_state(&listed.id)?;
+        let changed = listing_changed(listed, stored.as_ref(), version, state.as_ref());
+        let left = !changed && state.as_ref().is_some_and(marked_unreadable);
+        let messages = if changed || state.is_none() {
             self.sync_messages(store, &listed.id).await
         } else {
             Ok(Synced::default())
@@ -989,7 +992,11 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             store.set_unsynced(&listed.id)?;
         }
         self.store_listing(store, listed, stored.as_ref(), version)?;
-        let members = self.refresh_members(store, listed).await;
+        let members = if left {
+            Ok(())
+        } else {
+            self.refresh_members(store, listed).await
+        };
         let synced = messages?;
         members?;
         Ok(synced)
@@ -1086,29 +1093,52 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     }
 
     /// A conversation the account can't read ([`Unreadable`]): no longer kept to be synced again, or forgotten when its
-    /// thread is gone (told as a change, so a view showing it drops it). One `info` line tells which, with the status
-    /// and the service's code, never its answer. Whether the store kept that.
+    /// thread is gone (told as a change, so a view showing it drops it; its writes still to go are told failed,
+    /// [`Outbox::forgotten`]). One `info` line tells which, with the status and the service's code, never its answer.
+    /// Whether the store kept that.
     fn leave_unreadable(&self, store: &mut Store, unreadable: Unreadable, report: &mut CatchUpReport) -> bool {
         let id = unreadable.conversation.as_str();
         let (status, code) = (unreadable.status, unreadable.code.as_deref().unwrap_or("no code"));
         let left = if unreadable.forgotten {
             log::info!("catch-up: conversation {id} forgotten: the service answered HTTP {status} ({code}), deleted");
             store.forget_conversation(id).map(|forgot| {
-                if forgot {
+                if forgot.stored {
                     self.changed(|changes| changes.conversation(id));
                 }
+                self.outbox.forgotten(forgot.unsent);
             })
         } else {
             log::info!(
                 "catch-up: conversation {id} skipped: the service answered HTTP {status} ({code}), not readable"
             );
-            store.set_synced(id).map(|_| ())
+            store.set_synced(id).and_then(|_| self.mark_unreadable(store, id))
         };
         if let Err(error) = &left {
             log::warn!("catch-up: conversation {id} can't be left unsynced: {error}");
         }
         report.unreadable.push(unreadable);
         left.is_ok()
+    }
+
+    /// A conversation the account can't read that no sync ever read gets a sync state with no link and no bound (every
+    /// read keeps a bound: [`marked_unreadable`]), so a later listing reads it again only when it shows it changed
+    /// ([`listing_changed`]), not on every full listing; its next read is a first one. A state kept from when it could
+    /// be read stays as it is (a listing skips that one unless it is newer already).
+    fn mark_unreadable(&self, store: &mut Store, id: &str) -> Result<(), StoreError> {
+        if store.sync_state(id)?.is_some() {
+            return Ok(());
+        }
+        store.set_sync_state(&SyncState {
+            conversation_id: id.to_owned(),
+            sync_link: None,
+            backward_link: None,
+            backward_oldest: None,
+            sync_until: None,
+            gap_link: None,
+            gap_until: None,
+            history_complete: false,
+            updated: (self.clock)(),
+        })
     }
 
     /// A conversation the store doesn't know, read as a thread: kept at version 0 (the list's version replaces it),
@@ -1281,6 +1311,29 @@ fn conversation_row(listed: &chat::Conversation, version: i64) -> Conversation {
         version,
         last_activity: listed.last_message().and_then(|message| message.arrival_time_ms()),
     }
+}
+
+/// Whether the list shows a stored conversation changed since it was stored: a newer version (one it can't read is a
+/// change). One the account couldn't read ([`marked_unreadable`]) has changed at a later last message too, whatever its
+/// version says, so the account added back to a thread it left reads it again.
+fn listing_changed(
+    listed: &chat::Conversation,
+    stored: Option<&Conversation>,
+    version: Option<i64>,
+    state: Option<&SyncState>,
+) -> bool {
+    let (Some(stored), Some(version)) = (stored, version) else {
+        return true;
+    };
+    let unreadable = state.is_some_and(marked_unreadable);
+    let last_activity = listed.last_message().and_then(|message| message.arrival_time_ms());
+    version > stored.version || (unreadable && advances(last_activity, stored.last_activity))
+}
+
+/// Whether `state` is the mark of a conversation the account couldn't read and no sync ever read
+/// ([`CatchUp::mark_unreadable`]): no sync link and no bound, which every read keeps.
+fn marked_unreadable(state: &SyncState) -> bool {
+    state.sync_link.is_none() && state.sync_until.is_none()
 }
 
 /// Whether a listed last activity moves the stored one on: the store keeps the later of the two.

@@ -701,6 +701,32 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         Ok(Some(seen))
     }
 
+    /// The rows of a conversation the store forgot that weren't sent ([`Store::forget_conversation`]: its thread is
+    /// gone, so a write to it can never succeed). The store no longer has them, so none goes out or can be resent;
+    /// each still to go (waiting, or in flight as an earlier run left it) is kept for [`Outbox::take_arrived`] as
+    /// failed, so its owner stops showing it as sending. One already denied or failed was told so before.
+    pub(crate) fn forgotten(&self, unsent: Vec<OutboxEntry>) {
+        let now = (self.clock)();
+        for mut row in unsent {
+            if !matches!(row.state, OutboxState::Pending | OutboxState::Sending) {
+                continue;
+            }
+            log::info!(
+                "outbox row {} ({:?}, clientmessageid {}) failed: its conversation was deleted",
+                row.id,
+                row.kind,
+                row.client_message_id
+            );
+            row.state = OutboxState::Failed;
+            row.not_before = None;
+            row.last_error = Some("its conversation was deleted".to_owned());
+            row.updated_at = now;
+            let mut arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
+            arrived.retain(|queued| queued.id != row.id);
+            arrived.push(row);
+        }
+    }
+
     /// The row a message of ours belongs to ([`Outbox::match_arrival`]).
     fn match_own(&self, store: &mut Store, message: &Message) -> Result<Option<OutboxEntry>, OutboxError> {
         let arrival = Arrival {

@@ -3,7 +3,7 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use crate::{Applied, Store, StoreError, sql_limit};
+use crate::{Applied, OutboxEntry, Store, StoreError, sql_limit};
 
 /// What kind of conversation a thread is. A kind this build doesn't name is kept as the text it came as.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +53,16 @@ pub struct Conversation {
     /// Milliseconds: the newest of what the service said about the last message and every stored message's arrival.
     /// It never moves back.
     pub last_activity: Option<i64>,
+}
+
+/// What [`Store::forget_conversation`] removed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Forgotten {
+    /// The conversation was stored.
+    pub stored: bool,
+    /// Its outbox rows that weren't sent (waiting, in flight, denied or failed), as they stood, oldest first: removed
+    /// with the rest of its rows, so none of them goes out or can be resent.
+    pub unsent: Vec<OutboxEntry>,
 }
 
 /// A member of a conversation.
@@ -147,15 +157,23 @@ impl Store {
     }
 
     /// Forgets `id` and all that is kept of it: its members, messages (their reactions, reply roots and search
-    /// entries), read horizons, sync state and its mark to be synced again all go with its row. For a thread the
-    /// service says is gone (hard-deleted). Whether it was stored.
+    /// entries), read horizons, sync state and its mark to be synced again all go with its row; its outbox rows and its
+    /// place among the favourites, which don't reference it, go in the same transaction. For a thread the service says
+    /// is gone (hard-deleted): whether it was stored, and its rows that weren't sent (a write to it can never succeed).
     ///
     /// # Errors
     ///
     /// [`StoreError::Sqlite`] when the write fails.
-    pub fn forget_conversation(&mut self, id: &str) -> Result<bool, StoreError> {
-        let removed = self.conn.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
-        Ok(removed > 0)
+    pub fn forget_conversation(&mut self, id: &str) -> Result<Forgotten, StoreError> {
+        let tx = self.conn.transaction()?;
+        let unsent = crate::outbox::forget_rows(&tx, id)?;
+        tx.execute("DELETE FROM favorites WHERE conversation_id = ?1", [id])?;
+        let removed = tx.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(Forgotten {
+            stored: removed > 0,
+            unsent,
+        })
     }
 
     /// One conversation.

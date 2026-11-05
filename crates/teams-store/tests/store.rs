@@ -5,9 +5,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use teams_store::{
-    AppReadHorizon, Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, EngineLock, Member, Message,
-    NewOutboxEntry, OutboxKind, OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store, StoreError, SyncState,
-    counts_unread,
+    AppReadHorizon, Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, EngineLock, Forgotten,
+    Member, Message, NewOutboxEntry, OutboxKind, OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store,
+    StoreError, SyncState, counts_unread,
 };
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -1150,8 +1150,16 @@ fn conversations_kept_to_be_synced_again_stay_until_synced() {
 }
 
 /// Keeps one of everything the store holds of a conversation `id`: members, a message (indexed, with a reaction), a
-/// read horizon, a sync state and the mark to be synced again.
+/// read horizon, a sync state, the mark to be synced again and outbox rows (one sent, one waiting).
 fn keep_all_of(store: &mut Store, id: &str) -> Result<(), StoreError> {
+    let write = |cmid: &str| NewOutboxEntry {
+        conversation_id: Some(id.to_owned()),
+        ..send(&format!("{id}-{cmid}"))
+    };
+    let sent = store.enqueue(&write("sent"))?.id;
+    store.begin_attempt(sent)?;
+    store.finish_attempt(sent, &AttemptOutcome::Sent { message_id: None })?;
+    store.enqueue(&write("waiting"))?;
     store.replace_members(id, 1, &[Member::new(ME, None), Member::new(PEER, None)])?;
     let mut kept = message("1000", 1000, "synthetic gone", 1000, PEER);
     id.clone_into(&mut kept.conversation_id);
@@ -1188,6 +1196,17 @@ fn held_of(store: &Store, id: &str) -> Result<Vec<&'static str>, StoreError> {
         ("horizon", store.read_horizon(id, ME)?.is_some()),
         ("sync state", store.sync_state(id)?.is_some()),
         ("kept", store.unsynced_conversations()?.iter().any(|kept| kept == id)),
+        (
+            "outbox",
+            store.outbox_by_client_message_id(&format!("{id}-sent"))?.is_some(),
+        ),
+        ("waiting", !store.outbox_unsettled(id)?.is_empty()),
+        (
+            "favorite",
+            store
+                .favorites()?
+                .is_some_and(|favorites| favorites.iter().any(|kept| kept == id)),
+        ),
     ];
     Ok(held
         .into_iter()
@@ -1203,13 +1222,43 @@ fn a_forgotten_conversation_leaves_nothing_of_it_and_the_others_stay() -> Result
     store.upsert_conversation(&conversation(GROUP, ConversationKind::Group, 1))?;
     keep_all_of(&mut store, CHAT)?;
     keep_all_of(&mut store, GROUP)?;
-    let everything = ["row", "members", "message", "reaction", "horizon", "sync state", "kept"];
+    store.replace_favorites(&[GROUP.to_owned(), CHAT.to_owned()], 1)?;
+    let everything = [
+        "row",
+        "members",
+        "message",
+        "reaction",
+        "horizon",
+        "sync state",
+        "kept",
+        "outbox",
+        "waiting",
+        "favorite",
+    ];
     assert_eq!(held_of(&store, GROUP)?, everything);
     assert_eq!(store.search("gone", 10)?.len(), 2);
 
-    assert!(store.forget_conversation(GROUP)?);
-    assert!(!store.forget_conversation(GROUP)?, "again: not stored");
+    let forgot = store.forget_conversation(GROUP)?;
+    assert!(forgot.stored);
+    let unsent: Vec<(&str, OutboxState)> = forgot
+        .unsent
+        .iter()
+        .map(|row| (row.client_message_id.as_str(), row.state))
+        .collect();
+    let waiting = format!("{GROUP}-waiting");
+    assert_eq!(
+        unsent,
+        [(waiting.as_str(), OutboxState::Pending)],
+        "the row not sent, as it stood"
+    );
+    assert_eq!(store.outbox_by_client_message_id(&waiting)?, None, "gone with the rest");
+    assert_eq!(
+        store.forget_conversation(GROUP)?,
+        Forgotten::default(),
+        "again: not stored"
+    );
     assert!(held_of(&store, GROUP)?.is_empty());
+    assert_eq!(store.favorites()?, Some(vec![CHAT.to_owned()]));
     assert_eq!(
         store.search("gone", 10)?.len(),
         1,

@@ -45,7 +45,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 pub use calendar::StoredEvent;
-pub use conversations::{Conversation, ConversationKind, Member};
+pub use conversations::{Conversation, ConversationKind, Forgotten, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange, counts_unread};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
 pub use pictures::PictureCache;

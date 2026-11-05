@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
-    CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, DRAFTS, Gaps, MAX_FAILED_CHECKS, MAX_PAGES, NOTES, Outbox,
-    OutboxError, StoredMessage, UnreadableSeen, enqueue, outbox::ConversationSync,
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Clock, Command, DRAFTS, Gaps, MAX_FAILED_CHECKS, MAX_PAGES,
+    NOTES, Outbox, OutboxError, StoredMessage, UnreadableSeen, enqueue, outbox::ConversationSync,
 };
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C,
@@ -898,6 +898,56 @@ async fn a_thread_the_account_left_is_skipped_once_and_not_kept_to_be_synced() {
     assert_eq!(reads_of(&server, "0a1e").await, 0);
 }
 
+/// A thread whose reads the service answers 400: a refusal that may pass, kept to be synced again.
+const REFUSED: &str = "19:00000000000000000000000000000bad@thread.tacv2";
+
+/// The full list again (no sync link kept), bringing `entries`; every read of [`LEFT`] answered 403 and of [`REFUSED`]
+/// 400. The report and how many reads went to each.
+async fn list_again(server: &MockServer, a: &mut Account, entries: Vec<Value>) -> (CatchUpReport, usize, usize) {
+    server.reset().await;
+    mount_list(server, entries, "l1").await;
+    refuse_reads(server, "0a1e", 403, "AclCheckFailed").await;
+    refuse_reads(server, "0bad", 400, "BadRequest").await;
+    a.store.set_conversation_list_sync_link(None, 0).unwrap();
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    (report, reads_of(server, "0a1e").await, reads_of(server, "0bad").await)
+}
+
+#[tokio::test]
+async fn a_full_listing_reads_a_thread_the_account_left_again_only_once_it_changed() {
+    let server = MockServer::start().await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    let (report, left, refused) = list_again(&server, &mut a, vec![listed(LEFT, 2), listed(REFUSED, 2)]).await;
+    assert_eq!(report.unreadable.len(), 1, "{report:?}");
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert!(left > 0 && refused > 0);
+
+    // listed as it was: the one it left isn't read again, the refused one is
+    let (report, left, refused) = list_again(&server, &mut a, vec![listed(LEFT, 2), listed(REFUSED, 2)]).await;
+    assert!(report.unreadable.is_empty(), "{report:?}");
+    assert_eq!(report.failed.len(), 1, "a 400 is tried again: {report:?}");
+    assert_eq!(left, 0, "not read again");
+    assert!(refused > 0);
+    assert!(
+        a.store.unsynced_conversations().unwrap() == [REFUSED],
+        "only the refused one is kept"
+    );
+
+    // a later last message (the account added back), its version as it was: read again
+    let mut added_back = listed(LEFT, 2);
+    added_back["lastMessage"] = entry(1001, json!("1001"));
+    let (report, left, _) = list_again(&server, &mut a, vec![added_back.clone()]).await;
+    assert_eq!(report.unreadable.len(), 1, "{report:?}");
+    assert!(left > 0);
+    let (_, left, _) = list_again(&server, &mut a, vec![added_back]).await;
+    assert_eq!(left, 0, "as it was again");
+
+    // a newer version: read again
+    let (report, left, _) = list_again(&server, &mut a, vec![listed(LEFT, 3)]).await;
+    assert_eq!(report.unreadable.len(), 1, "{report:?}");
+    assert!(left > 0);
+}
+
 #[tokio::test]
 async fn threads_kept_from_an_earlier_build_are_left_and_a_deleted_one_forgotten() {
     let server = MockServer::start().await;
@@ -976,6 +1026,48 @@ async fn threads_kept_from_an_earlier_build_are_left_and_a_deleted_one_forgotten
     .iter()
     .sum();
     assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn a_write_waiting_on_a_deleted_thread_is_told_failed_and_never_sent() {
+    let server = MockServer::start().await;
+    mount_list(&server, vec![listed(GONE, 2)], "l1").await;
+    refuse_reads(&server, "90e0", 404, "ThreadNotFound").await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    a.store
+        .upsert_conversation(&Conversation {
+            id: GONE.to_owned(),
+            kind: ConversationKind::Group,
+            topic: None,
+            version: 1,
+            last_activity: None,
+        })
+        .unwrap();
+    let row = enqueue(&mut a.store, &send(GONE, "never goes")).unwrap();
+
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(
+        report.unreadable.len() == 1 && report.unreadable[0].forgotten,
+        "{report:?}"
+    );
+    assert_eq!(a.store.conversation(GONE).unwrap(), None);
+    let told = a.outbox.take_arrived();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(
+        (told[0].id, told[0].state),
+        (row.id, OutboxState::Failed),
+        "its owner stops showing it as sending"
+    );
+    assert_eq!(a.store.outbox_entry(row.id).unwrap(), None, "gone with the thread");
+    assert!(a.store.outbox_left_by_earlier_runs().unwrap().is_empty());
+
+    let due = a.outbox.send_due(&mut a.store, &a.catch_up).await.unwrap();
+    assert!(due.rows.is_empty(), "nothing goes out: {due:?}");
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests.iter().all(|request| request.method.as_str() == "GET"),
+        "no write went out"
+    );
 }
 
 // --- the outbox's check ---

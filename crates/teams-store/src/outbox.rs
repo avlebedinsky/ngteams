@@ -241,6 +241,14 @@ fn entries(conn: &Connection, filter: &str, values: impl rusqlite::Params) -> Re
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Removes every row of `conversation_id` (a conversation being forgotten: none of them can go out any more, nor be
+/// resent); returns those that weren't sent, as they stood, oldest first.
+pub(crate) fn forget_rows(conn: &Connection, conversation_id: &str) -> Result<Vec<OutboxEntry>, StoreError> {
+    let unsent = entries(conn, "conversation_id = ?1 AND state <> 'sent'", [conversation_id])?;
+    conn.execute("DELETE FROM outbox WHERE conversation_id = ?1", [conversation_id])?;
+    Ok(unsent)
+}
+
 impl Store {
     /// Puts a command in the outbox as a pending row of this run.
     ///
