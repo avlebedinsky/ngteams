@@ -1,7 +1,7 @@
 //! A meeting chat's tabs, drawn on the real platform in the UI sandbox (`harness = false`: GPUI runs on the process's
 //! main thread), for their screenshots: the app's window over the fake engine (`common`), its store holding a made-up
-//! meeting chat whose recording's card offers "View recap"; its Recap (two recordings: Part 1 with the AI summary's
-//! upsell, its transcript searched, Part 2), the Recap of a meeting transcribed and not recorded, and the Shared tab.
+//! meeting chat whose recording's card offers "View recap"; its Recap (two recordings: Part 1 with its transcript,
+//! that transcript searched, Part 2), the Recap of a meeting transcribed and not recorded, and the Shared tab.
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -29,7 +29,6 @@ use std::{fs, mem};
 use common::{FakeCore, FakeEvents};
 use gpui::{App, AppContext as _, Entity, Window, WindowingModes};
 use teams_core::ChatListing;
-use teams_ui::recap_view::Pane;
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{ChatTab, Shell, ShellParts};
 use teams_ui::theme::{Appearance, DARK_KEY, LIGHT_KEY};
@@ -276,17 +275,11 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
         return;
     };
     recap.update(cx, |recap, cx| match page {
-        "transcript" | "transcript-only" => {
-            recap.show_pane(Pane::Transcript, cx);
-            if page == "transcript" {
-                recap.find("video");
-                recap.step_match(false, cx);
-            }
+        "transcript" => {
+            recap.find("video");
+            recap.step_match(false, cx);
         }
-        "part-2" => {
-            recap.select_part(1, cx);
-            recap.show_pane(Pane::Transcript, cx);
-        }
+        "part-2" => recap.select_part(1, cx),
         _ => {}
     });
 }

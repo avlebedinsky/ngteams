@@ -28,10 +28,6 @@ use crate::clock::HourCycle;
 pub const AI_NOTICE: &str = "AI-generated content may be incorrect";
 /// The shared files' card when the chat shared none.
 pub const NO_FILES: &str = "No files were shared.";
-/// The Copilot upsell's button (an account without Microsoft 365 Copilot, as Teams shows it).
-pub const UPGRADE_COPILOT: &str = "Upgrade Copilot";
-/// Where "Upgrade Copilot" goes: Microsoft 365's offer page for Copilot, as Teams opens it.
-pub const UPGRADE_LINK: &str = "https://offer.m365.cloud.microsoft/launchpad/v1/launchpad.metaos.html?partnerId=teamsmetaoswebcommercial&experienceId=meetingnotes";
 
 /// The meeting's line: its day and its span on the account's clock, "Thursday, November 5, 2026 11:14 AM - 11:18
 /// AM"; `None` when its parts give no start or no end (the recap shows the meeting's name instead).

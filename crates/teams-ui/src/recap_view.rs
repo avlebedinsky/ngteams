@@ -3,10 +3,9 @@
 //! - **The top row**: the meeting's line (its day and span) in a box with its menu, "Part 1", "Part 2" when the
 //!   meeting was recorded more than once, then Share (its menu: Copy link, the recap's Teams link), Watch in browser
 //!   (the recording in Stream, for a part with a recording) and "More options" (Open in Teams on the web, Copy link).
-//! - **A recorded part**: the recording played here ([`VideoPlayer`], filling its column at 16:9), under it the
-//!   Speakers chip with Teams' Copilot upsell (the account has no Microsoft 365 Copilot, as both accounts Teams was
-//!   looked at with); beside it the files shared in the chat and the panes: AI summary (the same upsell) and the
-//!   transcript. A part with only a transcript shows the files and the panes across the whole width.
+//! - **A recorded part**: the recording played here ([`VideoPlayer`], filling its column at 16:9); beside it the files
+//!   shared in the chat and the transcript. A part with only a transcript shows the files and the transcript across
+//!   the whole width. Teams' Copilot parts (the AI summary, speaker insights and their upsells) are left out.
 //! - **The transcript**: Teams' note that it is AI-generated, who started transcription, each speaker's turn (their
 //!   initials, name and time into the recording) with its paragraphs; the paragraph being spoken is highlighted and
 //!   kept in view while the recording plays, and a click on one plays the recording from there. Search finds the
@@ -42,8 +41,8 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::PictureSource;
 use crate::people;
 use crate::recap::{
-    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, UPGRADE_COPILOT, UPGRADE_LINK, local_session_line, part_label,
-    row_of, shows_parts, transcript_file_name,
+    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, local_session_line, part_label, row_of, shows_parts,
+    transcript_file_name,
 };
 use crate::theme::{self, Palette};
 use crate::video_player::{VideoPlayer, clock as offset};
@@ -59,13 +58,6 @@ pub const NOTHING_LEFT: &str = "This meeting wasn't recorded or transcribed.";
 pub const SAVING: &str = "Saving recording\u{2026} It shows here once it's ready.";
 /// The words a transcript that couldn't be read shows.
 pub const TRANSCRIPT_UNREAD: &str = "The transcript couldn't be loaded.";
-
-/// The panes beside the recording.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pane {
-    AiSummary,
-    Transcript,
-}
 
 /// What the recap read.
 enum Contents {
@@ -88,7 +80,6 @@ pub struct RecapView {
     title: SharedString,
     contents: Contents,
     selected: usize,
-    pane: Pane,
     transcripts: HashMap<String, Read>,
     /// Each recording's player, by its sharing link (a part's place can change when the recap is read again).
     players: HashMap<String, (Entity<VideoPlayer>, Subscription)>,
@@ -131,7 +122,6 @@ impl RecapView {
             title,
             contents: Contents::Reading,
             selected: 0,
-            pane: Pane::AiSummary,
             transcripts: HashMap::new(),
             players: HashMap::new(),
             spoken: None,
@@ -157,12 +147,6 @@ impl RecapView {
     #[must_use]
     pub fn conversation(&self) -> &str {
         &self.conversation
-    }
-
-    /// The pane shown beside the recording.
-    #[must_use]
-    pub fn pane(&self) -> Pane {
-        self.pane
     }
 
     /// The part shown, counted from 0.
@@ -330,19 +314,8 @@ impl RecapView {
         }
     }
 
-    /// Shows `pane`.
-    pub fn show_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        self.pane = pane;
-        self.read_transcript(cx);
-        cx.notify();
-    }
-
-    /// Reads the shown part's transcript while its pane shows, when it has one not read yet (or whose read failed and
-    /// is asked again).
+    /// Reads the shown part's transcript, when it has one not read yet (or whose read failed and is asked again).
     fn read_transcript(&mut self, cx: &mut Context<Self>) {
-        if self.pane != Pane::Transcript {
-            return;
-        }
         let Some(location) = self.part().and_then(|part| part.transcript.clone()) else {
             return;
         };
@@ -588,7 +561,7 @@ impl RecapView {
             .gap_2()
             .min_h_0()
             .child(self.files_card(palette, cx))
-            .child(self.panes_card(window, palette, cx));
+            .children(self.transcript_card(window, palette, cx));
         let body = if recorded {
             let player = self.player(cx);
             div()
@@ -794,50 +767,22 @@ impl RecapView {
             .into_any_element()
     }
 
-    /// The panes' pills and the pane shown.
-    fn panes_card(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let has_transcript = self.part().is_some_and(|part| part.transcript.is_some());
-        let pill = |pane: Pane, label: &'static str, key: &'static str, cx: &mut Context<Self>| {
-            let chosen = self.pane == pane;
-            div()
-                .id(SharedString::from(format!("recap-pane-{key}")))
-                .debug_selector(move || format!("recap-pane-{key}"))
-                .h(px(32.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded_full()
-                .border_1()
-                .cursor_pointer()
-                .border_color(rgb(if chosen { palette.brand } else { palette.border }))
-                .bg(rgb(if chosen { palette.selected } else { palette.surface }))
-                .text_color(rgb(if chosen { palette.brand } else { palette.foreground }))
-                .when(chosen, |pill| pill.font_weight(FontWeight::SEMIBOLD))
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| this.show_pane(pane, cx)))
-        };
-        let mut pills = div()
-            .flex()
-            .gap_2()
+    /// The shown part's transcript under its title; `None` for a recording without one.
+    fn transcript_card(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.part()?.transcript.as_ref()?;
+        let title = div()
+            .flex_none()
             .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(rgb(palette.border));
-        pills = pills.child(pill(Pane::AiSummary, "AI summary", "summary", cx));
-        if has_transcript {
-            pills = pills.child(pill(Pane::Transcript, "Transcript", "transcript", cx));
-        }
-        let shown = match self.pane {
-            Pane::Transcript if has_transcript => self.transcript_pane(window, palette, cx),
-            Pane::AiSummary | Pane::Transcript => summary_upsell(palette),
-        };
-        card(palette)
-            .debug_selector(|| "recap-panes".to_owned())
+            .pt_4()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child("Transcript");
+        let card = card(palette)
+            .debug_selector(|| "recap-transcript-card".to_owned())
             .flex_1()
             .min_h_0()
-            .child(pills)
-            .child(div().flex_1().min_h_0().flex().flex_col().child(shown))
-            .into_any_element()
+            .child(title)
+            .child(self.transcript_pane(window, palette, cx));
+        Some(card.into_any_element())
     }
 
     fn transcript_pane(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -1059,139 +1004,15 @@ fn highlighted(
         .into_any_element()
 }
 
-/// The left card: the recording, the Speakers chip and Teams' Copilot upsell for speaker insights.
+/// The left card: the recording, as tall as it plays.
 fn recording_card(player: Option<Entity<VideoPlayer>>, palette: Palette) -> AnyElement {
-    let speakers = div()
-        .debug_selector(|| "recap-speakers".to_owned())
-        .flex_none()
-        .h(px(30.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(rgb(palette.brand))
-        .text_sm()
-        .text_color(rgb(palette.brand))
-        .child("Speakers");
-    let upsell = div().flex().gap_4().child(illustration(Glyph::USERS, palette)).child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_x_1()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Upgrade to")
-                    .child(div().text_color(rgb(palette.brand)).child("Microsoft 365 Copilot"))
-                    .child("for AI speaker insights"),
-            )
-            .child(div().text_sm().child(
-                "Switch to a Microsoft 365 Copilot plan for AI-generated meeting summaries with decisions, action \
-                     items, and speaker details, organized into chapters so you can catch up faster.",
-            ))
-            .child(upgrade_button("recap-upgrade-speakers")),
-    );
     card(palette)
         .debug_selector(|| "recap-recording".to_owned())
+        .self_start()
         .flex_1()
         .min_w_0()
         .overflow_hidden()
         .children(player)
-        .child(
-            div()
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(div().flex().child(speakers))
-                .child(upsell),
-        )
-        .into_any_element()
-}
-
-/// The AI summary pane: Teams' upsell for an account without Microsoft 365 Copilot.
-fn summary_upsell(palette: Palette) -> AnyElement {
-    let point = |text: &'static str| {
-        div()
-            .w_full()
-            .flex()
-            .gap_2()
-            .text_sm()
-            .child(
-                div()
-                    .flex_none()
-                    .pt_0p5()
-                    .child(Glyph::SPARKLES.icon().size(px(14.0)).text_color(rgb(palette.brand))),
-            )
-            .child(div().flex_1().min_w_0().child(text))
-    };
-    div()
-        .debug_selector(|| "recap-summary-upsell".to_owned())
-        .flex_1()
-        .p_6()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_4()
-        .child(illustration(Glyph::SPARKLES, palette))
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .justify_center()
-                .gap_1()
-                .text_lg()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child("Upgrade your")
-                .child(div().text_color(rgb(palette.brand)).child("Copilot plan"))
-                .child("for AI summaries"),
-        )
-        .child(
-            div()
-                .w_full()
-                .max_w(px(420.0))
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(point("Transcribe and translate meetings in real time"))
-                .child(point("Recap key points and tasks from discussions"))
-                .child(point(
-                    "Get AI answers that are informed by your work calendar, chats, files, and organizational data",
-                )),
-        )
-        .child(upgrade_button("recap-upgrade-summary"))
-        .into_any_element()
-}
-
-/// "Upgrade Copilot": Microsoft 365's Copilot offer, in the browser.
-fn upgrade_button(id: &'static str) -> AnyElement {
-    let button = Button::new(id)
-        .label(UPGRADE_COPILOT)
-        .outline()
-        .on_click(|_, _, cx| cx.open_url(UPGRADE_LINK));
-    div().flex().child(selected_by(id, button)).into_any_element()
-}
-
-/// An upsell's picture: its icon large in a tinted box.
-fn illustration(glyph: Glyph, palette: Palette) -> AnyElement {
-    div()
-        .flex_none()
-        .size(px(96.0))
-        .rounded_lg()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgb(palette.selected))
-        .text_color(rgb(palette.brand))
-        .child(glyph.icon().size(px(44.0)))
         .into_any_element()
 }
 

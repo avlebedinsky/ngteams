@@ -71,8 +71,9 @@ browser and "Download as .vtt"). No value from it is copied here; the ids below 
 transcript's address (`TranscriptLocation`: only a personal site's, read with that site's token, as the chat-file
 upload's reads are); `teams_proto::transcript` reads the `WebVTT`. `teams_core::recap` makes both reads when the Recap
 tab asks; nothing is stored. The tab (`teams_ui::recap_view`) shows the parts, plays the recording, and draws the
-transcript; Share copies the recap link (without `fileUrl`, which only the item's own read gives), Watch in browser
+transcript beside it (no panes' pills: the transcript is the only pane); Share copies the recap link (without `fileUrl`, which only the item's own read gives), Watch in browser
 opens the recording's sharing link (Stream's player). Left out, as no read backs them or they write: Share's
 recipients (a grant and a post), Delete recap content and the transcript's Delete, "Go to Meeting Recaps" (a Teams
-app), the attendance report (the organizer's reports), Notes (Loop), feedback, Download as .docx, and the AI summary
-and speaker insights for a Copilot account (no capture of that state).
+app), the attendance report (the organizer's reports), Notes (Loop), feedback, Download as .docx, and everything
+Copilot: the AI summary, the Speakers chip's speaker insights and their "Upgrade Copilot" upsells (left out by the
+user's choice).

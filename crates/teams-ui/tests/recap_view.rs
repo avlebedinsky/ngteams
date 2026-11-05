@@ -1,5 +1,5 @@
 //! A meeting chat's tabs on GPUI's test context, over the fake engine (`common`) and a made-up meeting: the header's
-//! Chat, Shared and Recap; "View recap" on a recording's card showing the Recap; the recap's parts, panes and
+//! Chat, Shared and Recap; "View recap" on a recording's card showing the Recap; the recap's parts and
 //! transcript (read when shown, searched, a paragraph clicked playing the recording from there); a recap or transcript
 //! that can't be read and its Try again; another chat opening on Chat. Every id, name and word is made up.
 
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use common::Rig;
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use teams_ui::ViewTrace;
-use teams_ui::recap_view::{Pane, RecapView};
+use teams_ui::recap_view::RecapView;
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{ChatTab, Shell, ShellParts};
 
@@ -124,13 +124,13 @@ fn view_recap_on_the_recordings_card_shows_the_recap_tab() {
         assert!(cx.debug_bounds(selector).is_some(), "{selector} drawn");
     }
     assert!(
-        cx.debug_bounds("recap-summary-upsell").is_some(),
-        "the AI summary's upsell first"
+        cx.debug_bounds("recap-transcript-card").is_some(),
+        "the transcript beside the recording"
     );
     assert_eq!(
         asked(&rig, "meeting_transcript"),
-        0,
-        "the transcript is read when its pane shows"
+        2,
+        "each part shown (Part 2 from the card, then Part 1) has its transcript read"
     );
     // back to Chat, and the first recording's card shows Part 1
     click(cx, "chat-tab-chat");
@@ -144,9 +144,7 @@ fn the_transcript_is_read_searched_and_plays_the_recording_from_a_paragraph() {
     let (shell, cx) = shell_window(&rig, fixtures::MEETING);
     cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chat_tab(ChatTab::Recap, window, cx)));
     draw(cx);
-    click(cx, "recap-pane-transcript");
     let view = recap(&shell, cx);
-    assert_eq!(cx.update(|_, cx| view.read(cx).pane()), Pane::Transcript);
     assert_eq!(asked(&rig, "meeting_transcript"), 1);
     for selector in [
         "recap-ai-notice",
@@ -195,7 +193,6 @@ fn a_transcript_alone_shows_no_player_and_who_stopped_it() {
         "one part shows no parts' row"
     );
     assert!(cx.debug_bounds("recap-no-files").is_some());
-    click(cx, "recap-pane-transcript");
     assert!(cx.debug_bounds("recap-stopped").is_some());
 }
 
@@ -212,7 +209,6 @@ fn a_recap_that_cant_be_read_says_so_and_reads_again() {
     assert_eq!(asked(&rig, "meeting_contents"), 2);
     assert!(cx.debug_bounds("recap-part-0").is_some());
     // the transcript can't be read: said, and read again on Try again
-    click(cx, "recap-pane-transcript");
     assert!(
         cx.debug_bounds("recap-state The transcript couldn't be loaded.")
             .is_some()
