@@ -16,8 +16,10 @@
 //!   list brings it with a newer version, which syncs it. One no sync ever read is kept with a sync state that has no
 //!   link, so a full listing skips it too (its messages and its members) unless it shows a newer version or a later
 //!   last message. A deleted one is forgotten ([`Store::forget_conversation`], told as a change so the views drop it,
-//!   its writes still to go told failed and never sent), but the account's own notes, whose 404 means none yet. Each
-//!   is one `info` line naming the status and the service's code, never its answer.
+//!   its writes still to go told failed and never sent), but the account's own notes, whose 404 means none yet. The
+//!   store keeps the version and last activity it had then ([`Store::forgotten_thread`]), so a listing that still
+//!   names it neither adds it back nor reads it unless it shows a newer version or a later last message. Each is one
+//!   `info` line naming the status and the service's code, never its answer.
 //! - **A conversation's messages** ([`CatchUp::sync_messages`]): the first read is the newest page, whose
 //!   `backwardLink` is kept for older history ([`CatchUp::load_older`]); every later one follows the conversation's
 //!   sync link, which brings what changed since (`docs/protocol/chat.md`, "Sync answers"). A gap is bounded by the
@@ -966,7 +968,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// failed keep the conversation to be synced again before its new version is stored, so neither a later catch-up
     /// nor a later listing of it skips them; but not when the account can't read it ([`Unreadable`]). One known to be
     /// unreadable ([`CatchUp::mark_unreadable`]) has neither its messages nor its members read until the list shows it
-    /// changed.
+    /// changed; one forgotten as deleted isn't even added back until then ([`still_forgotten`]).
     async fn catch_up_conversation(
         &self,
         store: &mut Store,
@@ -974,6 +976,13 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     ) -> Result<Synced, CatchUpError> {
         let stored = store.conversation(&listed.id)?;
         let version = known_i64(&listed.version);
+        if stored.is_none() && still_forgotten(store, listed, version)? {
+            log::debug!(
+                "catch-up: conversation {} skipped: forgotten as deleted, and the list shows it unchanged",
+                listed.id
+            );
+            return Ok(Synced::default());
+        }
         if stored.is_none() {
             let added = store.upsert_conversation(&conversation_row(listed, 0))?;
             self.conversation_changed(&listed.id, added);
@@ -1328,6 +1337,18 @@ fn listing_changed(
     let unreadable = state.is_some_and(marked_unreadable);
     let last_activity = listed.last_message().and_then(|message| message.arrival_time_ms());
     version > stored.version || (unreadable && advances(last_activity, stored.last_activity))
+}
+
+/// Whether `listed` is a thread the store forgot as deleted ([`Store::forget_conversation`]) that the list shows
+/// unchanged since: no newer version and no later last message (the rule [`listing_changed`] keeps for one the account
+/// couldn't read). A version it can't read may be newer: such a listing reads the thread again.
+fn still_forgotten(store: &Store, listed: &chat::Conversation, version: Option<i64>) -> Result<bool, StoreError> {
+    let Some(forgotten) = store.forgotten_thread(&listed.id)? else {
+        return Ok(false);
+    };
+    let last_activity = listed.last_message().and_then(|message| message.arrival_time_ms());
+    let newer = version.is_none_or(|version| version > forgotten.version);
+    Ok(!newer && !advances(last_activity, forgotten.last_activity))
 }
 
 /// Whether `state` is the mark of a conversation the account couldn't read and no sync ever read

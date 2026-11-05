@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use teams_store::{
     AppReadHorizon, Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, EngineLock, Forgotten,
-    Member, Message, NewOutboxEntry, OutboxKind, OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store,
-    StoreError, SyncState, counts_unread,
+    ForgottenThread, Member, Message, NewOutboxEntry, OutboxKind, OutboxState, ReactionChange, ReadHorizon,
+    SCHEMA_VERSION, Store, StoreError, SyncState, counts_unread,
 };
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -248,7 +248,7 @@ fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), St
          ALTER TABLE teams DROP COLUMN people; ALTER TABLE teams DROP COLUMN guest; ALTER TABLE teams DROP COLUMN dynamic_membership;
          ALTER TABLE teams DROP COLUMN tenant_wide; ALTER TABLE teams DROP COLUMN channel_only; ALTER TABLE teams DROP COLUMN hidden;
          ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE teams DROP COLUMN site; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind; ALTER TABLE team_channels DROP COLUMN description; ALTER TABLE team_channels DROP COLUMN archived; ALTER TABLE team_channels DROP COLUMN owner; ALTER TABLE team_channels DROP COLUMN can_edit; ALTER TABLE team_channels DROP COLUMN can_delete; ALTER TABLE team_channels DROP COLUMN channel_group;
-         DROP TABLE app_read_horizon; DROP TABLE calendar_events;
+         DROP TABLE app_read_horizon; DROP TABLE calendar_events; DROP TABLE forgotten_conversations;
          PRAGMA user_version = 9;",
     )
     .expect("back to schema 9");
@@ -1265,6 +1265,76 @@ fn a_forgotten_conversation_leaves_nothing_of_it_and_the_others_stay() -> Result
         "its search entries go with its messages"
     );
     assert_eq!(held_of(&store, CHAT)?, everything, "the other one keeps all of it");
+    Ok(())
+}
+
+#[test]
+fn a_forgotten_thread_keeps_its_version_and_last_activity_until_it_is_stored_again() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir)?;
+    let mut group = conversation(GROUP, ConversationKind::Group, 4);
+    group.last_activity = Some(1_500);
+    store.upsert_conversation(&group)?;
+    assert_eq!(store.forgotten_thread(GROUP)?, None, "not forgotten");
+
+    assert!(store.forget_conversation(GROUP)?.stored);
+    let forgotten = Some(ForgottenThread {
+        version: 4,
+        last_activity: Some(1_500),
+    });
+    assert_eq!(store.forgotten_thread(GROUP)?, forgotten);
+    assert_eq!(store.conversation(GROUP)?, None, "its row stays gone");
+    assert_eq!(store.forget_conversation(GROUP)?, Forgotten::default());
+    assert_eq!(
+        store.forgotten_thread(GROUP)?,
+        forgotten,
+        "forgetting it again keeps what it was"
+    );
+    assert_eq!(store.forgotten_thread(CHAT)?, None, "the other one isn't forgotten");
+    drop(store);
+    let mut store = open(&dir)?;
+    assert_eq!(store.forgotten_thread(GROUP)?, forgotten, "kept across a reopen");
+
+    // stored again (recreated), then forgotten again at what it is then
+    assert_eq!(
+        store.upsert_conversation(&conversation(GROUP, ConversationKind::Group, 6))?,
+        Applied::Inserted
+    );
+    assert_eq!(
+        store.forgotten_thread(GROUP)?,
+        None,
+        "stored again: no longer forgotten"
+    );
+    store.forget_conversation(GROUP)?;
+    assert_eq!(
+        store.forgotten_thread(GROUP)?,
+        Some(ForgottenThread {
+            version: 6,
+            last_activity: None,
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn the_forgotten_threads_migration_keeps_the_conversations_and_forgets_none() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir)?;
+    store.upsert_conversation(&conversation(GROUP, ConversationKind::Group, 3))?;
+    drop(store);
+    // the store as schema 18 left it
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch("DROP TABLE forgotten_conversations; PRAGMA user_version = 18;")
+        .expect("back to schema 18");
+    drop(raw);
+
+    let mut store = open(&dir)?;
+    assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 19);
+    assert_eq!(store.conversation(GROUP)?.map(|stored| stored.version), Some(3));
+    assert_eq!(store.forgotten_thread(GROUP)?, None);
+    store.forget_conversation(GROUP)?;
+    assert!(store.forgotten_thread(GROUP)?.is_some());
     Ok(())
 }
 

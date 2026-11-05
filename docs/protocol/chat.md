@@ -100,7 +100,9 @@ either place, and from a plain `message` that starts with `<code>:`.
 Neither kind gets better on a second read. The native catch-up (`teams-core` `sync`, `Unreadable`) therefore doesn't
 keep such a conversation to be synced again. If the account is added back, the incremental list brings the
 conversation at a newer version and it syncs as any other. A `ThreadNotFound` thread is also removed from the store
-(`Store::forget_conversation`), but notes never are. Each such thread gets one `info` line naming the status and the
+(`Store::forget_conversation`), but notes never are. The full list keeps naming a deleted thread, so the store keeps
+its version and last activity after forgetting it, and a later listing adds it back and reads it again only at a newer
+version or a later last message. Each such thread gets one `info` line naming the status and the
 code, and the catch-up summary counts them as "skipped (not a member or deleted)". The error bodies seen are in our
 own words here; none was captured from the web client, which never reads this list.
 

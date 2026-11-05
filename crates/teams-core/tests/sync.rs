@@ -1028,6 +1028,91 @@ async fn threads_kept_from_an_earlier_build_are_left_and_a_deleted_one_forgotten
     assert_eq!(after, before);
 }
 
+/// The full list again (no sync link kept), bringing `entry`, a listing of [`GONE`], whose every read is answered 404
+/// `ThreadNotFound`. The report and how many reads went to it.
+async fn list_gone_again(server: &MockServer, a: &mut Account, entry: Value) -> (CatchUpReport, usize) {
+    server.reset().await;
+    mount_list(server, vec![entry], "l1").await;
+    refuse_reads(server, "90e0", 404, "ThreadNotFound").await;
+    a.store.set_conversation_list_sync_link(None, 0).unwrap();
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    (report, reads_of(server, "90e0").await)
+}
+
+#[tokio::test]
+async fn a_full_listing_reads_a_deleted_thread_again_only_once_it_changed() {
+    let server = MockServer::start().await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    let (report, read) = list_gone_again(&server, &mut a, listed(GONE, 2)).await;
+    assert!(
+        report.unreadable.len() == 1 && report.unreadable[0].forgotten,
+        "{report:?}"
+    );
+    assert!(read > 0);
+    assert_eq!(a.store.conversation(GONE).unwrap(), None, "forgotten");
+    a.catch_up.take_changes();
+
+    // listed as it was, again and again: neither added back nor read
+    for _ in 0..2 {
+        let (report, read) = list_gone_again(&server, &mut a, listed(GONE, 2)).await;
+        assert!(report.unreadable.is_empty() && report.failed.is_empty(), "{report:?}");
+        assert_eq!(read, 0, "not read again");
+        assert_eq!(a.store.conversation(GONE).unwrap(), None, "not added back");
+        assert!(a.catch_up.take_changes().is_empty(), "no view is told of it");
+    }
+
+    // a later last message, its version as it was: read again, and forgotten again at it
+    let mut later = listed(GONE, 2);
+    later["lastMessage"] = entry(1001, json!("1001"));
+    let (report, read) = list_gone_again(&server, &mut a, later.clone()).await;
+    assert!(
+        report.unreadable.len() == 1 && report.unreadable[0].forgotten,
+        "{report:?}"
+    );
+    assert!(read > 0);
+    assert_eq!(a.store.conversation(GONE).unwrap(), None);
+    let (_, read) = list_gone_again(&server, &mut a, later).await;
+    assert_eq!(read, 0, "as it was again");
+
+    // a newer version: read again
+    let (report, read) = list_gone_again(&server, &mut a, listed(GONE, 3)).await;
+    assert_eq!(report.unreadable.len(), 1, "{report:?}");
+    assert!(read > 0);
+    let (_, read) = list_gone_again(&server, &mut a, listed(GONE, 3)).await;
+    assert_eq!(read, 0, "as it was again");
+}
+
+#[tokio::test]
+async fn a_deleted_thread_that_reads_again_is_synced_as_any_other() {
+    let server = MockServer::start().await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    list_gone_again(&server, &mut a, listed(GONE, 2)).await;
+    assert_eq!(a.store.conversation(GONE).unwrap(), None);
+
+    // recreated: the list shows it newer and its reads answer
+    server.reset().await;
+    mount_list(&server, vec![listed(GONE, 3)], "l2").await;
+    mount_pages(&server, vec![("", page(vec![], Some("s1"), None))]).await;
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(format!("/api/chatsvc/amer/v1/threads/{GONE}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": GONE, "members": []})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    a.store.set_conversation_list_sync_link(None, 0).unwrap();
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.unreadable.is_empty() && report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        a.store.conversation(GONE).unwrap().map(|stored| stored.version),
+        Some(3)
+    );
+    assert_eq!(
+        a.store.forgotten_thread(GONE).unwrap(),
+        None,
+        "stored again: no longer forgotten"
+    );
+}
+
 #[tokio::test]
 async fn a_write_waiting_on_a_deleted_thread_is_told_failed_and_never_sent() {
     let server = MockServer::start().await;

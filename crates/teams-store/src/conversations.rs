@@ -65,6 +65,16 @@ pub struct Forgotten {
     pub unsent: Vec<OutboxEntry>,
 }
 
+/// A thread the store forgot as deleted for good ([`Store::forget_conversation`]), as it was stored then: a
+/// conversation list that still names it shows it changed only at a newer version or a later last message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgottenThread {
+    /// The thread's `version` when it was forgotten.
+    pub version: i64,
+    /// Its last activity then (milliseconds), when one was known.
+    pub last_activity: Option<i64>,
+}
+
 /// A member of a conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
@@ -114,6 +124,8 @@ impl Store {
             .optional()?;
         let applied = match stored {
             None => {
+                // stored again: no longer forgotten
+                tx.execute("DELETE FROM forgotten_conversations WHERE id = ?1", [&conversation.id])?;
                 tx.execute(
                     "INSERT INTO conversations (id, kind, topic, version, last_activity) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
@@ -160,6 +172,8 @@ impl Store {
     /// entries), read horizons, sync state and its mark to be synced again all go with its row; its outbox rows and its
     /// place among the favourites, which don't reference it, go in the same transaction. For a thread the service says
     /// is gone (hard-deleted): whether it was stored, and its rows that weren't sent (a write to it can never succeed).
+    /// What stays is its version and last activity ([`Store::forgotten_thread`]) until it is stored again, so a
+    /// conversation list that still names it isn't taken for one bringing a new conversation.
     ///
     /// # Errors
     ///
@@ -168,12 +182,39 @@ impl Store {
         let tx = self.conn.transaction()?;
         let unsent = crate::outbox::forget_rows(&tx, id)?;
         tx.execute("DELETE FROM favorites WHERE conversation_id = ?1", [id])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO forgotten_conversations (id, version, last_activity)
+             SELECT id, version, last_activity FROM conversations WHERE id = ?1",
+            [id],
+        )?;
         let removed = tx.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(Forgotten {
             stored: removed > 0,
             unsent,
         })
+    }
+
+    /// The thread `id` as the store forgot it as deleted ([`Store::forget_conversation`]); none when it never was, or
+    /// was stored again since.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn forgotten_thread(&self, id: &str) -> Result<Option<ForgottenThread>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT version, last_activity FROM forgotten_conversations WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(ForgottenThread {
+                        version: row.get(0)?,
+                        last_activity: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// One conversation.

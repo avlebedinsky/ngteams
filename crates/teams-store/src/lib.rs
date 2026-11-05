@@ -1,7 +1,8 @@
 //! The native client's local store, one SQLite file per account (`<data_dir>/store/<alias>.sqlite`, mode `0600`, in
 //! WAL mode), outside the repo.
 //!
-//! - [`conversations`]: conversations by thread version, their members by roster version, the list by last activity;
+//! - [`conversations`]: conversations by thread version, their members by roster version, the list by last activity,
+//!   the threads forgotten as deleted (schema 19);
 //! - [`messages`]: messages by id and version (an edit or a soft delete is a newer version), reactions per user, pages
 //!   of a conversation, the unread count;
 //! - [`state`]: read horizons, the account's mark-all-read one, and where each conversation's sync stands;
@@ -45,7 +46,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 pub use calendar::StoredEvent;
-pub use conversations::{Conversation, ConversationKind, Forgotten, Member};
+pub use conversations::{Conversation, ConversationKind, Forgotten, ForgottenThread, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange, counts_unread};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
 pub use pictures::PictureCache;
