@@ -9,8 +9,9 @@
 
 use std::time::Duration;
 
-/// The longest transcript read, in bytes (a day of talk is a few megabytes).
-pub const MAX_TRANSCRIPT: usize = 16 * 1024 * 1024;
+/// The longest transcript read, in bytes: the most the transport reads of a site's answer ([`crate::MAX_BODY`]),
+/// hours of talk.
+pub const MAX_TRANSCRIPT: usize = crate::MAX_BODY;
 
 /// One cue of a transcript: a stretch of one speaker's words.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,8 @@ pub struct Cue {
 pub struct Turn {
     pub speaker: Option<String>,
     pub start: Duration,
-    /// Its cues, each a paragraph: where it starts and what it says.
+    /// Its paragraphs, one per utterance (the cues of one utterance joined, a cue without one a paragraph of its own):
+    /// where each starts and what it says.
     pub paragraphs: Vec<Paragraph>,
 }
 
@@ -121,9 +123,15 @@ fn timestamp(text: &str) -> Option<Duration> {
         return None;
     }
     let millis = number(millis)?;
-    Some(Duration::from_millis(
-        ((hours * 60 + minutes) * 60 + seconds) * 1_000 + millis,
-    ))
+    // an hour count too large for the arithmetic is no time a meeting has
+    let total = hours
+        .checked_mul(60)?
+        .checked_add(minutes)?
+        .checked_mul(60)?
+        .checked_add(seconds)?
+        .checked_mul(1_000)?
+        .checked_add(millis)?;
+    Some(Duration::from_millis(total))
 }
 
 /// A cue's speaker (its first `<v Name>`) and its words, every tag taken out and the entities read.

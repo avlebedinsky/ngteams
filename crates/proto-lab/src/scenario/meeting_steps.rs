@@ -44,9 +44,11 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let alias = alias_of("PROTO_LAB_ACCOUNT", Alias::A);
     let peer = alias_of("PROTO_LAB_PEER", if alias == Alias::B { Alias::A } else { Alias::B });
     // `PROTO_LAB_FAKE_AUDIO` names a WAV the microphone plays instead of the tone (speech, for a transcript to hold)
+    // (one that names no file stops the run: a meeting with no speech would leave an empty transcript, unexplained)
     let tone = match std::env::var_os("PROTO_LAB_FAKE_AUDIO").map(PathBuf::from) {
         Some(wav) if wav.is_file() => wav,
-        _ => write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?,
+        Some(wav) => return Err(setup(format!("PROTO_LAB_FAKE_AUDIO names no file: {}", wav.display()))),
+        None => write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?,
     };
     let session_options = SessionOptions {
         capture: Some(ScenarioName::MeetingSteps.as_str().to_owned()),

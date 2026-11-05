@@ -34,7 +34,7 @@ pub const UPGRADE_COPILOT: &str = "Upgrade Copilot";
 pub const UPGRADE_LINK: &str = "https://offer.m365.cloud.microsoft/launchpad/v1/launchpad.metaos.html?partnerId=teamsmetaoswebcommercial&experienceId=meetingnotes";
 
 /// The meeting's line: its day and its span on the account's clock, "Thursday, November 5, 2026 11:14 AM - 11:18
-/// AM"; the day alone without times.
+/// AM"; `None` when its parts give no start or no end (the recap shows the meeting's name instead).
 #[must_use]
 pub fn session_line<Tz: TimeZone>(parts: &[RecapPart], zone: &Tz, cycle: HourCycle) -> Option<String>
 where

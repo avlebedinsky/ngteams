@@ -286,6 +286,16 @@ impl VideoPlayer {
             )
     }
 
+    /// Pauses it while it plays or is loading to play (a recap's player its tab or part put away); nothing otherwise.
+    pub fn pause(&mut self, cx: &mut Context<Self>) {
+        if self.playing()
+            && let Some(player) = &self.player
+        {
+            player.send(Command::Pause);
+            cx.notify();
+        }
+    }
+
     /// Plays, or pauses while it plays; the first play opens the file.
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         if !self.playing() {

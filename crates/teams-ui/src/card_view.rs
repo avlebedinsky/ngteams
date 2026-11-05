@@ -76,11 +76,12 @@ impl PartialEq for ShownCards {
 impl Eq for ShownCards {}
 
 impl ShownCards {
-    /// The cards of a card message's `content`; `None` when it carries none.
+    /// The cards of a card message's `content`; `None` when it carries none this build draws (only attachments of
+    /// another kind: the message is drawn as one the app doesn't show, with Teams on the web to see it).
     #[must_use]
     pub fn of(content: &str) -> Option<Self> {
         card::card_message(content)
-            .filter(|message| !message.cards.is_empty() || message.unshown)
+            .filter(|message| !message.cards.is_empty())
             .map(|message| Self(Arc::new(message)))
     }
 
@@ -206,7 +207,7 @@ impl RenderOnce for CardsElement {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let mut base = HashMap::new();
         for card in &self.cards.0.cards {
-            base_visibility(&card.body, &mut base);
+            card_visibility(card, &mut base);
         }
         let draw = Draw {
             id: &self.id,
@@ -219,6 +220,11 @@ impl RenderOnce for CardsElement {
             base: &base,
         };
         let id = self.id.clone();
+        // an attachment beside the cards that isn't one (`CardMessage::unshown`) is said under them
+        let unshown = self.cards.0.unshown.then(|| {
+            let selector = draw.selector("unshown");
+            div().debug_selector(move || selector).child(unshown_line(draw.palette))
+        });
         div()
             .debug_selector(move || format!("cards-{id}"))
             .flex()
@@ -232,6 +238,7 @@ impl RenderOnce for CardsElement {
                     .enumerate()
                     .map(|(at, shown)| card_surface(&draw, &format!("c{at}"), shown, cx)),
             )
+            .children(unshown)
     }
 }
 
@@ -250,6 +257,22 @@ struct Draw<'a> {
 impl Draw<'_> {
     fn selector(&self, path: &str) -> String {
         format!("card-{}-{path}", self.id)
+    }
+}
+
+/// The ids of a card's elements, those of the cards its `ShowCard`s open among them, and whether each is visible to
+/// begin with.
+fn card_visibility(card: &Card, base: &mut HashMap<String, bool>) {
+    base_visibility(&card.body, base);
+    shown_cards_visibility(&card.actions, base);
+}
+
+/// The ids in the cards the `ShowCard`s among `actions` open.
+fn shown_cards_visibility(actions: &[Action], base: &mut HashMap<String, bool>) {
+    for action in actions {
+        if let ActionKind::ShowCard(shown) = &action.kind {
+            card_visibility(shown, base);
+        }
     }
 }
 
@@ -274,6 +297,7 @@ fn base_visibility(elements: &[Element], base: &mut HashMap<String, bool>) {
                     base_visibility(cell, base);
                 }
             }
+            Kind::Actions(actions) => shown_cards_visibility(actions, base),
             _ => {}
         }
     }
@@ -810,37 +834,33 @@ fn column_view(draw: &Draw<'_>, path: &str, column: &Column, cx: &mut App) -> An
     selectable(draw, &format!("{path}s"), column.select_action.as_deref(), inner)
 }
 
-/// A fact set: its titles, semibold, in a column beside its values.
+/// A fact set: its titles, semibold, in a column beside its values, each fact's title and value on one row of a grid
+/// (a value that wraps keeps the next fact's title beside the next value). The titles' column is as wide as its
+/// longest title, sharing the width evenly with the values when both can't have theirs.
 fn facts_view(draw: &Draw<'_>, path: &str, facts: &[(String, String)]) -> AnyElement {
     let palette = draw.palette;
     let cell = |text: &str, at: usize, title: bool| {
         let id = SharedString::from(draw.selector(&format!("{path}{at}{}", if title { "t" } else { "v" })));
+        let selector = id.to_string();
         div()
+            .debug_selector(move || selector)
+            .min_w_0()
             .when(title, |div| div.font_weight(FontWeight::SEMIBOLD))
             .child(rich_text::render(&id, &laid_out(text, draw.cycle), palette))
     };
-    let titles = div()
-        .flex_none()
-        .max_w(relative(0.5))
-        .flex()
-        .flex_col()
-        .gap_2()
-        .children(facts.iter().enumerate().map(|(at, (title, _))| cell(title, at, true)));
-    let values = div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .children(facts.iter().enumerate().map(|(at, (_, value))| cell(value, at, false)));
     let selector = draw.selector(path);
     styled(TextLook::default(), HAlign::Left, palette)
         .debug_selector(move || selector)
-        .flex()
-        .flex_row()
-        .gap_3()
-        .child(titles)
-        .child(values)
+        .grid()
+        .grid_cols_max_content(2)
+        .gap_x_3()
+        .gap_y_2()
+        .children(
+            facts
+                .iter()
+                .enumerate()
+                .flat_map(|(at, (title, value))| [cell(title, at, true), cell(value, at, false)]),
+        )
         .into_any_element()
 }
 

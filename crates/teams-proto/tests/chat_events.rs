@@ -48,6 +48,9 @@ fn a_call_event_gives_its_meetings_scheduled_times_and_call() {
         "01/02/2026 24:00:00",
         "01/02/2026",
         "1/2/2026 1:2:3:4",
+        "01/02/9223372036854775807 10:00:00",
+        "02/31/2026 10:00:00",
+        "02/29/2027 10:00:00",
         "x",
     ] {
         let content = format!("<startTime>{bad}</startTime><endTime>01/02/2027 10:00:00</endTime>");

@@ -286,23 +286,18 @@ fn utc_ms(text: &str) -> Option<i64> {
     if date.next().is_some() || time.next().is_some() {
         return None;
     }
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hours > 23 || minutes > 59 || seconds > 59 {
-        return None;
-    }
-    let days = days_from_civil(i64::try_from(year).ok()?, month, day);
-    let seconds = days * 86_400 + i64::try_from(hours * 3_600 + minutes * 60 + seconds).ok()?;
-    Some(seconds * 1_000)
-}
-
-/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's `days_from_civil`); `month` 1–12.
-fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
-    let (month, day) = (i64::try_from(month).unwrap_or(1), i64::try_from(day).unwrap_or(1));
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let of_era = year - era * 400;
-    let of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
-    era * 146_097 + of_cycle - 719_468
+    // a day the month has (not 02/31), a four-digit year as every captured one is
+    let year = i32::try_from(year).ok().filter(|year| (1..=9999).contains(year))?;
+    let month = ::time::Month::try_from(u8::try_from(month).ok()?).ok()?;
+    let date = ::time::Date::from_calendar_date(year, month, u8::try_from(day).ok()?).ok()?;
+    let clock = ::time::Time::from_hms(
+        u8::try_from(hours).ok()?,
+        u8::try_from(minutes).ok()?,
+        u8::try_from(seconds).ok()?,
+    )
+    .ok()?;
+    let at = ::time::PrimitiveDateTime::new(date, clock).assume_utc();
+    i64::try_from(at.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
 /// A number written as digits only (as every captured count and length is); anything else is no number.

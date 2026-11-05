@@ -1,7 +1,7 @@
 //! A card a workflow posted (`RichText/Media_Card`), drawn as Teams draws it (`teams_ui::card_view`), on GPUI's test
 //! context over the fake engine: the card on its own surface beside the Workflows bot's avatar, its text, its picture
 //! asked of the engine by the gateway's thumbnail of its link, its buttons (a link opened, a shown card opened and
-//! closed, elements toggled, a bot's button opening the chat in Teams on the web), and the note for what it can't show.
+//! closed, elements toggled, a bot's button opening its message in Teams on the web), and the note for what it can't show.
 //! Every card here is synthetic: every word, link and id is made up.
 
 use std::sync::Arc;
@@ -11,7 +11,6 @@ use base64::engine::general_purpose::STANDARD;
 use gpui::{Bounds, Modifiers, Pixels, VisualTestContext};
 use serde_json::{Value, json};
 use teams_proto::LinkPreviewPicture;
-use teams_proto::chat::web_chat_link;
 use teams_store::Message;
 use teams_ui::card_view::CARD_WIDTH;
 use teams_ui::chat_list;
@@ -26,10 +25,15 @@ const ICON: &str = "https://example.invalid/icon.png";
 
 /// A card message from the Workflows bot carrying the Adaptive Card `card`.
 fn card_message(id: &str, card: &Value) -> Message {
-    let activity = json!({
-        "type": "message/card",
-        "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": card}],
-    });
+    attachments_message(
+        id,
+        &json!([{"contentType": "application/vnd.microsoft.card.adaptive", "content": card}]),
+    )
+}
+
+/// A card message from the Workflows bot carrying `attachments`.
+fn attachments_message(id: &str, attachments: &Value) -> Message {
+    let activity = json!({"type": "message/card", "attachments": attachments});
     let b64 = STANDARD.encode(serde_json::to_vec(&activity).unwrap());
     let content = format!(
         "<URIObject type=\"SWIFT.1\">Card - access it on <a href=\"https://go.skype.com/cards.unsupported\">\
@@ -140,9 +144,12 @@ fn a_cards_buttons_open_links_toggle_and_show_cards_and_send_to_teams_on_the_web
     assert!(bounds(cx, &format!("card-{ID}-c0a2cb0.")).is_some());
     click(cx, &format!("card-{ID}-c0a2"));
     assert!(bounds(cx, &format!("card-{ID}-c0a2cb0.")).is_none());
-    // a button that sends to the bot opens the chat in Teams on the web, never a bot invoke
+    // a button that sends to the bot opens its message in Teams on the web, never a bot invoke
     click(cx, &format!("card-{ID}-c0a3"));
-    assert_eq!(cx.opened_url(), Some(web_chat_link(super::AB)));
+    assert_eq!(
+        cx.opened_url(),
+        Some(teams_proto::workflow::MessageRun::link_to(super::AB, ID, None))
+    );
 }
 
 #[test]
@@ -156,6 +163,76 @@ fn a_card_with_an_input_says_it_has_content_it_cant_show() {
     let (_view, cx) = chat_window(&rig, written_trace);
     assert!(bounds(cx, &format!("card-{ID}-c0b0.")).is_some());
     assert!(bounds(cx, &format!("card-{ID}-c0unshown")).is_some());
+}
+
+#[test]
+fn a_toggle_in_a_shown_card_shows_its_hidden_element_on_the_first_click() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Top"}],
+        "actions": [{"type": "Action.ShowCard", "title": "More", "card": {
+            "type": "AdaptiveCard",
+            "body": [{"type": "TextBlock", "id": "inner", "isVisible": false, "text": "Inner"}],
+            "actions": [{"type": "Action.ToggleVisibility", "title": "Reveal", "targetElements": ["inner"]}]
+        }}]
+    });
+    let rig = rig_with(vec![card_message(ID, &card)]);
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(bounds(cx, &format!("card-{ID}-c0a0cb0.")).is_none());
+    click(cx, &format!("card-{ID}-c0a0ca0"));
+    assert!(bounds(cx, &format!("card-{ID}-c0a0cb0.")).is_some());
+}
+
+#[test]
+fn a_facts_title_stays_beside_its_value_when_the_value_before_wraps() {
+    let long = "a value long enough to wrap over several lines of its card, and then over a few more lines still, \
+                as a task's description does";
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "FactSet", "facts": [
+            {"title": "Description", "value": long},
+            {"title": "Due", "value": "Friday"}
+        ]}]
+    });
+    let rig = rig_with(vec![card_message(ID, &card)]);
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    let cell = |cx: &mut VisualTestContext, at: &str| bounds(cx, &format!("card-{ID}-c0b0.{at}")).expect(at);
+    let first_value = cell(cx, "0v");
+    let (title, value) = (cell(cx, "1t"), cell(cx, "1v"));
+    assert!(
+        first_value.size.height > value.size.height * 1.5,
+        "the first value wraps: {first_value:?} {value:?}"
+    );
+    assert_eq!(
+        title.origin.y, value.origin.y,
+        "the second fact's title is on its value's row"
+    );
+    assert!(title.origin.y >= first_value.origin.y + first_value.size.height);
+    assert!(value.origin.x > title.origin.x + title.size.width);
+}
+
+#[test]
+fn an_attachment_that_isnt_a_card_is_said_never_left_blank() {
+    let connector = json!({"contentType": "application/vnd.microsoft.teams.card.o365connector", "content": {}});
+    let adaptive = json!({
+        "contentType": "application/vnd.microsoft.card.adaptive",
+        "content": {"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Shown"}]}
+    });
+    let rig = rig_with(vec![
+        attachments_message("601", &json!([connector.clone()])),
+        attachments_message("602", &json!([adaptive, connector])),
+    ]);
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    // nothing it draws: the message the app doesn't show, with Teams on the web to see it
+    assert!(bounds(cx, "unsupported-601").is_some());
+    assert!(bounds(cx, "cards-601").is_none());
+    // a card and an attachment of another kind: the card, and the note under it
+    assert!(bounds(cx, "card-602-c0b0.").is_some());
+    assert!(bounds(cx, "card-602-unshown").is_some());
 }
 
 #[test]

@@ -4108,7 +4108,12 @@ fn bubble(
         Body::Deleted => muted(DELETED, palette),
         Body::Cards(cards) => {
             let drawn = CardsElement::new(item.id.clone(), cards.clone(), palette, HourCycle::Twelve)
-                .in_teams(Some(web_chat_link(chat.conversation)));
+                // a button that sends to the bot opens the card's message in Teams on the web, where it runs
+                .in_teams(Some(teams_proto::workflow::MessageRun::link_to(
+                    chat.conversation,
+                    &item.id,
+                    None,
+                )));
             match &chat.cards {
                 Some(hook) => drawn
                     .state(hook.state.clone(), Rc::clone(&hook.on_state))

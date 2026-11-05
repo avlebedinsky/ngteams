@@ -612,9 +612,7 @@ impl Shell {
         if !matches!(before, Main::Settings | Main::Search) {
             self.before_settings = before;
         }
-        if let Some(chat) = &self.chat {
-            chat.update(cx, |chat, cx| chat.set_shown(false, cx));
-        }
+        self.put_chat_away(cx);
         self.leave_workflows(cx);
         self.close_switcher(window, cx);
         self.close_search(cx);
@@ -1208,7 +1206,8 @@ impl Shell {
             .row(id)
             .filter(|row| row.named)
             .map(|row| row.name.clone());
-        chat.update(cx, |chat, cx| chat.set_title(title, cx));
+        chat.update(cx, |chat, cx| chat.set_title(title.clone(), cx));
+        self.retitle_recap(title, cx);
     }
 
     /// Traces what the chat's header shows (`header shown`: the chat; its other member's presence, `none` for a chat
@@ -1541,9 +1540,7 @@ impl Shell {
 
     /// Shows `main` in the conversation pane, the chat that was there put away.
     fn show_main(&mut self, main: Main, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(chat) = &self.chat {
-            chat.update(cx, |chat, cx| chat.set_shown(false, cx));
-        }
+        self.put_chat_away(cx);
         self.teams.update(cx, |teams, cx| teams.select(None, cx));
         self.list.update(cx, |list, cx| list.select(None, cx));
         self.main = main;
@@ -1857,9 +1854,7 @@ impl Shell {
                 settings.change(|settings| settings.set_selected_chat(&account, None), cx);
             });
         }
-        if let Some(chat) = &self.chat {
-            chat.update(cx, |chat, cx| chat.set_shown(false, cx));
-        }
+        self.put_chat_away(cx);
         self.main = Main::Channel(chosen.id);
         self.hide_calendar(window, cx);
         self.close_switcher(window, cx);
@@ -1929,9 +1924,7 @@ impl Shell {
             if !matches!(before, Main::Settings | Main::Calendar) {
                 self.before_settings = before;
             }
-            if let Some(chat) = &self.chat {
-                chat.update(cx, |chat, cx| chat.set_shown(false, cx));
-            }
+            self.put_chat_away(cx);
         }
         let focus = self.search_box.read(cx).results_focus().clone();
         focus.focus(window, cx);
@@ -1997,13 +1990,26 @@ impl Shell {
         self.trace_call_button(cx);
         self.close_switcher(window, cx);
         self.close_search(cx);
-        // the chat opened takes what is typed next, and is shown (read receipts may go)
+        // the chat opened takes what is typed next, and is shown (read receipts may go); a meeting chat opened again on
+        // its Recap or Shared tab keeps that tab, its chat neither shown nor typed into
         if let Some(chat) = &self.chat {
-            chat.update(cx, |chat, cx| chat.set_shown(true, cx));
-            let compose = chat.read(cx).compose().clone();
-            compose.update(cx, |compose, cx| compose.focus(window, cx));
+            let shown = self.chat_tab_shown();
+            chat.update(cx, |chat, cx| chat.set_shown(shown, cx));
+            if shown {
+                let compose = chat.read(cx).compose().clone();
+                compose.update(cx, |compose, cx| compose.focus(window, cx));
+            }
         }
         cx.notify();
+    }
+
+    /// The chat shown was put away (another view took the pane): it isn't shown (no read receipts go), and a meeting
+    /// recap's recording stops playing.
+    fn put_chat_away(&self, cx: &mut App) {
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.set_shown(false, cx));
+        }
+        self.pause_meeting_tabs(cx);
     }
 
     fn keep_draft(&mut self, cx: &App) {
@@ -2121,9 +2127,7 @@ impl Shell {
             if !matches!(before, Main::Calendar | Main::Search) {
                 self.before_settings = before;
             }
-            if let Some(chat) = &self.chat {
-                chat.update(cx, |chat, cx| chat.set_shown(false, cx));
-            }
+            self.put_chat_away(cx);
             self.leave_workflows(cx);
             cx.notify();
         }

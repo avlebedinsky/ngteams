@@ -73,15 +73,39 @@ impl Shell {
         self.meeting_tabs.shared.as_ref()
     }
 
-    /// Another chat was opened: its tabs start on Chat, the other chat's views let go.
+    /// Another chat was opened: its tabs start on Chat, the other chat's views let go. The same chat opened again keeps
+    /// its tab and its views.
     pub(super) fn reset_meeting_tabs(&mut self, chat: &str, cx: &App) {
-        let kept = self
-            .meeting_tabs
+        let tabs = &self.meeting_tabs;
+        let kept = tabs
             .recap
             .as_ref()
-            .is_some_and(|recap| recap.read(cx).conversation() == chat);
+            .is_some_and(|recap| recap.read(cx).conversation() == chat)
+            || tabs
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.read(cx).conversation() == chat);
         if !kept {
             self.meeting_tabs = MeetingTabs::default();
+        }
+    }
+
+    /// Whether the chat view itself is what the conversation pane shows of its chat (not a meeting's other tab).
+    pub(super) fn chat_tab_shown(&self) -> bool {
+        self.meeting_tabs.shown == ChatTab::Chat
+    }
+
+    /// The meeting chat shown was put away (another view took the pane): its recap's recording stops playing.
+    pub(super) fn pause_meeting_tabs(&self, cx: &mut App) {
+        if let Some(recap) = &self.meeting_tabs.recap {
+            recap.update(cx, RecapView::pause);
+        }
+    }
+
+    /// The meeting's name as the list now has it, for the recap's file names.
+    pub(super) fn retitle_recap(&self, title: Option<SharedString>, cx: &mut App) {
+        if let (Some(recap), Some(title)) = (&self.meeting_tabs.recap, title) {
+            recap.update(cx, |recap, cx| recap.set_title(title, cx));
         }
     }
 
@@ -94,10 +118,17 @@ impl Shell {
         let id = id.clone();
         self.trace
             .record(&TraceLine::new("chat-tab", "shown").conversation(&id).kind(tab.key()));
-        if tab == ChatTab::Recap && self.meeting_tabs.recap.is_none() {
-            let title = self.meeting_title(&id, cx);
-            let core = Arc::clone(&self.core);
-            self.meeting_tabs.recap = Some(cx.new(|cx| RecapView::new(core, id.clone(), title, window, cx)));
+        match &self.meeting_tabs.recap {
+            None if tab == ChatTab::Recap => {
+                let title = self.meeting_title(&id, cx);
+                let core = Arc::clone(&self.core);
+                self.meeting_tabs.recap = Some(cx.new(|cx| RecapView::new(core, id.clone(), title, window, cx)));
+            }
+            // shown again: a recap that held nothing yet is read again (a recording saved since)
+            Some(recap) if tab == ChatTab::Recap => recap.update(cx, RecapView::read_again_if_empty),
+            // put away: its recording doesn't play on unseen
+            Some(recap) => recap.update(cx, RecapView::pause),
+            None => {}
         }
         if tab == ChatTab::Shared && self.meeting_tabs.shared.is_none() {
             let core = Arc::clone(&self.core);

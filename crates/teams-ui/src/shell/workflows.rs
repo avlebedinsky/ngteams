@@ -74,9 +74,7 @@ impl Shell {
             if !matches!(before, Main::Settings | Main::Calendar | Main::Search) {
                 self.before_settings = before;
             }
-            if let Some(chat) = &self.chat {
-                chat.update(cx, |chat, cx| chat.set_shown(false, cx));
-            }
+            self.put_chat_away(cx);
             self.close_switcher(window, cx);
             self.close_search(cx);
         }

@@ -90,7 +90,8 @@ pub struct RecapView {
     selected: usize,
     pane: Pane,
     transcripts: HashMap<String, Read>,
-    players: HashMap<usize, (Entity<VideoPlayer>, Subscription)>,
+    /// Each recording's player, by its sharing link (a part's place can change when the recap is read again).
+    players: HashMap<String, (Entity<VideoPlayer>, Subscription)>,
     /// The paragraph being spoken, as last kept in view.
     spoken: Option<(usize, usize)>,
     /// The recording asked for ("View recap" on its card) before the parts were read.
@@ -191,6 +192,27 @@ impl RecapView {
         cx.notify();
     }
 
+    /// Pauses its recordings: the tab, or the chat, was put away (a player out of sight keeps no sound going).
+    pub fn pause(&mut self, cx: &mut Context<Self>) {
+        for (player, _) in self.players.values() {
+            player.update(cx, VideoPlayer::pause);
+        }
+    }
+
+    /// The tab shown again (or "View recap" clicked): a recap that couldn't be read, or that held nothing yet (a
+    /// recording still being saved, which MCPS lists only once it is), is read again with the chat's files.
+    pub fn read_again_if_empty(&mut self, cx: &mut Context<Self>) {
+        let empty = match &self.contents {
+            Contents::Reading => false,
+            Contents::Failed => true,
+            Contents::Read(parts) => parts.is_empty(),
+        };
+        if empty {
+            self.read(cx);
+            self.read_files(cx);
+        }
+    }
+
     /// Reads the meeting's contents (again).
     pub fn read(&mut self, cx: &mut Context<Self>) {
         self.contents = Contents::Reading;
@@ -202,6 +224,13 @@ impl RecapView {
                     Ok(contents) => Contents::Read(recap_parts(&contents)),
                     Err(_) => Contents::Failed,
                 };
+                // read again (Refresh), the parts may be fewer: a part gone takes its player with it
+                let parts = this.parts().unwrap_or_default();
+                let recordings: Vec<String> = parts.iter().filter_map(|part| part.recording.clone()).collect();
+                if this.selected >= parts.len() {
+                    this.selected = 0;
+                }
+                this.players.retain(|link, _| recordings.contains(link));
                 if let Some(recording) = this.wanted.take() {
                     this.show_recording(recording, cx);
                 }
@@ -258,13 +287,7 @@ impl RecapView {
         if self.parts().is_none_or(|parts| index >= parts.len()) {
             return;
         }
-        if let Some((player, _)) = self.players.get(&self.selected) {
-            player.update(cx, |player, cx| {
-                if matches!(player.state(), Some(teams_media::player::State::Playing)) {
-                    player.toggle(cx);
-                }
-            });
-        }
+        self.pause(cx);
         self.selected = index;
         self.spoken = None;
         self.search = None;
@@ -345,14 +368,14 @@ impl RecapView {
     /// The shown part's player, made when first asked for.
     fn player(&mut self, cx: &mut Context<Self>) -> Option<Entity<VideoPlayer>> {
         let index = self.selected;
-        if let Some((player, _)) = self.players.get(&index) {
+        let link = self.part()?.recording.clone()?;
+        if let Some((player, _)) = self.players.get(&link) {
             return Some(player.clone());
         }
-        let link = self.part()?.recording.clone()?;
         let file = SharedFile {
             name: format!("{}.mp4", self.title),
             extension: "mp4".to_owned(),
-            share_url: Some(link),
+            share_url: Some(link.clone()),
             object_url: None,
             preview: None,
         };
@@ -360,7 +383,7 @@ impl RecapView {
         let id = format!("recap-{index}");
         let player = cx.new(|cx| VideoPlayer::new(id, file, source, cx).filling());
         let watched = cx.observe(&player, |this, player, cx| this.follow(&player, cx));
-        self.players.insert(index, (player.clone(), watched));
+        self.players.insert(link, (player.clone(), watched));
         Some(player)
     }
 

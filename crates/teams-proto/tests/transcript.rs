@@ -92,6 +92,11 @@ fn a_file_that_isnt_a_transcript_reads_as_none() {
         read_vtt("WEBVTT\n\n00:00:1.0 --> 00:00:02.000\nbad\n\n00:61:00.000 --> 00:62:00.000\nbad"),
         None
     );
+    // an hour count past what a time can hold
+    assert_eq!(
+        read_vtt("WEBVTT\n\n18446744073709551615:00:00.000 --> 18446744073709551615:00:01.000\nlong"),
+        None
+    );
     // an empty cue says nothing
     assert_eq!(
         read_vtt("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v Ada Lab></v>"),

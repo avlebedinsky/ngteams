@@ -245,3 +245,52 @@ fn the_shared_tab_lists_what_the_chat_shared_and_another_chat_opens_on_chat() {
     assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Chat);
     assert!(cx.update(|_, cx| shell.read(cx).shared_view().is_none()));
 }
+
+fn reopen(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_chat(fixtures::MEETING.to_owned(), window, cx);
+        });
+    });
+    draw(cx);
+}
+
+fn chat_shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| shell.read(cx).chat().map(|chat| chat.read(cx).is_shown()))
+        .expect("a chat view")
+}
+
+#[test]
+fn the_same_chat_opened_again_keeps_its_tab_its_chat_unseen() {
+    let rig = rig(false);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    for (tab, selector) in [(ChatTab::Recap, "chat-tab-recap"), (ChatTab::Shared, "chat-tab-shared")] {
+        click(cx, selector);
+        reopen(&shell, cx);
+        assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), tab);
+        // the chat under the tab is neither shown (no read receipts go) nor typed into
+        assert!(!chat_shown(&shell, cx), "{tab:?}");
+        click(cx, "chat-tab-chat");
+        assert!(chat_shown(&shell, cx));
+    }
+}
+
+#[test]
+fn a_recap_that_held_nothing_is_read_again_when_shown_again() {
+    let rig = rig(false);
+    locked(&rig.core.meeting_contents).insert(fixtures::MEETING.to_owned(), Vec::new());
+    let (_shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    assert!(cx.debug_bounds("recap-part-0").is_none());
+    assert_eq!(asked(&rig, "meeting_contents"), 1);
+    // the recording saved since: the tab shown again reads it
+    locked(&rig.core.meeting_contents).insert(fixtures::MEETING.to_owned(), fixtures::recorded());
+    click(cx, "chat-tab-chat");
+    click(cx, "chat-tab-recap");
+    assert_eq!(asked(&rig, "meeting_contents"), 2);
+    assert!(cx.debug_bounds("recap-part-0").is_some());
+    // a recap that held something isn't read again
+    click(cx, "chat-tab-chat");
+    click(cx, "chat-tab-recap");
+    assert_eq!(asked(&rig, "meeting_contents"), 2);
+}
