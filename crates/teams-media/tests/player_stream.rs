@@ -244,7 +244,13 @@ fn a_presentation_plays_faster_its_sound_s_pitch_kept() {
     );
     // back at 1× (a rate past the slowest is kept to it, one that isn't a number is 1×)
     player.send(Command::Rate(0.1));
+    seen.wait_for_any(Duration::from_secs(10), |status| {
+        (status.rate - 0.8).abs() < f64::EPSILON
+    });
     player.send(Command::Rate(f64::NAN));
+    seen.wait_for_any(Duration::from_secs(10), |status| {
+        (status.rate - 1.0).abs() < f64::EPSILON
+    });
     player.send(Command::Seek(Duration::from_secs(1)));
     seen.wait_for(State::Paused, Duration::from_secs(10));
     let started = Instant::now();
@@ -302,6 +308,30 @@ fn a_paused_seek_shows_the_frame_there_and_reads_from_its_segment() {
     player.send(Command::Volume(f64::NAN));
     player.send(Command::Pause);
     seen.wait_for(State::Paused, Duration::from_secs(10));
+}
+
+/// Its volume and its mute reach the sound the speaker gets: a quarter as loud once turned down, silent once muted.
+#[test]
+fn a_presentation_s_volume_and_mute_reach_its_sound() {
+    let source = Arc::new(SlowParts::default());
+    let (player, seen, speaker) = open_with(source, true);
+    seen.wait_for_any(Duration::from_secs(10), |status| {
+        status.position >= Duration::from_millis(900)
+    });
+    player.send(Command::Volume(0.25));
+    seen.wait_for_any(Duration::from_secs(10), |status| {
+        status.position >= Duration::from_millis(1_900)
+    });
+    player.send(Command::Muted(true));
+    seen.wait_for(State::Ended, Duration::from_secs(20));
+    let sound = speaker.0.lock().unwrap().clone();
+    assert!(sound.len() >= 48_000 * 27 / 10, "{} samples", sound.len());
+    // the tone's amplitude between two times, in ms (48 samples each)
+    let at = |from: usize, to: usize| amplitude_at(&sound[48 * from..48 * to], 1_000.0);
+    let (loud, quieter, muted) = (at(250, 750), at(1_400, 1_800), at(2_400, 2_700));
+    assert!(loud > 0.03, "{loud}");
+    assert!((0.15..0.4).contains(&(quieter / loud)), "{quieter} of {loud}");
+    assert!(muted < loud / 20.0, "{muted} of {loud}");
 }
 
 #[test]

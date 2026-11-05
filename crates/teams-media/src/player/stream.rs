@@ -465,13 +465,24 @@ fn branch(
         hungry: AtomicBool::new(false),
         abandon: Mutex::new(Abandon::new()),
     });
-    let (hungry, enough, seeking) = (Arc::clone(&lane), Arc::clone(&lane), Arc::clone(&lane));
+    // the `appsrc` holds its callbacks and the lane holds the `appsrc`: they hold the lane weakly, or neither would go
+    let (hungry, enough, seeking) = (Arc::downgrade(&lane), Arc::downgrade(&lane), Arc::downgrade(&lane));
     src.set_callbacks(
         gst_app::AppSrcCallbacks::builder()
-            .need_data(move |_, _| hungry.wants(true))
-            .enough_data(move |_| enough.wants(false))
+            .need_data(move |_, _| {
+                if let Some(lane) = hungry.upgrade() {
+                    lane.wants(true);
+                }
+            })
+            .enough_data(move |_| {
+                if let Some(lane) = enough.upgrade() {
+                    lane.wants(false);
+                }
+            })
             .seek_data(move |_, at| {
-                seeking.seek(Duration::from_nanos(at));
+                if let Some(lane) = seeking.upgrade() {
+                    lane.seek(Duration::from_nanos(at));
+                }
                 true
             })
             .build(),
@@ -540,7 +551,12 @@ fn feed(streamed: &Streamed, lane: &Lane, source: &dyn SegmentSource, opened: &O
         }
         if next >= segments {
             if !ended {
-                let _ = lane.src.end_of_stream();
+                // under the push's lock, as a sample is: an end said after a seek came would end the `appsrc` for
+                // the place the seek put it (its flush clears an end only once that seek's callback returned)
+                let _pushing = lane.push.lock().unwrap_or_else(PoisonError::into_inner);
+                if lane.place().seek == place.seek {
+                    let _ = lane.src.end_of_stream();
+                }
                 ended = true;
             }
             lane.wait_for_seek(place.seek, streamed);

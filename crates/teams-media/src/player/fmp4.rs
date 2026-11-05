@@ -57,6 +57,10 @@ pub struct Sample {
 /// `sample_is_non_sync_sample` in a sample's flags.
 const NON_SYNC: u32 = 0x0001_0000;
 
+/// The most samples a media segment is read with: far more than one holds (a 6 s segment at 60 fps has 360), so a
+/// run claiming more (a count whose samples take no bytes, as no encoder writes one) doesn't add up.
+pub const MAX_SAMPLES: usize = 65_536;
+
 /// The boxes of `bytes`: each one's type and body (`size` 1 is a 64-bit size, 0 runs to the end); stops at one
 /// that doesn't fit.
 fn boxes(bytes: &[u8]) -> impl Iterator<Item = ([u8; 4], Range<usize>)> + '_ {
@@ -159,8 +163,11 @@ pub fn read_init(bytes: &[u8]) -> Option<TrackInit> {
 /// The media time an edit list's first edit that isn't empty starts at.
 fn edit_start(elst: &[u8]) -> Option<u64> {
     let (version, _, rest) = full(elst)?;
-    let count = usize::try_from(u32_at(rest, 0)?).ok()?;
     let size = if version == 1 { 20 } else { 12 };
+    // the entries the box holds, whatever its count says
+    let count = usize::try_from(u32_at(rest, 0)?)
+        .ok()?
+        .min(rest.len().saturating_sub(4) / size);
     (0..count).find_map(|index| {
         let at = 4 + index * size;
         let time = if version == 1 {
@@ -247,7 +254,7 @@ fn audio_config(esds: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Reads a media segment's samples (its `moof`s' first track fragment each, their bytes in the segment); `None` for
-/// one that doesn't add up (a sample's bytes past the segment's end).
+/// one that doesn't add up (a sample's bytes past the segment's end, more than [`MAX_SAMPLES`] samples).
 #[must_use]
 pub fn read_samples(bytes: &[u8], init: &TrackInit) -> Option<Vec<Sample>> {
     let mut samples = Vec::new();
@@ -334,6 +341,9 @@ impl Run {
     fn read(&mut self, trun: &[u8], len: usize, samples: &mut Vec<Sample>) -> Option<()> {
         let (version, flags, trun) = full(trun)?;
         let count = usize::try_from(u32_at(trun, 0)?).ok()?;
+        if count > MAX_SAMPLES.saturating_sub(samples.len()) {
+            return None;
+        }
         let mut at = 4;
         if flags & 0x1 != 0 {
             let offset = i32::from_be_bytes(trun.get(at..at + 4)?.try_into().ok()?);
@@ -600,10 +610,37 @@ mod tests {
         assert_eq!((samples[0].decode, samples[0].key), (500, false));
         // a sample past the segment's end
         let long = bx(*b"trun", &fb(0, 0x201, &words(&[1, 8, 400])));
-        let moof = bx(*b"moof", &bx(*b"traf", &[tfhd, long].concat()));
+        let moof = bx(*b"moof", &bx(*b"traf", &[tfhd.clone(), long].concat()));
         assert!(read_samples(&[bx(*b"mdat", b"x"), moof].concat(), &init).is_none());
         // a moof without a track fragment
         assert!(read_samples(&bx(*b"moof", &bx(*b"mfhd", &[0; 8])), &init).is_none());
+        // a run claiming more samples than a segment holds, each taking no bytes (no field, a default size of 0)
+        let endless = bx(*b"trun", &fb(0, 0, &words(&[u32::MAX])));
+        let moof = bx(*b"moof", &bx(*b"traf", &[tfhd.clone(), endless].concat()));
+        assert!(read_samples(&moof, &init).is_none());
+        let most = u32::try_from(MAX_SAMPLES).unwrap();
+        let full_run = bx(*b"trun", &fb(0, 0, &words(&[most])));
+        let moof = bx(*b"moof", &bx(*b"traf", &[tfhd.clone(), full_run.clone()].concat()));
+        assert_eq!(
+            read_samples(&moof, &init).map(|samples| samples.len()),
+            Some(MAX_SAMPLES)
+        );
+        let one_more = bx(*b"trun", &fb(0, 0, &words(&[1])));
+        let moof = bx(*b"moof", &bx(*b"traf", &[tfhd, full_run, one_more].concat()));
+        assert!(read_samples(&moof, &init).is_none());
+    }
+
+    #[test]
+    fn an_edit_list_is_read_by_the_entries_it_holds_whatever_its_count() {
+        // a count of 4 billion over one entry: that entry read, the walk ended
+        let elst = fb(0, 0, &[&words(&[u32::MAX, 9000, 1500])[..], &[0, 1, 0, 0]].concat());
+        assert_eq!(edit_start(&elst), Some(1500));
+        let empty = fb(
+            0,
+            0,
+            &[&words(&[u32::MAX, 9000])[..], &[0xff; 4], &[0, 1, 0, 0]].concat(),
+        );
+        assert_eq!(edit_start(&empty), None);
     }
 
     #[test]
