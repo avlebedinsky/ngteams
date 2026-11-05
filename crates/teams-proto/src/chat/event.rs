@@ -105,6 +105,8 @@ pub struct Recording {
     pub initiator: Option<String>,
     /// Whether it started by itself (`isAutoRecording="True"`).
     pub automatic: bool,
+    /// Its player's link (`<a href>`, empty until it is ready), when it is an `https` link.
+    pub link: Option<String>,
 }
 
 impl Recording {
@@ -252,6 +254,57 @@ fn call(content: &str) -> Option<ChatEvent> {
     }))
 }
 
+/// A meeting's times as a call's event in its chat gives them (`<meetingDetails>`): when it was scheduled, and the
+/// call it is of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingTimes {
+    /// Its scheduled start and end, ms since the epoch (`<startTime>`, `<endTime>`: `MM/dd/yyyy HH:mm:ss`, UTC), when
+    /// both read and the end isn't before the start.
+    pub scheduled: Option<(i64, i64)>,
+    /// The call's id (`<callId>`), the one a recording's and a transcript's messages name.
+    pub call_id: Option<String>,
+}
+
+/// The times an `Event/Call`'s `content` gives; `None` when it gives neither.
+#[must_use]
+pub fn meeting_times(content: &str) -> Option<MeetingTimes> {
+    let html = Html::parse_fragment(bounded(content).0);
+    let start = first_text(&html, "starttime").and_then(|text| utc_ms(&text));
+    let end = first_text(&html, "endtime").and_then(|text| utc_ms(&text));
+    let scheduled = start.zip(end).filter(|(start, end)| end >= start);
+    let call_id = first_text(&html, "callid");
+    (scheduled.is_some() || call_id.is_some()).then_some(MeetingTimes { scheduled, call_id })
+}
+
+/// `MM/dd/yyyy HH:mm:ss` (UTC) as ms since the epoch.
+fn utc_ms(text: &str) -> Option<i64> {
+    let (date, time) = text.trim().split_once(' ')?;
+    let mut date = date.split('/');
+    let (month, day, year) = (digits(date.next()?)?, digits(date.next()?)?, digits(date.next()?)?);
+    let mut time = time.split(':');
+    let (hours, minutes, seconds) = (digits(time.next()?)?, digits(time.next()?)?, digits(time.next()?)?);
+    if date.next().is_some() || time.next().is_some() {
+        return None;
+    }
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hours > 23 || minutes > 59 || seconds > 59 {
+        return None;
+    }
+    let days = days_from_civil(i64::try_from(year).ok()?, month, day);
+    let seconds = days * 86_400 + i64::try_from(hours * 3_600 + minutes * 60 + seconds).ok()?;
+    Some(seconds * 1_000)
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's `days_from_civil`); `month` 1–12.
+fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
+    let (month, day) = (i64::try_from(month).unwrap_or(1), i64::try_from(day).unwrap_or(1));
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let of_era = year - era * 400;
+    let of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    era * 146_097 + of_cycle - 719_468
+}
+
 /// A number written as digits only (as every captured count and length is); anything else is no number.
 fn digits(text: &str) -> Option<u64> {
     (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
@@ -291,6 +344,10 @@ fn recording(content: &str) -> Option<Recording> {
             .filter(|mri| !mri.is_empty())
             .map(str::to_owned),
         automatic: initiator.and_then(|element| element.value().attr("isautorecording")) == Some("True"),
+        link: first_attribute(&html, "a", "href")
+            .map(str::trim)
+            .filter(|link| link.starts_with("https://"))
+            .map(str::to_owned),
     })
 }
 

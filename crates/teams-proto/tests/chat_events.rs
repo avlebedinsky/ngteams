@@ -5,7 +5,7 @@
 use teams_proto::chat::Field;
 use teams_proto::chat::{
     CallEnd, CallStart, ChatEvent, ChatPolicy, Member, Members, RecordingContents, RecordingStatus, Removed,
-    TopicUpdate, chat_event, thread_activity,
+    TopicUpdate, chat_event, meeting_times, thread_activity,
 };
 
 const ANN: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -26,6 +26,33 @@ fn details(event: &str) -> String {
          <callEventType>{event}</callEventType>\n<conversationStartTime>01/02/2026 10:00:05</conversationStartTime>\n\
          <callId>11111111-2222-4333-8444-555555555555</callId>\n"
     )
+}
+
+#[test]
+fn a_call_event_gives_its_meetings_scheduled_times_and_call() {
+    let times = meeting_times(&format!("<partlist alt =\"\"></partlist>{}", details("callStarted"))).expect("times");
+    // 2026-01-02 10:00 and 10:30 UTC
+    assert_eq!(times.scheduled, Some((1_767_348_000_000, 1_767_349_800_000)));
+    assert_eq!(times.call_id.as_deref(), Some("11111111-2222-4333-8444-555555555555"));
+    // a leap day, and an end before the start that is no schedule
+    let leap = meeting_times(
+        "<meetingDetails><startTime>02/29/2028 23:59:59</startTime><endTime>03/01/2028 00:00:00</endTime></meetingDetails>",
+    )
+    .expect("times");
+    assert_eq!(leap.scheduled, Some((1_835_481_599_000, 1_835_481_600_000)));
+    let backwards =
+        "<startTime>01/02/2026 10:30:00</startTime><endTime>01/02/2026 10:00:00</endTime><callId>c</callId>";
+    assert_eq!(meeting_times(backwards).and_then(|times| times.scheduled), None);
+    for bad in [
+        "13/01/2026 10:00:00",
+        "01/02/2026 24:00:00",
+        "01/02/2026",
+        "1/2/2026 1:2:3:4",
+        "x",
+    ] {
+        let content = format!("<startTime>{bad}</startTime><endTime>01/02/2027 10:00:00</endTime>");
+        assert_eq!(meeting_times(&content), None, "{bad}");
+    }
 }
 
 #[test]

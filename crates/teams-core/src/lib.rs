@@ -49,6 +49,7 @@ pub mod own_presence;
 pub mod pictures;
 pub mod presence;
 pub mod profiles;
+mod recap;
 pub mod search;
 pub mod service_search;
 pub mod sync;

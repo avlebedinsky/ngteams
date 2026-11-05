@@ -350,11 +350,12 @@ reads them, `teams_ui::system_message` words them). A kind or a shape not listed
   channel's; the length a .NET time span, `h:mm:ss.fffffff`). Three states were seen, each a message of its own:
   `Initial`/`0` (started: "<name> started recording." or "… started recording and transcription"),
   `ChunkFinished`/`202` (stopped: "Recording stopped. Saving recording…", "Recording and transcription stopped") and
-  `Success`/`200` (ready: the recording's card, its name and length, played in Teams on the web). The `Transcript`
+  `Success`/`200` (ready: the recording's card, its name and length; in a meeting's chat "View recap" opens its
+  Recap tab, [recap.md](recap.md), elsewhere Teams on the web). The `Transcript`
   half of a recording is drawn as nothing, as the web client does. Another state or contents is no event.
 - **`RichText/Media_CallTranscript`**: JSON with every quote escaped (`{\"callId\":…}`): `callId`, `scopeId`,
   `iCalUid`, `meetingOrganizerId`, `isDeleted` (always `false` here), `isExportedToOdsp`. Drawn as the transcript's
-  card ("Transcript is available"), read in Teams on the web.
+  card ("Transcript is available"), read in the meeting's Recap tab ([recap.md](recap.md)).
 - **`ThreadActivity/MemberJoined` and `MemberLeft`**: JSON `{eventtime, initiator, members: [{id, friendlyname,
   meetingMemberType?}]}`; `meetingMemberType` was only ever `temp` (joined for the meeting). A meeting chat: "<names>
   was/were invited to the meeting.", "<names> left the chat."; a temporary member "has temporarily joined the chat.",

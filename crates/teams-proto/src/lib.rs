@@ -34,6 +34,7 @@ mod meeting;
 mod own;
 mod post_read;
 mod read;
+pub mod recap;
 mod recurrence;
 mod relay;
 mod request;
@@ -42,6 +43,7 @@ mod search;
 mod team_apps;
 mod team_read;
 mod thumbnail;
+pub mod transcript;
 pub use attachment::{DriveSite, DriveWrite, MAX_ATTACHMENT_SIZE, OwnDrive, UploadedFile, direct_file_grants};
 mod urlp;
 pub mod workflow;
@@ -99,6 +101,7 @@ pub use read::{
     GRAPH_USER_SELECT, GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team,
     TeamAbout, TeamsAnswer, object_id,
 };
+pub use recap::{MCPS_AUDIENCE, MeetingContent, MeetingContents, RecapPart, TranscriptLocation};
 pub use recurrence::{Pattern as RecurrencePattern, Recurrence, WeekIndex, Weekday};
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
 pub use request::Request;

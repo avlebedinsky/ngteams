@@ -127,6 +127,15 @@ impl<C: Credentials> HttpTransport<C> {
         self.drive_read(site, &url).await
     }
 
+    /// A meeting transcript's `WebVTT`, read on the personal site that holds it with that site's token
+    /// ([`crate::TranscriptLocation`]).
+    ///
+    /// # Errors
+    /// Returns transport, credentials, or unsuccessful service responses.
+    pub async fn meeting_transcript(&self, transcript: &crate::TranscriptLocation) -> Result<Response, HttpError> {
+        self.drive_read(transcript.site(), transcript.url()).await
+    }
+
     async fn drive_read(&self, site: &DriveSite, url: &str) -> Result<Response, HttpError> {
         let url = url::Url::parse(url).map_err(|_| HttpError::Refused(Refusal::NotAllowed))?;
         if DriveSite::from_web_url(url.as_str()).as_ref() != Some(site) {

@@ -401,6 +401,15 @@ Giphy's public media CDN holds GIFs selected by Teams' picker. The native transp
 | `GET` | `https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v1/metadata/<emoticonAssetVersion>/default.json` | Teams' reaction catalog: every reaction's id, code points, skin tones, description, categories | not sent | [chat.md](chat.md#reaction-pictures) | bundle (`emoticonAssetVersion` in the web client's config) |
 | `GET` | static assets on `teams.public.onecdn.static.microsoft`, `res.cdn.office.net`, `statics.teams.cdn.office.net`, `aadcdn.msftauth.net`, `login.live.com` | the client's scripts, styles, images, sounds and sign-in pages | Host-gated sign-in window (`teams-signin`); no protocol transport service | this file · M2 T27 (the bound) | seen, not reviewed |
 
+## Meeting recap (`https://<teams origin>/api/mcps/<region>/`, the organizer's OneDrive)
+
+| Method | Path | What it does | Native | Notes · task | Evidence |
+|---|---|---|---|---|---|
+| `GET` | `contents/?threadId=<meeting chat>[&organizerId=<oid>]` | what a meeting left for its Recap: `Recording` (its sharing link) and `TranscriptV2` (its item's transcript) resources with the call, item and times | Read (`MeetingContents`), the meeting-artifacts token | [recap.md](recap.md#the-reads) | lab capture 2026-11-05 (`meeting-steps`, a's Meet now meetings) |
+| `GET` | `https://<tenant>-my.sharepoint.com/personal/<organizer>/_api/v2.1/drives/<drive>/items/<item>/media/transcripts/<id>/streamContent?is=1&applymediaedits=false` | a meeting transcript's `WebVTT` ("Download as .vtt") | `HttpTransport::meeting_transcript` (`TranscriptLocation`), the site's SharePoint token | [recap.md](recap.md#the-reads) | lab capture 2026-11-05 |
+| `GET` | the same item's `_api/v2.0`/`v2.1` reads (`media/transcripts`, `listItem`), `_api_cached/v2.1/…/cdnmedia/transcripts` and `thumbnails`, Graph `POST drives/<drive>/items/<item>/preview` | the web client's embedded player and its transcript | not used (the recording plays through Graph's `shares/…/driveItem`, the transcript through `streamContent`) | [recap.md](recap.md#the-reads) | lab capture 2026-11-05 |
+| `GET` | `https://graph.microsoft.com/v1.0/users/<oid>/licenseDetails` | the account's licenses (the recap's Copilot upsell) | not used | [recap.md](recap.md#the-reads) | lab capture 2026-11-05 |
+
 ## Additional native feature routes
 
 The following routes were integrated with private attachments, channel management, captions and workflows.

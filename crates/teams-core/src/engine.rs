@@ -483,6 +483,9 @@ pub enum EngineError {
     /// The calendar couldn't be read, or its answer wasn't in the shape the web client reads ([`crate::calendar`]).
     #[error("the calendar couldn't be read")]
     CalendarUnread,
+    /// A meeting's recap (what it left, or a transcript) couldn't be read ([`crate::recap`]).
+    #[error("the meeting's recap couldn't be read")]
+    RecapUnread,
     /// A meeting's chat couldn't be read for the meeting it is ([`crate::calendar`]).
     #[error("the meeting couldn't be read")]
     MeetingUnread,
@@ -531,6 +534,7 @@ impl EngineError {
             Self::FileUnread => "file unread",
             Self::CalendarUnread => "calendar unread",
             Self::MeetingUnread => "meeting unread",
+            Self::RecapUnread => "recap unread",
             Self::EventNotSaved { .. } => "event not saved",
             Self::ChannelNotCreated { .. } => "channel not created",
             Self::TeamNotChanged { .. } => "team not changed",
@@ -607,6 +611,10 @@ impl<T> Answer<T> {
 /// A request to the engine's thread, with where its answer goes.
 enum Request {
     UploadFile(PathBuf, Responder<teams_proto::UploadedFile>),
+    /// What a meeting left, by its chat ([`crate::recap`]).
+    MeetingContents(String, Responder<Vec<teams_proto::MeetingContent>>),
+    /// A meeting transcript's `WebVTT`, by its address on its item ([`crate::recap`]).
+    MeetingTranscript(String, Responder<String>),
     Write(Action, Responder<OutboxEntry>),
     /// A read receipt already queued while the engine waited on the service.
     SendQueued(i64, Responder<OutboxEntry>),
@@ -1346,6 +1354,20 @@ impl EngineRequests {
         })
     }
 
+    /// What the meeting whose chat is `thread` left (its recordings and transcripts), as its recap lists it, read now
+    /// ([`crate::recap`]): [`EngineError::RecapUnread`] when it can't be read.
+    pub fn meeting_contents(&self, thread: impl Into<String>) -> Reply<Vec<teams_proto::MeetingContent>> {
+        let thread = thread.into();
+        self.ask(|reply| Request::MeetingContents(thread, reply))
+    }
+
+    /// The `WebVTT` of the meeting transcript at `location` (a transcript content's), read now ([`crate::recap`]):
+    /// [`EngineError::RecapUnread`] when it can't be read.
+    pub fn meeting_transcript(&self, location: impl Into<String>) -> Reply<String> {
+        let location = location.into();
+        self.ask(|reply| Request::MeetingTranscript(location, reply))
+    }
+
     /// The size of the file a message carries, by its sharing link, as its item gives it ([`crate::file_content`]);
     /// its download link is kept for the reads that follow, so asking early spares the first read that wait.
     pub fn file_size(&self, share_url: impl Into<String>) -> Reply<u64> {
@@ -1563,6 +1585,7 @@ struct Core<C, T> {
     pictures: Pictures<C>,
     thumbnails: Thumbnails<C>,
     files: FileContents<C>,
+    recaps: crate::recap::Recaps<C>,
     uploads: crate::attachments::Uploads<C, T>,
     calendar: Calendar<C, T>,
     channels: Channels<C, T>,
@@ -1625,6 +1648,7 @@ where
         let pictures = Pictures::new(Arc::clone(&parts.client), disk.clone());
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let files = FileContents::new(Arc::clone(&parts.client));
+        let recaps = crate::recap::Recaps::new(Arc::clone(&parts.client));
         let uploads = crate::attachments::Uploads::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let calendar = Calendar::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let channels = Channels::new(Arc::clone(&parts.client), Arc::clone(&outbox));
@@ -1652,6 +1676,7 @@ where
             pictures,
             thumbnails,
             files,
+            recaps,
             uploads,
             calendar,
             channels,
@@ -1852,6 +1877,8 @@ where
     async fn on_request(&mut self, request: Request) {
         match request {
             Request::UploadFile(path, reply) => self.uploads.upload(path, reply),
+            Request::MeetingContents(thread, reply) => self.recaps.contents(thread, reply),
+            Request::MeetingTranscript(location, reply) => self.recaps.transcript(&location, reply),
             Request::Write(action, reply) => {
                 let _ = reply.send(self.logged_write(action).await);
             }

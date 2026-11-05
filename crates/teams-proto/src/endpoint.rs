@@ -93,6 +93,13 @@ pub enum Service {
     /// `<img>` loads as any browser does): a GIF a message shows, picked from Teams' GIF picker
     /// (`media/<id>/<file>`, [`crate::GiphyPicture`]). Reads only, nothing of the account's sent.
     Giphy,
+    /// The meeting content processing service (MCPS) at the account's base for it, the region's GTM `mcpService`
+    /// (`https://<AFD host>/api/mcps/<region>`), which a transport reaches only once it was given one
+    /// (`HttpTransport::with_mcps`), with the account's token for the meeting-artifacts app
+    /// ([`crate::MCPS_AUDIENCE`]): a meeting's recordings and transcripts, as its recap lists them
+    /// ([`crate::MeetingContents`], `contents/?threadId=<chat>`, the path's trailing slash as the web client sends it).
+    /// Reads only.
+    Mcps,
     /// Substrate's search, `https://substrate.office.com/`, with the account's token for
     /// `https://outlook.office.com/search` ([`crate::SUBSTRATE_AUDIENCE`]): the title bar's search
     /// ([`crate::SubstrateSearch`], `search/api/v1/suggestions` and `searchservice/api/v2/query`), reads by `POST`

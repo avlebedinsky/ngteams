@@ -189,6 +189,9 @@ pub enum Refusal {
     /// An AMS read on a transport that wasn't given the account's AMS base.
     #[error("no AMS base")]
     NoAms,
+    /// An MCPS read on a transport that wasn't given the account's MCPS base.
+    #[error("no MCPS base")]
+    NoMcps,
     /// The URL built isn't on its service's base: another host, scheme or port, or a path or query other than the
     /// base's and the endpoint's exactly.
     #[error("the URL isn't on its service's base")]
@@ -255,6 +258,9 @@ pub enum BuildError {
     /// Not an AMS base the transport accepts (see [`HttpTransport::with_ams`]).
     #[error("not an AMS base the transport accepts")]
     AmsBase,
+    /// Not an MCPS base the transport accepts (see [`HttpTransport::with_mcps`]).
+    #[error("not an MCPS base the transport accepts")]
+    McpsBase,
     /// Not a loopback `http` origin with a port.
     #[error("not a loopback http origin")]
     MockOrigin,
@@ -284,6 +290,8 @@ pub struct HttpTransport<C> {
     presence: Option<Url>,
     /// The AMS base (`https://<name>.asyncgw.teams.microsoft.com`, its path empty), once given.
     ams: Option<Url>,
+    /// The MCPS base (`https://<AFD host>/api/mcps/<region>`, no trailing slash), once given.
+    mcps: Option<Url>,
     max_retry_wait: Duration,
     mock_origin: Option<Url>,
     /// Read-only ([`HttpTransport::read_only`]): only reads (a `GET`, a read by `POST` of the sealed list, a search) go
@@ -496,6 +504,7 @@ impl<C: Credentials> HttpTransport<C> {
             user_profile: None,
             presence: None,
             ams: None,
+            mcps: None,
             max_retry_wait: MAX_RETRY_WAIT,
             mock_origin: None,
             read_only: false,
@@ -571,6 +580,24 @@ impl<C: Credentials> HttpTransport<C> {
     pub fn with_csa(mut self, base: &str) -> Result<Self, BuildError> {
         self.csa = Some(parse_csa_base(base).ok_or(BuildError::CsaBase)?);
         Ok(self)
+    }
+
+    /// The transport with the account's MCPS base, the region's GTM `mcpService` (trimmed): `https`, an AFD host
+    /// ([`crate::AFD_HOSTS`]) with no port or user info, the path `/api/mcps/<region>` exactly (the region lowercase
+    /// letters: `us`), one trailing slash allowed, no query or fragment. Without it, every MCPS read is refused
+    /// ([`Refusal::NoMcps`]).
+    ///
+    /// # Errors
+    /// [`BuildError::McpsBase`] for any other base ([`Self::accepts_mcps_base`]).
+    pub fn with_mcps(mut self, base: &str) -> Result<Self, BuildError> {
+        self.mcps = Some(parse_service_base(base, is_mcps_path).ok_or(BuildError::McpsBase)?);
+        Ok(self)
+    }
+
+    /// Whether [`Self::with_mcps`] takes `base`.
+    #[must_use]
+    pub fn accepts_mcps_base(base: &str) -> bool {
+        parse_service_base(base, is_mcps_path).is_some()
     }
 
     /// Whether [`Self::with_csa`] takes `base`.
@@ -710,8 +737,8 @@ impl<C: Credentials> HttpTransport<C> {
         {
             let mut segments = url.path_segments_mut().map_err(|()| refused(Refusal::NotAllowed))?;
             segments.pop_if_empty().extend(endpoint.segments());
-            if service == Service::Presence && ups_slash(endpoint) {
-                // UPS's paths end in a slash, as every captured one did (but a subscription's)
+            if (service == Service::Presence && ups_slash(endpoint)) || service == Service::Mcps {
+                // UPS's paths end in a slash, as every captured one did (but a subscription's), and MCPS's
                 segments.push("");
             }
         }
@@ -753,6 +780,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Giphy => fixed(format!("https://{GIPHY_HOST}/")),
             Service::Substrate => fixed(format!("https://{SUBSTRATE_HOST}/")),
             Service::Ams => self.ams.clone().ok_or(refused(Refusal::NoAms)),
+            Service::Mcps => self.mcps.clone().ok_or(refused(Refusal::NoMcps)),
         }
     }
 
@@ -1322,6 +1350,7 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Provisioning => Some(PROVISIONING_AUDIENCE),
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
+        Service::Mcps => Some(crate::recap::MCPS_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
         Service::Substrate => Some(SUBSTRATE_AUDIENCE),
         Service::Workflows => Some(crate::workflow::WORKFLOW_AUDIENCE),
@@ -1350,6 +1379,7 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Trouter
         | Service::Graph
         | Service::Csa
+        | Service::Mcps
         | Service::Presence
         | Service::Calling
         | Service::Relay
@@ -1377,6 +1407,7 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::UserProfile
         | Service::Graph
         | Service::Csa
+        | Service::Mcps
         | Service::Presence
         | Service::Calling
         | Service::Relay
@@ -1429,6 +1460,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         Service::Trouter
         | Service::Graph
         | Service::Csa
+        | Service::Mcps
         | Service::Provisioning
         | Service::Workflows
         | Service::WorkflowConnections
@@ -1455,7 +1487,7 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
     let segments = endpoint.segments();
     let mut wanted = decoded_path(base).unwrap_or_default();
     wanted.extend(segments.iter().cloned());
-    if service == Service::Presence && ups_slash(endpoint) {
+    if (service == Service::Presence && ups_slash(endpoint)) || service == Service::Mcps {
         wanted.push(String::new());
     }
     let service_rule = match service {
@@ -1465,6 +1497,7 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Graph
         | Service::MiddleTier
         | Service::Csa
+        | Service::Mcps
         | Service::Provisioning
         | Service::Workflows
         | Service::WorkflowConnections
@@ -1566,6 +1599,17 @@ fn parse_service_base(base: &str, path_is: fn(&[String]) -> bool) -> Option<Url>
         // the base as it was given, not one the parser normalized
         && url.as_str() == base;
     (plain && path_is(&decoded_path(&url)?)).then_some(url)
+}
+
+/// Whether a decoded base path is MCPS's, `/api/mcps/<region>` (the region lowercase letters).
+fn is_mcps_path(path: &[String]) -> bool {
+    matches!(
+        path,
+        [api, mcps, region] if api == "api"
+            && mcps == "mcps"
+            && !region.is_empty()
+            && region.bytes().all(|byte| byte.is_ascii_lowercase())
+    )
 }
 
 /// The CSA base, if `base` is one [`HttpTransport::with_csa`] accepts.

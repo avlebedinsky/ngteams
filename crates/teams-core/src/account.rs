@@ -206,7 +206,7 @@ pub fn start<S: SecretStore + 'static>(
     let reads = with_csa(reads, session.service_base(CSA_GTM).as_deref())?;
     let reads = with_channel_services(reads, |gtm| session.service_base(gtm))?;
     let reads = with_presence(reads, presence.as_deref())?;
-    let reads = with_ams(reads, session.service_base(AMS_GTM).as_deref())?;
+    let reads = with_content_services(reads, |gtm| session.service_base(gtm))?;
     let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(Arc::clone(&transport), Arc::clone(&session))?))
@@ -360,6 +360,33 @@ fn with_channel_services<C: Credentials>(
 ) -> Result<HttpTransport<C>, BuildError> {
     let reads = with_provisioning(reads, base(PROVISIONING_GTM).as_deref())?;
     with_user_profile(reads, base(USER_PROFILE_GTM).as_deref())
+}
+
+/// The reads' transport with the bases of the services a chat's content is read from: AMS (a message's pictures)
+/// and MCPS (a meeting's recap), each when the region has one the transport accepts.
+fn with_content_services<C: Credentials>(
+    reads: HttpTransport<C>,
+    base: impl Fn(&str) -> Option<String>,
+) -> Result<HttpTransport<C>, BuildError> {
+    let reads = with_ams(reads, base(AMS_GTM).as_deref())?;
+    with_mcps(reads, base(MCPS_GTM).as_deref())
+}
+
+/// The GTM MCPS's base comes from (a meeting's recap: its recordings and transcripts).
+pub const MCPS_GTM: &str = "mcpService";
+
+/// The reads' transport with MCPS's base (a meeting's recap) when the region has one the transport accepts. Without
+/// one, or with one of another form (logged, without its value), every recap read is refused and the Recap tab says
+/// the recap can't be read: an optional read never stops the engine.
+fn with_mcps<C: Credentials>(reads: HttpTransport<C>, mcps: Option<&str>) -> Result<HttpTransport<C>, BuildError> {
+    match mcps {
+        Some(base) if HttpTransport::<C>::accepts_mcps_base(base) => reads.with_mcps(base),
+        Some(_) => {
+            log::warn!("the region's mcpService base isn't of the form the transport accepts: no meeting recaps");
+            Ok(reads)
+        }
+        None => Ok(reads),
+    }
 }
 
 /// The GTM AMS's base comes from (the async gateway: a message's pictures' reads).
