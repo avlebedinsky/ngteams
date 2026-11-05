@@ -14,10 +14,12 @@
 //!   show under "Replies to an earlier post". Each message shows its sender's name ([`Core::person`]: their profile's,
 //!   else the name the message carried, else their MRI; none for the thread's own message, never its id), its time,
 //!   its rich text through our own renderer ([`crate::rich_text`]), "Edited", or "This message was deleted"; a system
-//!   message ([`crate::system_message`]: a call's start or end, a recording, a transcript, members added, joined, left
-//!   or removed, the name) is a line in Teams' words, a card's title and detail on one line; one Teams draws nothing
-//!   for isn't shown, nor its thread when nothing under it is (with replies, a placeholder stands for it); any other
-//!   type or shape a placeholder that names no content. A forwarded message is drawn as in a chat
+//!   message ([`crate::system_message`]: a call's start or end, a recording, a transcript) is a line in Teams' words, a
+//!   card's title and detail on one line; one Teams draws nothing for isn't shown, nor its thread when nothing under it
+//!   is (with replies, a placeholder stands for it). The thread's own events (`ThreadActivity/…`: people added or
+//!   gone, the channel renamed or its description changed, apps, tabs) are among them: the web client reads a
+//!   channel's posts with `filterSystemMessage=true` and tells those events only in the channel's info pane. Any other
+//!   type or shape is a placeholder that names no content. A forwarded message is drawn as in a chat
 //!   ([`crate::forwarded`]), its original's time a link to it, told as [`ChannelViewEvent::OpenOriginal`].
 //!
 //! What the view shows is traced (`channel-view shown`: the channel, its messages' ids in the order shown, each `post`
@@ -67,6 +69,8 @@ pub const PAGE: usize = 200;
 pub const EARLIER_POST: &str = "Replies to an earlier post";
 /// The line under the posts: nothing can be written here.
 pub const READ_ONLY: &str = "Channels are read-only here";
+/// The type prefix of a thread's own events (`ThreadActivity/AddMember`, `ThreadActivity/TopicTopicUpdated`, …).
+const THREAD_EVENT: &str = "ThreadActivity/";
 
 /// A thread as arranged from the store's messages: its post's id, the post when it is held, and its replies, the
 /// oldest first.
@@ -600,6 +604,10 @@ impl ChannelView {
         }
         if let Some(line) = self.meeting_call_line(message) {
             return Some(Body::Event(line.into()));
+        }
+        // the channel's own events: Teams' post list has them filtered out (its info pane tells them)
+        if message.message_type.starts_with(THREAD_EVENT) {
+            return None;
         }
         let names = ChannelNames {
             people,

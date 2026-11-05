@@ -618,6 +618,54 @@ fn a_post_teams_draws_nothing_for_takes_its_thread_with_it_or_stands_as_a_placeh
     assert!(post.sender_name.is_empty());
 }
 
+/// A thread event from the channel itself, of `kind` with `content`.
+fn channel_event(id: &str, kind: &str, content: &str) -> Message {
+    let mut event = message(id, CHANNEL, content);
+    event.message_type = kind.to_owned();
+    event.sender = Some(CHANNEL.to_owned());
+    event.sender_name = None;
+    event
+}
+
+#[test]
+fn the_channels_own_events_are_not_posts_as_teams_list_filters_them_out() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (mut messages, mut roots) = channel_store();
+    let renamed =
+        r#"{"oldValue":"Made-up Old","newValue":"Made-up New","user":"8:orgid:00000000-0000-4000-8000-00000000000a"}"#;
+    let events = [
+        // the service sent the rename twice, then the description unchanged
+        ("1760000600000", "ThreadActivity/TopicTopicUpdated", renamed),
+        ("1760000600001", "ThreadActivity/TopicTopicUpdated", renamed),
+        (
+            "1760000600002",
+            "ThreadActivity/TopicDescriptionUpdated",
+            r#"{"oldValue":null,"newValue":null,"user":"8:orgid:00000000-0000-4000-8000-00000000000a"}"#,
+        ),
+        (
+            "1760000600003",
+            "ThreadActivity/MemberJoined",
+            r#"{"eventtime":1,"initiator":"8:orgid:00000000-0000-4000-8000-00000000000a","members":[{"id":"8:orgid:00000000-0000-4000-8000-00000000000b","friendlyname":"Made-up B"}]}"#,
+        ),
+    ];
+    for (at, (id, kind, content)) in events.into_iter().enumerate() {
+        messages.insert(at, channel_event(id, kind, content));
+        roots.push((id.to_owned(), id.to_owned()));
+    }
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    let shapes = thread_shapes(&view, cx);
+    for (id, _, _) in events {
+        assert!(!shapes.iter().any(|thread| thread.0 == id), "{id} shown: {shapes:?}");
+    }
+    // the channel's posts are still there
+    assert!(shapes.iter().any(|thread| thread.0 == POST), "{shapes:?}");
+}
+
 #[test]
 fn a_post_or_reply_with_a_file_or_card_no_capture_showed_says_so_never_guessed() {
     let rig = rig();

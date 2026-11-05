@@ -83,6 +83,16 @@ A channel is a conversation of the chat service, read with the same reads as a c
 - **One post's chain** (`GET v1/users/ME/conversations/<channel>;messageid=<post>/messages`, the same query): 200, the
   post and its replies (24 messages for one post, 1 for an event), each with that link.
 
+## The channel's own events
+
+A channel's thread carries its own events among its posts (`ThreadActivity/…`: people added or gone, the channel
+renamed or its description changed, apps and tabs). The web client never draws them in the post list: every captured
+read of a channel's posts asked CSA for `filterSystemMessage=true`, and the bundle words them only in the channel's
+info pane (its "channel update" renderer): "<name> changed channel name from <old> to <new>." ("Channel name was
+changed from <old> to <new>." when the system did it) and "<name> changed the channel description.". The native
+client reads a channel from the chat service, which holds them, and draws none of them (`channel_view`); it has no
+info pane.
+
 ## What the native client reads
 
 - **The teams**: `GET <CSA base>/api/v3/teams/users/me` with the web client's query exactly, the account's

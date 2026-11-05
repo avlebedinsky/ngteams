@@ -376,7 +376,13 @@ reads them, `teams_ui::system_message` words them). A kind or a shape not listed
 - **Seen, not drawn**: `ThreadActivity/RoleUpdate`, `PinnedItemsUpdate`, `FileAdd`, `ModalityUpdate`, the app and
   channel events of a team (`AddCustomApp`, `SpaceThreadChannelAdded`, `TopicTopicUpdated`, …), `RichText/Media_Card`
   (an adaptive card), `RichText/Media_CallLogRecording` and `Media_CallLogTranscript` (the account's call log stream).
-  They keep the placeholder (a thread's centred, without an author).
+  They keep the placeholder (a thread's centred, without an author). In a channel no thread event is drawn at all
+  ([channels.md](channels.md#the-channels-own-events)).
+- **A channel renamed** (`ThreadActivity/TopicTopicUpdated`) and **its description changed**
+  (`TopicDescriptionUpdated`): JSON content, not XML: `oldValue`, `newValue` (strings, or `null` for no description)
+  and `user` (the initiator's MRI). A personal build's channel rename brought two identical `TopicTopicUpdated`
+  events a fraction of a second apart and a `TopicDescriptionUpdated` with both values `null`, each sent by the
+  channel's thread (`19:…`).
 - **Notifications**: the web client's chat notifications take only some types (its toast filter, read from the
   bundle): `Text`, `RichText/Html`, `RichText/Media_Card`, `RichText/Media_CallRecording` and
   `ThreadActivity/AddMember` (plus the Skype interop types). A recording is notified only when its upload failed (a
