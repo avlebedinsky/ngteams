@@ -276,6 +276,33 @@ fn the_same_chat_opened_again_keeps_its_tab_its_chat_unseen() {
 }
 
 #[test]
+fn a_refresh_keeps_the_recording_shown_when_an_earlier_one_went() {
+    let rig = rig(false);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    click(cx, "recap-part-1");
+    let view = recap(&shell, cx);
+    let shown = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            let part = view.parts().and_then(|parts| parts.get(view.selected()).cloned());
+            part.and_then(|part| part.item_id)
+        })
+    };
+    assert_eq!(shown(cx).as_deref(), Some("ITEM2"));
+    // the first recording deleted elsewhere, then Refresh: the second is still the one shown, now Part 1
+    let left: Vec<_> = fixtures::recorded()
+        .into_iter()
+        .filter(|content| content.item_id.as_deref() != Some("ITEM1"))
+        .collect();
+    locked(&rig.core.meeting_contents).insert(fixtures::MEETING.to_owned(), left);
+    cx.update(|_, cx| view.update(cx, RecapView::read));
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).selected()), 0);
+    assert_eq!(shown(cx).as_deref(), Some("ITEM2"));
+}
+
+#[test]
 fn a_recap_that_held_nothing_is_read_again_when_shown_again() {
     let rig = rig(false);
     locked(&rig.core.meeting_contents).insert(fixtures::MEETING.to_owned(), Vec::new());

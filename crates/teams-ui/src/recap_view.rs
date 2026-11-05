@@ -215,6 +215,8 @@ impl RecapView {
 
     /// Reads the meeting's contents (again).
     pub fn read(&mut self, cx: &mut Context<Self>) {
+        // the recording shown: still the one shown once the recap is read again, wherever its part went
+        let shown = self.part().and_then(|part| part.recording.clone());
         self.contents = Contents::Reading;
         let reply = self.core.meeting_contents(self.conversation.clone());
         self.reading = Some(cx.spawn(async move |this, cx| {
@@ -224,13 +226,7 @@ impl RecapView {
                     Ok(contents) => Contents::Read(recap_parts(&contents)),
                     Err(_) => Contents::Failed,
                 };
-                // read again (Refresh), the parts may be fewer: a part gone takes its player with it
-                let parts = this.parts().unwrap_or_default();
-                let recordings: Vec<String> = parts.iter().filter_map(|part| part.recording.clone()).collect();
-                if this.selected >= parts.len() {
-                    this.selected = 0;
-                }
-                this.players.retain(|link, _| recordings.contains(link));
+                this.settle_parts(shown.as_deref(), cx);
                 if let Some(recording) = this.wanted.take() {
                     this.show_recording(recording, cx);
                 }
@@ -240,6 +236,30 @@ impl RecapView {
             });
         }));
         cx.notify();
+    }
+
+    /// The parts read again (Refresh): the recording that was shown stays shown at its new place. When it is gone (or
+    /// none was), its player goes with it, every other recording pauses, and the first part shows when the one at the
+    /// old place is gone too.
+    fn settle_parts(&mut self, shown: Option<&str>, cx: &mut Context<Self>) {
+        let parts = self.parts().unwrap_or_default();
+        let recordings: Vec<String> = parts.iter().filter_map(|part| part.recording.clone()).collect();
+        let at = shown.and_then(|link| parts.iter().position(|part| part.recording.as_deref() == Some(link)));
+        let count = parts.len();
+        self.players.retain(|link, _| recordings.contains(link));
+        if let Some(at) = at {
+            self.selected = at;
+            return;
+        }
+        self.pause(cx);
+        if shown.is_some() || self.selected >= count {
+            if self.selected >= count {
+                self.selected = 0;
+            }
+            self.spoken = None;
+            self.search = None;
+            self.query.clear();
+        }
     }
 
     /// The files the chat's stored messages shared, for the "Shared files" card, and whether a recording is still
@@ -389,6 +409,14 @@ impl RecapView {
 
     /// The recording moved on: the paragraph spoken now is highlighted and kept in view.
     fn follow(&mut self, player: &Entity<VideoPlayer>, cx: &mut Context<Self>) {
+        // only the shown part's recording moves its transcript
+        let shown = self
+            .part()
+            .and_then(|part| part.recording.as_ref())
+            .and_then(|link| self.players.get(link));
+        if shown.is_none_or(|(shown, _)| shown != player) {
+            return;
+        }
         let Some(at) = player.read(cx).position() else { return };
         let spoken = self.transcript().and_then(|transcript| transcript.spoken_at(at));
         if spoken != self.spoken {
