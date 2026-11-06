@@ -15,6 +15,7 @@ fn plan(step: CallStep) -> CallPlan {
             group_chat: None,
         },
         callees: vec![(Alias::B, "8:orgid:00000000-0000-4000-8000-000000000002".to_owned())],
+        bystanders: Vec::new(),
         held_starts: &[Modality::Audio, Modality::Video],
         step,
         options: RunOptions {
@@ -762,7 +763,7 @@ async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_cont
         let plan = plan(step);
         let mut placed = None;
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
-        plan.ring(&mut caller, &mut callees, &mut placed, &mut report)
+        plan.ring(&mut caller, &mut callees, &[], &mut placed, &mut report)
             .await
             .unwrap();
         assert!(placed.is_some_and(|at| at > 0));
@@ -795,7 +796,7 @@ async fn declining_checks_the_bound_ring_before_clicking_then_waits_for_it_to_en
     let mut callees = [(Alias::B, recipient)];
     let mut placed = None;
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
-    plan.ring(&mut caller, &mut callees, &mut placed, &mut report)
+    plan.ring(&mut caller, &mut callees, &[], &mut placed, &mut report)
         .await
         .unwrap();
     assert!(report.failures.is_empty());
@@ -1007,7 +1008,7 @@ async fn answered_video_and_keepalive_phases_require_audio_and_media_on_both_pag
         }
         let mut callees = [(Alias::B, recipient)];
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
-        converse(step, &mut origin, &mut callees, &mut report, plan(step).pauses)
+        converse(step, (&mut origin, &mut callees, &[]), &mut report, plan(step).pauses)
             .await
             .unwrap();
         assert!(report.failures.is_empty(), "{step:?}: {:?}", report.failures);

@@ -232,6 +232,9 @@ pub(crate) struct CallPlan {
     pub(crate) call: RunCall,
     /// Each callee and its MRI.
     pub(crate) callees: Vec<(Alias, String)>,
+    /// `steps` only: accounts whose pages load and stand up calling but aren't called, so a step can reach them
+    /// (`@c …`): the person a consult calls (`PROTO_LAB_STEPS_BYSTANDERS=c`).
+    pub(crate) bystanders: Vec<Alias>,
     /// The calls `start-held` places, in order.
     pub(crate) held_starts: &'static [Modality],
     pub(crate) step: CallStep,
@@ -290,12 +293,33 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             group_chat: None,
         },
         callees: vec![(Alias::B, mri_b)],
+        bystanders: bystanders(options.call),
         held_starts: &[Modality::Audio, Modality::Video],
         step: options.call,
         options,
         pauses: CallPauses::default(),
     };
     run_plan(paths, &plan).await
+}
+
+/// A running call's pages: the caller's, the callees' and the bystanders' (`steps` only).
+type CallPages<'a> = (
+    &'a mut LabSession,
+    &'a mut [(Alias, LabSession)],
+    &'a [(Alias, LabSession)],
+);
+
+/// The accounts `PROTO_LAB_STEPS_BYSTANDERS` names (`c`, or `b,c`), for `steps` only: none for any other step.
+pub(crate) fn bystanders(step: CallStep) -> Vec<Alias> {
+    if step != CallStep::Steps {
+        return Vec::new();
+    }
+    std::env::var("PROTO_LAB_STEPS_BYSTANDERS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|alias| alias.trim().parse::<Alias>().ok())
+        .filter(|alias| *alias != CALLER)
+        .collect()
 }
 
 /// `alias`'s MRI from the lab config.
@@ -332,6 +356,12 @@ pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<Scenar
     } else {
         std::iter::once(CALLER)
             .chain(plan.callees.iter().map(|(alias, _)| *alias))
+            .chain(
+                plan.bystanders
+                    .iter()
+                    .copied()
+                    .filter(|alias| plan.callees.iter().all(|(callee, _)| callee != alias)),
+            )
             .collect()
     };
     let sessions = open_all(paths, &aliases, &options).await?;
@@ -466,6 +496,8 @@ async fn close_all(
         if let Some(dir) = capture {
             if alias == CALLER {
                 judge_caller(&dir, step, report);
+            } else if plan.callee_mri(alias).is_empty() {
+                report.notes.push(format!("{alias}: a bystander, not judged"));
             } else {
                 let last = plan.callees.last().is_some_and(|(callee, _)| *callee == alias);
                 let callee = (alias, plan.callee_mri(alias), CalleeRole::of(step, last));
@@ -538,6 +570,9 @@ impl CallPlan {
         let members: Vec<String> = std::iter::once(self.call.caller.clone())
             .chain(self.callees.iter().map(|(_, mri)| mri.clone()))
             .collect();
+        let taking_part = (1 + self.callees.len()).min(sessions.len());
+        // a bystander declares nothing: it takes no step of the run's call, only those a `steps` line gives it
+        let (sessions, bystanders) = sessions.split_at_mut(taking_part);
         for (_, session) in sessions.iter() {
             session.declare_target(&expected, &members)?;
         }
@@ -546,6 +581,12 @@ impl CallPlan {
             .ok_or_else(|| setup("no caller's browser".to_owned()))?;
         let caller = &mut caller.1;
         self.load_pages(caller, callees, report).await?;
+        for (alias, session) in bystanders.iter_mut() {
+            load_at(*alias, session, TEAMS_URL, self.options.load_timeout).await?;
+            size_page(session).await?;
+            stand_up_calling_with(*alias, &mut session.driver(), report, self.pauses).await?;
+            report.notes.push(format!("{alias}: loaded as a bystander, not called"));
+        }
         if self.step == CallStep::StartHeld {
             return start_held(caller, &self.expected_chat()?, self.held_starts, report).await;
         }
@@ -556,7 +597,7 @@ impl CallPlan {
         for (alias, session) in callees.iter() {
             watch_controls(*alias, session).await?;
         }
-        self.ring(caller, callees, placed, report).await
+        self.ring(caller, callees, bystanders, placed, report).await
     }
 
     /// Loads every page (a's at the chat, the callees' at the client's start, a joiner's at the chat) and stands up
@@ -597,6 +638,7 @@ impl CallPlan {
         &self,
         caller: &mut LabSession,
         callees: &mut [(Alias, LabSession)],
+        bystanders: &[(Alias, LabSession)],
         placed: &mut Option<u64>,
         report: &mut ScenarioReport,
     ) -> Result<(), ScenarioError> {
@@ -609,7 +651,7 @@ impl CallPlan {
                     note_ring_controls(callees, report).await;
                     return Err(error);
                 }
-                self.act(action, at, caller, callees, report).await?;
+                self.act(action, at, (caller, callees, bystanders), report).await?;
                 wait_ring_end(callees, RING_END, report).await;
             }
             None if self.step == CallStep::Cancel => {
@@ -632,8 +674,7 @@ impl CallPlan {
         &self,
         action: CalleeAction,
         placed: u64,
-        caller: &mut LabSession,
-        callees: &mut [(Alias, LabSession)],
+        (caller, callees, bystanders): CallPages<'_>,
         report: &mut ScenarioReport,
     ) -> Result<(), ScenarioError> {
         let answering = if self.step == CallStep::Join {
@@ -661,7 +702,7 @@ impl CallPlan {
             self.step,
             CallStep::Answer | CallStep::Video | CallStep::Dropped | CallStep::KeepAlive | CallStep::Steps
         ) {
-            converse(self.step, caller, callees, report, self.pauses).await?;
+            converse(self.step, (caller, callees, bystanders), report, self.pauses).await?;
         }
         if self.step == CallStep::Join {
             self.join_late(placed, callees, report).await?;
@@ -707,6 +748,9 @@ pub(crate) async fn check_ring(
         .group_chat
         .clone()
         .map_or_else(|| call_chat(&call.caller, callee), Ok)?;
+    // the page's events since it loaded go to its account's evidence first: its chat reads (a callee's on the Calls
+    // app come from the client's worker, before the ring) are what the recipients' read reuses
+    linger(session, Duration::from_millis(200)).await;
     session
         .driver()
         .preflight_recipients("verify the incoming call recipients", &expected)
@@ -1274,8 +1318,7 @@ pub const TONE_WAIT: Duration = Duration::from_secs(25);
 /// [`AFTER_DROP`] after it came back ([`drop_off`]); then each callee hangs up.
 async fn converse(
     step: CallStep,
-    caller: &mut LabSession,
-    callees: &mut [(Alias, LabSession)],
+    (caller, callees, bystanders): CallPages<'_>,
     report: &mut ScenarioReport,
     pauses: CallPauses,
 ) -> Result<(), ScenarioError> {
@@ -1293,7 +1336,7 @@ async fn converse(
         CallStep::Video => show_video(caller, callees, report, pauses).await?,
         CallStep::Dropped => drop_off(caller, callees, report, pauses).await?,
         CallStep::KeepAlive => keep_alive(caller, callees, report, pauses).await,
-        CallStep::Steps => steps(caller, callees, report).await?,
+        CallStep::Steps => steps(caller, callees, bystanders, report).await?,
         _ => {}
     }
     for (alias, session) in callees.iter_mut() {
@@ -1388,6 +1431,7 @@ pub const KEEP_ALIVE_HOLD: Duration = Duration::from_mins(47);
 async fn steps(
     caller: &LabSession,
     callees: &[(Alias, LabSession)],
+    bystanders: &[(Alias, LabSession)],
     report: &mut ScenarioReport,
 ) -> Result<(), ScenarioError> {
     use super::team_manage::{StepPage, serve_pages};
@@ -1397,6 +1441,7 @@ async fn steps(
     // the caller's page takes a step by default, a callee's one addressed to it (`@b shot b.png`)
     let mut drivers: Vec<_> = std::iter::once((CALLER, caller))
         .chain(callees.iter().map(|(alias, session)| (*alias, session)))
+        .chain(bystanders.iter().map(|(alias, session)| (*alias, session)))
         .map(|(alias, session)| (alias, session, session.driver()))
         .collect();
     let mut pages: Vec<_> = drivers

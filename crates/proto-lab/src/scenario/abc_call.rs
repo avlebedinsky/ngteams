@@ -36,6 +36,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             group_chat: Some(chat_id.clone()),
         },
         callees,
+        bystanders: super::ab_call::bystanders(options.call),
         // a group chat's header offers an audio call, and "Meet now", a meeting (M4): no video call to start
         held_starts: &[Modality::Audio],
         step: options.call,
