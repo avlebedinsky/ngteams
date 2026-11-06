@@ -1206,8 +1206,12 @@ impl Compose {
 
     /// Restores a refused file send, retaining any newer text typed while its share was pending.
     fn give_back(&mut self, mut draft: Draft, _: &mut Window, cx: &mut Context<Self>) {
-        // files attached since stay beside the text given back (a translated send's text left the box once it went)
-        if draft.attachments.is_empty() && (!self.editor.read(cx).is_empty() || self.mode != Mode::New) {
+        // files attached since stay beside the text given back (a translated send's text left the box once it went),
+        // but never beside an edit, which carries no files
+        let edit_beside_files = matches!(draft.mode, Mode::Edit { .. }) && !self.attachments.is_empty();
+        if draft.attachments.is_empty()
+            && (!self.editor.read(cx).is_empty() || self.mode != Mode::New || edit_beside_files)
+        {
             return;
         }
         if !self.editor.read(cx).is_empty() {
