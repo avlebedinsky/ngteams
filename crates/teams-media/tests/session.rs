@@ -3,7 +3,7 @@
 //! and FEC fill in); neither waits on a stuck device of its own, and a stuck speaker plays again; a device that goes
 //! away and the far end's hang-up are reported. With A's speaker looped back into
 //! its microphone, the session's audio processing takes B's echo out of what A sends: every frame A plays is the far
-//! end its echo canceller hears.
+//! end its echo canceller hears. A session's health is libwebrtc's own statistics, its rates between two reads.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -439,4 +439,36 @@ fn a_muted_microphone_sends_silence_and_the_line_goes_on() {
     eprintln!("B hears A at {while_muted:.4} while muted, {after:.3} after");
     assert!(while_muted < 0.03, "B heard A's tone while A was muted: {while_muted}");
     assert!(after > 0.3, "B hears A's tone again once unmuted: {after}");
+}
+
+#[test]
+fn a_session_s_health_is_libwebrtc_s_own_statistics_with_rates_between_reads() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(&turn, &file_devices(A_TONE, &recording(dir.path(), "a")));
+    let b = start(&turn, &file_devices(B_TONE, &recording(dir.path(), "b")));
+    negotiate(&a, &b);
+    wait_for(&a, &SessionEvent::Connected, CONNECT_WAIT);
+    wait_for(&b, &SessionEvent::Connected, CONNECT_WAIT);
+    std::thread::sleep(SETTLE);
+    let first = a.health();
+    let sent = first.audio.sent.clone().expect("a sends audio");
+    assert!(sent.packets > 0 && sent.bitrate_kbps.is_none(), "{first:?}");
+    assert_eq!(sent.codec.as_deref(), Some("opus"), "{first:?}");
+    std::thread::sleep(Duration::from_secs(1));
+    let second = a.health();
+    let (sent, received) = (
+        second.audio.sent.clone().unwrap(),
+        second.audio.received.clone().unwrap(),
+    );
+    eprintln!("A's health: {second:?}");
+    assert!(sent.bitrate_kbps.is_some_and(|kbps| kbps > 0.0), "{second:?}");
+    assert!(received.bitrate_kbps.is_some_and(|kbps| kbps > 0.0), "{second:?}");
+    assert!(received.packets > 0, "{second:?}");
+    assert!(second.network.round_trip_ms.is_some(), "{second:?}");
+    assert!(
+        second.video.is_empty() && second.sharing.is_empty(),
+        "no video line: {second:?}"
+    );
+    let _ = (a.close(), b.close());
 }

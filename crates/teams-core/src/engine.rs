@@ -696,6 +696,8 @@ enum Request {
     LoadOlder(String, Responder<Option<Synced>>),
     /// A call action, with when it was asked (a start taken too late is refused: [`crate::calling::START_WITHIN`]).
     Call(CallAction, std::time::Instant, Responder<CallId>),
+    /// A running call's health, as its media measures it: nothing is sent ([`crate::calling::CallHealth`]).
+    CallHealth(CallId, Responder<Option<crate::calling::CallHealth>>),
     SyncConversation(String, Responder<Synced>),
     /// A chat's translations made on this computer, kept in the store: no service write.
     KeepTranslations(Vec<StoredTranslation>, Responder<()>),
@@ -946,6 +948,13 @@ impl EngineRequests {
     pub fn call(&self, action: CallAction) -> Reply<CallId> {
         let asked = std::time::Instant::now();
         self.ask(|reply| Request::Call(action, asked, reply))
+    }
+
+    /// The health of the running call `call` now (Teams' Call health), read from its media's own statistics: nothing
+    /// is sent, and it isn't a call action. `None` when `call` has no media running (it ended, or isn't this
+    /// account's), or the engine has no calling. Its rates are against the last time it was asked.
+    pub fn call_health(&self, call: CallId) -> Reply<Option<crate::calling::CallHealth>> {
+        self.ask(|reply| Request::CallHealth(call, reply))
     }
 
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
@@ -2162,6 +2171,7 @@ where
                 let _ = reply.send(self.transient(transient).await);
             }
             Request::Call(action, asked, reply) => self.call(action, asked, reply),
+            Request::CallHealth(call, reply) => self.call_health(call, reply),
             Request::OwnAvailability(status, reply) => {
                 log::info!("action: own availability {status:?}");
                 let _ = reply.send(self.own_availability(status).await);
@@ -2675,6 +2685,16 @@ where
                 described::call(&action)
             );
             let _ = reply.send(Err(CallActionError::NoCalling.into()));
+        }
+    }
+
+    /// A call's health ([`EngineRequests::call_health`]), handed to the calling; none in an engine without calling.
+    fn call_health(&self, call: CallId, reply: Responder<Option<crate::calling::CallHealth>>) {
+        match self.calls.as_ref().map(CallingTask::actions) {
+            Some(calls) => calls.health(call, reply),
+            None => {
+                let _ = reply.send(Ok(None));
+            }
         }
     }
 

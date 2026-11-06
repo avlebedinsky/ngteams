@@ -533,6 +533,36 @@ impl Peer {
         self.lines.lock().unwrap_or_else(PoisonError::into_inner).sharing = mids;
     }
 
+    /// libwebrtc's statistics of the call now (`getStats`), waited for on the asking thread. Nothing is sent.
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] when libwebrtc can't read them.
+    pub(crate) fn stats(&self) -> Result<Vec<libwebrtc::stats::RtcStats>, Error> {
+        block_on(self.pc.get_stats()).map_err(rtc)
+    }
+
+    /// Which video lines are screen sharing's, by mid: our screen's, and the sharing lines (the dialect's, a group
+    /// offer's own).
+    pub(crate) fn sharing_lines(&self) -> crate::health::Lines {
+        let mut sharing = self
+            .lines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sharing
+            .clone();
+        let offered = self
+            .sharing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(RtpTransceiver::mid);
+        sharing.extend(offered);
+        crate::health::Lines {
+            sharing,
+            screen: self.screen_mid(),
+        }
+    }
+
     /// Puts our screen on a line of its own, sending only (its encoder software H.264, its rate a still picture's): the
     /// source its frames go to. The line is in our next offer ([`Peer::offer`]), its mid then [`Peer::screen_mid`].
     ///

@@ -15,7 +15,8 @@
 //! - **Call actions**: handed to the calling at once ([`Inbox::hand_calls_to`]), as the loop hands them: the calling
 //!   runs on its own, so a Call pressed while a catch-up runs for minutes rings now, not once that is over (the
 //!   header's Call went, and nothing happened until then). A group chat's call reads whom it calls from the store.
-//!   Once a shutdown is kept, none goes any more: each is answered [`EngineError::Stopped`].
+//!   Once a shutdown is kept, none goes any more: each is answered [`EngineError::Stopped`]. A call's health (no
+//!   action: it reads the call's media) goes to the calling at once the same way.
 //! - **Kept**: everything else (another write, older history, a sync, presence, the shutdown).
 //! - Such an answer comes before a request made earlier that is kept (a write's row isn't in it yet); what that request
 //!   changes is told by its events, as always.
@@ -124,6 +125,13 @@ impl Inbox {
                     None
                 }
                 None => Some(Request::Call(action, asked, reply)),
+            },
+            Request::CallHealth(call, reply) => match self.calls.get() {
+                Some(calls) => {
+                    calls.health(call, reply);
+                    None
+                }
+                None => Some(Request::CallHealth(call, reply)),
             },
             Request::Person(mri, reply) => {
                 let person = store.profile(&mri).and_then(|stored| {

@@ -17,6 +17,7 @@ impl Glyph {
     pub const ALARM: Self = Self(include_bytes!("../assets/icons/alarm-clock.svg"));
     pub const BELL_OFF: Self = Self(include_bytes!("../assets/icons/bell-off.svg"));
     pub const TIMER: Self = Self(include_bytes!("../assets/icons/timer.svg"));
+    pub const ACTIVITY: Self = Self(include_bytes!("../assets/icons/activity.svg"));
     pub const ARROW_DOWN: Self = Self(include_bytes!("../assets/icons/arrow-down.svg"));
     pub const ARROW_RIGHT: Self = Self(include_bytes!("../assets/icons/arrow-right.svg"));
     pub const ARROW_UP: Self = Self(include_bytes!("../assets/icons/arrow-up.svg"));

@@ -61,8 +61,8 @@ mod workflows;
 
 pub use calendar::{EventWrite, EventWritten, Invitable, MeetingAvailability};
 pub use calling::{
-    CallAction, CallActionError, CallCaptions, CallMedia, CallParticipant, CallParts, CallRecording, CallStatus,
-    CallVideo, CallView, Caption, CaptionPhase, GROUP_SLOTS, IncomingCall, LobbyPerson, RecordingPhase,
+    CallAction, CallActionError, CallCaptions, CallHealth, CallMedia, CallParticipant, CallParts, CallRecording,
+    CallStatus, CallVideo, CallView, Caption, CaptionPhase, GROUP_SLOTS, IncomingCall, LobbyPerson, RecordingPhase,
     RecordingProblem, Relay, START_WITHIN, VideoOutput,
 };
 pub use channels::{ChannelDraft, ChannelMade, ChannelProblem};

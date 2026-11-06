@@ -712,7 +712,8 @@ impl CallStage {
 }
 
 /// What the call's More offers besides its own entries, as Teams' per call kind: Meeting info (a meeting's), Timer (a
-/// group call's or a meeting's), and under Settings Mute notifications (a group call's or a meeting's).
+/// group call's or a meeting's), and under Settings Call health (any call once it is up) and Mute notifications (a
+/// group call's or a meeting's).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -721,6 +722,7 @@ impl CallStage {
 pub(super) struct MoreTools {
     meeting_info: bool,
     timer: bool,
+    call_health: bool,
     mute_notifications: bool,
     /// The notifications are held back now (the entry reads Unmute notifications).
     notifications_muted: bool,
@@ -736,6 +738,7 @@ impl CallStage {
         MoreTools {
             meeting_info: is_meeting(&active) && active.status == CallStatus::Connected,
             timer: group,
+            call_health: active.status == CallStatus::Connected,
             mute_notifications: group,
             notifications_muted: crate::notify::muted_in_call(cx),
         }
@@ -885,7 +888,8 @@ pub(super) fn more_items(menu: PopupMenu, stage: &WeakEntity<CallStage>, tools: 
     }
 }
 
-/// More's Settings, where it has an entry: Mute notifications (or Unmute) in a group call or a meeting.
+/// More's Settings, where it has an entry: Call health once the call is up, Mute notifications (or Unmute) in a group
+/// call or a meeting.
 pub(super) fn settings_submenu(
     menu: PopupMenu,
     stage: &WeakEntity<CallStage>,
@@ -893,7 +897,7 @@ pub(super) fn settings_submenu(
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    if !tools.mute_notifications {
+    if !tools.mute_notifications && !tools.call_health {
         return menu;
     }
     let stage = stage.clone();
@@ -903,6 +907,14 @@ pub(super) fn settings_submenu(
         window,
         cx,
         move |menu, _, _| {
+            let menu = if tools.call_health {
+                menu.item(super::health::menu_item(stage.clone()))
+            } else {
+                menu
+            };
+            if !tools.mute_notifications {
+                return menu.min_w(px(220.0));
+            }
             let stage = stage.clone();
             let muted = tools.notifications_muted;
             let (glyph, label) = if muted {

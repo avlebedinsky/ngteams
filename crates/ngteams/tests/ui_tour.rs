@@ -10,7 +10,7 @@
 //! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
 //! Dark and Light; a picture opened in the picture viewer, fitted and zoomed; the 12-hour time format and a chat's
 //! times on it; a group chat's presence; the "Chats" section's See more, what it brings and a chat opened from below
-//! the rows shown; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, beside the main window
+//! the rows shown; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, its Call health, beside the main window
 //! with its in-call strip, and in Teams Dark; a group call with Raise and React, its People pane, its speaker view and
 //! its chat, in Teams Light and Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 210] = [
+const STEPS: [Step; 5 + 214] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1343,10 +1343,19 @@ const STEPS: [Step; 5 + 210] = [
     ("call-window-effects", |_, _, cx| {
         with_stage(cx, |stage, cx| stage.show_effects(true, cx));
     }),
+    // its Call health pane from More → Settings: made-up measures (the mock's engine runs no call media)
+    ("call-window-health", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_health_reading(tour_health(), cx));
+    }),
+    // and its Video page, from View more video data
+    ("call-window-health-video", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_health_section(2, cx));
+    }),
     // the main window beside it, its chats usable, its in-call strip the way back: the parent puts the two side by
     // side and shoots the screen
     ("call-side-by-side", |_, _, cx| {
         with_stage(cx, |stage, cx| {
+            stage.show_health(false, cx);
             stage.show_effects(false, cx);
             stage.show_roster(false, cx);
         });
@@ -1396,9 +1405,20 @@ const STEPS: [Step; 5 + 210] = [
     ("call-window-effects-dark", |_, _, cx| {
         with_stage(cx, |stage, cx| stage.show_effects(true, cx));
     }),
+    // and its Call health pane in Teams Dark
+    ("call-window-health-dark", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_health_reading(tour_health(), cx));
+    }),
+    // and its Audio page in Teams Dark
+    ("call-window-health-audio-dark", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_health_section(1, cx));
+    }),
     // the 1:1 call on hold in Teams Dark: Resume in Hold's place, the camera and the microphone greyed out, "On hold"
     ("call-window-held-dark", |shell, _, cx| {
-        with_stage(cx, |stage, cx| stage.show_effects(false, cx));
+        with_stage(cx, |stage, cx| {
+            stage.show_health(false, cx);
+            stage.show_effects(false, cx);
+        });
         held(shell, true, cx);
     }),
     // the same call held by its far end (Teams' held party): the far end's avatar over "On hold", no duration, the
@@ -2186,6 +2206,41 @@ fn with_stage(cx: &mut App, change: impl FnOnce(&mut CallStage, &mut Context<Cal
     });
     if let Some(stage) = stage {
         stage.update(cx, change);
+    }
+}
+
+/// A 1:1 video call's health as the Call health pane shows it (made up): audio and video both ways, nothing shared.
+fn tour_health() -> teams_core::CallHealth {
+    use teams_core::calling::{MediaHealth, NetworkHealth, StreamHealth};
+    let stream = |kbps, packets, video: Option<(u32, u32, f64)>, codec: &str| StreamHealth {
+        bitrate_kbps: Some(kbps),
+        packets,
+        loss_percent: Some(0.4),
+        jitter_ms: Some(3.0),
+        round_trip_ms: Some(38.0),
+        frame_rate: video.map(|(_, _, fps)| fps),
+        resolution: video.map(|(width, height, _)| (width, height)),
+        codec: Some(codec.to_owned()),
+        hardware: video.map(|_| false),
+    };
+    teams_core::CallHealth {
+        network: NetworkHealth {
+            round_trip_ms: Some(38.0),
+            received_loss_percent: Some(0.4),
+            received_jitter_ms: Some(3.0),
+            sent_loss_percent: Some(0.0),
+            available_send_kbps: Some(2_480.0),
+            available_receive_kbps: None,
+        },
+        audio: MediaHealth {
+            sent: Some(stream(33.0, 6_212, None, "opus")),
+            received: Some(stream(31.0, 6_190, None, "opus")),
+        },
+        video: MediaHealth {
+            sent: Some(stream(1_180.0, 48_120, Some((1280, 720, 30.0)), "H264")),
+            received: Some(stream(860.0, 39_005, Some((960, 540, 24.0)), "H264")),
+        },
+        sharing: MediaHealth::default(),
     }
 }
 

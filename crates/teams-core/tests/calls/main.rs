@@ -8,6 +8,7 @@
 //! - `failures`: the native signaling feeds the call tracker; what a failure does (Task 14's decision with
 //!   Codex); the engine stopping hangs up.
 //! - `share`: a 1:1 call's screen shared either way, and the far end's shown.
+//! - `health`: a running call's health read from its media (the Call health pane's), and none once it ended.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
 
@@ -19,6 +20,7 @@ mod diagnostics;
 mod failures;
 mod flows;
 mod group;
+mod health;
 mod in_call;
 mod meeting_state;
 mod recording;

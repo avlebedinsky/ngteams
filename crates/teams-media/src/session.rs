@@ -285,6 +285,8 @@ pub struct MediaSession {
     video: Mutex<video::SessionVideo>,
     /// One SDP step at a time: libwebrtc takes its descriptions in the order they are applied.
     negotiation: Mutex<()>,
+    /// The call's health as last read, for the next read's rates ([`MediaSession::health`]).
+    health: Mutex<crate::health::HealthReader>,
 }
 
 impl MediaSession {
@@ -343,6 +345,7 @@ impl MediaSession {
             unopened: Mutex::new(Some(Unopened { processing })),
             video: Mutex::new(video::SessionVideo::default()),
             negotiation: Mutex::new(()),
+            health: Mutex::new(crate::health::HealthReader::default()),
         })
     }
 
@@ -634,6 +637,21 @@ impl MediaSession {
         } else {
             events.recv_timeout(timeout).ok()
         }
+    }
+
+    /// The call's health now, as libwebrtc measures it (Teams' Call health): its rates against the last time it was
+    /// asked. Waits for libwebrtc on the asking thread; nothing is sent. Statistics libwebrtc can't read show nothing.
+    #[must_use]
+    pub fn health(&self) -> crate::health::CallHealth {
+        let stats = self.peer.stats().unwrap_or_else(|error| {
+            log::debug!("the call's statistics can't be read: {error}");
+            Vec::new()
+        });
+        let lines = self.peer.sharing_lines();
+        self.health
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .read(&stats, &lines, Instant::now())
     }
 
     #[must_use]

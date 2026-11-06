@@ -855,8 +855,14 @@ shows the timer's bar and editor, the lock's question and notices, Meeting info 
 dot, and starts and stops a recording (Record, above). People's Download attendance list is made locally from the
 roster's `endpointJoinTime`s. Not built: Notes (a Loop page), Controls' Enable lobby and Allow all
 participants to (their requests weren't captured), Help and Report a concern (no captured target), Accessibility
-settings and Don't show chat bubbles (the app has neither), Call health, Apps (its loaded pane wasn't captured), and
-the Dial pad (the user doesn't want one).
+settings and Don't show chat bubbles (the app has neither), Apps (its loaded pane wasn't captured), and the Dial pad
+(the user doesn't want one).
+
+**Call health** (More → Settings → Call health, in 1:1 and group calls) is the client's own: its pane shows the
+call's network, audio, video and screen sharing as the call's libwebrtc peer measures them (its statistics, the same
+`getStats` a browser offers), read every two seconds while the pane is open. Nothing goes to the service for it: no
+request, no conversation update, no change to the call. Rates (bitrates, loss) are the difference between two reads;
+the camera's lines and a screen's are told apart by mid (`teams_media::health`).
 
 ## A call held past a dropped socket
 

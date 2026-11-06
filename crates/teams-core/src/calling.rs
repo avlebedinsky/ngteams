@@ -68,6 +68,8 @@ pub use captions::{CallCaptions, Caption, CaptionPhase};
 mod recording;
 pub use recording::{CallRecording, RecordingPhase, RecordingProblem};
 mod gallery;
+mod health;
+pub use health::{CallHealth, MediaHealth, NetworkHealth, StreamHealth};
 mod media;
 mod people;
 mod share;
@@ -355,6 +357,8 @@ pub(crate) enum Act {
     Share(CallId, bool),
     Add(CallId, Mri),
     Transfer(CallId, Mri),
+    /// The call's health read ([`health`]): no action, its answer goes to its own responder.
+    Health(CallId, crate::engine::Responder<Option<CallHealth>>),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -463,6 +467,13 @@ impl CallActions {
             let (_, reply) = refused.0;
             let _ = reply.send(Err(EngineError::Stopped));
         }
+    }
+
+    /// Hands a read of the call's health to the calling; its answer goes to `reply` (dropped unanswered, it hears the
+    /// engine stopped).
+    pub(crate) fn health(&self, call: CallId, reply: crate::engine::Responder<Option<CallHealth>>) {
+        let (unused, _) = oneshot::channel();
+        self.act(Act::Health(call, reply), unused);
     }
 }
 
@@ -1557,6 +1568,7 @@ where
     fn act(&mut self, act: Act, reply: Waiting) {
         let now = Instant::now();
         let answer = match act {
+            Act::Health(call, health) => return self.health(call, health),
             Act::Captions(..) | Act::CaptionLanguage(..) | Act::Record(..) => self.service_act(act),
             Act::Place(_) | Act::Join(_) | Act::JoinChannel(..) | Act::Answer(_) => return self.set_up(act, reply),
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),

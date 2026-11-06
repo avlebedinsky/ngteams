@@ -11,6 +11,7 @@
 //! - [`session`]: a call's media on threads of its own: the microphone through the audio processing ([`processing`],
 //!   libwebrtc's own module) to libwebrtc, libwebrtc's audio to the speaker, the camera's frames to libwebrtc and its
 //!   decoded video to the caller's sinks ([`video`]: the camera's bounds and the frames' conversions).
+//! - [`health`]: the call's health as libwebrtc's own statistics tell it (Teams' Call health), read when asked.
 //! - [`devices`]: the device seam (a microphone, a speaker, a camera): a file backend that opens no audio server, and
 //!   a PipeWire backend whose caller selects its server at run time (the UI sandbox's, or the desktop's for the
 //!   personal build). [`tone`] makes and measures the test tone.
@@ -25,6 +26,7 @@ use std::io;
 
 pub mod captions;
 pub mod devices;
+pub mod health;
 pub mod mcp;
 pub mod player;
 pub mod processing;

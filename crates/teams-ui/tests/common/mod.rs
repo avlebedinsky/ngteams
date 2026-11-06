@@ -208,6 +208,8 @@ pub struct FakeCore {
     /// kept in `held_calls` for the test to send.
     pub hold_calls: Mutex<bool>,
     pub held_calls: Mutex<Vec<Answer<CallId>>>,
+    /// What `call_health` answers for any call (none: no media).
+    pub call_health: Mutex<Option<teams_core::CallHealth>>,
     /// The app's read-only mode, as `Core::read_only` answers it.
     pub read_only: Mutex<bool>,
     /// The scheduling tests' calendar service; its defaults match Core's empty, unsaved calendar.
@@ -1077,6 +1079,10 @@ impl Core for FakeCore {
         self.answer("reply_roots", || {
             locked(&self.roots).get(&conversation).cloned().unwrap_or_default()
         })
+    }
+
+    fn call_health(&self, _: CallId) -> Reply<Option<teams_core::CallHealth>> {
+        self.answer("call_health", || locked(&self.call_health).clone())
     }
 
     fn call(&self, action: CallAction) -> Reply<CallId> {

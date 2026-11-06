@@ -24,8 +24,8 @@ use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Availability, CalendarEvent, CallAction, CallId, ChannelDraft, ChannelMade, ChatListing, EngineHandle,
-    EngineRequests, Event, EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable,
+    Action, Availability, CalendarEvent, CallAction, CallHealth, CallId, ChannelDraft, ChannelMade, ChatListing,
+    EngineHandle, EngineRequests, Event, EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable,
     MeetingAvailability, MeetingDetails, OwnStatus, Person, PictureBytes, Reply, SearchAnswer, SearchScope, Strip,
     TeamChange, TeamMember, TeamWritten, TranscriptWrite, Transient, TransientSent,
 };
@@ -222,6 +222,12 @@ pub trait Core: Send + Sync + 'static {
     /// invitation the engine offered, a hang-up, muting; answered with the call it acted on, or why it was refused
     /// (nothing sent). Only the user's action asks for one ([`crate::calls`]).
     fn call(&self, action: CallAction) -> Reply<CallId>;
+    /// The running call's health now (the call window's Call health), read from its media's own statistics: nothing
+    /// is sent, and it isn't a call action. `None` when the call has no media running; a fake core's never has.
+    fn call_health(&self, call: CallId) -> Reply<Option<CallHealth>> {
+        let _ = call;
+        Reply::ready(Ok(None))
+    }
     /// Whether the engine sends nothing (the personal build's read-only mode, `ngteams --read-only`): the views offer
     /// no write (the boxes, a message's actions, the calls, the status say "Read-only"), and one asked anyway is
     /// refused below them, recorded in the diagnostic log. `false` by default.
@@ -834,6 +840,10 @@ impl Core for EngineRequests {
 
     fn call(&self, action: CallAction) -> Reply<CallId> {
         EngineRequests::call(self, action)
+    }
+
+    fn call_health(&self, call: CallId) -> Reply<Option<CallHealth>> {
+        EngineRequests::call_health(self, call)
     }
 }
 

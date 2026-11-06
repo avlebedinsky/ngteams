@@ -28,6 +28,8 @@
 //!   the self-preview over the background effects ([`crate::effects::EffectsPicker`]): what the call sends while the
 //!   camera is on, else a preview only the user's Preview turns on. A background chosen applies to the call's camera
 //!   at once and is kept for the next calls.
+//! - **The Call health pane** ([`health`], More → Settings → Call health): the call's network, audio, video and screen
+//!   sharing as its media measures them, refreshed while it is open; reading them sends nothing.
 //! - **How a call ended**, when the user didn't end it (the far end hung up, it dropped, never connected, went to
 //!   voicemail): who it was with (their avatar and name), why it ended in plain words ([`calls::Ended::reason`]: "Lab
 //!   Bee ended the call", "No one else joined the call", never a code the service sent), how long it lasted, and
@@ -47,6 +49,8 @@
 mod captions;
 mod chat_pane;
 mod gallery;
+mod health;
+pub use health::HEALTH_REFRESH;
 mod invite;
 mod meeting;
 mod people_pane;
@@ -185,6 +189,8 @@ enum Pane {
     Effects,
     /// More → Meeting info.
     MeetingInfo,
+    /// More → Settings → Call health ([`health`]).
+    Health,
 }
 
 /// What the call window shows (see the module docs). A GPUI entity, the window's root view.
@@ -211,6 +217,8 @@ pub struct CallStage {
     effects: Option<Entity<EffectsPicker>>,
     /// The call's chat, once the Chat pane showed it.
     chat: Option<Entity<crate::chat_view::ChatView>>,
+    /// The Call health pane's reading, while it is open.
+    health: Option<health::HealthPane>,
     /// What the call's chat is drawn with ([`StageParts::shell`]).
     shell: Option<ShellParts>,
     /// How the stage lays its tiles out (View).
@@ -325,6 +333,7 @@ impl CallStage {
             pane: Pane::None,
             effects: None,
             chat: None,
+            health: None,
             shell,
             layout: Layout::default(),
             pinned: None,
@@ -872,6 +881,7 @@ impl CallStage {
             let chat = self.chat_pane(active, palette, cx);
             let effects = self.effects_pane(active, palette, cx);
             let info = self.meeting_info_pane(active, title, palette, cx);
+            let health = self.health_pane(palette, cx);
             return div()
                 .size_full()
                 .flex()
@@ -880,6 +890,7 @@ impl CallStage {
                 .children(chat)
                 .children(effects)
                 .children(info)
+                .children(health)
                 .into_any_element();
         }
         match (ended, ended.and_then(|ended| ended.check)) {

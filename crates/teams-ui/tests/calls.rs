@@ -11,6 +11,9 @@
 #![cfg(test)]
 
 pub mod common;
+/// The Call health pane, from More → Settings.
+#[path = "calls/health.rs"]
+mod health;
 #[path = "common/notices.rs"]
 mod notices;
 

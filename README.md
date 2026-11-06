@@ -342,8 +342,9 @@ the people beside it. People's "Invite someone" adds someone to a chat's call (a
 chat of the three); who doesn't answer shows "No response" with Call again. Transfer (1:1 calls) holds the call and
 transfers it to someone picked, Consult holds it and opens their chat; a call the far end transfers calls the target
 at once. More's Record and transcribe starts a recording with its transcript after asking the spoken language (Stop
-recording, after asking, stops anyone's); the recording lands in the chat as Teams saves it. The main window keeps an
-in-call strip.
+recording, after asking, stops anyone's); the recording lands in the chat as Teams saves it. More → Settings → Call
+health shows the call's network, audio, video and screen sharing measures as its media reads them (nothing goes to
+Teams). The main window keeps an in-call strip.
 Ctrl+Shift+M mutes, Ctrl+Shift+O toggles camera, Ctrl+Shift+K raises or lowers the hand and Ctrl+Shift+H leaves.
 Camera starts off; only the user's action turns it on.
 Notifications, tray and device access use the session selected at startup: desktop for the user's normal app,
