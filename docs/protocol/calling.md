@@ -708,8 +708,24 @@ a alone). What each of Teams' remaining call controls sends:
   the people in a strip on its right, and its View adds **Focus on content**. Share becomes a red **Stop sharing**.
   Stopping renegotiates `["Audio"]` with the sharing line gone from the offer and the bundle. Both ends' rosters list
   the sharer's `screenSharerAttributes` from then on.
-- **Share in a group call** (the 1:1 call above escalated by an add): the participant properties went as above, but no
-  renegotiation followed and the viewer showed nothing before the call ended; the group path wasn't captured.
+- **Share in a group call** (captured again 2026-11-06: a 1:1 call a ↔ b escalated by adding c, a sharing, b and c
+  viewing). The sharer posts the same `screenSharerAttributes` and renegotiates nothing: the mixer offers every group
+  call a sharing line of its own (labelled `applicationsharing-video`, answered both ways like a receiving line), and
+  the sharer only describes it again at the call leg's `updateMediaDescriptions`: `{"UpdateMediaDescriptions":
+  {"mediaDescriptions": {"descriptions": [<the other video lines as described>, {"mid": <the sharing line>,
+  "direction": "sendonly", "label": "applicationsharing-video"}], "negotiationTag": "<its participant id>;ss_1",
+  "requestId": <n>}}}` (`200`); Stop sharing describes it `recvonly` again (no label) with the same tag. Everyone's
+  roster then lists the sharer's endpoint's `applicationsharing-video` stream `sendonly` (it is `recvonly` otherwise),
+  with its `sourceId`. A viewer sends no request for it: it asks the mixer over the call's data channel, as for a
+  camera, with a `controlVideoStreaming` source request naming the sharer's sharing source on the stream id of its own
+  sharing line (`sourceId` `-1` once the share ends); the share then shows large with the people in a strip on its
+  right. Why #13's native viewer saw nothing: the native client rejected the mixer's sharing line in its answers and
+  asked for no source on it. It now takes that line as the web client does, reads who shares from the roster, asks for
+  their screen on it and shows it as a 1:1 call's far end's share (`Event::CallRemoteShare`). Sharing from a group
+  call isn't offered natively: the screen would have to go out on the mixer's line, which libwebrtc negotiated
+  receive-only on our side, and LiveKit's bindings (`libwebrtc` 0.3.55) don't expose a line's `set_direction`
+  (`webrtc-sys` does), so it can't be turned to send without an offer of our own on the mixer's lines (turned away
+  before, "Hold and resume").
 - **The native client's share, 1:1.** Share asks the desktop's screen-cast portal (`org.freedesktop.portal.ScreenCast`:
   `CreateSession`, `SelectSources` for a monitor or a window with the cursor drawn in, `Start`, `OpenPipeWireRemote`)
   for what to share; the node it names is read over the portal's PipeWire remote for as long as the share, its frames
@@ -722,7 +738,7 @@ a alone). What each of Teams' remaining call controls sends:
   receiving (its frames shown apart from the camera's, the share taking the stage with the people beside it; View's
   Focus on content shows it alone) and answered with `["Audio", "ScreenViewer"]`; an offer rejecting the line ends the
   share. A sharing line offered `inactive` (every 1:1 start's and invitation's) stays rejected. A group call offers no
-  Share: its path wasn't captured.
+  Share (above).
 - **Dial pad** (1:1 calls): a pad of 1–9, `*`, 0, `#` with letters, under a Number field that collects what was pressed.
   Each key goes as a DTMF tone on the call's audio sender (the browser's `insertDTMF`, 200 ms tone, 100 ms gap, RFC
   4733 `telephone-event` on the audio line); nothing goes to the signaling. The native client has no dial pad and sends
@@ -750,12 +766,28 @@ a alone). What each of Teams' remaining call controls sends:
 - **Consult** (1:1 calls) holds the call and asks "Consult then transfer the call" (the person; Cancel, Start a call,
   Open chat). Start a call places an ordinary call to them in their 1:1 chat while the first call stays held in a
   floating card (its name, "Hold" and how long, Resume, Leave); the consult call's toolbar leads with an outlined
-  **Transfer**. In the run the target's voicemail took the consult call and it dropped before Transfer was sent; the
-  consultative transfer's request wasn't captured. The native client offers Consult's dialog (it holds the call; the
-  person picked; Cancel on the left, leaving the call held; Open chat opening their 1:1 chat in the main window) but not
-  Start a call: the consult call would be a second call of the account while the first stays held, and the engine
-  keeps one call per account (the machine has one call slot; the call floor admits one call or ring across the app's
-  accounts); the consultative transfer that follows it wasn't captured either.
+  **Transfer**. Captured end to end 2026-11-06 (`ab-call --call steps` with c's page a bystander, a ↔ b held, a
+  consulting c):
+  - The consult call is an ordinary start (`POST …/epconv`) to the target from the same endpoint, its
+    `endpointMetadata` naming `{"consultationContext": {"isIncomingConsult": true}}`; the target's client rings as for
+    any call (an unanswered one goes to the target's voicemail after about 20 s, and the consult then drops).
+  - Transfer in the consult call: the transferor first renegotiates the consult call `inactive` (`callModalities: []`),
+    then posts the **held** call's leg `transfer` link the blind transfer's `callTransfer` (`target`, `transferor`
+    details, `authorizationToken: null`, `transferAcceptance`/`transferCompletion` callbacks) plus
+    `"replacementDetails": {"replaces": <the consult call's far end's `replacement` link, as its acceptance handed it
+    out>, "replacementTargetParticipantId": <that far end's participant id>}` (`202`). The transferred party gets the
+    `callTransfer` with `isConsultative: true` and `replacementDetails.replacementTargetParticipantId`, takes it
+    (`transferAcceptance`), starts a new call to the target (`callInvitation.transferor` as delivered) and posts
+    `{"transferCompletion": {"code": 0}}`; the target's client receives the new call at its consult leg's
+    `replacement` callback (`callNotification` from the transferred party) and takes it in that leg's place, without a
+    ring. The transferor is told at `transferAcceptance` and `transferCompletion` (`noError`), then leaves the held
+    call (`ConversationEndNoModalityConnected`); its consult call ends with it.
+  The native client offers Consult's dialog (it holds the call; the person picked; Cancel on the left, leaving the call
+  held; Open chat opening their 1:1 chat in the main window) but not Start a call: the consult call is a second call of
+  the account while the first stays held, and the engine keeps one call per account (the machine has one call slot;
+  the call floor admits one call or ring across the app's accounts). A consultative transfer delivered to the native
+  client (`isConsultative: true`) isn't taken either: the target's side of it is a replacement, a delivery the engine
+  doesn't read.
 - **Add participants** (People's "Invite someone or dial a number"): picking someone in a 1:1 call creates a group chat
   of the three (`POST v1/threads`, no topic) and posts the conversation's `add` (`addParticipantAndModality`) with
   `{"participants": {"from", "to": [{id, participantId}]}, "participantInvitationData": {}, "groupChat": {"threadId":

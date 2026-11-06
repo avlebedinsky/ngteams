@@ -25,6 +25,8 @@ pub struct Participant {
     pub video_source: Option<i64>,
     /// Whether it sends video now (its main video line `sendrecv` or `sendonly`).
     pub video_on: bool,
+    /// The source id of its screen while it shares it in a group call: what a source request names to show it.
+    pub sharing_source: Option<i64>,
     /// Whether its microphone is muted, as its endpoint reports it.
     pub muted: bool,
     /// Whether its hand is raised.
@@ -161,6 +163,7 @@ fn participant(entry: &RosterEntry) -> Participant {
         audio_source: entry.audio_source,
         video_source: entry.video_source,
         video_on: entry.video_on,
+        sharing_source: entry.sharing_source,
         muted: entry.muted,
         hand_raised: entry.hand.is_some(),
         organizer: entry.organizer,

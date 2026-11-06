@@ -1261,18 +1261,31 @@ where
     /// and its view told when it changed.
     fn show_participants(&mut self, now: Instant) {
         let Some(live) = self.live.as_mut() else { return };
+        let mut shared = None;
         if live.is_group() {
             let slots = media::slots(live);
             live.gallery.set_slots(slots);
+            live.gallery.set_sharing_slot(media::sharing_slot(live));
             let wanted = live.gallery.assign();
             if !wanted.is_empty()
                 && let Err(error) = live.session.request_sources(wanted)
             {
                 log::warn!("call {}: its source requests didn't go: {error}", live.call.get());
             }
+            // someone's screen on the sharing line, as a 1:1 call's far end's renegotiation tells it
+            let shown = live.gallery.sharer().is_some();
+            if live.shares.theirs != shown {
+                live.shares.theirs = shown;
+                shared = Some(shown);
+            }
         }
-        if let Some(view) = live.gallery.changed(now) {
-            let call = live.call;
+        let call = live.call;
+        let view = live.gallery.changed(now);
+        if let Some(on) = shared {
+            log::info!("call {}: a shared screen shown {on}", call.get());
+            self.emit(Event::CallRemoteShare { call, on });
+        }
+        if let Some(view) = view {
             self.emit(Event::CallParticipants { call, view });
         }
     }

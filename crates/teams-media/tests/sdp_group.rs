@@ -3,9 +3,10 @@
 //!
 //! - The callee's answer takes the main video line and up to the slots' count of the other video lines both ways (as
 //!   the web client answers them; nothing is sent on the receiving ones), each with reduced-size RTCP, its feedback for
-//!   every payload type and the largest picture it takes (as the mixer takes them); it rejects the sharing line and any
-//!   line past the slots and keeps the data line; each receiving line's stream id (`a=x-source-streamid`) is what a
-//!   source request names it by, and the data line's is the client's own control plane source.
+//!   every payload type and the largest picture it takes (as the mixer takes them); it takes the sharing line the same
+//!   way (someone's screen comes on it), rejects any line past the slots and keeps the data line; each receiving line's
+//!   and the sharing line's stream id (`a=x-source-streamid`) is what a source request names it by, and the data line's
+//!   is the client's own control plane source.
 //! - The lines are described as the web client describes them: the main line `recvonly` while the camera is off,
 //!   `sendrecv` while it is on, each receiving line `recvonly`.
 //! - Our group offer (a caller's or a joiner's) has audio, the main line, the receiving lines, the sharing line last
@@ -143,11 +144,8 @@ fn a_callee_takes_the_main_line_both_ways_and_the_slots_receiving() -> TestResul
     for slot in &lines[1..11] {
         assert_taken(slot);
     }
-    assert!(
-        lines[11][0].starts_with("m=video 0 "),
-        "the sharing line rejected: {:?}",
-        lines[11]
-    );
+    assert_eq!(value(&lines[11], "label"), Some("applicationsharing-video"));
+    assert_taken(&lines[11]);
     assert!(
         lines[12][0].starts_with("m=x-data "),
         "the data line kept: {:?}",
@@ -162,6 +160,8 @@ fn a_callee_takes_the_main_line_both_ways_and_the_slots_receiving() -> TestResul
     );
     assert_eq!(session.data_stream_id(), Some(426));
     assert_eq!(session.main_video_mid(), Some("2"));
+    // the sharing line by its stream id, as a source request for someone's screen names it
+    assert_eq!(session.sharing_slot().and_then(|(_, stream)| stream), Some(425));
     Ok(())
 }
 
@@ -211,6 +211,11 @@ fn our_group_offer_is_the_web_client_s_kind() -> TestResult {
         session.video_slots().len(),
         9,
         "the receiving lines, the sharing line not among them"
+    );
+    // the sharing line known as the group call's own, its stream id the mixer's answer will name
+    assert_eq!(
+        session.sharing_slot().map(|(mid, _)| mid),
+        value(&lines[11], "mid").map(str::to_owned)
     );
     // the descriptions name the offer's own mids: the main line, then each receiving line
     assert_eq!(session.main_video_mid(), value(&lines[1], "mid"));

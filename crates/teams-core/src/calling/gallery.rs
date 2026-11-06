@@ -8,6 +8,9 @@
 //!   whose camera is on first. What the lines are to show goes to the mixer as source requests
 //!   ([`teams_media::session::SourceRequest`]: the line's stream id, the participant's video source id while its
 //!   camera is on, `-1` while it is off), each line only when it changed (the session keeps what went).
+//! - **Whose screen the sharing line shows** (a group call's): the first participant whose screen is shared (the
+//!   roster's `applicationsharing-video` stream going out), asked for on the call's sharing line by its stream id as a
+//!   receiving line's video is (`-1` once nobody shares), as the web client's viewer asks the mixer for it.
 //! - **Who is speaking**: in a 1:1 call, the far end while what the speaker plays is louder than [`SPEAKING_LEVEL`];
 //!   in a group call, the newest dominant speaker the mixer told (by audio source id) while what the speaker plays is
 //!   (the mixer's word alone would keep the last one speaking through a silence), and nobody in a group call without
@@ -79,6 +82,8 @@ pub(super) struct Gallery {
     slots: Vec<Option<u32>>,
     /// Who each receiving line shows, by MRI and video source.
     shown: Vec<Option<(String, i64)>>,
+    /// A group call's sharing line's stream id, once the far end named one.
+    sharing_slot: Option<u32>,
     /// Who the mixer last said spoke (a group call's), by audio source id.
     dominant: Option<i64>,
     /// Until when the far end (a 1:1 call's) and the account are speaking.
@@ -120,6 +125,19 @@ impl Gallery {
     pub(super) fn set_slots(&mut self, slots: Vec<Option<u32>>) {
         self.shown.resize(slots.len(), None);
         self.slots = slots;
+    }
+
+    /// The group call's sharing line's stream id (`None` while it has none).
+    pub(super) fn set_sharing_slot(&mut self, slot: Option<u32>) {
+        self.sharing_slot = slot;
+    }
+
+    /// Whose screen is shared now, in a group call whose sharing line can show it: the first participant sharing.
+    pub(super) fn sharer(&self) -> Option<&Participant> {
+        if !self.lines || self.sharing_slot.is_none() {
+            return None;
+        }
+        self.participants.iter().find(|p| p.sharing_source.is_some())
     }
 
     /// The source requests that show what the lines are to show now (a 1:1 call's: none): each line that has a stream
@@ -167,10 +185,15 @@ impl Gallery {
                 -1
             }
         };
+        let screen = self.sharing_slot.map(|stream| {
+            let sharer = self.sharer().and_then(|p| p.sharing_source);
+            (stream, sharer.unwrap_or(-1))
+        });
         self.slots
             .iter()
             .zip(&self.shown)
             .filter_map(|(stream, shown)| Some((stream.as_ref().copied()?, shown.as_ref().map_or(-1, source))))
+            .chain(screen)
             .collect()
     }
 
@@ -256,6 +279,7 @@ mod tests {
             audio_source: Some(audio),
             video_source: Some(audio + 1),
             video_on: true,
+            sharing_source: None,
             muted: false,
             hand_raised: false,
             organizer: false,
@@ -360,5 +384,24 @@ mod tests {
         let view = gallery.changed(now).unwrap();
         assert_eq!(speaking(&view), (false, vec![false, false]));
         assert!(view.participants.iter().all(|p| p.line.is_none()), "{view:?}");
+    }
+
+    #[test]
+    fn a_group_call_s_shared_screen_is_asked_for_on_its_sharing_line_and_let_go_once_it_stops() {
+        let mut gallery = Gallery::new(true, true);
+        gallery.set_participants(vec![participant("8:orgid:b", 10), participant("8:orgid:c", 20)]);
+        gallery.set_slots(vec![Some(5)]);
+        assert!(gallery.sharer().is_none(), "no sharing line yet");
+        gallery.set_sharing_slot(Some(425));
+        assert!(gallery.sharer().is_none(), "nobody shares");
+        assert_eq!(gallery.assign(), vec![(5, 11), (425, -1)]);
+        let mut sharing = participant("8:orgid:c", 20);
+        sharing.sharing_source = Some(212);
+        gallery.set_participants(vec![participant("8:orgid:b", 10), sharing]);
+        assert_eq!(gallery.sharer().map(|p| p.mri.as_str()), Some("8:orgid:c"));
+        assert_eq!(gallery.assign(), vec![(5, 11), (425, 212)]);
+        gallery.set_participants(vec![participant("8:orgid:b", 10), participant("8:orgid:c", 20)]);
+        assert!(gallery.sharer().is_none());
+        assert_eq!(gallery.assign(), vec![(5, 11), (425, -1)]);
     }
 }

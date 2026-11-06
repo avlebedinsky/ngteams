@@ -337,8 +337,8 @@ Resume while held), Chat (the call's chat beside the stage), People, Raise and R
 Speaker, Focus on content while a share shows, Show videos first; More options: Turn off other videos, Hide me, Full
 screen), More, camera, microphone, Share (1:1 calls with video: "Share content", the screen or window picked at the
 desktop's screen-cast portal; Stop sharing while shared) and Leave (End meeting, after a confirmation, for a meeting's
-organizer). A 1:1 call the far end holds shows its avatar over "On hold"; the far end's shared screen takes the stage,
-the people beside it. People's "Invite someone" adds someone to a chat's call (a 1:1 call becomes a group call in a new
+organizer). A 1:1 call the far end holds shows its avatar over "On hold"; the far end's shared screen (in a group call,
+anyone's) takes the stage, the people beside it. People's "Invite someone" adds someone to a chat's call (a 1:1 call becomes a group call in a new
 chat of the three); who doesn't answer shows "No response" with Call again. Transfer (1:1 calls) holds the call and
 transfers it to someone picked, Consult holds it and opens their chat; a call the far end transfers calls the target
 at once. More's Record and transcribe starts a recording with its transcript after asking the spoken language (Stop

@@ -894,6 +894,11 @@ pub(super) fn lock(dialect: &Mutex<NgcSession>) -> std::sync::MutexGuard<'_, Ngc
 }
 
 /// A group call's receiving lines' stream ids, in line order, as its dialect names them now.
+/// The running group call's sharing line's stream id, as its dialect names it now.
+pub(super) fn sharing_slot(live: &LiveMedia) -> Option<u32> {
+    lock(&live.dialect).sharing_slot().and_then(|(_, stream)| stream)
+}
+
 pub(super) fn slots(live: &LiveMedia) -> Vec<Option<u32>> {
     lock(&live.dialect)
         .video_slots()

@@ -11,7 +11,11 @@
 //!   `["Audio", "ScreenViewer"]`; its frames go to the video output's sharing sink. [`Event::CallRemoteShare`] tells it
 //!   shown and, once an offer rejects that line, gone.
 //!
-//! A group call's share (the mixer's) wasn't captured: the engine shares only in a 1:1 call's media.
+//! - **Someone's share in a group call**: the mixer's sharing line shows whoever the roster says shares, asked for as a
+//!   receiving line's video is (`super::gallery`); [`Event::CallRemoteShare`] tells it shown and gone.
+//!
+//! The account shares only in a 1:1 call's media: a group call's screen goes out on the mixer's own sharing line,
+//! which libwebrtc's bindings can't turn to send without an offer of ours (`docs/protocol/calling.md`).
 
 use std::sync::Arc;
 use std::time::Instant;

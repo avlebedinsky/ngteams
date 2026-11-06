@@ -332,6 +332,9 @@ pub(crate) struct RosterEntry {
     pub(crate) audio_source: Option<i64>,
     pub(crate) video_source: Option<i64>,
     pub(crate) video_on: bool,
+    /// The source id of its screen while it shares it (its `applicationsharing-video` stream going out: `sendonly` or
+    /// `sendrecv`, seen 2026-11-06 in a group call's roster): what a source request names to show it.
+    pub(crate) sharing_source: Option<i64>,
     /// The endpoint in the call says its microphone is muted (`endpointState.state.isMuted`, seen 2026-11-06: each
     /// participant's client reports it with `updateEndpointState` as it mutes and unmutes).
     pub(crate) muted: bool,
@@ -416,6 +419,12 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
             .find(|stream| stream.get("label").and_then(Value::as_str) == Some(label))
     };
     let video = stream("main-video");
+    let sends = |stream: &Value| {
+        stream
+            .get("direction")
+            .and_then(Value::as_str)
+            .is_some_and(|direction| matches!(direction, "sendrecv" | "sendonly"))
+    };
     let state_active = entry.get("state").and_then(Value::as_str) == Some("active");
     let waiting = endpoints.is_some_and(|endpoints| {
         endpoints
@@ -435,9 +444,10 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
             .map(str::to_owned),
         audio_source: stream("main-audio").and_then(|audio| audio.get("sourceId")?.as_i64()),
         video_source: video.and_then(|video| video.get("sourceId")?.as_i64()),
-        video_on: video
-            .and_then(|video| video.get("direction")?.as_str())
-            .is_some_and(|direction| matches!(direction, "sendrecv" | "sendonly")),
+        video_on: video.is_some_and(sends),
+        sharing_source: stream("applicationsharing-video")
+            .filter(|sharing| sends(sharing))
+            .and_then(|sharing| sharing.get("sourceId")?.as_i64()),
         muted: endpoints.is_some_and(|endpoints| {
             endpoints
                 .values()
@@ -844,6 +854,25 @@ mod tests {
             (read[0].audio_source, read[0].video_source, read[0].video_on),
             (None, None, false)
         );
+    }
+
+    #[test]
+    fn a_group_call_s_sharer_is_read_by_its_sharing_stream_going_out() {
+        // a group call's roster in the captured shape (2026-11-06): the sharer's `applicationsharing-video` stream
+        // `recvonly` while it doesn't share, `sendonly` while it does
+        let sharing = |direction: &str| {
+            let body = json!({"participants": {CALLER: {"version": 3, "state": "active", "endpoints": {"e1": {
+            "call": {"mediaStreams": [
+                {"type": "audio", "label": "main-audio", "sourceId": 201, "direction": "sendrecv"},
+                {"type": "video", "label": "main-video", "sourceId": 202, "direction": "recvonly"},
+                {"type": "applicationsharing-video", "label": "applicationsharing-video", "sourceId": 212,
+                    "direction": direction},
+            ]}}}}}});
+            roster(body.to_string().as_bytes()).unwrap()[0].sharing_source
+        };
+        assert_eq!(sharing("recvonly"), None);
+        assert_eq!(sharing("sendonly"), Some(212));
+        assert_eq!(sharing("sendrecv"), Some(212));
     }
 
     #[test]

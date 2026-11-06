@@ -520,7 +520,9 @@ pub enum VideoLines {
     /// answers it so; what we send on it the camera decides, and the call's services are told by signaling), and up
     /// to `slots` more video lines, taken as offered (both ways, as the web client answers them; described receive-only
     /// and nothing sent on them): each carries one participant's video,
-    /// the one a source request chose ([`crate::mcp`]). The sharing line and any other video line are read rejected.
+    /// the one a source request chose ([`crate::mcp`]). The sharing line is taken as offered too (both ways, as the web
+    /// client answers it): whoever shares their screen, the one a source request chose, comes on it. Any other video
+    /// line is read rejected.
     Group { slots: usize },
     /// Every video line as the far end offered it: a mixer's side (the tests' mixer answering a client's group
     /// offer), which sends on every line the client receives on.
@@ -538,6 +540,8 @@ enum Taken {
     /// A 1:1 call's sharing line: the far end's screen, read as one it only sends on; or ours, which it receives, as
     /// offered.
     Sharing,
+    /// A group call's sharing line (the mixer's): taken as offered, a stream of its own named as a receiving line's.
+    GroupSharing,
 }
 
 /// One call's media session as Teams' dialect sees it: the pairs of libwebrtc's and Teams' mids for every m-line and
@@ -560,6 +564,8 @@ pub struct NgcSession {
     /// libwebrtc's mid of the line our screen goes on, once [`NgcSession::mark_sharing`] named it: labelled the sharing
     /// line when our offer adds it.
     our_sharing: Option<String>,
+    /// A group call's sharing line, by Teams mid: the mixer's (taken as offered) or our group offer's.
+    group_sharing: Option<String>,
 }
 
 /// Which half of an exchange an SDP is.
@@ -628,6 +634,11 @@ impl NgcSession {
                         only_theirs(section);
                     }
                 }
+                Taken::GroupSharing => {
+                    if let Some(mid) = mid {
+                        self.take_sharing(mid);
+                    }
+                }
                 Taken::Offered => {}
             }
         }
@@ -656,6 +667,9 @@ impl NgcSession {
             (VideoLines::Main { .. } | VideoLines::Group { .. }, None) if !sharing => Taken::Main,
             (VideoLines::Group { .. }, _) if self.slots.iter().any(|slot| slot == mid) => Taken::Slot,
             (VideoLines::Group { slots }, Some(_)) if !sharing && self.slots.len() < slots => Taken::Slot,
+            (VideoLines::Group { .. }, _) if sharing && self.group_sharing.as_ref().is_none_or(|line| line == mid) => {
+                Taken::GroupSharing
+            }
             // a 1:1 call's sharing line in use: the far end's screen, or ours it receives (never one offered
             // `inactive`, as every start and invitation offers it)
             (VideoLines::Main { .. }, _) if sharing && section.direction() != Some("inactive") => Taken::Sharing,
@@ -678,6 +692,23 @@ impl NgcSession {
             .filter(|line| line.label == SHARING_LABEL)
             .map(|line| line.local.clone())
             .collect()
+    }
+
+    /// A group call's sharing line, once the call took it: libwebrtc's mid and the stream id the far end named it by
+    /// (what a source request for someone's screen names it by).
+    #[must_use]
+    pub fn sharing_slot(&self) -> Option<(String, Option<u32>)> {
+        let remote = self.group_sharing.as_deref()?;
+        let line = self.by_remote(remote)?;
+        Some((line.local.clone(), self.stream_id(remote)))
+    }
+
+    /// Takes a group call's sharing line `mid` (by Teams mid), with a stream of its own as a receiving line's.
+    fn take_sharing(&mut self, mid: String) {
+        if !self.slot_streams.iter().any(|(slot, _)| *slot == mid) {
+            self.slot_streams.push((mid.clone(), fresh_ssrc()));
+        }
+        self.group_sharing = Some(mid);
     }
 
     /// Takes the receiving line `mid` (by Teams mid), with a stream of its own.
@@ -817,6 +848,14 @@ impl NgcSession {
                 .by_local(local)
                 .cloned()
                 .ok_or(SdpError::Unwritable("an m-line without a mid"))?;
+            if matches!(self.video, VideoLines::Group { .. })
+                && name.label == SHARING_LABEL
+                && self.our_sharing.is_none()
+                && self.group_sharing.is_none()
+            {
+                // a group offer's sharing line: whoever shares their screen comes on it
+                self.group_sharing = Some(name.remote.clone());
+            }
             if section.kind == Kind::Video && !section.rejected() && name.label != SHARING_LABEL {
                 let main = self.video_line.get_or_insert_with(|| name.remote.clone()).clone();
                 // a group call's offer: every other video line but the sharing one is one we receive on
@@ -972,7 +1011,9 @@ impl NgcSession {
                 continue;
             }
             let main = self.video_line.as_deref() == Some(name.remote.as_str());
-            let slot = self.slots.contains(&name.remote);
+            // a group call's sharing line answered both ways, as a receiving line is (the web client answers it so)
+            let slot = self.slots.contains(&name.remote)
+                || (role == Role::Answer && self.group_sharing.as_deref() == Some(name.remote.as_str()));
             match (role, self.video) {
                 (Role::Offer, VideoLines::Main { sending: false }) if main => directed(section, "recvonly"),
                 // a receiving line sends nothing, yet goes both ways naming a stream of its own, as the web client
