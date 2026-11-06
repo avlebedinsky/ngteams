@@ -95,6 +95,7 @@ fn recording(item: &str) -> Recording {
 
 #[test]
 fn a_recording_is_streamed_through_the_engine_and_played() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let engine = Arc::new(Recordings::default());
@@ -107,7 +108,7 @@ fn a_recording_is_streamed_through_the_engine_and_played() {
     draw(cx);
     click(cx, "video-play-recap");
     wait_state(&view, cx, State::Playing);
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + WAIT;
     while cx.update(|_, cx| view.read(cx).position()).unwrap_or_default() < Duration::from_millis(500) {
         assert!(Instant::now() < until, "it doesn't move on");
         draw(cx);
@@ -125,7 +126,7 @@ fn a_recording_is_streamed_through_the_engine_and_played() {
     assert!(engine.files.0.lock().unwrap().is_empty());
     // paused, unless its 3 s already played to their end (a loaded machine)
     click(cx, "video-play-recap");
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + WAIT;
     while !matches!(
         cx.update(|_, cx| view.read(cx).state()),
         Some(State::Paused | State::Ended)
@@ -138,6 +139,7 @@ fn a_recording_is_streamed_through_the_engine_and_played() {
 
 #[test]
 fn a_recording_that_can_t_be_streamed_plays_from_its_download_link() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let engine = Arc::new(Recordings::default());
@@ -155,6 +157,7 @@ fn a_recording_that_can_t_be_streamed_plays_from_its_download_link() {
 
 #[test]
 fn a_recording_paused_while_its_stream_opens_stays_paused_from_its_download_link() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let engine = Arc::new(Recordings::default());
@@ -273,6 +276,20 @@ impl crate::inline::PictureEngine for Files {
     }
 }
 
+/// The longest a player is waited for: it opens and decodes on threads of its own, which a loaded machine can starve
+/// for well over ten seconds.
+const WAIT: Duration = Duration::from_secs(60);
+
+/// Taken by each test that opens a player, so they play one at a time. Each player is a `GStreamer` pipeline with
+/// threads of its own: the crate's tests playing all at once on a loaded machine starved some for over a minute (still
+/// loading, or not yet paused), and four at a time still now and then; one at a time, under the same load, never.
+static PLAYING: Mutex<()> = Mutex::new(());
+
+/// This test's turn to play, held until it ends.
+fn playing_slot() -> std::sync::MutexGuard<'static, ()> {
+    PLAYING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 const MOVIE: &[u8] = include_bytes!("../../../teams-media/tests/fixtures/media/made-up-test-pattern.mp4");
 
 fn movie_file() -> SharedFile {
@@ -302,7 +319,7 @@ fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
 }
 
 fn wait_state(view: &Entity<VideoPlayer>, cx: &mut gpui::VisualTestContext, wanted: State) {
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + WAIT;
     loop {
         draw(cx);
         let state = cx.update(|_, cx| view.read(cx).state());
@@ -316,6 +333,7 @@ fn wait_state(view: &Entity<VideoPlayer>, cx: &mut gpui::VisualTestContext, want
 
 #[test]
 fn a_synthetic_movie_plays_pauses_and_seeks_without_opening_any_devices() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let files = Arc::new(Files::default());
@@ -368,6 +386,7 @@ fn a_synthetic_movie_plays_pauses_and_seeks_without_opening_any_devices() {
 
 #[test]
 fn the_volume_slider_sets_how_loud_it_plays_and_unmutes_it() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let source = PictureSource::of(Arc::new(Files::default()));
@@ -407,6 +426,7 @@ fn the_volume_slider_sets_how_loud_it_plays_and_unmutes_it() {
 
 #[test]
 fn video_actions_open_only_the_mock_browser_and_copy_the_original_link() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let source = PictureSource::of(Arc::new(Files::default()));
@@ -439,6 +459,7 @@ fn video_actions_open_only_the_mock_browser_and_copy_the_original_link() {
 
 #[test]
 fn starting_a_second_movie_pauses_the_first() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let source = PictureSource::of(Arc::new(Files::default()));
@@ -541,6 +562,7 @@ fn the_frame_sink_accepts_only_packed_bgra_and_keeps_the_latest_frame_and_status
 fn player_statuses_render_their_loading_and_failure_states_and_fullscreen_is_reversible() {
     use gpui::TestAppContext;
 
+    let _playing = playing_slot();
     let mut app = TestAppContext::single();
     app.update(crate::window::init);
     let source = PictureSource::of(Arc::new(Files::default()));
@@ -612,6 +634,7 @@ fn made_up_captions() -> Captions {
 
 #[test]
 fn captions_follow_the_cues_and_are_named_by_their_language() {
+    let _playing = playing_slot();
     let captions = made_up_captions();
     assert_eq!(captions.at(Duration::from_millis(400)), Some("Hello everyone."));
     assert_eq!(captions.at(Duration::from_millis(1_700)), None);
@@ -680,7 +703,7 @@ fn playing_at(view: &Entity<VideoPlayer>, position: Duration, cx: &mut gpui::Vis
 
 /// Waits until its player tells it plays at `rate`.
 fn wait_rate(view: &Entity<VideoPlayer>, cx: &mut gpui::VisualTestContext, rate: f64) {
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + WAIT;
     loop {
         draw(cx);
         let told = cx.update(|_, cx| view.read(cx).status.map(|status| status.rate));
@@ -704,6 +727,7 @@ fn turn_captions_on(view: &Entity<VideoPlayer>, cx: &mut gpui::VisualTestContext
 
 #[test]
 fn a_recap_s_captions_show_where_it_plays_once_turned_on() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     let (view, cx) = captioned(&mut app);
     // the recap's bar: captions, speed and settings in place of "More options"
@@ -738,6 +762,7 @@ fn a_recap_s_captions_show_where_it_plays_once_turned_on() {
 
 #[test]
 fn a_recap_plays_at_the_speed_chosen_and_keeps_it() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     let (view, cx) = captioned(&mut app);
     let rate = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).rate());
@@ -779,6 +804,7 @@ fn a_recap_plays_at_the_speed_chosen_and_keeps_it() {
 
 #[test]
 fn the_settings_set_the_captions_look_and_show_the_quality_and_keys() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     let (view, cx) = captioned(&mut app);
     let style = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| CaptionStyle::current(cx));
@@ -828,6 +854,7 @@ fn the_settings_set_the_captions_look_and_show_the_quality_and_keys() {
 
 #[test]
 fn a_chat_s_video_keeps_its_own_bar() {
+    let _playing = playing_slot();
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let source = PictureSource::of(Arc::new(Files::default()));
