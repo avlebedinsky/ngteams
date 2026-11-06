@@ -224,19 +224,23 @@ fn attendees_accept_nested_and_flat_names_or_addresses_and_drop_unreadable_entri
         [
             Attendee {
                 name: Some("Nested".into()),
-                address: Some("nested@example.invalid".into())
+                address: Some("nested@example.invalid".into()),
+                ..Attendee::default()
             },
             Attendee {
                 name: Some("Alias".into()),
-                address: Some("alias@example.invalid".into())
+                address: Some("alias@example.invalid".into()),
+                ..Attendee::default()
             },
             Attendee {
                 name: None,
-                address: Some("only-address@example.invalid".into())
+                address: Some("only-address@example.invalid".into()),
+                ..Attendee::default()
             },
             Attendee {
                 name: Some("Name only".into()),
-                address: None
+                address: None,
+                ..Attendee::default()
             },
         ]
     );
@@ -449,4 +453,41 @@ fn timezone_settings_read_local_names_and_fallback_without_guessing() {
         );
     }
     assert_eq!(TimeZoneSettings::read_answer(b"{"), None);
+}
+
+#[test]
+fn an_event_read_whole_gives_each_attendee_s_answer_and_whether_they_are_optional() {
+    let value = json!({
+        "objectId": "AAMkMadeUp",
+        "subject": "Synthetic",
+        "startTime": "2026-11-06T10:00:00+00:00",
+        "endTime": "2026-11-06T10:30:00+00:00",
+        "attendees": [
+            {"name": "Accepting", "address": "yes@example.invalid", "role": "User",
+             "status": {"response": "Accepted", "time": "2026-11-06T05:52:15.2453471+00:00"}},
+            {"name": "Maybe", "address": "maybe@example.invalid", "type": "Optional",
+             "status": {"response": "TentativelyAccepted"}},
+            {"name": "Silent", "address": "silent@example.invalid", "status": {"response": "None"}},
+            {"name": "Unasked", "address": "unasked@example.invalid"}
+        ]
+    });
+    let read = EventRead::new("AAMkMadeUp")
+        .unwrap()
+        .read_answer(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    let answers: Vec<(Option<EventResponse>, bool)> = read
+        .event
+        .attendees
+        .iter()
+        .map(|attendee| (attendee.response.clone(), attendee.optional))
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            (Some(EventResponse::Accepted), false),
+            (Some(EventResponse::Tentative), true),
+            (Some(EventResponse::NoResponse), false),
+            (None, false),
+        ]
+    );
 }

@@ -204,6 +204,7 @@ async fn editable_calendar(server: &MockServer) {
     answer(server, "GET", EVENT, 200, event()).await;
     answer(server, "PUT", EVENT, 204, Value::Null).await;
     answer(server, "PUT", &format!("{EVENT}/cancel"), 204, Value::Null).await;
+    answer(server, "PUT", &format!("{EVENT}/respond"), 204, Value::Null).await;
     answer(server, "DELETE", EVENT, 204, Value::Null).await;
     Mock::given(method("POST"))
         .and(path(EVENTS))
@@ -249,6 +250,15 @@ async fn calendar_writes_keep_the_organizer_and_fields_read_before_an_edit() {
         .await
         .unwrap();
     rig.handle
+        .write_event(EventWrite::Respond {
+            id: "MadeUpEvent".to_owned(),
+            answer: teams_core::RsvpAnswer::Tentative,
+            send: true,
+            comment: Some("Made-up note".to_owned()),
+        })
+        .await
+        .unwrap();
+    rig.handle
         .write_event(EventWrite::Delete {
             id: "MadeUpEvent".to_owned(),
         })
@@ -259,6 +269,12 @@ async fn calendar_writes_keep_the_organizer_and_fields_read_before_an_edit() {
     assert_eq!(posted["calendarEvent"]["organizerAddress"], MAIL_A);
     assert_eq!(posted["calendarEvent"]["organizerName"], "Lab A");
     assert_eq!(posted["calendarEvent"]["eventTimeZone"], "Utc");
+    let answered: Value =
+        serde_json::from_slice(&requests(&rig.server, "PUT", &format!("{EVENT}/respond")).await[0].body).unwrap();
+    assert_eq!(
+        answered,
+        json!({"responseType": "TentativelyAccept", "sendResponse": true, "comment": "Made-up note"})
+    );
     let updated: Value = serde_json::from_slice(&requests(&rig.server, "PUT", EVENT).await[0].body).unwrap();
     assert_eq!(updated["updatedCalendarEvent"]["subject"], "Changed planning");
     assert_eq!(updated["updatedCalendarEvent"]["untouchedField"], "kept");

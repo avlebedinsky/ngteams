@@ -163,10 +163,11 @@ pub(crate) fn calendar_view(state: &State, request: &Request) -> Option<Response
 }
 
 /// The scheduling form's requests (`docs/protocol/calendar.md`, "Writing an event"), answered as the service did and
-/// kept nowhere: an event's creation (its body's event back with a made-up id), a change, a cancellation and a delete
-/// (`204`), one event read whole (from the made-up weeks around now; a made-up series' master with its weekly
-/// recurrence), a Teams meeting's online meeting, the time zone's name, and the Scheduler's free/busy reads (made-up
-/// busy times, and the half hours they leave free). `None` for any other request.
+/// kept nowhere: an event's creation (its body's event back with a made-up id), a change, a cancellation, an answer
+/// to an invitation and a delete (`204`), one event read whole (from the made-up weeks around now, its attendees with
+/// their answers; a made-up series' master with its weekly recurrence), a Teams meeting's online meeting, the time
+/// zone's name, and the Scheduler's free/busy reads (made-up busy times, and the half hours they leave free). `None`
+/// for any other request.
 fn writes(request: &Request, rest: &[String]) -> Option<ResponseTemplate> {
     let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
     let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
@@ -187,7 +188,10 @@ fn writes(request: &Request, rest: &[String]) -> Option<ResponseTemplate> {
                 &json!({"type": "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent", "value": [event]}),
             )
         }
-        ("PUT", ["v2.0", "me", "calendars", "events", _] | ["v2.0", "me", "calendars", "events", _, "cancel"])
+        (
+            "PUT",
+            ["v2.0", "me", "calendars", "events", _] | ["v2.0", "me", "calendars", "events", _, "cancel" | "respond"],
+        )
         | ("DELETE", ["v2.0", "me", "calendars", "events", _]) => status(204),
         ("GET", ["v2.0", "me", "calendars", "events", id]) => {
             let now = std::time::SystemTime::now()
@@ -203,6 +207,15 @@ fn writes(request: &Request, rest: &[String]) -> Option<ResponseTemplate> {
                     event["bodyContent"] = json!("<div>Made-up notes</div>");
                     event["isReminderSet"] = json!(true);
                     event["reminderMinutesBeforeStart"] = json!(15);
+                    // read whole, an event names each attendee's answer, as the service gives its organizer
+                    event["attendees"] = json!([
+                        {"name": "Avery Example", "address": "avery@example.com", "status": {"response": "Accepted"}},
+                        {"name": "Lab Account A", "address": "a@example.com", "status": {"response": "Accepted"}},
+                        {"name": "Riley Placeholder", "address": "riley@example.com",
+                         "status": {"response": "TentativelyAccepted"}},
+                        {"name": "Casey Madeup", "address": "casey@example.com", "type": "Optional",
+                         "status": {"response": "None"}},
+                    ]);
                     answer(200, &event)
                 }
                 None => status(404),

@@ -266,6 +266,7 @@ fn canceling_an_organizers_meeting_requires_confirmation_and_refreshes_after_suc
     meeting.attendees.push(teams_proto::Attendee {
         name: Some("Synthetic attendee".to_owned()),
         address: Some("guest@lab.example.test".to_owned()),
+        ..teams_proto::Attendee::default()
     });
     let (view, cx, _) = window(&rig);
     let shown = Shown::of(std::rc::Rc::new(meeting)).unwrap();
@@ -341,9 +342,10 @@ fn the_card_of_a_channel_meeting_the_account_scheduled_edits_it_from_the_team_s_
     assert!(cx.debug_bounds("calendar-card-edit").is_some(), "its organizer's Edit");
     assert!(cx.debug_bounds("calendar-card-remove").is_some(), "and Cancel meeting");
     click(cx, "calendar-card-edit");
+    // the card read its own copy for whom it invites; Edit reads the team's
     assert_eq!(
-        rig.core.calendar.lock().unwrap().full_reads,
-        [format!("{}/{}", fixtures::TEAM_MAILBOX, fixtures::CHANNEL_EVENT)]
+        rig.core.calendar.lock().unwrap().full_reads.last(),
+        Some(&format!("{}/{}", fixtures::TEAM_MAILBOX, fixtures::CHANNEL_EVENT))
     );
     let form = cx
         .update(|_, cx| teams_ui::event_form::shown(cx))
@@ -612,4 +614,274 @@ fn double_clicking_an_empty_half_hour_opens_an_unsaved_draft_at_that_time() {
         teams_ui::event_form::close(cx);
     });
     assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
+}
+
+#[test]
+fn a_drag_across_half_hours_selects_them_and_new_schedules_the_selection() {
+    let rig = Rig::start();
+    rig.core.calendar.lock().unwrap().events = vec![event("busy", 14)];
+    let (view, cx, _) = window(&rig);
+    // a click on an event opens its card and selects nothing behind it
+    click(cx, "calendar-event-busy");
+    assert!(cx.update(|_, cx| view.read(cx).card().is_some()));
+    assert!(cx.update(|_, cx| view.read(cx).selection().is_none()));
+    cx.update(|_, cx| view.update(cx, CalendarView::close_card));
+    draw(cx);
+    let from = cx.debug_bounds("calendar-slot-2026-10-28-20").unwrap().center();
+    let to = cx.debug_bounds("calendar-slot-2026-10-28-23").unwrap().center();
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: from,
+        button: gpui::MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseMoveEvent {
+        position: to,
+        pressed_button: Some(gpui::MouseButton::Left),
+        modifiers: Modifiers::none(),
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: to,
+        button: gpui::MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+    });
+    draw(cx);
+    assert!(
+        cx.debug_bounds("calendar-selection").is_some(),
+        "the selection is drawn"
+    );
+    let slot = cx.update(|_, cx| view.read(cx).next_slot());
+    assert_eq!(slot.start, date(28).and_hms_opt(10, 0, 0).unwrap());
+    assert_eq!(slot.end, date(28).and_hms_opt(12, 0, 0).unwrap());
+    // moving without the button pressed changes nothing
+    cx.simulate_event(gpui::MouseMoveEvent {
+        position: from,
+        pressed_button: None,
+        modifiers: Modifiers::none(),
+    });
+    click(cx, "calendar-new");
+    cx.update(|_, cx| {
+        let form = teams_ui::event_form::shown(cx).unwrap();
+        assert_eq!(form.read(cx).slot().start, date(28).and_hms_opt(10, 0, 0).unwrap());
+        assert_eq!(form.read(cx).slot().end, date(28).and_hms_opt(12, 0, 0).unwrap());
+        teams_ui::event_form::close(cx);
+    });
+    // Escape drops the selection; New then takes the next half hour
+    cx.simulate_keystrokes("escape");
+    assert!(cx.update(|_, cx| view.read(cx).selection().is_none()));
+    assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
+}
+
+#[test]
+fn the_card_reads_its_event_whole_for_whom_it_invites_and_cancels_the_organizer_s_meeting() {
+    let rig = Rig::start();
+    // the calendar view names no attendees; the event read whole does, with their answers
+    let body = serde_json::json!({
+        "objectId": "own-meeting",
+        "subject": "Synthetic meeting",
+        "startTime": "2026-10-27T09:00:00",
+        "endTime": "2026-10-27T10:00:00",
+        "isOrganizer": true,
+        "myResponseType": "Organizer",
+        "attendees": [
+            {"name": "Synthetic attendee", "address": "guest@lab.example.test",
+             "status": {"response": "Accepted"}},
+            {"name": "Synthetic optional", "address": "optional@lab.example.test", "type": "Optional",
+             "status": {"response": "None"}}
+        ]
+    });
+    let full = teams_proto::EventRead::new("own-meeting")
+        .unwrap()
+        .read_answer(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    rig.core
+        .calendar
+        .lock()
+        .unwrap()
+        .full
+        .insert("own-meeting".to_owned(), full);
+    let (view, cx, _) = window(&rig);
+    let shown = Shown::of(std::rc::Rc::new(event("own-meeting", 9))).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    draw(cx);
+    assert!(cx.debug_bounds("calendar-card-attendees").is_some());
+    let answers = cx.update(|_, cx| {
+        view.read(cx).card().map(|shown| {
+            shown
+                .event
+                .attendees
+                .iter()
+                .map(|attendee| attendee.response.clone())
+                .collect::<Vec<_>>()
+        })
+    });
+    assert_eq!(
+        answers,
+        Some(vec![Some(EventResponse::Accepted), Some(EventResponse::NoResponse)])
+    );
+    answered(&rig);
+    click(cx, "calendar-card-remove");
+    click(cx, "calendar-card-remove-confirm");
+    assert!(matches!(
+        rig.core.calendar.lock().unwrap().writes.as_slice(),
+        [EventWrite::Cancel { id, message: None, .. }] if id == "own-meeting"
+    ));
+}
+
+#[test]
+fn the_filter_hides_the_kinds_unticked_and_clear_filters_shows_them_again() {
+    let rig = Rig::start();
+    let mut series = invitation("series", 9);
+    series.kind = teams_core::EventKind::Occurrence;
+    series.online = true;
+    rig.core.calendar.lock().unwrap().events = vec![event("own", 11), series];
+    let (view, cx, _) = window(&rig);
+    assert!(cx.debug_bounds("calendar-event-series").is_some());
+    click(cx, "calendar-filter");
+    click(cx, "calendar-filter-recurring");
+    assert!(cx.update(|_, cx| view.read(cx).hidden().hides(teams_ui::calendar_view::Shows::Recurring)));
+    assert!(
+        cx.debug_bounds("calendar-event-series").is_none(),
+        "a series' occurrence is hidden"
+    );
+    assert!(cx.debug_bounds("calendar-event-own").is_some(), "a single event stays");
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.flip_shown(teams_ui::calendar_view::Shows::Organized, cx);
+        });
+    });
+    draw(cx);
+    assert!(
+        cx.debug_bounds("calendar-event-own").is_none(),
+        "the account's own is hidden too"
+    );
+    click(cx, "calendar-filter");
+    click(cx, "calendar-filter-clear");
+    assert!(!cx.update(|_, cx| view.read(cx).hidden().any()));
+    assert!(cx.debug_bounds("calendar-event-series").is_some());
+    assert!(cx.debug_bounds("calendar-event-own").is_some());
+}
+
+/// Someone else's meeting the account hasn't answered, as the calendar view gives one.
+fn invitation(id: &str, hour: u8) -> teams_core::CalendarEvent {
+    let mut meeting = event(id, hour);
+    meeting.is_organizer = false;
+    meeting.response = EventResponse::NotResponded;
+    meeting.organizer_name = Some("Synthetic organizer".to_owned());
+    meeting
+}
+
+fn answered(rig: &Rig) {
+    rig.core
+        .calendar
+        .lock()
+        .unwrap()
+        .write_answers
+        .push_back(Ok(EventWritten { created: None }));
+}
+
+
+#[test]
+fn an_invitation_s_card_accepts_it_with_a_message_and_shows_the_answer() {
+    let rig = Rig::start();
+    let (view, cx, _) = window(&rig);
+    let shown = Shown::of(std::rc::Rc::new(invitation("invited", 9))).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("calendar-card-rsvp-scope").is_none(),
+        "a single event offers no series"
+    );
+    answered(&rig);
+    click(cx, "calendar-card-rsvp-note");
+    cx.simulate_input("See you there");
+    // typed into the message, a "t" is a letter, not Today
+    assert_eq!(cx.update(|_, cx| view.read(cx).anchor()), date(27));
+    click(cx, "calendar-card-rsvp-accept");
+    assert!(matches!(
+        rig.core.calendar.lock().unwrap().writes.as_slice(),
+        [EventWrite::Respond { id, answer: teams_core::RsvpAnswer::Accept, send: true, comment: Some(note) }]
+            if id == "invited" && note == "See you there"
+    ));
+    let response = cx.update(|_, cx| view.read(cx).card().map(|shown| shown.event.response.clone()));
+    assert_eq!(
+        response,
+        Some(EventResponse::Accepted),
+        "the card stays open on the answer"
+    );
+}
+
+#[test]
+fn an_occurrence_is_answered_for_its_series_or_declined_without_telling_the_organizer() {
+    let rig = Rig::start();
+    let (view, cx, _) = window(&rig);
+    let mut occurrence = invitation("occurrence", 10);
+    occurrence.kind = teams_core::EventKind::Occurrence;
+    occurrence.series_master_id = Some("master".to_owned());
+    let shown = Shown::of(std::rc::Rc::new(occurrence)).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    answered(&rig);
+    click(cx, "calendar-card-rsvp-scope");
+    click(cx, "calendar-rsvp-scope-series");
+    click(cx, "calendar-card-rsvp-tentative");
+    assert!(matches!(
+        rig.core.calendar.lock().unwrap().writes.as_slice(),
+        [EventWrite::Respond { id, answer: teams_core::RsvpAnswer::Tentative, send: true, comment: None }]
+            if id == "master"
+    ));
+
+    // "Email organizer" unticked: this occurrence declined, nothing sent to the organizer, and the card closes
+    answered(&rig);
+    click(cx, "calendar-card-rsvp-scope");
+    click(cx, "calendar-rsvp-scope-event");
+    click(cx, "calendar-card-rsvp-email");
+    click(cx, "calendar-card-rsvp-decline");
+    assert!(matches!(
+        rig.core.calendar.lock().unwrap().writes.last(),
+        Some(EventWrite::Respond { id, answer: teams_core::RsvpAnswer::Decline, send: false, comment: None })
+            if id == "occurrence"
+    ));
+    assert!(cx.update(|_, cx| view.read(cx).card().is_none()));
+}
+
+#[test]
+fn an_organizer_cancels_a_whole_series_with_a_message_and_an_appointment_offers_no_answer() {
+    let rig = Rig::start();
+    let (view, cx, _) = window(&rig);
+    let appointment = Shown::of(std::rc::Rc::new(event("appointment", 8))).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(appointment, cx)));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("calendar-card-rsvp").is_none(),
+        "the account's own event asks no answer"
+    );
+
+    let mut occurrence = event("own-occurrence", 11);
+    occurrence.kind = teams_core::EventKind::Occurrence;
+    occurrence.series_master_id = Some("own-master".to_owned());
+    occurrence.meeting_chat = Some("19:meeting_MadeUpSeries@thread.v2".to_owned());
+    occurrence.attendees.push(teams_proto::Attendee {
+        name: Some("Synthetic attendee".to_owned()),
+        address: Some("guest@lab.example.test".to_owned()),
+        ..teams_proto::Attendee::default()
+    });
+    let shown = Shown::of(std::rc::Rc::new(occurrence)).unwrap();
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.close_card(cx);
+            view.open_card(shown, cx);
+        });
+    });
+    answered(&rig);
+    click(cx, "calendar-card-remove");
+    click(cx, "calendar-card-remove-series");
+    click(cx, "calendar-card-cancel-note");
+    cx.simulate_input("Moving to next month");
+    click(cx, "calendar-card-remove-confirm");
+    assert!(matches!(
+        rig.core.calendar.lock().unwrap().writes.as_slice(),
+        [EventWrite::Cancel { id, message: Some(message), .. }] if id == "own-master" && message == "Moving to next month"
+    ));
 }

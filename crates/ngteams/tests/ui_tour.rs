@@ -118,7 +118,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 154] = [
+const STEPS: [Step; 5 + 157] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -977,12 +977,47 @@ const STEPS: [Step; 5 + 154] = [
             model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
         });
     }),
+    // the account's own meeting's card in Teams Dark: whom it invites and how each answered, Edit and Cancel occurrence
+    ("calendar-card-dark", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        let own = calendar.read(cx).events().and_then(|events| {
+            events
+                .iter()
+                .find(|shown| shown.event.online && !shown.event.cancelled && shown.event.is_organizer)
+                .cloned()
+        });
+        match own {
+            Some(own) => calendar.update(cx, |calendar, cx| calendar.open_card(own, cx)),
+            None => say("no meeting of the account's in the calendar"),
+        }
+    }),
+    // two hours of tomorrow (or Monday) selected by a drag, as New would schedule them
+    ("calendar-selection-dark", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.close_card(cx);
+            let span = calendar.span();
+            let date = span.dates().nth(1).unwrap_or(span.first);
+            let selection = teams_ui::calendar_view::Selection::at(date, 22).to(25);
+            calendar.select(selection, cx);
+        });
+    }),
+    // the Filter with series hidden: "Filter applied", only the single events left
+    ("calendar-filtered-dark", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.flip_shown(teams_ui::calendar_view::Shows::Recurring, cx);
+        });
+    }),
     // the toolbar's Join with an ID: its panel under the toolbar
     ("calendar-join-id", |shell, window, cx| {
         let calendar = shell.read(cx).calendar_view().clone();
-        calendar.update(cx, |calendar, cx| calendar.open_join_id(window, cx));
+        calendar.update(cx, |calendar, cx| {
+            calendar.clear_filters(cx);
+            calendar.open_join_id(window, cx);
+        });
     }),
-    // the calendar's New: the scheduling form in a window of its own ("New event - Calendar"), at the next half hour,
+    // the calendar's New: the scheduling form in a window of its own ("New event - Calendar"), at the selection,
     // the day beside it with the new event's block, in Teams Dark as the user's screenshot has it
     ("event-form-dark", |shell, _, cx| {
         let calendar = shell.read(cx).calendar_view().clone();

@@ -176,10 +176,14 @@ pub enum ShowAs {
 }
 
 /// Someone an event invites.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Attendee {
     pub name: Option<String>,
     pub address: Option<String>,
+    /// Their answer (`status.response`), when the answer carries it: an event read whole gives it to its organizer.
+    pub response: Option<Response>,
+    /// Invited as optional (`type` `Optional`).
+    pub optional: bool,
 }
 
 /// One event of the account's calendar.
@@ -482,7 +486,18 @@ fn attendees(attendees: Option<&Value>) -> Vec<Attendee> {
             };
             let name = text(&["name", "displayName"]);
             let address = text(&["address", "smtpAddress", "email"]);
-            (name.is_some() || address.is_some()).then_some(Attendee { name, address })
+            let answer = attendee
+                .get("status")
+                .and_then(|status| status.get("response"))
+                .and_then(Value::as_str)
+                .map(|answer| response(Some(answer)));
+            let optional = attendee.get("type").and_then(Value::as_str) == Some("Optional");
+            (name.is_some() || address.is_some()).then_some(Attendee {
+                name,
+                address,
+                response: answer,
+                optional,
+            })
         })
         .collect()
 }

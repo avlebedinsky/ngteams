@@ -3,8 +3,9 @@
 
 use chrono::{Datelike as _, NaiveDate, NaiveDateTime, Timelike as _};
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, point, prelude::FluentBuilder as _, px, relative, rgb,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, point,
+    prelude::FluentBuilder as _, px, relative, rgb,
 };
 
 use super::{CalendarView, GUTTER, HOUR_HEIGHT, MIN_MINUTES, MONTH_LISTED, Toggle, hour_label, mix, time_text};
@@ -102,31 +103,23 @@ impl CalendarView {
                     .bg(rgb(mix(palette.background, palette.border, 550))),
             ]
         });
-        // the half hours, behind the events: a double click on an empty one schedules an event there
-        let cells = (0..48u16)
-            .map(|half| {
-                let start = date.and_time(chrono::NaiveTime::MIN) + chrono::Duration::minutes(i64::from(half) * 30);
-                let selector = format!("calendar-slot-{}-{half}", date.format("%Y-%m-%d"));
+        let cells = (0..48u16).map(|half| half_hour(date, half, cx)).collect::<Vec<_>>();
+        let selected = self
+            .selection
+            .filter(|selection| selection.date == date)
+            .map(|selection| {
                 div()
-                    .debug_selector(move || selector.clone())
-                    .id(SharedString::from(format!(
-                        "calendar-slot-{}-{half}",
-                        date.format("%Y%m%d")
-                    )))
+                    .debug_selector(|| "calendar-selection".to_owned())
                     .absolute()
-                    .top(px(f32::from(half) * HOUR_HEIGHT / 2.0))
+                    .top(px(f32::from(selection.first) * HOUR_HEIGHT / 2.0))
+                    .h(px(f32::from(selection.last - selection.first + 1) * HOUR_HEIGHT / 2.0))
                     .left_0()
                     .right_0()
-                    .h(px(HOUR_HEIGHT / 2.0))
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        if event.click_count() >= 2 {
-                            let slot =
-                                crate::event_form::Slot::new(start, start + crate::event_form::model::DEFAULT_LENGTH);
-                            this.new_event(slot, false, cx);
-                        }
-                    }))
-            })
-            .collect::<Vec<_>>();
+                    .rounded_sm()
+                    .bg(rgb(mix(palette.background, palette.brand, 300)))
+                    .border_1()
+                    .border_color(rgb(palette.brand))
+            });
         let slots = calendar::day_slots(events, date, MIN_MINUTES);
         let blocks: Vec<AnyElement> = slots.into_iter().map(|slot| block(slot, cycle, palette, cx)).collect();
         let now_line = self.now_line(date, now, palette);
@@ -142,6 +135,7 @@ impl CalendarView {
                 column.bg(rgb(mix(palette.background, palette.surface, 500)))
             })
             .children(lines)
+            .children(selected)
             .children(cells)
             .children(blocks)
             .children(now_line)
@@ -414,6 +408,36 @@ fn all_day_strip(
     )
 }
 
+/// One half hour of a day's column, behind the events: a click selects it, a drag stretches the selection over more,
+/// and a double click schedules an event there, as Teams' calendar does.
+fn half_hour(date: NaiveDate, half: u16, cx: &mut Context<CalendarView>) -> gpui::Stateful<gpui::Div> {
+    let selector = format!("calendar-slot-{}-{half}", date.format("%Y-%m-%d"));
+    div()
+        .debug_selector(move || selector.clone())
+        .id(SharedString::from(format!(
+            "calendar-slot-{}-{half}",
+            date.format("%Y%m%d")
+        )))
+        .absolute()
+        .top(px(f32::from(half) * HOUR_HEIGHT / 2.0))
+        .left_0()
+        .right_0()
+        .h(px(HOUR_HEIGHT / 2.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.press_slot(date, half, event.click_count, cx);
+            }),
+        )
+        .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+            this.drag_slot(date, half, event.pressed_button == Some(MouseButton::Left), cx);
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| this.release_slot()),
+        )
+}
+
 /// The hours' labels left of the time grid.
 fn hours_gutter(cycle: HourCycle, palette: Palette) -> gpui::Div {
     div()
@@ -461,6 +485,8 @@ fn block(slot: Slot, cycle: HourCycle, palette: Palette, cx: &mut Context<Calend
                 .flex()
                 .overflow_hidden()
                 .cursor_pointer()
+                // a press on an event is the event's, not a selection of the half hour behind it
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(edge(look, palette))
                 .child(text)
                 .children(mark.map(|mark| div().absolute().right(px(4.0)).bottom(px(3.0)).child(mark)))

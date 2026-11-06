@@ -45,7 +45,7 @@ enums):
 | `myResponseType` | `None`, `Organizer`, `Accepted`, `Tentative`, `Declined`, `NotResponded` | a declined meeting isn't shown (as in Teams); tentative and not answered are drawn with a striped edge |
 | `showAs` | `Free`, `Tentative`, `Busy`, `OOF`, `WorkingElsewhere`, `Unknown` | free and tentative drawn striped |
 | `location` | where | text (or an object's `displayName`) |
-| `attendees` | who is invited | each one's name and address, when readable |
+| `attendees` | who is invited | each one's name and address, when readable; `type` `Optional` an optional one; `status.response` (`Accepted`, `TentativelyAccepted`, `Declined`, `None`, …) their answer. The calendar view's events carried no `attendees` at all on 2026-11-06 (a meeting a→c read by both); the event read whole carries them with each one's `status` (`{"response", "time"}`) |
 | `isPrivate`, `bodyPreview`, `onlineMeetingConferenceId` | private, the start of its text, the dial-in id | read; the text is shown in the event's card |
 | `seriesMasterId` | an occurrence's or exception's series (its master's id) | the event the scheduling form reads and writes to change the whole series |
 
@@ -148,8 +148,20 @@ Meeting"`).
 - `DELETE v2.0/me/calendars/events/<id>` (no body): the event taken off the account's calendar (an appointment, a
   meeting its organizer cancelled). `204`.
 
-The bundle also names an event's forward, an answer to an invitation (`…/respond`), a channel meeting's writes and a
-webinar's; none was captured, and the native client sends none.
+- `PUT v2.0/me/calendars/events/<id>/respond` with `{"responseType": "Accept"|"TentativelyAccept"|"Decline",
+  "sendResponse": <bool>, "comment"?: <text>}`: the account's answer to an invitation (the bundle's
+  `updateMeetingResponse`, which also may send `attendance`; read from the web client's code kept with the lab's
+  references). The id is an occurrence's for that occurrence, its series master's for the whole series. `204`.
+  Checked live on 2026-11-06 by the native client: c accepted a's weekly series (by its master, with a note), and a's
+  event read whole then gave c's `status.response` `Accepted` on each occurrence.
+
+Checked live on 2026-11-06 by the native client (lab accounts a and c only): the change (`204`), the organizer's
+cancellation of one occurrence and of the whole series by its master's id, each with `cancellationMessage` (`204`; the
+organizer's calendar then holds neither, c's holds each as `isCancelled` and `Canceled: …`), and c's delete of a
+cancelled occurrence and of the cancelled series' master (`204`).
+
+The bundle also names an event's forward, a channel meeting's writes and a webinar's; none was captured, and the native
+client sends none.
 
 ### A series
 
@@ -214,8 +226,8 @@ their typed protocol requests with the service's own credential.
 
 ### What the native client does
 
-- **New, Edit, Cancel meeting, Delete** (`crates/teams-ui/src/event_form.rs`, the calendar's card): each a sealed
-  write (`teams-proto` `CreateEvent`, `UpdateEvent`, `CancelEvent`, `DeleteEvent`) through the outbox's calendar kind
+- **New, Edit, Cancel meeting, Delete, the answer** (`crates/teams-ui/src/event_form.rs`, the calendar's card): each a
+  sealed write (`teams-proto` `CreateEvent`, `UpdateEvent`, `CancelEvent`, `DeleteEvent`, `RespondEvent`) through the outbox's calendar kind
   (`Outbox::try_calendar`): one attempt, with another only after a 401 or a short throttle,
   never after an unknown outcome. A Teams meeting's creation first makes its online meeting (`CreateOnlineMeeting`, a
   plain request) and carries it. The engine fills in the organizer (the account's MRI, its profile's address, its
@@ -230,4 +242,9 @@ their typed protocol requests with the service's own credential.
 - **The Scheduler** (`crates/teams-ui/src/event_form/scheduler.rs`): both free/busy reads (`teams-proto`'s
   `MeetingTimes` and `Schedules`, plain requests) for the form's day, sent together when it shows the Scheduler or
   names attendees, and again as the day, the attendees or the length change.
+- **The card** reads its event whole when it opens (`EventRead`) for whom it invites and their answers, which also
+  tells the organizer's meeting (Cancel meeting) from an appointment (Delete). An invitation's card offers Accept,
+  Decline and Tentative with "Email organizer" and an optional message, as the web client's peek does, for the
+  occurrence or (by its master) the whole series; an occurrence's Cancel and Delete offer this event or the whole
+  series, a cancellation with a message for the attendees.
 - It never sends the online meeting's delete.

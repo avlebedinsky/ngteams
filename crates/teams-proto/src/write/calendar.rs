@@ -814,6 +814,77 @@ impl Prepared for DeleteEvent {
     }
 }
 
+/// An attendee's answer to a meeting's invitation, as the web client's RSVP sends it (`responseType`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RsvpAnswer {
+    /// Accept (`Accept`).
+    Accept,
+    /// Tentative (`TentativelyAccept`).
+    Tentative,
+    /// Decline (`Decline`): the event leaves the account's calendar.
+    Decline,
+}
+
+impl RsvpAnswer {
+    /// Its `responseType`.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Tentative => "TentativelyAccept",
+            Self::Decline => "Decline",
+        }
+    }
+}
+
+/// `PUT v2.0/me/calendars/events/<id>/respond` with `{"responseType", "sendResponse", "comment"?}`: the account's
+/// answer to a meeting's invitation, for the occurrence `id` names or, named by its series' master, the whole series;
+/// sent to the organizer when `send`, with `comment` as its note. The service answers `204`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RespondEvent {
+    id: String,
+    answer: RsvpAnswer,
+    send: bool,
+    comment: Option<String>,
+}
+
+impl RespondEvent {
+    /// The answer `answer` to the event `id`'s invitation; `None` without an id.
+    #[must_use]
+    pub fn new(id: String, answer: RsvpAnswer, send: bool, comment: Option<String>) -> Option<Self> {
+        (!id.is_empty()).then_some(Self {
+            id,
+            answer,
+            send,
+            comment,
+        })
+    }
+}
+
+impl Prepared for RespondEvent {
+    fn wire(&self) -> Option<Wire> {
+        let mut body = Map::new();
+        body.insert("responseType".to_owned(), json!(self.answer.wire()));
+        body.insert("sendResponse".to_owned(), json!(self.send));
+        // the note goes only with an answer that is sent
+        if let Some(comment) = self
+            .comment
+            .as_ref()
+            .filter(|comment| self.send && !comment.trim().is_empty())
+        {
+            body.insert("comment".to_owned(), json!(comment));
+        }
+        Some(Wire {
+            raw: None,
+            service: Service::MiddleTier,
+            method: Method::Put,
+            endpoint: Endpoint::new(EVENTS.into_iter().chain([self.id.as_str(), "respond"])),
+            headers: Vec::new(),
+            body: Some(Value::Object(body)),
+        })
+    }
+}
+
 fn bool_text(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
@@ -877,6 +948,47 @@ mod tests {
         assert!(
             create.wire().is_some() && update.wire().is_some() && cancel.wire().is_some() && delete.wire().is_some()
         );
+    }
+
+    #[test]
+    fn an_answer_to_an_invitation_is_sent_as_the_web_client_sends_it() {
+        let accept = RespondEvent::new(
+            "AAMkEvent".to_owned(),
+            RsvpAnswer::Accept,
+            true,
+            Some("See you there".to_owned()),
+        )
+        .expect("an answer");
+        let wire = accept.wire().expect("a wire form");
+        assert_eq!(wire.method(), Method::Put);
+        assert_eq!(
+            wire.endpoint().segments(),
+            ["v2.0", "me", "calendars", "events", "AAMkEvent", "respond"]
+        );
+        assert_eq!(
+            wire.body(),
+            Some(&json!({"responseType": "Accept", "sendResponse": true, "comment": "See you there"}))
+        );
+
+        // an answer not sent carries no note; a blank note is left out
+        let quiet = RespondEvent::new(
+            "AAMkEvent".to_owned(),
+            RsvpAnswer::Tentative,
+            false,
+            Some("unsent".to_owned()),
+        )
+        .expect("an answer");
+        assert_eq!(
+            quiet.wire().and_then(|wire| wire.body().cloned()),
+            Some(json!({"responseType": "TentativelyAccept", "sendResponse": false}))
+        );
+        let blank = RespondEvent::new("AAMkEvent".to_owned(), RsvpAnswer::Decline, true, Some("  ".to_owned()))
+            .expect("an answer");
+        assert_eq!(
+            blank.wire().and_then(|wire| wire.body().cloned()),
+            Some(json!({"responseType": "Decline", "sendResponse": true}))
+        );
+        assert!(RespondEvent::new(String::new(), RsvpAnswer::Accept, true, None).is_none());
     }
 
     fn channel() -> MeetingChannel {

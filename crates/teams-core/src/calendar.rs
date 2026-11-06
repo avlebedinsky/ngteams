@@ -29,8 +29,8 @@ use teams_proto::{
     Author, CalendarEvent, CalendarView, CancelChannelEvent, CancelEvent, ChannelEventRead, ChannelMeetup, Client,
     CreateChannelEvent, CreateEvent, CreateOnlineMeeting, Credentials, CsaTeams, DeleteEvent, EventAttendee,
     EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingChannel, MeetingDetails,
-    MeetingThread, MeetingTimes, Organizer, PersonSchedule, Request, ScheduledMeeting, Schedules, SetMeetingTitle,
-    ShortProfileLookup, TimeZoneSettings, Transport, UpdateChannelEvent, UpdateEvent,
+    MeetingThread, MeetingTimes, Organizer, PersonSchedule, Request, RespondEvent, RsvpAnswer, ScheduledMeeting,
+    Schedules, SetMeetingTitle, ShortProfileLookup, TimeZoneSettings, Transport, UpdateChannelEvent, UpdateEvent,
 };
 use teams_store::{Store, StoreError, StoredEvent};
 use tokio::task::JoinSet;
@@ -73,6 +73,14 @@ pub enum EventWrite {
     },
     /// The event `id` deleted from the account's calendar.
     Delete { id: String },
+    /// The account's answer to the invitation of the event `id` (an occurrence, or a series' master for the whole
+    /// series): sent to the organizer when `send`, with `comment` as its note.
+    Respond {
+        id: String,
+        answer: RsvpAnswer,
+        send: bool,
+        comment: Option<String>,
+    },
     /// A channel's meeting (`meeting`, as its post `post` in `channel` names it) cancelled by its organizer, `message`
     /// sent with the cancellation: everyone on the team told.
     CancelInChannel {
@@ -92,6 +100,7 @@ impl EventWrite {
             Self::Update { .. } | Self::UpdateInChannel { .. } => "change",
             Self::Cancel { .. } | Self::CancelInChannel { .. } => "cancellation",
             Self::Delete { .. } => "delete",
+            Self::Respond { .. } => "answer",
         }
     }
 }
@@ -459,6 +468,15 @@ where
                 },
                 EventWrite::Delete { id } => match DeleteEvent::new(id) {
                     Some(delete) => send(&outbox, &delete, kind).await,
+                    None => Err(not_saved(kind, "no event")),
+                },
+                EventWrite::Respond {
+                    id,
+                    answer,
+                    send: tell,
+                    comment,
+                } => match RespondEvent::new(id, answer, tell, comment) {
+                    Some(respond) => send(&outbox, &respond, kind).await,
                     None => Err(not_saved(kind, "no event")),
                 },
             };

@@ -415,6 +415,7 @@ impl CalendarView {
             .child(selected_by("calendar-next", next))
             .child(selected_by("calendar-dates", dates))
             .child(div().flex_1())
+            .child(self.filter_menu(palette, cx))
             .child(self.mode_switcher(cx))
             .child(Self::more_menu(cx))
             .child(separator(palette))
@@ -658,7 +659,7 @@ impl CalendarView {
 }
 
 /// A calendar's tick box: brand-filled with a check while its events are shown.
-fn calendar_tick(selector: &'static str, ticked: bool, palette: Palette) -> gpui::Div {
+pub(super) fn calendar_tick(selector: &'static str, ticked: bool, palette: Palette) -> gpui::Div {
     div()
         .debug_selector(move || selector.to_owned())
         .size(px(18.0))

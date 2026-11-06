@@ -96,7 +96,7 @@ pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
 pub use teams_proto::{
     Attendee, CalendarEvent, ChannelEventRef, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventResponse,
     EventShowAs, EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails, MeetingInfo,
-    Organizer, ScheduledMeeting, ShowAs, ZonedTime, join_url_chat,
+    Organizer, RsvpAnswer, ScheduledMeeting, ShowAs, ZonedTime, join_url_chat,
 };
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
 pub use teams_trouter::RegistrationReport;

@@ -90,6 +90,9 @@ impl Glyph {
     pub const CIRCLE_MINUS: Self = Self(include_bytes!("../assets/icons/circle-minus.svg"));
     pub const RECORD: Self = Self(include_bytes!("../assets/icons/circle-dot.svg"));
     pub const RECORD_STOP: Self = Self(include_bytes!("../assets/icons/circle-stop.svg"));
+    pub const CIRCLE_QUESTION: Self = Self(include_bytes!("../assets/icons/circle-question-mark.svg"));
+    pub const CIRCLE_X: Self = Self(include_bytes!("../assets/icons/circle-x.svg"));
+    pub const LIST_FILTER: Self = Self(include_bytes!("../assets/icons/list-filter.svg"));
     pub const CLOCK: Self = Self(include_bytes!("../assets/icons/clock.svg"));
     pub const CLOUD_UPLOAD: Self = Self(include_bytes!("../assets/icons/cloud-upload.svg"));
     pub const CODE: Self = Self(include_bytes!("../assets/icons/square-code.svg"));

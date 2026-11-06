@@ -1,15 +1,16 @@
-//! An event's card: its title, when, its series, where, the organizer and the account's answer, who is invited and
-//! its text; for a Teams meeting the split Join (any time, started or not; its menu has Join and Copy join link, as in
-//! Teams) and Chat with participants.
+//! An event's card: its title, an invitation's answers ([`super::rsvp`]), when, its series, where, the organizer and the
+//! account's answer, who is invited and how each answered, and its text; for a Teams meeting the split Join (any time,
+//! started or not; its menu has Join and Copy join link, as in Teams) and Chat with participants; for the account's own
+//! event Edit and its removal (this event or the whole series of an occurrence).
 
-use std::fmt::Write as _;
 use std::rc::Rc;
 
 use gpui::{
-    App, ClipboardItem, Context, InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _,
-    Styled as _, div, px, relative, rgb,
+    App, AppContext as _, ClipboardItem, Context, InteractiveElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::Input;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{Disableable as _, Sizable as _};
 use teams_core::{CalendarEvent, EventResponse};
@@ -29,8 +30,9 @@ impl CalendarView {
         let row = |glyph: Glyph, text: String| card_row(glyph, text, palette);
         let when = when_text(&shown, cycle);
         let organizer = organizer_text(&event);
-        let invited = invited_text(&event);
+        let invited = attendees_view(&event, palette);
         let actions = self.card_actions(&shown, palette, cx);
+        let rsvp = self.rsvp_view(&event, palette, cx);
         let manage = self.manage_actions(&event, palette, cx);
         let card = div()
             .debug_selector(|| "calendar-card".to_owned())
@@ -57,6 +59,7 @@ impl CalendarView {
                     .bg(rgb(mix(palette.surface, theme::DANGER, 150)))
                     .child("This event was canceled.")
             }))
+            .children(rsvp)
             .child(row(Glyph::CLOCK, when))
             .children(
                 event
@@ -66,7 +69,7 @@ impl CalendarView {
             )
             .children(event.location.clone().map(|location| row(Glyph::MAP_PIN, location)))
             .children(organizer.map(|organizer| row(Glyph::USER, organizer)))
-            .children(invited.map(|invited| row(Glyph::USERS, invited)))
+            .children(invited)
             .children(event.preview.clone().map(|preview| {
                 div()
                     .text_sm()
@@ -145,28 +148,14 @@ impl CalendarView {
                 .gap_2()
                 .children(edit)
                 .child(div().flex_1())
-                .child(selected_by(
-                    "calendar-card-remove",
-                    Button::new("calendar-card-remove")
-                        .icon(if meeting { Glyph::CALENDAR_CANCEL } else { Glyph::TRASH }.icon())
-                        .label(removal)
-                        .ghost()
-                        .text_color(rgb(theme::DANGER))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.removal = Removal::Asked;
-                            cx.notify();
-                        })),
+                .child(Self::remove_button(
+                    removal,
+                    meeting,
+                    occurrence && event.series_master_id.is_some(),
+                    cx,
                 )),
             Removal::Asked | Removal::Sending => {
-                let question = if meeting && occurrence {
-                    "Cancel this occurrence? Everyone invited gets a cancellation of it; the rest of the series stays."
-                } else if meeting {
-                    "Cancel this meeting? Everyone invited gets a cancellation."
-                } else if occurrence && own {
-                    "Delete this occurrence from your calendar? The rest of the series stays."
-                } else {
-                    "Delete this event from your calendar?"
-                };
+                let (question, removal) = confirmation((meeting, own), self.removal_series, removal);
                 self.removal_confirm(question, removal, palette, cx)
             }
         };
@@ -181,15 +170,16 @@ impl CalendarView {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        div()
-            .debug_selector(|| "calendar-card-confirm".to_owned())
-            .p_3()
+        let note = self.removal_note.clone().map(|note| {
+            div()
+                .debug_selector(|| "calendar-card-cancel-note".to_owned())
+                .child(Input::new(&note).small())
+        });
+        let buttons = div()
             .flex()
             .items_center()
+            .justify_end()
             .gap_2()
-            .rounded_md()
-            .bg(rgb(mix(palette.surface, theme::DANGER, 100)))
-            .child(div().flex_1().text_sm().child(question))
             .child(selected_by(
                 "calendar-card-keep",
                 Button::new("calendar-card-keep")
@@ -198,6 +188,8 @@ impl CalendarView {
                     .small()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.removal = Removal::None;
+                        this.removal_series = false;
+                        this.removal_note = None;
                         cx.notify();
                     })),
             ))
@@ -209,7 +201,71 @@ impl CalendarView {
                     .small()
                     .disabled(self.removal == Removal::Sending)
                     .on_click(cx.listener(|this, _, _, cx| this.remove_carded(cx))),
-            ))
+            ));
+        div()
+            .debug_selector(|| "calendar-card-confirm".to_owned())
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_md()
+            .bg(rgb(mix(palette.surface, theme::DANGER, 100)))
+            .child(div().text_sm().child(question))
+            .children(note)
+            .child(buttons)
+    }
+
+    /// The card's removal: asked at once, or, for an occurrence of a series, a drop-down of this event and the whole
+    /// series, as Teams' peek offers it. A meeting's cancellation asks for a message for the attendees.
+    fn remove_button(removal: &'static str, meeting: bool, series: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let button = Button::new("calendar-card-remove")
+            .icon(if meeting { Glyph::CALENDAR_CANCEL } else { Glyph::TRASH }.icon())
+            .label(removal)
+            .ghost()
+            .text_color(rgb(theme::DANGER));
+        if !series {
+            return selected_by(
+                "calendar-card-remove",
+                button.on_click(cx.listener(move |this, _, window, cx| this.ask_removal(false, meeting, window, cx))),
+            );
+        }
+        let view = cx.entity().downgrade();
+        selected_by(
+            "calendar-card-remove",
+            button
+                .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu.min_w(px(220.0));
+                    for (whole, selector, words) in [
+                        (false, "calendar-card-remove-occurrence", "This event"),
+                        (true, "calendar-card-remove-series", "All events in the series"),
+                    ] {
+                        let view = view.clone();
+                        menu = menu.item(
+                            PopupMenuItem::element(move |_, _| {
+                                div().debug_selector(move || selector.to_owned()).child(words)
+                            })
+                            .on_click(move |_, window, cx: &mut App| {
+                                let _ = view.update(cx, |this, cx| this.ask_removal(whole, meeting, window, cx));
+                            }),
+                        );
+                    }
+                    menu
+                }),
+        )
+    }
+
+    /// Asks to confirm the card's removal, of the whole series when `series`; a `meeting`'s asks for a message.
+    fn ask_removal(&mut self, series: bool, meeting: bool, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.removal = Removal::Asked;
+        self.removal_series = series;
+        self.removal_note = meeting.then(|| {
+            cx.new(|cx| {
+                gpui_component::input::InputState::new(window, cx)
+                    .placeholder("Add a message for the attendees (optional)")
+            })
+        });
+        cx.notify();
     }
 
     /// What the card's Join goes into: the meeting's call when its event names its chat and organizer, else its link,
@@ -464,21 +520,148 @@ fn organizer_text(event: &CalendarEvent) -> Option<String> {
     })
 }
 
-/// Who is invited: how many, the first six by name and how many more.
-fn invited_text(event: &CalendarEvent) -> Option<String> {
-    if event.attendees.is_empty() {
-        return None;
+/// What the removal's confirmation asks, and its button's words: of a meeting or not and the account's or not
+/// (the pair), of the whole `series`; `removal` the words its card's button had (an occurrence's end in "occurrence").
+fn confirmation((meeting, own): (bool, bool), series: bool, removal: &'static str) -> (&'static str, &'static str) {
+    let occurrence = removal.ends_with("occurrence");
+    match (meeting, own, series) {
+        (true, _, true) => (
+            "Cancel the whole series? Everyone invited gets a cancellation of every event in it.",
+            "Cancel series",
+        ),
+        (false, true, true) => ("Delete every event of this series from your calendar?", "Delete series"),
+        (false, false, true) => (
+            "Remove every canceled event of this series from your calendar?",
+            "Remove series",
+        ),
+        (true, _, false) if occurrence => (
+            "Cancel this occurrence? Everyone invited gets a cancellation of it; the rest of the series stays.",
+            removal,
+        ),
+        (true, _, false) => ("Cancel this meeting? Everyone invited gets a cancellation.", removal),
+        (false, true, false) if occurrence => (
+            "Delete this occurrence from your calendar? The rest of the series stays.",
+            removal,
+        ),
+        (false, _, false) => ("Delete this event from your calendar?", removal),
     }
-    let names: Vec<&str> = event
+}
+
+/// How many of an event's attendees are listed on its card before "and N more".
+const LISTED: usize = 8;
+
+/// Who is invited, as Teams' peek lists them: how many and how they answered ([`attendee_tally`]), then each one with
+/// their answer's mark ([`attendee_row`]); the first [`LISTED`], then how many more.
+fn attendees_view(event: &CalendarEvent, palette: Palette) -> Option<gpui::Div> {
+    // an attendee's copy lists the organizer among them, and others' answers only as its own copy last heard them: the
+    // organizer is said above, and only the organizer's copy tells who answered what
+    let organizer = event.organizer_address.as_deref().map(str::to_lowercase);
+    let invited: Vec<&teams_core::Attendee> = event
         .attendees
         .iter()
-        .filter_map(|attendee| attendee.name.as_deref().or(attendee.address.as_deref()))
-        .take(6)
+        .filter(|attendee| organizer.is_none() || attendee.address.as_deref().map(str::to_lowercase) != organizer)
         .collect();
-    let rest = event.attendees.len().saturating_sub(names.len());
-    let mut text = format!("{} invited: {}", event.attendees.len(), names.join(", "));
-    if rest > 0 {
-        let _ = write!(text, " and {rest} more");
+    if invited.is_empty() {
+        return None;
     }
-    Some(text)
+    let known = event.is_organizer;
+    let rows = invited
+        .iter()
+        .take(LISTED)
+        .map(|attendee| attendee_row(attendee, known, palette));
+    let rest = invited.len().saturating_sub(LISTED);
+    Some(
+        div()
+            .debug_selector(|| "calendar-card-attendees".to_owned())
+            .flex()
+            .items_start()
+            .gap_3()
+            .child(
+                div().pt(px(2.0)).child(
+                    Glyph::USERS
+                        .icon()
+                        .size(px(16.0))
+                        .text_color(rgb(palette.muted_foreground)),
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(attendee_tally(&invited, known))
+                    .children(rows)
+                    .children((rest > 0).then(|| {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(palette.muted_foreground))
+                            .child(format!("and {rest} more"))
+                    })),
+            ),
+    )
+}
+
+/// How many an event invites and, on the organizer's copy (`known`), how they answered: "2 invited · 1 accepted, 1
+/// didn't respond".
+fn attendee_tally(invited: &[&teams_core::Attendee], known: bool) -> String {
+    let heading = format!("{} invited", invited.len());
+    if !known {
+        return heading;
+    }
+    let count = |wanted: fn(&EventResponse) -> bool| {
+        invited
+            .iter()
+            .filter(|attendee| attendee.response.as_ref().is_some_and(wanted))
+            .count()
+    };
+    let answers: Vec<String> = [
+        (count(|answer| *answer == EventResponse::Accepted), "accepted"),
+        (count(|answer| *answer == EventResponse::Tentative), "tentative"),
+        (count(|answer| *answer == EventResponse::Declined), "declined"),
+        (
+            count(|answer| matches!(answer, EventResponse::NotResponded | EventResponse::NoResponse)),
+            "didn't respond",
+        ),
+    ]
+    .into_iter()
+    .filter(|(number, _)| *number > 0)
+    .map(|(number, words)| format!("{number} {words}"))
+    .collect();
+    if answers.is_empty() {
+        heading
+    } else {
+        format!("{heading} · {}", answers.join(", "))
+    }
+}
+
+/// One attendee on the card: their answer's mark and their answer in words when it is `known`, their name (optional
+/// ones said so).
+fn attendee_row(attendee: &teams_core::Attendee, known: bool, palette: Palette) -> gpui::Div {
+    let name = attendee
+        .name
+        .clone()
+        .or_else(|| attendee.address.clone())
+        .unwrap_or_default();
+    let (glyph, colour, words) = match attendee.response.as_ref().filter(|_| known) {
+        Some(EventResponse::Accepted) => (Glyph::CIRCLE_CHECK, theme::SUCCESS, "Accepted"),
+        Some(EventResponse::Tentative) => (Glyph::CIRCLE_QUESTION, palette.muted_foreground, "Tentative"),
+        Some(EventResponse::Declined) => (Glyph::CIRCLE_X, theme::DANGER, "Declined"),
+        _ => (Glyph::USER, palette.muted_foreground, ""),
+    };
+    let note = match (words.is_empty(), attendee.optional) {
+        (false, true) => format!("{words} · Optional"),
+        (true, true) => "Optional".to_owned(),
+        (false, false) => words.to_owned(),
+        (true, false) => String::new(),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .child(glyph.icon().size(px(14.0)).text_color(rgb(colour)))
+        .child(div().flex_1().min_w_0().truncate().child(name))
+        .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(note))
 }

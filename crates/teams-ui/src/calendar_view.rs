@@ -2,7 +2,8 @@
 //! panes, a left pane with the month (Monday first, the days shown marked, today circled, its own month arrows, folded
 //! to the week by its chevron), "Add calendar", "My calendars" with the account's calendar ticked and "Show all"; a
 //! toolbar with the pane's toggle, Today, the previous and next arrows, the dates shown (a month picker under them), the
-//! view switcher (Day, Work week, Week, Month), "…" (Refresh), "Join with an ID" and the split "New"; and the grid:
+//! Filter (`filter`), the view switcher (Day, Work week, Week, Month), "…" (Refresh), "Join with an ID" and the split
+//! "New"; and the grid:
 //! the days' headers (today's in the brand colour under a brand line), the hours with their half-hour lines, the
 //! all-day strip, each event a block with a coloured edge (striped while not accepted), its title and organizer, the
 //! recurring mark (crossed out on a cancelled occurrence, which is outlined), overlapping events side by side, and the
@@ -19,11 +20,15 @@
 //!   pre-join, [`crate::prejoin`], which starts the meeting's call when nobody has), "Chat with
 //!   participants" (the meeting's chat); Join's menu has Join and "Copy join link". A build that shows no call, and the
 //!   read-only mode, offer no Join (and Copy join link beside Chat instead).
-//! - **New** (its menu: an event or a Teams meeting), a double click on an empty half hour of the grid, and an
-//!   event's Edit (its card's, or a double click on it) open the scheduling form in a window of its own
-//!   ([`crate::event_form`]); a save there reads the days shown again. The card of the account's own meeting offers
-//!   Cancel meeting, of its appointment Delete, and of a meeting cancelled by its organizer Remove from calendar, each
-//!   confirmed first.
+//! - **The grid's half hours**: a click selects one and a drag stretches the selection over more of its day, as Teams'
+//!   calendar does; New (its menu: an event or a Teams meeting), Enter, and a double click schedule the selection (a
+//!   double click outside it, that half hour), and Escape drops it. New without one takes the next half hour.
+//! - **New** and an event's Edit (its card's, or a double click on it) open the scheduling form in a window of its own
+//!   ([`crate::event_form`]); a save there reads the days shown again. The card reads its event whole for whom it
+//!   invites and their answers. The card of the account's own meeting offers Cancel meeting (with a message for the
+//!   attendees), of its appointment Delete, and of a meeting cancelled by its organizer Remove from calendar, each
+//!   confirmed first, for an occurrence this event or the whole series. An invitation's card offers Accept, Decline
+//!   and Tentative with an optional message for the organizer (`rsvp`).
 //! - **Join with an ID** (`join_id`): the meeting's ID and passcode, the meeting found in the calendar by them and
 //!   joined as its card's Join joins it. "Add calendar" (other people's and shared calendars) says it isn't
 //!   available yet.
@@ -31,7 +36,7 @@
 //!   views, Escape closes a card or the month picker.
 //! - **Traced**: `calendar shown` with the view's key, `calendar read` with the view's key when its events came,
 //!   `calendar stored` when the store's were drawn first,
-//!   `calendar-event opened` (the event's kind), never a subject or a name.
+//!   `calendar-event opened` (the event's kind), `calendar-event answered` (the answer), never a subject or a name.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -57,11 +62,15 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
 mod card;
+mod filter;
 mod grid;
 mod join_id;
 mod pane;
+mod rsvp;
 
+pub use filter::{Hidden, Shows};
 pub use join_id::ID_INVALID;
+pub use rsvp::RSVP_NOT_SENT;
 
 /// One hour's height in the time grid, px.
 const HOUR_HEIGHT: f32 = 96.0;
@@ -113,6 +122,8 @@ enum Toggle {
     ShowAll,
     /// The grid scrolls to the working day (or now) when next drawn.
     ScrollDue,
+    /// The pointer is pressed on the grid's half hours: moving it stretches the selection.
+    Dragging,
 }
 
 /// The switches on.
@@ -173,10 +184,21 @@ pub struct CalendarView {
     /// A read asked again (`again`, after a write) while that span was being read: it runs once that read is over, so
     /// the answer from before the write isn't the last one.
     read_again: bool,
+    /// The half hours selected on the grid (a click, or a drag across them): what New, Enter and a double click
+    /// schedule, as Teams' calendar does.
+    selection: Option<Selection>,
+    /// The kinds of event the toolbar's Filter hides.
+    hidden: Hidden,
     /// The card of the event clicked.
     card: Option<Shown>,
     /// The card asks to confirm its Cancel meeting, Delete or Remove from calendar, and one is being sent.
     removal: Removal,
+    /// The removal asked is of the whole series (its master's), not of the occurrence carded.
+    removal_series: bool,
+    /// The message for the attendees a meeting's cancellation carries, while the card asks to confirm it.
+    removal_note: Option<Entity<gpui_component::input::InputState>>,
+    /// The card's answer to its invitation, while its note is written or it is being sent.
+    rsvp: Option<rsvp::RsvpDraft>,
     /// What a control that can't act yet says, until closed.
     notice: Option<&'static str>,
     /// Join with an ID's panel, while it is open.
@@ -219,8 +241,13 @@ impl CalendarView {
             loaded: HashMap::new(),
             reading: None,
             read_again: false,
+            selection: None,
+            hidden: Hidden::default(),
             card: None,
             removal: Removal::None,
+            removal_series: false,
+            removal_note: None,
+            rsvp: None,
             notice: None,
             join_id: None,
             scroll: ScrollHandle::new(),
@@ -322,7 +349,33 @@ impl CalendarView {
         let kind = if shown.event.online { "meeting" } else { "event" };
         self.trace
             .record(&TraceLine::new("calendar-event", "opened").kind(kind));
+        // the calendar view names no attendees: the event read whole does, with each one's answer, as Teams' peek
+        // shows them (and what tells the organizer's meeting from an appointment)
+        let id = shown.event.id.clone();
+        let full = (!shown.event.cancelled && !self.core.read_only()).then(|| self.core.calendar_event(id.clone()));
         self.card = Some(shown);
+        self.rsvp = None;
+        if let Some(full) = full {
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let Ok(full) = full.await else { return };
+                let _ = this.update(cx, |view, cx| view.card_read(&id, full.event.attendees, cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The carded event `id` was read whole: its card shows whom it invites and their answers.
+    fn card_read(&mut self, id: &str, attendees: Vec<teams_core::Attendee>, cx: &mut Context<Self>) {
+        let Some(shown) = self.card.as_mut().filter(|shown| shown.event.id == id) else {
+            return;
+        };
+        if attendees.is_empty() || shown.event.attendees == attendees {
+            return;
+        }
+        let mut event = (*shown.event).clone();
+        event.attendees = attendees;
+        shown.event = Rc::new(event);
         cx.notify();
     }
 
@@ -330,18 +383,78 @@ impl CalendarView {
     pub fn close_card(&mut self, cx: &mut Context<Self>) {
         self.card = None;
         self.removal = Removal::None;
+        self.removal_series = false;
+        self.removal_note = None;
+        self.rsvp = None;
         cx.notify();
     }
 
-    /// The slot New opens with: the next half hour.
+    /// The slot New opens with: the half hours selected on the grid, else the next half hour.
     #[must_use]
     pub fn next_slot(&self) -> crate::event_form::Slot {
-        crate::event_form::Slot::next_half_hour(calendar::now().naive_local())
+        match self.selection.filter(|selection| self.span().contains(selection.date)) {
+            Some(selection) => selection.slot(),
+            None => crate::event_form::Slot::next_half_hour(calendar::now().naive_local()),
+        }
+    }
+
+    /// The half hours selected on the grid.
+    #[must_use]
+    pub fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
+
+    /// The pointer pressed on the half hour `half` of `date`: it alone is selected, and a drag from it stretches the
+    /// selection; a double click schedules the selection (or this half hour, outside it).
+    pub(crate) fn press_slot(&mut self, date: NaiveDate, half: u16, clicks: usize, cx: &mut Context<Self>) {
+        if clicks >= 2 {
+            let slot = match self.selection.filter(|selection| selection.holds(date, half)) {
+                Some(selection) => selection.slot(),
+                None => Selection::at(date, half).slot(),
+            };
+            self.toggles.set(Toggle::Dragging, false);
+            self.new_event(slot, false, cx);
+            return;
+        }
+        self.selection = Some(Selection::at(date, half));
+        self.toggles.set(Toggle::Dragging, true);
+        cx.notify();
+    }
+
+    /// The pointer moved over the half hour `half` of `date`, pressed (`pressed`) or not: a drag stretches the
+    /// selection over its day's half hours.
+    pub(crate) fn drag_slot(&mut self, date: NaiveDate, half: u16, pressed: bool, cx: &mut Context<Self>) {
+        if !pressed {
+            self.toggles.set(Toggle::Dragging, false);
+            return;
+        }
+        if !self.toggles.on(Toggle::Dragging) {
+            return;
+        }
+        if let Some(selection) = self.selection.as_mut().filter(|selection| selection.date == date) {
+            let stretched = selection.to(half);
+            if stretched != *selection {
+                *selection = stretched;
+                cx.notify();
+            }
+        }
+    }
+
+    /// The drag on the grid's half hours ended.
+    pub(crate) fn release_slot(&mut self) {
+        self.toggles.set(Toggle::Dragging, false);
+    }
+
+    /// Selects `selection` on the grid, as a drag across its half hours does.
+    pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
+        self.selection = Some(selection);
+        cx.notify();
     }
 
     /// Opens the scheduling form on a new event in `slot`, a Teams meeting when `online` (New, its menu, a double click
     /// on an empty half hour).
     pub fn new_event(&mut self, slot: crate::event_form::Slot, online: bool, cx: &mut Context<Self>) {
+        self.selection = None;
         let seed = crate::event_form::Seed::New { slot, online };
         crate::event_form::open(
             Arc::clone(&self.core),
@@ -474,14 +587,24 @@ impl CalendarView {
         if own_channel_meeting(event, self.core.me()) && !event.cancelled {
             return self.cancel_channel_carded(cx);
         }
+        // the whole series is its master's to cancel or delete
+        let id = match &event.series_master_id {
+            Some(master) if self.removal_series => master.clone(),
+            _ => event.id.clone(),
+        };
         let write = if event.is_organizer && !event.attendees.is_empty() && !event.cancelled {
+            let message = self
+                .removal_note
+                .as_ref()
+                .map(|note| note.read(cx).value().trim().to_owned())
+                .filter(|message| !message.is_empty());
             teams_core::EventWrite::Cancel {
-                id: event.id.clone(),
+                id,
                 chat: event.meeting_chat.clone(),
-                message: None,
+                message,
             }
         } else {
-            teams_core::EventWrite::Delete { id: event.id.clone() }
+            teams_core::EventWrite::Delete { id }
         };
         self.removal = Removal::Sending;
         let reply = self.core.write_event(write);
@@ -491,7 +614,7 @@ impl CalendarView {
                 view.removal = Removal::None;
                 match answer {
                     Ok(_) => {
-                        view.card = None;
+                        view.close_card(cx);
                         view.read(true, cx);
                     }
                     Err(teams_core::EngineError::Stopped) => {}
@@ -555,7 +678,7 @@ impl CalendarView {
                 view.removal = Removal::None;
                 match answer {
                     Ok(()) => {
-                        view.card = None;
+                        view.close_card(cx);
                         view.read(true, cx);
                     }
                     Err(teams_core::EngineError::Stopped) => {}
@@ -643,7 +766,7 @@ impl CalendarView {
         cx.notify();
     }
 
-    fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
         if modifiers.control && modifiers.alt {
@@ -658,13 +781,23 @@ impl CalendarView {
             self.set_mode(mode, cx);
             return;
         }
-        if modifiers.modified() {
+        // while the card asks for a note, the keys are the note's (a "t" is a letter, not Today)
+        let writing = self.writing(window, cx);
+        if modifiers.modified() || (writing && keystroke.key != "escape") {
             return;
         }
         match keystroke.key.as_str() {
             "left" => self.step(false, cx),
             "right" => self.step(true, cx),
             "t" => self.today(cx),
+            "enter" if self.card.is_none() && self.selection.is_some() => {
+                let slot = self.next_slot();
+                self.new_event(slot, false, cx);
+            }
+            "escape" if self.card.is_none() && self.picker.is_none() && self.selection.is_some() => {
+                self.selection = None;
+                cx.notify();
+            }
             "escape" if self.card.is_some() => self.close_card(cx),
             "escape" if self.picker.is_some() => {
                 self.picker = None;
@@ -680,6 +813,22 @@ impl CalendarView {
         if self.toggles.on(Toggle::Hidden) {
             return Rc::default();
         }
+        let shown = self.unfiltered();
+        if !self.hidden.any() {
+            return shown;
+        }
+        let hidden = self.hidden;
+        Rc::new(
+            shown
+                .iter()
+                .filter(|shown| hidden.shows(&shown.event))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// The events of the span shown, before the Filter.
+    fn unfiltered(&self) -> Rc<Vec<Shown>> {
         self.events()
             .or_else(|| {
                 // while the span is read, a span read before that holds its days
@@ -746,6 +895,53 @@ pub const EVENT_UNREAD: &str = "The event couldn't be opened. Check the connecti
 /// What the card says when its Cancel meeting or Delete didn't go through.
 pub const EVENT_NOT_REMOVED: &str = "The event couldn't be canceled or deleted. Check the connection, then try again.";
 
+/// Half hours selected on one day of the grid: from `first` to `last`, both counted from midnight, `anchor` the one the
+/// drag started on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub date: NaiveDate,
+    anchor: u16,
+    pub first: u16,
+    pub last: u16,
+}
+
+impl Selection {
+    /// The half hour `half` of `date` alone.
+    #[must_use]
+    pub fn at(date: NaiveDate, half: u16) -> Self {
+        let half = half.min(47);
+        Self {
+            date,
+            anchor: half,
+            first: half,
+            last: half,
+        }
+    }
+
+    /// Stretched from its anchor to `half`.
+    #[must_use]
+    pub fn to(self, half: u16) -> Self {
+        let half = half.min(47);
+        Self {
+            first: self.anchor.min(half),
+            last: self.anchor.max(half),
+            ..self
+        }
+    }
+
+    fn holds(self, date: NaiveDate, half: u16) -> bool {
+        self.date == date && (self.first..=self.last).contains(&half)
+    }
+
+    /// The slot it covers.
+    #[must_use]
+    pub fn slot(self) -> crate::event_form::Slot {
+        let midnight = self.date.and_time(chrono::NaiveTime::MIN);
+        let at = |half: u16| midnight + chrono::Duration::minutes(i64::from(half) * 30);
+        crate::event_form::Slot::new(at(self.first), at(self.last + 1))
+    }
+}
+
 /// Where the card's Cancel meeting, Delete or Remove from calendar stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Removal {
@@ -790,7 +986,8 @@ pub(crate) fn hour_label(hour: u32, cycle: HourCycle) -> String {
 }
 
 impl Render for CalendarView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ready_rsvp(window, cx);
         let palette = theme::current(cx);
         let failed = matches!(self.loaded.get(&self.span()), Some(Loaded::Failed)) && self.reading.is_none();
         let failure = failed.then(|| {

@@ -147,7 +147,8 @@ pub use write::{
 };
 pub use write::{
     CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
-    EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateChannelEvent, UpdateEvent, ZonedTime,
+    EventDraft, EventShowAs, MeetingChannel, Organizer, RespondEvent, RsvpAnswer, UpdateChannelEvent, UpdateEvent,
+    ZonedTime,
 };
 
 pub use workflow::{MessageRun, MessageSender, Principal, WorkflowFailure, WorkflowRequest, WorkflowResponse};
