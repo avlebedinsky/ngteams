@@ -16,7 +16,9 @@ opens people search results as chats, and keeps unread badges in sync with read 
 keeps its existing file references and cards. Channel menus provide management, notification and section
 preferences, email and workflow actions. Calls and meetings support Teams
 live captions and spoken-language controls (Alt+Shift+C); caption text stays in memory and clears on hide or call
-end. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
+end. Captions can be translated on this computer ("Translate to" in the caption settings) by Claude Code (Claude
+Haiku) or the Codex CLI (GPT-6-Luna), whichever is installed (Settings → Calls → Captions); the caption text then
+goes to that tool and its provider. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
 [workflows](docs/protocol/workflows.md), and [live captions](docs/protocol/live-captions.md).
 
 ## Layout

@@ -63,6 +63,7 @@ use crate::settings_view::{self, DeviceChoice, device_label};
 use crate::shell::{CallChat, HangUpCall, JoinCall, ToggleCameraCall, ToggleCaptionsCall, ToggleMuteCall};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
+use crate::translate::CaptionTranslation;
 use crate::video::{Tile, Tiles, VideoFeed};
 
 /// The call window's key context.
@@ -150,6 +151,8 @@ pub struct CallStage {
     caption_font: f32,
     caption_top: bool,
     caption_language: Option<String>,
+    /// The captions translated on this computer, when the user picked a language ([`crate::translate`]).
+    translation: Entity<CaptionTranslation>,
     /// Who the call was with, as last said while it was up: its end still names them.
     with: Option<SharedString>,
     /// The call's end was shown (and traced).
@@ -159,7 +162,7 @@ pub struct CallStage {
     focus: FocusHandle,
     ticking: Option<Task<()>>,
     _waking: Option<Task<()>>,
-    _observing: [Subscription; 3],
+    _observing: [Subscription; 4],
 }
 
 impl EventEmitter<CallStageEvent> for CallStage {}
@@ -175,8 +178,11 @@ impl CallStage {
             namer,
             others,
         } = parts;
+        let translation = cx.new(|cx| CaptionTranslation::new(settings.clone(), cx));
         let observing = [
             cx.observe(&calls, |this: &mut Self, _, cx| this.changed(cx)),
+            // a caption's translation came, or translating stopped
+            cx.observe(&translation, |_, _, cx| cx.notify()),
             // the devices listed or chosen: their menus follow
             cx.observe(&settings, |_, _, cx| cx.notify()),
             // the window gone (its call ended, or closed): the call's frames go with it
@@ -208,6 +214,7 @@ impl CallStage {
             caption_font: 18.0,
             caption_top: false,
             caption_language: None,
+            translation,
             with: None,
             end_shown: false,
             closing: None,
@@ -279,6 +286,7 @@ impl CallStage {
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.caption_scroll.scroll_to_bottom();
         let live = self.live(cx);
+        self.translate(live.as_ref(), cx);
         if let Some(active) = &live {
             let (core, echo) = (Arc::clone(&self.core), self.calls.read(cx).echo().cloned());
             self.people.follow(
@@ -422,6 +430,34 @@ impl CallStage {
         self.ask(ask, cx);
     }
 
+    /// Hands the captions shown, and the call's title and people, to the translation.
+    fn translate(&self, live: Option<&ActiveCall>, cx: &mut Context<Self>) {
+        let captions = self.calls.read(cx).captions();
+        let showing = live.is_some()
+            && matches!(
+                captions.phase,
+                teams_core::CaptionPhase::On | teams_core::CaptionPhase::Starting
+            );
+        let lines = captions.lines.clone();
+        let brief = live.map(|active| self.brief(active, cx)).unwrap_or_default();
+        self.translation
+            .update(cx, |translation, cx| translation.follow(&lines, showing, brief, cx));
+    }
+
+    /// The call's title and who is in it, for the translation's context.
+    fn brief(&self, active: &ActiveCall, cx: &App) -> String {
+        let mut brief = vec![format!("Title: {}", self.title(active, cx))];
+        if let Some(title) = active.title.as_deref().filter(|title| !title.trim().is_empty()) {
+            brief.push(format!("Meeting: {title}"));
+        }
+        let names = call_view::names_in_call(active, self.people.of(active.id));
+        if !names.is_empty() {
+            let names: Vec<&str> = names.iter().map(SharedString::as_ref).collect();
+            brief.push(format!("In the call: {}", names.join(", ")));
+        }
+        brief.join("\n")
+    }
+
     /// Who the call is with, as the window's title says it.
     fn title(&self, active: &ActiveCall, cx: &App) -> SharedString {
         let names = call_view::names_in_call(active, self.people.of(active.id));
@@ -541,7 +577,13 @@ impl CallStage {
             .gap_1()
             .child(roster)
             .child(self.more(palette, cx))
-            .child(div().w(px(1.0)).h(px(32.0)).mx_1().bg(rgb(palette.on_frame).opacity(0.25)))
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(px(32.0))
+                    .mx_1()
+                    .bg(rgb(palette.on_frame).opacity(0.25)),
+            )
             .children(camera)
             .child(
                 div()
@@ -1523,7 +1565,9 @@ fn self_view(speaking: bool, video: Option<AnyElement>, palette: Palette, cx: &A
         .bg(rgb(palette.surface))
         .border_2()
         .border_color(rgb(if speaking { palette.brand } else { palette.border }))
-        .when(!speaking, |own| own.shadow(theme::glow(palette, 0x0000_0000, 0.3, 18.0, 6.0)))
+        .when(!speaking, |own| {
+            own.shadow(theme::glow(palette, 0x0000_0000, 0.3, 18.0, 6.0))
+        })
         .child(face)
         .child(name_tag(SharedString::from("You"), speaking, palette));
     crate::motion::breathe(own, "call-self-speaking", speaking, palette, cx)

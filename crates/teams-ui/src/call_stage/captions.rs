@@ -1,5 +1,8 @@
-//! Teams' Language and speech menu and ephemeral caption pane.
+//! Teams' Language and speech menu and ephemeral caption pane, with the captions translated on this computer when the
+//! user picked a language in its settings' "Translate to" ([`crate::translate`]): a line shows its translation alone,
+//! as Teams shows translated captions, and its text as spoken (dimmed) until the translation comes.
 use super::*;
+use crate::translate::{self, CaptionTranslation, Shown, Status};
 use teams_core::CaptionPhase;
 use teams_proto::captions::SPOKEN_LANGUAGES;
 
@@ -49,27 +52,9 @@ impl CallStage {
         let language_label = language_label(&state.spoken_language);
         let header = self.caption_header(palette, &state.spoken_language, cx);
         let status = Self::caption_status(&state, language_label, cx);
-        let lines = state.lines.iter().filter(|line| !line.text.is_empty()).map(|line| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .px_4()
-                .py_1p5()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(SharedString::from(
-                            line.display_name.clone().unwrap_or_else(|| "Speaker".into()),
-                        )),
-                )
-                .child(
-                    div()
-                        .text_size(px(self.caption_font))
-                        .child(SharedString::from(line.text.clone())),
-                )
-        });
+        let status_now = self.translation.read(cx).status().clone();
+        let translation_failed = Self::translation_notice(&status_now, palette, cx);
+        let lines = self.caption_lines(&state.lines, palette, cx);
         let transcript = div()
             .id("call-caption-text")
             .debug_selector(|| "call-caption-text".to_owned())
@@ -102,6 +87,7 @@ impl CallStage {
                 .border_t_1()
                 .border_color(rgb(palette.border))
                 .child(header)
+                .children(translation_failed.filter(|_| state.phase == CaptionPhase::On))
                 .children(status)
                 .when(state.phase != CaptionPhase::Failed && !state.lines.is_empty(), |view| {
                     view.child(transcript)
@@ -110,6 +96,41 @@ impl CallStage {
                 .children(confirmation)
                 .into_any_element(),
         )
+    }
+    /// Each line with text: its speaker over its text, translated when there is a translation.
+    fn caption_lines(&self, lines: &[teams_core::Caption], palette: Palette, cx: &App) -> Vec<AnyElement> {
+        let translation = self.translation.read(cx);
+        lines
+            .iter()
+            .filter(|line| !line.text.is_empty())
+            .map(|line| {
+                let (text, waiting) = match translation.shown(line) {
+                    Shown::Translated(text) | Shown::Spoken(text) => (text, false),
+                    Shown::Waiting(text) => (text, true),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .px_4()
+                    .py_1p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(SharedString::from(
+                                line.display_name.clone().unwrap_or_else(|| "Speaker".into()),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(self.caption_font))
+                            .when(waiting, |text| text.text_color(rgb(palette.muted_foreground)))
+                            .child(SharedString::from(text.to_owned())),
+                    )
+                    .into_any_element()
+            })
+            .collect()
     }
     fn caption_status(
         state: &teams_core::CallCaptions,
@@ -159,12 +180,15 @@ impl CallStage {
         let language_label = language_label(&current);
         let font = self.caption_font;
         let top = self.caption_top;
+        let translate_to = self.settings.read(cx).settings().caption_translate_to;
+        let settings_model = self.settings.clone();
         let settings = icon_button("call-caption-settings", Glyph::SETTINGS, "Caption settings")
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
                 let current = current.clone();
                 let stage_language = stage.clone();
                 let stage_font = stage.clone();
                 let stage_position = stage.clone();
+                let settings_model = settings_model.clone();
                 menu.submenu(
                     format!("Meeting spoken language: {language_label}"),
                     window,
@@ -172,6 +196,23 @@ impl CallStage {
                     move |mut menu, _, _| {
                         for &(code, label) in SPOKEN_LANGUAGES {
                             menu = menu.item(language_item(stage_language.clone(), code, label, &current));
+                        }
+                        menu.scrollable(true).max_h(px(360.0))
+                    },
+                )
+                .submenu(
+                    format!(
+                        "Translate to: {}",
+                        translate_to
+                            .and_then(translate::language)
+                            .map_or("Off", |(_, name)| name)
+                    ),
+                    window,
+                    cx,
+                    move |mut menu, _, _| {
+                        menu = menu.item(translate_item(settings_model.clone(), None, "Off", translate_to));
+                        for &(code, name) in translate::TARGET_LANGUAGES {
+                            menu = menu.item(translate_item(settings_model.clone(), Some(code), name, translate_to));
                         }
                         menu.scrollable(true).max_h(px(360.0))
                     },
@@ -212,9 +253,14 @@ impl CallStage {
             .py_1()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
                     .text_sm()
                     .text_color(rgb(palette.muted_foreground))
-                    .child("Live captions"),
+                    .child("Live captions")
+                    .children(translated_into(self.translation.read(cx).status())),
             )
             .child(
                 div().flex().items_center().gap_1().child(settings).child(selected_by(
@@ -274,6 +320,94 @@ impl CallStage {
                 )
         })
     }
+}
+
+impl CallStage {
+    /// Translating stopped: why, that the captions show as spoken, and Try again.
+    fn translation_notice(status: &Status, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let Status::Failed { failure, language } = status else {
+            return None;
+        };
+        let retry = Button::new("call-caption-translate-retry")
+            .label("Try again")
+            .outline()
+            .small()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.translation.update(cx, CaptionTranslation::retry);
+            }));
+        Some(
+            div()
+                .debug_selector(|| "call-caption-translate-failed".to_owned())
+                .mx_4()
+                .my_1()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(theme::DANGER))
+                .text_sm()
+                .child(Glyph::CIRCLE_ALERT.icon().size(px(16.0)).text_color(rgb(theme::DANGER)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(SharedString::from(format!(
+                            "Captions can't be translated into {language}. {}",
+                            failure.message()
+                        )))
+                        .child(
+                            div()
+                                .text_color(rgb(palette.muted_foreground))
+                                .child("Showing captions as spoken."),
+                        ),
+                )
+                .child(selected_by("call-caption-translate-retry", retry)),
+        )
+    }
+}
+
+/// The header's note of the translation: the language and the tool doing it.
+fn translated_into(status: &Status) -> Option<gpui::Div> {
+    let Status::Translating { backend, language } = status else {
+        return None;
+    };
+    Some(
+        div()
+            .debug_selector(|| "call-caption-translated".to_owned())
+            .text_xs()
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
+            .child(SharedString::from(format!(
+                "Translated into {language} by {}",
+                backend.label()
+            ))),
+    )
+}
+
+/// A row of "Translate to": a language, or Off (`None`).
+fn translate_item(
+    settings: Entity<SettingsModel>,
+    code: Option<&'static str>,
+    label: &'static str,
+    current: Option<&'static str>,
+) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .debug_selector(move || format!("call-caption-translate-{}", code.unwrap_or("off")))
+            .child(label)
+    })
+    .checked(code == current)
+    .on_click(move |_, _, cx| {
+        settings.update(cx, |settings, cx| {
+            settings.change(|settings| settings.caption_translate_to = code, cx);
+        });
+    })
 }
 
 fn language_label(current: &str) -> &'static str {

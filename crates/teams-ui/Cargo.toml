@@ -39,6 +39,8 @@ teams-media.workspace = true
 teams-log.workspace = true
 # the settings file's problems
 thiserror.workspace = true
+# caption translation's tool process: its whole process group ended with it
+rustix = { workspace = true, features = ["process"] }
 # the bridge's stop signal to its drain task (a runtime-free oneshot)
 tokio = { workspace = true, features = ["sync"] }
 # the settings file

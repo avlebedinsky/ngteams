@@ -50,6 +50,7 @@ use toml::{Table, Value};
 
 use crate::effects::CameraPreview;
 use crate::theme::{self, Appearance};
+use crate::translate::{self, TranslatorChoice};
 
 /// The settings file's mode.
 pub const FILE_MODE: u32 = 0o600;
@@ -349,6 +350,12 @@ pub struct Settings {
     pub appearance: Appearance,
     /// The clock times are shown on, the app's for every account.
     pub time_format: TimeFormat,
+    /// The language live captions are translated into on this computer ([`crate::translate`]), by its code in
+    /// [`crate::translate::TARGET_LANGUAGES`]; `None`: not translated (the default: nothing goes to a tool until the
+    /// user picks one).
+    pub caption_translate_to: Option<&'static str>,
+    /// Which tool translates them.
+    pub caption_translator: TranslatorChoice,
     /// The other accounts' own settings, by the account's MRI: the first account's are [`Settings::selected_chat`]
     /// and [`Settings::manual_status`] themselves (see [`Settings::first_account`]).
     pub accounts: BTreeMap<String, AccountSettings>,
@@ -493,6 +500,8 @@ impl Default for Settings {
             video_effect: VideoEffect::None,
             appearance: Appearance::default(),
             time_format: TimeFormat::default(),
+            caption_translate_to: None,
+            caption_translator: TranslatorChoice::default(),
             accounts: BTreeMap::new(),
             first_account: None,
         }
@@ -523,6 +532,8 @@ pub mod keys {
     pub const FONT_FAMILY: &str = "font_family";
     pub const ANIMATIONS: &str = "animations";
     pub const TIME_FORMAT: &str = "time_format";
+    pub const CAPTION_TRANSLATE_TO: &str = "caption_translate_to";
+    pub const CAPTION_TRANSLATOR: &str = "caption_translator";
     /// The other accounts' own settings: a table of tables, by the account's MRI.
     pub const ACCOUNTS: &str = "accounts";
     /// The account whose own settings are the top-level ones, by its MRI.
@@ -628,6 +639,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .and_then(TimeFormat::from_key)
                 .ok_or(bad(keys::TIME_FORMAT, "not one of system, 12-hour, 24-hour"))?;
         }
+        keys::CAPTION_TRANSLATE_TO | keys::CAPTION_TRANSLATOR => take_captions(settings, key, value)?,
         keys::ACCOUNTS => take_accounts(settings, value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
@@ -717,6 +729,31 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
                 why: "not a font's name",
             })?);
         }
+    }
+    Ok(())
+}
+
+/// Takes the captions' translation: the language they are translated into, or the tool translating them.
+fn take_captions(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
+    if key == keys::CAPTION_TRANSLATE_TO {
+        settings.caption_translate_to = Some(
+            value
+                .as_str()
+                .and_then(translate::language)
+                .map(|(code, _)| code)
+                .ok_or(Problem::BadValue {
+                    key: keys::CAPTION_TRANSLATE_TO,
+                    why: "not a language captions are translated into",
+                })?,
+        );
+    } else {
+        settings.caption_translator = value
+            .as_str()
+            .and_then(TranslatorChoice::from_key)
+            .ok_or(Problem::BadValue {
+                key: keys::CAPTION_TRANSLATOR,
+                why: "not one of automatic, claude, codex",
+            })?;
     }
     Ok(())
 }
@@ -815,6 +852,7 @@ pub fn render(settings: &Settings) -> String {
         keys::TIME_FORMAT.to_owned(),
         Value::String(settings.time_format.key().to_owned()),
     );
+    render_captions(settings, &mut table);
     let accounts: Table = settings
         .accounts
         .iter()
@@ -837,6 +875,20 @@ pub fn render(settings: &Settings) -> String {
         table.insert(keys::FIRST_ACCOUNT.to_owned(), Value::String(first.clone()));
     }
     table.to_string()
+}
+
+/// The captions' translation, into the file's table (the language only when one is picked).
+fn render_captions(settings: &Settings, table: &mut Table) {
+    if let Some(language) = settings.caption_translate_to {
+        table.insert(
+            keys::CAPTION_TRANSLATE_TO.to_owned(),
+            Value::String(language.to_owned()),
+        );
+    }
+    table.insert(
+        keys::CAPTION_TRANSLATOR.to_owned(),
+        Value::String(settings.caption_translator.key().to_owned()),
+    );
 }
 
 /// How the app looks, into the file's table (the font family only when one is named).

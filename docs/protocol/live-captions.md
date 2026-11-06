@@ -85,6 +85,14 @@ client has no global lab roster admission or automatic hang-up based on changed 
 run, the agent establishes the call's complete reach under [the lab-contact rule](../lab-rules.md). A failed
 caption invite/command is reported in the caption pane and cannot fail the voice call.
 
+## Local translation (not Teams')
+
+Separately from Teams' own translation below, the native client can translate the captions it shows on the user's
+own computer: "Translate to" in the caption settings, done by the installed Claude Code (`claude`, Claude Haiku) or
+Codex CLI (`codex app-server`, GPT-6-Luna; Codex rejects a plain `luna` model for a ChatGPT account). Nothing is sent
+to Teams and the meeting is unaffected; the caption text goes to the chosen tool and its provider. How it schedules,
+keeps the call's context and bounds it is in `crates/teams-ui/src/translate.rs` and its `session` module.
+
 ## Translated captions: reference and verification prerequisite
 
 Microsoft's [live caption guidance](https://support.microsoft.com/en-gb/teams/meetings/use-live-captions-in-microsoft-teams-meetings)

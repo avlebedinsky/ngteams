@@ -8153,6 +8153,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "log",
+ "rustix",
  "serde_json",
  "teams-auth",
  "teams-call",

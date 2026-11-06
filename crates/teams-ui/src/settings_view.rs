@@ -48,6 +48,7 @@ use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsM
 use crate::shell::shown_as;
 use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
 use crate::trace::ViewTrace;
+use crate::translate::{TranslatorChoice, Translators};
 
 /// The font picker's first row: the system's UI font (no family named).
 pub const SYSTEM_FONT_LABEL: &str = "System font";
@@ -610,7 +611,9 @@ impl SettingsView {
                 Some("Motion"),
                 vec![row(
                     "Play animations",
-                    Some("Fade chats in as they open and let new messages rise. Off, everything holds still, animated pictures too."),
+                    Some(
+                        "Fade chats in as they open and let new messages rise. Off, everything holds still, animated pictures too.",
+                    ),
                     self.switch("animations", appearance.animations, |settings, on| {
                         settings.appearance.animations = on;
                     }),
@@ -874,7 +877,53 @@ impl SettingsView {
         if self.shows_effects(cx) {
             groups.push(self.video_effects(palette, cx));
         }
+        groups.push(self.captions(settings, palette, cx));
         groups
+    }
+
+    /// Which tool translates live captions ([`crate::translate`]): Automatic (naming the tool it comes to) and each
+    /// tool installed, the one chosen kept even when it is gone; the picker's test selector is `caption-translator`.
+    fn captions(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let translators = Translators::of(cx);
+        let chosen = settings.caption_translator;
+        let picks = TranslatorChoice::ALL
+            .into_iter()
+            .filter_map(|choice| {
+                let label = match choice {
+                    TranslatorChoice::Automatic => translators.pick(choice).map_or_else(
+                        |_| "Automatic".to_owned(),
+                        |(backend, _)| format!("Automatic ({})", backend.label()),
+                    ),
+                    TranslatorChoice::Only(backend) if translators.pick(choice).is_ok() => backend.label().to_owned(),
+                    TranslatorChoice::Only(backend) if choice == chosen => {
+                        format!("{} (not installed)", backend.label())
+                    }
+                    TranslatorChoice::Only(_) => return None,
+                };
+                Some(Pick {
+                    key: choice.key().to_owned(),
+                    label: label.into(),
+                    status: None,
+                    chosen: choice == chosen,
+                    apply: self.changer(move |settings| settings.caption_translator = choice),
+                })
+            })
+            .collect();
+        let description = if translators.installed().next().is_some() {
+            "When you translate live captions, their text goes to this tool on your computer and its provider."
+        } else {
+            "Install Claude Code (claude) or the Codex CLI (codex) to translate live captions."
+        };
+        group(
+            Some("Captions"),
+            vec![row(
+                "Translate captions with",
+                Some(description),
+                picker("caption-translator", picks, palette),
+                palette,
+            )],
+            palette,
+        )
     }
 
     /// The camera's video effects: what they do, the self-preview and the backgrounds.
@@ -1523,7 +1572,12 @@ impl Render for SettingsView {
                             .children(problems)
                             .children(content);
                         // another page fades in from a little below
-                        crate::motion::rise(page, SharedString::from(format!("settings-in-{}", self.page.key())), 8.0, cx)
+                        crate::motion::rise(
+                            page,
+                            SharedString::from(format!("settings-in-{}", self.page.key())),
+                            8.0,
+                            cx,
+                        )
                     }),
             )
     }

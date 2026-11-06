@@ -17,6 +17,7 @@ use teams_ui::settings::{
     Problem, Settings, SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
 };
 use teams_ui::theme::{self, Appearance, THEMES};
+use teams_ui::translate::{Backend, TranslatorChoice};
 
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 
@@ -56,6 +57,8 @@ fn changed() -> Settings {
             animations: false,
         },
         time_format: TimeFormat::Twelve,
+        caption_translate_to: Some("de"),
+        caption_translator: TranslatorChoice::Only(Backend::Codex),
         accounts: [(
             "8:orgid:00000000-0000-4000-8000-00000000000b".to_owned(),
             AccountSettings {
@@ -715,6 +718,38 @@ fn the_time_format_follows_the_system_by_default_and_each_choice_goes_through_th
         assert_eq!(read, Settings::default(), "{bad}");
         assert!(
             matches!(&problems[..], [Problem::BadValue { key: "time_format", .. }]),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_the_file() {
+    let defaults = Settings::default();
+    assert_eq!(defaults.caption_translate_to, None);
+    assert_eq!(defaults.caption_translator, TranslatorChoice::Automatic);
+    assert!(!render(&defaults).contains("caption_translate_to"));
+    for choice in TranslatorChoice::ALL {
+        let settings = Settings {
+            caption_translate_to: Some("pt-br"),
+            caption_translator: choice,
+            ..Settings::default()
+        };
+        let text = render(&settings);
+        assert!(text.contains("caption_translate_to = \"pt-br\""), "{text}");
+        let (read, problems) = parse(&text).expect("TOML");
+        assert_eq!(read, settings);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+    for (bad, key) in [
+        ("caption_translate_to = \"klingon\"", "caption_translate_to"),
+        ("caption_translate_to = 3", "caption_translate_to"),
+        ("caption_translator = \"luna\"", "caption_translator"),
+    ] {
+        let (read, problems) = parse(bad).expect("TOML");
+        assert_eq!(read, Settings::default(), "{bad}");
+        assert!(
+            matches!(&problems[..], [Problem::BadValue { key: found, .. }] if *found == key),
             "{bad}: {problems:?}"
         );
     }

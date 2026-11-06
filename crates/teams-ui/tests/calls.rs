@@ -40,6 +40,7 @@ use teams_ui::settings::{Settings, SettingsModel, attach_devices};
 use teams_ui::settings_view::{Page, TestCallOffer};
 use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::switcher::CallCommand;
+use teams_ui::translate::{Backend, Translators};
 use teams_ui::video::{Tile, VideoFeed};
 use teams_ui::{Calls, ViewTrace};
 
@@ -2673,6 +2674,109 @@ fn caption_shortcut_pane_hide_and_call_end_keep_speech_ephemeral() {
     );
 }
 
+/// A fake Claude Code answering each caption with its text after `AR `.
+const FAKE_CLAUDE: &str = r#"#!/bin/bash
+while IFS= read -r line; do
+  text=$(printf '%s' "$line" | sed -n 's/.*<caption[^>]*>\(.*\)<\/caption>.*/\1/p')
+  printf '{"type":"result","is_error":false,"result":"AR %s"}\n' "$text"
+done
+"#;
+
+/// The caption settings' "Translate to" open.
+fn translate_menu(window: &mut VisualTestContext) {
+    click(window, "call-caption-settings");
+    window.simulate_keystrokes("down down left");
+    draw(window);
+    if !drawn(window, "call-caption-translate-off") {
+        window.simulate_keystrokes("right");
+    }
+    assert!(drawn(window, "call-caption-translate-off"));
+}
+
+#[test]
+fn captions_translate_on_this_computer_and_say_why_when_they_cannot() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    rig.cx.update(|cx| cx.set_global(Translators::default()));
+    caption_state(&rig, teams_core::CaptionPhase::On, None);
+    rig.send(Event::CallCaptions {
+        call: call(1),
+        captions: teams_core::CallCaptions {
+            phase: teams_core::CaptionPhase::On,
+            spoken_language: "en-us".into(),
+            error: None,
+            lines: vec![teams_core::Caption {
+                id: "synthetic/1".into(),
+                speaker: Some(LAB_B.into()),
+                display_name: Some("Lab Speaker".into()),
+                text: "Private synthetic caption words.".into(),
+                final_result: true,
+                spoken_language: "en-us".into(),
+                track_language: "en-us".into(),
+                audio_timestamp: 123,
+                duration: 10,
+            }],
+        },
+    });
+    assert!(drawn(window, "call-caption-text"));
+    assert!(
+        !drawn(window, "call-caption-translated"),
+        "off until a language is picked"
+    );
+    // Arabic picked, no tool installed: the captions as spoken, and why
+    translate_menu(window);
+    click(window, "call-caption-translate-ar");
+    let settings = rig.cx.read(|cx| shell.read(cx).settings().clone());
+    assert_eq!(
+        rig.cx.read(|cx| settings.read(cx).settings().caption_translate_to),
+        Some("ar")
+    );
+    assert!(drawn(window, "call-caption-translate-failed"));
+    assert!(drawn(window, "call-caption-text"));
+    // the tool installed meanwhile: Try again translates
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("claude");
+    std::fs::write(&program, FAKE_CLAUDE).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    rig.cx
+        .update(|cx| cx.set_global(Translators::with(vec![(Backend::Claude, program)])));
+    click(window, "call-caption-translate-retry");
+    for _ in 0..500 {
+        if !drawn(window, "call-caption-translate-failed") && drawn(window, "call-caption-translated") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(drawn(window, "call-caption-translated"));
+    assert!(!drawn(window, "call-caption-translate-failed"));
+    // Off: no longer translated
+    translate_menu(window);
+    click(window, "call-caption-translate-off");
+    assert!(!drawn(window, "call-caption-translated"));
+    assert_eq!(
+        rig.cx.read(|cx| settings.read(cx).settings().caption_translate_to),
+        None
+    );
+    // translating is local: the meeting is never asked anything, and no caption reaches the trace
+    assert!(
+        !actions(&rig)
+            .iter()
+            .any(|action| matches!(action, CallAction::CaptionLanguage { .. }))
+    );
+    assert!(
+        !String::from_utf8(written.0.lock().unwrap().clone())
+            .unwrap()
+            .contains("Private synthetic caption words")
+    );
+}
+
 fn caption_stage() -> (Rig, Entity<CallWindows>, &'static mut VisualTestContext) {
     let rig = calling();
     let (trace, _) = trace();
@@ -2809,11 +2913,11 @@ fn caption_font_and_position_choices_are_local_and_preserve_the_ephemeral_lines(
     let before_actions = actions(&rig).len();
     let before = window.debug_bounds("call-captions").unwrap();
     click(window, "call-caption-settings");
-    window.simulate_keystrokes("down down left down down enter");
+    window.simulate_keystrokes("down down down left down down enter");
     draw(window);
     assert!(drawn(window, "call-caption-text"));
     click(window, "call-caption-settings");
-    window.simulate_keystrokes("down down down left down enter");
+    window.simulate_keystrokes("down down down down left down enter");
     draw(window);
     let after = window.debug_bounds("call-captions").unwrap();
     assert!(

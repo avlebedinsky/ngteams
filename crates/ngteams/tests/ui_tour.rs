@@ -118,7 +118,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 152] = [
+const STEPS: [Step; 5 + 154] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1087,11 +1087,44 @@ const STEPS: [Step; 5 + 152] = [
             stage.show_roster(false, cx);
         });
     }),
-    // the call window in Teams Dark
-    ("call-window-dark", |shell, _, cx| {
+    // live captions translated into German on this computer (a fake `claude` answering for Claude Haiku): each line
+    // its translation alone (the one still spoken too, once its text settled), the pane naming the tool
+    ("call-window-captions", |shell, _, cx| translated_captions(shell, cx)),
+    // in Teams Dark, the tool picked gone: the captions as spoken under a notice saying why, with Try again
+    ("call-window-captions-failed-dark", |shell, _, cx| {
+        cx.set_global(teams_ui::translate::Translators::default());
         let model = shell.read(cx).settings().clone();
         model.update(cx, |model, cx| {
-            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+            model.change(
+                |settings| {
+                    settings.appearance.theme = teams_ui::theme::DARK_KEY;
+                    settings.caption_translator =
+                        teams_ui::translate::TranslatorChoice::Only(teams_ui::translate::Backend::Codex);
+                },
+                cx,
+            );
+        });
+    }),
+    // the call window in Teams Dark (the captions hidden again, translating off)
+    ("call-window-dark", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models.apply(
+            teams_core::Event::CallCaptions {
+                call: teams_core::CallId::for_tests(FAKE_CALL),
+                captions: teams_core::CallCaptions::default(),
+            },
+            cx,
+        );
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(
+                |settings| {
+                    settings.appearance.theme = teams_ui::theme::DARK_KEY;
+                    settings.caption_translate_to = None;
+                    settings.caption_translator = teams_ui::translate::TranslatorChoice::Automatic;
+                },
+                cx,
+            );
         });
     }),
     // and its video effects' pane in Teams Dark
@@ -1127,6 +1160,81 @@ const STEPS: [Step; 5 + 152] = [
         );
     }),
 ];
+
+/// A fake Claude Code for the tour: it answers the made-up captions with their German, anything else unchanged.
+const FAKE_CLAUDE: &str = r#"#!/bin/bash
+while IFS= read -r line; do
+  case "$line" in
+    *"release plan"*) text="Guten Morgen zusammen. Gehen wir den Release-Plan durch.";;
+    *"still want to"*) text="Vorher möchte ich noch";;
+    *"passed overnight"*) text="Der Acme-Build ist über Nacht durchgelaufen, also können wir am Donnerstag ausliefern.";;
+    *) text=$(printf '%s' "$line" | sed -n 's/.*<caption[^>]*>\(.*\)<\/caption>.*/\1/p');;
+  esac
+  printf '{"type":"result","is_error":false,"result":"%s"}\n' "$text"
+done
+"#;
+
+/// The made-up call's captions shown and translated into German by [`FAKE_CLAUDE`]: two lines said, one still spoken.
+fn translated_captions(shell: &Entity<Shell>, cx: &mut App) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let program = std::env::temp_dir().join(format!("tour-claude-{}", std::process::id()));
+    let written = fs::write(&program, FAKE_CLAUDE)
+        .and_then(|()| fs::set_permissions(&program, fs::Permissions::from_mode(0o755)));
+    if let Err(error) = written {
+        eprintln!("tour translator: {error}");
+        cx.quit();
+        return;
+    }
+    cx.set_global(teams_ui::translate::Translators::with(vec![(
+        teams_ui::translate::Backend::Claude,
+        program,
+    )]));
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(|settings| settings.caption_translate_to = Some("de"), cx);
+    });
+    let line = |stamp: u64, who: (&str, &str), text: &str, final_result: bool| teams_core::Caption {
+        id: format!("made-up/{stamp}"),
+        speaker: Some(who.0.to_owned()),
+        display_name: Some(who.1.to_owned()),
+        text: text.to_owned(),
+        final_result,
+        spoken_language: "en-us".to_owned(),
+        track_language: "en-us".to_owned(),
+        audio_timestamp: stamp,
+        duration: 10,
+    };
+    let bee = (LAB_B, "Lab Bee");
+    let lines = vec![
+        line(
+            1,
+            bee,
+            "Good morning, everyone. Let's go through the release plan.",
+            true,
+        ),
+        line(
+            2,
+            bee,
+            "The Acme build passed overnight, so we can ship on Thursday.",
+            true,
+        ),
+        // still spoken: sent once its text settles
+        line(3, bee, "Before that I still want to", false),
+    ];
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::CallCaptions {
+            call: teams_core::CallId::for_tests(FAKE_CALL),
+            captions: teams_core::CallCaptions {
+                phase: teams_core::CaptionPhase::On,
+                spoken_language: "en-us".to_owned(),
+                error: None,
+                lines,
+            },
+        },
+        cx,
+    );
+}
 
 /// Who waits in the made-up call's lobby, told to a's models as the engine would tell it.
 fn lobby(shell: &Entity<Shell>, waiting: Vec<(&str, &str)>, cx: &mut App) {
