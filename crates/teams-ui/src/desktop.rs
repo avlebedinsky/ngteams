@@ -24,10 +24,10 @@
 //!
 //! - **Several accounts** ([`Desktop::add_account`], [`Desktop::remove_account`]): each account has its own notifier,
 //!   call alert and own presence, all live at once, so every account notifies and rings whichever one the window
-//!   shows; while there are several, each notification names its account (its summary followed by the account's
-//!   name). Activating one shows its account in the window first. The tray item's total sums every account's unread
-//!   count. The window holds a shell per account and shows the one the [`Accounts`] show; the rail's avatars switch
-//!   between them, and its "+" and an account's "Sign out and remove" are asked of the app
+//!   shows. A notification never names its account (the accounts may well share one name): activating one shows its
+//!   account in the window first, found by the notification's id, never its text. The tray item's total sums every
+//!   account's unread count. The window holds a shell per account and shows the one the [`Accounts`] show; the rail's
+//!   avatars switch between them, and its "+" and an account's "Sign out and remove" are asked of the app
 //!   ([`DesktopEvent::AddAccount`], [`DesktopEvent::RemoveAccount`]), which starts or stops the account's engine and
 //!   tells the desktop.
 //!
@@ -49,9 +49,7 @@ use crate::accounts::{AccountParts, Accounts, AccountsEvent};
 use crate::bus::{self, BusError};
 use crate::call_alert::{CallAlert, CallAlertEvent};
 use crate::call_window::{AccountNamer, CallWindows, CallWindowsEvent};
-use crate::notify::{
-    AccountLabel, BusNotifications, DEFAULT_ACTION, LabelledServer, NotificationServer, Notifier, NotifierEvent,
-};
+use crate::notify::{BusNotifications, DEFAULT_ACTION, NotificationServer, Notifier, NotifierEvent};
 use crate::own_presence::OwnPresence;
 use crate::ringtone::Ringer;
 use crate::settings_view::Page;
@@ -101,8 +99,6 @@ struct Slot {
     call_alert: Entity<CallAlert>,
     own_presence: Entity<OwnPresence>,
     tray: Entity<Tray>,
-    /// The account's name on its notifications while the app runs several.
-    label: AccountLabel,
     _subscriptions: [Subscription; 2],
 }
 
@@ -122,7 +118,7 @@ pub struct Desktop {
     server: Option<Arc<dyn NotificationServer>>,
     /// The call's own window.
     call_windows: Entity<CallWindows>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 3],
 }
 
 impl EventEmitter<DesktopEvent> for Desktop {}
@@ -179,8 +175,6 @@ impl Desktop {
             AccountsEvent::RemoveAsked(key) => cx.emit(DesktopEvent::RemoveAccount(key.clone())),
             AccountsEvent::Switched(_) => {}
         });
-        // an account's name read from its profile: its notifications name it so
-        let renamed = cx.observe(&accounts, |this: &mut Self, _, cx| this.relabel(cx));
         let desktop = cx.entity().downgrade();
         let closing = cx.on_window_closed(move |cx, id| {
             // a desktop that is gone has no window to watch
@@ -201,7 +195,7 @@ impl Desktop {
             bus: None,
             server: None,
             call_windows,
-            _subscriptions: [asking, renamed, closing, calling],
+            _subscriptions: [asking, closing, calling],
         };
         this.push(first, name, detail, cx);
         this
@@ -319,7 +313,6 @@ impl Desktop {
             call_alert,
             own_presence,
             tray,
-            label: AccountLabel::default(),
             _subscriptions: [opening, alerted],
         }
     }
@@ -364,7 +357,6 @@ impl Desktop {
             });
         }
         self.slots.push(slot);
-        self.relabel(cx);
     }
 
     /// Adds an account the app started (its engine's request side, models, name and what tells it apart), sharing the
@@ -422,17 +414,6 @@ impl Desktop {
                 root.update(cx, |root, cx| root.remove_shell(key, cx));
                 Some(())
             });
-        }
-        self.relabel(cx);
-    }
-
-    /// Names each account on its notifications while the app runs several, none while it runs one.
-    fn relabel(&self, cx: &App) {
-        let several = self.slots.len() > 1;
-        let accounts = self.accounts.read(cx);
-        for slot in &self.slots {
-            let name = accounts.tile(&slot.key).map(|tile| tile.name.to_string());
-            slot.label.set(name.filter(|_| several));
         }
     }
 
@@ -657,7 +638,7 @@ impl Desktop {
     }
 
     /// Hands a notification server (the bus's, once it is up; a test's fake) to every account's notifier and call
-    /// alert, and to the accounts added later, each through its account's label.
+    /// alert, and to the accounts added later.
     pub fn use_server(&mut self, server: Arc<dyn NotificationServer>, cx: &mut Context<Self>) {
         for slot in &self.slots {
             hand_server(slot, &server, cx);
@@ -682,12 +663,12 @@ impl Desktop {
     }
 }
 
-/// Hands `server` to `slot`'s notifier and call alert, through the account's label.
+/// Hands `server` to `slot`'s notifier and call alert.
 fn hand_server(slot: &Slot, server: &Arc<dyn NotificationServer>, cx: &mut App) {
-    let labelled: Arc<dyn NotificationServer> = Arc::new(LabelledServer::new(Arc::clone(server), slot.label.clone()));
     slot.notifier
-        .update(cx, |notifier, _| notifier.set_server(Arc::clone(&labelled)));
-    slot.call_alert.update(cx, |alert, cx| alert.set_server(labelled, cx));
+        .update(cx, |notifier, _| notifier.set_server(Arc::clone(server)));
+    slot.call_alert
+        .update(cx, |alert, cx| alert.set_server(Arc::clone(server), cx));
 }
 
 /// The notifications on `connection`: the server handed to every account's notifier and call alert, each activation

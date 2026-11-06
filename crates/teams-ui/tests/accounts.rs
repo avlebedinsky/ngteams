@@ -1,6 +1,6 @@
 //! Several accounts on one desktop, over two fake engines (`common`): the window keeps a shell per account and shows
-//! the one the rail's accounts show; every account notifies, its notifications naming it while there are several, and
-//! activating one shows its account first; the tray's total sums the accounts' unread counts; a call on one account
+//! the one the rail's accounts show; every account notifies, its notifications never naming it, and activating one
+//! shows its account first; the tray's total sums the accounts' unread counts; a call on one account
 //! keeps the others from entering one, and has the app's one call window while the window shows another account
 //! with that call's in-call strip above it (the app staying while the call window is open); an account removed takes its shell and its count with it. Every id and name is
 //! made up.
@@ -255,7 +255,7 @@ fn the_window_keeps_a_shell_per_account_and_shows_the_one_switched_to() {
 }
 
 #[test]
-fn every_account_notifies_naming_itself_and_opening_one_shows_its_account() {
+fn every_account_notifies_naming_no_account_and_opening_one_shows_its_account() {
     let d = TwoAccounts::start();
     let window = d.open();
     assert_eq!(d.shown(window).0, LAB_A);
@@ -264,7 +264,7 @@ fn every_account_notifies_naming_itself_and_opening_one_shows_its_account() {
     let [Asked::Show { notice, id, .. }] = asked.as_slice() else {
         panic!("not one notification shown: {asked:?}");
     };
-    assert_eq!(notice.summary, "Cee · Bee Work");
+    assert_eq!(notice.summary, "Cee");
     assert_eq!(notice.conversation, BC);
     let id = *id;
     let notifier = d
