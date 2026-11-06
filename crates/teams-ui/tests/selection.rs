@@ -1,7 +1,8 @@
 //! A message's text selected with the mouse and copied, as Teams allows: a drag across its runs and paragraphs (bold, a
 //! link and inline code among them) and on into the next message, a double-click on a word, a triple-click on a
-//! paragraph, a click on a link still opening it, and the selection copied as plain text. Drawn on GPUI's test
-//! context; every id and link is made up.
+//! paragraph, a click on a link still opening it, and the selection copied as plain text; a right-click on a link
+//! offering "Copy link" (its href, not the text shown) and "Open link". Drawn on GPUI's test context; every id and link
+//! is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -14,7 +15,7 @@ use gpui::{
 };
 use teams_proto::chat::parse_html;
 use teams_ui::rich_text::{self, Mentions, Rendered};
-use teams_ui::selection::{MessageKey, Scope, TextSelection};
+use teams_ui::selection::{MessageKey, Scope, TextSelection, close_link_menu, link_menu, open_link_menu};
 use teams_ui::theme::LIGHT_PALETTE;
 
 fn laid_out(content: &str) -> Arc<Rendered> {
@@ -177,4 +178,141 @@ fn a_click_on_a_link_still_opens_it_and_selects_nothing() {
     assert!(opened, "a click on the link opens it");
     assert_eq!(cx.opened_url().as_deref(), Some("https://example.test/opened"));
     assert!(selection.is_empty(), "a click selects nothing");
+}
+
+/// A right-click at each spot along `from`'s line, walking right, until one opens a link's menu; where it did.
+fn right_click_a_link(cx: &mut VisualTestContext, from: Point<Pixels>) -> Option<Point<Pixels>> {
+    (0..60u8).find_map(|step| {
+        let at = from + point(px(4.0 * f32::from(step)), px(0.0));
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        redraw(cx);
+        menu_open(cx).map(|_| at)
+    })
+}
+
+/// The link whose menu is open in the window.
+fn menu_open(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|window, cx| link_menu(window, cx))
+}
+
+#[test]
+fn a_right_click_on_a_link_offers_copy_link_which_copies_its_href() {
+    let (selection, _, cx) = drawn();
+    let first = paragraphs(cx)[0];
+    // a right-click on plain text with nothing selected opens no menu
+    cx.simulate_mouse_down(first, MouseButton::Right, Modifiers::none());
+    redraw(cx);
+    assert_eq!(menu_open(cx), None);
+    assert!(
+        right_click_a_link(cx, first).is_some(),
+        "a right-click on the link opens its menu"
+    );
+    assert_eq!(menu_open(cx).as_deref(), Some("https://example.test/opened"));
+    assert!(cx.debug_bounds("link-menu").is_some(), "the menu is drawn");
+    assert!(cx.debug_bounds("link-menu-open").is_some(), "it offers Open link");
+    let copy = cx.debug_bounds("link-menu-copy").expect("it offers Copy link");
+    cx.simulate_click(copy.center(), Modifiers::none());
+    // the link's href, not the text shown ("link")
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some("https://example.test/opened")
+    );
+    assert_eq!(menu_open(cx), None, "a choice closes the menu");
+    assert!(cx.opened_url().is_none(), "copying opens nothing");
+    assert!(selection.is_empty(), "a right-click selects nothing");
+}
+
+#[test]
+fn open_link_opens_it_and_a_press_outside_closes_the_menu() {
+    let (_, _, cx) = drawn();
+    let drawn = paragraphs(cx);
+    assert!(right_click_a_link(cx, drawn[0]).is_some());
+    cx.simulate_mouse_down(drawn[2], MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(drawn[2], MouseButton::Left, Modifiers::none());
+    redraw(cx);
+    assert_eq!(menu_open(cx), None, "a press outside closes it");
+    assert!(cx.opened_url().is_none());
+    assert!(right_click_a_link(cx, drawn[0]).is_some());
+    let open = cx.debug_bounds("link-menu-open").expect("it offers Open link");
+    cx.simulate_click(open.center(), Modifiers::none());
+    assert_eq!(cx.opened_url().as_deref(), Some("https://example.test/opened"));
+    assert_eq!(menu_open(cx), None);
+}
+
+#[test]
+fn a_right_click_on_a_link_over_a_selection_opens_the_link_s_menu_and_keeps_the_selection() {
+    let (selection, messages, cx) = drawn();
+    let drawn = paragraphs(cx);
+    let end = drawn[1] + point(px(500.0), px(0.0));
+    cx.simulate_mouse_down(drawn[0], MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    redraw(cx);
+    assert!(right_click_a_link(cx, drawn[0]).is_some());
+    assert!(selection.menu().is_none(), "the selection's own menu stays closed");
+    assert_eq!(
+        copied(&selection, &messages).as_deref(),
+        Some("plain bold link x = 1\nsecond line")
+    );
+    // a right-click on the selected text under the link opens the selection's menu and closes the link's
+    cx.simulate_mouse_down(drawn[1], MouseButton::Right, Modifiers::none());
+    redraw(cx);
+    assert!(selection.menu().is_some());
+    assert_eq!(menu_open(cx), None);
+}
+
+/// A card's text, drawn without a selection (as `card_view` draws it).
+struct Card {
+    rendered: Arc<Rendered>,
+}
+
+impl Render for Card {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(600.0)).child(rich_text::render(
+            &SharedString::from("card-text"),
+            &self.rendered,
+            LIGHT_PALETTE,
+        ))
+    }
+}
+
+#[test]
+fn a_link_in_text_that_isn_t_selectable_has_the_menu_too_and_a_mention_none() {
+    let rendered = laid_out(
+        "<p><span itemscope itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Lab B</span> \
+         <a href=\"mailto:lab@example.test\">write</a></p>",
+    );
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    let (_, cx) = app.add_window_view(move |_, _| Card { rendered });
+    redraw(cx);
+    let text = cx.debug_bounds("rich-link").expect("the text is drawn");
+    let start = text.origin + point(px(2.0), px(4.0));
+    // the mention comes first: a right-click on it opens nothing
+    cx.simulate_mouse_down(start, MouseButton::Right, Modifiers::none());
+    redraw(cx);
+    assert_eq!(menu_open(cx), None, "a mention isn't a link");
+    assert!(right_click_a_link(cx, start).is_some());
+    assert_eq!(menu_open(cx).as_deref(), Some("mailto:lab@example.test"));
+    let copy = cx.debug_bounds("link-menu-copy").expect("it offers Copy link");
+    cx.simulate_click(copy.center(), Modifiers::none());
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some("mailto:lab@example.test")
+    );
+}
+
+#[test]
+fn a_menu_opened_for_a_link_is_drawn_by_the_text_holding_it() {
+    let (_, _, cx) = drawn();
+    cx.update(|window, cx| open_link_menu("https://example.test/opened", window, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("link-menu-copy").is_some());
+    cx.update(|_, cx| close_link_menu(cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("link-menu-copy").is_none());
+    // a link no text holds draws nothing
+    cx.update(|window, cx| open_link_menu("https://example.test/elsewhere", window, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("link-menu").is_none());
 }

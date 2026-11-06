@@ -16,17 +16,21 @@
 //!   unit a line, a blank line between messages. So a selection reaching a message scrolled out of the list still
 //!   copies whole.
 //! - **The right-click menu** ([`menu`]): over a selection, "Copy" with its key, as Teams' own menu over selected text.
+//! - **A link's right-click menu** ([`open_link_menu`]): a right-click on a link opens, at the pointer, "Copy link"
+//!   (its `href` on the clipboard, not the text shown) and "Open link" (as a click opens it, only an `http`, `https` or
+//!   `mailto` one), whether or not the text is selectable (a card's text too). One is open at a time, app-wide; the
+//!   unit it was opened on draws it, over everything, and a press outside it or a choice closes it.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, GlobalElementId, HighlightStyle, Hitbox,
-    HitboxBehavior, Hsla, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledText, TextLayout, Window, anchored, deferred, div, point, px,
-    rgb,
+    AnyElement, App, AvailableSpace, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Div, Element, ElementId,
+    Global, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, InteractiveElement as _,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
+    Point, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, StyledText, TextLayout, Window,
+    WindowId, anchored, deferred, div, point, px, rgb,
 };
 use gpui_component::kbd::Kbd;
 
@@ -37,6 +41,12 @@ use crate::theme::Palette;
 
 /// The right-click menu's entry.
 pub const COPY: &str = "Copy";
+
+/// A link's right-click menu's entry that puts the link on the clipboard.
+pub const COPY_LINK: &str = "Copy link";
+
+/// A link's right-click menu's entry that opens the link.
+pub const OPEN_LINK: &str = "Open link";
 
 /// How strongly the brand colour tints selected text's background (readable on every theme's bubbles, a selected
 /// bubble's too).
@@ -510,15 +520,44 @@ impl SelectableText {
     }
 
     /// A press on it: a link's press is kept for its click; a selectable unit starts or extends the selection, or
-    /// opens the right-click menu over one.
-    fn on_press(&self, hitbox: &Hitbox, pressed: &Rc<Cell<Option<usize>>>, window: &mut Window) {
+    /// opens the right-click menu over one; a right-click on a link opens its menu (on this unit, `owner`).
+    fn on_press(
+        &self,
+        hitbox: &Hitbox,
+        pressed: &Rc<Cell<Option<usize>>>,
+        owner: Option<GlobalElementId>,
+        window: &mut Window,
+    ) {
         let layout = self.text.layout().clone();
         let content = self.content.clone();
+        let links = self.links.clone();
         let place = self.place.clone();
         let hitbox = hitbox.clone();
         let pressed = Rc::clone(pressed);
-        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, _| {
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || !hitbox.is_hovered(window) {
+                return;
+            }
+            let link = layout
+                .index_for_position(event.position)
+                .ok()
+                .and_then(|index| Self::link_at(&links, index));
+            if event.button == MouseButton::Right
+                && let Some(link) = link
+            {
+                if let Some(place) = &place {
+                    place.selection.close_menu();
+                }
+                set_link_menu(
+                    LinkMenu {
+                        window: window.window_handle().window_id(),
+                        owner: owner.clone(),
+                        at: Some(event.position),
+                        href: link.href.clone(),
+                    },
+                    cx,
+                );
+                window.refresh();
                 return;
             }
             match event.button {
@@ -598,6 +637,49 @@ impl SelectableText {
     }
 }
 
+impl SelectableText {
+    /// The link menu open on this unit (`id`) in this window, drawn over everything at the pointer it was opened at;
+    /// one opened for a link without a unit ([`open_link_menu`]) is taken by the first unit drawn that holds the link,
+    /// under the link's first letter.
+    fn link_menu(&self, id: Option<&GlobalElementId>, window: &mut Window, cx: &mut App) {
+        let Some(id) = id else { return };
+        let Some(mut open) = cx.try_global::<LinkMenus>().and_then(|menus| menus.0.clone()) else {
+            return;
+        };
+        if open.window != window.window_handle().window_id() {
+            return;
+        }
+        match &open.owner {
+            Some(owner) if owner == id => {}
+            None => {
+                let layout = self.text.layout();
+                let Some(under) = self
+                    .links
+                    .iter()
+                    .find(|link| link.href == open.href)
+                    .and_then(|link| layout.position_for_index(link.range.start))
+                else {
+                    return;
+                };
+                open.owner = Some(id.clone());
+                open.at = open.at.or(Some(under + point(px(0.0), layout.line_height())));
+                set_link_menu(open.clone(), cx);
+            }
+            Some(_) => return,
+        }
+        let Some(at) = open.at else { return };
+        let menu = link_menu_element(open.href, crate::theme::current(cx));
+        let mut menu = anchored()
+            .position(at)
+            .snap_to_window_with_margin(px(8.0))
+            .child(menu)
+            .into_any_element();
+        // laid out on its own (it is no child of the tree's layout), then drawn over everything once the tree is
+        menu.layout_as_root(AvailableSpace::min_size(), window, cx);
+        window.defer_draw(menu, window.element_offset(), MENU_PRIORITY, None);
+    }
+}
+
 impl IntoElement for SelectableText {
     type Element = Self;
 
@@ -630,7 +712,7 @@ impl Element for SelectableText {
 
     fn prepaint(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         state: &mut (),
@@ -638,6 +720,7 @@ impl Element for SelectableText {
         cx: &mut App,
     ) -> Hitbox {
         self.text.prepaint(None, inspector_id, bounds, state, window, cx);
+        self.link_menu(id, window, cx);
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
@@ -660,7 +743,7 @@ impl Element for SelectableText {
             None => Rc::default(),
         };
         self.cursor(hitbox, window);
-        self.on_press(hitbox, &pressed, window);
+        self.on_press(hitbox, &pressed, id.cloned(), window);
         self.on_drag(bounds, window);
         self.on_release(hitbox, &pressed, window);
         self.text
@@ -679,9 +762,51 @@ pub fn menu(
     let at = selection.menu()?;
     let closing = selection.clone();
     let copying = selection.clone();
-    let entry = div()
-        .id("selection-copy")
-        .debug_selector(|| "selection-copy".to_owned())
+    let entry = menu_entry("selection-copy", Glyph::COPY, COPY, palette)
+        .on_click(move |_, window, cx| {
+            copy(window, cx);
+            copying.close_menu();
+            window.refresh();
+        })
+        .children(key);
+    let menu = menu_surface("selection-menu", palette)
+        .on_mouse_down_out(move |_, window, _| {
+            closing.close_menu();
+            window.refresh();
+        })
+        .child(entry);
+    Some(
+        deferred(anchored().position(at).snap_to_window_with_margin(px(8.0)).child(menu))
+            .with_priority(MENU_PRIORITY)
+            .into_any_element(),
+    )
+}
+
+/// Where a right-click menu is drawn among the deferred elements: over the view's popups.
+const MENU_PRIORITY: usize = 2;
+
+/// A right-click menu's surface: raised, bordered, rounded, its entries in a column.
+fn menu_surface(id: &'static str, palette: Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .w(px(MENU_WIDTH))
+        .p_1()
+        .flex()
+        .flex_col()
+        .bg(rgb(palette.surface))
+        .border_1()
+        .border_color(rgb(palette.border))
+        .rounded_lg()
+        .shadow_lg()
+        .occlude()
+}
+
+/// A right-click menu's entry: its icon and its label, the hover's colour under it.
+fn menu_entry(id: &'static str, glyph: Glyph, label: &'static str, palette: Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
         .w_full()
         .h(px(32.0))
         .px_2()
@@ -693,37 +818,85 @@ pub fn menu(
         .text_sm()
         .text_color(rgb(palette.foreground))
         .hover(move |row| row.bg(rgb(palette.hover)))
-        .on_click(move |_, window, cx| {
-            copy(window, cx);
-            copying.close_menu();
+        .child(glyph.icon().size(px(14.0)))
+        .child(div().flex_1().child(label))
+}
+
+/// The open link menu, app-wide: one right-click menu is open at a time.
+#[derive(Default)]
+struct LinkMenus(Option<LinkMenu>);
+
+impl Global for LinkMenus {}
+
+/// A link menu: the window it is in, the unit it was opened on (none until one holding the link is drawn), where it
+/// is drawn (where the pointer was; none: under the link) and the link's `href`.
+#[derive(Clone, Debug)]
+struct LinkMenu {
+    window: WindowId,
+    owner: Option<GlobalElementId>,
+    at: Option<Point<Pixels>>,
+    href: String,
+}
+
+fn set_link_menu(menu: LinkMenu, cx: &mut App) {
+    cx.default_global::<LinkMenus>().0 = Some(menu);
+}
+
+/// Opens the right-click menu of the link to `href` in `window`, as a right-click on it would, under the link in the
+/// first text drawn that holds it.
+pub fn open_link_menu(href: &str, window: &mut Window, cx: &mut App) {
+    set_link_menu(
+        LinkMenu {
+            window: window.window_handle().window_id(),
+            owner: None,
+            at: None,
+            href: href.to_owned(),
+        },
+        cx,
+    );
+    window.refresh();
+}
+
+/// The `href` of the link whose right-click menu is open in `window`, while one is.
+#[must_use]
+pub fn link_menu(window: &Window, cx: &App) -> Option<String> {
+    cx.try_global::<LinkMenus>()
+        .and_then(|menus| menus.0.as_ref())
+        .filter(|menu| menu.window == window.window_handle().window_id())
+        .map(|menu| menu.href.clone())
+}
+
+/// Closes the link menu, wherever it is open.
+pub fn close_link_menu(cx: &mut App) {
+    if cx.try_global::<LinkMenus>().is_some_and(|menus| menus.0.is_some()) {
+        cx.global_mut::<LinkMenus>().0 = None;
+    }
+}
+
+/// A link's right-click menu: "Copy link" puts `href` on the clipboard, "Open link" opens it (only an `http`, `https`
+/// or `mailto` one, as a click does); either closes the menu, as a press outside it does.
+fn link_menu_element(href: String, palette: Palette) -> AnyElement {
+    let copied = href.clone();
+    let copy = menu_entry("link-menu-copy", Glyph::LINK, COPY_LINK, palette).on_click(move |_, window, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+        close_link_menu(cx);
+        window.refresh();
+    });
+    let open = rich_text::opens(&href).then(|| {
+        menu_entry("link-menu-open", Glyph::OPEN_OUT, OPEN_LINK, palette).on_click(move |_, window, cx| {
+            cx.open_url(&href);
+            close_link_menu(cx);
             window.refresh();
         })
-        .child(Glyph::COPY.icon().size(px(14.0)))
-        .child(div().flex_1().child(COPY))
-        .children(key);
-    let menu = div()
-        .id("selection-menu")
-        .debug_selector(|| "selection-menu".to_owned())
-        .w(px(MENU_WIDTH))
-        .p_1()
-        .flex()
-        .flex_col()
-        .bg(rgb(palette.surface))
-        .border_1()
-        .border_color(rgb(palette.border))
-        .rounded_lg()
-        .shadow_lg()
-        .occlude()
-        .on_mouse_down_out(move |_, window, _| {
-            closing.close_menu();
+    });
+    menu_surface("link-menu", palette)
+        .on_mouse_down_out(|_, window, cx| {
+            close_link_menu(cx);
             window.refresh();
         })
-        .child(entry);
-    Some(
-        deferred(anchored().position(at).snap_to_window_with_margin(px(8.0)).child(menu))
-            .with_priority(2)
-            .into_any_element(),
-    )
+        .child(copy)
+        .children(open)
+        .into_any_element()
 }
 
 #[cfg(test)]

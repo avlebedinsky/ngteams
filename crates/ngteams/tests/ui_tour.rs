@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 219] = [
+const STEPS: [Step; 5 + 221] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1300,7 +1300,24 @@ const STEPS: [Step; 5 + 219] = [
         event_form::close(cx);
         shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
     }),
-    ("chat-forward-dark", |shell, _, cx| {
+    // the right-click menu of the forwarded note's link, as a right-click on it opens it: Copy link and Open link; in
+    // Teams Light, then in Teams Dark
+    ("chat-link-menu", |shell, window, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+        teams_ui::selection::open_link_menu(FORWARDED_LINK, window, cx);
+    }),
+    ("chat-link-menu-dark", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+    }),
+    ("chat-forward-dark", |shell, window, cx| {
+        teams_ui::selection::close_link_menu(cx);
+        window.refresh();
         let model = shell.read(cx).settings().clone();
         model.update(cx, |model, cx| {
             model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
@@ -3387,6 +3404,9 @@ fn made_up_frame(dark: [u8; 3], light: [u8; 3]) -> image::RgbaImage {
 /// The made-up picture b sent and the outsider forwarded, its object on AMS.
 const FORWARDED_OBJECT: &str = "0-eus-d9-0000000000000000000000000000f0d0";
 
+/// The made-up link in the note b sent and the outsider forwarded.
+const FORWARDED_LINK: &str = "https://example.com/made-up-assets";
+
 /// Two of b's messages in the a–b–c chat, forwarded to a by the outsider in their 1:1 chat as Teams forwards them
 /// (`docs/protocol/chat.md`, "Forwarded messages"): a note with a link, and a picture (a made-up phone screenshot,
 /// served by the mock as AMS would) over a line.
@@ -3394,7 +3414,7 @@ fn seed_forwards(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> S
     let mut png = Vec::new();
     made_up_phone().write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
     runtime.block_on(mock.serve_bytes(&format!("/v1/objects/{FORWARDED_OBJECT}/views/imgo"), "image/png", png));
-    let link = "https://example.com/made-up-assets";
+    let link = FORWARDED_LINK;
     let note = format!(
         "<blockquote itemtype=\"http://schema.skype.com/Forward\">\r\n<p>Hey, here is the made-up link. It was mentioned \
          in the made-up review, as a stand-in for a forwarded note that runs over a line</p>\r\n<p><a href=\

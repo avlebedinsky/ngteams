@@ -28,7 +28,8 @@
 //!   [`render_with_header`]) above the content; pictures and emoticons through `crate::inline`, their bytes asked of
 //!   the engine of the [`PictureSource`] the view gave ([`Rendered::with_source`]); a link opens through GPUI's
 //!   `open_url` (the portal or `xdg-open`; in tests the test platform's record or the UI sandbox's no-op opener), and
-//!   only an `http`, `https` or `mailto` one (the model keeps no other, and the renderer checks again).
+//!   only an `http`, `https` or `mailto` one (the model keeps no other, and the renderer checks again); a right-click
+//!   on one opens its menu, "Copy link" and "Open link" (`crate::selection`'s link menu).
 
 use std::cell::Cell;
 use std::collections::HashSet;
