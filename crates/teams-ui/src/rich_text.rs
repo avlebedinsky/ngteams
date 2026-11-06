@@ -40,7 +40,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StrikethroughStyle, Styled as _, UnderlineStyle, Window, div, px, rgb,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, UnderlineStyle, Window,
+    div, px, rgb,
 };
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
@@ -253,6 +254,32 @@ pub struct QuoteBlock {
     /// When the quoted message was sent, ms since the epoch (a reply's, as the quote carries it).
     pub time: Option<i64>,
     pub blocks: Vec<Block>,
+}
+
+/// What a click on a reply's quote calls with the quoted message's id and the time the quote carries: the view the
+/// reply is in going to the quoted message (`crate::chat_view`).
+#[derive(Clone)]
+pub struct OpenQuoted(Rc<OpenQuotedFn>);
+
+/// What [`OpenQuoted`] calls.
+type OpenQuotedFn = dyn Fn(&str, Option<i64>, &mut Window, &mut App);
+
+impl OpenQuoted {
+    #[must_use]
+    pub fn new(open: impl Fn(&str, Option<i64>, &mut Window, &mut App) + 'static) -> Self {
+        Self(Rc::new(open))
+    }
+
+    /// Goes to the quoted message `id` (sent at `time`, as the quote carries it).
+    pub fn open(&self, id: &str, time: Option<i64>, window: &mut Window, cx: &mut App) {
+        (self.0)(id, time, window, cx);
+    }
+}
+
+impl std::fmt::Debug for OpenQuoted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpenQuoted")
+    }
 }
 
 /// A picture pasted into a message, or a GIF it shows: the view or GIF its `src` names, its `alt`, the size the message
@@ -1185,7 +1212,8 @@ const QUOTE_EDGE: f32 = 3.0;
 
 /// A quote as Teams draws a reply's: a card set off from its bubble (a shade darker, a hairline border, a thicker left
 /// edge, here in the brand gradient), the quoted message's sender and time over its text. A reply's text is held to
-/// two lines a paragraph; a plain quote's is drawn in full.
+/// two lines a paragraph; a plain quote's is drawn in full. A reply's quote goes to the quoted message on a click
+/// when its scope goes there ([`Scope::quoted`]): [`quote_link`].
 fn quote_block(draw: &Draw<'_>, path: &mut Vec<usize>, quote: &QuoteBlock) -> AnyElement {
     let palette = draw.palette;
     let header = (quote.sender_name.is_some() || quote.time.is_some()).then(|| {
@@ -1203,7 +1231,8 @@ fn quote_block(draw: &Draw<'_>, path: &mut Vec<usize>, quote: &QuoteBlock) -> An
             }))
             .children(quote.time.map(QuoteTime))
     });
-    div()
+    let edge_selector = format!("{}-quote-{path:?}", draw.id);
+    let card = div()
         .debug_selector(|| "rich-quote".to_owned())
         .relative()
         .my_1()
@@ -1226,7 +1255,9 @@ fn quote_block(draw: &Draw<'_>, path: &mut Vec<usize>, quote: &QuoteBlock) -> An
                 .bottom_0()
                 .left_0()
                 .w(px(QUOTE_EDGE))
-                .bg(crate::theme::brand_gradient(palette, 180.0)),
+                .bg(crate::theme::brand_gradient(palette, 180.0))
+                // a test finds the quote by its edge (the quote's own selector is every quote's)
+                .debug_selector(move || edge_selector),
         )
         .children(header)
         // a reply's preview is held to two lines a paragraph, as Teams holds it; a plain quote (the Quote format) is drawn
@@ -1235,7 +1266,30 @@ fn quote_block(draw: &Draw<'_>, path: &mut Vec<usize>, quote: &QuoteBlock) -> An
             div()
                 .when(quote.message_id.is_some(), |body| body.line_clamp(2).text_ellipsis())
                 .children(blocks(draw, path, &quote.blocks)),
-        )
+        );
+    quote_link(draw, path, quote, card)
+}
+
+/// A reply's quote that goes to the quoted message on a click, as Teams' does, when the scope goes there: a pointing
+/// hand over it (Teams draws no other hover). A click that ends a drag which selected text selects, and goes nowhere.
+fn quote_link(draw: &Draw<'_>, path: &[usize], quote: &QuoteBlock, card: gpui::Div) -> AnyElement {
+    let (Some(id), Some(scope)) = (quote.message_id.clone(), draw.scope) else {
+        return card.into_any_element();
+    };
+    let Some(open) = scope.quoted.clone() else {
+        return card.into_any_element();
+    };
+    let selection = scope.selection.clone();
+    let time = quote.time;
+    card.id(SharedString::from(format!("{}-quote-link-{path:?}", draw.id)))
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            if !selection.is_empty() {
+                return;
+            }
+            cx.stop_propagation();
+            open.open(&id, time, window, cx);
+        })
         .into_any_element()
 }
 

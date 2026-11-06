@@ -419,13 +419,15 @@ impl Place {
     }
 }
 
-/// A message's units' selection: the view's selection and the message's key, for `rich_text` to place each unit; and
-/// what a click on one of the message's pictures opens (the picture viewer), when the view opens them.
+/// A message's units' selection: the view's selection and the message's key, for `rich_text` to place each unit;
+/// what a click on one of the message's pictures opens (the picture viewer), when the view opens them; and where a
+/// click on a reply's quote goes (the quoted message, in the view), when the view goes there.
 #[derive(Clone, Debug)]
 pub struct Scope {
     pub selection: TextSelection,
     pub message: MessageKey,
     pub open: Option<OpenPicture>,
+    pub quoted: Option<rich_text::OpenQuoted>,
 }
 
 impl Scope {
@@ -435,6 +437,7 @@ impl Scope {
             selection: selection.clone(),
             message,
             open: None,
+            quoted: None,
         }
     }
 
@@ -442,6 +445,13 @@ impl Scope {
     #[must_use]
     pub fn opening(mut self, open: OpenPicture) -> Self {
         self.open = Some(open);
+        self
+    }
+
+    /// It, a click on one of the message's reply quotes calling `quoted` with the quoted message.
+    #[must_use]
+    pub fn quoting(mut self, quoted: rich_text::OpenQuoted) -> Self {
+        self.quoted = Some(quoted);
         self
     }
 

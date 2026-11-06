@@ -33,6 +33,9 @@ mod meeting;
 // names and pictures in the chat list and the chat view (M2 Task 12)
 #[path = "chat_view/people.rs"]
 mod people;
+// a click on a reply's quote goes to the message it quotes
+#[path = "chat_view/quote_jump.rs"]
+mod quote_jump;
 // a message's picture opened in the picture viewer's window
 #[path = "chat_view/viewer.rs"]
 mod viewer;

@@ -165,7 +165,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 229] = [
+const STEPS: [Step; 5 + 231] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -884,6 +884,8 @@ const STEPS: [Step; 5 + 229] = [
         clear_compose(shell, window, cx);
         show_chats_section(shell, cx);
     }),
+    // a click on the reply's quote: the chat at the quoted message, ringed for a moment
+    ("chat-quote-jump-dark", |shell, _, cx| go_to_quote(shell, cx)),
     // the account menu over it, in Teams Dark
     ("account-menu-dark", |shell, _, cx| {
         shell.update(cx, Shell::toggle_status_menu)
@@ -929,6 +931,8 @@ const STEPS: [Step; 5 + 229] = [
             shell.open_chat(AB_CHAT.to_owned(), window, cx);
         });
     }),
+    // a click on the reply's quote in Teams Light: the chat at the quoted message, ringed for a moment
+    ("chat-quote-jump", |shell, _, cx| go_to_quote(shell, cx)),
     // the files' cards again, in Teams Light
     ("chat-files", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
@@ -2612,6 +2616,23 @@ fn last_message(shell: &Entity<Shell>, cx: &App) -> Option<(Entity<teams_ui::cha
         _ => None,
     })?;
     Some((chat, message))
+}
+
+/// Goes to the message the chat's first reply quotes, as a click on its quote does.
+fn go_to_quote(shell: &Entity<Shell>, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let quoted = chat.read(cx).message_items().find_map(|message| match &message.body {
+        teams_ui::chat_view::Body::Text(text) => text.0.blocks.iter().find_map(|block| match block {
+            teams_ui::rich_text::Block::Quote(quote) => quote.message_id.clone().map(|id| (id, quote.time)),
+            _ => None,
+        }),
+        _ => None,
+    });
+    if let Some((id, time)) = quoted {
+        chat.update(cx, |chat, cx| chat.go_to_quoted(id, time, cx));
+    }
 }
 
 /// Selects text from the fourth character of the chat's second-to-last text message to the eighth of its last, as a

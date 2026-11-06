@@ -74,6 +74,10 @@
 //!   (the service's search finds what was never synced) is read for through the service's older pages, up to
 //!   [`MAX_SEEK`] of them. Until the message is shown no read
 //!   receipt goes, and one already waiting is dropped.
+//! - **A reply's quote** goes to the message it quotes on a click ([`ChatView::go_to_quoted`]), as Teams' does: read
+//!   back to as a message opened at is (its time asked of the store, else the quote's), scrolled to the middle of the
+//!   view and ringed in Teams' orange for a moment ([`FLASH`]), never selected; a deleted one's placeholder likewise;
+//!   one found nowhere leaves the view where it is.
 //!
 //! - **A team's channel** ([`Place::Channel`], [`ChatView::in_place`]) is drawn as Teams' channel: its posts as a
 //!   chat's messages, each post's replies summed up under it ([`Replies`]), its compose box "Message in <channel>"
@@ -85,8 +89,8 @@
 //!   (meeting cards, a channel meeting's call, the channel's own events) is [`channel`]'s.
 //!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds;
-//! `chat-view revealed`: the message opened at; `typing shown`/`cleared`; `outbox shown`: the rows shown and their
-//! states), never text or a name.
+//! `chat-view revealed`: the message opened at; `quoted shown`: the message a quote went to; `typing shown`/`cleared`;
+//! `outbox shown`: the rows shown and their states), never text or a name.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -229,6 +233,9 @@ pub const MAX_FRUITLESS: u32 = 3;
 /// How many older pages the view reads at most for a message it opens at that the store didn't hold
 /// ([`ChatView::reveal`]).
 pub const MAX_SEEK: u32 = 20;
+/// How long the message a reply's quote was clicked to stays ringed, as Teams' 4 s animation (the ring fades out over
+/// its first three quarters).
+pub const FLASH: Duration = Duration::from_secs(4);
 /// How many quick reactions the hover bar shows, as Teams' does; keys 1–4 pick them once react is chosen, and key 5
 /// opens every other.
 pub const QUICK_COUNT: usize = 4;
@@ -1051,8 +1058,25 @@ pub struct ChatView {
     /// A message to open at that the store didn't hold (a search finds what was never synced), with the older pages
     /// read for it so far: shown once an older page brings it, given up after [`MAX_SEEK`] pages or at the beginning.
     seeking: Option<((i64, String), u32)>,
+    /// Where a click on a reply's quote is going ([`ChatView::go_to_quoted`]).
+    quote: QuoteJump,
     /// The models' changes, the compose box's events, the window's activation and the presence model's changes.
     _subscriptions: [Subscription; 4],
+}
+
+/// A click on a reply's quote on its way to the quoted message, and the message it went to.
+#[derive(Default)]
+struct QuoteJump {
+    /// The quoted message it is going to, until it is shown or found nowhere, and the store's look for it while that
+    /// runs.
+    going_to: Option<(String, Option<Task<()>>)>,
+    /// The message it went to, ringed for a moment ([`FLASH`]), and the wait that ends it.
+    flashed: Option<(String, Task<()>)>,
+    /// Quote clicks shown so far: each ring's animation is its own, so a second click on a quote plays it again.
+    flashes: u64,
+    /// The row it scrolled to the top, to be centred once the list has laid it out there, and whether a frame has laid
+    /// it out yet ([`ChatView::centre`]).
+    centring: Option<(usize, bool)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1196,6 +1220,7 @@ impl ChatView {
             reveal: None,
             revealing: None,
             seeking: None,
+            quote: QuoteJump::default(),
             _subscriptions: subscriptions,
         };
         view.start(cx);
@@ -1503,6 +1528,14 @@ impl ChatView {
         })
     }
 
+    /// What a click on a reply's quote calls: the view going to the quoted message ([`Self::go_to_quoted`]).
+    fn quote_opener(cx: &Context<Self>) -> rich_text::OpenQuoted {
+        let view = cx.entity().downgrade();
+        rich_text::OpenQuoted::new(move |id, time, _, cx| {
+            let _ = view.update(cx, |this, cx| this.go_to_quoted(id.to_owned(), time, cx));
+        })
+    }
+
     /// The pictures of the messages the view holds, in its order (`crate::picture_viewer`'s Previous and Next), and
     /// where they are asked for.
     fn pictures(&self) -> (Vec<Viewed>, Option<rich_text::PictureSource>) {
@@ -1705,9 +1738,15 @@ impl ChatView {
             if older && more && pages < MAX_SEEK {
                 self.seeking = Some((target, pages + 1));
                 self.load_older(cx);
+            } else if self.going_to(&message) {
+                self.quote_missing();
             }
             return;
         };
+        if self.going_to(&message) {
+            self.flash(index, message, cx);
+            return;
+        }
         self.select(Some(message.clone()), cx);
         self.list.pause_following_tail();
         self.list.scroll_to_reveal_item(index);
@@ -1717,6 +1756,120 @@ impl ChatView {
                 .messages([message.as_str()]),
         );
         cx.notify();
+    }
+
+    /// Goes to the message a reply quotes, as a click on its quote does in Teams: when the view holds it (a deleted
+    /// one too, as its placeholder), it is scrolled to the middle of the view and ringed for a moment ([`FLASH`]); else
+    /// its arrival time is asked of the store (else taken from the quote: a chat message's id is its arrival time) and
+    /// the view reads back to it as it does for a message it opens at ([`ChatView::reveal`]: the store's pages, then
+    /// the service's older ones, [`MAX_SEEK`] at most), then shows it so. One found nowhere (gone from the chat, or
+    /// older than the pages read) leaves the view where it is, as Teams does.
+    pub fn go_to_quoted(&mut self, id: String, time: Option<i64>, cx: &mut Context<Self>) {
+        if let Some(index) = self.index_of(&id) {
+            self.flash(index, id, cx);
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        let conversation = self.conversation.clone();
+        let wanted = id.clone();
+        let look = cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let stored = core.message(conversation, wanted.clone()).await.ok().flatten();
+            let _ = this.update(cx, |view, cx| {
+                let Some((going, look)) = view.quote.going_to.as_mut() else {
+                    return;
+                };
+                if *going != wanted {
+                    return;
+                }
+                *look = None;
+                let at = stored
+                    .map(|message| message.arrival_time)
+                    .or(time)
+                    .or_else(|| wanted.parse().ok());
+                match at {
+                    Some(at) => view.reveal(at, wanted, cx),
+                    None => view.quote_missing(),
+                }
+            });
+        });
+        self.quote.going_to = Some((id, Some(look)));
+    }
+
+    /// Whether a quote's click is going to `message`.
+    fn going_to(&self, message: &str) -> bool {
+        self.quote.going_to.as_ref().is_some_and(|(id, _)| id == message)
+    }
+
+    /// The row of message `id`, when the view holds it.
+    fn index_of(&self, id: &str) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|item| matches!(item, Item::Message(item) if item.id == id))
+    }
+
+    /// Shows the message at row `index` a quote's click went to: scrolled to the middle of the view as Teams scrolls it
+    /// (put at the top first, then centred once laid out there: [`Self::centre`]; the list stops following the newest)
+    /// and ringed for [`FLASH`].
+    fn flash(&mut self, index: usize, id: String, cx: &mut Context<Self>) {
+        self.quote.going_to = None;
+        self.quote.flashes += 1;
+        self.list.scroll_to(ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.0),
+        });
+        self.quote.centring = Some((index, false));
+        self.trace.record(
+            &TraceLine::new(self.trace_view(), "quoted shown")
+                .conversation(&self.conversation)
+                .messages([id.as_str()]),
+        );
+        let wait = cx.spawn(async move |this, cx: &mut AsyncApp| {
+            cx.background_executor().timer(FLASH).await;
+            let _ = this.update(cx, |view, cx| {
+                view.quote.flashed = None;
+                cx.notify();
+            });
+        });
+        self.quote.flashed = Some((id, wait));
+        cx.notify();
+    }
+
+    /// A quote's click found its message nowhere: the view stays where it is, as Teams' does.
+    fn quote_missing(&mut self) {
+        if let Some((id, _)) = self.quote.going_to.take() {
+            self.trace.record(
+                &TraceLine::new(self.trace_view(), "quoted missing")
+                    .conversation(&self.conversation)
+                    .messages([id.as_str()]),
+            );
+        }
+    }
+
+    /// Once a frame has laid out the row a quote's click put at the top, scrolls it to the middle of the view (as far
+    /// as the list goes: the newest stay at the bottom); until then asks for that frame.
+    fn centre(&mut self, cx: &mut Context<Self>) {
+        match self.quote.centring {
+            Some((index, true)) => {
+                self.quote.centring = None;
+                let Some(row) = self.list.bounds_for_item(index) else {
+                    return;
+                };
+                let view = self.list.viewport_bounds();
+                let wanted = view.top() + ((view.size.height - row.size.height) / 2.0).max(px(0.0));
+                self.list.scroll_by(row.top() - wanted);
+            }
+            Some((index, false)) => {
+                self.quote.centring = Some((index, true));
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+
+    /// The message ringed for a moment after a quote's click went to it.
+    #[must_use]
+    pub fn flashed(&self) -> Option<&str> {
+        self.quote.flashed.as_ref().map(|(id, _)| id.as_str())
     }
 
     /// Scrolls to the newest message and follows the tail again.
@@ -3023,6 +3176,7 @@ impl ChatView {
             && self.reveal.is_none()
             && self.revealing.is_none()
             && self.seeking.is_none()
+            && self.quote.going_to.is_none()
             && self.list.is_following_tail()
             && self.conversation != NOTES
             // a channel's horizon isn't moved from here: no capture showed a channel's receipt
@@ -3208,6 +3362,34 @@ impl ChatView {
         row.into_any_element()
     }
 
+    /// The ring Teams draws inside the bubble of the message a reply's quote was clicked to: a hairline in its orange
+    /// (the theme's mention colour) that fades out over the first three quarters of [`FLASH`].
+    fn flash_ring(&self, item: &MessageItem, palette: Palette, cx: &App) -> Option<AnyElement> {
+        if self.flashed() != Some(item.id.as_str()) {
+            return None;
+        }
+        let id = item.id.clone();
+        let ring = div()
+            .debug_selector(move || format!("quoted-flash-{id}"))
+            .absolute()
+            .inset_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.mention));
+        if !crate::motion::on(cx) {
+            return Some(ring.into_any_element());
+        }
+        Some(
+            gpui::AnimationExt::with_animation(
+                ring,
+                SharedString::from(format!("quoted-flash-{}-{}", item.id, self.quote.flashes)),
+                gpui::Animation::new(FLASH),
+                |ring, t| ring.opacity((1.0 - t * 4.0 / 3.0).max(0.0)),
+            )
+            .into_any_element(),
+        )
+    }
+
     /// The column left of someone else's messages: their avatar beside the first of a group, level with its bubble's
     /// top, with their presence's badge when the models know it (the view asks the engine about its senders after
     /// each load, [`Self::watch_senders`], and draws what the model holds).
@@ -3282,6 +3464,8 @@ impl ChatView {
                     conversation: &self.conversation,
                     selection: &self.text_selection,
                     open: Some(Self::picture_opener(&item.id, cx)),
+                    quoted: Some(Self::quote_opener(cx)),
+                    ring: self.flash_ring(item, palette, cx),
                     cards: matches!(item.body, Body::Cards(_)).then(|| self.card_hook(&item.id, cx)),
                     root: self.place.in_channel().then(|| self.root_of(&item.id)),
                     meeting: Self::meeting_view(item, palette, cx),
@@ -4491,6 +4675,10 @@ struct InChat<'a> {
     conversation: &'a str,
     selection: &'a TextSelection,
     open: Option<OpenPicture>,
+    /// What a click on one of its reply quotes calls: the view going to the quoted message.
+    quoted: Option<rich_text::OpenQuoted>,
+    /// The ring over the bubble while a quote's click has just gone to it ([`ChatView::flash_ring`]).
+    ring: Option<AnyElement>,
     /// A card message's: what its cards show and who is told when a click changes it.
     cards: Option<CardHook>,
     /// A channel's message's thread's post (its own id for a post): what a card's button opens in Teams on the web.
@@ -4539,6 +4727,9 @@ fn bubble(
             let mut scope = Scope::new(chat.selection, message_key(item));
             if let Some(open) = chat.open.clone() {
                 scope = scope.opening(open);
+            }
+            if let Some(quoted) = chat.quoted.clone() {
+                scope = scope.quoting(quoted);
             }
             rich_text::render_selectable(&id, &text.0, palette, forward, Some(&scope))
         }
@@ -4606,6 +4797,7 @@ fn bubble(
                 ))
                 .into_any_element()
         }))
+        .children(chat.ring.take())
         // last, so it is drawn over the bubble
         .children(bar)
         .into_any_element()
@@ -4858,6 +5050,7 @@ impl Render for ChatView {
         )
         .size_full()
         .pb_3();
+        self.centre(cx);
         let pill = self.jump_pill(cx);
         let typing = self.typing_line(palette, cx);
         let messages = hover_bar_keys(div(), cx)
