@@ -528,7 +528,8 @@ impl CallStage {
                             .on_click(move |_, _, cx| emit(&settings, CallStageEvent::DeviceSettings, cx)),
                     );
                     let menu = captions::more(menu, stage.clone(), caption_visible, caption_available, window, cx);
-                    meeting::settings_submenu(menu, &stage, tools, window, cx).min_w(px(240.0))
+                    let menu = meeting::settings_submenu(menu, &stage, tools, window, cx);
+                    meeting::help_item(menu, tools).min_w(px(240.0))
                 }),
         )
         .into_any_element()

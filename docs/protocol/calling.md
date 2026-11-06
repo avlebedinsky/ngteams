@@ -762,7 +762,13 @@ a alone). What each of Teams' remaining call controls sends:
   target with `callInvitation.transferor` as delivered (the authorization goes back to the call controller only; the
   logger redacts it) once the old call's media is closed (`Event::CallTransferred`, then the new call told as any
   start). The voicemail choice and the call topic weren't captured and aren't offered; a consultative transfer
-  delivered (`isConsultative: true`) isn't taken.
+  delivered (`isConsultative: true`) isn't taken. Run natively 2026-11-06 (lab a, b, c, all native): a's Transfer
+  held the call, b took it and called c, a left. c's client first ignored the transferred call: its invitation names
+  `customContext` twice (the call controller's own context), and the tracker refuses a notification that names a key
+  twice. That one key now takes its last value, as the web client's `JSON.parse` takes it; c then rang, answered,
+  and b and c talked. The same run checked the 1:1 Share (b showed a's screen beside the people; Stop sharing ended
+  it), Add participants (c rang in a new group chat of the three and joined: a group call of three) and Consult's
+  dialog (held; Open chat now opens the person's chat named even when the chat list doesn't show it).
 - **Consult** (1:1 calls) holds the call and asks "Consult then transfer the call" (the person; Cancel, Start a call,
   Open chat). Start a call places an ordinary call to them in their 1:1 chat while the first call stays held in a
   floating card (its name, "Hold" and how long, Resume, Leave); the consult call's toolbar leads with an outlined
@@ -923,9 +929,20 @@ recording bot's entry into `teams_call::MeetingState` (the bot is left out of th
 shows the timer's bar and editor, the lock's question and notices, Meeting info and the recording's notice and red
 dot, and starts and stops a recording (Record, above). People's Download attendance list is made locally from the
 roster's `endpointJoinTime`s. Not built: Notes (a Loop page), Controls' Enable lobby and Allow all
-participants to (their requests weren't captured), Help and Report a concern (no captured target), Accessibility
-settings and Don't show chat bubbles (the app has neither), Apps (its loaded pane wasn't captured), and the Dial pad
-(the user doesn't want one).
+participants to (their requests weren't captured), Report a concern (a meeting's only; its target wasn't captured),
+Accessibility settings and Don't show chat bubbles (the app has neither), Apps, and the Dial pad (the user doesn't
+want one).
+
+**Help** (More's last entry in a group call or a meeting, after a separator; a 1:1 call's More has none) opens
+`https://go.microsoft.com/fwlink/?linkid=2163160` in a new browser tab (it lands on Microsoft's Teams support
+article); nothing goes to the call. The native client opens the same link in the browser. **Apps** (captured
+2026-11-06 in the a–b–c group call): the pane reads the chat's `…/api/mt/part/<region>/beta/chats/<chat>/apps/
+definitionsv2` and `…/apps/chatentitlements`, shows "Search for apps", "Add some apps for this meeting." when the chat
+has none, and "Add a new app" with the store's apps (each Add, Privacy, Terms of use, Permissions), Get more apps at
+its foot. It isn't built natively: an added app runs as its vendor's web page inside Teams with the user's
+single-sign-on token, which this client neither hosts (no web view in the call window) nor may hand to an app's
+backend (AGENTS.md). **Notes** (meetings) is a Loop page in the organizer's OneDrive, edited live as a Fluid
+component; the client has no Loop or Fluid runtime, so it isn't built either.
 
 **Call health** (More → Settings → Call health, in 1:1 and group calls) is the client's own: its pane shows the
 call's network, audio, video and screen sharing as the call's libwebrtc peer measures them (its statistics, the same

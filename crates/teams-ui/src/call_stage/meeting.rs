@@ -848,6 +848,21 @@ pub(super) fn more_items(menu: PopupMenu, stage: &WeakEntity<CallStage>, tools: 
     }
 }
 
+/// What More's Help opens in a group call or a meeting, as Teams' does (seen 2026-11-06): Microsoft's help for Teams
+/// calls and meetings, in the browser.
+pub(super) const HELP_URL: &str = "https://go.microsoft.com/fwlink/?linkid=2163160";
+
+/// More's last entry in a group call or a meeting, after a separator: Help ([`HELP_URL`]). A 1:1 call's More has none.
+pub(super) fn help_item(menu: PopupMenu, tools: MoreTools) -> PopupMenu {
+    if !tools.timer {
+        return menu;
+    }
+    menu.separator().item(
+        toolbar::menu_item("call-more-help", Some(Glyph::CIRCLE_QUESTION), "Help")
+            .on_click(|_, _, cx| cx.open_url(HELP_URL)),
+    )
+}
+
 /// More's Settings, where it has an entry: Call health once the call is up, Mute notifications (or Unmute) in a group
 /// call or a meeting.
 pub(super) fn settings_submenu(
@@ -861,36 +876,32 @@ pub(super) fn settings_submenu(
         return menu;
     }
     let stage = stage.clone();
-    menu.submenu_with_icon(
-        Some(Glyph::SETTINGS.icon()),
-        "Settings",
-        window,
-        cx,
-        move |menu, _, _| {
-            let menu = if tools.call_health {
-                menu.item(super::health::menu_item(stage.clone()))
-            } else {
-                menu
-            };
-            if !tools.mute_notifications {
-                return menu.min_w(px(220.0));
-            }
-            let stage = stage.clone();
-            let muted = tools.notifications_muted;
-            let (glyph, label) = if muted {
-                (Glyph::BELL, "Unmute notifications")
-            } else {
-                (Glyph::BELL_OFF, "Mute notifications")
-            };
-            menu.min_w(px(220.0)).item(
-                toolbar::menu_item("call-more-mute-notifications", Some(glyph), label).on_click(move |_, _, cx| {
-                    // held back while the call runs: the stage takes it back when the call ends
-                    crate::notify::mute_in_call(!muted, cx);
-                    let _ = stage.update(cx, |_, cx| cx.notify());
-                }),
-            )
-        },
-    )
+    // no icon, as Record and transcribe and Language and speech: the kit draws a submenu's in the gutter, out of line
+    // with the items' own (seen live, 2026-11-06)
+    menu.submenu("Settings", window, cx, move |menu, _, _| {
+        let menu = if tools.call_health {
+            menu.item(super::health::menu_item(stage.clone()))
+        } else {
+            menu
+        };
+        if !tools.mute_notifications {
+            return menu.min_w(px(220.0));
+        }
+        let stage = stage.clone();
+        let muted = tools.notifications_muted;
+        let (glyph, label) = if muted {
+            (Glyph::BELL, "Unmute notifications")
+        } else {
+            (Glyph::BELL_OFF, "Mute notifications")
+        };
+        menu.min_w(px(220.0)).item(
+            toolbar::menu_item("call-more-mute-notifications", Some(glyph), label).on_click(move |_, _, cx| {
+                // held back while the call runs: the stage takes it back when the call ends
+                crate::notify::mute_in_call(!muted, cx);
+                let _ = stage.update(cx, |_, cx| cx.notify());
+            }),
+        )
+    })
 }
 
 /// The timer's bar of what is left (`fraction` of its whole time), filled from its right as Teams' is.

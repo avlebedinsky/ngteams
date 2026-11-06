@@ -3551,6 +3551,20 @@ fn now_ms() -> i64 {
 }
 
 #[test]
+fn a_group_call_s_more_ends_with_help_which_opens_teams_help_in_the_browser() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    let before = actions(&rig).len();
+    click(stage, "call-more");
+    click(stage, "call-more-help");
+    assert_eq!(
+        stage.opened_url().as_deref(),
+        Some("https://go.microsoft.com/fwlink/?linkid=2163160")
+    );
+    assert_eq!(actions(&rig).len(), before, "Help acts on no call");
+}
+
+#[test]
 fn a_group_call_s_timer_shows_to_everyone_and_each_change_goes_to_the_call() {
     use teams_proto::{MeetingTimer, TimerState};
     let rig = calling();
