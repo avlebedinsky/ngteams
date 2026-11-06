@@ -2,12 +2,8 @@
 //! cold start), fed one caption at a time on its stdin and read back from its stdout, on a thread of its own so the
 //! window never waits on it.
 //!
-//! - **Claude Code** runs as `claude -p --input-format stream-json --output-format stream-json`: one user message per
-//!   caption in one conversation, its `result` line the answer. No tools, MCP servers, slash commands, settings files
-//!   (so no hooks) or saved session.
-//! - **Codex** runs as `codex app-server` (JSON-RPC over stdio): `initialize`, one ephemeral read-only thread whose
-//!   base instructions are ours, then one `turn/start` per caption, its last agent message the answer. Hooks, apps,
-//!   plugins, MCP servers, tools and project docs are turned off for it.
+//! The process is [`crate::local_ai`]'s [`Tool`], with its fastest model ([`Work::Captions`]): Claude Code or the
+//! Codex CLI, without tools, hooks, MCP servers or saved sessions.
 //!
 //! **The call's context**: the process keeps the conversation, so each caption is read against the whole call so far
 //! (the call's title and people, every caption with its speaker, what was said that wasn't sent, the translations it
@@ -21,24 +17,19 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use serde_json::{Value, json};
+use super::{LineKey, instructions};
+pub use crate::local_ai::Failure;
+use crate::local_ai::{Backend, Launch, Tool, Work, cap};
 
-use super::{Backend, LineKey, instructions};
-
-/// How long a wait on the tool polls before it looks at whether the session was dropped.
+/// How long a wait for the next caption polls before it looks at whether the session was dropped.
 const POLL: Duration = Duration::from_millis(100);
-/// The most of the tool's stderr kept, to tell a sign-in failure: its tail.
-const STDERR_TAIL: usize = 4096;
 /// The longest answer taken; anything longer isn't a caption's translation.
 const MAX_ANSWER: usize = 2000;
 /// The longest glossary carried to the next process.
@@ -48,18 +39,6 @@ const RECENT_LINES: usize = 30;
 const RECENT_CHARS: usize = 6000;
 /// The longest brief (the call's title and people) sent.
 const MAX_BRIEF: usize = 1500;
-/// What a tool's refusal says when it isn't signed in.
-const SIGN_IN: [&str; 9] = [
-    "login",
-    "log in",
-    "sign in",
-    "signed in",
-    "logged in",
-    "authenticat",
-    "api key",
-    "unauthorized",
-    "credential",
-];
 /// What asks the tool for the call's glossary (the instructions say what to answer).
 pub const GLOSSARY_REQUEST: &str = "<glossary-request/>";
 
@@ -124,40 +103,6 @@ pub struct Job {
 pub enum Outcome {
     Translated { job: Job, text: String },
     Failed(Failure),
-}
-
-/// Why a session ended.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Failure {
-    /// The tool asked for isn't on the `PATH`; `None`: neither is.
-    NotInstalled(Option<Backend>),
-    SignedOut(Backend),
-    TimedOut(Backend),
-    /// The tool stopped or refused, in its own words when it gave some.
-    Stopped(Backend, Option<String>),
-}
-
-impl Failure {
-    /// What the caption pane says of it.
-    #[must_use]
-    pub fn message(&self) -> String {
-        match self {
-            Self::NotInstalled(None) => {
-                "Neither Claude Code (claude) nor the Codex CLI (codex) is installed.".to_owned()
-            }
-            Self::NotInstalled(Some(backend)) => {
-                format!("{} ({}) isn't installed.", backend.tool(), backend.program())
-            }
-            Self::SignedOut(backend) => format!(
-                "{} isn't signed in. Run {} in a terminal, then try again.",
-                backend.tool(),
-                backend.sign_in()
-            ),
-            Self::TimedOut(backend) => format!("{} took too long to answer.", backend.tool()),
-            Self::Stopped(backend, Some(why)) => format!("{} stopped: {why}", backend.tool()),
-            Self::Stopped(backend, None) => format!("{} stopped unexpectedly.", backend.tool()),
-        }
-    }
 }
 
 /// A running session: dropping it stops its thread and its process.
@@ -299,15 +244,6 @@ fn clean(text: &str) -> String {
     text.replace('<', "‹").replace('>', "›")
 }
 
-/// `text` cut to at most `max` bytes, on a character's boundary.
-fn cap(text: &str, max: usize) -> String {
-    let mut end = text.len().min(max);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_owned()
-}
-
 /// The session's thread.
 struct Worker {
     spec: Spec,
@@ -319,24 +255,24 @@ struct Worker {
 
 impl Worker {
     fn run(mut self) {
-        let mut tool = match Tool::start(&self.spec, &self.stop) {
+        let mut tool = match self.start() {
             Ok(tool) => tool,
             Err(failure) => return self.fail(failure),
         };
         while let Some(job) = self.next_job() {
-            if tool.turns >= self.spec.limits.turns || tool.chars >= self.spec.limits.chars {
+            if tool.turns() >= self.spec.limits.turns || tool.chars() >= self.spec.limits.chars {
                 tool = match self.renew(tool) {
                     Ok(tool) => tool,
                     Err(failure) => return self.fail(failure),
                 };
             }
-            let message = self.memory.message(&job, tool.turns == 0);
-            let wait = if tool.answered {
+            let message = self.memory.message(&job, tool.turns() == 0);
+            let wait = if tool.answered() {
                 self.spec.limits.turn
             } else {
                 self.spec.limits.first
             };
-            match tool.ask(&message, wait, &self.stop) {
+            match tool.ask(&message, wait, &self.stop).map(|text| answer(&text)) {
                 Ok(text) => {
                     self.memory.remember(&job, &text);
                     if self.out.try_send(Outcome::Translated { job, text }).is_err() {
@@ -374,310 +310,25 @@ impl Worker {
                 (!glossary.is_empty() && !glossary.eq_ignore_ascii_case("none")).then(|| cap(glossary, MAX_GLOSSARY));
         }
         tool.close();
-        Tool::start(&self.spec, &self.stop)
+        self.start()
+    }
+
+    /// Starts the tool, with the instructions for the session's language.
+    fn start(&self) -> Result<Tool, Failure> {
+        let launch = Launch {
+            backend: self.spec.backend,
+            program: self.spec.program.clone(),
+            work: Work::Captions,
+            instructions: instructions(self.spec.language),
+            first: self.spec.limits.first,
+        };
+        Tool::start(&launch, &self.stop)
     }
 
     /// Tells the model, unless the session was dropped (nobody listens then).
     fn fail(&self, failure: Failure) {
         if !self.stop.load(Ordering::Relaxed) {
             let _ = self.out.try_send(Outcome::Failed(failure));
-        }
-    }
-}
-
-/// The running process and where its conversation stands.
-struct Tool {
-    backend: Backend,
-    child: Child,
-    stdin: Option<ChildStdin>,
-    lines: Receiver<String>,
-    stderr: Arc<Mutex<String>>,
-    /// Codex's thread.
-    thread: Option<String>,
-    next_id: u64,
-    /// Captions sent, and their characters.
-    turns: usize,
-    chars: usize,
-    /// It answered once: later answers get the shorter wait.
-    answered: bool,
-}
-
-impl Tool {
-    fn start(spec: &Spec, stop: &AtomicBool) -> Result<Self, Failure> {
-        let backend = spec.backend;
-        let instructions = instructions(spec.language);
-        let mut command = Command::new(&spec.program);
-        command
-            .args(backend.args(&instructions))
-            .current_dir(std::env::temp_dir())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // its own group, so whatever it starts ends with it
-            .process_group(0);
-        let mut child = command.spawn().map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => Failure::NotInstalled(Some(backend)),
-            _ => Failure::Stopped(backend, Some(error.to_string())),
-        })?;
-        let stdin = child.stdin.take();
-        let lines = child.stdout.take().map_or_else(
-            || mpsc::channel().1,
-            |stdout| {
-                let (sender, lines) = mpsc::channel();
-                thread::spawn(move || read_lines(stdout, &sender));
-                lines
-            },
-        );
-        let stderr = Arc::new(Mutex::new(String::new()));
-        if let Some(pipe) = child.stderr.take() {
-            let tail = Arc::clone(&stderr);
-            thread::spawn(move || keep_tail(pipe, &tail));
-        }
-        let mut tool = Self {
-            backend,
-            child,
-            stdin,
-            lines,
-            stderr,
-            thread: None,
-            next_id: 1,
-            turns: 0,
-            chars: 0,
-            answered: false,
-        };
-        if backend == Backend::Codex
-            && let Err(failure) = tool.codex_thread(&instructions, spec.limits.first, stop)
-        {
-            tool.close();
-            return Err(failure);
-        }
-        Ok(tool)
-    }
-
-    /// Codex: initializes the app server and starts the thread the captions go to.
-    fn codex_thread(&mut self, instructions: &str, wait: Duration, stop: &AtomicBool) -> Result<(), Failure> {
-        let deadline = Instant::now() + wait;
-        let initialize = self.request(
-            "initialize",
-            &json!({"clientInfo": {"name": "ngteams", "version": env!("CARGO_PKG_VERSION")}}),
-        )?;
-        self.answer_of(initialize, deadline, stop)?;
-        self.write(&json!({"jsonrpc": "2.0", "method": "initialized"}))?;
-        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let start = self.request(
-            "thread/start",
-            &json!({
-                "model": Backend::Codex.model(),
-                "cwd": cwd,
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "ephemeral": true,
-                "baseInstructions": instructions,
-            }),
-        )?;
-        let started = self.answer_of(start, deadline, stop)?;
-        let thread = started
-            .pointer("/thread/id")
-            .and_then(Value::as_str)
-            .ok_or(Failure::Stopped(self.backend, None))?;
-        self.thread = Some(thread.to_owned());
-        Ok(())
-    }
-
-    /// Sends JSON-RPC request `method`; its id.
-    fn request(&mut self, method: &str, params: &Value) -> Result<u64, Failure> {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))?;
-        Ok(id)
-    }
-
-    /// The result of JSON-RPC request `id`, answering any request the server makes meanwhile.
-    fn answer_of(&mut self, id: u64, deadline: Instant, stop: &AtomicBool) -> Result<Value, Failure> {
-        loop {
-            let message = self.next_message(deadline, stop)?;
-            self.refuse_request(&message)?;
-            if message.get("id").and_then(Value::as_u64) == Some(id) && message.get("method").is_none() {
-                if let Some(error) = message.get("error") {
-                    return Err(self.refusal(error.get("message").and_then(Value::as_str)));
-                }
-                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-            }
-        }
-    }
-
-    /// The server asking something of the client (an approval): refused, as nothing here may be approved.
-    fn refuse_request(&mut self, message: &Value) -> Result<(), Failure> {
-        if let (Some(id), Some(_)) = (message.get("id"), message.get("method")) {
-            self.write(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "not supported"}}))?;
-        }
-        Ok(())
-    }
-
-    /// Sends `message` (a caption's, or the glossary request) and waits up to `wait` for the answer.
-    fn ask(&mut self, message: &str, wait: Duration, stop: &AtomicBool) -> Result<String, Failure> {
-        let deadline = Instant::now() + wait;
-        self.turns += 1;
-        self.chars += message.len();
-        let text = match self.backend {
-            Backend::Claude => self.ask_claude(message, deadline, stop),
-            Backend::Codex => self.ask_codex(message, deadline, stop),
-        }?;
-        self.answered = true;
-        Ok(answer(&text))
-    }
-
-    fn ask_claude(&mut self, message: &str, deadline: Instant, stop: &AtomicBool) -> Result<String, Failure> {
-        self.write(&json!({"type": "user", "message": {"role": "user", "content": message}}))?;
-        loop {
-            let line = self.next_message(deadline, stop)?;
-            if line.get("type").and_then(Value::as_str) != Some("result") {
-                continue;
-            }
-            let said = line.get("result").and_then(Value::as_str);
-            if line.get("is_error").and_then(Value::as_bool) == Some(true) {
-                return Err(self.refusal(said));
-            }
-            return Ok(said.unwrap_or_default().to_owned());
-        }
-    }
-
-    fn ask_codex(&mut self, message: &str, deadline: Instant, stop: &AtomicBool) -> Result<String, Failure> {
-        let thread = self.thread.clone().unwrap_or_default();
-        let id = self.request(
-            "turn/start",
-            &json!({"threadId": thread, "input": [{"type": "text", "text": message}], "effort": "low"}),
-        )?;
-        let (mut text, mut error) = (None::<String>, None::<String>);
-        loop {
-            let line = self.next_message(deadline, stop)?;
-            self.refuse_request(&line)?;
-            if line.get("id").and_then(Value::as_u64) == Some(id)
-                && let Some(refused) = line.get("error")
-            {
-                return Err(self.refusal(refused.get("message").and_then(Value::as_str)));
-            }
-            let params = line.get("params").unwrap_or(&Value::Null);
-            match line.get("method").and_then(Value::as_str) {
-                Some("item/completed") if params.pointer("/item/type") == Some(&json!("agentMessage")) => {
-                    text = params.pointer("/item/text").and_then(Value::as_str).map(str::to_owned);
-                }
-                Some("error") if params.get("willRetry") != Some(&json!(true)) => {
-                    error = params
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                }
-                Some("turn/completed") => {
-                    let failed = params.pointer("/turn/error/message").and_then(Value::as_str);
-                    return match (error.or_else(|| failed.map(str::to_owned)), text) {
-                        (Some(why), _) => Err(self.refusal(Some(&why))),
-                        (None, Some(text)) => Ok(text),
-                        (None, None) => Err(Failure::Stopped(self.backend, Some("it gave no answer.".to_owned()))),
-                    };
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn write(&mut self, message: &Value) -> Result<(), Failure> {
-        let backend = self.backend;
-        let stdin = self.stdin.as_mut().ok_or(Failure::Stopped(backend, None))?;
-        let mut line = message.to_string();
-        line.push('\n');
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.flush())
-            .map_err(|_| self.exited())
-    }
-
-    /// The tool's next JSON line (other lines skipped), by `deadline`.
-    fn next_message(&mut self, deadline: Instant, stop: &AtomicBool) -> Result<Value, Failure> {
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                return Err(Failure::Stopped(self.backend, None));
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(Failure::TimedOut(self.backend));
-            }
-            match self.lines.recv_timeout(left.min(POLL)) {
-                Ok(line) => {
-                    if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                        return Ok(value);
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return Err(self.exited()),
-            }
-        }
-    }
-
-    /// Why the process ended: signed out when its last words say so, else in those words.
-    fn exited(&mut self) -> Failure {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
-        // the stderr reader may still be taking its last bytes
-        thread::sleep(Duration::from_millis(50));
-        let tail = self.stderr.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        let last = tail.lines().rev().find(|line| !line.trim().is_empty());
-        self.refusal(last)
-    }
-
-    /// A refusal in the tool's words: a sign-in one as such.
-    fn refusal(&self, said: Option<&str>) -> Failure {
-        let Some(said) = said.map(str::trim).filter(|said| !said.is_empty()) else {
-            return Failure::Stopped(self.backend, None);
-        };
-        let lower = said.to_lowercase();
-        if SIGN_IN.iter().any(|word| lower.contains(word)) {
-            return Failure::SignedOut(self.backend);
-        }
-        let line = said.lines().next().unwrap_or(said);
-        let mut why = cap(line, 160);
-        if why.len() < line.len() {
-            why.push('…');
-        }
-        Failure::Stopped(self.backend, Some(why))
-    }
-
-    /// Ends the process: its stdin closed (both tools leave then), and after a moment its whole group killed.
-    fn close(mut self) {
-        drop(self.stdin.take());
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
-        let group = rustix::process::Pid::from_child(&self.child);
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Hands each line the tool writes to the session, until it ends.
-fn read_lines(stdout: impl std::io::Read, sender: &mpsc::Sender<String>) {
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
-        if sender.send(line).is_err() {
-            break;
-        }
-    }
-}
-
-/// Keeps the last [`STDERR_TAIL`] bytes the tool writes to stderr.
-fn keep_tail(mut pipe: impl std::io::Read, tail: &Mutex<String>) {
-    let mut chunk = [0_u8; 1024];
-    while let Ok(read @ 1..) = pipe.read(&mut chunk) {
-        let mut tail = tail.lock().unwrap_or_else(PoisonError::into_inner);
-        tail.push_str(&String::from_utf8_lossy(&chunk[..read]));
-        if tail.len() > STDERR_TAIL {
-            let cut = tail.len() - STDERR_TAIL;
-            let cut = (cut..tail.len()).find(|at| tail.is_char_boundary(*at)).unwrap_or(0);
-            tail.drain(..cut);
         }
     }
 }

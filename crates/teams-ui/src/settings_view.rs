@@ -43,6 +43,7 @@ use teams_media::devices::catalog::{DeviceKind, DeviceList};
 use crate::clock::{self, HourCycle};
 use crate::effects::{EffectsPicker, PickerPlace};
 use crate::icons::{Glyph, icon_button, selected_by};
+use crate::local_ai::Work;
 use crate::presence;
 use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel, TimeFormat};
 use crate::shell::shown_as;
@@ -878,37 +879,19 @@ impl SettingsView {
             groups.push(self.video_effects(palette, cx));
         }
         groups.push(self.captions(settings, palette, cx));
+        groups.push(self.recaps(settings, palette, cx));
         groups
     }
 
-    /// Which tool translates live captions ([`crate::translate`]): Automatic (naming the tool it comes to) and each
-    /// tool installed, the one chosen kept even when it is gone; the picker's test selector is `caption-translator`.
+    /// Which tool translates live captions ([`crate::translate`]); the picker's test selector is `caption-translator`.
     fn captions(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let translators = Translators::of(cx);
-        let chosen = settings.caption_translator;
-        let picks = TranslatorChoice::ALL
-            .into_iter()
-            .filter_map(|choice| {
-                let label = match choice {
-                    TranslatorChoice::Automatic => translators.pick(choice).map_or_else(
-                        |_| "Automatic".to_owned(),
-                        |(backend, _)| format!("Automatic ({})", backend.label()),
-                    ),
-                    TranslatorChoice::Only(backend) if translators.pick(choice).is_ok() => backend.label().to_owned(),
-                    TranslatorChoice::Only(backend) if choice == chosen => {
-                        format!("{} (not installed)", backend.label())
-                    }
-                    TranslatorChoice::Only(_) => return None,
-                };
-                Some(Pick {
-                    key: choice.key().to_owned(),
-                    label: label.into(),
-                    status: None,
-                    chosen: choice == chosen,
-                    apply: self.changer(move |settings| settings.caption_translator = choice),
-                })
-            })
-            .collect();
+        let picks = self.tool_picks(
+            &translators,
+            settings.caption_translator,
+            Work::Captions,
+            |settings, choice| settings.caption_translator = choice,
+        );
         let description = if translators.installed().next().is_some() {
             "When you translate live captions, their text goes to this tool on your computer and its provider."
         } else {
@@ -924,6 +907,64 @@ impl SettingsView {
             )],
             palette,
         )
+    }
+
+    /// Which tool makes a recap's AI summary ([`crate::recap_summary`]); the picker's test selector is
+    /// `recap-summarizer`.
+    fn recaps(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let tools = Translators::of(cx);
+        let picks = self.tool_picks(&tools, settings.recap_summarizer, Work::Summary, |settings, choice| {
+            settings.recap_summarizer = choice;
+        });
+        let description = if tools.installed().next().is_some() {
+            "When you ask for a recap's AI summary, its transcript goes to this tool on your computer and its provider."
+        } else {
+            "Install Claude Code (claude) or the Codex CLI (codex) to summarize meeting recaps."
+        };
+        group(
+            Some("Meeting recaps"),
+            vec![row(
+                "Summarize recaps with",
+                Some(description),
+                picker("recap-summarizer", picks, palette),
+                palette,
+            )],
+            palette,
+        )
+    }
+
+    /// A tool picker's rows: Automatic (naming the tool it comes to) and each tool installed, labelled by its model for
+    /// `work`, the one chosen kept even when it is gone.
+    fn tool_picks(
+        &self,
+        tools: &Translators,
+        chosen: TranslatorChoice,
+        work: Work,
+        set: fn(&mut Settings, TranslatorChoice),
+    ) -> Vec<Pick> {
+        TranslatorChoice::ALL
+            .into_iter()
+            .filter_map(|choice| {
+                let label = match choice {
+                    TranslatorChoice::Automatic => tools.pick(choice).map_or_else(
+                        |_| "Automatic".to_owned(),
+                        |(backend, _)| format!("Automatic ({})", backend.label(work)),
+                    ),
+                    TranslatorChoice::Only(backend) if tools.pick(choice).is_ok() => backend.label(work).to_owned(),
+                    TranslatorChoice::Only(backend) if choice == chosen => {
+                        format!("{} (not installed)", backend.label(work))
+                    }
+                    TranslatorChoice::Only(_) => return None,
+                };
+                Some(Pick {
+                    key: choice.key().to_owned(),
+                    label: label.into(),
+                    status: None,
+                    chosen: choice == chosen,
+                    apply: self.changer(move |settings| set(settings, choice)),
+                })
+            })
+            .collect()
     }
 
     /// The camera's video effects: what they do, the self-preview and the backgrounds.

@@ -356,6 +356,8 @@ pub struct Settings {
     pub caption_translate_to: Option<&'static str>,
     /// Which tool translates them.
     pub caption_translator: TranslatorChoice,
+    /// Which tool makes a meeting recap's AI summary ([`crate::recap_summary`]), when the user asks for one.
+    pub recap_summarizer: TranslatorChoice,
     /// The other accounts' own settings, by the account's MRI: the first account's are [`Settings::selected_chat`]
     /// and [`Settings::manual_status`] themselves (see [`Settings::first_account`]).
     pub accounts: BTreeMap<String, AccountSettings>,
@@ -502,6 +504,7 @@ impl Default for Settings {
             time_format: TimeFormat::default(),
             caption_translate_to: None,
             caption_translator: TranslatorChoice::default(),
+            recap_summarizer: TranslatorChoice::default(),
             accounts: BTreeMap::new(),
             first_account: None,
         }
@@ -534,6 +537,7 @@ pub mod keys {
     pub const TIME_FORMAT: &str = "time_format";
     pub const CAPTION_TRANSLATE_TO: &str = "caption_translate_to";
     pub const CAPTION_TRANSLATOR: &str = "caption_translator";
+    pub const RECAP_SUMMARIZER: &str = "recap_summarizer";
     /// The other accounts' own settings: a table of tables, by the account's MRI.
     pub const ACCOUNTS: &str = "accounts";
     /// The account whose own settings are the top-level ones, by its MRI.
@@ -639,7 +643,9 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .and_then(TimeFormat::from_key)
                 .ok_or(bad(keys::TIME_FORMAT, "not one of system, 12-hour, 24-hour"))?;
         }
-        keys::CAPTION_TRANSLATE_TO | keys::CAPTION_TRANSLATOR => take_captions(settings, key, value)?,
+        keys::CAPTION_TRANSLATE_TO | keys::CAPTION_TRANSLATOR | keys::RECAP_SUMMARIZER => {
+            take_captions(settings, key, value)?;
+        }
         keys::ACCOUNTS => take_accounts(settings, value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
@@ -733,7 +739,8 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
     Ok(())
 }
 
-/// Takes the captions' translation: the language they are translated into, or the tool translating them.
+/// Takes the local AI tools' settings: the language captions are translated into, the tool translating them, or the
+/// tool summarizing recaps.
 fn take_captions(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
     if key == keys::CAPTION_TRANSLATE_TO {
         settings.caption_translate_to = Some(
@@ -746,6 +753,14 @@ fn take_captions(settings: &mut Settings, key: &str, value: &Value) -> Result<()
                     why: "not a language captions are translated into",
                 })?,
         );
+    } else if key == keys::RECAP_SUMMARIZER {
+        settings.recap_summarizer = value
+            .as_str()
+            .and_then(TranslatorChoice::from_key)
+            .ok_or(Problem::BadValue {
+                key: keys::RECAP_SUMMARIZER,
+                why: "not one of automatic, claude, codex",
+            })?;
     } else {
         settings.caption_translator = value
             .as_str()
@@ -853,6 +868,10 @@ pub fn render(settings: &Settings) -> String {
         Value::String(settings.time_format.key().to_owned()),
     );
     render_captions(settings, &mut table);
+    table.insert(
+        keys::RECAP_SUMMARIZER.to_owned(),
+        Value::String(settings.recap_summarizer.key().to_owned()),
+    );
     let accounts: Table = settings
         .accounts
         .iter()
@@ -1159,6 +1178,14 @@ impl SettingsModel {
     pub fn backgrounds_dir(&self) -> Option<PathBuf> {
         let file = self.file.as_ref()?;
         Some(file.path().parent()?.join(BACKGROUNDS_DIR))
+    }
+
+    /// Where the recaps' AI summaries are kept: [`crate::recap_summary::SUMMARY_DIR`] beside the settings file; `None`
+    /// for settings kept in memory (summaries kept for the run only).
+    #[must_use]
+    pub fn summaries_dir(&self) -> Option<PathBuf> {
+        let file = self.file.as_ref()?;
+        Some(file.path().parent()?.join(crate::recap_summary::SUMMARY_DIR))
     }
 
     /// The background the camera is sent with, as the settings choose it ([`Settings::video_effect`]).

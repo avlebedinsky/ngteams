@@ -3,11 +3,13 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::AppContext as _;
 
 use super::*;
+use crate::local_ai::executable;
 use crate::settings::Settings;
 
 #[test]
@@ -55,7 +57,7 @@ fn the_tools_are_chosen_claude_first() {
     );
     for backend in Backend::ALL {
         assert_eq!(backend.program(), backend.key());
-        assert!(!backend.label().is_empty() && !backend.model().is_empty());
+        assert!(!backend.label(Work::Captions).is_empty() && !backend.model(Work::Captions).is_empty());
     }
 }
 

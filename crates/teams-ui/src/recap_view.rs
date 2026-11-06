@@ -10,8 +10,11 @@
 //!   blocks is offered none). It runs apart from the view ([`crate::recording_download`]): a row under the top row
 //!   shows how far it got with Cancel, then Show in folder, or what failed with Try again.
 //! - **A recorded part**: the recording played here ([`VideoPlayer`], filling its column at 16:9); beside it the files
-//!   shared in the chat and the transcript. A part with only a transcript shows the files and the transcript across
-//!   the whole width. Teams' Copilot parts (the AI summary, speaker insights and their upsells) are left out.
+//!   shared in the chat and the panes Teams' Recap has there: AI summary and Transcript. A part with only a transcript
+//!   shows the files and the panes across the whole width. Teams' Copilot (its AI summary, speaker insights and their
+//!   upsells) is left out: the AI summary is made on this computer instead ([`crate::recap_summary`]),
+//!   when the user asks for one, laid out as Fathom's call summaries are, its moments played from a click, copied, or
+//!   sent to the meeting's chat after a preview.
 //! - **The transcript**: Teams' note that it is AI-generated, who started transcription, each speaker's turn (their
 //!   initials, name and time into the recording) with its paragraphs; the paragraph being spoken is highlighted and
 //!   kept in view while the recording plays, and a click on one plays the recording from there. Search finds the
@@ -46,6 +49,10 @@ use teams_proto::chat::SharedFile;
 use teams_proto::recap::{RecapPart, recap_link, recap_parts};
 use teams_proto::transcript::{Cue, Turn, read_vtt};
 
+mod summary;
+
+pub use summary::{COPIED, EMPTY_TRANSCRIPT, NO_TRANSCRIPT, SENT, SUMMARY_FAILED};
+
 use crate::bridge::Core;
 use crate::clock;
 use crate::icons::{Glyph, icon_button, selected_by};
@@ -55,7 +62,9 @@ use crate::recap::{
     AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, local_session_line, part_label, recording_file_name, row_of,
     shows_parts, transcript_file_name,
 };
+use crate::recap_summary::RecapSummary;
 use crate::recording_download::{self, Progress, RecordingDownload, byte_size, download_of};
+use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
 use crate::video_player::{Captions, Recording, VideoPlayer, clock as offset};
 
@@ -70,6 +79,23 @@ pub const NOTHING_LEFT: &str = "This meeting wasn't recorded or transcribed.";
 pub const SAVING: &str = "Saving recording\u{2026} It shows here once it's ready.";
 /// The words a transcript that couldn't be read shows.
 pub const TRANSCRIPT_UNREAD: &str = "The transcript couldn't be loaded.";
+
+/// The panes beside the recording, as Teams' Recap has them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    AiSummary,
+    Transcript,
+}
+
+/// Where sending the summary to the chat stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Post {
+    /// The message shown, waiting for Send.
+    Preview,
+    Sending,
+    /// It wasn't sent: why.
+    Failed(String),
+}
 
 /// What the recap read.
 enum Contents {
@@ -133,6 +159,14 @@ pub struct RecapView {
     focus: FocusHandle,
     _typed: Subscription,
     reading: Option<Task<()>>,
+    /// The app's settings: the tool summaries are made with, and where they are kept.
+    settings: Option<Entity<SettingsModel>>,
+    /// The pane the user picked; `None`: the one [`RecapView::pane`] works out.
+    pane: Option<Pane>,
+    /// Each part's summary followed, by its key ([`crate::recap_summary::cache_key`]).
+    summaries: HashMap<String, (Entity<RecapSummary>, Subscription)>,
+    summary_scroll: ScrollHandle,
+    sending: Option<Post>,
 }
 
 impl RecapView {
@@ -173,10 +207,22 @@ impl RecapView {
             focus: cx.focus_handle(),
             _typed: typed,
             reading: None,
+            settings: None,
+            pane: None,
+            summaries: HashMap::new(),
+            summary_scroll: ScrollHandle::new(),
+            sending: None,
         };
         view.read(cx);
         view.read_files(cx);
         view
+    }
+
+    /// With the app's settings: the tool its summaries are made with, and where they are kept.
+    #[must_use]
+    pub fn with_settings(mut self, settings: Entity<SettingsModel>) -> Self {
+        self.settings = Some(settings);
+        self
     }
 
     /// The chat the recap is of.
@@ -335,6 +381,8 @@ impl RecapView {
         }
         self.pause(cx);
         self.selected = index;
+        self.pane = None;
+        self.sending = None;
         self.spoken = None;
         self.search = None;
         self.query.clear();
@@ -357,9 +405,9 @@ impl RecapView {
         }
     }
 
-    /// The recap card's Transcript chip: the shown part's transcript from its top (the transcript is the recap's only
-    /// pane, beside the recording).
+    /// The recap card's Transcript chip: the shown part's Transcript pane, from its top.
     pub fn show_transcript(&mut self, cx: &mut Context<Self>) {
+        self.pane = Some(Pane::Transcript);
         self.spoken = None;
         self.scroll.scroll_to_item(0);
         cx.notify();
@@ -706,15 +754,18 @@ impl Render for RecapView {
             }
             Contents::Read(_) => self.recap(window, palette, cx),
         };
+        let preview = self.send_preview(palette, cx);
         div()
             .debug_selector(|| "recap-view".to_owned())
             .id("recap-view")
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(palette.background))
             .child(body)
+            .children(preview)
     }
 }
 
@@ -750,7 +801,7 @@ impl RecapView {
             .gap_2()
             .min_h_0()
             .child(self.files_card(palette, cx))
-            .children(self.transcript_card(window, palette, cx));
+            .child(self.panes_card(window, palette, cx));
         let body = if recorded {
             let player = self.player(cx);
             div()
@@ -1098,22 +1149,50 @@ impl RecapView {
             .into_any_element()
     }
 
-    /// The shown part's transcript under its title; `None` for a recording without one.
-    fn transcript_card(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.part()?.transcript.as_ref()?;
-        let title = div()
-            .flex_none()
-            .px_4()
-            .pt_4()
-            .font_weight(FontWeight::SEMIBOLD)
-            .child("Transcript");
-        let card = card(palette)
+    /// The panes' pills (AI summary, and Transcript for a part with one) and the pane shown.
+    fn panes_card(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let has_transcript = self.part().is_some_and(|part| part.transcript.is_some());
+        let shown = self.pane(cx);
+        let pill = |pane: Pane, label: &'static str, key: &'static str, cx: &mut Context<Self>| {
+            let chosen = shown == pane;
+            div()
+                .id(SharedString::from(format!("recap-pane-{key}")))
+                .debug_selector(move || format!("recap-pane-{key}{}", if chosen { " shown" } else { "" }))
+                .h(px(32.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .rounded_full()
+                .border_1()
+                .cursor_pointer()
+                .border_color(rgb(if chosen { palette.brand } else { palette.border }))
+                .bg(rgb(if chosen { palette.selected } else { palette.surface }))
+                .text_sm()
+                .text_color(rgb(if chosen { palette.brand } else { palette.foreground }))
+                .when(chosen, |pill| pill.font_weight(FontWeight::SEMIBOLD))
+                .when(pane == Pane::AiSummary, |pill| {
+                    pill.child(Glyph::SPARKLES.icon().size(px(14.0)))
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.show_pane(pane, cx)))
+        };
+        let mut pills = div().flex_none().flex().gap_2().px_4().pt_4().pb_2();
+        pills = pills.child(pill(Pane::AiSummary, "AI summary", "summary", cx));
+        if has_transcript {
+            pills = pills.child(pill(Pane::Transcript, "Transcript", "transcript", cx));
+        }
+        let body = match shown {
+            Pane::Transcript if has_transcript => self.transcript_pane(window, palette, cx),
+            Pane::AiSummary | Pane::Transcript => self.summary_pane(palette, cx),
+        };
+        card(palette)
             .debug_selector(|| "recap-transcript-card".to_owned())
             .flex_1()
             .min_h_0()
-            .child(title)
-            .child(self.transcript_pane(window, palette, cx));
-        Some(card.into_any_element())
+            .child(pills)
+            .child(div().flex_1().min_h_0().flex().flex_col().child(body))
+            .into_any_element()
     }
 
     fn transcript_pane(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {

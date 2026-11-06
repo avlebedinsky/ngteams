@@ -59,6 +59,7 @@ fn changed() -> Settings {
         time_format: TimeFormat::Twelve,
         caption_translate_to: Some("de"),
         caption_translator: TranslatorChoice::Only(Backend::Codex),
+        recap_summarizer: TranslatorChoice::Only(Backend::Claude),
         accounts: [(
             "8:orgid:00000000-0000-4000-8000-00000000000b".to_owned(),
             AccountSettings {
@@ -753,6 +754,37 @@ fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_th
             "{bad}: {problems:?}"
         );
     }
+}
+
+#[test]
+fn the_recap_summarizer_is_automatic_by_default_and_goes_through_the_file() {
+    assert_eq!(Settings::default().recap_summarizer, TranslatorChoice::Automatic);
+    for choice in TranslatorChoice::ALL {
+        let settings = Settings {
+            recap_summarizer: choice,
+            ..Settings::default()
+        };
+        let text = render(&settings);
+        assert!(
+            text.contains(&format!("recap_summarizer = \"{}\"", choice.key())),
+            "{text}"
+        );
+        let (read, problems) = parse(&text).expect("TOML");
+        assert_eq!(read, settings);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+    let (read, problems) = parse("recap_summarizer = \"opus\"").expect("TOML");
+    assert_eq!(read, Settings::default());
+    assert!(
+        matches!(
+            &problems[..],
+            [Problem::BadValue {
+                key: "recap_summarizer",
+                ..
+            }]
+        ),
+        "{problems:?}"
+    );
 }
 
 #[test]

@@ -21,8 +21,11 @@ log = { workspace = true, features = ["max_level_debug", "release_max_level_debu
 gpui-component.workspace = true
 # the kit's icons, served by the paths its components ask for (`AppAssets`)
 gpui-kit-assets.workspace = true
-# the view trace: one JSON object per line
+# the view trace: one JSON object per line; a recap's AI summary kept as a file, and the tool's answer read
+serde.workspace = true
 serde_json.workspace = true
+# a recap's AI summary's file named by a hash of its recording's link
+sha2.workspace = true
 # a reaction's animation strip (a PNG) cut into the frames GPUI plays, and a message's pictures (PNG, JPEG, GIF,
 # WebP) decoded: the version and decoders GPUI already links
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
@@ -39,7 +42,7 @@ teams-media.workspace = true
 teams-log.workspace = true
 # the settings file's problems
 thiserror.workspace = true
-# caption translation's tool process: its whole process group ended with it
+# the local AI tools' processes (caption translation, recap summaries): each one's whole process group ended with it
 rustix = { workspace = true, features = ["process"] }
 # the bridge's stop signal to its drain task (a runtime-free oneshot)
 tokio = { workspace = true, features = ["sync"] }

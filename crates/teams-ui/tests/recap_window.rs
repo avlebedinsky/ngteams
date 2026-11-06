@@ -3,7 +3,9 @@
 //! meeting chat whose recording's card offers "View recap"; its Recap (two recordings: Part 1 with its transcript,
 //! that transcript searched, Part 2, Part 1's recording playing as the engine streams it and paused; paused with its
 //! captions on, its speed menu at 1.5x, its settings and its caption settings open; Part 1's recording downloading,
-//! downloaded and failed), the Recap of a meeting transcribed and not recorded, and the Shared tab.
+//! downloaded and failed), the Recap of a meeting transcribed and not recorded, and the Shared tab; Part 1's AI summary
+//! offered, being made, failed, made, and previewed before it is sent to the chat (made by a fake `claude`, or a
+//! made-up summary kept for the run).
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -42,7 +44,12 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 const CHILD_ENV: &str = "TEAMS_UI_RECAP_WINDOW_TEST";
 
 /// Each page and the themes it is shot in.
-const PAGES: [(&str, &[&str]); 15] = [
+const PAGES: [(&str, &[&str]); 20] = [
+    ("summary", &[LIGHT_KEY, DARK_KEY]),
+    ("summary-offer", &[LIGHT_KEY, DARK_KEY]),
+    ("summary-running", &[LIGHT_KEY]),
+    ("summary-failed", &[LIGHT_KEY]),
+    ("summary-preview", &[LIGHT_KEY, DARK_KEY]),
     ("downloading", &[LIGHT_KEY, DARK_KEY]),
     ("downloaded", &[LIGHT_KEY]),
     ("download-failed", &[LIGHT_KEY]),
@@ -259,6 +266,89 @@ fn download_target() -> PathBuf {
         .join(RECORDING_NAME)
 }
 
+/// The summary pages' tool: a fake `claude` that never answers (being made) or is signed out (failed), in a folder of
+/// the run's own; a made-up summary of Part 1 kept for the run (made, previewed).
+fn seed_summary(page: &str, cx: &mut App) {
+    use std::os::unix::fs::PermissionsExt as _;
+    use teams_ui::local_ai::{Backend, Tools};
+    let body = match page {
+        "summary-running" => "while read -r line; do :; done\n",
+        "summary-failed" => {
+            "read -r line\necho '{\"type\":\"result\",\"is_error\":true,\"result\":\"Not logged in · Please run /login\"}'\n"
+        }
+        "summary-offer" => "",
+        "summary" | "summary-preview" => {
+            teams_ui::recap_summary::keep(&fixtures::sharing_link("ITEM1"), &made_summary(), None, cx);
+            return;
+        }
+        _ => return,
+    };
+    let folder = summary_tool_dir();
+    let program = folder.join("claude");
+    let written = fs::create_dir_all(&folder)
+        .and_then(|()| fs::write(&program, format!("#!/bin/bash\n{body}")))
+        .and_then(|()| fs::set_permissions(&program, fs::Permissions::from_mode(0o755)));
+    if let Err(error) = written {
+        eprintln!("the fake tool: {error}");
+    }
+    cx.set_global(Tools::with(vec![(Backend::Claude, program)]));
+}
+
+fn summary_tool_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("ngteams-recap-summary-{}", std::process::id()))
+}
+
+/// A made-up summary of the made-up meeting, as the tool would make it.
+fn made_summary() -> teams_ui::recap_summary::Made {
+    use teams_ui::recap_summary::{Made, Point, Step, Summary, Topic};
+    let point = |text: &str, at: u64| Point {
+        text: text.to_owned(),
+        at: Some(at),
+    };
+    Made {
+        summary: Summary {
+            purpose: "Walk through the new recap's video player and transcript before the release.".to_owned(),
+            takeaways: vec![
+                "The video player plays the recording, and the transcript follows it as it plays.".to_owned(),
+                "Search finds every match in the transcript and counts them.".to_owned(),
+                "The release waits for the search's last fixes.".to_owned(),
+            ],
+            topics: vec![
+                Topic {
+                    title: "Video player".to_owned(),
+                    points: vec![
+                        point("Ada opened the weekly sync with the video player first.", 7),
+                        point("Bo confirmed the video plays and the transcript follows it.", 15),
+                    ],
+                },
+                Topic {
+                    title: "Transcript search".to_owned(),
+                    points: vec![point(
+                        "Ada showed the search finding every video named in the meeting.",
+                        20,
+                    )],
+                },
+            ],
+            next_steps: vec![
+                Step {
+                    owner: Some("Ada Lab".to_owned()),
+                    text: "Finish the search fixes by Friday.".to_owned(),
+                    at: Some(20),
+                },
+                Step {
+                    owner: Some("Bo Lab".to_owned()),
+                    text: "Check playback on the second recording.".to_owned(),
+                    at: Some(15),
+                },
+            ],
+            questions: vec![point("Should the transcript follow the video when it is searched?", 22)],
+        },
+        tool: "claude".to_owned(),
+        made_at: fixtures::START + 3_600_000,
+        sections: 1,
+    }
+}
+
 /// The pages that play Part 1's recording, then pause it.
 const PLAYED: [&str; 6] = ["playing", "paused", "captions", "speed", "settings", "caption-settings"];
 
@@ -274,6 +364,7 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
         });
     }
     seed_download(&core, &page);
+    seed_summary(&page, cx);
     let (events, received) = mpsc::unbounded_channel();
     let source = FakeEvents {
         events: received,
@@ -335,6 +426,9 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
 /// The page's last step: ready to be shot, a recording paused first on the pages that show it paused, with the menu
 /// they show open.
 fn last(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
+    if page.starts_with("summary") {
+        let _ = fs::remove_dir_all(summary_tool_dir());
+    }
     if page.starts_with("download") {
         // the row stays as it is drawn; the made-up file goes
         if let Some(folder) = download_target().parent() {
@@ -386,6 +480,9 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
             recap.step_match(false, cx);
         }
         "part-2" => recap.select_part(1, cx),
+        "summary-offer" => recap.show_pane(teams_ui::recap_view::Pane::AiSummary, cx),
+        "summary-running" | "summary-failed" => recap.summarize(cx),
+        "summary-preview" => recap.preview_summary(cx),
         "downloading" | "downloaded" | "download-failed" => {
             recap.save_recording(fixtures::sharing_link("ITEM1"), download_target(), cx);
         }

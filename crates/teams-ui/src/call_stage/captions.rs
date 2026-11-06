@@ -385,7 +385,7 @@ fn translated_into(status: &Status) -> Option<gpui::Div> {
             .whitespace_nowrap()
             .child(SharedString::from(format!(
                 "Translated into {language} by {}",
-                backend.label()
+                backend.label(crate::local_ai::Work::Captions)
             ))),
     )
 }

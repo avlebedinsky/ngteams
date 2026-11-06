@@ -313,7 +313,11 @@ The compose editor supports formatting, emoji, mentions and quotes; Enter sends,
 and expanded formatting mode uses Ctrl+Enter to send. A meeting chat's header has Teams' Chat, Shared and Recap tabs:
 Recap plays the meeting's recordings with their transcripts (search, download), as a recording's "View recap" opens
 it, and its More options downloads a recording the account may download
-([docs/protocol/recap.md](docs/protocol/recap.md)). Settings control appearance, notifications, privacy,
+([docs/protocol/recap.md](docs/protocol/recap.md)). Its AI summary is made on this computer when asked for, laid out
+as Fathom's call summaries (purpose, key takeaways, topics with their moments, next steps with owners, open
+questions), by Claude Code (Claude Sonnet) or the Codex CLI (GPT-6.1-Terra) (Settings → Calls → Meeting recaps): the
+transcript then goes to that tool and its provider. It is kept per recording, copied as Markdown, or sent to the
+meeting's chat after a preview. Settings control appearance, notifications, privacy,
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.
 

@@ -123,7 +123,9 @@ impl Shell {
             None if tab == ChatTab::Recap => {
                 let title = self.meeting_title(&id, cx);
                 let core = Arc::clone(&self.core);
-                self.meeting_tabs.recap = Some(cx.new(|cx| RecapView::new(core, id.clone(), title, window, cx)));
+                let settings = self.settings.clone();
+                self.meeting_tabs.recap =
+                    Some(cx.new(|cx| RecapView::new(core, id.clone(), title, window, cx).with_settings(settings)));
             }
             // shown again: a recap that held nothing yet is read again (a recording saved since)
             Some(recap) if tab == ChatTab::Recap => recap.update(cx, RecapView::read_again_if_empty),

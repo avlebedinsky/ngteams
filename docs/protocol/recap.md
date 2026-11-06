@@ -168,7 +168,9 @@ played) and keyboard shortcuts (the app's own keys: Space, Left/Right, M, C, Z/X
 recipients (a grant and a post), Delete recap content and the transcript's Delete, "Go to Meeting Recaps" (a Teams
 app), the attendance report (the organizer's reports), Notes (Loop), feedback, Download as .docx, and everything
 Copilot: the AI summary, the Speakers chip's speaker insights and their "Upgrade Copilot" upsells (left out by the
-user's choice).
+user's choice). The AI summary pane is the app's own instead: made on this computer by Claude Code or the Codex CLI
+from the transcript the recap already read (`teams_ui::recap_summary`), no Teams request involved; sending it to the
+chat is an ordinary message post through the outbox.
 
 The chat's recap card (`teams_ui::meeting_recap`) is worked out from the chat's own messages (each recording's call,
 file, start and length, the transcript's call); it reads only the recording's thumbnail (Graph, as a shared file's) and

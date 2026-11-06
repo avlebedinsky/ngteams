@@ -4,6 +4,9 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use serde_json::Value;
 
 use super::*;
 use crate::translate::LineKey;
@@ -187,7 +190,7 @@ fn the_call_reached_both_processes(log: &str) {
 
 #[test]
 fn claude_runs_without_tools_settings_or_saved_sessions() {
-    let args = Backend::Claude.args("Synthetic instructions.");
+    let args = Backend::Claude.args(Work::Captions, "Synthetic instructions.");
     for flag in [
         "--tools",
         "--setting-sources",
@@ -198,7 +201,7 @@ fn claude_runs_without_tools_settings_or_saved_sessions() {
         assert!(args.iter().any(|arg| arg == flag), "{flag}");
     }
     assert_eq!(args.last().map(String::as_str), Some("Synthetic instructions."));
-    let codex = Backend::Codex.args("unused");
+    let codex = Backend::Codex.args(Work::Captions, "unused");
     assert_eq!(codex[0], "app-server");
     assert!(codex.iter().any(|arg| arg == "features.hooks=false"));
     assert!(!codex.iter().any(|arg| arg == "unused"));

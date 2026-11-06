@@ -9,6 +9,8 @@
 mod common;
 #[path = "support/recap_fixtures.rs"]
 mod fixtures;
+#[path = "support/recap_summary_view.rs"]
+mod summary;
 
 use std::sync::Arc;
 use std::time::Duration;
