@@ -228,7 +228,7 @@ Probes make plain HTTP GETs with the account's tokens and print outlines/claims,
 | `ab-chat`, `ab-chat-full`, `abc-chat`, `chat-shapes`, `abc-everyone` | messages, edits, reactions, quotes, typing, group creation and mentions; explicit holds where shapes are captured |
 | `ab-image`, `ab-file` | synthetic uploads held for shape capture |
 | `ab-trouter`, `ab-trouter-quiet` | push capture; quiet variant holds `user.activity` frames |
-| `echo-call`, `ab-call`, `abc-call` | browser echo, 1:1 and group call captures; `--call` chooses the step (`--call steps`: once the call is up, the caller's page is driven over `PROTO_LAB_STEPS_SOCKET` with `team-manage`'s steps) |
+| `echo-call`, `ab-call`, `abc-call` | browser echo, 1:1 and group call captures; `--call` chooses the step (`--call steps`: once the call is up, the caller's page is driven over `PROTO_LAB_STEPS_SOCKET` with `team-manage`'s steps, a callee's by a step that starts `@b ` or `@c `) |
 | `ab-meeting`, `ab-meeting-join`, `meeting-steps` | scheduling, pre-join and step-controlled meeting captures |
 | `channel-create`, `team-manage` | held channel/team writes; team sending requires explicit scenario configuration. `team-manage` is also how an agent looks at a feature in browser Teams before building it: steps over `PROTO_LAB_STEPS_SOCKET` (`go`, `click`, `point`, `xy`, `wheel`, `type`, `insert`, `press`, `js`, `shot`, `seen`, `hold`, `quit`) |
 | `own-presence-activity`, `own-presence-endpoint`, `own-presence-both`, `own-presence-manual-held`, `own-presence-manual` | compare activity/presence paths, with the requested capture holds |
