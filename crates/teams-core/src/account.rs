@@ -324,12 +324,13 @@ fn with_provisioning<C: Credentials>(
 }
 
 /// The writes' transport with what a team's writes need: the provisioning service's base (a private channel, an archived
-/// team) and CSA's (its tags), each by its GTM from `base`.
+/// team) and CSA's (its tags), each by its GTM from `base`; and AMS's, which a pasted picture is sent to.
 fn with_team_writes<C: Credentials>(
     writes: HttpTransport<C>,
     base: impl Fn(&str) -> Option<String>,
 ) -> Result<HttpTransport<C>, BuildError> {
     let writes = with_provisioning(writes, base(PROVISIONING_GTM).as_deref())?;
+    let writes = with_ams(writes, base(AMS_GTM).as_deref())?;
     with_csa(writes, base(CSA_GTM).as_deref())
 }
 

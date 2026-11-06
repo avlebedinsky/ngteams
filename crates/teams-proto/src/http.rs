@@ -416,6 +416,14 @@ impl<C: Credentials> HttpTransport<C> {
             return self.exchange(outgoing).await;
         }
         let mut headers = plain_headers(request.service, body.is_some() || request.service == Service::Presence);
+        // a write to the media service (a picture's object, its bytes) takes JSON back, as the web client's asked
+        if request.service == Service::Ams {
+            for (name, value) in &mut headers {
+                if name.eq_ignore_ascii_case(ACCEPT.as_str()) {
+                    "application/json".clone_into(value);
+                }
+            }
+        }
         // a request naming its own body's type (a picture's bytes) sends that one alone
         if request
             .headers
@@ -1366,6 +1374,11 @@ const RELAY_PATH: &str = "trap";
 /// The async gateway's hosts end in this ([`Service::Ams`]: `us-prod.asyncgw.teams.microsoft.com`).
 pub const AMS_HOST_SUFFIX: &str = ".asyncgw.teams.microsoft.com";
 
+/// The `User-Agent` the media service is sent, as a Chrome on Linux running the web client sends it: the service makes
+/// the client's platform of it.
+const WEB_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+
 /// The `Accept` a picture's view is read with, as a browser's `<img>` sends it.
 const PICTURE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8";
 
@@ -1494,7 +1507,14 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         // the Entra form of the web client's read (`docs/protocol/auth.md`)
         Service::Relay => &[("api-version", "2"), ("x-ms-migration", "True")],
         // the object read's form (`proto-lab probe object`), as the web client's object creation sent it
-        Service::Ams => &[("x-ms-migration", "True")],
+        // the media service makes a platform id of the `User-Agent` and the client's build, and answers 400 without them:
+        // the web client's
+        Service::Ams => &[
+            ("x-ms-migration", "True"),
+            ("x-ms-test-user", "False"),
+            ("user-agent", WEB_USER_AGENT),
+            ("x-ms-client-version", crate::own::CLIENT_BUILD),
+        ],
         Service::Trouter
         | Service::Graph
         | Service::Csa

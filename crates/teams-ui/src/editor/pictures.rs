@@ -336,11 +336,18 @@ impl Editor {
                     .h(shape.image.height)
                     .flex_none(),
             )
-            // over the editor's own press-and-drag layer, which would take their clicks
-            .child(gpui::deferred(
-                div().absolute().top_1().right_1().occlude().child(remove),
-            ))
-            .children(status.map(|status| gpui::deferred(div().absolute().left_1().bottom_1().occlude().child(status))))
+            // their clicks theirs, not the editor's press-and-drag layer under the rows
+            .child(div().absolute().top_1().right_1().occlude().child(remove))
+            .children(status.map(|status| {
+                div()
+                    .absolute()
+                    .left_1()
+                    .right_1()
+                    .bottom_1()
+                    .flex()
+                    .occlude()
+                    .child(status)
+            }))
             .into_any_element()
     }
 
@@ -357,11 +364,13 @@ impl Editor {
             ),
             PictureState::Failed(why) => Some(
                 pill()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .items_center()
                     .gap_1()
                     .text_color(rgb(crate::theme::DANGER))
-                    .child(div().max_w(px(180.0)).truncate().child(why.clone()))
+                    .child(div().flex_1().min_w_0().truncate().child(why.clone()))
                     .child(selected_by(
                         format!("editor-picture-retry-{id}"),
                         icon_button(("editor-picture-retry", id), Glyph::REFRESH, "Retry upload")

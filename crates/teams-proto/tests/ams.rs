@@ -255,6 +255,11 @@ async fn a_pasted_picture_is_sent_as_the_web_client_sends_one_on_the_ams_base() 
     assert_eq!(header(created, "x-ams-post-sharing-mode"), ["Inline"]);
     assert_eq!(header(created, "content-type"), ["application/json"]);
     assert_eq!(header(created, "x-ms-migration"), ["True"]);
+    assert_eq!(header(created, "accept"), ["application/json"]);
+    assert!(
+        header(created, "user-agent")[0].starts_with("Mozilla/5.0 (X11; Linux x86_64)"),
+        "the service makes a platform of it"
+    );
     let body: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
     assert_eq!(
         body,

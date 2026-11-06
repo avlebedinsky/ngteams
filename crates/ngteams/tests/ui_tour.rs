@@ -3160,7 +3160,8 @@ impl MockLab {
         let origin = mock.origin();
         let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
         // the outbox sends the calendar's writes (Meet now's meeting) to the middle tier
-        let transport = Arc::new(http()?.with_middle_tier(MIDDLE_TIER_BASE)?);
+        // and a pasted picture to AMS
+        let transport = Arc::new(http()?.with_middle_tier(MIDDLE_TIER_BASE)?.with_ams(AMS_BASE)?);
 
         let trouter_client = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())?
             .with_options(Options {

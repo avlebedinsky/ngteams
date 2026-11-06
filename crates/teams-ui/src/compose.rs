@@ -643,6 +643,7 @@ impl Compose {
                 this.trace
                     .record(&TraceLine::new("compose", "changed").conversation(&this.conversation));
                 this.refresh_picker(cx);
+                this.fit_pictures(cx);
                 this.typed(window, cx);
                 // the send button follows whether there is anything to send
                 cx.notify();

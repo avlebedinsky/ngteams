@@ -383,8 +383,9 @@ impl Render for Editor {
             .relative()
             .w_full()
             .cursor_text()
-            .child(scroll)
-            .child(input_and_mouse(cx.entity()));
+            // the press-and-drag layer under the rows, so a picture's own buttons over them take their clicks
+            .child(input_and_mouse(cx.entity()))
+            .child(scroll);
         Self::on_actions(root, cx)
     }
 }

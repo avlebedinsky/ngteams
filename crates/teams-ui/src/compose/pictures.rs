@@ -30,6 +30,22 @@ impl Compose {
         .detach();
     }
 
+    /// The box as first shown grows to show a picture whole, as Teams' does: its most height is the expanded box's while
+    /// it shows one, else its few lines'.
+    pub(super) fn fit_pictures(&mut self, cx: &mut Context<Self>) {
+        if self.expanded {
+            return;
+        }
+        let pictures = !self.editor.read(cx).shown_pictures().is_empty();
+        let most = gpui::px(if pictures {
+            super::EXPANDED_MAX
+        } else {
+            super::COLLAPSED_MAX
+        });
+        self.editor
+            .update(cx, |editor, cx| editor.set_heights(None, Some(most), cx));
+    }
+
     /// Attaches the files a paste brought that aren't pictures, where the box takes files.
     pub(super) fn pasted_files(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         if self.accepts_files() {
