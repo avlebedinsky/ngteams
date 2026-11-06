@@ -30,6 +30,10 @@ pub use call::{
     TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
     UpdateParticipantProperties, VoiceConsent,
 };
+pub use call::{
+    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, TimerState, TimerUpdate, UpdateMeetingSettings,
+    UpdateMeetingStates, meeting_locked,
+};
 pub use channel::{
     AddChannelMembers, ChannelCreated, ChannelLayout, CreateChannel, NewChannel, NewChannelKind, ShowChannelByDefault,
     channel_error_code,

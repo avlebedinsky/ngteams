@@ -44,6 +44,8 @@ impl CallStage {
                 .on_click(cx.listener(|this, _, _, cx| this.show_roster(false, cx))),
         );
         let lobby = (!active.lobby.is_empty()).then(|| self.lobby_section(&active.lobby, palette, cx));
+        let more = self.roster_more(active, cx);
+        let close = div().flex().items_center().gap_1().children(more).child(close);
         side_pane("call-roster-pane", "Participants", close, palette)
             .children(self.invite(active, palette, cx))
             .child(

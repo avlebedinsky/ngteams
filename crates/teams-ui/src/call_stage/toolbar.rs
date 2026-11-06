@@ -51,11 +51,18 @@ impl CallStage {
                     .child(div().truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
                     .child(
                         div()
-                            .debug_selector(|| "call-window-status".to_owned())
-                            .truncate()
-                            .text_xs()
-                            .text_color(rgb(palette.on_frame).opacity(0.75))
-                            .child(state),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .children(live.and_then(recording_dot))
+                            .child(
+                                div()
+                                    .debug_selector(|| "call-window-status".to_owned())
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(palette.on_frame).opacity(0.75))
+                                    .child(state),
+                            ),
                     ),
             )
             .children(live.map(|active| self.toolbar(active, palette, cx)))
@@ -159,6 +166,7 @@ impl CallStage {
             .when_some(hold_or_resume, |bar, hold| bar.child(hold).child(divider(palette)))
             .children(self.meeting_tools(active, palette, cx))
             .child(self.view_menu(palette, cx))
+            .children(self.controls_menu(active, palette, cx))
             .child(self.more(palette, cx))
             .child(divider(palette))
             // on hold, Teams greys the camera and the microphone out until the call resumes
@@ -449,6 +457,7 @@ impl CallStage {
             && self
                 .live(cx)
                 .is_some_and(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall);
+        let tools = self.more_tools(cx);
         selected_by(
             "call-more",
             Button::new("call-more")
@@ -458,6 +467,7 @@ impl CallStage {
                 .child(tool_face(Glyph::MORE, self.caption("More")))
                 .tooltip("More actions")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, window, cx| {
+                    let menu = meeting::more_items(menu, &stage, tools);
                     let menu = if video {
                         menu.item(effects_item("call-more-video-effects", stage.clone()))
                     } else {
@@ -468,7 +478,8 @@ impl CallStage {
                         menu_item("call-more-device-settings", Some(Glyph::VOLUME), "Audio settings")
                             .on_click(move |_, _, cx| emit(&settings, CallStageEvent::DeviceSettings, cx)),
                     );
-                    captions::more(menu, stage.clone(), caption_visible, caption_available, window, cx).min_w(px(240.0))
+                    let menu = captions::more(menu, stage.clone(), caption_visible, caption_available, window, cx);
+                    meeting::settings_submenu(menu, &stage, tools, window, cx).min_w(px(240.0))
                 }),
         )
         .into_any_element()
@@ -604,7 +615,7 @@ fn divider(palette: Palette) -> gpui::Div {
 }
 
 /// A row of a call menu, its test selector `selector`: its icon (when it has one) and its label.
-fn menu_item(selector: &'static str, glyph: Option<Glyph>, label: &'static str) -> PopupMenuItem {
+pub(super) fn menu_item(selector: &'static str, glyph: Option<Glyph>, label: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| {
         div()
             .debug_selector(move || selector.to_owned())
@@ -738,4 +749,17 @@ pub(super) fn tool_face(glyph: Glyph, caption: &'static str) -> gpui::Div {
         .gap_0p5()
         .child(glyph.icon().size(px(20.0)))
         .when(!caption.is_empty(), |face| face.child(div().text_xs().child(caption)))
+}
+
+/// The red dot Teams shows by the call's duration while a recording runs.
+fn recording_dot(active: &ActiveCall) -> Option<gpui::Div> {
+    active.meeting.recording.as_ref()?;
+    Some(
+        div()
+            .debug_selector(|| "call-recording-dot".to_owned())
+            .flex_none()
+            .size(px(10.0))
+            .rounded_full()
+            .bg(rgb(theme::DANGER)),
+    )
 }

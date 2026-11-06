@@ -6,6 +6,7 @@ use teams_proto::{
     StartCall, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
 };
 use teams_proto::{EndConversation, HoldCall, PublishState, RemoveState, ResumeCall, SendCallReaction};
+use teams_proto::{UpdateMeetingSettings, UpdateMeetingStates};
 
 /// The id a write's outcome comes back under ([`crate::Calls::on_outcome`]). Unique for the machine's life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -56,6 +57,8 @@ pub enum CallWrite {
     EndMeeting(EndConversation),
     Hold(HoldCall),
     Resume(ResumeCall),
+    MeetingStates(UpdateMeetingStates),
+    MeetingSettings(UpdateMeetingSettings),
 }
 
 impl CallWrite {
@@ -87,6 +90,8 @@ impl CallWrite {
             Self::EndMeeting(write) => sink.submit(id, write),
             Self::Hold(write) => sink.submit(id, write),
             Self::Resume(write) => sink.submit(id, write),
+            Self::MeetingStates(write) => sink.submit(id, write),
+            Self::MeetingSettings(write) => sink.submit(id, write),
         }
     }
 
@@ -119,6 +124,8 @@ impl CallWrite {
             Self::EndMeeting(_) => "end_conversation",
             Self::Hold(_) => "hold",
             Self::Resume(_) => "resume",
+            Self::MeetingStates(_) => "update_meeting_states",
+            Self::MeetingSettings(_) => "update_meeting_settings",
         }
     }
 }

@@ -959,6 +959,8 @@ impl Core for FakeCore {
             | CallAction::React { call, .. }
             | CallAction::EndMeeting { call }
             | CallAction::Hold { call, .. }
+            | CallAction::Timer { call, .. }
+            | CallAction::LockMeeting { call, .. }
             | CallAction::Renegotiate { call } => call,
             CallAction::Call { .. }
             | CallAction::TestCall { .. }

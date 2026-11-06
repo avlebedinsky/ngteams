@@ -195,6 +195,14 @@ pub enum CallAction {
     /// A 1:1 call put on hold (`true`: the far end hears the service's music, the microphone sends silence) or taken
     /// off it, as Teams' Hold and Resume ([`Event::CallHeld`] tells it as it stands; the user's own mute comes back).
     Hold { call: CallId, held: bool },
+    /// The meeting's timer set as Teams' Timer sets it (Start, Pause, Play, Reset, Cancel timer): everyone in the call
+    /// sees it ([`Event::CallMeeting`] tells it as the conversation says).
+    Timer {
+        call: CallId,
+        timer: teams_proto::MeetingTimer,
+    },
+    /// The meeting locked (`true`: nobody else can join) or unlocked by its organizer, as Teams' Lock the meeting.
+    LockMeeting { call: CallId, locked: bool },
 }
 
 impl CallAction {
@@ -314,6 +322,8 @@ pub(crate) enum Act {
     React(CallId, String),
     EndMeeting(CallId),
     Hold(CallId, bool),
+    Timer(CallId, teams_proto::MeetingTimer),
+    LockMeeting(CallId, bool),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -819,6 +829,7 @@ where
                 log::info!("call {}: held by its far end {held}", call.get());
                 self.emit(Event::CallHeldByFarEnd { call, held });
             }
+            CallEvent::Meeting { call, state } => self.emit(Event::CallMeeting { call, state }),
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }
@@ -1415,6 +1426,23 @@ where
     C: Credentials + 'static,
     T: Transport<Error = HttpError> + Send + 'static,
 {
+    /// The meeting's timer and lock changed.
+    fn meeting_act(&mut self, act: Act) -> Result<CallId, CallActionError> {
+        match act {
+            Act::Timer(call, timer) => self
+                .calls
+                .set_timer(call, &timer)
+                .map(|()| call)
+                .map_err(CallActionError::from),
+            Act::LockMeeting(call, locked) => self
+                .calls
+                .lock_meeting(call, locked)
+                .map(|()| call)
+                .map_err(CallActionError::from),
+            _ => Err(CallActionError::Call(CallError::NotNow)),
+        }
+    }
+
     /// Takes the account's action; its answer goes to `reply`, at once or once its media is set up.
     fn act(&mut self, act: Act, reply: Waiting) {
         let now = Instant::now();
@@ -1458,6 +1486,7 @@ where
                 .hold(call, held)
                 .map(|()| call)
                 .map_err(CallActionError::from),
+            act @ (Act::Timer(..) | Act::LockMeeting(..)) => self.meeting_act(act),
             Act::Renegotiate(call) => match self.live.as_ref().filter(|live| live.call == call) {
                 // the machine first: the session's new offer would replace the one it waits on
                 Some(live) => match self.calls.begin_renegotiation(call) {

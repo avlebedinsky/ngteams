@@ -1,0 +1,101 @@
+{
+  "_synthetic": "Shaped like a meeting call's conversationUpdate and rosterUpdate deliveries (docs/protocol/calling.md, 'More of a running call', seen 2026-11-06); every id, code, passcode, name and time is made up; the placeholders (<mri:\u2026>, <guid:\u2026>, <code:\u2026>, <key:\u2026>, <thread:\u2026>) are filled in by the tests.",
+  "conversation_update": {
+    "conversationController": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0?i=0-0-0-0&e=1",
+    "sequenceNumber": 12,
+    "subject": "",
+    "meetingDetails": {
+      "invitation": "%3Cdiv+style%3D%22max-width%3A+1024px%3B+color%3A+%23242424%3B%22+class%3D%22me-email-text%22+lang%3D%22en-US%22%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A24px%3B%22+aria-hidden%3D%22true%22%3E________________%3C%2Fdiv%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A+12px%3B%22%3E%3Cspan+class%3D%22me-email-text%22+style%3D%22font-size%3A+20px%3B%22%3EMicrosoft+Teams+meeting%3C%2Fspan%3E%3C%2Fdiv%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A+6px%3B%22%3E%3Cspan+class%3D%22me-email-text%22+style%3D%22font-size%3A+20px%3B%22%3EJoin%3A+%3C%2Fspan%3E%3Ca+id%3D%22meet_invite_block.action.join_link%22+title%3D%22Meeting+join%22+class%3D%22me-email-link%22+href%3D%22https%3A%2F%2Fteams.microsoft.com%2Fmeet%2F<code:1>%3Fp%3D<key:1>%22%3Ehttps%3A%2F%2Fteams.microsoft.com%2Fmeet%2F<code:1>%3Fp%3D<key:1>%3C%2Fa%3E%3C%2Fdiv%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A+6px%3B%22%3E%3Cspan+class%3D%22me-email-text-secondary%22%3EMeeting+ID%3A+%3C%2Fspan%3E%3Cspan+class%3D%22me-email-text%22%3E111+222+333+444+5%3C%2Fspan%3E%3C%2Fdiv%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A+32px%3B%22%3E%3Cspan+class%3D%22me-email-text-secondary%22%3EPasscode%3A+%3C%2Fspan%3E%3Cspan+class%3D%22me-email-text%22%3ESynth3ic%3C%2Fspan%3E%3C%2Fdiv%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A+12px%3B%22%3E%3Chr+style%3D%22border%3A+0%3B%22%3E%3C%2Fhr%3E%3C%2Fdiv%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A+24px%3B%22%3E%3Ca+id%3D%22meet_invite_block.action.help%22+class%3D%22me-email-link%22+href%3D%22https%3A%2F%2Faka.ms%2FJoinTeamsMeeting%3Fomkt%3Den-US%22%3ENeed+help%3F%3C%2Fa%3E+%3Cspan%3E%7C%3C%2Fspan%3E+%3Ca+id%3D%22meet_invite_block.action.join_link_compatibility%22+href%3D%22https%3A%2F%2Fteams.microsoft.com%2Fl%2Fmeetup-join%2F<thread:1>%2F0%22+class%3D%22me-email-link%22%3ESystem+reference%3C%2Fa%3E%3C%2Fdiv%3E%0D%0A++%3Cdiv+style%3D%22margin-bottom%3A24px%3B%22+aria-hidden%3D%22true%22%3E________________%3C%2Fdiv%3E%0D%0A%3C%2Fdiv%3E",
+      "meetingCapability": {
+        "lockMeeting": true,
+        "disableLobby": false,
+        "presenterOption": "Everyone"
+      }
+    },
+    "meetingStates": {
+      "multiModalAI": {
+        "value": {
+          "enable": false
+        },
+        "sequenceNumber": 1
+      },
+      "timer": {
+        "value": {
+          "data": "{\"adhocTimer\":{\"state\":\"InProgress\",\"remainingDuration\":300000,\"sections\":[{\"title\":\"\",\"originalDuration\":300000}],\"pendingConsent\":false,\"consentRequested\":false},\"agendaTimer\":{\"state\":\"Cancelled\",\"remainingDuration\":300000,\"sections\":[],\"pendingConsent\":false,\"consentRequested\":false},\"rosTimer\":{\"state\":\"Cancelled\",\"remainingDuration\":300000,\"sections\":[{\"title\":\"\",\"originalDuration\":300000}],\"pendingConsent\":false,\"consentRequested\":false}}",
+          "lastEditTime": "2026-01-02T03:04:05.0060070Z"
+        },
+        "sequenceNumber": 3
+      }
+    }
+  },
+  "recording_roster": {
+    "participants": {
+      "<mri:recorder>": {
+        "version": 21,
+        "state": "active",
+        "details": {
+          "id": "<mri:recorder>",
+          "displayName": null,
+          "participantType": "none"
+        },
+        "endpoints": {
+          "<guid:1>": {
+            "call": {
+              "serverMuteVersion": 1
+            },
+            "endpointJoinTime": "2026-01-02T03:00:00.0000000Z",
+            "modalityJoined": "Call",
+            "endpointMetadata": {
+              "processingModes": {
+                "recording": {
+                  "state": "Active",
+                  "userId": "<mri:a>",
+                  "timestamp": "2026-01-02T03:00:04.0000000Z",
+                  "properties": {
+                    "recordVideo": "True",
+                    "exportFormatType": "Mp4"
+                  }
+                },
+                "realTimeTranscript": {
+                  "state": "Active"
+                }
+              }
+            }
+          }
+        },
+        "role": "admin"
+      }
+    },
+    "type": "Delta",
+    "sequenceNumber": 21
+  },
+  "recording_stopped_roster": {
+    "participants": {
+      "<mri:recorder>": {
+        "version": 24,
+        "state": "active",
+        "details": {
+          "id": "<mri:recorder>",
+          "displayName": null
+        },
+        "endpoints": {
+          "<guid:1>": {
+            "call": {
+              "serverMuteVersion": 1
+            },
+            "endpointMetadata": {
+              "processingModes": {
+                "recording": {
+                  "state": "Inactive",
+                  "userId": ""
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "type": "Delta",
+    "sequenceNumber": 24
+  }
+}

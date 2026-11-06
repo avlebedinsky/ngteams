@@ -31,6 +31,8 @@ pub struct Participant {
     pub hand_raised: bool,
     /// Whether it organizes the meeting (its roster entry's `meetingRole` `organizer`).
     pub organizer: bool,
+    /// When its endpoint in the call joined (`endpointJoinTime`, RFC 3339, as the roster writes it).
+    pub joined: Option<String>,
 }
 
 /// The account's own entry in the call's roster, as last told: its raised hand's id while it is up, and whether it
@@ -162,5 +164,6 @@ fn participant(entry: &RosterEntry) -> Participant {
         muted: entry.muted,
         hand_raised: entry.hand.is_some(),
         organizer: entry.organizer,
+        joined: entry.joined.clone(),
     }
 }

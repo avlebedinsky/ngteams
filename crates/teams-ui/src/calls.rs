@@ -119,6 +119,9 @@ pub struct ActiveCall {
     /// The far end holds the 1:1 call ([`teams_core::Event::CallHeldByFarEnd`]): Teams' held party sees its avatar
     /// over "On hold", its own controls as they were.
     pub held_by_far_end: bool,
+    /// What the meeting shares with everyone in it: its timer, its lock, how to join it, a recording someone runs
+    /// ([`teams_core::Event::CallMeeting`]).
+    pub meeting: teams_core::MeetingState,
 }
 
 /// A live reaction someone in the call sent ([`teams_core::Event::CallReaction`]).
@@ -468,6 +471,10 @@ pub enum Ask {
     EndMeeting,
     /// Put the 1:1 call on hold, or take it off hold (Teams' Hold and Resume).
     ToggleHold,
+    /// Set the meeting's timer (Teams' Timer: Start, Pause, Play, Reset, Cancel timer).
+    Timer(teams_proto::MeetingTimer),
+    /// Lock the meeting (`true`) or unlock it (its organizer's Lock the meeting).
+    LockMeeting(bool),
 }
 
 impl Ask {
@@ -493,6 +500,8 @@ impl Ask {
             Self::React(_) => "react",
             Self::EndMeeting => "end-meeting",
             Self::ToggleHold => "hold",
+            Self::Timer(_) => "timer",
+            Self::LockMeeting(_) => "lock-meeting",
         }
     }
 
@@ -736,6 +745,12 @@ impl Calls {
         self.prejoin.as_ref()
     }
 
+    /// The meeting last gone into (its chat, organizer and tenant, its title), as its pre-join named it.
+    #[must_use]
+    pub fn meeting_to_join(&self) -> Option<&MeetingToJoin> {
+        self.meeting.as_ref()
+    }
+
     /// Shows the pre-join of `to_join`: its camera off, its microphone on, nothing sent.
     pub fn open_prejoin(&mut self, to_join: MeetingToJoin, cx: &mut Context<Self>) {
         if !self.shown {
@@ -889,6 +904,7 @@ impl Calls {
                     | Event::CallOwn { .. }
                     | Event::CallHeld { .. }
                     | Event::CallHeldByFarEnd { .. }
+                    | Event::CallMeeting { .. }
                     | Event::CallReaction { .. }
             );
         }
@@ -941,6 +957,7 @@ impl Calls {
             Event::CallOwn { .. }
             | Event::CallHeld { .. }
             | Event::CallHeldByFarEnd { .. }
+            | Event::CallMeeting { .. }
             | Event::CallReaction { .. } => self.in_call(event),
             _ => return false,
         }
@@ -969,6 +986,11 @@ impl Calls {
             Event::CallHeldByFarEnd { call, held } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.held_by_far_end = *held;
+                }
+            }
+            Event::CallMeeting { call, state } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.meeting = state.clone();
                 }
             }
             Event::CallReaction {
@@ -1087,6 +1109,7 @@ impl Calls {
             reactions: Vec::new(),
             held: None,
             held_by_far_end: false,
+            meeting: teams_core::MeetingState::default(),
         }
     }
 
@@ -1173,7 +1196,9 @@ impl Calls {
                     admit: *admit,
                 })
             }
-            Ask::ToggleHand | Ask::React(_) | Ask::EndMeeting => self.meeting_action(ask),
+            Ask::ToggleHand | Ask::React(_) | Ask::EndMeeting | Ask::Timer(_) | Ask::LockMeeting(_) => {
+                self.meeting_action(ask)
+            }
             Ask::ToggleHold => {
                 let call = self.call.as_ref().ok_or("no-call")?;
                 Ok(CallAction::Hold {
@@ -1205,6 +1230,14 @@ impl Calls {
                 reaction: reaction.clone(),
             }),
             Ask::EndMeeting if call.organizer => Ok(CallAction::EndMeeting { call: call.id }),
+            Ask::Timer(timer) => Ok(CallAction::Timer {
+                call: call.id,
+                timer: timer.clone(),
+            }),
+            Ask::LockMeeting(locked) if call.organizer => Ok(CallAction::LockMeeting {
+                call: call.id,
+                locked: *locked,
+            }),
             _ => Err("not-organizer"),
         }
     }

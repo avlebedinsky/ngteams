@@ -436,6 +436,12 @@ pub enum Event {
     /// The far end of the account's 1:1 call put it on hold (`held`) or took it off hold, as its roster tells (the
     /// service's music on hold in the call while the account holds nothing): Teams' held party sees "On hold".
     CallHeldByFarEnd { call: CallId, held: bool },
+    /// What the account's meeting shares with everyone in it changed: its timer, its lock, how to join it, a recording
+    /// someone runs ([`teams_call::MeetingState`]).
+    CallMeeting {
+        call: CallId,
+        state: teams_call::MeetingState,
+    },
     /// Someone in the account's call sent a live reaction (the account's own too, as the service echoes it): who, their
     /// name as given, and the reaction (`like`, `heart`, `applause`, `laugh`, `surprised`).
     CallReaction {
@@ -2901,6 +2907,8 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
         CallAction::React { call, reaction } => Act::React(call, reaction),
         CallAction::EndMeeting { call } => Act::EndMeeting(call),
         CallAction::Hold { call, held } => Act::Hold(call, held),
+        CallAction::Timer { call, timer } => Act::Timer(call, timer),
+        CallAction::LockMeeting { call, locked } => Act::LockMeeting(call, locked),
     })
 }
 

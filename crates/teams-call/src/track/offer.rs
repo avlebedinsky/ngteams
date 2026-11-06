@@ -148,6 +148,8 @@ impl Offer {
                     | CallOperation::SendMessage
                     | CallOperation::Hold
                     | CallOperation::Resume
+                    | CallOperation::UpdateMeetingStates
+                    | CallOperation::UpdateMeetingSettings
             ),
             OfferState::Leaving => operation == CallOperation::Leave,
             OfferState::Declined => operation == CallOperation::Reject,
@@ -233,6 +235,8 @@ impl Offer {
                     CallOperation::PublishState,
                     CallOperation::RemoveState,
                     CallOperation::SendMessage,
+                    CallOperation::UpdateMeetingStates,
+                    CallOperation::UpdateMeetingSettings,
                 ]
                 .into_iter()
                 .filter_map(|operation| {

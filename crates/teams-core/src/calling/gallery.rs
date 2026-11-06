@@ -52,6 +52,8 @@ pub struct CallParticipant {
     pub hand_raised: bool,
     /// Whether it organizes the meeting: Teams' People pane says "Organizer" under its name.
     pub organizer: bool,
+    /// When it joined the call, as its roster entry says (`endpointJoinTime`, RFC 3339): the attendance list's time.
+    pub joined: Option<String>,
 }
 
 /// What a call's view is now: its participants, whether the account itself is speaking, and whether its microphone
@@ -228,6 +230,7 @@ impl Gallery {
                     muted: participant.muted,
                     hand_raised: participant.hand_raised,
                     organizer: participant.organizer,
+                    joined: participant.joined.clone(),
                 }
             })
             .collect();
@@ -256,6 +259,7 @@ mod tests {
             muted: false,
             hand_raised: false,
             organizer: false,
+            joined: None,
         }
     }
 

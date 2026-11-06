@@ -1165,6 +1165,7 @@ fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
                 muted: false,
                 hand_raised: false,
                 organizer: false,
+                joined: None,
             }],
             speaking: false,
             hearing: false,
@@ -1255,6 +1256,7 @@ fn view(who: &[(&str, &str, bool, Option<usize>, bool)], speaking: bool) -> Call
                 muted: false,
                 hand_raised: false,
                 organizer: false,
+                joined: None,
             })
             .collect(),
         speaking,
@@ -1478,6 +1480,7 @@ fn echo_heard(rig: &Rig, number: u64) {
                 muted: false,
                 hand_raised: false,
                 organizer: false,
+                joined: None,
             }],
             speaking: false,
             hearing: true,
@@ -3381,4 +3384,250 @@ fn a_reconnecting_call_says_so_over_its_stage() {
     status(&rig, 1, CallStatus::Connected);
     rig.cx.run_until_parked();
     assert!(!drawn(stage, "call-reconnecting"));
+}
+
+/// A group call in the trio chat, connected, its roster telling b and c: the call's window.
+fn group_call_up(rig: &Rig) -> &'static mut VisualTestContext {
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(rig, Some(TRIO), Arc::clone(&trace));
+    let (windows, _) = call_windows(rig, &shell, &trace);
+    registered(rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(rig, 1, CallStatus::Connected);
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: view(
+            &[
+                (LAB_B, "Lab Bee", false, Some(1), false),
+                (LAB_C, "Lab Sea", false, Some(2), false),
+            ],
+            false,
+        ),
+    });
+    rig.cx.run_until_parked();
+    let stage = stage(rig, &windows);
+    // the windows live as long as the test
+    std::mem::forget(windows);
+    stage
+}
+
+/// The meeting's state `state`, told for call 1.
+fn meeting(rig: &Rig, state: teams_core::MeetingState) {
+    rig.send(Event::CallMeeting { call: call(1), state });
+    rig.cx.run_until_parked();
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_group_call_s_timer_shows_to_everyone_and_each_change_goes_to_the_call() {
+    use teams_proto::{MeetingTimer, TimerState};
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    assert!(!drawn(stage, "call-timer"));
+    click(stage, "call-more");
+    click(stage, "call-more-timer");
+    // More → Timer: five minutes, paused, until it is sent
+    assert!(drawn(stage, "call-timer"));
+    click(stage, "call-timer-toggle");
+    let Some(CallAction::Timer { timer, .. }) = actions(&rig).last().cloned() else {
+        panic!("{:?}", actions(&rig));
+    };
+    assert_eq!(
+        (timer.state, timer.remaining_ms, timer.previous),
+        (TimerState::InProgress, 300_000, None)
+    );
+    // the conversation tells the timer running: Pause pauses it where it is
+    let running = MeetingTimer {
+        state: TimerState::InProgress,
+        remaining_ms: 300_000,
+        original_ms: 300_000,
+        edited_ms: Some(now_ms() - 61_000),
+        previous: None,
+    };
+    meeting(
+        &rig,
+        teams_core::MeetingState {
+            timer: Some(running),
+            ..teams_core::MeetingState::default()
+        },
+    );
+    click(stage, "call-timer-toggle");
+    let Some(CallAction::Timer { timer, .. }) = actions(&rig).last().cloned() else {
+        panic!("{:?}", actions(&rig));
+    };
+    assert_eq!(timer.state, TimerState::Paused);
+    assert_eq!(timer.previous, Some(TimerState::InProgress));
+    assert!(
+        (238_000..=240_000).contains(&timer.remaining_ms),
+        "{}",
+        timer.remaining_ms
+    );
+    // its time opens the editor: +5 min and Start
+    click(stage, "call-timer-time");
+    assert!(drawn(stage, "call-timer-editor"));
+    click(stage, "call-timer-add-5");
+    click(stage, "call-timer-start");
+    let Some(CallAction::Timer { timer, .. }) = actions(&rig).last().cloned() else {
+        panic!("{:?}", actions(&rig));
+    };
+    assert_eq!(
+        (timer.state, timer.remaining_ms, timer.original_ms),
+        (TimerState::InProgress, 600_000, 600_000)
+    );
+    assert!(!drawn(stage, "call-timer-editor"));
+    // cancelled for everyone: no bar
+    meeting(&rig, teams_core::MeetingState::default());
+    assert!(!drawn(stage, "call-timer"));
+}
+
+#[test]
+fn a_recording_someone_runs_and_the_lock_s_change_show_their_notices() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    meeting(
+        &rig,
+        teams_core::MeetingState {
+            recording: Some(teams_core::Recording {
+                by: Some(Mri::new(LAB_B)),
+            }),
+            ..teams_core::MeetingState::default()
+        },
+    );
+    assert!(drawn(stage, "call-recording-notice"));
+    assert!(drawn(stage, "call-recording-dot"));
+    click(stage, "call-recording-notice-close");
+    assert!(!drawn(stage, "call-recording-notice"));
+    assert!(drawn(stage, "call-recording-dot"), "the dot stays while it records");
+    meeting(
+        &rig,
+        teams_core::MeetingState {
+            locked: true,
+            ..teams_core::MeetingState::default()
+        },
+    );
+    assert!(drawn(stage, "call-lock-notice"));
+    assert!(!drawn(stage, "call-recording-dot"), "the recording stopped");
+}
+
+#[test]
+fn a_meeting_s_organizer_locks_it_after_asking_and_its_info_shows_how_to_join() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let window = prejoin_window(&rig, &windows);
+    click(window, "prejoin-join");
+    status(&rig, 1, CallStatus::Joining);
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    assert!(!drawn(stage, "call-controls"), "not told it organizes");
+    rig.send(Event::CallOwn {
+        call: call(1),
+        hand_raised: false,
+        organizer: true,
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-controls"));
+    click(stage, "call-roster");
+    click(stage, "call-roster-more");
+    assert!(drawn(stage, "call-roster-attendance"));
+    click(stage, "call-roster-lock");
+    assert!(drawn(stage, "call-lock-dialog"), "Lock asks first");
+    let before = actions(&rig).len();
+    click(stage, "call-lock-cancel");
+    assert_eq!(actions(&rig).len(), before, "Cancel sends nothing");
+    click(stage, "call-roster-more");
+    click(stage, "call-roster-lock");
+    click(stage, "call-lock-confirm");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::LockMeeting {
+            call: call(1),
+            locked: true
+        })
+    );
+    // More → Meeting info: how to join, as the invitation says
+    click(stage, "call-more");
+    click(stage, "call-more-meeting-info");
+    assert!(drawn(stage, "call-meeting-info-pane"));
+    assert!(!drawn(stage, "call-meeting-passcode"), "not told yet");
+    meeting(
+        &rig,
+        teams_core::MeetingState {
+            locked: true,
+            join: Some(teams_proto::MeetingJoinInfo {
+                join_link: Some("https://teams.microsoft.com/meet/1112223334445?p=MadeUp".to_owned()),
+                meeting_id: Some("111 222 333 444 5".to_owned()),
+                passcode: Some("MadeUp1".to_owned()),
+                help_link: None,
+                reference_link: None,
+            }),
+            ..teams_core::MeetingState::default()
+        },
+    );
+    for shown in [
+        "call-meeting-join-link",
+        "call-meeting-id",
+        "call-meeting-passcode",
+        "call-lock-notice",
+    ] {
+        assert!(drawn(stage, shown), "{shown}");
+    }
+}
+
+#[test]
+fn the_attendance_list_is_teams_utf16_tab_separated_file() {
+    let joined = chrono::DateTime::parse_from_rfc3339("2026-01-02T15:04:05Z")
+        .unwrap()
+        .with_timezone(&chrono::Local);
+    let bytes = teams_ui::call_stage::attendance_list(&[("Lab Bee".to_owned(), joined)]);
+    assert_eq!(&bytes[..2], [0xff, 0xfe], "its BOM");
+    let units: Vec<u16> = bytes[2..]
+        .chunks(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let text = String::from_utf16(&units).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("Full Name\tUser Action\tTimestamp"));
+    let row = lines.next().unwrap();
+    assert!(row.starts_with("Lab Bee\tJoined\t"), "{row}");
+    assert!(
+        row.ends_with(&joined.format("%-m/%-d/%y, %-I:%M:%S %p").to_string()),
+        "{row}"
+    );
+}
+
+#[test]
+fn the_timer_reads_and_changes_as_teams_does() {
+    use teams_proto::{MeetingTimer, TimerState};
+    use teams_ui::call_stage::{TimerChange, timer_after, timer_text};
+    assert_eq!(timer_text(300_000), "05:00");
+    assert_eq!(timer_text(59_001), "01:00");
+    assert_eq!(timer_text(0), "00:00");
+    let paused = MeetingTimer {
+        state: TimerState::Paused,
+        remaining_ms: 90_000,
+        original_ms: 120_000,
+        edited_ms: None,
+        previous: None,
+    };
+    let played = timer_after(Some(&paused), TimerChange::Toggle, 0, 0).unwrap();
+    assert_eq!((played.state, played.remaining_ms), (TimerState::InProgress, 90_000));
+    let reset = timer_after(Some(&paused), TimerChange::Reset, 0, 0).unwrap();
+    assert_eq!((reset.state, reset.remaining_ms), (TimerState::Paused, 120_000));
+    let cancelled = timer_after(Some(&paused), TimerChange::Cancel, 0, 0).unwrap();
+    assert_eq!(cancelled.state, TimerState::Cancelled);
+    assert_eq!(timer_after(None, TimerChange::Reset, 0, 0), None, "no timer to reset");
 }

@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 176] = [
+const STEPS: [Step; 5 + 181] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1397,7 +1397,78 @@ const STEPS: [Step; 5 + 176] = [
             stage.confirm_end_meeting(true, cx);
         });
     }),
+    // the meeting's timer running over the stage, someone's recording's notice and the red dot by the duration
+    ("call-group-timer", |shell, _, cx| {
+        with_stage(cx, |stage, cx| {
+            stage.confirm_end_meeting(false, cx);
+            stage.show_roster(false, cx);
+        });
+        meeting_state(shell, false, cx);
+    }),
+    // the timer's editor open from its time
+    ("call-group-timer-edit", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.edit_timer(true, cx));
+    }),
+    // in Teams Dark, the meeting locked: its notice, and Lock the meeting's question over the window
+    ("call-group-lock-dark", |shell, _, cx| {
+        with_stage(cx, |stage, cx| stage.edit_timer(false, cx));
+        meeting_state(shell, true, cx);
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+        with_stage(cx, |stage, cx| stage.confirm_locking(true, cx));
+    }),
+    // More's Meeting info in Teams Dark: how to join, as the invitation says
+    ("call-group-meeting-info-dark", |_, _, cx| {
+        with_stage(cx, |stage, cx| {
+            stage.confirm_locking(false, cx);
+            stage.show_meeting_info(true, cx);
+        });
+    }),
+    // and in Teams Light
+    ("call-group-meeting-info", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+    }),
 ];
+
+/// The made-up group call's meeting state, as the engine tells it: a timer running for a minute already, Lab Bee's
+/// recording, how to join, and the meeting `locked` or not.
+fn meeting_state(shell: &Entity<Shell>, locked: bool, cx: &mut App) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |now| i64::try_from(now.as_millis()).unwrap_or(0));
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::CallMeeting {
+            call: teams_core::CallId::for_tests(GROUP_CALL),
+            state: teams_core::MeetingState {
+                timer: Some(teams_proto::MeetingTimer {
+                    state: teams_proto::TimerState::InProgress,
+                    remaining_ms: 300_000,
+                    original_ms: 300_000,
+                    edited_ms: Some(now - 60_000),
+                    previous: None,
+                }),
+                locked,
+                join: Some(teams_proto::MeetingJoinInfo {
+                    join_link: Some("https://teams.microsoft.com/meet/1112223334445?p=MadeUpKey".to_owned()),
+                    meeting_id: Some("111 222 333 444 5".to_owned()),
+                    passcode: Some("MadeUp1".to_owned()),
+                    help_link: Some("https://aka.ms/JoinTeamsMeeting?omkt=en-US".to_owned()),
+                    reference_link: Some("https://teams.microsoft.com/l/meetup-join/made-up".to_owned()),
+                }),
+                recording: Some(teams_core::Recording {
+                    by: Some(Mri::new(LAB_B)),
+                }),
+            },
+        },
+        cx,
+    );
+}
 
 /// The made-up 1:1 call on hold (`held`) or off it, as the engine tells it.
 fn held(shell: &Entity<Shell>, held: bool, cx: &mut App) {
@@ -1453,6 +1524,7 @@ fn fake_group_call(shell: &Entity<Shell>, cx: &mut App) {
         muted: quiet,
         hand_raised: quiet,
         organizer: false,
+        joined: None,
     };
     let events = [
         teams_core::Event::Call {
@@ -1669,6 +1741,7 @@ fn fake_call(shell: &Entity<Shell>, cx: &mut App) {
                     muted: false,
                     hand_raised: false,
                     organizer: false,
+                    joined: None,
                 }],
                 speaking: false,
                 hearing: false,

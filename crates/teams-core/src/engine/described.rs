@@ -64,6 +64,13 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::React { call, reaction } => format!("call {}: reaction {reaction}", call.get()),
         CallAction::EndMeeting { call } => format!("call {}: the meeting ended for everyone", call.get()),
         CallAction::Hold { call, held } => format!("call {} held {held}", call.get()),
+        CallAction::Timer { call, timer } => format!(
+            "call {}: timer {} {} ms",
+            call.get(),
+            timer.state.as_str(),
+            timer.remaining_ms
+        ),
+        CallAction::LockMeeting { call, locked } => format!("call {}: meeting locked {locked}", call.get()),
     }
 }
 
@@ -185,7 +192,7 @@ fn plain(event: &Event) -> String {
         ),
         // no names: how many wait
         Event::Lobby { call, waiting } => format!("call {}: {} waiting in the lobby", call.get(), waiting.len()),
-        Event::CallOwn { .. } | Event::CallReaction { .. } => call_state(event),
+        Event::CallOwn { .. } | Event::CallReaction { .. } | Event::CallMeeting { .. } => call_state(event),
         Event::CallHeld { call, held } => format!("call {} held {held}", call.get()),
         Event::CallHeldByFarEnd { call, held } => format!("call {} held by its far end {held}", call.get()),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
@@ -196,6 +203,18 @@ fn plain(event: &Event) -> String {
         | Event::Failed { .. }
         | Event::CatchUpFailed { .. } => String::new(),
     }
+}
+
+/// What a meeting shares, by kind: never its join link or passcode, nor who records.
+fn call_meeting(call: crate::CallId, state: &teams_call::MeetingState) -> String {
+    format!(
+        "call {}: timer {:?}, locked {}, join info {}, recording {}",
+        call.get(),
+        state.timer.as_ref().map(|timer| timer.state),
+        state.locked,
+        state.join.is_some(),
+        state.recording.is_some()
+    )
 }
 
 /// The account's own state in its call, and a live reaction, by MRI and kind: never the sender's name.
@@ -212,6 +231,7 @@ fn call_state(event: &Event) -> String {
         Event::CallReaction {
             call, from, reaction, ..
         } => format!("call {}: reaction {reaction} from {from}", call.get()),
+        Event::CallMeeting { call, state } => call_meeting(*call, state),
         _ => String::new(),
     }
 }

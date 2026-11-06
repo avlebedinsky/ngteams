@@ -165,6 +165,10 @@ pub(crate) enum Step {
     Hold,
     /// The account's call taken off hold: its failing leaves it held.
     Resume,
+    /// The meeting's timer changed: its failing ends nothing (the timer stays as last told).
+    MeetingStates,
+    /// The meeting locked or unlocked: its failing ends nothing (the lock stays as last told).
+    MeetingSettings,
 }
 
 impl Step {
@@ -195,6 +199,8 @@ impl Step {
             Self::EndMeeting => "end_conversation",
             Self::Hold => "hold",
             Self::Resume => "resume",
+            Self::MeetingStates => "update_meeting_states",
+            Self::MeetingSettings => "update_meeting_settings",
         }
     }
 }
@@ -323,6 +329,8 @@ pub(crate) struct Call {
     pub(crate) endpoint_states: u64,
     /// The states the account published or took back in the call so far (its raised hand): each counts the next.
     pub(crate) published: u64,
+    /// What the meeting shares with everyone in it, as last told, and what its next changes name.
+    pub(crate) meeting: crate::machine::Meeting,
 }
 
 impl Call {
@@ -378,6 +386,7 @@ impl Call {
             started,
             endpoint_states: 1,
             published: 0,
+            meeting: crate::machine::Meeting::default(),
         }
     }
 

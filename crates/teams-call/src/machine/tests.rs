@@ -10,6 +10,9 @@ mod dynamic_callbacks;
 #[path = "../../tests/support/in_call.rs"]
 mod in_call;
 
+#[path = "../../tests/support/meeting_state.rs"]
+mod meeting_state;
+
 use std::time::{Duration, Instant};
 
 use crate::{Delivery, Observed};

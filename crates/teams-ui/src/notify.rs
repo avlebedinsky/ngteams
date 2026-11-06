@@ -362,6 +362,7 @@ impl Notifier {
 
     fn arrived(&mut self, conversation: &str, message: &Message, source: Source, cx: &mut Context<Self>) {
         if self.settings.read(cx).settings().notifications == Notifications::Off
+            || muted_in_call(cx)
             || !may_notify(self.core.me(), conversation, message, source)
         {
             return;
@@ -855,5 +856,25 @@ mod tests {
     fn a_collapsed_notification_counts_its_messages() {
         assert_eq!(collapsed_body(4, false), "4 new messages");
         assert_eq!(collapsed_body(5, true), "5 new messages, one or more mentioning you");
+    }
+}
+
+/// The call window's More → Settings → Mute notifications: no message notifies while the call it was asked in runs
+/// (the call window takes it back when the call ends).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MutedInCall(pub bool);
+
+impl gpui::Global for MutedInCall {}
+
+/// Whether a call's Mute notifications holds the notifications back now.
+#[must_use]
+pub fn muted_in_call(cx: &App) -> bool {
+    cx.try_global::<MutedInCall>().is_some_and(|muted| muted.0)
+}
+
+/// Holds the notifications back while a call runs (`muted`), or lets them through again.
+pub fn mute_in_call(muted: bool, cx: &mut App) {
+    if muted_in_call(cx) != muted {
+        cx.set_global(MutedInCall(muted));
     }
 }

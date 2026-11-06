@@ -89,6 +89,7 @@ pub use machine::{
     CallError, CallEvent, CallId, CallState, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity, Incoming,
     Outcome, Placement,
 };
+pub use machine::{MeetingState, RECORDER_MRI, Recording};
 pub use read::RemoteEnd;
 pub use roster::Participant;
 pub use write::{CallWrite, WriteId, WriteSink};

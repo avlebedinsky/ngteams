@@ -83,10 +83,16 @@ pub enum CallOperation {
     /// `DELETE …/conv/<id>`: the organizer ends the meeting for everyone in it, at the conversation's own URL (seen
     /// 2026-11-06, `meeting-steps`: End meeting). Reaches only who is in it.
     EndConversation,
+    /// `POST …/conv/<id>/updateMeetingStates`: a change of the meeting's shared states (its timer), at the
+    /// conversation's `updateMeetingStates` link (seen 2026-11-06, `ab-call --call steps`: Timer). Names nobody else.
+    UpdateMeetingStates,
+    /// `PUT …/conv/<id>/updateMeetingSettings`: the organizer locks or unlocks the meeting, at the conversation's
+    /// `updateMeetingSettings` link (seen 2026-11-06, `meeting-steps`: Lock the meeting). Names nobody else.
+    UpdateMeetingSettings,
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 28] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
@@ -113,6 +119,8 @@ impl CallOperation {
         Self::EndConversation,
         Self::Hold,
         Self::Resume,
+        Self::UpdateMeetingStates,
+        Self::UpdateMeetingSettings,
     ];
 
     /// The protocol operation name.
@@ -145,6 +153,8 @@ impl CallOperation {
             Self::EndConversation => "end_conversation",
             Self::Hold => "hold",
             Self::Resume => "resume",
+            Self::UpdateMeetingStates => "update_meeting_states",
+            Self::UpdateMeetingSettings => "update_meeting_settings",
         }
     }
 
@@ -152,7 +162,7 @@ impl CallOperation {
     #[must_use]
     pub fn method(self) -> &'static str {
         match self {
-            Self::UpdateEndpointMetadata => "PUT",
+            Self::UpdateEndpointMetadata | Self::UpdateMeetingSettings => "PUT",
             Self::Reject | Self::EndConversation => "DELETE",
             Self::Add
             | Self::Leave
@@ -176,7 +186,8 @@ impl CallOperation {
             | Self::RemoveState
             | Self::SendMessage
             | Self::Hold
-            | Self::Resume => "POST",
+            | Self::Resume
+            | Self::UpdateMeetingStates => "POST",
         }
     }
 
@@ -206,6 +217,8 @@ impl CallOperation {
             Self::SendMessage => "sendMessage",
             Self::Hold => "hold",
             Self::Resume => "resume",
+            Self::UpdateMeetingStates => "updateMeetingStates",
+            Self::UpdateMeetingSettings => "updateMeetingSettings",
             // the conversation's own URL, the call leg's own: no segment after it
             Self::Join | Self::KeepAlive | Self::EndConversation => "",
         }

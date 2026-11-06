@@ -88,6 +88,9 @@ pub(crate) struct Conversation {
     pub(crate) send_message: Option<CallLink>,
     /// The conversation itself (its `conversationController`): where a meeting's organizer ends it for everyone.
     pub(crate) controller: Option<CallLink>,
+    /// `updateMeetingStates` and `updateMeetingSettings`: where the meeting's timer and its lock change.
+    pub(crate) meeting_states: Option<CallLink>,
+    pub(crate) meeting_settings: Option<CallLink>,
 }
 
 impl Conversation {
@@ -105,6 +108,8 @@ impl Conversation {
             remove_state: at("removeState"),
             send_message: at("sendMessage"),
             controller: None,
+            meeting_states: at("updateMeetingStates"),
+            meeting_settings: at("updateMeetingSettings"),
         }
     }
 }
@@ -324,6 +329,8 @@ pub(crate) struct RosterEntry {
     pub(crate) hand: Option<String>,
     /// The participant organizes the meeting (`meetingRole` `organizer`).
     pub(crate) organizer: bool,
+    /// When its endpoint in the call joined (`endpointJoinTime`).
+    pub(crate) joined: Option<String>,
 }
 
 /// The roster update `body`'s participants, each where it reads (an MRI and a version); `None` unless it is one.
@@ -375,9 +382,9 @@ pub(crate) fn music_on_hold(body: &[u8]) -> Option<(u64, bool)> {
 }
 
 fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
-    // The built-in caption service and the music on hold are hidden in Teams: never a person in the gallery (the
-    // music would make a held 1:1 call look like a group call's).
-    if mri == teams_proto::captions::CAPTION_SERVICE_MRI || mri == MUSIC_ON_HOLD_MRI {
+    // The built-in caption service, the music on hold and the recording bot are hidden in Teams: never a person in
+    // the gallery (the music would make a held 1:1 call look like a group call's; a recording shows as its notice).
+    if mri == teams_proto::captions::CAPTION_SERVICE_MRI || mri == MUSIC_ON_HOLD_MRI || mri == crate::RECORDER_MRI {
         return None;
     }
     let version = entry.get("version")?.as_u64()?;
@@ -442,6 +449,13 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
             .and_then(|state| state.get("stateId")?.as_str())
             .map(str::to_owned),
         organizer: entry.get("meetingRole").and_then(Value::as_str) == Some("organizer"),
+        joined: endpoints.and_then(|endpoints| {
+            endpoints
+                .values()
+                .filter(|endpoint| endpoint.get("call").is_some_and(Value::is_object))
+                .find_map(|endpoint| endpoint.get("endpointJoinTime")?.as_str())
+                .map(str::to_owned)
+        }),
     })
 }
 

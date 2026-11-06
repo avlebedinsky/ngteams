@@ -1,5 +1,6 @@
 //! Typed call-control requests with validated operation links and protocol-shaped bodies.
 
+mod meeting;
 mod parts;
 
 use std::fmt;
@@ -9,6 +10,10 @@ use crate::Mri;
 use serde_json::{Map, Value, json};
 use url::Url;
 
+pub use self::meeting::{
+    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, TimerState, TimerUpdate, UpdateMeetingSettings,
+    UpdateMeetingStates, meeting_locked,
+};
 pub(crate) use self::parts::on_calling_base;
 pub use self::parts::{
     CALL_START_URL, CALLING_BASE, CALLING_HOST, CallContext, CallLink, CallParticipant, ChannelParameters, ClientInfo,
@@ -620,6 +625,8 @@ call_write!(
     HoldCall,
     ResumeCall,
 );
+
+call_write!(UpdateMeetingStates, UpdateMeetingSettings);
 
 /// The meeting a call is, as a join or a start names it (`meetingInfo`): its organizer's object id and tenant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

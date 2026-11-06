@@ -34,6 +34,8 @@ pub(crate) struct Party {
     pub(crate) link: Option<String>,
     /// Its `receiveMessage` callback: where the call's live reactions reach it.
     pub(crate) messages: Option<String>,
+    /// Its `conversationUpdate` callback: where the meeting's timer and lock reach it.
+    pub(crate) updates: Option<String>,
     pub(crate) active: bool,
     pub(crate) video_on: bool,
     /// Its endpoint's state as it last reported it (`updateEndpointState`).
@@ -66,6 +68,45 @@ pub(crate) fn listen(state: &mut State, index: usize, mri: &str, link: Option<&s
     };
     for party in call.roster.iter_mut().filter(|party| party.mri == mri) {
         party.messages = link.map(str::to_owned);
+    }
+}
+
+/// `mri`'s conversation updates in call `index` reach it at `link` from now on.
+pub(crate) fn updates_at(state: &mut State, index: usize, mri: &str, link: Option<&str>) {
+    let Some(call) = state.calling.calls.get_mut(index) else {
+        return;
+    };
+    for party in call.roster.iter_mut().filter(|party| party.mri == mri) {
+        party.updates = link.map(str::to_owned);
+    }
+}
+
+/// A change of the meeting's timer or lock (an `updateMeetingStates`' or an `updateMeetingSettings`' `body`) in call
+/// `index`, delivered to everyone in it at their `conversationUpdate` callbacks in the captured shape: the timer's JSON
+/// text with the service's edit time and the next sequence number, the lock under `meetingDetails.meetingCapability`.
+pub(crate) fn meeting_changed(state: &mut State, index: usize, body: &Value) {
+    let Some(call) = state.calling.calls.get_mut(index) else {
+        return;
+    };
+    let mut update = json!({"conversationController": Value::Null});
+    if let Some(data) = body.pointer("/meetingStates/timer/value/data") {
+        call.timer_sequence += 1;
+        update["meetingStates"] = json!({"timer": {
+            "value": {"data": data, "lastEditTime": crate::calling::now_rfc3339()},
+            "sequenceNumber": call.timer_sequence,
+        }});
+    }
+    if let Some(locked) = body.pointer("/meetingSettings/lockMeeting") {
+        update["meetingDetails"] = json!({"meetingCapability": {"lockMeeting": locked}});
+    }
+    let links: Vec<String> = call
+        .roster
+        .iter()
+        .filter(|party| party.active)
+        .filter_map(|party| party.updates.clone())
+        .collect();
+    for link in links {
+        state.call_back(Some(&link), update.clone());
     }
 }
 
@@ -136,6 +177,7 @@ pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<Str
         mri: mri.to_owned(),
         link,
         messages: None,
+        updates: None,
         active: true,
         video_on: false,
         muted: false,

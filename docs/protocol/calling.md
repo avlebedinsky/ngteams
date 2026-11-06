@@ -769,6 +769,30 @@ a alone). What each of Teams' remaining call controls sends:
 - **Apps**: a pane (Search for apps, the chat's apps, Get more apps) read from the chat's
   `…/chats/<chat>/apps/definitionsv2` and `apps/chatentitlements`.
 
+**How everyone learns it** (b's deliveries in the same run): a timer change reaches every participant as the
+conversation's `conversationUpdate` with `meetingStates.timer: {"value": {"data", "lastEditTime"}, "sequenceNumber"}`,
+`lastEditTime` the service's time of the edit and the sequence one past the request's (a request names the sequence it
+changes: `0` before any timer, then the one last told). A running timer has `remainingDuration` left as of
+`lastEditTime`; a paused one has it left. Reset sends `Paused` at the whole time (`sections[0].originalDuration`);
+the web client sends each change with the other two timers as last told and, after its first, the `adhocTimer`'s
+`previousState`. A lock change reaches everyone as `meetingDetails.meetingCapability.lockMeeting`. The same updates
+carry `meetingDetails.invitation`: the meeting's invitation, form-encoded HTML, whose anchors
+`meet_invite_block.action.join_link`, `…help` and `…join_link_compatibility` and its "Meeting ID:" and "Passcode:"
+lines are what Meeting info shows (its join link's `p` is not the passcode). A recording shows in the roster:
+Microsoft's recording bot (`28:bdd75849-…`, no display name) joins, its endpoint's
+`endpointMetadata.processingModes.recording` `{"state": "Active", "userId": <who started it>}` while it records
+(`Inactive`, `userId` empty once stopped), and `meetingStates.cloudRecording.value.State` says the same.
+
+The native client sends the timer and the lock as captured (`CallAction::Timer`, `CallAction::LockMeeting`, the
+organizer's only; a pause sends what is left then, which no capture showed), reads the conversation's updates and the
+recording bot's entry into `teams_call::MeetingState` (the bot is left out of the people, as Teams hides it), and
+shows the timer's bar and editor, the lock's question and notices, Meeting info and the recording's notice and red
+dot. People's Download attendance list is made locally from the roster's `endpointJoinTime`s. Not built: starting a
+recording (the user's token would go to the recording bot), Notes (a Loop page), Controls' Enable lobby and Allow all
+participants to (their requests weren't captured), Help and Report a concern (no captured target), Accessibility
+settings and Don't show chat bubbles (the app has neither), Call health, Apps (its loaded pane wasn't captured), and
+the Dial pad (the user doesn't want one).
+
 ## A call held past a dropped socket
 
 `dropped`: with the callee's page off the network (DevTools' emulation fails new requests; open sockets stay, so the run

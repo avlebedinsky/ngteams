@@ -19,5 +19,6 @@ mod failures;
 mod flows;
 mod group;
 mod in_call;
+mod meeting_state;
 mod support;
 mod video;

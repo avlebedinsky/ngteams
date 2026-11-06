@@ -95,6 +95,8 @@ pub struct Leg {
     roster: Option<String>,
     /// The `receiveMessage` callback its `attach` handed out.
     messages: Option<String>,
+    /// The `conversationUpdate` callback its `attach` handed out.
+    updates: Option<String>,
 }
 
 /// A call as the mock keeps it, for a test to read ([`crate::ChatServiceMock::calls`]).
@@ -127,6 +129,8 @@ pub struct MockCall {
     /// The `rosterUpdate` callbacks of the callees' `attach`es: each told the roster when it attached, then every
     /// change while the call runs (whether its callee answered, or let the ring end and joined later).
     pub(crate) roster_watchers: Vec<String>,
+    /// The meeting timer's sequence as last delivered (each change counts the next).
+    pub(crate) timer_sequence: u64,
 }
 
 /// A party's callbacks the mock calls back: its acceptance, the call's end and progress.
@@ -334,6 +338,12 @@ fn start(state: &mut State, caller: &str, body: &Value) -> Option<ResponseTempla
     }
     roster::enter(state, index, caller, roster::link_of(body));
     roster::listen(state, index, caller, roster::named(body, "receiveMessage").as_deref());
+    roster::updates_at(
+        state,
+        index,
+        caller,
+        roster::named(body, "conversationUpdate").as_deref(),
+    );
     Some(json_answer(200, &conversation_answer(&call.conversation)))
 }
 
@@ -366,6 +376,7 @@ fn new_call(
                 renegotiation: None,
                 roster: None,
                 messages: None,
+                updates: None,
             })
             .collect(),
         requests: Vec::new(),
@@ -377,6 +388,7 @@ fn new_call(
         roster: Vec::new(),
         roster_version: 0,
         roster_watchers: Vec::new(),
+        timer_sequence: 0,
     });
     state.calling.calls.len() - 1
 }
@@ -385,6 +397,32 @@ fn log(state: &mut State, index: usize, account: &str, op: &str) {
     if let Some(call) = state.calling.calls.get_mut(index) {
         call.requests.push((op.to_owned(), account.to_owned()));
     }
+}
+
+/// Now, as the service writes its edit times (`2026-11-06T09:06:07.0044889Z`, to the millisecond here).
+pub(crate) fn now_rfc3339() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    // the civil date of a day count since 1970-01-01 (Howard Hinnant's days_from_civil, inverted)
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60,
+        now.subsec_millis()
+    )
 }
 
 /// The conversation a start or a join opens (`answers.json`'s call start answer, on `conversation`), with the links a
@@ -397,7 +435,14 @@ fn conversation_answer(conversation: &str) -> Value {
         &text,
         &[("SyntheticConversation0", conversation), ("?i=0-0-0-0&e=1", CONV_QUERY)],
     );
-    for op in ["updateEndpointState", "publishState", "removeState", "sendMessage"] {
+    for op in [
+        "updateEndpointState",
+        "publishState",
+        "removeState",
+        "sendMessage",
+        "updateMeetingStates",
+        "updateMeetingSettings",
+    ] {
         answer["links"][op] = json!(conversation_url(conversation, Some(op)));
     }
     answer
@@ -525,6 +570,12 @@ fn join(state: &mut State, account: &str, conversation: &str, body: &Value) -> O
         accept_by_controller(state, index, acceptance.as_deref(), answer);
         roster::enter(state, index, account, roster::link_of(body));
         roster::listen(state, index, account, roster::named(body, "receiveMessage").as_deref());
+        roster::updates_at(
+            state,
+            index,
+            account,
+            roster::named(body, "conversationUpdate").as_deref(),
+        );
     }
     Some(json_answer(200, &conversation_answer(conversation)))
 }
@@ -602,6 +653,10 @@ fn conversation_op(
         "removeState" => roster::hand(state, index, account, None),
         "sendMessage" => {
             roster::react(state, index, body);
+            return Some(status(202));
+        }
+        "updateMeetingStates" | "updateMeetingSettings" => {
+            roster::meeting_changed(state, index, body);
             return Some(status(202));
         }
         "updateEndpointMetadata" | "updateParticipantProperties" => {}
@@ -912,6 +967,7 @@ fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     leg_state.attached.push((endpoint, end));
     leg_state.roster = roster::link_of(body);
     leg_state.messages = roster::named(body, "receiveMessage");
+    leg_state.updates = roster::named(body, "conversationUpdate");
     if let Some(link) = roster::link_of(body) {
         roster::watch(state, index, &link);
     }
@@ -930,7 +986,13 @@ fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     // the conversation's links for the account's hand and its reactions besides (seen 2026-11-06)
     if let Some(responses) = answer["additionalActionResponses"].as_array_mut() {
         for response in responses {
-            for op in ["publishState", "removeState", "sendMessage"] {
+            for op in [
+                "publishState",
+                "removeState",
+                "sendMessage",
+                "updateMeetingStates",
+                "updateMeetingSettings",
+            ] {
                 response["output"]["links"][op] = json!(conversation_url(&call.conversation, Some(op)));
             }
         }
@@ -966,9 +1028,11 @@ fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     leg_state.renegotiation = renegotiation;
     let roster_link = leg_state.roster.clone();
     let messages = leg_state.messages.clone();
+    let updates = leg_state.updates.clone();
     state.calling.calls[index].phase = CallPhase::Connected;
     roster::enter(state, index, &callee, roster_link);
     roster::listen(state, index, &callee, messages.as_deref());
+    roster::updates_at(state, index, &callee, updates.as_deref());
     if let Some(answer) = body.pointer("/callAcceptance/mediaContent") {
         // a caller the mock plays: its peer takes the callee's answer
         state.peer_accept(&call.id, &callee, answer);

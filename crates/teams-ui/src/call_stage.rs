@@ -44,9 +44,11 @@
 mod captions;
 mod chat_pane;
 mod gallery;
+mod meeting;
 mod people_pane;
 mod toolbar;
 pub use gallery::Layout;
+pub use meeting::{ATTENDANCE_FILE, TimerChange, attendance_list, timer_after, timer_text};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -171,6 +173,8 @@ enum Pane {
     People,
     Chat,
     Effects,
+    /// More → Meeting info.
+    MeetingInfo,
 }
 
 /// What the call window shows (see the module docs). A GPUI entity, the window's root view.
@@ -217,6 +221,20 @@ pub struct CallStage {
     confirm_end: bool,
     /// The meeting the call is, as its chat's thread names it (its join link), read once per call.
     meeting: Option<MeetingLink>,
+    /// More → Timer opened the timer's bar before the meeting runs one: five minutes, paused, until it is sent.
+    timer_draft: bool,
+    /// The timer's editor while it is open: its minutes and seconds.
+    timer_edit: Option<(u64, u64)>,
+    /// "Lock the meeting?" is asked.
+    confirm_lock: bool,
+    /// The meeting's lock as last seen, and the notice of its change while it shows (locked or not).
+    lock_seen: Option<bool>,
+    lock_notice: Option<bool>,
+    /// A recording ran when last seen, and its notice shows.
+    recording_seen: bool,
+    recording_notice: bool,
+    /// Meeting info's Copy join info put the join info on the clipboard.
+    join_info_copied: bool,
     /// The live reactions' floating while some show.
     reacting: Option<Task<()>>,
     /// The window's width as last drawn, px: a narrow one's toolbar shows its controls' icons alone.
@@ -301,6 +319,14 @@ impl CallStage {
             hands: Vec::new(),
             confirm_end: false,
             meeting: None,
+            timer_draft: false,
+            timer_edit: None,
+            confirm_lock: false,
+            lock_seen: None,
+            lock_notice: None,
+            recording_seen: false,
+            recording_notice: false,
+            join_info_copied: false,
             reacting: None,
             width: f32::MAX,
             results: None,
@@ -454,8 +480,12 @@ impl CallStage {
             );
             self.float_reactions(active, cx);
             self.order_hands(active);
+            self.meeting_seen(active);
         } else {
             self.confirm_end = false;
+            self.confirm_lock = false;
+            // the call's Mute notifications held them back only while it ran
+            crate::notify::mute_in_call(false, cx);
             if let Some(tiles) = &mut self.tiles {
                 tiles.clear(self.call.get());
             }
@@ -812,9 +842,11 @@ impl CallStage {
     ) -> AnyElement {
         if let Some(active) = live {
             let stage = self.stage(active, title, palette, cx);
+            let stage = self.with_meeting(stage, active, palette, cx);
             let roster = (self.pane == Pane::People).then(|| self.roster_pane(active, palette, cx));
             let chat = self.chat_pane(active, palette, cx);
             let effects = self.effects_pane(active, palette, cx);
+            let info = self.meeting_info_pane(active, title, palette, cx);
             return div()
                 .size_full()
                 .flex()
@@ -822,6 +854,7 @@ impl CallStage {
                 .children(roster)
                 .children(chat)
                 .children(effects)
+                .children(info)
                 .into_any_element();
         }
         match (ended, ended.and_then(|ended| ended.check)) {
@@ -969,6 +1002,7 @@ impl Render for CallStage {
             .child(div().flex_1().min_h_0().child(body))
             .children(captions);
         let confirmation = self.end_confirmation(palette, cx);
+        let lock = self.lock_confirmation(palette, cx);
         let sheet = crate::sheet::float(
             div().flex_1().min_h_0().w_full(),
             panes,
@@ -997,6 +1031,7 @@ impl Render for CallStage {
             .child(header)
             .child(sheet)
             .children(confirmation)
+            .children(lock)
     }
 }
 

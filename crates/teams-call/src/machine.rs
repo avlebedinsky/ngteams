@@ -187,6 +187,9 @@ pub enum CallEvent {
     /// The far end of the account's call put it on hold (`held`: the service's music-on-hold app came into its roster
     /// while the account held nothing) or took it off hold (the app left).
     HeldByFarEnd { call: CallId, held: bool },
+    /// What the meeting shares with everyone in it changed: its timer, its lock, how to join it, a recording someone
+    /// runs ([`MeetingState`]), as its conversation's updates and its roster tell it.
+    Meeting { call: CallId, state: MeetingState },
     /// Someone in the call sent a live reaction (`like`, `heart`, `applause`, `laugh`, `surprised`), the account's own
     /// as the service echoes it too: who, their name as given, and the reaction.
     Reaction {
@@ -1317,7 +1320,9 @@ impl Calls {
                 | Step::Lobby
                 | Step::Muted
                 | Step::Hand
-                | Step::React,
+                | Step::React
+                | Step::MeetingStates
+                | Step::MeetingSettings,
                 None,
             ) => {}
             (step, None) => self.fail(step, now),
@@ -1354,6 +1359,8 @@ impl Calls {
         };
         let Some(call) = self.call.as_mut() else { return };
         call.conversation = conversation;
+        self.meeting_answered(body);
+        let Some(call) = self.call.as_mut() else { return };
         // a meeting's call that runs already: who is in it comes only with this answer (its updates tell changes)
         if let Some(update) = read::answered_roster(body) {
             if let Some(participants) = call.roster.apply(update, &self.identity.mri) {
@@ -1416,6 +1423,7 @@ impl Calls {
                 self.echo_present(now);
             }
             (Kind::Conversation, "receiveMessage") => self.message_received(delivery),
+            (Kind::Conversation, "conversationUpdate") => self.conversation_updated(delivery),
             (Kind::Conversation, "addParticipantFailure") => {
                 if let Some(call) = self.call.as_mut().filter(|call| call.caption_inviting) {
                     call.caption_inviting = false;
@@ -1686,6 +1694,7 @@ impl Calls {
     /// A roster update at the call's own callback: the participants told when they changed.
     fn roster_updated(&mut self, delivery: &Delivery) {
         self.caption_roster(&delivery.body);
+        self.recorder_told(&delivery.body);
         let Some(update) = read::roster(&delivery.body) else {
             return;
         };
@@ -2025,3 +2034,8 @@ fn lobby_told(call: &mut Call, out: &mut Out, me: &Mri) {
 
 #[path = "captions.rs"]
 mod captions;
+
+#[path = "meeting.rs"]
+mod meeting;
+pub(crate) use meeting::Meeting;
+pub use meeting::{MeetingState, RECORDER_MRI, Recording};
