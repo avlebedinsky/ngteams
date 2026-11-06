@@ -160,18 +160,8 @@ review the next range. A blocked fix/check/landing leaves the base unchanged and
 
 ## Resume across either host
 
-On mode entry (including after `/clear` or a new session in the same process) or explicit resume, inspect
-`.dispatch/*/progress.json` and consider only unfinished boards: a task queued, running, waiting on user, failed, or
-preserved unfinished; a landed task no successful pass covered (its hash isn't an ancestor of `review_base`); or a
-pending result/completion notice. A finished board (every task landed, done, or user-dropped, its review settled and
-its drain's completion notice delivered) is history: don't claim it, append sessions, or point the page at it. Start
-a new board, even when its owner is this live process. Commits after its `review_base` that none of its tasks landed
-belong to other sessions; the new board's fresh base leaves them out. A matching owner PID never makes a board this
-run, since `/clear` keeps the PID. "After compaction reread only your own run" means the board this conversation
-created or claimed in its current context, not one found by PID.
-
-Skip unfinished boards with live verified owners other than this process; one this process owned under an earlier
-session was abandoned by it. For ownerless boards, check runtime agents/session state before claiming
+On mode entry or explicit resume, inspect `.dispatch/*/progress.json`; after compaction reread only your own run.
+Skip boards with live verified owners. For ownerless boards, check runtime agents/session state before claiming
 them; a recent timestamp alone doesn't prove death. A PID may be reused: verify host identity where possible.
 Don't combine boards owned by other sessions or discard their records. Resume recent abandoned work and say so;
 ask about old potentially obsolete tasks while continuing independent new work on a new board.

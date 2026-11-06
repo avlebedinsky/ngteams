@@ -13,8 +13,7 @@ and schemas exposed by the session. Never invent a tool or start a nested CLI to
   blocking wait at most 60 seconds and report only meaningful changes.
 - Use `run_in_background` for long shell commands and `TaskStop` to stop owned commands. Keep their IDs in the task.
 - The owner PID is `$CLAUDE_PID` and session ID is `$CLAUDE_CODE_SESSION_ID` when provided. Verify the owner exists.
-  Do not use the PID of a short-lived tool shell. `/clear` keeps the PID and changes the session ID, so a board owned
-  by this PID may be a finished earlier run; apply the resume rules rather than treating it as yours.
+  Do not use the PID of a short-lived tool shell.
 - The status server discovers Claude transcripts by name. Preserve `sessions` and optionally set `transcript` to
   the actual JSONL. Legacy boards without explicit worktree metadata can be inspected with
   `scripts/agent-state.sh <name> <session-id>...`.
