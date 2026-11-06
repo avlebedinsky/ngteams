@@ -3873,3 +3873,43 @@ fn transfer_holds_the_call_asks_whom_and_transfers_it_and_cancel_leaves_it_held(
     rig.cx.run_until_parked();
     assert!(drawn(stage, "call-resume"));
 }
+
+#[test]
+fn consult_holds_the_call_and_opens_the_person_s_one_to_one_chat() {
+    let rig = calling();
+    knows_sea(&rig);
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, asked) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    click(stage, "call-consult");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Hold {
+            call: call(1),
+            held: true
+        })
+    );
+    assert!(drawn(stage, "call-consult-dialog"));
+    stage.simulate_input("Lab");
+    stage.executor().advance_clock(std::time::Duration::from_millis(400));
+    click(stage, "call-transfer-found-0");
+    click(stage, "call-consult-chat");
+    assert!(!drawn(stage, "call-consult-dialog"));
+    let me = rig.cx.read(|cx| shell.read(cx).account().to_owned());
+    let chat = teams_proto::one_to_one_id(&me, LAB_SEA).expect("a 1:1 chat");
+    assert_eq!(
+        asked.lock().unwrap().last(),
+        Some(&CallWindowsEvent::OpenChat(me, chat))
+    );
+    // the call stays held: nothing resumes it
+    assert!(
+        !actions(&rig)
+            .iter()
+            .any(|action| matches!(action, CallAction::Hold { held: false, .. }))
+    );
+}

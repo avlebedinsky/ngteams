@@ -244,6 +244,11 @@ impl Desktop {
                     shell.open_settings_page(Page::Calls, window, cx);
                 });
             }
+            CallWindowsEvent::OpenChat(key, chat) => {
+                this.switch(key, cx);
+                let chat = chat.clone();
+                this.in_shell(cx, move |shell, window, cx| shell.open_chat(chat, window, cx));
+            }
             CallWindowsEvent::Closed => {
                 // a call window closed for another to open in its place keeps the app
                 let open = this.call_windows.read(cx).window().is_some();

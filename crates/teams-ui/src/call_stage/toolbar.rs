@@ -117,7 +117,7 @@ impl CallStage {
         ))
     }
 
-    /// A 1:1 call's Transfer, first in Teams' toolbar: it holds the call and asks whom (its dialog); greyed out while
+    /// A 1:1 call's Transfer and Consult, first in Teams' toolbar: it holds the call and asks whom (its dialog); greyed out while
     /// the call is held, as Teams has it.
     fn transfer_tools(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> Option<Vec<AnyElement>> {
         if !self.takes_transfer(active) {
@@ -131,8 +131,19 @@ impl CallStage {
             cx,
             |this, window, cx| this.open_transfer(transfer::Asking::Transfer, window, cx),
         );
+        let consult = tool(
+            ("call-consult", Glyph::USERS, self.caption("Consult")),
+            ("Consult then transfer", None),
+            false,
+            palette,
+            cx,
+            |this, window, cx| this.open_transfer(transfer::Asking::Consult, window, cx),
+        );
         let held = active.held.is_some();
-        Some(vec![on_hold(div().child(transfer), held)])
+        Some(vec![on_hold(
+            div().flex().items_center().gap_1().child(transfer).child(consult),
+            held,
+        )])
     }
 
     /// Whether the call takes Raise and React: a group call's or a meeting's that is up, as Teams offers them (a 1:1

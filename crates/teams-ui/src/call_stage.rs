@@ -116,12 +116,14 @@ pub const AUTO_CLOSE: Duration = Duration::from_secs(8);
 pub type ChatNamer = Rc<dyn Fn(&str, &App) -> Option<SharedString>>;
 
 /// What the call window asks of the app.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallStageEvent {
     /// More's (or a test call's results') "Device settings": the main window's settings on their Calls page.
     DeviceSettings,
     /// Close on a call's end or a test call's results, or the end left alone for [`AUTO_CLOSE`].
     Close,
+    /// Consult's Open chat: the 1:1 chat of this id opens in the main window.
+    OpenChat(String),
 }
 
 /// What a call's end offers: a new start to its chat, or a join of its group call that runs on.

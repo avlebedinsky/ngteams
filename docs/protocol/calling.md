@@ -751,7 +751,11 @@ a alone). What each of Teams' remaining call controls sends:
   Open chat). Start a call places an ordinary call to them in their 1:1 chat while the first call stays held in a
   floating card (its name, "Hold" and how long, Resume, Leave); the consult call's toolbar leads with an outlined
   **Transfer**. In the run the target's voicemail took the consult call and it dropped before Transfer was sent; the
-  consultative transfer's request wasn't captured.
+  consultative transfer's request wasn't captured. The native client offers Consult's dialog (it holds the call; the
+  person picked; Cancel on the left, leaving the call held; Open chat opening their 1:1 chat in the main window) but not
+  Start a call: the consult call would be a second call of the account while the first stays held, and the engine
+  keeps one call per account (the machine has one call slot; the call floor admits one call or ring across the app's
+  accounts); the consultative transfer that follows it wasn't captured either.
 - **Add participants** (People's "Invite someone or dial a number"): picking someone in a 1:1 call creates a group chat
   of the three (`POST v1/threads`, no topic) and posts the conversation's `add` (`addParticipantAndModality`) with
   `{"participants": {"from", "to": [{id, participantId}]}, "participantInvitationData": {}, "groupChat": {"threadId":

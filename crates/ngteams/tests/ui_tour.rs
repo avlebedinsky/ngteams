@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 201] = [
+const STEPS: [Step; 5 + 202] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1413,6 +1413,15 @@ const STEPS: [Step; 5 + 201] = [
     // and in Teams Dark
     ("call-window-transfer-picked-dark", |shell, _, cx| {
         theme(shell, teams_ui::theme::DARK_KEY, cx);
+    }),
+    // Consult in Teams Light: "Consult then transfer the call", someone picked, Cancel on the left and Open chat
+    ("call-window-consult", |shell, _, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        with_stage_window(cx, |stage, window, cx| {
+            stage.close_transfer(cx);
+            stage.open_transfer(teams_ui::call_stage::Asking::Consult, window, cx);
+            stage.pick_transfer(tour_person(), window, cx);
+        });
     }),
     // People in the 1:1 call, someone typed in "Invite someone" and found
     ("call-window-invite", |shell, _, cx| {
