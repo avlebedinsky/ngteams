@@ -318,6 +318,34 @@ fn a_send_being_translated_goes_as_it_was_sent_and_a_cancelled_edit_s_goes_not_a
     assert_eq!(message_writes(&rig).len(), 1, "{:?}", message_writes(&rig));
 }
 
+#[test]
+fn a_translated_send_refused_comes_back_beside_a_file_attached_meanwhile() {
+    let rig = Rig::start();
+    let dir = tempfile::tempdir().unwrap();
+    let slow = FAKE_CLAUDE.replace("*'<outgoing'*)\n", "*'<outgoing'*)\n      sleep 1\n");
+    let fake = tool(dir.path(), "claude", &slow);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, fake)])));
+    let (view, cx) = translated_chat(&rig);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    send(&view, cx, "Hallo");
+    let file = dir.path().join("made-up-notes.txt");
+    fs::write(&file, "synthetic").unwrap();
+    cx.update(|window, cx| {
+        compose.update(cx, |compose, cx| {
+            compose.attach_files(std::slice::from_ref(&file), window, cx);
+        });
+    });
+    // the engine refuses the write when the translation came
+    *rig.core.stopped.lock().unwrap() = true;
+    until(cx, |_| !message_writes(&rig).is_empty());
+    until(cx, |cx| {
+        cx.update(|_, cx| !compose.read(cx).translating() && compose.read(cx).value(cx).trim() == "Hallo")
+    });
+    assert_eq!(message_writes(&rig).len(), 1, "asked once");
+    cx.update(|_, cx| assert_eq!(compose.read(cx).attachments().len(), 1, "the file stays beside it"));
+}
+
 /// The header's language picker on its own.
 struct Header(Entity<ChatTranslation>);
 
