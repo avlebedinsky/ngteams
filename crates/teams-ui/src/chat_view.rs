@@ -4713,23 +4713,15 @@ struct CardHook {
     cycle: HourCycle,
 }
 
-fn bubble(
+/// What `item`'s bubble holds: its text, its cards, its meeting, or the line a message drawn elsewhere leaves.
+fn bubble_content(
     item: &MessageItem,
-    mut chat: InChat<'_>,
-    highlighted: bool,
+    chat: &mut InChat<'_>,
+    id: &SharedString,
     palette: Palette,
-    bar: Option<AnyElement>,
     forward: Option<AnyElement>,
 ) -> AnyElement {
-    let id: SharedString = format!("message-text-{}", item.id).into();
-    let (files, links) = match &item.body {
-        Body::Text(text) => (
-            files::file_cards(&item.id, &item.files, text.0.source.as_ref(), palette),
-            link_preview::cards(&item.id, &item.links, text.0.source.as_ref(), palette),
-        ),
-        _ => (None, None),
-    };
-    let content = match &item.body {
+    match &item.body {
         Body::Text(text) => {
             let mut scope = Scope::new(chat.selection, message_key(item));
             if let Some(open) = chat.open.clone() {
@@ -4738,7 +4730,7 @@ fn bubble(
             if let Some(quoted) = chat.quoted.clone() {
                 scope = scope.quoting(quoted);
             }
-            rich_text::render_selectable(&id, &text.0, palette, forward, Some(&scope))
+            rich_text::render_selectable(id, &text.0, palette, forward, Some(&scope))
         }
         Body::Deleted => muted(DELETED, palette),
         Body::Cards(cards) => {
@@ -4769,7 +4761,26 @@ fn bubble(
         Body::Event(_) | Body::TimedEvent(_) | Body::MeetingEnded(_) | Body::Card(_) | Body::UnsupportedEvent(_) => {
             div().into_any_element()
         }
+    }
+}
+
+fn bubble(
+    item: &MessageItem,
+    mut chat: InChat<'_>,
+    highlighted: bool,
+    palette: Palette,
+    bar: Option<AnyElement>,
+    forward: Option<AnyElement>,
+) -> AnyElement {
+    let id: SharedString = format!("message-text-{}", item.id).into();
+    let (files, links) = match &item.body {
+        Body::Text(text) => (
+            files::file_cards(&item.id, &item.files, text.0.source.as_ref(), palette),
+            link_preview::cards(&item.id, &item.links, text.0.source.as_ref(), palette),
+        ),
+        _ => (None, None),
     };
+    let content = bubble_content(item, &mut chat, &id, palette, forward);
     let selector = format!("bubble-{}", item.id);
     let bubble = div()
         .debug_selector(move || selector)
