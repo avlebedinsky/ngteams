@@ -270,10 +270,30 @@ team's `spaceAdminSettings.userSettings.generalChannelSetting`; other standard c
 `channelSettings` thread property. Both keep fields this build does not expose. Private/shared channels expose
 their own membership rather than standard-channel moderation controls.
 
-Granular notification settings are account conversation properties: `channelNotificationSettings` (JSON text
-with `allNewPosts`, `tag`, `channelTeam`, `dskNotif`), `alerts` and `followAllRc`. Unknown keys survive a save. The
-desktop notifier reads the current channel preferences and suppresses muted/desktop-off channels. The dialog's
-failure state prevents saving a default over unread settings.
+Channel notification settings are the account's own conversation properties, read with the channel's conversation
+(`v1/users/ME/conversations/<channel>?view=msnp24Equivalent`). Seen 2026-11-06 with `proto-lab run team-manage`
+steps, lab account a in its lab-only team's General channel (a the only person): the channel's "..." → Channel
+notifications opens "Channel notification settings", with "<team> › <channel>" under the title; "Notify me for all
+new messages" is a dropdown of "Show in Activity and banner", "Show in Activity" and "Off"; "Include thread replies"
+is a checkbox, unchecked and unavailable while Off; under a rule, "Follow all new threads" with "Threads you
+participate in or are @mentioned in are auto-followed. Choose where you get notified in settings." and a "Go to
+Settings" link (Settings' Notifications), and an On/Off switch. Save stays unavailable until something changes.
+
+What Save sends, each a `PUT …/properties?name=<property>` answered 200, and only for what changed (the follow switch
+first):
+
+| Choice | Property and value |
+|---|---|
+| Show in Activity and banner | `channelNotificationSettings`: `{"allNewPosts":"On","dskNotif":"On","includeReplies":<bool>}` |
+| Show in Activity | `channelNotificationSettings`: `{"allNewPosts":"On","includeReplies":<bool>}` (no `dskNotif`) |
+| Off | `channelNotificationSettings`: `{"allNewPosts":"Off","includeReplies":false}` |
+| Follow all new threads on / off | `followAllRc`: the time it was turned on in epoch milliseconds, as text / empty text |
+
+Reopened, the dialog shows what was saved. Teams' dialog writes no `alerts` property and no `tag` or `channelTeam`
+keys; the classic client's `alerts` `false` (a muted channel) still keeps the desktop notifier quiet. The native
+dialog keeps keys of `channelNotificationSettings` it doesn't know. The notifier shows a post that doesn't mention the
+account only for "Show in Activity and banner", and such a reply only when replies are included or new threads are
+followed. A failed read leaves the dialog unable to save, so a default never overwrites unread settings.
 
 Channel email uses `beta/channels/<channel>/email`: a read returns `emailAddressDetails.emailId` and
 `allowedSenders` (`allowedSenderType`, `allowedDomains`). `NotFound` starts members-only address creation; other

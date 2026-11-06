@@ -60,6 +60,9 @@ enum Route {
     ConversationProperty {
         chat: String,
     },
+    OwnConversation {
+        chat: String,
+    },
     Thread {
         id: String,
     },
@@ -93,6 +96,7 @@ impl Route {
     fn of_chat(method: &str, chat: &str, rest: &[&str]) -> Option<Self> {
         let chat = chat.to_owned();
         let route = match (method, rest) {
+            ("GET", []) => Self::OwnConversation { chat },
             ("GET", ["messages"]) => Self::Messages { chat },
             ("GET", ["messages", "epochTimeStamp", _]) => Self::Around { chat },
             ("POST", ["messages"]) => Self::Post { chat },
@@ -194,7 +198,11 @@ fn dispatch(state: &mut State, route: Route, call: &Call<'_>) -> ResponseTemplat
         Route::Edit { chat, message } => writes::edit(state, call, &chat, &message),
         Route::Delete { chat, message } => writes::delete(state, call, &chat, &message),
         Route::Reaction { chat, message, remove } => writes::reaction(state, call, &chat, &message, remove),
-        Route::ConversationProperty { chat } => writes::read_horizon(state, call, &chat),
+        Route::ConversationProperty { chat } => match call.query("name") {
+            Some("channelNotificationSettings" | "followAllRc") => writes::own_property(state, call, &chat),
+            _ => writes::read_horizon(state, call, &chat),
+        },
+        Route::OwnConversation { chat } => reads::own_conversation(state, call, &chat),
         Route::CreateChat => writes::create_chat(state, call),
     }
 }
@@ -262,6 +270,10 @@ mod tests {
         assert_eq!(
             route("GET", "users/ME/conversations/19:x@thread.v2/messages/epochTimeStamp/5"),
             Some(Route::Around { chat: chat.clone() })
+        );
+        assert_eq!(
+            route("GET", "users/ME/conversations/19:x@thread.v2"),
+            Some(Route::OwnConversation { chat: chat.clone() })
         );
         assert_eq!(
             route("PUT", "users/ME/conversations/19:x@thread.v2/properties"),

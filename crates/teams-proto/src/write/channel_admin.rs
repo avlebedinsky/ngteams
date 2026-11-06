@@ -269,11 +269,14 @@ fn valid_preferences(data: &Value) -> bool {
             return false;
         }
     }
-    ["alerts", "followAllRc", "notifyAllRc"].into_iter().all(|key| {
-        properties
-            .get(key)
-            .is_none_or(|value| matches!(value.as_str(), Some("true" | "false")))
-    })
+    // Teams keeps "follow all new threads" as the time it was turned on (epoch milliseconds) or empty once off; an
+    // older client wrote `true`/`false`. Any text is a valid answer; only another type is a malformed one.
+    properties
+        .get("alerts")
+        .is_none_or(|value| matches!(value.as_str(), Some("true" | "false")))
+        && ["followAllRc", "notifyAllRc"]
+            .into_iter()
+            .all(|key| properties.get(key).is_none_or(Value::is_string))
 }
 
 impl Read for ChannelRead {
@@ -420,6 +423,28 @@ mod tests {
             .expect("string")
             .to_owned();
         assert_eq!(serde_json::from_str::<Value>(&stored).expect("JSON"), settings);
+    }
+    #[test]
+    fn preferences_take_teams_follow_times_and_refuse_malformed_values() {
+        // Synthetic answers in the shape of the chat service's conversation read.
+        let read = ChannelRead::Preferences {
+            channel: "19:channel@thread.tacv2".to_owned(),
+        };
+        let answer = |properties: Value| {
+            serde_json::to_vec(&json!({"id": "19:channel@thread.tacv2", "properties": properties})).expect("JSON")
+        };
+        for follow in ["1793885113290", "", "true", "false"] {
+            let settings = json!({"allNewPosts": "On", "includeReplies": true}).to_string();
+            let body = answer(json!({"followAllRc": follow, "channelNotificationSettings": settings}));
+            assert!(read.read_answer(&body).is_some(), "followAllRc {follow:?}");
+        }
+        for properties in [
+            json!({"followAllRc": 1}),
+            json!({"alerts": "maybe"}),
+            json!({"channelNotificationSettings": "not json"}),
+        ] {
+            assert!(read.read_answer(&answer(properties.clone())).is_none(), "{properties}");
+        }
     }
     #[test]
     fn archive_and_restore_name_the_owning_group_and_exact_channel() {

@@ -248,6 +248,30 @@ pub(crate) fn read_horizon(state: &mut State, call: &Call<'_>, chat: &str) -> Re
     status(200)
 }
 
+/// `PUT …/conversations/<chat>/properties?name=<channelNotificationSettings|followAllRc>`: one of the caller's own
+/// channel preferences, its text value kept for the caller's own read of the conversation, answered 200
+/// (`docs/protocol/channels.md`). Nobody else is told.
+pub(crate) fn own_property(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTemplate {
+    if let Err(code) = member_of(state, chat, &call.caller) {
+        return status(code);
+    }
+    let Some(name) = call.query("name") else {
+        return status(400);
+    };
+    let Some(value) = call
+        .object()
+        .and_then(|body| body.get(name)?.as_str().map(str::to_owned))
+    else {
+        return status(400);
+    };
+    state
+        .own_properties
+        .entry((call.caller.clone(), chat.to_owned()))
+        .or_default()
+        .insert(name.to_owned(), Value::String(value));
+    status(200)
+}
+
 /// `POST v1/threads` (`docs/protocol/chat-service.md`): `{members: [{id, role}], properties: {threadType: "chat"}}`
 /// with the caller among the members. With `uniquerosterthread` and two members it is their 1:1 chat (the one there
 /// is, if any), otherwise a new group chat. Answered 201 with `{"threadResource": <the thread read>}` and a

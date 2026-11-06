@@ -134,10 +134,10 @@ fn notification_choices_reach_own_properties_and_failed_reads_cannot_be_saved() 
     let rig = Rig::start();
     let (shell, cx) = shell(&rig);
     open(&shell, ChannelChoice::Notifications, cx);
-    click(cx, "channel-notification-muted");
+    choose_level(cx, "banner");
     click(cx, "channel-management-save");
     let views = rig.core.team_views.lock().unwrap();
-    assert!(views.iter().any(|request|matches!(request,OwnTeamView::ChannelProperty{channel,property:teams_proto::ChannelOwnProperty::Alerts,value}if channel==CHANNEL&&value=="false")));
+    assert!(views.iter().any(|request|matches!(request,OwnTeamView::ChannelProperty{channel,property:teams_proto::ChannelOwnProperty::Notifications,value}if channel==CHANNEL&&value.contains("\"dskNotif\":\"On\""))));
     drop(views);
     rig.core
         .channel_data_errors
@@ -223,17 +223,111 @@ fn moderation_toggles_and_notification_options_reach_their_domain_operations() {
     assert_eq!(settings["allowConnectorsPost"], 0);
     drop(writes);
     open(&shell, ChannelChoice::Notifications, cx);
-    click(cx, "channel-notification-all");
-    for selector in [
-        "channel-notification-follow",
-        "channel-notification-mentions",
-        "channel-notification-tags",
-        "channel-notification-desktop",
-    ] {
-        click(cx, selector);
-    }
+    choose_level(cx, "activity");
+    click(cx, "channel-notification-replies");
+    click(cx, "channel-notification-follow");
     click(cx, "channel-management-save");
-    assert!(!rig.core.team_views.lock().unwrap().is_empty());
+    assert_eq!(rig.core.team_views.lock().unwrap().len(), 2);
+}
+
+/// Opens the notification level's dropdown and chooses `key`'s row.
+fn choose_level(cx: &mut VisualTestContext, key: &str) {
+    click(cx, "channel-notification-level");
+    click(cx, &format!("channel-notification-level-{key}"));
+}
+
+/// The value of the account's own `property` each request sent sets, in order.
+fn own_values(rig: &Rig, property: teams_proto::ChannelOwnProperty) -> Vec<String> {
+    rig.core
+        .team_views
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|request| match request {
+            OwnTeamView::ChannelProperty {
+                channel,
+                property: sent,
+                value,
+            } if channel == CHANNEL && *sent == property => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn notification_settings_save_what_teams_writes_and_reopen_showing_the_saved_choice() {
+    use teams_proto::ChannelOwnProperty::{Alerts, FollowAll, Notifications};
+    let rig = Rig::start();
+    let (shell, cx) = shell(&rig);
+    open(&shell, ChannelChoice::Notifications, cx);
+    // nothing changed yet: Save is offered but sends nothing, as Teams' is greyed out
+    click(cx, "channel-management-save");
+    assert!(rig.core.team_views.lock().unwrap().is_empty());
+    // Off keeps "Include thread replies" unavailable, as Teams does
+    click(cx, "channel-notification-replies");
+    click(cx, "channel-management-save");
+    assert!(rig.core.team_views.lock().unwrap().is_empty());
+    choose_level(cx, "banner");
+    click(cx, "channel-notification-replies");
+    click(cx, "channel-notification-follow");
+    click(cx, "channel-management-save");
+    assert!(own_values(&rig, Alerts).is_empty(), "Teams' dialog never writes alerts");
+    let follow = own_values(&rig, FollowAll);
+    assert!(
+        matches!(&follow[..], [time] if time.len() >= 13 && time.bytes().all(|b| b.is_ascii_digit())),
+        "follow is the time it was turned on: {follow:?}"
+    );
+    let saved = own_values(&rig, Notifications);
+    let settings: serde_json::Value = serde_json::from_str(&saved[0]).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({"allNewPosts": "On", "dskNotif": "On", "includeReplies": true})
+    );
+    assert!(
+        cx.update(|_, cx| shell.read(cx).team_dialog().is_none()),
+        "a confirmed save closes the dialog"
+    );
+    // the service now answers with what was saved: reopened, the dialog shows it and offers no save until a change
+    rig.core.channel_data.lock().unwrap().insert(
+        format!("preferences:{CHANNEL}"),
+        ChannelData(serde_json::json!({"id": CHANNEL, "properties": {
+            "followAllRc": follow[0], "channelNotificationSettings": saved[0]}})),
+    );
+    open(&shell, ChannelChoice::Notifications, cx);
+    rig.core.team_views.lock().unwrap().clear();
+    click(cx, "channel-management-save");
+    assert!(rig.core.team_views.lock().unwrap().is_empty(), "reopened unchanged");
+    choose_level(cx, "off");
+    click(cx, "channel-notification-follow");
+    click(cx, "channel-management-save");
+    assert_eq!(
+        own_values(&rig, FollowAll),
+        [String::new()],
+        "unfollowing empties the time"
+    );
+    let settings: serde_json::Value = serde_json::from_str(&own_values(&rig, Notifications)[0]).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({"allNewPosts": "Off", "includeReplies": false})
+    );
+}
+
+#[test]
+fn go_to_settings_opens_the_notifications_page() {
+    let rig = Rig::start();
+    let (shell, cx) = shell(&rig);
+    open(&shell, ChannelChoice::Notifications, cx);
+    click(cx, "channel-notification-settings-link");
+    assert!(cx.update(|_, cx| shell.read(cx).team_dialog().is_none()));
+    assert!(
+        bounds(cx, "notifications-mentions").is_some(),
+        "the Notifications page is shown"
+    );
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).settings_view().read(cx).page()),
+        teams_ui::settings_view::Page::Notifications
+    );
+    assert!(rig.core.team_views.lock().unwrap().is_empty());
 }
 
 #[test]

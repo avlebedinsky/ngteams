@@ -174,6 +174,20 @@ pub(crate) fn filtered(state: &State, call: &Call<'_>, id: &str) -> ResponseTemp
     }
 }
 
+/// `GET v1/users/ME/conversations/<chat>?view=msnp24Equivalent`: the caller's own view of a conversation, here its id
+/// and the own properties the caller set (`docs/protocol/channels.md`).
+pub(crate) fn own_conversation(state: &State, call: &Call<'_>, chat: &str) -> ResponseTemplate {
+    if let Err(code) = member_of(state, chat, &call.caller) {
+        return status(code);
+    }
+    let properties = state
+        .own_properties
+        .get(&(call.caller.clone(), chat.to_owned()))
+        .cloned()
+        .unwrap_or_default();
+    json(200, &json!({"id": chat, "properties": properties}))
+}
+
 /// The conversation `id` if `caller` is a member; otherwise the status of the refusal: 404 when there is none, 403
 /// when they aren't one.
 pub(crate) fn member_of<'s>(state: &'s State, id: &str, caller: &str) -> Result<&'s Conversation, u16> {

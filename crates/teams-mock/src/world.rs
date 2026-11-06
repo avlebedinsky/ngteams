@@ -102,6 +102,9 @@ pub(crate) struct State {
     pub(crate) peers: crate::peers::Peers,
     /// Counts the changes the mock's Trouter acts on (a queued event, a registration), so its sockets wake up.
     pub(crate) changes: watch::Sender<u64>,
+    /// The account's own conversation properties it set, by (account MRI, conversation): a channel's
+    /// `channelNotificationSettings` and `followAllRc` (`docs/protocol/channels.md`).
+    pub(crate) own_properties: BTreeMap<(String, String), serde_json::Map<String, Value>>,
     clock: u64,
     groups_made: u64,
 }
@@ -137,6 +140,7 @@ impl State {
             #[cfg(feature = "media")]
             peers: crate::peers::Peers::default(),
             changes: watch::Sender::new(0),
+            own_properties: BTreeMap::new(),
             clock: CLOCK_START,
             groups_made: 0,
         })

@@ -757,6 +757,41 @@ async fn a_read_receipt_sets_only_the_readers_own_horizon() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_channel_s_own_notification_settings_read_back_only_for_who_set_them() -> TestResult {
+    let lab = Lab::start().await?;
+    let read = format!("users/ME/conversations/{}?view=msnp24Equivalent", segment(TEAM_CHANNEL));
+    assert_eq!(
+        lab.get(LAB_A, &read).await?,
+        json!({"id": TEAM_CHANNEL, "properties": {}})
+    );
+    let settings = json!({"allNewPosts": "On", "includeReplies": true}).to_string();
+    for (name, value) in [
+        ("channelNotificationSettings", settings.as_str()),
+        ("followAllRc", "1760000060000"),
+    ] {
+        let path = format!(
+            "users/ME/conversations/{}/properties?name={name}",
+            segment(TEAM_CHANNEL)
+        );
+        let answer = lab
+            .send(LAB_A, Method::PUT, &path, Some(&json!({ name: value })))
+            .await?;
+        assert_eq!(answer.status, 200, "{name}");
+    }
+    assert_eq!(
+        lab.get(LAB_A, &read).await?["properties"],
+        json!({"channelNotificationSettings": settings, "followAllRc": "1760000060000"})
+    );
+    assert_eq!(
+        lab.get(LAB_B, &read).await?["properties"],
+        json!({}),
+        "b's own view is b's"
+    );
+    assert!(lab.mock.take_events(LAB_B).is_empty(), "nobody is told");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_post_made_for_a_test_reads_back_and_reaches_the_others_as_a_client_s_does() -> TestResult {
     let lab = Lab::start().await?;
     let id = lab

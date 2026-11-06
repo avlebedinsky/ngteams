@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 171] = [
+const STEPS: [Step; 5 + 173] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -270,6 +270,8 @@ const STEPS: [Step; 5 + 171] = [
             });
         }
     }),
+    // the channel's "Channel notification settings", as Teams': the level's dropdown, replies, following
+    ("channel-notifications", open_channel_notifications),
     ("channel-workflows", |shell, window, cx| {
         shell.update(cx, Shell::close_team_dialog);
         let team = shell
@@ -684,7 +686,9 @@ const STEPS: [Step; 5 + 171] = [
     ("channel-dialog-dark-closed", |shell, _, cx| {
         with_channel_dialog(shell, cx, teams_ui::channel_dialog::ChannelDialog::close_now);
     }),
+    ("channel-notifications-dark", open_channel_notifications),
     ("teams-page-dark", |shell, window, cx| {
+        shell.update(cx, Shell::close_team_dialog);
         shell.update(cx, |shell, cx| shell.open_teams_page(window, cx));
     }),
     ("teams-page-dark-row-menu", |shell, window, cx| {
@@ -1950,6 +1954,31 @@ fn open_channel_dialog(shell: &Entity<Shell>, window: &mut Window, cx: &mut App)
     sidebar.update(cx, |sidebar, cx| sidebar.close_team_menu(window, cx));
     let teams = shell.read(cx).teams().clone();
     teams.update(cx, |teams, cx| teams.add_channel(TEAM, cx));
+}
+
+/// Opens the mock's team's General channel's "Channel notification settings" in place of any team dialog.
+fn open_channel_notifications(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    shell.update(cx, Shell::close_team_dialog);
+    let team = shell
+        .read(cx)
+        .teams()
+        .read(cx)
+        .teams()
+        .and_then(|teams| teams.iter().find(|team| team.id == TEAM))
+        .cloned();
+    if let Some(team) = team
+        && let Some(channel) = team.channels.first().cloned()
+    {
+        shell.update(cx, |shell, cx| {
+            shell.channel_chosen(
+                &team,
+                &channel,
+                teams_ui::channel_menu::ChannelChoice::Notifications,
+                window,
+                cx,
+            );
+        });
+    }
 }
 
 /// Fills the dialog as a person would: a private channel, laid out as posts.

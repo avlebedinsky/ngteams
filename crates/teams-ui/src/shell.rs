@@ -1701,6 +1701,9 @@ impl Shell {
                 match event {
                     TeamDialogEvent::Closed => {}
                     TeamDialogEvent::MoreOptions => this.open_create_team_more(window, cx),
+                    TeamDialogEvent::NotificationSettings => {
+                        this.open_settings_page(Page::Notifications, window, cx);
+                    }
                     TeamDialogEvent::Workflows { see_all } => this.open_workflows(*see_all, window, cx),
                     TeamDialogEvent::RunWorkflow { flow, message } => {
                         this.run_workflow(flow.clone(), message.clone(), window, cx);

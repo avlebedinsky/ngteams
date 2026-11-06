@@ -570,14 +570,13 @@ async fn choose(
     } else {
         None
     };
-    if channel_preferences.as_ref().is_some_and(|settings| {
-        settings.preset == crate::channel_management::NotificationPreset::Muted || settings.desktop == Some(false)
-    }) {
+    if channel_preferences.as_ref().is_some_and(|settings| settings.muted) {
         return Vec::new();
     }
-    let roots = if channel_preferences.as_ref().is_some_and(|settings| {
-        settings.follow_threads || settings.preset == crate::channel_management::NotificationPreset::All
-    }) {
+    let roots = if channel_preferences
+        .as_ref()
+        .is_some_and(|settings| settings.banners_posts() || settings.banners_replies())
+    {
         let id = candidates
             .first()
             .map(|candidate| candidate.conversation.clone())
@@ -593,9 +592,9 @@ async fn choose(
         let is_reply = roots.iter().any(|(id, root)| id == &candidate.message.id && id != root);
         let channel_all = channel_preferences.as_ref().is_some_and(|settings| {
             if is_reply {
-                settings.follow_threads
+                settings.banners_replies()
             } else {
-                settings.preset == crate::channel_management::NotificationPreset::All
+                settings.banners_posts()
             }
         });
         if (level == Notifications::Mentions || channel && !channel_all) && !mention {

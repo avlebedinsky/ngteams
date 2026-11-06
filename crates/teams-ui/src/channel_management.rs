@@ -13,7 +13,9 @@ use gpui::{
     Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable as _, FocusTrapElement as _, Selectable as _};
 use serde_json::{Value, json};
@@ -41,7 +43,7 @@ impl Mode {
         match self {
             Self::Edit => "Edit channel",
             Self::Manage => "Manage channel",
-            Self::Notifications => "Channel notifications",
+            Self::Notifications => "Channel notification settings",
             Self::Email => "Get email address",
             Self::Archive => "Archive channel",
             Self::Restore => "Restore channel",
@@ -60,32 +62,58 @@ impl Mode {
     }
 }
 
+/// Teams' "Notify me for all new messages": where a channel's every new post shows, beyond mentions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum NotificationPreset {
-    All,
+pub enum NotificationLevel {
+    /// "Show in Activity and banner": `allNewPosts` on and `dskNotif` on.
+    Banner,
+    /// "Show in Activity": `allNewPosts` on, no `dskNotif`.
+    Activity,
+    /// "Off": `allNewPosts` off (or never set).
     #[default]
-    MentionsAndReplies,
-    Muted,
+    Off,
+}
+impl NotificationLevel {
+    pub const ALL: [Self; 3] = [Self::Banner, Self::Activity, Self::Off];
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Banner => "banner",
+            Self::Activity => "activity",
+            Self::Off => "off",
+        }
+    }
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Banner => "Show in Activity and banner",
+            Self::Activity => "Show in Activity",
+            Self::Off => "Off",
+        }
+    }
 }
 
-/// Preferences understood by both the dialog and the desktop notifier. Unknown JSON keys are kept on save.
+/// The account's own preferences for a channel, as Teams' "Channel notification settings" shows them, understood by
+/// both the dialog and the desktop notifier. Unknown keys of `channelNotificationSettings` are kept on save.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelNotifications {
-    pub preset: NotificationPreset,
-    pub tag_mentions: bool,
-    pub channel_mentions: bool,
-    pub desktop: Option<bool>,
+    pub level: NotificationLevel,
+    /// "Include thread replies" (`includeReplies`), only with a level other than Off.
+    pub include_replies: bool,
+    /// "Follow all new threads": `followAllRc` holds the time it was turned on, empty once turned off.
     pub follow_threads: bool,
+    /// The classic client's channel mute (`alerts` `false`): Teams' current dialog neither shows nor writes it, but a
+    /// muted channel stays quiet.
+    pub muted: bool,
     pub raw: Value,
 }
 impl Default for ChannelNotifications {
     fn default() -> Self {
         Self {
-            preset: NotificationPreset::MentionsAndReplies,
-            tag_mentions: true,
-            channel_mentions: true,
-            desktop: None,
+            level: NotificationLevel::Off,
+            include_replies: false,
             follow_threads: false,
+            muted: false,
             raw: json!({}),
         }
     }
@@ -100,46 +128,79 @@ impl ChannelNotifications {
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
+        let on = |key: &str| raw.get(key).and_then(Value::as_str) == Some("On");
+        let level = match (on("allNewPosts"), on("dskNotif")) {
+            (true, true) => NotificationLevel::Banner,
+            (true, false) => NotificationLevel::Activity,
+            (false, _) => NotificationLevel::Off,
+        };
+        let include_replies = level != NotificationLevel::Off
+            && raw
+                .get("includeReplies")
+                .is_some_and(|value| *value == json!(true) || *value == json!("true"));
         Self {
-            preset: if properties.get("alerts").and_then(Value::as_str) == Some("false") {
-                NotificationPreset::Muted
-            } else if raw.get("allNewPosts").and_then(Value::as_str) == Some("On") {
-                NotificationPreset::All
-            } else {
-                NotificationPreset::MentionsAndReplies
-            },
-            tag_mentions: raw.get("tag").and_then(Value::as_str) != Some("Off"),
-            channel_mentions: raw.get("channelTeam").and_then(Value::as_str) != Some("Off"),
-            desktop: match raw.get("dskNotif").and_then(Value::as_str) {
-                Some("On") => Some(true),
-                Some("Off") => Some(false),
-                _ => None,
-            },
-            follow_threads: properties.get("followAllRc").and_then(Value::as_str) == Some("true"),
+            level,
+            include_replies,
+            follow_threads: properties
+                .get("followAllRc")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty() && value != "false"),
+            muted: properties.get("alerts").and_then(Value::as_str) == Some("false"),
             raw,
         }
     }
+    /// The writes that take `before` (what was read) to these preferences, as Teams sends them: the follow time
+    /// first when it changed (`now_ms` when turned on, empty when off), then the notification settings when they
+    /// changed. Nothing when nothing changed.
     #[must_use]
-    pub fn requests(&self, channel: &str) -> Vec<OwnTeamView> {
+    pub fn requests(&self, before: &Self, channel: &str, now_ms: u128) -> Vec<OwnTeamView> {
+        let mut writes = Vec::new();
+        if self.follow_threads != before.follow_threads {
+            let value = if self.follow_threads {
+                now_ms.to_string()
+            } else {
+                String::new()
+            };
+            writes.push((ChannelOwnProperty::FollowAll, value));
+        }
+        if self.level != before.level || self.include_replies != before.include_replies {
+            writes.push((ChannelOwnProperty::Notifications, self.settings().to_string()));
+        }
+        writes
+            .into_iter()
+            .map(|(property, value)| OwnTeamView::ChannelProperty {
+                channel: channel.to_owned(),
+                property,
+                value,
+            })
+            .collect()
+    }
+    /// `channelNotificationSettings` with this level and replies choice over the keys that were read.
+    fn settings(&self) -> Value {
         let mut raw = self.raw.clone();
-        let on = |enabled| if enabled { "On" } else { "Off" };
-        let muted = self.preset == NotificationPreset::Muted;
-        raw["allNewPosts"] = json!(on(self.preset == NotificationPreset::All));
-        raw["tag"] = json!(on(self.tag_mentions && !muted));
-        raw["channelTeam"] = json!(on(self.channel_mentions && !muted));
-        raw["dskNotif"] = self.desktop.map_or(Value::Null, |enabled| json!(on(enabled)));
-        [
-            (ChannelOwnProperty::Notifications, raw.to_string()),
-            (ChannelOwnProperty::Alerts, (!muted).to_string()),
-            (ChannelOwnProperty::FollowAll, self.follow_threads.to_string()),
-        ]
-        .into_iter()
-        .map(|(property, value)| OwnTeamView::ChannelProperty {
-            channel: channel.to_owned(),
-            property,
-            value,
-        })
-        .collect()
+        let Some(fields) = raw.as_object_mut() else {
+            return json!({});
+        };
+        let on = self.level != NotificationLevel::Off;
+        fields.insert("allNewPosts".to_owned(), json!(if on { "On" } else { "Off" }));
+        if self.level == NotificationLevel::Banner {
+            fields.insert("dskNotif".to_owned(), json!("On"));
+        } else {
+            fields.remove("dskNotif");
+        }
+        fields.insert("includeReplies".to_owned(), json!(on && self.include_replies));
+        raw
+    }
+    /// Whether a new post that doesn't mention the account shows a banner.
+    #[must_use]
+    pub fn banners_posts(&self) -> bool {
+        !self.muted && self.level == NotificationLevel::Banner
+    }
+    /// Whether a reply that doesn't mention the account shows a banner: replies are included with the posts, or new
+    /// threads are followed.
+    #[must_use]
+    pub fn banners_replies(&self) -> bool {
+        !self.muted && (self.banners_posts() && self.include_replies || self.follow_threads)
     }
 }
 
@@ -161,6 +222,8 @@ pub struct ChannelManagement {
     read: Option<Task<()>>,
     error: Option<SharedString>,
     notices: ChannelNotifications,
+    /// The preferences as read: Save offers only a change from them, and sends only what changed.
+    notices_read: ChannelNotifications,
     moderation: Value,
     team_settings: Value,
     email_domains: Vec<String>,
@@ -229,6 +292,7 @@ impl ChannelManagement {
             read: None,
             error: None,
             notices: ChannelNotifications::default(),
+            notices_read: ChannelNotifications::default(),
             moderation: json!({}),
             team_settings: json!({}),
             email_domains: Vec::new(),
@@ -296,7 +360,10 @@ impl ChannelManagement {
         match result {
             Ok(data) => {
                 match self.mode {
-                    Mode::Notifications => self.notices = ChannelNotifications::read(&data.0),
+                    Mode::Notifications => {
+                        self.notices = ChannelNotifications::read(&data.0);
+                        self.notices_read = self.notices.clone();
+                    }
                     Mode::Manage => {
                         let raw = data.0.pointer("/properties/channelSettings");
                         self.team_settings = data
@@ -418,7 +485,14 @@ impl ChannelManagement {
         }
         self.error = None;
         if self.mode == Mode::Notifications {
-            let reply = self.core.own_team_view(self.notices.requests(&self.channel.id), None);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis());
+            let requests = self.notices.requests(&self.notices_read, &self.channel.id, now_ms);
+            if requests.is_empty() {
+                return;
+            }
+            let reply = self.core.own_team_view(requests, None);
             self.finish(reply, "Channel notifications saved", cx);
             return;
         }
@@ -633,63 +707,146 @@ impl ChannelManagement {
             .child(div().flex_1().min_w_0().text_sm().child(label))
             .child(selected_by(id, control))
     }
+    /// Teams' "Channel notification settings": where every new post shows, whether replies count, and following all
+    /// new threads.
     fn notification_form(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
-        let presets = [
-            ("all", "All new messages", NotificationPreset::All),
-            (
-                "mentions",
-                "Mentions and replies",
-                NotificationPreset::MentionsAndReplies,
-            ),
-            ("muted", "Mute", NotificationPreset::Muted),
-        ]
-        .into_iter()
-        .map(|(key, label, preset)| {
-            selected_by(
-                format!("channel-notification-{key}"),
-                Button::new(SharedString::from(format!("channel-notification-{key}")))
-                    .label(label)
-                    .selected(self.notices.preset == preset)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.notices.preset = preset;
-                        cx.notify();
-                    })),
-            )
-        });
+        let fixed = self.core.read_only() || self.working.is_some();
+        let off = self.notices.level == NotificationLevel::Off;
+        let replies = Checkbox::new("channel-notification-replies")
+            .label("Include thread replies")
+            .checked(self.notices.include_replies)
+            .disabled(fixed || off)
+            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                this.notices.include_replies = *on;
+                cx.notify();
+            }));
         div()
             .flex()
             .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .child("Notify me for all new messages"),
+                    )
+                    .child(self.level_picker(fixed, palette, cx)),
+            )
+            .child(selected_by("channel-notification-replies", replies))
+            .child(div().h(px(1.0)).bg(rgb(palette.border)))
+            .child(self.follow_row(fixed, palette, cx))
+    }
+    /// The level's dropdown: the chosen level on its face, and a check on it in the menu.
+    fn level_picker(&self, fixed: bool, palette: Palette, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let chosen = self.notices.level;
+        let face = div()
+            .w_full()
+            .flex()
+            .items_center()
             .gap_2()
-            .child(div().text_sm().child("Notify me about"))
-            .child(div().flex().flex_wrap().gap_2().children(presets))
-            .child(self.switch(
-                ("channel-notification-follow", "Include replies to all threads"),
-                self.notices.follow_threads,
-                |this, v| this.notices.follow_threads = v,
-                palette,
-                cx,
-            ))
-            .child(self.switch(
-                ("channel-notification-mentions", "Channel and team mentions"),
-                self.notices.channel_mentions,
-                |this, v| this.notices.channel_mentions = v,
-                palette,
-                cx,
-            ))
-            .child(self.switch(
-                ("channel-notification-tags", "Tag mentions"),
-                self.notices.tag_mentions,
-                |this, v| this.notices.tag_mentions = v,
-                palette,
-                cx,
-            ))
-            .child(self.switch(
-                ("channel-notification-desktop", "Show desktop notifications"),
-                self.notices.desktop.unwrap_or(true),
-                |this, v| this.notices.desktop = Some(v),
-                palette,
-                cx,
-            ))
+            .min_w_0()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(chosen.label()),
+            )
+            .child(
+                Glyph::CHEVRON_DOWN
+                    .icon()
+                    .size(px(14.0))
+                    .text_color(rgb(palette.muted_foreground)),
+            );
+        let dialog = cx.entity().downgrade();
+        selected_by(
+            "channel-notification-level",
+            Button::new("channel-notification-level")
+                .outline()
+                .w(px(260.0))
+                .disabled(fixed)
+                .child(face)
+                .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                    NotificationLevel::ALL
+                        .into_iter()
+                        .fold(menu.min_w(px(260.0)), |menu, level| {
+                            menu.item(level_item(level, level == chosen, dialog.clone()))
+                        })
+                }),
+        )
+        .into_any_element()
+    }
+    /// "Follow all new threads", what following means and where its notifications are chosen, and its switch.
+    fn follow_row(&self, fixed: bool, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let on = self.notices.follow_threads;
+        let link = div()
+            .id("channel-notification-settings-link")
+            .debug_selector(|| "channel-notification-settings-link".to_owned())
+            .text_color(rgb(palette.brand))
+            .cursor_pointer()
+            .hover(gpui::Styled::underline)
+            .child("Go to Settings")
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.working.is_none() {
+                    cx.emit(TeamDialogEvent::NotificationSettings);
+                }
+            }));
+        let control = Switch::new("channel-notification-follow")
+            .checked(on)
+            .disabled(fixed)
+            .on_click(cx.listener(|this, value: &bool, _, cx| {
+                this.notices.follow_threads = *value;
+                cx.notify();
+            }));
+        let about = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_sm().child("Follow all new threads"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child("Threads you participate in or are @mentioned in are auto-followed."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(rgb(palette.muted_foreground))
+                            .child("Choose where you get notified in settings."),
+                    )
+                    .child(link),
+            );
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(about)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().child(if on { "On" } else { "Off" }))
+                    .child(selected_by("channel-notification-follow", control)),
+            )
     }
     fn manage_form(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let tabs = div()
@@ -906,6 +1063,29 @@ impl ChannelManagement {
         }
         cx.notify();
     }
+    /// The line under the title: the channel's name, or for its notifications Teams' "<team> › <channel>".
+    fn subtitle(&self, palette: Palette) -> gpui::Div {
+        let line = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .text_sm()
+            .text_color(rgb(palette.muted_foreground));
+        if self.mode != Mode::Notifications {
+            return line.child(self.channel.name.clone());
+        }
+        line.child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(self.team.name.clone()),
+        )
+        .child(Glyph::CHEVRON_RIGHT.icon().size(px(12.0)))
+        .child(div().flex_none().child(self.channel.name.clone()))
+    }
     fn footer(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let writes = self.mode != Mode::Email || self.email_settings;
         let manage_write = self.mode != Mode::Manage
@@ -916,7 +1096,8 @@ impl ChannelManagement {
             && self.error.is_none()
             && !self.loading
             && self.working.is_none()
-            && (self.mode != Mode::Delete || self.confirmed);
+            && (self.mode != Mode::Delete || self.confirmed)
+            && (self.mode != Mode::Notifications || self.notices != self.notices_read);
         let footer = div()
             .flex()
             .justify_end()
@@ -983,12 +1164,7 @@ impl Render for ChannelManagement {
                             .flex_col()
                             .gap_1()
                             .child(team_dialogs::title(self.mode.title()))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(palette.muted_foreground))
-                                    .child(self.channel.name.clone()),
-                            ),
+                            .child(self.subtitle(palette)),
                     )
                     .child(selected_by(
                         "channel-management-close",
@@ -1030,6 +1206,26 @@ impl Render for ChannelManagement {
     }
 }
 
+/// A row of the level's dropdown: its words, checked when chosen; choosing Off also clears "Include thread replies",
+/// as Teams does.
+fn level_item(level: NotificationLevel, chosen: bool, dialog: WeakEntity<ChannelManagement>) -> PopupMenuItem {
+    let selector = format!("channel-notification-level-{}", level.key());
+    PopupMenuItem::element(move |_, _| {
+        let selector = selector.clone();
+        div().debug_selector(move || selector.clone()).child(level.label())
+    })
+    .checked(chosen)
+    .on_click(move |_, _, cx| {
+        let _ = dialog.update(cx, |this, cx| {
+            this.notices.level = level;
+            if level == NotificationLevel::Off {
+                this.notices.include_replies = false;
+            }
+            cx.notify();
+        });
+    })
+}
+
 fn valid_domain(domain: &str) -> bool {
     domain.len() <= 253
         && domain.contains('.')
@@ -1061,21 +1257,76 @@ pub fn mode(choice: &ChannelChoice) -> Option<Mode> {
 mod tests {
     use super::*;
     use teams_proto::Request;
+    /// The `channelNotificationSettings` a request carries, parsed.
+    fn settings_of(request: &OwnTeamView) -> Value {
+        let body = request.body().expect("body");
+        serde_json::from_str(body["channelNotificationSettings"].as_str().expect("string")).expect("json")
+    }
     #[test]
-    fn muted_and_desktop_preferences_are_read_and_unknown_keys_survive_a_save() {
-        let properties = json!({"properties":{"alerts":"false","followAllRc":"true","channelNotificationSettings":json!({"allNewPosts":"Off","tag":"On","channelTeam":"Off","dskNotif":"Off","future":{"keep":1}}).to_string()}});
-        let mut settings = ChannelNotifications::read(&properties);
-        assert_eq!(settings.preset, NotificationPreset::Muted);
-        assert_eq!(settings.desktop, Some(false));
-        assert!(settings.follow_threads);
-        settings.preset = NotificationPreset::All;
-        let requests = settings.requests("channel");
-        let body = requests[0].body().expect("body");
-        let raw: Value =
-            serde_json::from_str(body["channelNotificationSettings"].as_str().expect("string")).expect("json");
-        assert_eq!(raw["future"], json!({"keep":1}));
-        assert_eq!(raw["allNewPosts"], "On");
-        assert_eq!(requests[1].body().expect("alerts")["alerts"], "true");
+    fn teams_levels_replies_and_follow_times_are_read_as_teams_writes_them() {
+        // Synthetic values in the shapes browser Teams wrote for each of its choices.
+        let read = |settings: Value, follow: &str| {
+            ChannelNotifications::read(
+                &json!({"properties":{"followAllRc":follow,"channelNotificationSettings":settings.to_string()}}),
+            )
+        };
+        let banner = read(
+            json!({"allNewPosts":"On","dskNotif":"On","includeReplies":true}),
+            "1793885113290",
+        );
+        assert_eq!(banner.level, NotificationLevel::Banner);
+        assert!(banner.include_replies && banner.follow_threads && !banner.muted);
+        assert!(banner.banners_posts() && banner.banners_replies());
+        let activity = read(json!({"allNewPosts":"On","includeReplies":true}), "");
+        assert_eq!(activity.level, NotificationLevel::Activity);
+        assert!(!activity.follow_threads && !activity.banners_posts() && !activity.banners_replies());
+        let off = read(json!({"allNewPosts":"Off","includeReplies":true}), "false");
+        assert_eq!(off.level, NotificationLevel::Off);
+        assert!(!off.include_replies && !off.follow_threads);
+        let unset = ChannelNotifications::read(&json!({"properties":{}}));
+        assert_eq!(unset, ChannelNotifications::default());
+        let muted = ChannelNotifications::read(&json!({"properties":{"alerts":"false","followAllRc":"true"}}));
+        assert!(muted.muted && muted.follow_threads && !muted.banners_replies());
+    }
+    #[test]
+    fn a_save_sends_only_what_changed_as_teams_does_and_keeps_unknown_keys() {
+        let before = ChannelNotifications::read(&json!({"properties":{"alerts":"true","channelNotificationSettings":
+            json!({"allNewPosts":"On","dskNotif":"On","includeReplies":true,"future":{"keep":1}}).to_string()}}));
+        assert!(before.requests(&before, "channel", 7).is_empty(), "nothing changed");
+        let mut after = before.clone();
+        after.level = NotificationLevel::Activity;
+        let requests = after.requests(&before, "channel", 7);
+        assert_eq!(requests.len(), 1, "never `alerts`, nor the unchanged follow time");
+        let settings = settings_of(&requests[0]);
+        assert_eq!(settings["allNewPosts"], "On");
+        assert!(
+            settings.get("dskNotif").is_none(),
+            "Show in Activity drops the banner key"
+        );
+        assert_eq!(settings["includeReplies"], true);
+        assert_eq!(settings["future"], json!({"keep":1}));
+        after.level = NotificationLevel::Off;
+        after.include_replies = false;
+        after.follow_threads = true;
+        let requests = after.requests(&before, "channel", 1_793_885_113_290);
+        assert!(
+            matches!(&requests[0], OwnTeamView::ChannelProperty { property: ChannelOwnProperty::FollowAll, value, .. }
+            if value == "1793885113290")
+        );
+        let settings = settings_of(&requests[1]);
+        assert_eq!(
+            (&settings["allNewPosts"], &settings["includeReplies"]),
+            (&json!("Off"), &json!(false))
+        );
+        let followed = ChannelNotifications {
+            follow_threads: true,
+            ..before.clone()
+        };
+        let unfollow = before.requests(&followed, "channel", 7);
+        assert!(
+            matches!(&unfollow[..], [OwnTeamView::ChannelProperty { property: ChannelOwnProperty::FollowAll, value, .. }]
+            if value.is_empty())
+        );
     }
     #[test]
     fn sender_domains_reject_urls_addresses_and_malformed_dns_labels() {
