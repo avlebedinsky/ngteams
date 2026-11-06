@@ -49,8 +49,9 @@ where
 
     /// A picture pasted into a message in `conversation`, sent as Teams' web client sends one: an object only that
     /// conversation may read, then the picture's bytes into it. The answer is the object's id, which the message's
-    /// `<img>` names. Each write is one attempt through the outbox ([`send_picture`]); a failed upload leaves an empty
-    /// object nobody is shown, as the web client's retries do.
+    /// `<img>` names. Each write goes through the outbox once, again only as [`CallRetries`] allows (a `401`, a short
+    /// throttle; [`send_picture`]); a failed upload leaves an empty object nobody is shown, as the web client's
+    /// retries do.
     pub(crate) fn picture(&self, conversation: String, picture: PastedPicture, reply: Responder<String>) {
         let outbox = Arc::clone(&self.outbox);
         let slots = Arc::clone(&self.slots);

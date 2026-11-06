@@ -511,8 +511,8 @@ made-up PNG into the box as a clipboard paste, then Enter):
   `src` the object's `imgo` view on `us-api.asm.skype.com`, `width` and `height`, `id` `x_<object>`, `itemid` the
   object and `alt` `image`, in a paragraph of its own, and the object's id in the message's `amsreferences`.
 
-The native client sends a pasted picture the same way (`teams_proto::CreatePicture`, `UploadPicture`, each a single
-attempt through the outbox, `teams_core::attachments`), but **at paste time**, while the picture is in the box, as
+The native client sends a pasted picture the same way (`teams_proto::CreatePicture`, `UploadPicture`, each through the outbox,
+again only as `CallRetries` allows: a `401`, a short throttle; `teams_core::attachments`), but **at paste time**, while the picture is in the box, as
 the file attachments are uploaded when chosen; Send waits for it. Its post writes the `<img>` above in the received
 form's attribute order (`teams_proto::sent_picture`, `MessageText`), without the received ones' `itemscope="png"`,
 whose value for another format no capture showed, and the object in `amsreferences`. An object made for a picture removed

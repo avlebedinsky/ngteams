@@ -1462,8 +1462,6 @@ impl Calls {
             (Step::Accept, Some(body)) => self.connected_by_accept(body, now),
             (Step::Decline, Some(_)) => self.finish(End::Declined),
             (Step::Leave, Some(_)) => self.left(),
-            // a keep-alive not taken ends nothing: the next one goes when it falls due, as the web client's does; a
-            // group call's media described again and not taken leaves the call as it was (the camera goes unseen)
             // the meeting ended for everyone: the call is over here (the conversation's end follows)
             (Step::EndMeeting, Some(_)) => self.finish(End::HungUp),
             // not ended for everyone: the account leaves it alone, as a hang-up does
@@ -1475,6 +1473,10 @@ impl Calls {
                 self.out.event(CallEvent::TransferFailed { call: id });
             }
             (Step::AcceptTransfer, body) => self.transfer_taken(body.is_some()),
+            // a keep-alive not taken ends nothing: the next one goes when it falls due, as the web client's does; a
+            // group call's media described again and not taken leaves the call as it was (the camera goes unseen);
+            // an in-call control not taken (mute, hand, reaction, the meeting's states, settings or properties, mute
+            // all, the lobby, the channel parameters) is no reason to end the call: it stays as it was
             (_, Some(_))
             | (
                 Step::KeepAlive
