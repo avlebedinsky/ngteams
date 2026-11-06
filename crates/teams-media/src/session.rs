@@ -18,8 +18,9 @@
 //! - **the camera thread** (`teams-media-cam`), while the camera is on ([`MediaSession::set_camera`]), hands the
 //!   camera's frames to libwebrtc, which encodes and sends them while our video line is negotiated to send;
 //! - **the screen thread** (`teams-media-scr`), while the account shares its screen ([`MediaSession::share_screen`]),
-//!   hands the screen's frames to libwebrtc on a sharing line of their own; the far end's share comes on its sharing
-//!   line, told to the sinks as [`SHARING_LINE`] ([`MediaSession::set_sharing_lines`]).
+//!   hands the screen's frames to libwebrtc on a sharing line of their own (a group call's: on the mixer's sharing
+//!   line, [`MediaSession::share_group_screen`]); the far end's share comes on its sharing line, told to the sinks as
+//!   [`SHARING_LINE`] ([`MediaSession::set_sharing_lines`]).
 //!
 //! No thread waits on another's device: a stuck speaker only stops what is played, a stuck microphone only what is
 //! sent.
@@ -562,6 +563,50 @@ impl MediaSession {
         Ok((offer, mid))
     }
 
+    /// Names a group call's sharing line (libwebrtc's mid, the dialect's `crate::sdp::NgcSession::sharing_slot`) before
+    /// the mixer's offer of it is answered: the answer sends on it too, so the account's screen can go out on it
+    /// ([`MediaSession::share_group_screen`]). `None` for a 1:1 call.
+    pub fn set_group_sharing(&self, mid: Option<String>) {
+        self.peer.set_group_sharing(mid);
+    }
+
+    /// Shares `screen` in a group call: its frames sent on the call's sharing line, which already goes both ways;
+    /// nothing is negotiated (the call's services are told by its media descriptions).
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] when the call has no sharing line that sends, [`Error::Io`] when the screen thread can't be
+    /// spawned.
+    pub fn share_group_screen(&self, screen: Box<dyn VideoSource>) -> Result<(), Error> {
+        let source = self
+            .peer
+            .group_screen_source()
+            .ok_or_else(|| Error::Rtc("the group call's sharing line doesn't send".into()))?;
+        let mut video = self.video.lock().unwrap_or_else(PoisonError::into_inner);
+        video.stop_screen();
+        let stop = Arc::new(AtomicBool::new(false));
+        let looped = ScreenLoop {
+            shared: Arc::clone(&self.shared),
+            source,
+            screen,
+            stop: Arc::clone(&stop),
+        };
+        let handle = thread::Builder::new()
+            .name("teams-media-scr".into())
+            .spawn(move || looped.run())?;
+        video.screen = Some((stop, handle));
+        self.peer.set_group_screen_sending(true);
+        Ok(())
+    }
+
+    /// Stops sharing the screen in a group call: its thread stopped, the sharing line's encoding off (the line still
+    /// receives). Whether it was shared.
+    pub fn stop_group_screen(&self) -> bool {
+        self.video.lock().unwrap_or_else(PoisonError::into_inner).stop_screen();
+        let sharing = self.peer.group_screen_sending();
+        self.peer.set_group_screen_sending(false);
+        sharing
+    }
+
     /// Stops sharing the screen: its thread stopped and our offer rejecting its line; `None` when none was shared.
     ///
     /// # Errors
@@ -578,7 +623,7 @@ impl MediaSession {
     /// Whether the account shares its screen.
     #[must_use]
     pub fn sharing(&self) -> bool {
-        self.peer.screen_mid().is_some()
+        self.peer.screen_mid().is_some() || self.peer.group_screen_sending()
     }
 
     /// Whether the camera is on.

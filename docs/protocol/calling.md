@@ -721,11 +721,26 @@ a alone). What each of Teams' remaining call controls sends:
   sharing line (`sourceId` `-1` once the share ends); the share then shows large with the people in a strip on its
   right. Why #13's native viewer saw nothing: the native client rejected the mixer's sharing line in its answers and
   asked for no source on it. It now takes that line as the web client does, reads who shares from the roster, asks for
-  their screen on it and shows it as a 1:1 call's far end's share (`Event::CallRemoteShare`). Sharing from a group
-  call isn't offered natively: the screen would have to go out on the mixer's line, which libwebrtc negotiated
-  receive-only on our side, and LiveKit's bindings (`libwebrtc` 0.3.55) don't expose a line's `set_direction`
-  (`webrtc-sys` does), so it can't be turned to send without an offer of our own on the mixer's lines (turned away
-  before, "Hold and resume").
+  their screen on it and shows it as a 1:1 call's far end's share (`Event::CallRemoteShare`). The web client's
+  sharing line goes both ways with its own streams named from the call's start (`a=ssrc-group:FID`, its
+  `x-ssrc-range` the first), in its group offer and in its answer to the mixer's: the screen later goes out on those
+  streams, which is why nothing is renegotiated.
+- **The native client's share, group call or meeting.** As the web client's: its sharing line goes both ways from the
+  call's start, libwebrtc's idle screen track on it (a source fed nothing, the encoding inactive) so its answer and
+  its group offer name the line's own streams. A line the mixer offered is turned to send before it is answered,
+  through `RtpTransceiver::set_direction`, which LiveKit's bindings (`libwebrtc` 0.3.55, 0.4.0 too) leave out and the
+  workspace patches in (`vendor/libwebrtc`, `build/patches/libwebrtc`). Share picks the screen at the portal as in a
+  1:1 call, feeds its frames to that source and turns the encoding on, posts `screenSharerAttributes`, then describes
+  the lines with the sharing line `sendonly` and labelled, tagged `<participant id>;ss_<n>` (`n` the share's
+  `screenSharerAttributes` number: the capture's one share was `1` both ways); later descriptions (a camera turned,
+  a renegotiation answered) keep it so while the share lasts. Stop sharing (or the screen ending at the desktop)
+  stops the frames and describes it `recvonly`, unlabelled, with the same tag. The sharer's window keeps the people's
+  gallery with the red Stop sharing in Share's place, as the web client's; a viewer names the share by whoever the
+  roster says shares. Run natively 2026-11-06 (lab a, b, c, all native, a's group call in their chat): a (its own
+  offer's line) shared, `screenSharerAttributes` `202`, the descriptions `200`; b and c showed the share named AI with
+  the people beside it and decoded its stream; Stop sharing ended it at both. c (the mixer's offered line, turned to
+  send) shared the same way and a showed it. The sandbox's synthetic screen delivered no picture in that run (its
+  camera neither: `docs/backlog/sandbox-video-no-frames.md`), so what went out was the line's black keep-alive frames.
 - **The native client's share, 1:1.** Share asks the desktop's screen-cast portal (`org.freedesktop.portal.ScreenCast`:
   `CreateSession`, `SelectSources` for a monitor or a window with the cursor drawn in, `Start`, `OpenPipeWireRemote`)
   for what to share; the node it names is read over the portal's PipeWire remote for as long as the share, its frames
@@ -737,8 +752,7 @@ a alone). What each of Teams' remaining call controls sends:
   bundle, and the renegotiation names `["Audio"]`. The far end's offer that adds a sharing line it sends on is taken
   receiving (its frames shown apart from the camera's, the share taking the stage with the people beside it; View's
   Focus on content shows it alone) and answered with `["Audio", "ScreenViewer"]`; an offer rejecting the line ends the
-  share. A sharing line offered `inactive` (every 1:1 start's and invitation's) stays rejected. A group call offers no
-  Share (above).
+  share. A sharing line offered `inactive` (every 1:1 start's and invitation's) stays rejected.
 - **Dial pad** (1:1 calls): a pad of 1–9, `*`, 0, `#` with letters, under a Number field that collects what was pressed.
   Each key goes as a DTMF tone on the call's audio sender (the browser's `insertDTMF`, 200 ms tone, 100 ms gap, RFC
   4733 `telephone-event` on the audio line); nothing goes to the signaling. The native client has no dial pad and sends

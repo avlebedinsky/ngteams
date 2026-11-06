@@ -235,9 +235,10 @@ pub enum CallAction {
     },
     /// The meeting locked (`true`: nobody else can join) or unlocked by its organizer, as Teams' Lock the meeting.
     LockMeeting { call: CallId, locked: bool },
-    /// A 1:1 call's screen shared (`true`: the user picks it at the desktop's portal, its frames sent on a sharing line
-    /// of its own) or no longer, as Teams' Share and Stop sharing ([`Event::CallSharing`] tells it as it stands). A
-    /// call whose media carries no video shares nothing.
+    /// The call's screen shared (`true`: the user picks it at the desktop's portal, its frames sent on a sharing line
+    /// of its own in a 1:1 call, on the mixer's sharing line in a group call or meeting) or no longer, as Teams' Share
+    /// and Stop sharing ([`Event::CallSharing`] tells it as it stands). A call whose media carries no video shares
+    /// nothing.
     Share { call: CallId, on: bool },
     /// `invitee` added to the call, as Teams' People pane adds someone (seen 2026-11-06): a 1:1 call first gets a new
     /// group chat of the three and becomes a group call in it ([`Event::CallGroupChat`]); a group call's own chat is
@@ -1286,7 +1287,10 @@ where
     fn media_done(&mut self, done: MediaDone, now: Instant) {
         if !matches!(
             done,
-            MediaDone::Opened { .. } | MediaDone::GroupCamera { .. } | MediaDone::ScreenPicked { .. }
+            MediaDone::Opened { .. }
+                | MediaDone::GroupCamera { .. }
+                | MediaDone::ScreenPicked { .. }
+                | MediaDone::GroupShared { .. }
         ) {
             self.sdp_running = false;
         }
@@ -1464,13 +1468,9 @@ where
                 let turned = self.group_camera_turned(call, on, result);
                 let _ = reply.send(turned.map(|()| call).map_err(EngineError::from));
             }
-            MediaDone::ScreenPicked { call, result, reply } => self.screen_picked(call, result, reply),
-            MediaDone::Shared {
-                call,
-                on,
-                result,
-                reply,
-            } => self.shared((call, on), result, reply, now),
+            done @ (MediaDone::ScreenPicked { .. } | MediaDone::GroupShared { .. } | MediaDone::Shared { .. }) => {
+                self.share_step_done(done, now);
+            }
         }
     }
 
@@ -1956,13 +1956,15 @@ fn close(call: CallId, session: Arc<teams_media::session::MediaSession>) {
     let stats = session.stats();
     let video = stats.video;
     log::info!(
-        "call {}: its video closes: {} frames captured, {} sent, {} unsent; {} received, {} shown",
+        "call {}: its video closes: {} frames captured, {} sent, {} unsent; {} received, {} shown; {} of a shared screen \
+         sent",
         call.get(),
         video.captured,
         video.sent,
         video.unsent,
         video.received,
         video.shown,
+        video.screen_sent,
     );
     log::info!(
         "call {}: its media closes: {} audio frames captured, {} sent, {} unsent; {} received, {} malformed; {} \

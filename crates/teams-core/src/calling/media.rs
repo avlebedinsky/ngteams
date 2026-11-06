@@ -31,7 +31,7 @@ use teams_call::CallId;
 use teams_media::devices::VideoSource;
 use teams_media::devices::{Devices, VideoSink};
 use teams_media::relay::{self, RelayConfig, RelayServer, teams_relay};
-use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
+use teams_media::sdp::{NgcSdp, NgcSession, SHARING_LABEL, VideoLines};
 use teams_media::session::{MediaSession, RemoteSinks, SessionConfig, SessionDevice, SessionEvent, VideoParts};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
@@ -266,6 +266,8 @@ fn set_up(
             let theirs = ngc(offer)?;
             let theirs = dialect.read_offer(&theirs).map_err(|error| text(&error))?;
             session.set_sharing_lines(dialect.sharing_mids());
+            // a group call's sharing line answered sending too: the account's screen goes out on it
+            session.set_group_sharing(dialect.sharing_slot().map(|(mid, _)| mid));
             let answer = session.accept_offer(theirs).map_err(|error| text(&error))?;
             if group {
                 session
@@ -275,7 +277,7 @@ fn set_up(
             dialect.write_answer(&answer).map_err(|error| text(&error))?
         }
     };
-    let group = group.then(|| descriptions(&dialect, false));
+    let group = group.then(|| descriptions(&dialect, false, None));
     Ok(Prepared {
         session,
         dialect,
@@ -295,10 +297,20 @@ impl LiveMedia {
     }
 
     /// A group call's video lines described anew, numbered on: the main line as its camera goes, each receiving line
-    /// receiving.
+    /// receiving, and the sharing line sending while the account shares its screen.
     pub(super) fn describe(&mut self) -> MediaDescriptions {
+        let sharing = self.shares.own.then_some(true);
+        self.describe_with(sharing)
+    }
+
+    /// [`LiveMedia::describe`] as a share starts (`on`) or stops: the sharing line `sendonly` or `recvonly` again.
+    pub(super) fn describe_share(&mut self, on: bool) -> MediaDescriptions {
+        self.describe_with(Some(on))
+    }
+
+    fn describe_with(&mut self, sharing: Option<bool>) -> MediaDescriptions {
         self.described += 1;
-        let mut described = descriptions(&lock(&self.dialect), self.camera == Some(true));
+        let mut described = descriptions(&lock(&self.dialect), self.camera == Some(true), sharing);
         described.request_id = Some(self.described);
         described
     }
@@ -317,18 +329,26 @@ impl LiveMedia {
 }
 
 /// A group call's video lines as its requests describe them: the main line as the camera goes (`sending`), each
-/// receiving line receiving.
-pub(super) fn descriptions(dialect: &NgcSession, sending: bool) -> MediaDescriptions {
+/// receiving line receiving; the sharing line, when `sharing` names it, `sendonly` and labelled while the account's
+/// screen goes out on it (`true`) and `recvonly` once it stops (`false`), as the web client's share describes it.
+pub(super) fn descriptions(dialect: &NgcSession, sending: bool, sharing: Option<bool>) -> MediaDescriptions {
+    let lines = dialect
+        .group_descriptions(sending)
+        .into_iter()
+        .map(|(mid, direction)| MediaDescription {
+            mid,
+            direction: direction.to_owned(),
+            label: None,
+        });
+    let screen = sharing
+        .zip(dialect.group_sharing_mid())
+        .map(|(on, mid)| MediaDescription {
+            mid: mid.to_owned(),
+            direction: if on { "sendonly" } else { "recvonly" }.to_owned(),
+            label: on.then(|| SHARING_LABEL.to_owned()),
+        });
     MediaDescriptions {
-        descriptions: dialect
-            .group_descriptions(sending)
-            .into_iter()
-            .map(|(mid, direction)| MediaDescription {
-                mid,
-                direction: direction.to_owned(),
-                label: None,
-            })
-            .collect(),
+        descriptions: lines.chain(screen).collect(),
         request_id: Some(1),
     }
 }
@@ -446,6 +466,14 @@ pub(crate) enum MediaDone {
         result: Result<Box<dyn VideoSource>, String>,
         reply: super::Waiting,
     },
+    /// The account's screen shared (`on`) or no longer on a group call's sharing line (or why not): its lines are
+    /// described again next.
+    GroupShared {
+        call: CallId,
+        on: bool,
+        result: Result<(), String>,
+        reply: super::Waiting,
+    },
     /// The account's screen shared (`on`) or no longer, with our renegotiation's offer adding or rejecting its line
     /// (none when nothing was shared), or why not.
     Shared {
@@ -489,8 +517,8 @@ pub(super) struct LiveMedia {
     pub(super) described: u64,
 }
 
-/// Who shares a screen in a 1:1 call: the account (`own`), the far end (`theirs`: its sharing line in use, our answer
-/// receiving on it).
+/// Who shares a screen in a call: the account (`own`), the far end (`theirs`: a 1:1 call's far end's sharing line in
+/// use, our answer receiving on it; in a group call, someone the roster says shares).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Shares {
     pub(super) own: bool,
@@ -742,6 +770,7 @@ pub(super) fn answer(live: &LiveMedia, offer: MediaContent) -> impl FnOnce() -> 
             let offer = dialect.read_offer(&offer).map_err(|error| error.to_string())?;
             // the far end's screen's frames are the share's, not a camera's
             session.set_sharing_lines(dialect.sharing_mids());
+            session.set_group_sharing(dialect.sharing_slot().map(|(mid, _)| mid));
             let answer = session.accept_offer(offer).map_err(|error| error.to_string())?;
             dialect.write_answer(&answer).map_err(|error| error.to_string())
         });
@@ -789,6 +818,31 @@ pub(super) fn share(
         MediaDone::Shared {
             call,
             on: true,
+            result,
+            reply,
+        }
+    }
+}
+
+/// Shares `screen` (`Some`) on a group call's sharing line, or stops sharing it there (`None`), off the engine's
+/// thread: nothing is negotiated; `reply` is answered once its lines are described.
+pub(super) fn share_group(
+    live: &LiveMedia,
+    screen: Option<Box<dyn VideoSource>>,
+    reply: super::Waiting,
+) -> impl FnOnce() -> MediaDone + Send + use<> {
+    let (call, session) = (live.call, Arc::clone(&live.session));
+    move || {
+        let on = screen.is_some();
+        let result = if let Some(screen) = screen {
+            session.share_group_screen(screen).map_err(|error| error.to_string())
+        } else {
+            session.stop_group_screen();
+            Ok(())
+        };
+        MediaDone::GroupShared {
+            call,
+            on,
             result,
             reply,
         }

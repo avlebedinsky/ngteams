@@ -1928,6 +1928,7 @@ fn group_controls(
         hand_raised: false,
         organizer: false,
         joined: None,
+        sharing: false,
     };
     let mut participants = vec![participant(LAB_B, "Lab Bee", 1)];
     if with_c {
@@ -2077,6 +2078,7 @@ fn fake_group_call(shell: &Entity<Shell>, cx: &mut App) {
         hand_raised: quiet,
         organizer: false,
         joined: None,
+        sharing: false,
     };
     let events = [
         teams_core::Event::Call {
@@ -2447,6 +2449,7 @@ fn fake_call(shell: &Entity<Shell>, cx: &mut App) {
                     hand_raised: false,
                     organizer: false,
                     joined: None,
+                    sharing: false,
                 }],
                 speaking: false,
                 hearing: false,

@@ -1172,6 +1172,7 @@ fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
                 hand_raised: false,
                 organizer: false,
                 joined: None,
+                sharing: false,
             }],
             speaking: false,
             hearing: false,
@@ -1263,6 +1264,7 @@ fn view(who: &[(&str, &str, bool, Option<usize>, bool)], speaking: bool) -> Call
                 hand_raised: false,
                 organizer: false,
                 joined: None,
+                sharing: false,
             })
             .collect(),
         speaking,
@@ -1487,6 +1489,7 @@ fn echo_heard(rig: &Rig, number: u64) {
                 hand_raised: false,
                 organizer: false,
                 joined: None,
+                sharing: false,
             }],
             speaking: false,
             hearing: true,
@@ -3367,11 +3370,52 @@ fn the_far_end_s_share_takes_the_stage_with_the_people_beside_it_and_view_focuse
 }
 
 #[test]
-fn a_group_call_and_a_build_without_video_offer_no_share() {
+fn a_group_call_shares_its_screen_from_share_content_beside_the_people_as_teams_shows_it() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, _) = trace();
+    let (_windows, group) = in_group_call(&rig, &trace);
+    click(group, "call-share");
+    assert!(drawn(group, "call-share-content"));
+    click(group, "call-share-screen");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Share {
+            call: call(1),
+            on: true
+        })
+    );
+    rig.send(Event::CallSharing {
+        call: call(1),
+        on: true,
+    });
+    rig.cx.run_until_parked();
+    // the sharer sees the people as before, with the red Stop sharing in Share's place (its own screen isn't shown)
+    assert!(drawn(group, "call-stop-sharing") && !drawn(group, "call-share"));
+    assert!(drawn(group, "call-participant-0") && drawn(group, "call-participant-1"));
+    assert!(!drawn(group, "call-share-stage"));
+    click(group, "call-stop-sharing");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Share {
+            call: call(1),
+            on: false
+        })
+    );
+    rig.send(Event::CallSharing {
+        call: call(1),
+        on: false,
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(group, "call-share"));
+}
+
+#[test]
+fn a_build_without_video_offers_no_share() {
     let rig = calling();
     let (trace, _) = trace();
     let (_windows, group) = in_group_call(&rig, &trace);
-    assert!(!drawn(group, "call-share"), "a group call's share wasn't captured");
+    assert!(!drawn(group, "call-share"), "no video: nothing to share with");
     let rig = calling();
     let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
     let (windows, _) = call_windows(&rig, &shell, &trace);

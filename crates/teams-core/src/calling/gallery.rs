@@ -57,6 +57,8 @@ pub struct CallParticipant {
     pub organizer: bool,
     /// When it joined the call, as its roster entry says (`endpointJoinTime`, RFC 3339): the attendance list's time.
     pub joined: Option<String>,
+    /// Whether it shares its screen now (a group call's roster lists its sharing stream going out): the share's name.
+    pub sharing: bool,
 }
 
 /// What a call's view is now: its participants, whether the account itself is speaking, and whether its microphone
@@ -254,6 +256,7 @@ impl Gallery {
                     hand_raised: participant.hand_raised,
                     organizer: participant.organizer,
                     joined: participant.joined.clone(),
+                    sharing: participant.sharing_source.is_some(),
                 }
             })
             .collect();

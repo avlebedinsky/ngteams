@@ -425,13 +425,19 @@ pub(crate) fn keep_alive(call: &Call, link: &CallLink) -> Result<CallWrite, Call
     Ok(CallWrite::KeepAlive(KeepAliveCall::new(&call.context, link)?))
 }
 
-/// A group call's media lines described again at the call controller's `updateMediaDescriptions` link.
-pub(crate) fn describe(call: &Call, link: &CallLink, descriptions: &MediaDescriptions) -> Result<CallWrite, CallError> {
+/// A group call's media lines described again at the call controller's `updateMediaDescriptions` link, tagged `tag`
+/// when given (a share's).
+pub(crate) fn describe(
+    call: &Call,
+    link: &CallLink,
+    descriptions: &MediaDescriptions,
+    tag: Option<&str>,
+) -> Result<CallWrite, CallError> {
     Ok(CallWrite::MediaDescriptions(UpdateMediaDescriptions::new(
         &call.context,
         link,
         descriptions,
-        None,
+        tag,
     )?))
 }
 

@@ -1,13 +1,14 @@
 //! A 1:1 call's shared screen, on the mock and its loopback peer (`docs/protocol/calling.md`, "More of a running
 //! call"): the far end's share answered receiving with `["Audio", "ScreenViewer"]` and shown on the sharing line's sink
 //! until its offer rejects that line; the account's own Share telling its conversation it shares and renegotiating
-//! with `["Audio", "ScreenSharer"]`, the far end shown its screen, and Stop sharing renegotiating it away.
+//! with `["Audio", "ScreenSharer"]`, the far end shown its screen, and Stop sharing renegotiating it away. A group
+//! call's share describes its sharing line instead, renegotiating nothing.
 
 use serde_json::Value;
 
-use crate::support::{A_TONE, Account, B_TONE, Lab, wait_until};
+use crate::support::{A_TONE, Account, B_TONE, Lab, PEER_TONE, wait_until};
 use teams_core::{CallAction, CallId, CallStatus, End, Event};
-use teams_mock::{AB_CHAT, LAB_A, LAB_B, LAB_C};
+use teams_mock::{AB_CHAT, ABC_CHAT, LAB_A, LAB_B, LAB_C};
 
 /// Frames of a shared screen a side must have shown.
 const FRAMES: u64 = 15;
@@ -138,6 +139,112 @@ async fn a_native_end_shares_its_screen_and_the_other_is_shown_it() {
 
     a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
+}
+
+/// The bodies of every `updateMediaDescriptions` the mock got, in order.
+async fn descriptions(lab: &Lab) -> Vec<Value> {
+    lab.mock
+        .received_requests()
+        .await
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("/updateMediaDescriptions"))
+        .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+        .map(|body| body["UpdateMediaDescriptions"]["mediaDescriptions"].clone())
+        .collect()
+}
+
+/// The last `updateMediaDescriptions` describes the sharing line going `direction` (labelled while it sends), tagged
+/// as a share's; waits for it up to five seconds.
+async fn shares_described(lab: &Lab, direction: &str) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let last = descriptions(lab).await.pop().unwrap_or_default();
+        let sharing = last["descriptions"]
+            .as_array()
+            .and_then(|lines| lines.last())
+            .cloned()
+            .unwrap_or_default();
+        let labelled = sharing.get("label").and_then(Value::as_str);
+        let tagged = last["negotiationTag"]
+            .as_str()
+            .is_some_and(|tag| tag.ends_with(";ss_1"));
+        let wanted_label = (direction == "sendonly").then_some("applicationsharing-video");
+        if sharing["direction"] == direction && labelled == wanted_label && tagged {
+            return last;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not described {direction}: {last}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A group call's share (`docs/protocol/calling.md`, "The native client's share, group call or meeting"): a calls the
+/// a–b–c chat (its own group offer), b and c answer the mixer's offers. b shares: its conversation told, then its
+/// lines described with the sharing line `sendonly`, labelled and tagged, nothing renegotiated; Stop sharing describes
+/// it `recvonly` with the same tag. a, whose sharing line its own offer made, shares the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_group_call_shares_on_its_sharing_line_by_describing_it_without_a_renegotiation() {
+    let lab = Lab::start_group_video().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let mut c = lab.account(LAB_C, PEER_TONE).await;
+    let call_a = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: ABC_CHAT.into() })
+        .await
+        .unwrap();
+    let (ringing_b, ringing_c) = (b.incoming().await, c.incoming().await);
+    let mut answered = Vec::new();
+    for (account, ringing) in [(&mut b, ringing_b.call), (&mut c, ringing_c.call)] {
+        let call = account
+            .handle
+            .requests()
+            .call(CallAction::Answer { call: ringing })
+            .await
+            .unwrap();
+        account.status(call, &CallStatus::Connected).await;
+        answered.push(call);
+    }
+    a.status(call_a, &CallStatus::Connected).await;
+    let call_b = answered[0];
+
+    let share = |call, on| CallAction::Share { call, on };
+    assert_eq!(b.handle.requests().call(share(call_b, true)).await.unwrap(), call_b);
+    assert!(share_told(&mut b, call_b, true).await, "b shares");
+    shares_described(&lab, "sendonly").await;
+    let sent = lab.sent_by(LAB_B);
+    let at = |op: &str| sent.iter().position(|sent| sent == op);
+    assert!(
+        at("updateParticipantProperties").is_some()
+            && at("updateParticipantProperties") < at("updateMediaDescriptions"),
+        "{sent:?}"
+    );
+    assert!(!sent.contains(&"renegotiate".to_owned()), "{sent:?}");
+
+    assert_eq!(b.handle.requests().call(share(call_b, false)).await.unwrap(), call_b);
+    assert!(!share_told(&mut b, call_b, true).await, "b no longer shares");
+    shares_described(&lab, "recvonly").await;
+
+    assert_eq!(a.handle.requests().call(share(call_a, true)).await.unwrap(), call_a);
+    assert!(
+        share_told(&mut a, call_a, true).await,
+        "a shares on its own offer's line"
+    );
+    shares_described(&lab, "sendonly").await;
+    assert!(!lab.sent_by(LAB_A).contains(&"renegotiate".to_owned()));
+
+    for (account, call) in [(&mut a, call_a), (&mut b, call_b), (&mut c, answered[1])] {
+        account
+            .handle
+            .requests()
+            .call(CallAction::HangUp { call })
+            .await
+            .unwrap();
+        assert_eq!(account.ended(call).await, End::HungUp);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -260,7 +260,7 @@ pub(super) struct ScreenLoop {
 
 impl ScreenLoop {
     pub(super) fn run(mut self) {
-        let epoch = Instant::now();
+        let mut first = true;
         while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
             let frame = match self.screen.next_frame(FRAME_WAIT) {
                 Ok(Some(frame)) => frame,
@@ -271,11 +271,22 @@ impl ScreenLoop {
                     return;
                 }
             };
+            if std::mem::take(&mut first) {
+                log::info!(
+                    "the shared screen's first frame: {}x{} {:?}",
+                    frame.width,
+                    frame.height,
+                    frame.format
+                );
+            }
             let Some(i420) = to_i420(&frame, SCREEN_MAX) else {
+                log::debug!("a frame of the shared screen doesn't convert");
                 continue;
             };
-            let mut sent = RtcVideoFrame::new(VideoRotation::VideoRotation0, to_buffer(&i420));
-            sent.timestamp_us = i64::try_from(epoch.elapsed().as_micros()).unwrap_or(i64::MAX);
+            // stamped by the bindings on the wall clock, as the source's black keep-alive frames are: a frame stamped
+            // earlier than the last one the encoder saw is dropped, and a group call's sharing line has sent those
+            // keep-alive frames since the call began
+            let sent = RtcVideoFrame::new(VideoRotation::VideoRotation0, to_buffer(&i420));
             if self.source.capture_frame(&sent) {
                 VideoShared::count(&self.shared.video.screen_sent);
             }

@@ -236,6 +236,7 @@ fn device_and_gallery_diagnostics_report_counts_and_lines_without_participant_na
                     hand_raised: false,
                     organizer: false,
                     joined: None,
+                    sharing: false,
                 }],
                 speaking,
                 hearing: true,

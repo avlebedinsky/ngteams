@@ -15,6 +15,13 @@
 //!   them, [`Peer::set_sharing_lines`]) is none of them, its frames the share's ([`SHARING_LINE`]).
 //! - **A screen shared** ([`Peer::share_screen`]): a line of its own, sending only, its track fed by the screen's
 //!   frames; stopped ([`Peer::stop_screen`]), the next offer rejects that line, as the web client's does.
+//! - **A group call's screen** goes out on the mixer's sharing line, which a share never renegotiates: that line goes
+//!   both ways from the call's start, as the web client offers and answers it, with an idle screen track on its
+//!   sender (its encoding inactive, its source fed nothing) and the line's own streams named in the SDP; a share feeds
+//!   the screen's frames to that source and turns the encoding on ([`Peer::set_group_screen_sending`]). Our group
+//!   offer adds the line so; the mixer's offered line is turned to send before it is answered
+//!   ([`Peer::set_group_sharing`], through `RtpTransceiver::set_direction`, which the workspace patches into the
+//!   bindings).
 //! - **Sending**: the audio track carries what the session hands it ([`Peer::audio`]); the camera's track is on the
 //!   main video line from the line's first negotiation on and sends only while the camera is on (its encoding active:
 //!   [`Peer::set_sending`]), so turning a group call's camera changes no SDP.
@@ -383,6 +390,16 @@ struct Screen {
     transceiver: RtpTransceiver,
 }
 
+/// A group call's sharing line made ready to send our screen: the idle screen track on its sender.
+struct GroupScreen {
+    source: NativeVideoSource,
+    sender: RtpSender,
+    /// The line's mid, once a negotiation named it.
+    mid: Option<String>,
+    /// The screen goes out: the line's encoding active.
+    sending: bool,
+}
+
 /// The call's peer.
 pub(crate) struct Peer {
     pc: PeerConnection,
@@ -394,9 +411,13 @@ pub(crate) struct Peer {
     gathering: Arc<Gathering>,
     /// The video lines by mid: the main one first, then the receiving ones; and the sharing lines.
     lines: Arc<Mutex<LineMap>>,
-    /// The sharing line of a group offer of ours: no line of ours.
+    /// A group call's sharing line (our group offer's, or the mixer's once answered): none of the camera's lines.
     sharing: Mutex<Option<RtpTransceiver>>,
-    /// Our screen, while it is shared.
+    /// libwebrtc's mid of the mixer's sharing line, a group call's, for the answer to its offer.
+    group_sharing: Mutex<Option<String>>,
+    /// A group call's sharing line, ready to send our screen.
+    group_screen: Mutex<Option<GroupScreen>>,
+    /// Our screen, while it is shared on a line of its own (a 1:1 call's).
     screen: Mutex<Option<Screen>>,
     events: Events,
 }
@@ -428,6 +449,8 @@ impl Peer {
             gathering: Arc::new(Gathering::default()),
             lines: Arc::new(Mutex::new(LineMap::default())),
             sharing: Mutex::new(None),
+            group_sharing: Mutex::new(None),
+            group_screen: Mutex::new(None),
             screen: Mutex::new(None),
             events,
         };
@@ -557,9 +580,114 @@ impl Peer {
             .as_ref()
             .and_then(RtpTransceiver::mid);
         sharing.extend(offered);
+        let group = self
+            .group_screen()
+            .as_ref()
+            .filter(|screen| screen.sending)
+            .and_then(|screen| screen.mid.clone());
         crate::health::Lines {
             sharing,
-            screen: self.screen_mid(),
+            screen: self.screen_mid().or(group),
+        }
+    }
+
+    fn group_screen(&self) -> MutexGuard<'_, Option<GroupScreen>> {
+        self.group_screen.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Names the mixer's sharing line of a group call (libwebrtc's mid), whose offer is answered next: the answer
+    /// turns it to send ([`Peer::accept_offer`]). Set before that offer is applied.
+    pub(crate) fn set_group_sharing(&self, mid: Option<String>) {
+        *self.group_sharing.lock().unwrap_or_else(PoisonError::into_inner) = mid;
+    }
+
+    /// The source a group call's screen goes to, once its sharing line is ready to send.
+    pub(crate) fn group_screen_source(&self) -> Option<NativeVideoSource> {
+        self.group_screen().as_ref().map(|screen| screen.source.clone())
+    }
+
+    /// Whether our screen goes out on a group call's sharing line (its encoding active); whether that line is ready to
+    /// send it. Nothing is negotiated.
+    pub(crate) fn set_group_screen_sending(&self, on: bool) -> bool {
+        let mut screen = self.group_screen();
+        let Some(screen) = screen.as_mut() else {
+            return false;
+        };
+        screen.sending = on;
+        group_screen_encoding(screen);
+        true
+    }
+
+    /// Whether our screen goes out on a group call's sharing line.
+    pub(crate) fn group_screen_sending(&self) -> bool {
+        self.group_screen().as_ref().is_some_and(|screen| screen.sending)
+    }
+
+    /// The idle screen track of a group call's sharing line, and its source (fed nothing until the account shares).
+    fn idle_screen() -> Result<(NativeVideoSource, RtcVideoTrack), Error> {
+        let source = {
+            let _runtime = runtime()?.enter();
+            NativeVideoSource::new(VideoResolution::default(), true)
+        };
+        let track = factory().create_video_track("teams-media-screen", source.clone());
+        Ok((source, track))
+    }
+
+    /// Keeps `transceiver` (a group call's sharing line, the idle screen track on its sender) as the line our screen
+    /// goes on: encoded in software, sending nothing yet.
+    fn keep_group_screen(&self, source: NativeVideoSource, transceiver: &RtpTransceiver) {
+        let sender = transceiver.sender();
+        sender.set_video_encoder_backend(VideoEncoderBackend::Software);
+        let screen = GroupScreen {
+            source,
+            sender,
+            mid: transceiver.mid(),
+            sending: false,
+        };
+        group_screen_encoding(&screen);
+        *self.group_screen() = Some(screen);
+    }
+
+    /// The mixer's sharing line of a group call ([`Peer::set_group_sharing`]) turned to send before it is answered: the
+    /// idle screen track on its sender, both ways. Once for the call; a line that can't be turned is answered as it
+    /// was (receiving only: the account can't share in that call).
+    fn ready_group_sharing(&self) {
+        if self.group_screen().is_some() {
+            return;
+        }
+        let Some(mid) = self
+            .group_sharing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return;
+        };
+        let Some(transceiver) = self
+            .pc
+            .transceivers()
+            .into_iter()
+            .find(|transceiver| transceiver.mid().as_deref() == Some(mid.as_str()))
+            .filter(|transceiver| transceiver.direction() != RtpTransceiverDirection::Stopped)
+        else {
+            return;
+        };
+        let turned = Self::idle_screen().and_then(|(source, track)| {
+            transceiver
+                .sender()
+                .set_track(Some(MediaStreamTrack::Video(track)))
+                .map_err(rtc)?;
+            transceiver
+                .set_direction(RtpTransceiverDirection::SendRecv)
+                .map_err(rtc)?;
+            Ok(source)
+        });
+        match turned {
+            Ok(source) => {
+                self.keep_group_screen(source, &transceiver);
+                *self.sharing.lock().unwrap_or_else(PoisonError::into_inner) = Some(transceiver);
+            }
+            Err(error) => log::info!("the group call's sharing line can't send a screen: {error}"),
         }
     }
 
@@ -704,7 +832,8 @@ impl Peer {
     }
 
     /// A group call's offer, as the web client's group offer is made: audio, the main video line, `slots` receiving
-    /// lines (both ways, nothing sent on them), the sharing line (received on, never shown) and the data channel.
+    /// lines (both ways, nothing sent on them), the sharing line (both ways: someone's screen comes on it, ours goes on
+    /// it) and the data channel.
     pub(crate) fn offer_group(&self, slots: usize) -> Result<SdpOffer, Error> {
         self.attach_audio()?;
         if !self.attach_video()? {
@@ -713,7 +842,20 @@ impl Peer {
         for _ in 0..slots {
             self.add_video(RtpTransceiverDirection::SendRecv)?;
         }
-        let sharing = self.add_video(RtpTransceiverDirection::RecvOnly)?;
+        // the idle screen track on it, as the web client offers it with its streams: a share only feeds that track
+        let (source, track) = Self::idle_screen()?;
+        let sharing = self
+            .pc
+            .add_transceiver(
+                MediaStreamTrack::Video(track),
+                RtpTransceiverInit {
+                    direction: RtpTransceiverDirection::SendRecv,
+                    stream_ids: vec![SCREEN_STREAM_ID.to_owned()],
+                    send_encodings: Vec::new(),
+                },
+            )
+            .map_err(rtc)?;
+        self.keep_group_screen(source, &sharing);
         *self.sharing.lock().unwrap_or_else(PoisonError::into_inner) = Some(sharing);
         self.open_channel()?;
         self.offer()
@@ -759,7 +901,8 @@ impl Peer {
         Ok(SdpOffer(self.local_sdp(&text)?))
     }
 
-    /// Answers the far end's `offer`: its audio line takes the audio track, its main video line the camera's.
+    /// Answers the far end's `offer`: its audio line takes the audio track, its main video line the camera's, and a
+    /// group call's sharing line the idle screen track ([`Peer::set_group_sharing`]).
     pub(crate) fn accept_offer(&self, offer: SdpOffer) -> Result<SdpAnswer, Error> {
         self.roll_back()?;
         block_on(self.pc.set_remote_description(offer.description()?)).map_err(rtc)?;
@@ -767,6 +910,8 @@ impl Peer {
         if self.has_video_line() {
             self.attach_video()?;
         }
+        // after the camera's: its track takes the first video line free to send, never the sharing line
+        self.ready_group_sharing();
         self.prefer_codecs();
         let answer = block_on(self.pc.create_answer(AnswerOptions::default())).map_err(rtc)?;
         let text = answer.to_string();
@@ -921,6 +1066,12 @@ impl Peer {
             }
             apply_sending(video);
         }
+        if let Some(screen) = self.group_screen().as_mut() {
+            if screen.mid.is_none() {
+                screen.mid = sharing;
+            }
+            group_screen_encoding(screen);
+        }
     }
 
     /// `text` (an offer or answer libwebrtc made) with the gathered candidates written into its first line in use.
@@ -986,6 +1137,23 @@ fn screen_encoding(sender: &RtpSender) {
     parameters.set_degradation_preference(DegradationPreference::MaintainResolution);
     if let Err(error) = sender.set_parameters(parameters) {
         log::debug!("the screen's encoding can't be set: {}", error.message);
+    }
+}
+
+/// A group call's screen's encoding: active while the account shares, within a screen's bounds ([`screen_encoding`]).
+fn group_screen_encoding(screen: &GroupScreen) {
+    let mut parameters = screen.sender.parameters();
+    if parameters.encodings.is_empty() {
+        return;
+    }
+    for encoding in &mut parameters.encodings {
+        encoding.active = screen.sending;
+        encoding.max_bitrate = Some(SCREEN_MAX_BITRATE);
+        encoding.max_framerate = Some(SCREEN_FPS);
+    }
+    parameters.set_degradation_preference(DegradationPreference::MaintainResolution);
+    if let Err(error) = screen.sender.set_parameters(parameters) {
+        log::debug!("the group call's screen's encoding can't be set: {}", error.message);
     }
 }
 

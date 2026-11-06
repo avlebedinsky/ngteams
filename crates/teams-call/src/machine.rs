@@ -869,7 +869,7 @@ impl Calls {
     ) -> Result<(), CallError> {
         let current = describable(&mut self.call, call)?;
         let link = current.group_media.descriptions.clone().ok_or(CallError::NotNow)?;
-        let write = build::describe(current, &link, described)?;
+        let write = build::describe(current, &link, described, None)?;
         // both built before either goes: a send capability that can't be built leaves the descriptions unsent too
         let parameters = match (parameters, current.group_media.channel_parameters.clone()) {
             (Some(parameters), Some(link)) => Some(build::channel_parameters(current, &link, &parameters)?),
@@ -879,6 +879,28 @@ impl Calls {
         if let Some(write) = parameters {
             self.out.send(current, Step::ChannelParameters, write);
         }
+        Ok(())
+    }
+
+    /// The account's screen goes out in `call`, up, a group call's, or no longer: its media lines described again as
+    /// `described` says (the sharing line `sendonly` and labelled, or `recvonly` once it stops), tagged as the web
+    /// client tags a share's (`<its participant id>;ss_<n>`, `n` the share's `screenSharerAttributes` number), at the
+    /// call controller's `updateMediaDescriptions` link. Nothing is renegotiated; its failing ends nothing.
+    ///
+    /// # Errors
+    /// [`CallError`]: the call can't be described now ([`Self::describable`]), or the write can't be built; nothing was
+    /// sent.
+    pub fn describe_share(&mut self, call: CallId, described: &MediaDescriptions) -> Result<(), CallError> {
+        let current = describable(&mut self.call, call)?;
+        let link = current.group_media.descriptions.clone().ok_or(CallError::NotNow)?;
+        // the capture's one share was `ss_1` both ways, its attributes' number 1: each share the number it was told by
+        let tag = current
+            .me
+            .participant_id
+            .as_ref()
+            .map(|id| format!("{id};ss_{}", current.screen_shares.max(1)));
+        let write = build::describe(current, &link, described, tag.as_deref())?;
+        self.out.send(current, Step::Describe, write);
         Ok(())
     }
 

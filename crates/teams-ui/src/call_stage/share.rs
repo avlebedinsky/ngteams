@@ -5,16 +5,10 @@
 use super::*;
 
 impl CallStage {
-    /// Whether the call takes Share: a 1:1 call's that is up and carries video (the engine shares there; a group call's
-    /// share wasn't captured), never the test call's or in the read-only mode.
+    /// Whether the call takes Share: a call's that is up and carries video, 1:1 or group call or meeting, as Teams
+    /// offers it in each; never the test call's or in the read-only mode.
     pub(super) fn takes_share(&self, active: &ActiveCall, cx: &App) -> bool {
-        let one_to_one = matches!(active.kind, CallKind::Chat | CallKind::Incoming)
-            && active.view.participants.len() <= 1
-            && active
-                .chat
-                .as_deref()
-                .is_none_or(|chat| teams_proto::one_to_one_pair(chat).is_some());
-        one_to_one
+        active.kind != CallKind::TestCall
             && active.status == CallStatus::Connected
             && self.calls.read(cx).video().is_some()
             && !self.core.read_only()

@@ -35,6 +35,10 @@
 //!   client does; the sharing line of ours a far end's offer names receiving is taken as offered. A sharing line
 //!   offered `inactive` (every 1:1 start's and invitation's) stays rejected. Which lines are sharing lines
 //!   ([`NgcSession::sharing_mids`]) is what routes their frames apart from the camera's.
+//! - **A group call's sharing line** goes both ways in our offers and answers, as the web client's: someone's screen
+//!   comes on it, and ours goes on it without a renegotiation. While libwebrtc sends on it (our idle screen track is on
+//!   it), its own streams stay named, as the web client names its; otherwise it names a stream of its own, as a
+//!   receiving line does.
 //!
 //! - **Video** ([`NgcSession::set_video`], [`VideoLines`]): which of an offer's video lines the call takes is the
 //!   session's to say before libwebrtc sees it: an audio-only call (a group call's, until it takes video) reads every
@@ -114,7 +118,7 @@ const DEFAULT_SCTP_PORT: &str = "5000";
 const SYNTHESIZED_CNAME: &str = "teams-ngc";
 
 /// The label of the screen-sharing video line: the last video line of the web client's offer.
-const SHARING_LABEL: &str = "applicationsharing-video";
+pub const SHARING_LABEL: &str = "applicationsharing-video";
 
 /// The bandwidth line of every session the web client writes.
 const SESSION_BANDWIDTH: &str = "b=CT:4000";
@@ -703,6 +707,13 @@ impl NgcSession {
         Some((line.local.clone(), self.stream_id(remote)))
     }
 
+    /// A group call's sharing line by Teams mid, once the call took it: what its media descriptions name it by while
+    /// the account's screen goes out on it.
+    #[must_use]
+    pub fn group_sharing_mid(&self) -> Option<&str> {
+        self.group_sharing.as_deref()
+    }
+
     /// Takes a group call's sharing line `mid` (by Teams mid), with a stream of its own as a receiving line's.
     fn take_sharing(&mut self, mid: String) {
         if !self.slot_streams.iter().any(|(slot, _)| *slot == mid) {
@@ -1011,10 +1022,15 @@ impl NgcSession {
                 continue;
             }
             let main = self.video_line.as_deref() == Some(name.remote.as_str());
+            let sharing = self.group_sharing.as_deref() == Some(name.remote.as_str());
             // a group call's sharing line answered both ways, as a receiving line is (the web client answers it so)
-            let slot = self.slots.contains(&name.remote)
-                || (role == Role::Answer && self.group_sharing.as_deref() == Some(name.remote.as_str()));
+            let slot = self.slots.contains(&name.remote) || (role == Role::Answer && sharing);
+            // libwebrtc sends on it (our screen's idle track is on it): its own streams stay named, as the web
+            // client's are, so the screen goes out on the stream the mixer was told
+            let screen =
+                sharing && section.has("ssrc") && !matches!(section.direction(), Some("recvonly" | "inactive"));
             match (role, self.video) {
+                (_, VideoLines::Group { .. }) if screen => directed(section, "sendrecv"),
                 (Role::Offer, VideoLines::Main { sending: false }) if main => directed(section, "recvonly"),
                 // a receiving line sends nothing, yet goes both ways naming a stream of its own, as the web client
                 // writes the receiving lines it shows: the mixer refuses a line going both ways that names the

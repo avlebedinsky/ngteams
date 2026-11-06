@@ -139,7 +139,18 @@ impl CallStage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let call = active.id.get();
-        let sharer = tiles.first().map_or_else(|| title.clone(), |tile| tile.name.clone());
+        // who the roster says shares (a group call's), else the far end
+        let sharing = active
+            .view
+            .participants
+            .iter()
+            .find(|p| p.sharing)
+            .map(|p| p.mri.as_str());
+        let sharer = tiles
+            .iter()
+            .find(|tile| sharing.is_some() && tile.mri.as_deref() == sharing)
+            .or(tiles.first())
+            .map_or_else(|| title.clone(), |tile| tile.name.clone());
         let picture = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Share, call));
         let content = share_content(picture, sharer, palette);
         if self.layout == Layout::Focus {
