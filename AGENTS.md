@@ -22,7 +22,7 @@ These protect real people, the user's account and the user's data. They hold for
   scopes and tenant. At `debug`, every API request and response and every Trouter frame is logged in full, with
   credentials redacted by the logger; `info` stays payload-free.
 - **No token or credential goes to a third party** (a bot, an app's backend). Exception: when the user starts a
-  recording, Microsoft's recording bot receives the user's recorder-scoped token, as Teams sends it.
+  recording or live captions, Microsoft's recording bot receives the user's recorder-scoped token, as Teams sends it.
 - **Agents run the user's own account only read-only, and install it only when the user asks**
   ([details](docs/personal-build.md#what-agents-may-do-with-the-personal-build)):
   - start it only through `scripts/run-personal-read-only.sh`; its data dirs (`~/.local/share/ngteams/`,
