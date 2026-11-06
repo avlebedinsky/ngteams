@@ -8,7 +8,12 @@ impl CallStage {
     /// The People pane.
     pub(super) fn roster_pane(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let people = self.people.of(active.id);
-        let mut rows = vec![self_row(active, self.hand_rank(self.core.me()), palette)];
+        let mut rows = vec![self_row(
+            active,
+            self.own_name.clone(),
+            self.hand_rank(self.core.me()),
+            palette,
+        )];
         if active.view.participants.is_empty() {
             rows.extend(people.iter().enumerate().map(|(index, (_, name))| {
                 roster_row(format!("call-roster-{index}"), name.clone(), Signs::default(), palette)
@@ -363,25 +368,32 @@ fn name_and_role(name: SharedString, organizer: bool, palette: Palette) -> gpui:
         })
 }
 
-/// The account's own row of the People pane: its mark (not the initials of "You"), "You" ("Organizer" under it for
-/// the meeting's organizer), and its signs.
-fn self_row(active: &ActiveCall, rank: Option<usize>, palette: Palette) -> AnyElement {
+/// The account's own row of the People pane, as Teams shows it: its name and initials (its mark, and "You", until
+/// its profile names it), "Organizer" under it for the meeting's organizer, and its signs.
+fn self_row(active: &ActiveCall, name: Option<SharedString>, rank: Option<usize>, palette: Palette) -> AnyElement {
     let shown = Signs {
         speaking: active.view.speaking && !active.muted,
         muted: active.muted,
         hand: active.hand_raised.then(|| rank.unwrap_or(0)),
         organizer: active.organizer && active.kind == CallKind::Meeting,
     };
-    let mark = div()
-        .size(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(rgb(palette.selected))
-        .text_color(rgb(palette.brand))
-        .child(Glyph::USER.icon().size(px(14.0)));
+    let (mark, name) = match name {
+        Some(name) => (people::avatar(Some(&name), None, Size::Small).into_any_element(), name),
+        None => (
+            div()
+                .size(px(24.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(palette.selected))
+                .text_color(rgb(palette.brand))
+                .child(Glyph::USER.icon().size(px(14.0)))
+                .into_any_element(),
+            SharedString::from("You"),
+        ),
+    };
     div()
         .debug_selector(|| "call-roster-self".to_owned())
         .h(px(48.0))
@@ -390,7 +402,7 @@ fn self_row(active: &ActiveCall, rank: Option<usize>, palette: Palette) -> AnyEl
         .items_center()
         .gap_3()
         .child(hand_ring(mark, shown.hand.is_some()))
-        .child(name_and_role(SharedString::from("You"), shown.organizer, palette))
+        .child(name_and_role(name, shown.organizer, palette))
         .child(signs(shown, palette))
         .into_any_element()
 }

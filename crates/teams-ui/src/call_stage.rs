@@ -235,6 +235,8 @@ pub struct CallStage {
     translation: Entity<CaptionTranslation>,
     /// Who the call was with, as last said while it was up: its end still names them.
     with: Option<SharedString>,
+    /// The account's own name, as its profile gives it: People names it so, as Teams does.
+    own_name: Option<SharedString>,
     /// The call's end was shown (and traced).
     end_shown: bool,
     /// The end closing by itself, while it is due.
@@ -310,6 +312,7 @@ impl CallStage {
             caption_language: None,
             translation,
             with: None,
+            own_name: None,
             end_shown: false,
             closing: None,
             focus: cx.focus_handle(),
@@ -317,8 +320,27 @@ impl CallStage {
             _waking: waking,
             _observing: observing,
         };
+        stage.read_own_name(cx);
         stage.changed(cx);
         stage
+    }
+
+    /// Reads the account's own name from its profile, once: People shows it in "You"'s place.
+    fn read_own_name(&self, cx: &mut Context<Self>) {
+        let reply = self.core.person(self.core.me().to_owned());
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let name = reply
+                .await
+                .ok()
+                .and_then(|person| person.name)
+                .filter(|name| !name.trim().is_empty());
+            // a stage that is gone shows nobody
+            let _ = this.update(cx, |this, cx| {
+                this.own_name = name.map(SharedString::from);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Opens or closes the participants' pane, as People does.
