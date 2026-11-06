@@ -784,8 +784,7 @@ a alone). What each of Teams' remaining call controls sends:
   `customContext` twice (the call controller's own context), and the tracker refuses a notification that names a key
   twice. That one key now takes its last value, as the web client's `JSON.parse` takes it; c then rang, answered,
   and b and c talked. The same run checked the 1:1 Share (b showed a's screen beside the people; Stop sharing ended
-  it), Add participants (c rang in a new group chat of the three and joined: a group call of three) and Consult's
-  dialog (held; Open chat now opens the person's chat named even when the chat list doesn't show it).
+  it) and Add participants (c rang in a new group chat of the three and joined: a group call of three).
 - **Consult** (1:1 calls) holds the call and asks "Consult then transfer the call" (the person; Cancel, Start a call,
   Open chat). Start a call places an ordinary call to them in their 1:1 chat while the first call stays held in a
   floating card (its name, "Hold" and how long, Resume, Leave); the consult call's toolbar leads with an outlined
@@ -805,12 +804,9 @@ a alone). What each of Teams' remaining call controls sends:
     `replacement` callback (`callNotification` from the transferred party) and takes it in that leg's place, without a
     ring. The transferor is told at `transferAcceptance` and `transferCompletion` (`noError`), then leaves the held
     call (`ConversationEndNoModalityConnected`); its consult call ends with it.
-  The native client offers Consult's dialog (it holds the call; the person picked; Cancel on the left, leaving the call
-  held; Open chat opening their 1:1 chat in the main window) but not Start a call: the consult call is a second call of
-  the account while the first stays held, and the engine keeps one call per account (the machine has one call slot;
-  the call floor admits one call or ring across the app's accounts). A consultative transfer delivered to the native
-  client (`isConsultative: true`) isn't taken either: the target's side of it is a replacement, a delivery the engine
-  doesn't read.
+  The native client has no Consult (the user's choice): this records only what Teams does. A consultative transfer
+  delivered to it (`isConsultative: true`) isn't taken either: the target's side of it is a replacement, a delivery
+  the engine doesn't read.
 - **Add participants** (People's "Invite someone or dial a number"): picking someone in a 1:1 call creates a group chat
   of the three (`POST v1/threads`, no topic) and posts the conversation's `add` (`addParticipantAndModality`) with
   `{"participants": {"from", "to": [{id, participantId}]}, "participantInvitationData": {}, "groupChat": {"threadId":

@@ -343,8 +343,7 @@ desktop's screen-cast portal; Stop sharing while shared) and Leave (End meeting,
 organizer). A 1:1 call the far end holds shows its avatar over "On hold"; the far end's shared screen (in a group call,
 anyone's) takes the stage, the people beside it. People's "Invite someone" adds someone to a chat's call (a 1:1 call becomes a group call in a new
 chat of the three); who doesn't answer shows "No response" with Call again. Transfer (1:1 calls) holds the call and
-transfers it to someone picked, Consult holds it and opens their chat; a call the far end transfers calls the target
-at once. More's Record and transcribe starts a recording with its transcript after asking the spoken language (video
+transfers it to someone picked; a call the far end transfers calls the target at once. More's Record and transcribe starts a recording with its transcript after asking the spoken language (video
 and audio, or the audio alone), or a transcription on its own; Stop recording and Stop transcription, after asking,
 stop anyone's. Show transcript opens the Transcript pane with the transcription's starts and stops (it opens by itself
 for its starter); the recording lands in the chat as Teams saves it. More → Settings → Call health shows the call's

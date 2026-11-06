@@ -262,8 +262,6 @@ pub struct Shell {
     settings: Entity<SettingsModel>,
     trace: Arc<ViewTrace>,
     list: Entity<ChatList>,
-    /// The names of 1:1 chats opened from a call that the list doesn't show yet (Consult → Open chat), by chat.
-    unlisted_names: std::collections::HashMap<String, SharedString>,
     teams: Entity<TeamsList>,
     /// The list pane: the chats and the teams.
     sidebar: Entity<Sidebar>,
@@ -380,7 +378,6 @@ impl Shell {
             settings,
             trace,
             list,
-            unlisted_names: std::collections::HashMap::new(),
             teams,
             sidebar,
             chat,
@@ -2010,24 +2007,6 @@ impl Shell {
         self.chat.as_ref()
     }
 
-    /// Opens someone's 1:1 chat `id` (a call's Consult → Open chat), headed by their `name` while the chat list doesn't
-    /// show it (a 1:1 chat with no message yet): as the chat list shows it when it lists it, else as a people search
-    /// result opens it (the chat found or made through the engine).
-    pub fn open_one_to_one(&mut self, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let listed = self.list.read(cx).row(&id).is_some();
-        let partner = one_to_one_partner(&id, self.core.me());
-        if !name.is_empty() {
-            self.unlisted_names.insert(id.clone(), SharedString::from(name));
-        }
-        match partner {
-            Some(partner) if !listed => {
-                self.search_box
-                    .update(cx, |search, cx| search.open_person(Some(&partner), cx));
-            }
-            _ => self.open_chat(id, window, cx),
-        }
-    }
-
     /// Opens a chat in the conversation pane and keeps it as the selected chat; the switcher closes. A team's channel
     /// the Teams list shows opens as a channel instead ([`Shell::open_channel`]), never in a chat view.
     pub fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -2741,20 +2720,6 @@ impl Shell {
             .into_any_element()
     }
 
-    /// A chat header's name: the chat list's, else the name a 1:1 chat opened from a call was opened under, else
-    /// "Chat".
-    fn header_name(&self, id: &str, row: Option<&crate::chat_list::ChatRow>) -> SharedString {
-        row.map_or_else(
-            || {
-                self.unlisted_names
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| SharedString::from("Chat"))
-            },
-            |row| row.name.clone(),
-        )
-    }
-
     fn main_pane(&self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let pane = div()
             .debug_selector(|| "conversation-pane".to_owned())
@@ -2765,7 +2730,7 @@ impl Shell {
         match &self.main {
             Main::Chat(id) => {
                 let row = self.list.read(cx).row(id);
-                let name = self.header_name(id, row);
+                let name = row.map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
                 let face =
                     row.map(|row| people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small));
                 let chat = self
@@ -3200,41 +3165,5 @@ pub fn shown_as(reporting: Reporting) -> Availability {
         Reporting::Inactive | Reporting::Halted | Reporting::Quit => Availability::Offline,
         // a manual status (or reset) that failed: what the account shows isn't known
         Reporting::Connecting | Reporting::NotSet(_) => Availability::Unknown,
-    }
-}
-
-/// The other member of the 1:1 chat `id` (`19:<oid>_<oid>@unq.gbl.spaces`) for the account `me`, as an MRI.
-fn one_to_one_partner(id: &str, me: &str) -> Option<String> {
-    let pair = id.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?;
-    let (one, other) = pair.split_once('_')?;
-    let mine = me.strip_prefix("8:orgid:")?;
-    let theirs = if one == mine {
-        other
-    } else if other == mine {
-        one
-    } else {
-        return None;
-    };
-    (!theirs.is_empty()).then(|| format!("8:orgid:{theirs}"))
-}
-
-#[cfg(test)]
-mod partner_tests {
-    use super::one_to_one_partner;
-
-    #[test]
-    fn a_one_to_one_chat_names_its_other_member_whichever_side_the_account_is() {
-        let me = "8:orgid:aaaa";
-        assert_eq!(
-            one_to_one_partner("19:aaaa_bbbb@unq.gbl.spaces", me).as_deref(),
-            Some("8:orgid:bbbb")
-        );
-        assert_eq!(
-            one_to_one_partner("19:bbbb_aaaa@unq.gbl.spaces", me).as_deref(),
-            Some("8:orgid:bbbb")
-        );
-        assert_eq!(one_to_one_partner("19:cccc_bbbb@unq.gbl.spaces", me), None);
-        assert_eq!(one_to_one_partner("19:abc@thread.v2", me), None);
-        assert_eq!(one_to_one_partner("19:aaaa_@unq.gbl.spaces", me), None);
     }
 }

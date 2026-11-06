@@ -1,5 +1,5 @@
 //! Finding someone to bring into the call: People's "Invite someone" box (a 1:1 call's and a group chat's call; Teams
-//! words it "Invite someone or dial a number", but ngteams dials no numbers) and the people Transfer and Consult pick.
+//! words it "Invite someone or dial a number", but ngteams dials no numbers) and the person Transfer picks.
 //! Typing names someone the account knows or the directory finds (the scheduling form's suggestions:
 //! `Core::invitable` and the service's search); only work accounts are offered, never a number, nor anyone already in
 //! the call.
@@ -15,7 +15,7 @@ pub(super) struct Finder {
     searching: Option<Task<()>>,
 }
 
-/// Which box looks: People's, or the transfer's or consult's dialog's.
+/// Which box looks: People's, or the transfer's dialog's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FinderOf {
     People,

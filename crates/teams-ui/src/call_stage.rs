@@ -59,7 +59,6 @@ mod recording;
 mod transcript;
 mod share;
 mod transfer;
-pub use transfer::Asking;
 mod toolbar;
 pub use gallery::Layout;
 pub use meeting::{ATTENDANCE_FILE, TimerChange, attendance_list, timer_after, timer_text};
@@ -123,14 +122,12 @@ pub const AUTO_CLOSE: Duration = Duration::from_secs(8);
 pub type ChatNamer = Rc<dyn Fn(&str, &App) -> Option<SharedString>>;
 
 /// What the call window asks of the app.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallStageEvent {
     /// More's (or a test call's results') "Device settings": the main window's settings on their Calls page.
     DeviceSettings,
     /// Close on a call's end or a test call's results, or the end left alone for [`AUTO_CLOSE`].
     Close,
-    /// Consult's Open chat: the 1:1 chat of this id opens in the main window.
-    OpenChat(String, String),
 }
 
 /// What a call's end offers: a new start to its chat, or a join of its group call that runs on.
@@ -243,7 +240,7 @@ pub struct CallStage {
     confirm_end: bool,
     /// People's "Invite someone or dial a number" box, while the pane shows it.
     inviting: Option<invite::Finder>,
-    /// Transfer's (or Consult's) dialog, while it is open.
+    /// Transfer's dialog, while it is open.
     dialog: Option<transfer::Dialog>,
     /// The meeting the call is, as its chat's thread names it (its join link), read once per call.
     meeting: Option<MeetingLink>,

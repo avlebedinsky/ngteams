@@ -51,8 +51,6 @@ pub enum CallWindowsEvent {
     DeviceSettings(String),
     /// The window closed.
     Closed,
-    /// Consult's Open chat in the window of the account of this MRI: the chat (second) opens in the main window.
-    OpenChat(String, String, String),
 }
 
 /// One account the windows follow.
@@ -323,9 +321,6 @@ impl CallWindows {
         let events = cx.subscribe(&stage, move |this: &mut Self, _, event, cx| match event {
             CallStageEvent::DeviceSettings => cx.emit(CallWindowsEvent::DeviceSettings(asked.clone())),
             CallStageEvent::Close => this.closed_by_user(true, cx),
-            CallStageEvent::OpenChat(chat, name) => {
-                cx.emit(CallWindowsEvent::OpenChat(asked.clone(), chat.clone(), name.clone()));
-            }
         });
         parts
             .trace

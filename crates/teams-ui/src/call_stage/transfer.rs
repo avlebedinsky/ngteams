@@ -1,28 +1,17 @@
-//! A 1:1 call's Transfer and Consult, as Teams' call window has them (seen 2026-11-06): each holds the call first and
-//! asks whom ("Type a name": no numbers are dialled). Transfer's "Transfer the call" offers, once someone is picked,
-//! "Transfer to an audio call" and Transfer; Cancel leaves the call held. Consult's "Consult then transfer the call"
-//! picks the person the same way and offers Open chat, which opens their 1:1 chat in the main window.
+//! A 1:1 call's Transfer, as Teams' call window has it (seen 2026-11-06): it holds the call first and asks whom ("Type
+//! a name": no numbers are dialled). "Transfer the call" offers, once someone is picked, "Transfer to an audio call" and
+//! Transfer; Cancel leaves the call held.
 //!
 //! Teams' Transfer also offers "Transfer to their work voicemail" and "Include a call topic for the recipient"; neither
-//! was captured, so neither is offered here. Consult's Start a call isn't offered either: it places a second call while
-//! the first stays held, and the engine keeps one call at a time (`teams-call`'s machine holds one call, the call floor
-//! admits one); its consultative transfer wasn't captured.
+//! was captured, so neither is offered here. Teams' Consult isn't offered at all (the user's choice).
 use super::invite::{Finder, FinderOf, found_list};
 use super::*;
 use gpui_component::Disableable as _;
 use gpui_component::input::Input;
 use teams_core::Invitable;
 
-/// Which dialog it is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Asking {
-    Transfer,
-    Consult,
-}
-
-/// The open dialog: which, its box, and the person picked.
+/// The open dialog: its box, and the person picked.
 pub(super) struct Dialog {
-    pub(super) asking: Asking,
     pub(super) finder: Finder,
     pub(super) picked: Option<Invitable>,
 }
@@ -35,7 +24,7 @@ impl CallStage {
     }
 
     /// Transfer asked: the call goes on hold (unless it is already), and its dialog opens.
-    pub fn open_transfer(&mut self, asking: Asking, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active) = self.live(cx) else { return };
         if !self.takes_transfer(&active) {
             return;
@@ -45,12 +34,8 @@ impl CallStage {
         }
         let finder = Self::finder(FinderOf::Dialog, "Type a name", window, cx);
         finder.query.update(cx, |input, cx| input.focus(window, cx));
-        self.trace.record(&TraceLine::new("call", "dialog").kind(asking.name()));
-        self.dialog = Some(Dialog {
-            asking,
-            finder,
-            picked: None,
-        });
+        self.trace.record(&TraceLine::new("call", "dialog").kind("transfer"));
+        self.dialog = Some(Dialog { finder, picked: None });
         cx.notify();
     }
 
@@ -95,24 +80,9 @@ impl CallStage {
         );
     }
 
-    /// Consult's Open chat: the person's 1:1 chat opens in the main window, the call staying held.
-    fn consult_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(picked) = self.dialog.take().and_then(|dialog| dialog.picked) else {
-            return;
-        };
-        if let Some(chat) = teams_proto::one_to_one_id(self.core.me(), &picked.mri) {
-            cx.emit(CallStageEvent::OpenChat(chat, picked.name.clone()));
-        }
-        cx.notify();
-    }
-
     /// The open dialog over the whole window, as Teams words it.
     pub(super) fn transfer_dialog(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.dialog.as_ref()?;
-        let (title, selector) = match dialog.asking {
-            Asking::Transfer => ("Transfer the call", "call-transfer-dialog"),
-            Asking::Consult => ("Consult then transfer the call", "call-consult-dialog"),
-        };
         let who = match &dialog.picked {
             Some(person) => picked_chip(person, palette, cx),
             None => div()
@@ -127,9 +97,9 @@ impl CallStage {
                 ))
                 .into_any_element(),
         };
-        let kind = (dialog.asking == Asking::Transfer && dialog.picked.is_some()).then(|| how(palette));
+        let kind = dialog.picked.is_some().then(|| how(palette));
         let card = div()
-            .debug_selector(move || selector.to_owned())
+            .debug_selector(|| "call-transfer-dialog".to_owned())
             .occlude()
             .w(px(600.0))
             .max_w_full()
@@ -143,7 +113,12 @@ impl CallStage {
             .bg(rgb(palette.surface))
             .text_color(rgb(palette.foreground))
             .shadow_lg()
-            .child(div().text_xl().font_weight(gpui::FontWeight::BOLD).child(title))
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("Transfer the call"),
+            )
             .child(who)
             .children(kind)
             .child(Self::dialog_buttons(dialog, cx));
@@ -173,40 +148,14 @@ impl CallStage {
                 .on_click(cx.listener(|this, _, _, cx| this.close_transfer(cx))),
         );
         let picked = dialog.picked.is_some();
-        // Transfer's Cancel sits beside Transfer; Consult's on the left, as Teams lays them out
-        let row = match dialog.asking {
-            Asking::Transfer => div().flex().justify_end().gap_2().child(cancel),
-            Asking::Consult => div().flex().justify_between().gap_2().child(cancel),
-        };
-        match dialog.asking {
-            Asking::Transfer => row.child(selected_by(
-                "call-transfer-go",
-                Button::new("call-transfer-go")
-                    .label("Transfer")
-                    .primary()
-                    .disabled(!picked)
-                    .on_click(cx.listener(|this, _, _, cx| this.transfer_now(cx))),
-            )),
-            Asking::Consult => row.child(selected_by(
-                "call-consult-chat",
-                Button::new("call-consult-chat")
-                    .label("Open chat")
-                    .primary()
-                    .disabled(!picked)
-                    .on_click(cx.listener(|this, _, _, cx| this.consult_chat(cx))),
-            )),
-        }
-    }
-}
-
-impl Asking {
-    /// The trace's name for it.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Transfer => "transfer",
-            Self::Consult => "consult",
-        }
+        div().flex().justify_end().gap_2().child(cancel).child(selected_by(
+            "call-transfer-go",
+            Button::new("call-transfer-go")
+                .label("Transfer")
+                .primary()
+                .disabled(!picked)
+                .on_click(cx.listener(|this, _, _, cx| this.transfer_now(cx))),
+        ))
     }
 }
 
