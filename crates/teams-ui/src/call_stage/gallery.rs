@@ -38,8 +38,8 @@ impl CallStage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // waiting in the lobby, the account sees nobody: only that someone should let it in
-        // waiting in the lobby, or holding the call, the account sees nobody's tile
-        let tiles = if active.status == CallStatus::Lobby || active.held.is_some() {
+        // waiting in the lobby, holding the call or held by the far end, the account sees nobody's tile
+        let tiles = if active.status == CallStatus::Lobby || active.held.is_some() || active.held_by_far_end {
             Vec::new()
         } else {
             self.tiles_of(active)
@@ -52,6 +52,13 @@ impl CallStage {
                 // Teams' held call: who it is with, "On hold" and how long, no rings
                 let lasted = calls::duration_text(since.elapsed().as_secs());
                 calling(title, &format!("On hold {lasted}"), palette, Vec::new())
+            } else if active.held_by_far_end {
+                // Teams' held party: who holds it over "On hold", no duration, no rings
+                div()
+                    .debug_selector(|| "call-held-by-far-end".to_owned())
+                    .size_full()
+                    .child(calling(title, "On hold", palette, Vec::new()))
+                    .into_any_element()
             } else {
                 let state = if waiting {
                     "Waiting for others to join".to_owned()

@@ -116,6 +116,9 @@ pub struct ActiveCall {
     pub reactions: Vec<LiveReaction>,
     /// Since when the account holds the call (Teams' Hold), while it does ([`teams_core::Event::CallHeld`]).
     pub held: Option<Instant>,
+    /// The far end holds the 1:1 call ([`teams_core::Event::CallHeldByFarEnd`]): Teams' held party sees its avatar
+    /// over "On hold", its own controls as they were.
+    pub held_by_far_end: bool,
 }
 
 /// A live reaction someone in the call sent ([`teams_core::Event::CallReaction`]).
@@ -885,6 +888,7 @@ impl Calls {
                     | Event::Lobby { .. }
                     | Event::CallOwn { .. }
                     | Event::CallHeld { .. }
+                    | Event::CallHeldByFarEnd { .. }
                     | Event::CallReaction { .. }
             );
         }
@@ -934,7 +938,10 @@ impl Calls {
                     active.lobby.clone_from(waiting);
                 }
             }
-            Event::CallOwn { .. } | Event::CallHeld { .. } | Event::CallReaction { .. } => self.in_call(event),
+            Event::CallOwn { .. }
+            | Event::CallHeld { .. }
+            | Event::CallHeldByFarEnd { .. }
+            | Event::CallReaction { .. } => self.in_call(event),
             _ => return false,
         }
         cx.notify();
@@ -957,6 +964,11 @@ impl Calls {
             Event::CallHeld { call, held } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.held = held.then(|| active.held.unwrap_or_else(Instant::now));
+                }
+            }
+            Event::CallHeldByFarEnd { call, held } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.held_by_far_end = *held;
                 }
             }
             Event::CallReaction {
@@ -1074,6 +1086,7 @@ impl Calls {
             organizer: false,
             reactions: Vec::new(),
             held: None,
+            held_by_far_end: false,
         }
     }
 

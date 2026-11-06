@@ -187,6 +187,7 @@ fn plain(event: &Event) -> String {
         Event::Lobby { call, waiting } => format!("call {}: {} waiting in the lobby", call.get(), waiting.len()),
         Event::CallOwn { .. } | Event::CallReaction { .. } => call_state(event),
         Event::CallHeld { call, held } => format!("call {} held {held}", call.get()),
+        Event::CallHeldByFarEnd { call, held } => format!("call {} held by its far end {held}", call.get()),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }

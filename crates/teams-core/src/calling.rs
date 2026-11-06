@@ -815,6 +815,10 @@ where
                 self.roster_told(event);
             }
             CallEvent::Held { call, held } => self.held(call, held),
+            CallEvent::HeldByFarEnd { call, held } => {
+                log::info!("call {}: held by its far end {held}", call.get());
+                self.emit(Event::CallHeldByFarEnd { call, held });
+            }
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }

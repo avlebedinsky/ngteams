@@ -12,7 +12,7 @@ use teams_proto::{
 };
 
 use crate::agent::{CallAgent, Kind, guid};
-use crate::call::{Acknowledgement, Call, Ending, KeepAlive, Negotiation, Phase, Side, Step};
+use crate::call::{Acknowledgement, Call, Ending, KeepAlive, Music, Negotiation, Phase, Side, Step};
 use crate::read::{self, Invitation, RemoteEnd};
 use crate::roster::Roster;
 use crate::{CallWrite, Participant, WriteId, build};
@@ -184,6 +184,9 @@ pub enum CallEvent {
     },
     /// The account's call on hold (`held`) or off it, as its Hold or Resume was taken (or, not taken, as it was).
     Held { call: CallId, held: bool },
+    /// The far end of the account's call put it on hold (`held`: the service's music-on-hold app came into its roster
+    /// while the account held nothing) or took it off hold (the app left).
+    HeldByFarEnd { call: CallId, held: bool },
     /// Someone in the call sent a live reaction (`like`, `heart`, `applause`, `laugh`, `surprised`), the account's own
     /// as the service echoes it too: who, their name as given, and the reaction.
     Reaction {
@@ -1692,6 +1695,7 @@ impl Calls {
             self.out.event(CallEvent::Participants { call: id, participants });
         }
         lobby_told(call, &mut self.out, &self.identity.mri);
+        music_told(call, &mut self.out, &delivery.body);
     }
 
     /// A message at the conversation's `receiveMessage` callback: a live reaction told; anything else changes nothing.
@@ -1968,6 +1972,37 @@ fn up(slot: &mut Option<Call>, call: CallId) -> Result<&mut Call, CallError> {
         Ok(current)
     } else {
         Err(CallError::NotNow)
+    }
+}
+
+/// The music-on-hold app's entry in a roster update `body`, told as the far end's hold when it came while the account
+/// held nothing (no hold of its own taken or in flight; Teams' held party sees "On hold", seen 2026-11-06), and its
+/// end once it left. Its entry while the account holds the call is the account's own hold's, told by nothing here.
+fn music_told(call: &mut Call, out: &mut Out, body: &[u8]) {
+    let Some((version, present)) = read::music_on_hold(body) else {
+        return;
+    };
+    if call.music.is_some_and(|music| music.version >= version) {
+        return;
+    }
+    let holding = call.resume.is_some()
+        || call
+            .writes
+            .values()
+            .any(|step| matches!(step, Step::Hold | Step::Resume));
+    let before = call.music.filter(|music| music.present);
+    // whose hold it plays for is settled as it comes: the account's own hold since then doesn't make it the account's
+    let far_end = present && before.map_or(!holding, |music| music.far_end);
+    call.music = Some(Music {
+        version,
+        present,
+        far_end,
+    });
+    if far_end != before.is_some_and(|music| music.far_end) {
+        out.event(CallEvent::HeldByFarEnd {
+            call: call.id,
+            held: far_end,
+        });
     }
 }
 

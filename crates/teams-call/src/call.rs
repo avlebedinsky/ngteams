@@ -241,6 +241,15 @@ pub(crate) struct Negotiation {
     pub(crate) link: CallLink,
 }
 
+/// The music-on-hold app in a call's roster: its entry's version, whether it is in the call, and whether it plays for
+/// the far end's hold (it came while the account held nothing) rather than the account's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Music {
+    pub(crate) version: u64,
+    pub(crate) present: bool,
+    pub(crate) far_end: bool,
+}
+
 /// One call.
 #[derive(Debug)]
 pub(crate) struct Call {
@@ -272,6 +281,8 @@ pub(crate) struct Call {
     pub(crate) hold: Option<CallLink>,
     /// While the account holds the call: the `resume` link its hold's answer handed out.
     pub(crate) resume: Option<CallLink>,
+    /// The music-on-hold app in the call's roster, as last delivered: whose hold it plays for.
+    pub(crate) music: Option<Music>,
     /// Who is in the call, as its roster updates tell it.
     pub(crate) roster: Roster,
     /// The test call's echo was in its roster (it joined after its `add`): once it isn't any more, the test call is
@@ -348,6 +359,7 @@ impl Call {
             group_media: GroupMediaLinks::default(),
             hold: None,
             resume: None,
+            music: None,
             roster: Roster::default(),
             echo_joined: false,
             negotiation: None,

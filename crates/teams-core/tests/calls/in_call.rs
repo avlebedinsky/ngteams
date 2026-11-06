@@ -137,6 +137,16 @@ async fn held(account: &mut crate::support::Account, call: CallId) -> bool {
         .await
 }
 
+/// The next hold by the far end `account` is told for `call`.
+async fn held_by_far_end(account: &mut crate::support::Account, call: CallId) -> bool {
+    account
+        .next(|event| match event {
+            Event::CallHeldByFarEnd { call: of, held } if *of == call => Some(*held),
+            _ => None,
+        })
+        .await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_one_to_one_call_goes_on_hold_and_comes_off_it_its_lines_as_they_were() {
     let lab = crate::support::Lab::start().await;
@@ -149,13 +159,16 @@ async fn a_one_to_one_call_goes_on_hold_and_comes_off_it_its_lines_as_they_were(
         .await
         .unwrap();
     let ringing = b.incoming().await;
-    answer(&mut b, ringing.call).await;
+    let call_b = answer(&mut b, ringing.call).await;
     a.status(call, &CallStatus::Connected).await;
     let hold = |held: bool| CallAction::Hold { call, held };
     a.handle.requests().call(hold(true)).await.unwrap();
     assert!(held(&mut a, call).await, "on hold once its hold was taken");
+    // b, held, is told so by the music on hold in its roster
+    assert!(held_by_far_end(&mut b, call_b).await, "b sees itself held");
     a.handle.requests().call(hold(false)).await.unwrap();
     assert!(!held(&mut a, call).await, "off hold once its resume was taken");
+    assert!(!held_by_far_end(&mut b, call_b).await, "b sees the hold end");
     let sent = lab.sent_by(LAB_A);
     let at = |op: &str| sent.iter().position(|sent| sent == op);
     assert!(at("hold").is_some() && at("hold") < at("resume"), "{sent:?}");

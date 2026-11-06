@@ -687,7 +687,11 @@ a ↔ b 2026-11-06; with its lines left as the mixer set them, the call's audio 
 **The held party** is told by nothing addressed to it: its roster gains the music-on-hold app (one `sendrecv` audio
 stream) and lists every stream of the holder's endpoint `inactive`, and the holder's renegotiation names no
 modality (`callModalities: []`). Teams shows the held party the far end's avatar over "On hold" (no duration), its own
-controls left as they were; the music-on-hold app leaving the roster ends it.
+controls left as they were; the music-on-hold app leaving the roster ends it (its entry turns `inactive`, its endpoints
+empty). The native client reads it the same way: the music-on-hold app's entry coming into the roster while the account
+holds nothing (no hold of its own taken or in flight) is the far end's hold (`Event::CallHeldByFarEnd`), its leaving
+the hold's end; its entry while the account holds the call is the account's own hold's. The call window shows the far
+end's avatar over "On hold", the toolbar unchanged.
 
 ### More of a running call (2026-11-06)
 

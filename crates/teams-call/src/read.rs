@@ -355,6 +355,25 @@ pub(crate) fn answered_roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
 /// hold lasts, playing the far end its music (seen 2026-11-06, `ab-call --call steps`, and a native hold).
 pub(crate) const MUSIC_ON_HOLD_MRI: &str = "28:56aa0a8f-4cd3-446b-8146-0023476a5ff2";
 
+/// The music-on-hold app's entry in the roster update `body`, if it lists one: its version, and whether it is in the
+/// call (`active` with an endpoint in the call, one `sendrecv` audio stream; `inactive` with its endpoints empty once
+/// the hold ended, seen 2026-11-06 at the held party's roster).
+pub(crate) fn music_on_hold(body: &[u8]) -> Option<(u64, bool)> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let entry = body.get("participants")?.get(MUSIC_ON_HOLD_MRI)?;
+    let version = entry.get("version")?.as_u64()?;
+    let in_call = entry.get("state").and_then(Value::as_str) == Some("active")
+        && entry
+            .get("endpoints")
+            .and_then(Value::as_object)
+            .is_some_and(|endpoints| {
+                endpoints
+                    .values()
+                    .any(|endpoint| endpoint.get("call").is_some_and(Value::is_object))
+            });
+    Some((version, in_call))
+}
+
 fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
     // The built-in caption service and the music on hold are hidden in Teams: never a person in the gallery (the
     // music would make a held 1:1 call look like a group call's).

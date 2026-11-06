@@ -3258,6 +3258,34 @@ fn a_one_to_one_call_goes_on_hold_and_resumes_as_teams_shows_it() {
 }
 
 #[test]
+fn a_one_to_one_call_held_by_its_far_end_shows_on_hold_its_controls_as_they_were() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    rig.send(Event::CallHeldByFarEnd {
+        call: call(1),
+        held: true,
+    });
+    rig.cx.run_until_parked();
+    // the far end's avatar over "On hold"; the account's own Hold and its devices as they were
+    assert!(drawn(stage, "call-held-by-far-end"));
+    assert!(drawn(stage, "call-hold"));
+    assert!(!drawn(stage, "call-held-controls"));
+    rig.send(Event::CallHeldByFarEnd {
+        call: call(1),
+        held: false,
+    });
+    rig.cx.run_until_parked();
+    assert!(!drawn(stage, "call-held-by-far-end"));
+}
+
+#[test]
 fn a_group_call_offers_no_hold() {
     let rig = calling();
     let (trace, _) = trace();

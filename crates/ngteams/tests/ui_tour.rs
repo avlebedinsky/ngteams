@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 174] = [
+const STEPS: [Step; 5 + 176] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1307,9 +1307,20 @@ const STEPS: [Step; 5 + 174] = [
         with_stage(cx, |stage, cx| stage.show_effects(false, cx));
         held(shell, true, cx);
     }),
+    // the same call held by its far end (Teams' held party): the far end's avatar over "On hold", no duration, the
+    // account's own controls as they were
+    ("call-window-held-by-far-end-dark", |shell, _, cx| {
+        held(shell, false, cx);
+        held_by_far_end(shell, true, cx);
+    }),
+    // and in Teams Light
+    ("call-window-held-by-far-end", |shell, _, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx)
+    }),
     // someone waiting in a meeting's lobby, as whoever may admit sees them: "Waiting in the lobby", Deny and Admit
     ("call-lobby-dark", |shell, _, cx| {
-        held(shell, false, cx);
+        held_by_far_end(shell, false, cx);
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
         lobby(
             shell,
             vec![("8:orgid:00000000-0000-4000-8000-00000000000c", "Lab Sea")],
@@ -1398,6 +1409,26 @@ fn held(shell: &Entity<Shell>, held: bool, cx: &mut App) {
         },
         cx,
     );
+}
+
+/// The made-up 1:1 call held by its far end (`held`) or not, as the engine tells it.
+fn held_by_far_end(shell: &Entity<Shell>, held: bool, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::CallHeldByFarEnd {
+            call: teams_core::CallId::for_tests(FAKE_CALL),
+            held,
+        },
+        cx,
+    );
+}
+
+/// The app in the theme `key`.
+fn theme(shell: &Entity<Shell>, key: &'static str, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(|settings| settings.appearance.theme = key, cx);
+    });
 }
 
 /// The made-up group call's number.

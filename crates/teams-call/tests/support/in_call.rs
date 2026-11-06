@@ -372,3 +372,70 @@ fn the_music_on_hold_in_a_held_call_s_roster_is_nobody_in_the_call() {
         .collect();
     assert_eq!(mris, [B]);
 }
+
+/// The music-on-hold app's roster entry, `version`, in the call (`present`) or gone.
+fn music_entry(version: u64, present: bool) -> Value {
+    let music = crate::read::MUSIC_ON_HOLD_MRI;
+    let entry = if present {
+        json!({"version": version, "state": "active", "details": {"id": music, "displayName": null},
+        "endpoints": {"e1": {"call": {"mediaStreams": [
+            {"type": "audio", "label": "main-audio", "sourceId": 201, "direction": "sendrecv"}
+        ]}}}})
+    } else {
+        json!({"version": version, "state": "inactive", "details": {"id": music, "displayName": null},
+            "endpoints": {}})
+    };
+    json!({"type": "Delta", "participants": {music: entry}})
+}
+
+/// Whether `effects` tell anything of the far end's hold.
+fn tells_far_hold(effects: &[Effect]) -> bool {
+    events(effects)
+        .iter()
+        .any(|event| matches!(event, CallEvent::HeldByFarEnd { .. }))
+}
+
+#[test]
+fn the_far_end_s_hold_is_told_while_the_music_on_hold_is_in_the_roster_and_the_account_holds_nothing() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    let roster = conversation_callback(&calls, "rosterUpdate");
+    effects(&mut calls);
+    calls.on_delivery(&delivery(&roster, &music_entry(8, true)), Observed::Nothing, now);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::HeldByFarEnd { call, held: true }));
+    // delivered again, or older: nothing more
+    calls.on_delivery(&delivery(&roster, &music_entry(8, true)), Observed::Nothing, now);
+    calls.on_delivery(&delivery(&roster, &music_entry(7, false)), Observed::Nothing, now);
+    assert!(!tells_far_hold(&effects(&mut calls)));
+    calls.on_delivery(&delivery(&roster, &music_entry(9, false)), Observed::Nothing, now);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::HeldByFarEnd { call, held: false }));
+    // held again later
+    calls.on_delivery(&delivery(&roster, &music_entry(10, true)), Observed::Nothing, now);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::HeldByFarEnd { call, held: true }));
+}
+
+#[test]
+fn the_music_on_hold_of_the_account_s_own_hold_tells_no_hold_by_the_far_end() {
+    let now = Instant::now();
+    let mut accepted = acceptance();
+    accepted["callAcceptance"]["links"]["hold"] = json!(cc("active", "hold"));
+    let (mut calls, call) = up_with(now, &accepted);
+    let roster = conversation_callback(&calls, "rosterUpdate");
+    calls.hold(call, true).unwrap();
+    let held = sent(&effects(&mut calls));
+    let [(id, "hold")] = held[..] else {
+        panic!("{held:#?}");
+    };
+    // the music came before the hold's answer, and stays a moment past the resume
+    calls.on_delivery(&delivery(&roster, &music_entry(8, true)), Observed::Nothing, now);
+    let resume = cc("holdSession", "resume");
+    calls.on_outcome(id, &ok(&json!({"holdResponse": {"links": {"resume": resume}}})), now);
+    calls.hold(call, false).unwrap();
+    let resumed = sent(&effects(&mut calls));
+    let [(id, "resume")] = resumed[..] else {
+        panic!("{resumed:#?}");
+    };
+    calls.on_outcome(id, &ok(&json!({})), now);
+    calls.on_delivery(&delivery(&roster, &music_entry(9, false)), Observed::Nothing, now);
+    assert!(!tells_far_hold(&effects(&mut calls)));
+}

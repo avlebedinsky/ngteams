@@ -721,16 +721,21 @@ fn controller_op(
             Some(status(200))
         }
         ("callAcceptance" | "mediaAnswers", "acknowledge") | ("mcProxy", "applyChannelParameters") => Some(status(200)),
-        // Hold answers where the hold is taken back, as captured; Resume is taken
+        // Hold answers where the hold is taken back, as captured, and the music on hold joins the call's roster (both
+        // ends see it) until Resume is taken
         ("active", "hold") => {
-            let id = &state.calling.calls[index].id;
+            let id = state.calling.calls[index].id.clone();
             let resume = cc_url(&format!("holdSession/{id}/1/a6/1/resume"));
+            roster::enter(state, index, MUSIC_ON_HOLD, None);
             Some(json_answer(
                 202,
                 &json!({"holdResponse": {"links": {"resume": resume}}, "debugContent": null}),
             ))
         }
-        ("holdSession", "resume") => Some(status(202)),
+        ("holdSession", "resume") => {
+            roster::leave(state, index, MUSIC_ON_HOLD);
+            Some(status(202))
+        }
         // the main video line first, as captured: `sendrecv` while the camera is on
         ("active", "updateMediaDescriptions") => {
             let on = body
@@ -1015,6 +1020,9 @@ fn acceptance_body(call: &MockCall, callee: &str, endpoint_type: Option<&str>, m
     body["callAcceptance"]["links"]["hold"] = json!(hold_url(&call.id));
     body
 }
+
+/// The service's music-on-hold app, in a held call's roster while the hold lasts (as captured).
+const MUSIC_ON_HOLD: &str = "28:56aa0a8f-4cd3-446b-8146-0023476a5ff2";
 
 /// The call leg's `hold` link of call `id`, as an acceptance and an `accept`'s answer hand it out.
 fn hold_url(id: &str) -> String {

@@ -433,6 +433,9 @@ pub enum Event {
     /// The account's 1:1 call on hold (`held`) or off it, as its [`CallAction::Hold`] was taken (or, not taken, as it
     /// stands).
     CallHeld { call: CallId, held: bool },
+    /// The far end of the account's 1:1 call put it on hold (`held`) or took it off hold, as its roster tells (the
+    /// service's music on hold in the call while the account holds nothing): Teams' held party sees "On hold".
+    CallHeldByFarEnd { call: CallId, held: bool },
     /// Someone in the account's call sent a live reaction (the account's own too, as the service echoes it): who, their
     /// name as given, and the reaction (`like`, `heart`, `applause`, `laugh`, `surprised`).
     CallReaction {
