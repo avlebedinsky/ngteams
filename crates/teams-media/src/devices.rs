@@ -1,7 +1,7 @@
 //! The device seam: where a call's audio and video come from and go to.
 //!
 //! A call's media session talks to [`Devices`] only: a microphone and a speaker of 10 ms mono frames at 48 kHz
-//! ([`AudioFrame`]), a camera of raw frames ([`VideoFrame`]), and somewhere received frames go ([`VideoSink`]). Two
+//! ([`AudioFrame`]), a camera of frames ([`VideoFrame`]), and somewhere received frames go ([`VideoSink`]). Two
 //! backends stand behind it:
 //!
 //! - [`file`]: no audio server at all. A tone or a WAV file in, a WAV recording out, a generated test pattern as the
@@ -64,7 +64,8 @@ impl AudioFrame {
     }
 }
 
-/// How a video frame's bytes are laid out (the raw formats a camera offers that the media takes).
+/// How a video frame's bytes are laid out: the raw formats a camera offers that the media takes, or one Motion JPEG
+/// picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelFormat {
     /// Planar 4:2:0: the Y plane (`stride` bytes a row), then U and V at half width and height.
@@ -79,6 +80,9 @@ pub enum PixelFormat {
     Bgra,
     Rgb,
     Bgr,
+    /// Motion JPEG: `data` is one JPEG picture, as a UVC camera gives it in its compressed mode, and `stride` says
+    /// nothing; [`crate::video::convert::to_i420`] decodes it.
+    Mjpeg,
 }
 
 impl PixelFormat {
@@ -95,11 +99,13 @@ impl PixelFormat {
             Self::Bgra => "BGRA",
             Self::Rgb => "RGB",
             Self::Bgr => "BGR",
+            Self::Mjpeg => "MJPG",
         }
     }
 }
 
-/// One raw video frame: `stride` bytes per row of its first plane, the planes one after another in `data`.
+/// One video frame: `stride` bytes per row of its first plane, the planes one after another in `data` (for
+/// [`PixelFormat::Mjpeg`], the picture's bytes instead).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoFrame {
     pub width: u32,

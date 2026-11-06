@@ -1,5 +1,6 @@
 //! Frames between the devices, the codec and a window: whatever raw format a camera hands over turned into the I420
-//! the encoder takes ([`to_i420`], scaled down by a whole factor to fit the size the call sends), and a decoded I420
+//! the encoder takes ([`to_i420`], a Motion JPEG picture decoded first, scaled down by a whole factor to fit the size
+//! the call sends), and a decoded I420
 //! frame turned into the premultiplied BGRA a window draws ([`i420_to_bgra`]). Colours as the camera's pictures and
 //! H.264's are written: BT.601, limited range.
 
@@ -29,9 +30,13 @@ struct Yuv {
 }
 
 /// `frame` as I420 (even sides, each plane's stride its width), scaled down by the smallest whole factor that fits
-/// `max`; `None` for a frame whose data is shorter than its format and size need, or that is empty.
+/// `max`; `None` for a frame whose data is shorter than its format and size need, that is empty, or a Motion JPEG
+/// picture that doesn't decode.
 #[must_use]
 pub fn to_i420(frame: &VideoFrame, max: MaxSize) -> Option<VideoFrame> {
+    if frame.format == PixelFormat::Mjpeg {
+        return to_i420(&super::mjpeg::decode(frame)?, max);
+    }
     if frame.width == 0 || frame.height == 0 || !holds(frame) {
         return None;
     }
@@ -88,10 +93,10 @@ fn holds(frame: &VideoFrame) -> bool {
     frame.stride >= frame.width.saturating_mul(bytes_per_pixel(frame.format)) && frame.data.len() >= needed
 }
 
-/// Bytes a pixel takes in the first plane (one for the planar formats' luma).
+/// Bytes a pixel takes in the first plane (one for the planar formats' luma; Motion JPEG is decoded before it is read).
 fn bytes_per_pixel(format: PixelFormat) -> u32 {
     match format {
-        PixelFormat::I420 | PixelFormat::Nv12 => 1,
+        PixelFormat::I420 | PixelFormat::Nv12 | PixelFormat::Mjpeg => 1,
         PixelFormat::Yuy2 => 2,
         PixelFormat::Rgb | PixelFormat::Bgr => 3,
         PixelFormat::Rgbx | PixelFormat::Bgrx | PixelFormat::Rgba | PixelFormat::Bgra => 4,
@@ -251,5 +256,74 @@ mod tests {
         frame.data.truncate(10);
         assert!(to_i420(&frame, MaxSize::HD).is_none());
         assert!(i420_to_bgra(&frame).is_none());
+    }
+
+    /// `jpeg` without its Huffman tables (`DHT` segments), as many UVC cameras send a Motion JPEG picture.
+    fn without_huffman_tables(jpeg: &[u8]) -> Vec<u8> {
+        let mut out = jpeg[..2].to_vec();
+        let mut at = 2;
+        while at + 4 <= jpeg.len() {
+            let marker = jpeg[at + 1];
+            let end = at + 2 + usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+            if marker == 0xda {
+                out.extend_from_slice(&jpeg[at..]);
+                break;
+            }
+            if marker != 0xc4 {
+                out.extend_from_slice(&jpeg[at..end]);
+            }
+            at = end;
+        }
+        out
+    }
+
+    /// A 1280 by 720 picture of one colour, `(200, 40, 40)`, as JPEG.
+    fn picture_jpeg() -> Vec<u8> {
+        let picture = image::RgbImage::from_pixel(1280, 720, image::Rgb([200, 40, 40]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&picture)
+            .unwrap();
+        jpeg
+    }
+
+    #[test]
+    fn a_motion_jpeg_picture_is_decoded_then_converted_even_without_its_huffman_tables_and_dropped_when_cut_short() {
+        let jpeg = picture_jpeg();
+        let stripped = without_huffman_tables(&jpeg);
+        assert!(stripped.len() < jpeg.len(), "the tables were taken out");
+        let want = from_rgb(200, 40, 40);
+        for data in [jpeg, stripped] {
+            let frame = VideoFrame {
+                width: 1280,
+                height: 720,
+                format: PixelFormat::Mjpeg,
+                stride: 0,
+                data,
+            };
+            let i420 = to_i420(&frame, MaxSize::HD).expect("decoded");
+            assert_eq!((i420.width, i420.height, i420.format), (1280, 720, PixelFormat::I420));
+            let (y, u, v) = (i420.data[640], i420.data[1280 * 720 + 10], i420.data[1280 * 720 * 5 / 4 + 10]);
+            assert!(y.abs_diff(want.y) <= 3 && u.abs_diff(want.u) <= 3 && v.abs_diff(want.v) <= 3, "{y} {u} {v}");
+        }
+        let mut cut = picture_jpeg();
+        cut.truncate(cut.len() / 2);
+        let cut = VideoFrame {
+            width: 1280,
+            height: 720,
+            format: PixelFormat::Mjpeg,
+            stride: 0,
+            data: cut,
+        };
+        assert!(to_i420(&cut, MaxSize::HD).is_none(), "a picture cut short is dropped, not filled with grey");
+        let broken = VideoFrame {
+            width: 1280,
+            height: 720,
+            format: PixelFormat::Mjpeg,
+            stride: 0,
+            data: b"not a picture".to_vec(),
+        };
+        assert!(to_i420(&broken, MaxSize::HD).is_none());
+        assert_eq!(PixelFormat::Mjpeg.name(), "MJPG");
     }
 }

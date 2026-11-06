@@ -31,7 +31,7 @@ use pipewire::spa::param::format_utils;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pipewire::spa::pod::serialize::PodSerializer;
 use pipewire::spa::pod::{self, ChoiceValue, Pod, Value};
-use pipewire::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Rectangle, SpaTypes};
+use pipewire::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes};
 use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 
 use crate::devices::{AudioFrame, FRAME_SAMPLES, PixelFormat, SAMPLE_RATE, VideoFrame};
@@ -183,20 +183,24 @@ fn audio_format() -> Result<Vec<u8>, String> {
     })
 }
 
-fn connect(stream: &StreamRc, direction: Direction, format: &[u8]) -> Result<(), String> {
-    connect_to(stream, direction, None, format)
+/// Connects `stream` offering `formats`, which the link tries in order.
+fn connect(stream: &StreamRc, direction: Direction, formats: &[Vec<u8>]) -> Result<(), String> {
+    connect_to(stream, direction, None, formats)
 }
 
 /// [`connect`], to the node `node` when one is named (a shared screen's).
-fn connect_to(stream: &StreamRc, direction: Direction, node: Option<u32>, format: &[u8]) -> Result<(), String> {
-    let pod = Pod::from_bytes(format).ok_or("a format PipeWire can't read")?;
+fn connect_to(
+    stream: &StreamRc,
+    direction: Direction,
+    node: Option<u32>,
+    formats: &[Vec<u8>],
+) -> Result<(), String> {
+    let mut pods = formats
+        .iter()
+        .map(|format| Pod::from_bytes(format).ok_or("a format PipeWire can't read"))
+        .collect::<Result<Vec<_>, _>>()?;
     stream
-        .connect(
-            direction,
-            node,
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-            &mut [pod],
-        )
+        .connect(direction, node, StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS, &mut pods)
         .map_err(text)
 }
 
@@ -266,7 +270,7 @@ pub(super) fn microphone(
         .state_changed(|_, state, _, new| state.frames.state(&new))
         .register()
         .map_err(text)?;
-    connect(&stream, Direction::Input, &audio_format()?)?;
+    connect(&stream, Direction::Input, &[audio_format()?])?;
     Ok(Box::new(Open {
         _listener: listener,
         _stream: stream,
@@ -308,7 +312,7 @@ pub(super) fn speaker(
         .state_changed(|_, feed, _, new| feed.state(&new))
         .register()
         .map_err(text)?;
-    connect(&stream, Direction::Output, &audio_format()?)?;
+    connect(&stream, Direction::Output, &[audio_format()?])?;
     Ok(Box::new(Open {
         _listener: listener,
         _stream: stream,
@@ -363,11 +367,7 @@ pub(super) fn camera(
         },
         target,
     )?;
-    let formats = video_formats(Rectangle {
-        width: 640,
-        height: 360,
-    })?;
-    video_capture(stream, frames, gate, (None, &formats))
+    video_capture(stream, frames, gate, (None, &camera_formats()?))
 }
 
 /// A shared screen's stream: the node `node` the screen-cast portal named, its picture taken at its own size (1080p
@@ -388,11 +388,7 @@ pub(super) fn screen(
         },
         None,
     )?;
-    let formats = video_formats(Rectangle {
-        width: 1920,
-        height: 1080,
-    })?;
-    video_capture(stream, frames, gate, (Some(node), &formats))
+    video_capture(stream, frames, gate, (Some(node), &[screen_formats()?]))
 }
 
 /// A video stream's listeners and its connection (to `node` when one is named, offering `formats`): each buffer's
@@ -401,7 +397,7 @@ fn video_capture(
     stream: StreamRc,
     frames: Queue<VideoFrame>,
     gate: Rc<Gate>,
-    (node, formats): (Option<u32>, &[u8]),
+    (node, formats): (Option<u32>, &[Vec<u8>]),
 ) -> Result<Box<dyn Any>, String> {
     let state = CameraState {
         format: None,
@@ -461,16 +457,35 @@ fn frame_of(data: &mut spa::buffer::Data, (format, width, height): (PixelFormat,
 /// A negotiated video format we take, as its pixel format and size.
 fn video_format(param: &Pod) -> Option<(PixelFormat, u32, u32)> {
     let (media_type, media_subtype) = format_utils::parse_format(param).ok()?;
-    if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+    if media_type != MediaType::Video {
         return None;
     }
-    let mut info = VideoInfoRaw::new();
-    info.parse(param).ok()?;
-    let format = CAMERA_FORMATS
-        .iter()
-        .find(|(video, _)| *video == info.format())
-        .map(|(_, pixel)| *pixel)?;
-    Some((format, info.size().width, info.size().height))
+    let format = if media_subtype == MediaSubtype::Mjpg {
+        PixelFormat::Mjpeg
+    } else if media_subtype == MediaSubtype::Raw {
+        let mut info = VideoInfoRaw::new();
+        info.parse(param).ok()?;
+        CAMERA_FORMATS
+            .iter()
+            .find(|(video, _)| *video == info.format())
+            .map(|(_, pixel)| *pixel)?
+    } else {
+        return None;
+    };
+    let Rectangle { width, height } = video_size(param)?;
+    Some((format, width, height))
+}
+
+/// The size a fixed video format names.
+fn video_size(param: &Pod) -> Option<Rectangle> {
+    let (_, value) = pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()).ok()?;
+    let Value::Object(object) = value else {
+        return None;
+    };
+    object.properties.into_iter().find_map(|property| match property.value {
+        Value::Rectangle(size) if property.key == FormatProperties::VideoSize.as_raw() => Some(size),
+        _ => None,
+    })
 }
 
 /// The memory a camera's buffers may come in: a DMA-BUF or a memfd (shared with this process, mapped by the stream's
@@ -498,9 +513,106 @@ fn camera_buffers() -> Result<Vec<u8>, String> {
     })
 }
 
-/// A video capture's offer: any of [`CAMERA_FORMATS`], `preferred`'s size at 15 frames a second preferred (a camera's
-/// 640x360, a screen's 1080p), anything up to 4K.
-fn video_formats(preferred: Rectangle) -> Result<Vec<u8>, String> {
+/// The 16:9 sizes a camera is asked for, the best first: the shape Teams sends and shows a camera in, the size the
+/// call sends ([`crate::video::convert::MaxSize::HD`]) first, then those nearest it. A camera lists its own modes,
+/// 4:3 often first (a UVC camera's default is 640x480), and PipeWire takes the first of the camera's modes a param
+/// matches, so one param of many sizes would get the camera's order, not this one: each size is offered as a param
+/// of its own, tried in turn ([`camera_formats`]).
+const CAMERA_SIZES: [(u32, u32); 6] = [(1280, 720), (1024, 576), (960, 540), (1920, 1080), (848, 480), (640, 360)];
+
+/// The frame rate the call sends (`teams_core`'s video settings): asked for, and not exceeded where a camera allows.
+const CAMERA_RATE: Fraction = Fraction { num: 30, denom: 1 };
+
+/// The lowest frame rate the first round of offers takes: a camera that gives a size only slower is asked for it in
+/// the second round, after every size it gives smoothly.
+const SMOOTH_RATE: Fraction = Fraction { num: 24, denom: 1 };
+
+/// How a camera's frames come.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Encoding {
+    /// Any of [`CAMERA_FORMATS`]: ready to convert, so taken over Motion JPEG at the same size and rate.
+    Raw,
+    /// Motion JPEG, decoded before it is sent: over USB, the only way most UVC cameras give 720p at 30 frames a
+    /// second (raw, a USB 2 link carries it at 10 at most).
+    Mjpeg,
+}
+
+/// The camera's offers, tried in order: each of [`CAMERA_SIZES`] raw and then as Motion JPEG, first at 24 to 30
+/// frames a second, then at any rate; last, for a camera with none of them, any size up to 4K, 1280x720 preferred.
+fn camera_formats() -> Result<Vec<Vec<u8>>, String> {
+    let any_rate = (Fraction { num: 0, denom: 1 }, Fraction { num: 120, denom: 1 });
+    let mut offers = Vec::new();
+    for rates in [(SMOOTH_RATE, CAMERA_RATE), any_rate] {
+        for (width, height) in CAMERA_SIZES {
+            for encoding in [Encoding::Raw, Encoding::Mjpeg] {
+                offers.push(camera_format(encoding, Value::Rectangle(Rectangle { width, height }), rates)?);
+            }
+        }
+    }
+    let any_size = Value::Choice(ChoiceValue::Rectangle(Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Range {
+            default: Rectangle {
+                width: 1280,
+                height: 720,
+            },
+            min: Rectangle { width: 1, height: 1 },
+            max: Rectangle {
+                width: 4096,
+                height: 4096,
+            },
+        },
+    )));
+    for encoding in [Encoding::Raw, Encoding::Mjpeg] {
+        offers.push(camera_format(encoding, any_size.clone(), any_rate)?);
+    }
+    Ok(offers)
+}
+
+/// An offer of frames as `encoding` at `size` and a rate in `(min, max)`, [`CAMERA_RATE`] preferred.
+fn camera_format(encoding: Encoding, size: Value, (min, max): (Fraction, Fraction)) -> Result<Vec<u8>, String> {
+    let subtype = match encoding {
+        Encoding::Raw => MediaSubtype::Raw,
+        Encoding::Mjpeg => MediaSubtype::Mjpg,
+    };
+    let mut properties = vec![
+        pod::Property::new(FormatProperties::MediaType.as_raw(), Value::Id(Id(MediaType::Video.as_raw()))),
+        pod::Property::new(FormatProperties::MediaSubtype.as_raw(), Value::Id(Id(subtype.as_raw()))),
+    ];
+    if encoding == Encoding::Raw {
+        let formats = CAMERA_FORMATS.iter().map(|(video, _)| Id(video.as_raw())).collect();
+        properties.push(pod::Property::new(
+            FormatProperties::VideoFormat.as_raw(),
+            Value::Choice(ChoiceValue::Id(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Enum {
+                    default: Id(CAMERA_FORMATS[0].0.as_raw()),
+                    alternatives: formats,
+                },
+            ))),
+        ));
+    }
+    properties.push(pod::Property::new(FormatProperties::VideoSize.as_raw(), size));
+    properties.push(pod::Property::new(
+        FormatProperties::VideoFramerate.as_raw(),
+        Value::Choice(ChoiceValue::Fraction(Choice(
+            ChoiceFlags::empty(),
+            ChoiceEnum::Range {
+                default: CAMERA_RATE,
+                min,
+                max,
+            },
+        ))),
+    ));
+    serialize(pod::Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties,
+    })
+}
+
+/// A shared screen's offer: any of [`CAMERA_FORMATS`], 1080p at 15 frames a second preferred, anything up to 4K.
+fn screen_formats() -> Result<Vec<u8>, String> {
     let object = pod::object!(
         SpaTypes::ObjectParamFormat,
         ParamType::EnumFormat,
@@ -527,7 +639,10 @@ fn video_formats(preferred: Rectangle) -> Result<Vec<u8>, String> {
             Choice,
             Range,
             Rectangle,
-            preferred,
+            Rectangle {
+                width: 1920,
+                height: 1080
+            },
             Rectangle { width: 1, height: 1 },
             Rectangle {
                 width: 4096,
@@ -636,5 +751,98 @@ mod tests {
         assert_eq!(fill(&mut bytes, 0, Some(&queue)), 4);
         assert_eq!(queue.with_items(|items| items.len()), 0);
         assert!((f32::from_le_bytes(bytes[..4].try_into().unwrap()) - 0.5).abs() < f32::EPSILON);
+    }
+
+    fn properties(bytes: &[u8]) -> Vec<pod::Property> {
+        let (_, value) = pod::deserialize::PodDeserializer::deserialize_any_from(bytes).expect("a pod");
+        let Value::Object(object) = value else {
+            panic!("not an object: {value:?}");
+        };
+        object.properties
+    }
+
+    fn property(properties: &[pod::Property], key: FormatProperties) -> &Value {
+        &properties
+            .iter()
+            .find(|property| property.key == key.as_raw())
+            .unwrap_or_else(|| panic!("no {key:?}"))
+            .value
+    }
+
+    /// An offer's encoding, size (`None` for a range) and lowest frame rate.
+    fn offer(bytes: &[u8]) -> (Encoding, Option<(u32, u32)>, u32) {
+        let properties = properties(bytes);
+        let encoding = match property(&properties, FormatProperties::MediaSubtype) {
+            Value::Id(Id(raw)) if *raw == MediaSubtype::Raw.as_raw() => Encoding::Raw,
+            Value::Id(Id(mjpg)) if *mjpg == MediaSubtype::Mjpg.as_raw() => Encoding::Mjpeg,
+            other => panic!("another subtype: {other:?}"),
+        };
+        assert_eq!(
+            properties.iter().any(|property| property.key == FormatProperties::VideoFormat.as_raw()),
+            encoding == Encoding::Raw,
+            "only a raw offer names its pixel formats"
+        );
+        let size = match property(&properties, FormatProperties::VideoSize) {
+            Value::Rectangle(size) => Some((size.width, size.height)),
+            Value::Choice(ChoiceValue::Rectangle(_)) => None,
+            other => panic!("not a size: {other:?}"),
+        };
+        let Value::Choice(ChoiceValue::Fraction(Choice(_, ChoiceEnum::Range { default, min, max }))) =
+            property(&properties, FormatProperties::VideoFramerate)
+        else {
+            panic!("not a rate range");
+        };
+        assert_eq!((default.num, default.denom), (30, 1));
+        assert!(max.num >= 30, "{max:?}");
+        (encoding, size, min.num)
+    }
+
+    #[test]
+    fn the_camera_is_asked_for_16_by_9_at_720p_and_30_frames_first_raw_then_motion_jpeg() {
+        let offers: Vec<_> = camera_formats().unwrap().iter().map(|bytes| offer(bytes)).collect();
+        assert_eq!(offers.len(), CAMERA_SIZES.len() * 4 + 2);
+        assert_eq!(offers[0], (Encoding::Raw, Some((1280, 720)), 24));
+        assert_eq!(offers[1], (Encoding::Mjpeg, Some((1280, 720)), 24));
+        let smooth = &offers[..CAMERA_SIZES.len() * 2];
+        assert!(smooth.iter().all(|(_, size, min)| *min == 24 && size.is_some_and(|(w, h)| (w * 9).abs_diff(h * 16) * 100 <= h * 16)));
+        let slow = &offers[CAMERA_SIZES.len() * 2..CAMERA_SIZES.len() * 4];
+        assert!(slow.iter().all(|(_, size, min)| *min == 0 && size.is_some()));
+        assert_eq!(offers[offers.len() - 2..], [(Encoding::Raw, None, 0), (Encoding::Mjpeg, None, 0)]);
+    }
+
+    #[test]
+    fn a_negotiated_motion_jpeg_or_raw_format_is_read_with_its_size() {
+        let fixed = |subtype: MediaSubtype, format: Option<VideoFormat>| {
+            let mut properties = vec![
+                pod::Property::new(FormatProperties::MediaType.as_raw(), Value::Id(Id(MediaType::Video.as_raw()))),
+                pod::Property::new(FormatProperties::MediaSubtype.as_raw(), Value::Id(Id(subtype.as_raw()))),
+                pod::Property::new(
+                    FormatProperties::VideoSize.as_raw(),
+                    Value::Rectangle(Rectangle {
+                        width: 1280,
+                        height: 720,
+                    }),
+                ),
+            ];
+            if let Some(format) = format {
+                properties.push(pod::Property::new(
+                    FormatProperties::VideoFormat.as_raw(),
+                    Value::Id(Id(format.as_raw())),
+                ));
+            }
+            serialize(pod::Object {
+                type_: SpaTypes::ObjectParamFormat.as_raw(),
+                id: ParamType::Format.as_raw(),
+                properties,
+            })
+            .unwrap()
+        };
+        let read = |bytes: &[u8]| video_format(Pod::from_bytes(bytes).expect("a pod"));
+        assert_eq!(read(&fixed(MediaSubtype::Mjpg, None)), Some((PixelFormat::Mjpeg, 1280, 720)));
+        assert_eq!(
+            read(&fixed(MediaSubtype::Raw, Some(VideoFormat::YUY2))),
+            Some((PixelFormat::Yuy2, 1280, 720))
+        );
+        assert_eq!(read(&fixed(MediaSubtype::H264, None)), None);
     }
 }

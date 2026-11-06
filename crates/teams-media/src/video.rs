@@ -7,6 +7,7 @@
 pub mod codec;
 pub mod convert;
 pub mod effects;
+mod mjpeg;
 
 /// H.264's RTP clock, in Hz.
 pub const VIDEO_CLOCK: u32 = 90_000;
