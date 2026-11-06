@@ -248,7 +248,12 @@ fn device_and_gallery_diagnostics_report_counts_and_lines_without_participant_na
             !line.contains(teams_mock::LAB_B),
             "the gallery reports counts rather than people"
         );
-        assert_eq!(line.ends_with(" and the account"), speaking);
+        // the account speaking is told after the others who speak, before the muted and the hands up
+        assert_eq!(
+            line.contains("speaking 1 and the account, muted 0, hands up 0"),
+            speaking
+        );
+        assert!(line.contains(", muted 0, hands up 0"));
     }
 }
 
