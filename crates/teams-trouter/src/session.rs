@@ -1062,7 +1062,10 @@ impl Link {
         };
         match calls.observed(&delivery) {
             Observed::Ignored => {
-                log::info!("trouter: an incoming call not offered by the call tracker, ignored");
+                log::info!(
+                    "trouter: an incoming call not offered by the call tracker, ignored: {}",
+                    teams_call::track::unread_invitation(&delivery)
+                );
                 PushEvent::Ignored(Ignored::IncomingCall)
             }
             observed => PushEvent::Call(CallDelivery::new(delivery, observed, self.responder.clone())),

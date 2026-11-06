@@ -234,6 +234,41 @@ fn unreadable_or_wrong_kind_invitations_stay_ignored() {
         Observed::Ignored
     );
 }
+/// `gp` encoded as an invitation's with `text` spliced into its call notification's opening, so a key can be named
+/// twice (a JSON value can't hold that).
+fn invitation_with_twice(path: &str, gp: &Value, text: &str) -> Delivery {
+    let raw = gp.to_string().replacen(
+        r#""callNotification":{"#,
+        &format!(r#""callNotification":{{{text},"#),
+        1,
+    );
+    let body = json!({"evt": 107, "gp": base64::engine::general_purpose::STANDARD.encode(raw)});
+    Delivery {
+        body: body.to_string().into_bytes(),
+        ..invitation_delivery(path, 9, gp)
+    }
+}
+#[test]
+fn a_transferred_call_s_invitation_naming_its_context_twice_is_offered_and_any_other_key_twice_is_not() {
+    let (invited, mut gp) = invitation(0, 1).unwrap();
+    // as a transferred call's invitation names it (seen 2026-11-06): `null`, then the service's own context
+    gp["callNotification"]["customContext"] = json!({"callDetails": {}});
+    let twice = invitation_with_twice(&invited.path, &gp, r#""customContext":null"#);
+    assert_eq!(
+        Tracker::new(Mri::new(LAB_B)).observe_delivery(&twice),
+        Observed::Offered
+    );
+    // any other key twice stays ambiguous, and the log says which
+    let from = invitation_with_twice(&invited.path, &gp, &format!(r#""from":{{"id":"{LAB_A}"}}"#));
+    assert_eq!(Tracker::new(Mri::new(LAB_B)).observe_delivery(&from), Observed::Ignored);
+    assert_eq!(unread_invitation(&from), "its notification names `from` twice");
+    // and a delivery that isn't an invitation at all says why too
+    let mut odd = invited.clone();
+    odd.body = br#"{"evt":107,"gp":"not base64"}"#.to_vec();
+    assert_eq!(unread_invitation(&odd), "its notification doesn't decode");
+    odd.body = b"not JSON".to_vec();
+    assert_eq!(unread_invitation(&odd), "its body isn't JSON");
+}
 #[test]
 fn redelivery_is_kept_but_an_ended_ring_never_rings_again() {
     let tracker = Tracker::new(Mri::new(LAB_B));

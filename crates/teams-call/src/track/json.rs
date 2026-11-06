@@ -19,6 +19,22 @@ pub(crate) fn strict_json(body: &[u8]) -> Option<Value> {
     Some(value)
 }
 
+/// The one key a body may name twice, in the same spelling, its last value kept ([`Strict`]'s `visit_map`).
+const LAST_WINS: &str = "customContext";
+
+/// What [`strict_json`]'s refusal of a body that names a key twice starts with, the key after it.
+const TWICE: &str = "two keys alike in some case: ";
+
+/// The key `body` names twice (in some case), when that is why [`strict_json`] refuses it: a key's name, never a
+/// value.
+pub(crate) fn twice_named(body: &[u8]) -> Option<String> {
+    let mut reader = serde_json::Deserializer::from_slice(body);
+    let error = Strict.deserialize(&mut reader).err()?.to_string();
+    let rest = error.strip_prefix(TWICE)?;
+    // serde_json appends " at line L column C"
+    Some(rest.rsplit_once(" at line ").map_or(rest, |(key, _)| key).to_owned())
+}
+
 /// A key as a case-insensitive reader compares it: upper-cased, then lower-cased, so `ſ` and `K` (Kelvin) fold with
 /// `s` and `k`. Where it folds more than such a reader would (`ß` and `ss`), a body is refused that didn't need to be.
 pub(crate) fn fold(key: &str) -> String {
@@ -83,8 +99,12 @@ impl<'de> Visitor<'de> for Strict {
         let mut object = Map::new();
         let mut seen = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
-            if !seen.insert(fold(&key)) {
-                return Err(de::Error::custom("two keys alike in some case"));
+            // a transferred call's invitation names `customContext` twice (seen 2026-11-06, native a → b transferred
+            // to c): the service's own context, which nothing here reads, taken as the web client's `JSON.parse`
+            // takes it (the last); any other key twice is ambiguous
+            let again = key == LAST_WINS && object.contains_key(LAST_WINS);
+            if !seen.insert(fold(&key)) && !again {
+                return Err(de::Error::custom(format!("{TWICE}{key}")));
             }
             let value = map.next_value_seed(Strict)?;
             object.insert(key, value);

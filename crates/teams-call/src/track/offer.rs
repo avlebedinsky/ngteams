@@ -425,6 +425,58 @@ pub(crate) fn read_invitation(delivery: &Delivery) -> Option<Invitation> {
     })
 }
 
+/// Why [`read_invitation`] doesn't read `delivery` as an invitation, in a few words naming the first part that doesn't
+/// fit (never anything the delivery carries): what the log says of an incoming call it ignores.
+#[must_use]
+pub fn unread_invitation(delivery: &Delivery) -> String {
+    let gp = strict_json(&delivery.body)
+        .and_then(|body| body.get("gp").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|gp| base64::engine::general_purpose::STANDARD.decode(gp).ok());
+    if let Some(key) = gp.as_deref().and_then(super::json::twice_named) {
+        return format!("its notification names `{key}` twice");
+    }
+    first_misfit(delivery).to_owned()
+}
+
+/// The first part of `delivery` that keeps it from being read as an invitation ([`unread_invitation`]).
+fn first_misfit(delivery: &Delivery) -> &'static str {
+    let Some(body) = strict_json(&delivery.body) else {
+        return "its body isn't JSON";
+    };
+    let Some(event) = body.get("evt").and_then(Value::as_u64) else {
+        return "it names no event";
+    };
+    if !INVITATION_EVENTS.contains(&event) {
+        return "its event isn't an invitation's";
+    }
+    let Some(gp) = body
+        .get("gp")
+        .and_then(Value::as_str)
+        .and_then(|gp| base64::engine::general_purpose::STANDARD.decode(gp).ok())
+        .and_then(|gp| strict_json(&gp))
+    else {
+        return "its notification doesn't decode";
+    };
+    let set = |pointer: &str| gp.pointer(pointer).is_some_and(|value| !value.is_null());
+    if gp.get("callNotification").is_none() {
+        "it has no call notification"
+    } else if set("/callNotification/replaces") {
+        "it replaces another call"
+    } else if set("/groupContext") {
+        "it names a group context"
+    } else if gp.pointer("/callNotification/links/attach").is_none() {
+        "it has no attach link"
+    } else if conversation_of(&gp).is_none() {
+        "it names no conversation"
+    } else if !kind_fits(event, &gp, set("/groupChat")) {
+        "its kind doesn't fit its chat (1:1 or group)"
+    } else if endpoint_root(&delivery.path).is_none() {
+        "it isn't at an endpoint's root"
+    } else {
+        "it isn't addressed to the account, or the account is busy"
+    }
+}
+
 /// Whether a delivery that [`read_invitation`] doesn't read may still be an invitation, so that nothing of it is handed
 /// on or answered: a delivery at an endpoint's root whose body isn't a strictly read JSON object with a numeric `evt`
 /// other than an invitation's ([`INVITATION_EVENTS`]), or that carries a `callNotification` (at its top, or in a `gp`

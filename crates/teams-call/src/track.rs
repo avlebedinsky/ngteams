@@ -5,6 +5,7 @@ mod json;
 mod offer;
 use context::{Context, Reply};
 use json::strict_json;
+pub use offer::unread_invitation;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -667,7 +668,10 @@ fn proxy_link(link: &Value) -> Option<Url> {
 fn answer_links(answer: &[u8]) -> Option<Vec<Link>> {
     const NAMES: [(CallOperation, &str); 12] = [
         (CallOperation::UpdateEndpointMetadata, "updateEndpointMetadata"),
-        (CallOperation::UpdateParticipantProperties, "updateParticipantProperties"),
+        (
+            CallOperation::UpdateParticipantProperties,
+            "updateParticipantProperties",
+        ),
         (CallOperation::Add, "addParticipantAndModality"),
         (CallOperation::Leave, "leave"),
         (CallOperation::Admit, "admit"),
