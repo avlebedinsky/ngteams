@@ -178,6 +178,27 @@ Transcript pane and "…").
 - **Names**: the 1:1 chat's lines name the account by its own name ("AI started recording.", "AI stopped
   recording.", "saved to AI's OneDrive"), as the meeting chat's do; no other line of the 1:1 chat names anyone. No
   group chat of lab accounts holds a recording, so a group chat's lines weren't seen.
+- **A call transcribed and not recorded** (a lab capture of 2026-11-06, `team-manage` as lab account a, the a–b chat's
+  call transcribed alone by a's native client; its card "Call with <name>", the call's day and span, Share, View recap,
+  the Transcript chip, no thumbnail). The bot saves the transcript as a file of its own in the starter's OneDrive
+  (`Recordings/<title>-<local stamp>-Meeting Transcript.mp4`, its last `Media_CallRecording` state naming its sharing
+  link, drive and item, `contentTypes="Transcript"`). MCPS lists it only under `invalidResources` (a `TranscriptV2`
+  with its call, times, item, `webUrl`, organizer and tenant, no `location`), so the Recap tab opened by itself doesn't
+  list the call: its sessions are the recordings. The card's View recap (and its Transcript chip, the Transcript pane
+  shown) opens the call's own recap: the call's day and span as a plain line (no box, no menu), Share and "…" (Go to
+  Meeting Recaps), no player and no Watch in browser, "Shared files" and the panes (AI summary, Transcript) across the
+  whole width; the Transcript pane says "No transcript available" ("The transcript for this meeting was never created,
+  has expired, or has been deleted.") with "Is this transcript useful?". Teams reads MCPS again, then the transcript
+  file's item on the personal site (`$select=accessViewpoint,…,media,…,expiration`: `media.mediaSource.contentType:
+  "Transcript"`, the call's `recordingStartDateTime` and `recordingEndDateTime`, the account allowed everything), its
+  Graph `preview`, and its `select=media/transcripts,audioTracks&$expand=…`, answered `"media": {}`: the file lists no
+  transcript, so Teams shows none. Leaving the tab and coming back shows the latest recording again. In an earlier
+  capture of the same chat, a call recorded between two transcribed stretches had a transcript card for each stretch;
+  one's View recap showed that call's session with "Part 1" (the transcribed stretch, a transcript glyph, "This part
+  of the meeting was transcribed only." in a bar with a Close under the top row) and "Part 2" (the recording); opened
+  by itself the same session showed the recording alone, no parts. Share → Copy link copies the tab's shape with the
+  transcript file's address as `fileUrl` and `recapType=ODSPTranscript`; the card's Share the card's shape, also
+  `recapType=ODSPTranscript`.
 
 ## What `ngteams` does
 
@@ -225,7 +246,14 @@ transcript no recording of its call holds a card of its own (`teams_ui::meeting_
 the tabs while it holds one. Its Recap tab makes the meeting's read with the chat's id, each call a session of its menu
 (its parts beside it when it was recorded more than once), the latest shown first; a recording with no transcript
 to read keeps the Transcript pane, saying there is none as Teams does, and the chat's captions saved on this computer
-stay sessions of their own (Teams' transcript of the same time would win, as a meeting's). A recording's start and
+stay sessions of their own (Teams' transcript of the same time would win, as a meeting's). The transcripts MCPS lists
+under `invalidResources` are read too (`ContentKind::UnreadTranscript`; one on a recording's item is told by the
+recording): a call transcribed alone isn't a session of the menu, and its card's View recap or Transcript chip shows it
+as Teams' does above (`teams_ui::recap_view`'s `transcribed`: the plain line, the files and panes across the width, the
+Transcript saying there is none; a stretch transcribed alone of a recorded call is a part of its session, with the
+note), the part the card stands for (its file, call and span, from the chat's messages) shown in its place when the
+read doesn't list it. Its AI summary has no transcript to work from either; captions saved on this computer of that
+call are a session of their own with theirs. The transcript file's item reads are left out: they found no transcript. A recording's start and
 stop name the account by its name, as Teams' 1:1 chat does. Share → Copy link copies a 1:1 call's link in Teams'
-shapes above (the tab's without `fileUrl`, which only the item's own read gives); a group chat's keeps the meeting's
-shape (`threadType=meeting`), its own not captured.
+shapes above (the tab's without `fileUrl`, which only the item's own read gives; a call transcribed alone's
+`recapType=ODSPTranscript`); a group chat's keeps the meeting's shape (`threadType=meeting`), its own not captured.

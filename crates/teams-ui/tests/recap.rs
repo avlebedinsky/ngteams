@@ -14,7 +14,7 @@ use chrono::FixedOffset;
 use teams_proto::recap::recap_parts;
 use teams_ui::clock::HourCycle;
 use teams_ui::recap::{
-    Search, SharedFilter, SharedKind, Transcript, filtered, matched_ranges, part_label, session_line, sessions,
+    Search, SharedFilter, SharedKind, Transcript, filtered, listed, matched_ranges, part_label, session_line, sessions,
     shared_items, shows_parts, transcript_file_name,
 };
 
@@ -58,8 +58,11 @@ fn two_recordings_are_two_parts_a_transcript_alone_one() {
 fn a_1_1_chats_calls_are_sessions_of_their_own_the_latest_first() {
     let mut parts = recap_parts(&fixtures::recorded());
     // a meeting's parts are its one session
-    assert_eq!(sessions(&parts, false), vec![(0..parts.len()).collect::<Vec<_>>()]);
-    assert_eq!(sessions(&[], true), Vec::<Vec<usize>>::new());
+    assert_eq!(
+        sessions(&parts, false, None),
+        vec![(0..parts.len()).collect::<Vec<_>>()]
+    );
+    assert_eq!(sessions(&[], true, None), Vec::<Vec<usize>>::new());
     // a 1:1 chat's: each call its own, a part naming no call (a transcript saved here) one of its own
     let call = |id: &str| Some(format!("00000000-0000-4000-8000-0000000000{id}"));
     parts[0].call_id = call("c1");
@@ -70,7 +73,47 @@ fn a_1_1_chats_calls_are_sessions_of_their_own_the_latest_first() {
     let mut later = parts[0].clone();
     later.call_id = call("c2");
     parts.push(later);
-    assert_eq!(sessions(&parts, true), vec![vec![3], vec![2], vec![0, 1]]);
+    assert_eq!(sessions(&parts, true, None), vec![vec![3], vec![2], vec![0, 1]]);
+}
+
+#[test]
+fn a_call_transcribed_alone_is_left_out_until_its_card_asks_for_it() {
+    let call = |id: &str| Some(format!("00000000-0000-4000-8000-0000000000{id}"));
+    let mut parts = recap_parts(&fixtures::recorded());
+    parts.truncate(1);
+    parts[0].call_id = call("c1");
+    // a transcript with nothing to read of the recorded call, then a later call transcribed alone
+    let unread = |call_id: Option<String>, start: i64| teams_proto::recap::RecapPart {
+        recording: None,
+        transcript: None,
+        sharing_link: Some(format!(
+            "https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/t{start}"
+        )),
+        call_id,
+        drive_id: Some("b!drive1".to_owned()),
+        item_id: Some(format!("T{start}")),
+        start_ms: Some(start),
+        end_ms: Some(start + 60_000),
+        organizer_id: None,
+        tenant_id: None,
+    };
+    let first = parts[0].start_ms.expect("a start");
+    parts.insert(0, unread(call("c1"), first - 120_000));
+    parts.push(unread(call("c2"), first + 3_600_000));
+    // the Recap lists the recording alone, as Teams' does
+    assert_eq!(sessions(&parts, true, None), vec![vec![1]]);
+    assert!(listed(&parts, &[1]));
+    // its card asks: the recorded call's transcribed part joins its call, the call transcribed alone is its own
+    assert_eq!(sessions(&parts, true, Some(0)), vec![vec![0, 1]]);
+    assert_eq!(sessions(&parts, true, Some(2)), vec![vec![2], vec![1]]);
+    assert!(!listed(&parts, &[2]), "a call transcribed alone isn't in the menu");
+    assert!(listed(&parts, &[0, 1]));
+    // a meeting's: the same, in its one session
+    assert_eq!(sessions(&parts, false, None), vec![vec![1]]);
+    // only calls transcribed alone: all shown rather than none
+    let alone = vec![unread(call("c1"), first), unread(call("c2"), first + 60_000)];
+    assert_eq!(sessions(&alone, true, None), vec![vec![1], vec![0]]);
+    assert!(listed(&alone, &[0]));
 }
 
 #[test]

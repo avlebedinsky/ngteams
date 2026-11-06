@@ -8,7 +8,9 @@
 //! made-up summary kept for the run). A 1:1 chat's call captions saved on this computer: the Transcript chip under its
 //! call's end, its Recap (the transcript, its AI summary made, its Delete transcript confirmation). The same chat's call
 //! recorded: its recording's recap card under its saved line, its Recap at the recording (its Transcript saying there is
-//! none, as Teams' does).
+//! none, as Teams' does). A call of that chat transcribed and not recorded: its card, and its Recap as the card shows
+//! it (its line alone, its Transcript saying there is none), and a stretch of the recorded call transcribed alone, a
+//! part of its session with Teams' note.
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -47,8 +49,11 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 const CHILD_ENV: &str = "TEAMS_UI_RECAP_WINDOW_TEST";
 
 /// Each page and the themes it is shot in.
-const PAGES: [(&str, &[&str]); 27] = [
+const PAGES: [(&str, &[&str]); 30] = [
     ("call-chat", &[LIGHT_KEY, DARK_KEY]),
+    ("call-transcribed-chat", &[LIGHT_KEY]),
+    ("call-transcribed", &[LIGHT_KEY, DARK_KEY]),
+    ("call-transcribed-part", &[LIGHT_KEY, DARK_KEY]),
     ("call-recap", &[LIGHT_KEY, DARK_KEY]),
     ("call-transcript", &[LIGHT_KEY]),
     ("saved-chat", &[LIGHT_KEY, DARK_KEY]),
@@ -332,6 +337,69 @@ fn seed_call(core: &FakeCore) {
     );
 }
 
+/// The a–b chat's second call, transcribed and not recorded: its transcript's message and its file saved in a's
+/// OneDrive, MCPS listing it with nothing to read; and a stretch of the recorded call transcribed before its recording
+/// (`call-transcribed-part`).
+fn seed_transcribed(core: &FakeCore) {
+    let me = core.me().to_owned();
+    let oid = me.trim_start_matches("8:orgid:").to_owned();
+    let minute = 60_000;
+    let at = fixtures::START + 40 * minute;
+    let link = fixtures::sharing_link(TRANSCRIBED_ITEM);
+    let saved = format!(
+        "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Success\" code=\"200\" />\
+         <Title>Call with Bo Lab</Title><a href=\"{link}\">Play</a><MeetingOrganizerId value=\"\" />\
+         <RecordingInitiatorId value=\"{me}\" isAutoRecording=\"False\" />\
+         <RecordingStorage type=\"RecordingInitiatorOneDrive\" userId=\"{oid}\" />\
+         <Identifiers><Id type=\"callId\" value=\"{TRANSCRIBED_CALL}\" /></Identifiers>\
+         <RecordingContent contentTypes=\"Transcript\" timestamp=\"2026-01-02T10:40:00Z\" duration=\"0:00:58\">\
+         <item type=\"onedriveForBusinessVideo\" uri=\"{link}\" driveId=\"b!drive1\" driveItemId=\"{TRANSCRIBED_ITEM}\" />\
+         </RecordingContent></URIObject>"
+    );
+    let message = |id: &str, kind: &str, content: String, when: i64| teams_store::Message {
+        conversation_id: SAVED_CHAT.to_owned(),
+        id: id.to_owned(),
+        version: 1,
+        client_message_id: None,
+        sender: Some(me.clone()),
+        sender_name: None,
+        message_type: kind.to_owned(),
+        content,
+        properties: None,
+        arrival_time: when,
+        compose_time: Some(when),
+        edit_time: None,
+        delete_time: None,
+    };
+    if let Some(messages) = locked(&core.messages).get_mut(SAVED_CHAT) {
+        let transcript = format!(r#"{{\"callId\":\"{TRANSCRIBED_CALL}\",\"isDeleted\":false}}"#);
+        messages.push(message("t1", "RichText/Media_CallTranscript", transcript, at));
+        messages.push(message("t2", "RichText/Media_CallRecording", saved, at + 2 * minute));
+        messages.sort_by_key(|message| message.arrival_time);
+    }
+    let unread = |item: &str, call: &str, start: i64, end: i64| teams_proto::MeetingContent {
+        kind: teams_proto::recap::ContentKind::UnreadTranscript,
+        location: String::new(),
+        call_id: Some(call.to_owned()),
+        drive_id: Some("b!drive1".to_owned()),
+        item_id: Some(item.to_owned()),
+        start_ms: Some(start),
+        end_ms: Some(end),
+        web_url: Some(fixtures::sharing_link(item)),
+        organizer_id: Some(oid.clone()),
+        tenant_id: Some("00000000-0000-4000-8000-0000000000f0".to_owned()),
+    };
+    if let Some(contents) = locked(&core.meeting_contents).get_mut(SAVED_CHAT) {
+        let recorded = fixtures::START + 3 * minute;
+        contents.push(unread(TRANSCRIBED_ITEM, TRANSCRIBED_CALL, at, at + 58_000));
+        contents.push(unread("ITEM8", CALL_ID, recorded - 2 * minute, recorded - minute));
+    }
+}
+
+/// The a–b chat's call transcribed alone: its transcript's file and its call.
+const TRANSCRIBED_ITEM: &str = "ITEM7";
+const TRANSCRIBED_CALL: &str = "00000000-0000-4000-8000-0000000000c7";
+
 /// The a–b call's recording: its item and its call.
 const CALL_ITEM: &str = "ITEM5";
 const CALL_ID: &str = "00000000-0000-4000-8000-0000000000c5";
@@ -587,6 +655,9 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
     if page.starts_with("call") {
         seed_call(&core);
     }
+    if page.starts_with("call-transcribed") {
+        seed_transcribed(&core);
+    }
     if page.starts_with("saved") {
         seed_saved(&core);
         if page == "saved-summary" {
@@ -693,7 +764,7 @@ fn last(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
 /// Opens the page's tab.
 fn step(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
     let tab = match page {
-        "chat" | "saved-chat" | "call-chat" => ChatTab::Chat,
+        "chat" | "saved-chat" | "call-chat" | "call-transcribed-chat" => ChatTab::Chat,
         "shared" => ChatTab::Shared,
         _ => ChatTab::Recap,
     };
@@ -717,6 +788,12 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
             recap.show_recording(fixtures::sharing_link(CALL_ITEM), cx);
             recap.show_transcript(cx);
         }
+        // as the call transcribed alone's card's Transcript chip shows it
+        "call-transcribed" => {
+            recap.show_recording(fixtures::sharing_link(TRANSCRIBED_ITEM), cx);
+            recap.show_transcript(cx);
+        }
+        "call-transcribed-part" => recap.show_recording(fixtures::sharing_link("ITEM8"), cx),
         "saved-summary" => {
             recap.show_saved(1, cx);
             recap.show_pane(teams_ui::recap_view::Pane::AiSummary, cx);

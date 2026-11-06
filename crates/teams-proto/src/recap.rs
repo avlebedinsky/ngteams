@@ -7,7 +7,9 @@
 //!   ([`MeetingContents::read_answer`]) lists [`MeetingContent`]s: a `Recording` (its `location` the recording's
 //!   sharing link, which the app plays through Graph as it plays any shared video) and a `TranscriptV2` (its
 //!   `location` the transcript on the recording's item, in the organizer's OneDrive), each with the call, the item and
-//!   their times (.NET ticks). Any other kind is left out.
+//!   their times (.NET ticks). A 1:1 or group chat's calls' transcripts come only under `invalidResources`, with no
+//!   location: each is a [`ContentKind::UnreadTranscript`] (its call, item, times and sharing link, nothing to read).
+//!   Any other kind is left out.
 //! - [`TranscriptLocation`] is where a transcript's `WebVTT` is read: the item's
 //!   `media/transcripts/<id>/streamContent?is=1&applymediaedits=false` on the personal site that holds it, with the
 //!   account's token for that site (the web client's own download of it, "Download as .vtt"). It is made only from a
@@ -46,17 +48,23 @@ impl MeetingContents {
         Self { thread: thread.into() }
     }
 
-    /// The contents an answer lists, in its order; a resource of a kind the recap doesn't show, or one without a
-    /// location, is left out. `None` when the body isn't the service's answer.
+    /// The contents an answer lists, in its order, then the transcripts it lists as invalid
+    /// ([`ContentKind::UnreadTranscript`]); a resource of a kind the recap doesn't show, or one without a location, is
+    /// left out. `None` when the body isn't the service's answer.
     #[must_use]
     pub fn read_answer(body: &[u8]) -> Option<Vec<MeetingContent>> {
         let answer: Value = serde_json::from_slice(body).ok()?;
         let resources = answer.get("resources")?.as_array()?;
+        let invalid = answer
+            .get("invalidResources")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
         Some(
             resources
                 .iter()
-                .take(MAX_CONTENTS)
                 .filter_map(MeetingContent::read)
+                .chain(invalid.iter().filter_map(MeetingContent::read_unread))
+                .take(MAX_CONTENTS)
                 .collect(),
         )
     }
@@ -79,13 +87,17 @@ pub enum ContentKind {
     Recording,
     /// `TranscriptV2`: its location is the transcript on the recording's item.
     Transcript,
+    /// A `TranscriptV2` listed under `invalidResources` (a 1:1 or group call's, in its starter's OneDrive): no location,
+    /// nothing to read, as Teams' Recap says ("No transcript available"); its item's sharing link stands for it.
+    UnreadTranscript,
 }
 
 /// One thing a meeting left, as MCPS lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeetingContent {
     pub kind: ContentKind,
-    /// `location`: a recording's sharing link, a transcript's address on its item (always `https`).
+    /// `location`: a recording's sharing link, a transcript's address on its item (always `https`); empty for an
+    /// unread transcript.
     pub location: String,
     /// The call it is of (`metadata.callId`).
     pub call_id: Option<String>,
@@ -114,10 +126,23 @@ impl MeetingContent {
         if !location.starts_with("https://") {
             return None;
         }
+        Some(Self::with_metadata(kind, location, resource))
+    }
+
+    /// An `invalidResources` entry: a `TranscriptV2` with nothing to read, kept when it names its item's sharing link.
+    fn read_unread(resource: &Value) -> Option<Self> {
+        if resource.get("type")?.as_str()? != "TranscriptV2" {
+            return None;
+        }
+        let content = Self::with_metadata(ContentKind::UnreadTranscript, String::new(), resource);
+        content.web_url.is_some().then_some(content)
+    }
+
+    fn with_metadata(kind: ContentKind, location: String, resource: &Value) -> Self {
         let metadata = resource.get("metadata");
         let field = |name: &str| text(metadata.and_then(|metadata| metadata.get(name)));
         let https = |name: &str| field(name).filter(|link| link.starts_with("https://"));
-        Some(Self {
+        Self {
             kind,
             location,
             call_id: field("callId"),
@@ -128,7 +153,7 @@ impl MeetingContent {
             web_url: https("webUrl"),
             organizer_id: field("organizerId"),
             tenant_id: field("ownerTenantId").or_else(|| field("organizerTenantId")),
-        })
+        }
     }
 
     /// The link the recording is played and shared by: a recording's location, a transcript's item's sharing link.
@@ -136,7 +161,7 @@ impl MeetingContent {
     pub fn sharing_link(&self) -> Option<&str> {
         match self.kind {
             ContentKind::Recording => Some(&self.location),
-            ContentKind::Transcript => self.web_url.as_deref(),
+            ContentKind::Transcript | ContentKind::UnreadTranscript => self.web_url.as_deref(),
         }
     }
 }
@@ -312,8 +337,18 @@ pub struct RecapPart {
     pub tenant_id: Option<String>,
 }
 
+impl RecapPart {
+    /// Whether it is a transcript with nothing to read ([`ContentKind::UnreadTranscript`]): no recording, no
+    /// transcript's address, only its item.
+    #[must_use]
+    pub fn is_unread_transcript(&self) -> bool {
+        self.recording.is_none() && self.transcript.is_none()
+    }
+}
+
 /// The parts the recap shows, the earliest first: each recording with the transcript on its item, then every
-/// transcript no recording holds. A content without an item is a part of its own.
+/// transcript no recording holds, then every unread transcript no other part's item holds (a call transcribed alone).
+/// A content without an item is a part of its own.
 #[must_use]
 pub fn recap_parts(contents: &[MeetingContent]) -> Vec<RecapPart> {
     let mut parts: Vec<RecapPart> = Vec::new();
@@ -333,6 +368,14 @@ pub fn recap_parts(contents: &[MeetingContent]) -> Vec<RecapPart> {
             Some(part) if part.transcript.is_none() => part.transcript = Some(content.location.clone()),
             Some(_) => {}
             None => parts.push(part_of(content)),
+        }
+    }
+    for content in contents
+        .iter()
+        .filter(|content| content.kind == ContentKind::UnreadTranscript)
+    {
+        if !parts.iter().any(|part| same_item(part, content)) {
+            parts.push(part_of(content));
         }
     }
     parts.sort_by_key(|part| part.start_ms.unwrap_or(i64::MAX));
@@ -385,7 +428,7 @@ pub fn recap_link(part: &RecapPart, thread: &str) -> Option<String> {
 /// A meeting's (and, as no capture showed a group chat's, a group chat's) is `threadType=meeting` from the Recap tab's
 /// shape. A 1:1 chat's call is `threadType=OneOnOneChat&meetingType=Unknown`; from its card it is the card's own
 /// shape, `subType=RecapSharingLink_RecapChiclet` with the sharing link as `fileUrl` too and no organizer or tenant, as
-/// browser Teams copies it.
+/// browser Teams copies it. A 1:1 call transcribed and not recorded is `recapType=ODSPTranscript`.
 #[must_use]
 pub fn recap_link_from(part: &RecapPart, thread: &str, from: LinkFrom) -> Option<String> {
     let one_to_one = thread.ends_with("@unq.gbl.spaces");
@@ -416,6 +459,8 @@ pub fn recap_link_from(part: &RecapPart, thread: &str, from: LinkFrom) -> Option
         let holds = match (part.recording.is_some(), part.transcript.is_some()) {
             (true, true) => "RecordingAndTranscript",
             (true, false) => "Recording",
+            // a 1:1 call transcribed alone: its transcript's own file, as Teams' card and Recap both copy it
+            (false, _) if one_to_one => "ODSPTranscript",
             (false, _) => "Transcript",
         };
         if one_to_one {

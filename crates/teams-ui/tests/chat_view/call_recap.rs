@@ -21,6 +21,8 @@ const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8
 const CALL: &str = "00000000-0000-4000-8000-0000000000c1";
 const OTHER_CALL: &str = "00000000-0000-4000-8000-0000000000c2";
 const LINK: &str = "https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/MadeUpCallRecording";
+/// The other call's transcript file, once saved.
+const TRANSCRIPT_LINK: &str = "https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/MadeUpCallTranscript";
 /// 2026-01-01 12:00 UTC.
 const NOON: i64 = 1_767_268_800_000;
 const MINUTE: i64 = 60_000;
@@ -67,6 +69,23 @@ fn recording(call: &str, status: &str, code: &str, contents: &str) -> String {
     )
 }
 
+/// The transcript alone of `call` saved: its own file (`…-Meeting Transcript.mp4`) in a's OneDrive, as the bot's
+/// last state names it.
+fn transcript_saved(call: &str) -> String {
+    let owner = LAB_A.trim_start_matches("8:orgid:");
+    format!(
+        "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Success\" code=\"200\" />\
+         <Title>Call with Lab Bee</Title><a href=\"{TRANSCRIPT_LINK}\">Play</a>\
+         <OriginalName v=\"Call with Lab Bee-20260101_123000-Meeting Transcript.mp4\" /><MeetingOrganizerId value=\"\" />\
+         <RecordingInitiatorId value=\"{LAB_A}\" isAutoRecording=\"False\" />\
+         <RecordingStorage type=\"RecordingInitiatorOneDrive\" userId=\"{owner}\" />\
+         <Identifiers><Id type=\"callId\" value=\"{call}\" /></Identifiers>\
+         <RecordingContent contentTypes=\"Transcript\" timestamp=\"2026-01-01T12:30:00.0000000Z\" duration=\"0:00:58\">\
+         <item type=\"onedriveForBusinessVideo\" uri=\"{TRANSCRIPT_LINK}\" driveId=\"b!drive1\" driveItemId=\"ITEM7\" />\
+         </RecordingContent></URIObject>"
+    )
+}
+
 fn transcript(call: &str) -> String {
     format!(r#"{{\"callId\":\"{call}\",\"isDeleted\":false}}"#)
 }
@@ -88,6 +107,7 @@ fn call_messages() -> Vec<Message> {
             30,
         ),
         message("7", "RichText/Media_CallTranscript", &transcript(OTHER_CALL), 30),
+        message("8", kind, &transcript_saved(OTHER_CALL), 32),
     ]
 }
 
@@ -186,7 +206,25 @@ fn the_cards(view: &Entity<ChatView>, shown: &[MessageItem], cx: &mut VisualTest
     };
     assert!(alone.transcript && alone.recordings.is_empty());
     assert_eq!(alone.span, Some((start, start + 51_000)));
+    the_transcript_alone(alone);
     assert!(cx.update(|_, cx| view.read(cx).has_call_recaps()));
+}
+
+/// The other call's card, transcribed alone: its own file once saved is what View recap opens, and Share's link is a
+/// 1:1 call's transcript file's.
+fn the_transcript_alone(alone: &teams_ui::meeting_recap::RecapCard) {
+    let saved = alone.transcribed.as_ref().expect("the transcript's file");
+    assert_eq!(saved.link, TRANSCRIPT_LINK);
+    assert_eq!(alone.opens(), Some(TRANSCRIPT_LINK));
+    let part = alone.transcribed_part().expect("the part it stands for");
+    assert!(part.is_unread_transcript());
+    assert_eq!(part.item_id.as_deref(), Some("ITEM7"));
+    assert_eq!(part.call_id.as_deref(), Some(OTHER_CALL));
+    let half = NOON + 30 * MINUTE;
+    assert_eq!((part.start_ms, part.end_ms), (Some(half), Some(half + 58_000)));
+    let shared = alone.share_link(CHAT).expect("a recap link");
+    assert!(shared.ends_with("&recapType=ODSPTranscript"), "{shared}");
+    assert!(shared.contains("subType=RecapSharingLink_RecapChiclet"), "{shared}");
 }
 
 /// Both cards drawn with their controls; the transcript's with no picture, neither with a web link.
@@ -200,6 +238,7 @@ fn drawn(cx: &mut VisualTestContext) {
         "recap-card-expiry-5",
         "recap-card-7",
         "view-recap-7",
+        "recap-card-share-7",
         "recap-card-transcript-7",
     ] {
         assert!(cx.debug_bounds(selector).is_some(), "{selector} drawn");
@@ -212,7 +251,7 @@ fn drawn(cx: &mut VisualTestContext) {
 }
 
 /// View recap, the Transcript chip and the thumbnail tell the shell to show the chat's Recap tab at the recording; the
-/// transcript's card at none.
+/// transcript's card at its own file, with the part it stands for.
 fn the_cards_open_the_recap(view: &Entity<ChatView>, cx: &mut VisualTestContext) {
     let told: Rc<RefCell<Vec<ChatViewEvent>>> = Rc::default();
     let kept = Rc::clone(&told);
@@ -234,19 +273,30 @@ fn the_cards_open_the_recap(view: &Entity<ChatView>, cx: &mut VisualTestContext)
         cx.simulate_click(button.center(), Modifiers::none());
         cx.run_until_parked();
     }
-    let opened = |recording: Option<&str>, open| ChatViewEvent::OpenRecap {
-        recording: recording.map(str::to_owned),
+    let opened = |recording: &str, open| ChatViewEvent::OpenRecap {
+        recording: Some(recording.to_owned()),
+        transcribed: None,
         open,
     };
+    let told = told.borrow();
     assert_eq!(
-        *told.borrow(),
-        vec![
-            opened(Some(LINK), RecapOpen::Recap),
-            opened(Some(LINK), RecapOpen::Transcript),
-            opened(Some(LINK), RecapOpen::Play),
-            opened(None, RecapOpen::Recap),
+        told[..3],
+        [
+            opened(LINK, RecapOpen::Recap),
+            opened(LINK, RecapOpen::Transcript),
+            opened(LINK, RecapOpen::Play),
         ]
     );
+    let ChatViewEvent::OpenRecap {
+        recording,
+        transcribed: Some(part),
+        open: RecapOpen::Recap,
+    } = &told[3]
+    else {
+        panic!("the transcript's View recap opens its part: {:?}", told[3]);
+    };
+    assert_eq!(recording.as_deref(), Some(TRANSCRIPT_LINK));
+    assert_eq!(part.sharing_link.as_deref(), Some(TRANSCRIPT_LINK));
 }
 
 #[test]

@@ -311,3 +311,63 @@ fn a_content_without_times_or_metadata_still_reads() {
     // items unknown: each is a part of its own, the ones with no time last
     assert_eq!(recap_parts(&contents).len(), 2);
 }
+
+#[test]
+fn a_1_1_calls_transcripts_listed_invalid_are_parts_with_nothing_to_read() {
+    const CALL_CHAT: &str =
+        "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+    let invalid = |item: &str, start: &str, end: &str| {
+        let mut transcript = resource("TranscriptV2", item, "", start, end);
+        transcript["metadata"]["webUrl"] =
+            serde_json::json!(format!("https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/{item}"));
+        transcript
+    };
+    let mut no_link = invalid("ITEM7", "639029451000000000", "639029451600000000");
+    no_link["metadata"]["webUrl"] = serde_json::json!("");
+    let body = serde_json::json!({
+        "resources": [
+            resource("Recording", "ITEM1", "https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/share1", "639029448000000000", "639029448300000000")
+        ],
+        // the recording's own transcript, a call transcribed alone, one naming no link, and one of another kind
+        "invalidResources": [
+            invalid("ITEM1", "639029448000000000", "639029448300000000"),
+            invalid("ITEM5", "639029450000000000", "639029450600000000"),
+            no_link,
+            {"type": "Recording", "metadata": {"driveItemId": "ITEM6"}}
+        ]
+    })
+    .to_string()
+    .into_bytes();
+    let contents = MeetingContents::read_answer(&body).expect("an answer");
+    let kinds: Vec<_> = contents
+        .iter()
+        .map(|content| (content.kind, content.item_id.as_deref()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (ContentKind::Recording, Some("ITEM1")),
+            (ContentKind::UnreadTranscript, Some("ITEM1")),
+            (ContentKind::UnreadTranscript, Some("ITEM5"))
+        ]
+    );
+    assert_eq!(contents[2].location, "");
+    assert_eq!(
+        contents[2].sharing_link(),
+        Some("https://madeup-my.sharepoint.com/:v:/g/personal/lab_a/ITEM5")
+    );
+    // the recording's own transcript is told by the recording; the call transcribed alone is a part of its own
+    let parts = recap_parts(&contents);
+    assert_eq!(parts.len(), 2);
+    assert!(!parts[0].is_unread_transcript());
+    assert!(parts[1].is_unread_transcript());
+    assert_eq!(parts[1].start_ms, Some(1_767_348_200_000));
+    // Share copies it as Teams' does: its own transcript file, from the tab and from its card
+    for from in [LinkFrom::Recap, LinkFrom::Card] {
+        let link = recap_link_from(&parts[1], CALL_CHAT, from).expect("a link");
+        assert!(link.ends_with("&recapType=ODSPTranscript"), "{link}");
+    }
+    // a meeting's part with only a transcript stays a transcript
+    let meeting = recap_link(&parts[1], THREAD).expect("a link");
+    assert!(meeting.ends_with("&recapType=Transcript"), "{meeting}");
+}

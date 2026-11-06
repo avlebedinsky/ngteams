@@ -2151,7 +2151,11 @@ impl Shell {
                 this.run_workflow(flow.clone(), message.clone(), window, cx);
             }
             ChatViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
-            ChatViewEvent::OpenRecap { recording, open } => this.open_recap(recording.clone(), *open, window, cx),
+            ChatViewEvent::OpenRecap {
+                recording,
+                transcribed,
+                open,
+            } => this.open_recap(recording.clone(), transcribed.clone(), *open, window, cx),
             ChatViewEvent::OpenSavedTranscript(id) => this.open_saved_transcript(*id, window, cx),
             // a chat has no channel's thread or meeting card
             ChatViewEvent::Action { .. } | ChatViewEvent::OpenThread { .. } | ChatViewEvent::EditMeeting { .. } => {}

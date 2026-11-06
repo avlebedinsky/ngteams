@@ -20,7 +20,8 @@
 //!
 //! A 1:1 or group chat's calls have the same card, drawn where Teams' chat draws it ([`call_cards`]): under each
 //! recording's "Recording has been saved" line, of that recording alone, and at a transcript's message when no
-//! recording of its call holds a transcript. Its actions open the chat's own Recap tab, as a meeting's do.
+//! recording of its call holds a transcript. Its actions open the chat's own Recap tab, as a meeting's do; a call
+//! transcribed and not recorded opens at its transcript's own file (in its starter's OneDrive), as Teams' card does.
 
 use std::collections::HashMap;
 
@@ -91,6 +92,48 @@ impl RecapCard {
         self.recordings.first()
     }
 
+    /// What View recap and the Transcript chip open, by its item's sharing link: the first recording, else the
+    /// transcript alone.
+    #[must_use]
+    pub fn opens(&self) -> Option<&str> {
+        self.recordings
+            .first()
+            .or(self.transcribed.as_ref())
+            .map(|shown| shown.link.as_str())
+    }
+
+    /// The recap's part a call transcribed alone stands for (its transcript's item, with nothing to read: Teams' Recap
+    /// says there is no transcript), shown when the recap's read lists none of its item; `None` for a card with a
+    /// recording, or a transcript whose file isn't known yet.
+    #[must_use]
+    pub fn transcribed_part(&self) -> Option<RecapPart> {
+        if !self.recordings.is_empty() {
+            return None;
+        }
+        let shown = self.transcribed.as_ref()?;
+        let file = shown.file.as_ref()?;
+        let span = span_of(shown.started, shown.duration).or(self.span);
+        Some(RecapPart {
+            recording: None,
+            transcript: None,
+            sharing_link: Some(shown.link.clone()),
+            call_id: self.call_id.clone(),
+            drive_id: Some(file.drive.clone()),
+            item_id: Some(file.item.clone()),
+            start_ms: span.map(|(start, _)| start).or(shown.started),
+            end_ms: span.map(|(_, end)| end),
+            organizer_id: self.organizer_oid(),
+            tenant_id: self.tenant.clone(),
+        })
+    }
+
+    /// The organizer as an object id (its MRI's prefix put away).
+    fn organizer_oid(&self) -> Option<String> {
+        self.organizer
+            .as_deref()
+            .map(|organizer| organizer.strip_prefix("8:orgid:").unwrap_or(organizer).to_owned())
+    }
+
     /// Whether it has a picture (a recording, ready or being saved).
     #[must_use]
     pub fn has_picture(&self) -> bool {
@@ -146,10 +189,7 @@ impl RecapCard {
             item_id: Some(file.item.clone()),
             start_ms: shown.started,
             end_ms: None,
-            organizer_id: self
-                .organizer
-                .as_deref()
-                .map(|organizer| organizer.strip_prefix("8:orgid:").unwrap_or(organizer).to_owned()),
+            organizer_id: self.organizer_oid(),
             tenant_id: self.tenant.clone(),
         })
     }
@@ -318,6 +358,18 @@ pub fn call_cards(messages: &[Message]) -> HashMap<String, RecapCard> {
             })
             .min_by_key(|(stopped, _)| stopped.arrival_time.abs_diff(message.arrival_time))
             .and_then(|(_, recording)| span_of(recording.started, recording.duration));
+        // its file once saved: the transcript's own saved state begun nearest its message
+        let saved = of_call()
+            .filter(|(_, recording)| {
+                recording.contents == RecordingContents::Transcript && recording.status == RecordingStatus::Ready
+            })
+            .min_by_key(|(_, recording)| {
+                recording
+                    .started
+                    .map_or(u64::MAX, |started| started.abs_diff(message.arrival_time))
+            })
+            .and_then(|(_, recording)| ready_of(recording));
+        let span = span.or_else(|| saved.as_ref().and_then(|saved| span_of(saved.started, saved.duration)));
         cards.insert(
             message.id.clone(),
             RecapCard {
@@ -325,6 +377,7 @@ pub fn call_cards(messages: &[Message]) -> HashMap<String, RecapCard> {
                 title: first.and_then(|recording| recording.title.clone()),
                 span,
                 transcript: true,
+                transcribed: saved,
                 organizer: first
                     .and_then(|recording| recording.organizer.clone().or_else(|| recording.storage_owner.clone())),
                 tenant: first.and_then(|recording| recording.tenant.clone()),
@@ -335,15 +388,20 @@ pub fn call_cards(messages: &[Message]) -> HashMap<String, RecapCard> {
     cards
 }
 
-/// The card of one recording saved: its own span, its transcript when it was transcribed; `None` without its link.
-fn recording_card(recording: &teams_proto::chat::Recording) -> Option<RecapCard> {
-    let ready = CardRecording {
+/// A saved recording (or transcript) as a card holds it; `None` without its link.
+fn ready_of(recording: &teams_proto::chat::Recording) -> Option<CardRecording> {
+    Some(CardRecording {
         link: recording.link.clone()?,
         file: recording.file.clone(),
         duration: recording.duration,
         started: recording.started,
         transcript: recording.transcript.clone(),
-    };
+    })
+}
+
+/// The card of one recording saved: its own span, its transcript when it was transcribed; `None` without its link.
+fn recording_card(recording: &teams_proto::chat::Recording) -> Option<RecapCard> {
+    let ready = ready_of(recording)?;
     Some(RecapCard {
         call_id: recording.call_id.clone(),
         title: recording.title.clone(),

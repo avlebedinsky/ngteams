@@ -54,20 +54,32 @@ pub fn local_session_line(parts: &[RecapPart], cycle: HourCycle) -> Option<Strin
     session_line(parts, &Local, cycle)
 }
 
-/// The recap's sessions as Teams' session menu lists them, the newest first, each the indices of its parts in order.
-/// A meeting chat's parts are its meeting's one session; a 1:1 or group chat's (`by_call`) are its calls', a session
-/// for each call (a part that names no call, as a transcript saved on this computer, one of its own), Teams' 1:1 Recap
-/// listing each call recorded by its own day and span.
+/// The recap's sessions, the newest first, each the indices of its parts in order. A meeting chat's parts are its
+/// meeting's one session; a 1:1 or group chat's (`by_call`) are its calls', a session for each call (a part that names
+/// no call, as a transcript saved on this computer, one of its own), Teams' 1:1 Recap listing each call recorded by its
+/// own day and span.
+///
+/// A transcript with nothing to read ([`RecapPart::is_unread_transcript`]: a call transcribed alone) is left out, as
+/// Teams' Recap lists the recordings alone, unless it is `revealed` (its card's View recap asked for it): then it joins
+/// its call's session, or is one of its own, as Teams' Recap shows it from that card. When every part is such a
+/// transcript, they are all shown rather than none.
 #[must_use]
-pub fn sessions(parts: &[RecapPart], by_call: bool) -> Vec<Vec<usize>> {
-    if parts.is_empty() {
+pub fn sessions(parts: &[RecapPart], by_call: bool, revealed: Option<usize>) -> Vec<Vec<usize>> {
+    let hidden = |index: usize, part: &RecapPart| part.is_unread_transcript() && Some(index) != revealed;
+    let all_hidden = parts.iter().all(RecapPart::is_unread_transcript);
+    let shown: Vec<(usize, &RecapPart)> = parts
+        .iter()
+        .enumerate()
+        .filter(|(index, part)| all_hidden || !hidden(*index, part))
+        .collect();
+    if shown.is_empty() {
         return Vec::new();
     }
     if !by_call {
-        return vec![(0..parts.len()).collect()];
+        return vec![shown.into_iter().map(|(index, _)| index).collect()];
     }
     let mut sessions: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
-    for (index, part) in parts.iter().enumerate() {
+    for (index, part) in shown {
         let call = part.call_id.as_deref();
         match sessions.iter_mut().find(|(of, _)| call.is_some() && *of == call) {
             Some((_, indices)) => indices.push(index),
@@ -76,6 +88,19 @@ pub fn sessions(parts: &[RecapPart], by_call: bool) -> Vec<Vec<usize>> {
     }
     // the parts come the earliest first: the session last begun first
     sessions.into_iter().rev().map(|(_, indices)| indices).collect()
+}
+
+/// Whether the session made of `indices` of `parts` is one the recap's session menu lists: it holds something besides
+/// a transcript with nothing to read (Teams' menu lists the recordings, and the app's saved transcripts are its own).
+/// A call transcribed alone, shown from its card, isn't listed: its line shows without the menu, as Teams' does.
+#[must_use]
+pub fn listed(parts: &[RecapPart], indices: &[usize]) -> bool {
+    let all_hidden = parts.iter().all(RecapPart::is_unread_transcript);
+    all_hidden
+        || indices
+            .iter()
+            .filter_map(|&index| parts.get(index))
+            .any(|part| !part.is_unread_transcript())
 }
 
 /// The line of the session made of `indices` of `parts` ([`session_line`] of its parts) in the local zone.

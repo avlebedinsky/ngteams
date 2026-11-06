@@ -14,6 +14,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Disableable as _, Sizable as _};
 use teams_core::Action;
 use teams_proto::chat::MessageText;
+use teams_proto::recap::RecapPart;
 
 use super::{Pane, Post, Read, RecapView, centred, event_row, spinner};
 use crate::clock;
@@ -26,6 +27,8 @@ use crate::theme::Palette;
 
 /// What the pane says of a part without a transcript.
 pub const NO_TRANSCRIPT: &str = "There's nothing to summarize: this recording has no transcript.";
+/// What the pane says of a call transcribed alone whose transcript Teams has nothing of (`docs/protocol/recap.md`).
+pub const NO_TEAMS_TRANSCRIPT: &str = "There's nothing to summarize: Teams has no transcript of this call to read.";
 /// What the pane says of a transcript in which nobody spoke.
 pub const EMPTY_TRANSCRIPT: &str = "There's nothing to summarize: the transcript is empty.";
 /// What the pane says when the transcript couldn't be read.
@@ -242,7 +245,9 @@ impl RecapView {
     pub(super) fn summary_pane(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let location = self.part().and_then(|part| part.transcript.clone());
         let Some(location) = location else {
-            return state(Glyph::SPARKLES, NO_TRANSCRIPT, None, palette);
+            let unread = self.part().is_some_and(RecapPart::is_unread_transcript);
+            let words = if unread { NO_TEAMS_TRANSCRIPT } else { NO_TRANSCRIPT };
+            return state(Glyph::SPARKLES, words, None, palette);
         };
         match self.transcripts.get(&location) {
             None | Some(Read::Reading) => return centred(spinner(palette), palette).into_any_element(),

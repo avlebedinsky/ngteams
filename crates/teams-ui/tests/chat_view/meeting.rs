@@ -372,6 +372,7 @@ fn the_card_opens_the_recap(view: &Entity<ChatView>, cx: &mut VisualTestContext)
     }
     let opened = |open| ChatViewEvent::OpenRecap {
         recording: Some(LINK.to_owned()),
+        transcribed: None,
         open,
     };
     assert_eq!(

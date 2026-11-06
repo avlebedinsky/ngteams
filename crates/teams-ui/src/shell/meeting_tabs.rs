@@ -159,11 +159,13 @@ impl Shell {
         cx.notify();
     }
 
-    /// The recap card's View recap, Transcript or thumbnail: the Recap tab, at the card's recording when it names one,
-    /// showing `open` (its transcript from the top, or its recording playing).
+    /// The recap card's View recap, Transcript or thumbnail: the Recap tab, at the card's recording when it names one (a
+    /// call transcribed alone's part when it is one), showing `open` (its transcript from the top, or its recording
+    /// playing).
     pub fn open_recap(
         &mut self,
         recording: Option<String>,
+        transcribed: Option<teams_proto::recap::RecapPart>,
         open: crate::chat_view::RecapOpen,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -171,8 +173,11 @@ impl Shell {
         self.show_chat_tab(ChatTab::Recap, window, cx);
         let Some(recap) = &self.meeting_tabs.recap else { return };
         recap.update(cx, |recap, cx| {
-            if let Some(recording) = recording {
-                recap.show_recording(recording, cx);
+            // a call transcribed alone: its part, wherever the read lists it (or where it would be)
+            match (transcribed, recording) {
+                (Some(part), _) => recap.show_transcribed(part, cx),
+                (None, Some(recording)) => recap.show_recording(recording, cx),
+                (None, None) => {}
             }
             match open {
                 crate::chat_view::RecapOpen::Recap => {}

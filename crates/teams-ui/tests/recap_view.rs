@@ -328,6 +328,165 @@ fn a_1_1_chats_calls_are_sessions_of_its_recap_the_latest_shown() {
     assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 0);
 }
 
+/// The call chat's second call, transcribed and not recorded: its transcript's message (`71`) and its file saved in a's
+/// OneDrive (`72`); listed by MCPS (`listed`) with nothing to read, as a 1:1 call's transcript is.
+fn transcribed_call(rig: &Rig, listed: bool) {
+    let call = "00000000-0000-4000-8000-0000000000c7";
+    let link = fixtures::sharing_link("ITEM7");
+    let saved = format!(
+        "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Success\" code=\"200\" />\
+         <Title>Call with Bo Lab</Title><a href=\"{link}\">Play</a><MeetingOrganizerId value=\"\" />\
+         <RecordingInitiatorId value=\"8:orgid:{0}\" isAutoRecording=\"False\" />\
+         <RecordingStorage type=\"RecordingInitiatorOneDrive\" userId=\"{0}\" />\
+         <Identifiers><Id type=\"callId\" value=\"{call}\" /></Identifiers>\
+         <RecordingContent contentTypes=\"Transcript\" timestamp=\"2026-01-02T11:00:00Z\" duration=\"0:00:58\">\
+         <item type=\"onedriveForBusinessVideo\" uri=\"{link}\" driveId=\"b!drive1\" driveItemId=\"ITEM7\" />\
+         </RecordingContent></URIObject>",
+        fixtures::ORGANIZER
+    );
+    {
+        let mut messages = locked(&rig.core.messages);
+        let chat = messages.get_mut(CALL_CHAT).expect("the call chat's");
+        let mut transcript = chat[0].clone();
+        transcript.id = "71".to_owned();
+        transcript.message_type = "RichText/Media_CallTranscript".to_owned();
+        transcript.content = format!(r#"{{\"callId\":\"{call}\",\"isDeleted\":false}}"#);
+        transcript.arrival_time += 3_600_000;
+        let mut file = chat[0].clone();
+        file.id = "72".to_owned();
+        file.content = saved;
+        file.arrival_time += 3_660_000;
+        chat.push(transcript);
+        chat.push(file);
+    }
+    if listed {
+        let mut contents = locked(&rig.core.meeting_contents);
+        let calls = contents.get_mut(CALL_CHAT).expect("the call's");
+        let mut unread = calls[0].clone();
+        unread.kind = teams_proto::recap::ContentKind::UnreadTranscript;
+        unread.location = String::new();
+        unread.web_url = Some(link);
+        unread.item_id = Some("ITEM7".to_owned());
+        unread.call_id = Some(call.to_owned());
+        unread.start_ms = unread.start_ms.map(|start| start + 3_600_000);
+        unread.end_ms = unread.end_ms.map(|end| end + 3_600_000);
+        calls.push(unread);
+    }
+}
+
+/// The Recap opened by itself: it lists the recording alone, as Teams' does.
+fn the_recording_alone_is_listed(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<RecapView> {
+    click(cx, "chat-tab-recap");
+    let shown = recap(shell, cx);
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 0);
+    click(cx, "recap-session");
+    assert!(cx.debug_bounds("recap-session-row-0").is_some());
+    assert!(cx.debug_bounds("recap-session-row-1").is_none(), "not listed");
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    shown
+}
+
+#[test]
+fn a_call_transcribed_alone_isnt_a_session_until_its_card_shows_it_with_no_transcript() {
+    let rig = call_rig();
+    transcribed_call(&rig, true);
+    let (shell, cx) = shell_window(&rig, CALL_CHAT);
+    let shown = the_recording_alone_is_listed(&shell, cx);
+    // its card's View recap shows it: its line alone, Share and More options, no player, its Transcript none
+    click(cx, "chat-tab-chat");
+    click(cx, "view-recap-71");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Recap);
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 1);
+    assert!(cx.debug_bounds("recap-session-line").is_some());
+    assert!(cx.debug_bounds("recap-session").is_none(), "no menu, as Teams' line");
+    for selector in ["recap-share", "recap-more", "recap-files"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector} drawn");
+    }
+    for selector in ["recap-recording", "recap-watch", "recap-transcribed-note"] {
+        assert!(cx.debug_bounds(selector).is_none(), "{selector} not drawn");
+    }
+    click(cx, "recap-pane-transcript");
+    assert!(
+        cx.debug_bounds(Box::leak(
+            format!("recap-state {}", teams_ui::recap_view::NO_TRANSCRIPT_YET).into_boxed_str()
+        ))
+        .is_some()
+    );
+    assert_eq!(asked(&rig, "meeting_transcript"), 0);
+    // the recording's own card still opens the recording
+    click(cx, "chat-tab-chat");
+    click(cx, "view-recap-51");
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 0);
+    assert!(cx.debug_bounds("recap-session").is_some());
+}
+
+#[test]
+fn a_call_transcribed_alone_mcps_doesnt_list_is_shown_from_its_card() {
+    let rig = call_rig();
+    transcribed_call(&rig, false);
+    let (shell, cx) = shell_window(&rig, CALL_CHAT);
+    click(cx, "recap-card-transcript-71");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Recap);
+    let shown = recap(&shell, cx);
+    let parts = cx
+        .update(|_, cx| shown.read(cx).parts().map(<[_]>::to_vec))
+        .expect("read");
+    assert_eq!(parts.len(), 2, "the card's part beside the recording");
+    assert!(parts[1].is_unread_transcript());
+    assert_eq!(parts[1].item_id.as_deref(), Some("ITEM7"));
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 1);
+    assert!(cx.debug_bounds("recap-session-line").is_some());
+    assert!(
+        cx.debug_bounds("recap-pane-transcript shown").is_some(),
+        "the chip shows its Transcript"
+    );
+}
+
+#[test]
+fn a_part_transcribed_only_among_its_calls_parts_says_so() {
+    let rig = call_rig();
+    // the recorded call transcribed alone first, then recorded: its card's View recap shows both its parts
+    let call = "00000000-0000-4000-8000-0000000000c5".to_owned();
+    {
+        let mut contents = locked(&rig.core.meeting_contents);
+        let calls = contents.get_mut(CALL_CHAT).expect("the call's");
+        calls[0].call_id = Some(call.clone());
+        let mut unread = calls[0].clone();
+        unread.kind = teams_proto::recap::ContentKind::UnreadTranscript;
+        unread.location = String::new();
+        unread.web_url = Some(fixtures::sharing_link("ITEM8"));
+        unread.item_id = Some("ITEM8".to_owned());
+        unread.start_ms = unread.start_ms.map(|start| start - 120_000);
+        unread.end_ms = unread.end_ms.map(|end| end - 120_000);
+        calls.push(unread);
+    }
+    let (shell, cx) = shell_window(&rig, CALL_CHAT);
+    click(cx, "chat-tab-recap");
+    let shown = recap(&shell, cx);
+    assert!(cx.debug_bounds("recap-part-0").is_none(), "the recording alone");
+    cx.update(|_, cx| {
+        shown.update(cx, |recap, cx| {
+            recap.show_recording(fixtures::sharing_link("ITEM8"), cx);
+        });
+    });
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 0);
+    for selector in [
+        "recap-part-0",
+        "recap-part-1",
+        "recap-session",
+        "recap-transcribed-note",
+    ] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector} drawn");
+    }
+    click(cx, "recap-transcribed-close");
+    assert!(cx.debug_bounds("recap-transcribed-note").is_none());
+    click(cx, "recap-part-1");
+    assert!(cx.debug_bounds("recap-recording").is_some());
+    assert!(cx.debug_bounds("recap-transcribed-note").is_none());
+}
+
 #[test]
 fn a_recap_that_cant_be_read_says_so_and_reads_again() {
     let rig = rig(true);

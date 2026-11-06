@@ -27,7 +27,8 @@
 //! - **A 1:1 or group chat's calls**: their cloud recordings are listed by the same read as a meeting's (the chat's id
 //!   for the meeting's), each a part played, downloaded and summarized as a meeting's; Teams lists their transcripts
 //!   with no address to read (`docs/protocol/recap.md`), so such a part's Transcript says there is none, as Teams'
-//!   does, and the chat's saved captions stay parts of their own.
+//!   does, and the chat's saved captions stay parts of their own. A call transcribed and not recorded isn't a session;
+//!   its card shows it ([`transcribed`]).
 //! - **Its states**: a spinner while the recap or a transcript is read; one that can't be read says so and offers to try
 //!   again, or Teams on the web; a meeting that left nothing says so.
 //!
@@ -58,9 +59,11 @@ use teams_proto::transcript::{Cue, Turn, read_vtt};
 
 mod local;
 mod summary;
+mod transcribed;
 
 pub use local::{DELETE_ASK, DELETED, SAVED_NOTICE};
-pub use summary::{COPIED, EMPTY_TRANSCRIPT, NO_TRANSCRIPT, SENT, SUMMARY_FAILED};
+pub use summary::{COPIED, EMPTY_TRANSCRIPT, NO_TEAMS_TRANSCRIPT, NO_TRANSCRIPT, SENT, SUMMARY_FAILED};
+pub use transcribed::TRANSCRIBED_ONLY;
 
 use crate::bridge::Core;
 use crate::clock;
@@ -68,8 +71,8 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::PictureSource;
 use crate::people;
 use crate::recap::{
-    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, local_line_of, part_label, recording_file_name, row_of,
-    sessions, transcript_file_name,
+    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, listed, local_line_of, part_label, recording_file_name,
+    row_of, sessions, transcript_file_name,
 };
 use crate::recap_summary::RecapSummary;
 use crate::recording_download::{self, Progress, RecordingDownload, byte_size, download_of};
@@ -159,8 +162,12 @@ pub struct RecapView {
     spoken: Option<(usize, usize)>,
     /// The recording asked for ("View recap" on its card) before the parts were read.
     wanted: Option<String>,
+    /// A call transcribed alone, as its card's View recap asked for it ([`transcribed`]).
+    transcribed: transcribed::Transcribed,
     /// The recap card's thumbnail asked for the shown recording to play before the parts were read.
     play_wanted: bool,
+    /// The recap card's Transcript chip asked for the Transcript pane before the parts were read.
+    transcript_wanted: bool,
     search_box: Entity<InputState>,
     search: Option<Search>,
     /// What was searched for: searched again once the transcript it was asked of arrives.
@@ -213,7 +220,9 @@ impl RecapView {
             watched: HashMap::new(),
             spoken: None,
             wanted: None,
+            transcribed: transcribed::Transcribed::default(),
             play_wanted: false,
+            transcript_wanted: false,
             search_box,
             search: None,
             query: String::new(),
@@ -318,6 +327,10 @@ impl RecapView {
                 if let Some(recording) = this.wanted.take() {
                     this.show_recording(recording, cx);
                 }
+                this.show_wanted_transcribed(cx);
+                if std::mem::take(&mut this.transcript_wanted) {
+                    this.show_transcript(cx);
+                }
                 this.show_wanted_saved(cx);
                 if std::mem::take(&mut this.play_wanted) {
                     this.play_when_shown(cx);
@@ -417,6 +430,7 @@ impl RecapView {
         }
         self.pause(cx);
         self.selected = index;
+        self.transcribed.note_closed = false;
         self.pane = None;
         self.sending = None;
         self.spoken = None;
@@ -427,7 +441,8 @@ impl RecapView {
         cx.notify();
     }
 
-    /// Shows the part of the recording whose sharing link is `recording` (once the parts are read).
+    /// Shows the part of the recording whose sharing link is `recording` (once the parts are read); a call transcribed
+    /// alone whose item's sharing link it is is shown too, as its card's View recap shows it ([`transcribed`]).
     pub fn show_recording(&mut self, recording: String, cx: &mut Context<Self>) {
         let Some(parts) = self.parts() else {
             self.wanted = Some(recording);
@@ -438,11 +453,18 @@ impl RecapView {
             .position(|part| part.recording.as_deref() == Some(recording.as_str()))
         {
             self.select_part(index, cx);
+        } else if let Some(index) = parts
+            .iter()
+            .position(|part| part.is_unread_transcript() && part.sharing_link.as_deref() == Some(recording.as_str()))
+        {
+            self.reveal(index, cx);
         }
     }
 
     /// The recap card's Transcript chip: the shown part's Transcript pane, from its top.
     pub fn show_transcript(&mut self, cx: &mut Context<Self>) {
+        // the part it is of is shown once the parts are read: the pane is shown again then
+        self.transcript_wanted = self.parts().is_none();
         self.pane = Some(Pane::Transcript);
         self.spoken = None;
         self.scroll.scroll_to_item(0);
@@ -867,6 +889,7 @@ impl RecapView {
             .px_3()
             .pb_3()
             .child(top)
+            .children(self.transcribed_note(palette, cx))
             .children(self.delete_confirmation(palette, cx))
             .children(self.download_rows(palette, cx))
             .children(self.saving.then(|| {
@@ -891,7 +914,7 @@ impl RecapView {
     /// one, a meeting chat's meeting one.
     fn sessions(&self) -> Vec<Vec<usize>> {
         let by_call = !crate::system_message::is_meeting_chat(&self.conversation);
-        sessions(self.parts().unwrap_or_default(), by_call)
+        sessions(self.parts().unwrap_or_default(), by_call, self.revealed())
     }
 
     /// The session of the part shown: its parts' indices.
@@ -932,10 +955,14 @@ impl RecapView {
         let parts = self.parts().unwrap_or_default();
         let cycle = clock::cycle(cx);
         let line = self.session_line(cx).unwrap_or_else(|| self.title.to_string());
+        if !listed(parts, &self.session()) {
+            return transcribed::session_line(line);
+        }
         // each session by its line, the one shown checked, the newest first
         let rows: Vec<(usize, String, bool)> = self
             .sessions()
             .into_iter()
+            .filter(|indices| listed(parts, indices))
             .filter_map(|indices| {
                 let first = *indices.first()?;
                 let line = local_line_of(parts, &indices, cycle).unwrap_or_else(|| self.title.to_string());
@@ -998,7 +1025,7 @@ impl RecapView {
                     palette.muted_foreground
                 }))
                 .when(chosen, |tab| tab.font_weight(FontWeight::SEMIBOLD))
-                .child(Glyph::PLAY_MEDIA.icon().size(px(14.0)))
+                .child(self.part_glyph(index).icon().size(px(14.0)))
                 .child(part_label(position))
                 .on_click(cx.listener(move |this, _, _, cx| this.select_part(index, cx)))
         };
@@ -1243,8 +1270,12 @@ impl RecapView {
     /// The panes' pills (AI summary, and Transcript for a part with one) and the pane shown.
     fn panes_card(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let has_transcript = self.part().is_some_and(|part| part.transcript.is_some());
-        // a recording without a transcript keeps the pane, saying there is none, as Teams' Recap does
-        let offers_transcript = has_transcript || self.part().is_some_and(|part| part.recording.is_some());
+        // a recording without a transcript, or a transcript with nothing to read, keeps the pane, saying there is none,
+        // as Teams' Recap does
+        let offers_transcript = has_transcript
+            || self
+                .part()
+                .is_some_and(|part| part.recording.is_some() || part.is_unread_transcript());
         let shown = self.pane(cx);
         let pill = |pane: Pane, label: &'static str, key: &'static str, cx: &mut Context<Self>| {
             let chosen = shown == pane;

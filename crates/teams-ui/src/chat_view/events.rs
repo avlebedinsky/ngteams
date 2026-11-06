@@ -369,12 +369,11 @@ impl ChatView {
             });
             selected_by(format!("recap-card-share-{}", item.id), button)
         });
-        let recording = card.first_recording().map(|recording| recording.link.clone());
         let view = Button::new(SharedString::from(format!("view-recap-{}", item.id)))
             .label(VIEW_RECAP)
             .primary()
             .with_size(gpui_component::Size::Large)
-            .on_click(recap_opener(recording, RecapOpen::Recap, cx));
+            .on_click(recap_opener(card, RecapOpen::Recap, cx));
         div()
             .flex()
             .items_center()
@@ -407,12 +406,11 @@ impl ChatView {
 
     /// The Transcript chip: the recap, its transcript shown.
     fn transcript_chip(item: &MessageItem, card: &RecapCard, cx: &mut Context<Self>) -> AnyElement {
-        let recording = card.first_recording().map(|recording| recording.link.clone());
         let chip = Button::new(SharedString::from(format!("recap-card-transcript-{}", item.id)))
             .icon(Glyph::TRANSCRIPT.icon())
             .label(TRANSCRIPT)
             .outline()
-            .on_click(recap_opener(recording, RecapOpen::Transcript, cx));
+            .on_click(recap_opener(card, RecapOpen::Transcript, cx));
         div()
             .flex()
             .child(selected_by(format!("recap-card-transcript-{}", item.id), chip))
@@ -471,11 +469,10 @@ impl ChatView {
             .bg(tint(palette.foreground, 0.08))
             .child(shown)
             .children(badge);
-        if let Some(recording) = first {
-            picture =
-                picture
-                    .cursor_pointer()
-                    .on_click(recap_opener(Some(recording.link.clone()), RecapOpen::Play, cx));
+        if first.is_some() {
+            picture = picture
+                .cursor_pointer()
+                .on_click(recap_opener(card, RecapOpen::Play, cx));
         }
         div()
             .flex_none()
@@ -555,14 +552,18 @@ impl ChatView {
 /// What a recap card's control does: tells [`ChatViewEvent::OpenRecap`] with `recording` (its sharing link) and what
 /// to show.
 fn recap_opener(
-    recording: Option<String>,
+    card: &RecapCard,
     open: RecapOpen,
     cx: &mut Context<ChatView>,
 ) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
+    // what the card opens: its first recording, else its transcript alone's item
+    let recording = card.opens().map(str::to_owned);
+    let transcribed = card.transcribed_part();
     cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
         cx.stop_propagation();
         cx.emit(ChatViewEvent::OpenRecap {
             recording: recording.clone(),
+            transcribed: transcribed.clone(),
             open,
         });
     })

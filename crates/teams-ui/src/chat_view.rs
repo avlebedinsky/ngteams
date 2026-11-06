@@ -378,9 +378,15 @@ pub enum ChatViewEvent {
     },
     /// "More actions" → "Create workflows" on a message: the Workflows dialog for it.
     CreateWorkflows(crate::workflow_run::MessageRef),
-    /// A meeting chat's recap card's View recap, Transcript or thumbnail: the chat's Recap tab, at the card's recording
-    /// (its sharing link) when the meeting was recorded, showing `open`.
-    OpenRecap { recording: Option<String>, open: RecapOpen },
+    /// A recap card's View recap, Transcript or thumbnail: the chat's Recap tab, at the card's recording (its sharing
+    /// link) when the meeting was recorded, showing `open`. A call transcribed alone names its transcript's item's
+    /// sharing link as `recording`, and `transcribed` is the part it stands for, shown when the recap's read lists none
+    /// of its item.
+    OpenRecap {
+        recording: Option<String>,
+        transcribed: Option<teams_proto::recap::RecapPart>,
+        open: RecapOpen,
+    },
     /// A call's end row's Transcript chip: the chat's call captions saved on this computer by that id
     /// ([`crate::call_transcript`]), shown in the chat's Recap tab.
     OpenSavedTranscript(i64),

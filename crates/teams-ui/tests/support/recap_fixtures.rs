@@ -27,13 +27,14 @@ fn content(kind: ContentKind, item: &str, from: i64, to: i64) -> MeetingContent 
         location: match kind {
             ContentKind::Recording => sharing_link(item),
             ContentKind::Transcript => transcript_location(item),
+            ContentKind::UnreadTranscript => String::new(),
         },
         call_id: Some("00000000-0000-4000-8000-0000000000c1".to_owned()),
         drive_id: Some("b!drive1".to_owned()),
         item_id: Some(item.to_owned()),
         start_ms: Some(from),
         end_ms: Some(to),
-        web_url: (kind == ContentKind::Transcript).then(|| sharing_link(item)),
+        web_url: (kind != ContentKind::Recording).then(|| sharing_link(item)),
         organizer_id: Some(ORGANIZER.to_owned()),
         tenant_id: Some("00000000-0000-4000-8000-0000000000f0".to_owned()),
     }
