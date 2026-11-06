@@ -114,37 +114,58 @@ pub(crate) async fn serve(
     socket: &std::path::Path,
     services: &[&str],
 ) -> Result<(), ScenarioError> {
+    let mut pages = [StepPage::new(alias, page, drive)];
+    serve_pages(&mut pages, report, socket, services).await
+}
+
+/// A page steps can drive: its account, its session, its driver and how far its `seen` looked.
+pub(crate) struct StepPage<'a> {
+    alias: Alias,
+    page: &'a LabSession,
+    drive: &'a mut Driver,
+    seen: usize,
+}
+
+impl<'a> StepPage<'a> {
+    pub(crate) fn new(alias: Alias, page: &'a LabSession, drive: &'a mut Driver) -> Self {
+        let seen = drive.seen_so_far();
+        Self {
+            alias,
+            page,
+            drive,
+            seen,
+        }
+    }
+}
+
+/// Takes steps on `socket` for `pages` until one says `quit`: a step goes to the first page unless it starts with
+/// `@<alias> ` (`@b shot b-share.png`), which sends it to that account's page; `seen` looks at the requests to
+/// `services` of the page it goes to.
+pub(crate) async fn serve_pages(
+    pages: &mut [StepPage<'_>],
+    report: &mut ScenarioReport,
+    socket: &std::path::Path,
+    services: &[&str],
+) -> Result<(), ScenarioError> {
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket).map_err(|error| ScenarioError::Setup(error.to_string()))?;
-    let mut seen = Seen {
-        at: drive.seen_so_far(),
-        services,
-    };
     loop {
         let (stream, _) = listener
             .accept()
             .await
             .map_err(|error| ScenarioError::Setup(error.to_string()))?;
-        if connection(alias, page, drive, report, stream, &mut seen).await {
+        if connection(pages, report, stream, services).await {
             return Ok(());
         }
     }
 }
 
-/// Where `seen` is: the requests looked at so far, and the services it looks at.
-struct Seen<'a> {
-    at: usize,
-    services: &'a [&'a str],
-}
-
 /// One connection's steps; whether a `quit` ended the run.
 async fn connection(
-    alias: Alias,
-    page: &LabSession,
-    drive: &mut Driver,
+    pages: &mut [StepPage<'_>],
     report: &mut ScenarioReport,
     stream: UnixStream,
-    seen: &mut Seen<'_>,
+    services: &[&str],
 ) -> bool {
     let (reading, mut writing) = stream.into_split();
     let mut lines = BufReader::new(reading).lines();
@@ -154,9 +175,13 @@ async fn connection(
             quit = true;
             "bye".to_owned()
         } else {
-            step(alias, page, drive, report, &line, seen)
-                .await
-                .unwrap_or_else(|error| format!("failed: {error}"))
+            let (target, line) = addressed(pages, line.trim());
+            match target {
+                Some(page) => step(page, report, line, services)
+                    .await
+                    .unwrap_or_else(|error| format!("failed: {error}")),
+                None => "failed: no such page".to_owned(),
+            }
         };
         if writing.write_all(format!("{answer}\n").as_bytes()).await.is_err() {
             break;
@@ -166,15 +191,24 @@ async fn connection(
     quit
 }
 
+/// The page `line` goes to (`@<alias> <step>`, else the first) and its step.
+fn addressed<'p, 'a, 'l>(pages: &'p mut [StepPage<'a>], line: &'l str) -> (Option<&'p mut StepPage<'a>>, &'l str) {
+    if let Some(rest) = line.strip_prefix('@') {
+        let (alias, step) = rest.split_once(' ').unwrap_or((rest, ""));
+        let alias = alias.parse::<Alias>().ok();
+        return (pages.iter_mut().find(|page| Some(page.alias) == alias), step.trim());
+    }
+    (pages.first_mut(), line)
+}
+
 /// One step's answer.
 async fn step(
-    alias: Alias,
-    page: &LabSession,
-    drive: &mut Driver,
+    target: &mut StepPage<'_>,
     report: &mut ScenarioReport,
     line: &str,
-    seen: &mut Seen<'_>,
+    services: &[&str],
 ) -> Result<String, ScenarioError> {
+    let (alias, page, drive) = (target.alias, target.page, &mut *target.drive);
     let (verb, rest) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
     match verb {
         "wait" => {
@@ -221,7 +255,7 @@ async fn step(
             drive.insert_text("typing", rest).await?;
             Ok("inserted".to_owned())
         }
-        "seen" => Ok(writes_seen(drive, report, &mut seen.at, seen.services).await),
+        "seen" => Ok(writes_seen(drive, report, &mut target.seen, services).await),
         "hold" => hold(page, rest),
         other => Ok(format!("unknown step {other}")),
     }

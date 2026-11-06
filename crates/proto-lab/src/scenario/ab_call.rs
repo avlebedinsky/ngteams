@@ -1293,7 +1293,7 @@ async fn converse(
         CallStep::Video => show_video(caller, callees, report, pauses).await?,
         CallStep::Dropped => drop_off(caller, callees, report, pauses).await?,
         CallStep::KeepAlive => keep_alive(caller, callees, report, pauses).await,
-        CallStep::Steps => steps(caller, report).await?,
+        CallStep::Steps => steps(caller, callees, report).await?,
         _ => {}
     }
     for (alias, session) in callees.iter_mut() {
@@ -1385,12 +1385,25 @@ pub(crate) async fn note_microphone(alias: Alias, session: &LabSession, report: 
 pub const KEEP_ALIVE_HOLD: Duration = Duration::from_mins(47);
 /// `steps`: the caller's page driven over `PROTO_LAB_STEPS_SOCKET` until a `quit` ([`super::team_manage::serve`]),
 /// `seen` looking at the call's services.
-async fn steps(caller: &mut LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+async fn steps(
+    caller: &LabSession,
+    callees: &[(Alias, LabSession)],
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    use super::team_manage::{StepPage, serve_pages};
     let socket: std::path::PathBuf = std::env::var_os("PROTO_LAB_STEPS_SOCKET")
         .map(Into::into)
         .ok_or_else(|| ScenarioError::Setup("PROTO_LAB_STEPS_SOCKET names no socket".to_owned()))?;
-    let mut drive = caller.driver();
-    let served = super::team_manage::serve(CALLER, caller, &mut drive, report, &socket, &CALL_SERVICES).await;
+    // the caller's page takes a step by default, a callee's one addressed to it (`@b shot b.png`)
+    let mut drivers: Vec<_> = std::iter::once((CALLER, caller))
+        .chain(callees.iter().map(|(alias, session)| (*alias, session)))
+        .map(|(alias, session)| (alias, session, session.driver()))
+        .collect();
+    let mut pages: Vec<_> = drivers
+        .iter_mut()
+        .map(|(alias, session, drive)| StepPage::new(*alias, session, drive))
+        .collect();
+    let served = serve_pages(&mut pages, report, &socket, &CALL_SERVICES).await;
     let _ = std::fs::remove_file(&socket);
     served
 }

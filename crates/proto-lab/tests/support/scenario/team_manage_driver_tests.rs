@@ -16,10 +16,7 @@ async fn commands_dispatch_keys_typing_navigation_and_observation() {
     let session = page.session(temp.path(), true);
     let mut drive = session.driver();
     let mut report = ScenarioReport::new(ScenarioName::TeamManage);
-    let mut seen = Seen {
-        at: 0,
-        services: &TEAM_SERVICES,
-    };
+    let mut target = StepPage::new(Alias::A, &session, &mut drive);
     for (command, expected) in [
         ("wait 0", "waited"),
         ("wait invalid", "waited"),
@@ -39,35 +36,19 @@ async fn commands_dispatch_keys_typing_navigation_and_observation() {
         ("what", "unknown step what"),
     ] {
         assert_eq!(
-            step(Alias::A, &session, &mut drive, &mut report, command, &mut seen)
-                .await
-                .unwrap(),
+            step(&mut target, &mut report, command, &TEAM_SERVICES).await.unwrap(),
             expected
         );
     }
-    let shot = step(
-        Alias::A,
-        &session,
-        &mut drive,
-        &mut report,
-        "shot synthetic.png",
-        &mut seen,
-    )
-    .await
-    .unwrap();
+    let shot = step(&mut target, &mut report, "shot synthetic.png", &TEAM_SERVICES)
+        .await
+        .unwrap();
     assert!(shot.contains("synthetic.png"));
     assert!(session.capture_dir().unwrap().join("synthetic.png").exists());
     assert!(
-        step(
-            Alias::A,
-            &session,
-            &mut drive,
-            &mut report,
-            "js synthetic failure",
-            &mut seen
-        )
-        .await
-        .is_err()
+        step(&mut target, &mut report, "js synthetic failure", &TEAM_SERVICES)
+            .await
+            .is_err()
     );
     let commands = page.commands();
     for key in ["Enter", "Backspace", " ", "Escape"] {
@@ -301,33 +282,21 @@ async fn disconnected_socket_writer_and_missing_post_body_do_not_break_other_obs
     let session = page.session(temp.path(), false);
     let mut drive = session.driver();
     let mut report = ScenarioReport::new(ScenarioName::TeamManage);
-    let mut seen = Seen {
-        at: 0,
-        services: &TEAM_SERVICES,
-    };
+    let mut target = StepPage::new(Alias::A, &session, &mut drive);
     assert_eq!(
-        step(
-            Alias::A,
-            &session,
-            &mut drive,
-            &mut report,
-            "hold POST /shape +synthetic",
-            &mut seen
-        )
-        .await
-        .unwrap(),
+        step(&mut target, &mut report, "hold POST /shape +synthetic", &TEAM_SERVICES)
+            .await
+            .unwrap(),
         "held"
     );
     assert_eq!(
-        step(Alias::A, &session, &mut drive, &mut report, "seen", &mut seen)
-            .await
-            .unwrap(),
+        step(&mut target, &mut report, "seen", &TEAM_SERVICES).await.unwrap(),
         ""
     );
     let (server, mut client) = UnixStream::pair().unwrap();
     client.write_all(b"js true\n").await.unwrap();
     drop(client);
-    assert!(!connection(Alias::A, &session, &mut drive, &mut report, server, &mut seen).await);
+    assert!(!connection(std::slice::from_mut(&mut target), &mut report, server, &TEAM_SERVICES).await);
     emit(&page, 1, "POST", "teams.cloud.microsoft", None);
     let mut at = 0;
     let answer = writes_seen(&mut page.driver, &mut report, &mut at, &TEAM_SERVICES).await;
@@ -340,4 +309,24 @@ async fn disconnected_socket_writer_and_missing_post_body_do_not_break_other_obs
             .await
             .contains("POST")
     );
+}
+
+#[tokio::test]
+async fn a_step_addressed_to_an_account_goes_to_that_account_s_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut page = page_with(false, false, |_, _| None).await;
+    let session = page.session(temp.path(), false);
+    let (mut first, mut second) = (session.driver(), session.driver());
+    let mut pages = [
+        StepPage::new(Alias::A, &session, &mut first),
+        StepPage::new(Alias::B, &session, &mut second),
+    ];
+    let (target, line) = addressed(&mut pages, "@b shot b.png");
+    assert_eq!(target.map(|page| page.alias), Some(Alias::B));
+    assert_eq!(line, "shot b.png");
+    let (target, line) = addressed(&mut pages, "shot a.png");
+    assert_eq!(target.map(|page| page.alias), Some(Alias::A));
+    assert_eq!(line, "shot a.png");
+    assert!(addressed(&mut pages, "@c js true").0.is_none());
+    assert!(addressed(&mut pages, "@nobody js true").0.is_none());
 }
