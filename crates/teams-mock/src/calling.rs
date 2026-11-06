@@ -140,6 +140,8 @@ pub struct MockCall {
     pub(crate) roster_watchers: Vec<String>,
     /// The meeting timer's sequence as last delivered (each change counts the next).
     pub(crate) timer_sequence: u64,
+    /// Its meeting options as its organizer's Controls set them, by name (`crate::meeting_options`).
+    pub(crate) options: serde_json::Map<String, Value>,
 }
 
 /// A party's callbacks the mock calls back: its acceptance, the call's end and progress.
@@ -406,6 +408,7 @@ fn new_call(
         roster_version: 0,
         roster_watchers: Vec::new(),
         timer_sequence: 0,
+        options: crate::meeting_options::defaults(),
     });
     state.calling.calls.len() - 1
 }
@@ -460,6 +463,7 @@ fn conversation_answer(conversation: &str) -> Value {
         "updateMeetingStates",
         "updateMeetingSettings",
         "updateParticipantProperties",
+        "mute",
     ] {
         answer["links"][op] = json!(conversation_url(conversation, Some(op)));
     }
@@ -678,14 +682,24 @@ fn conversation_op(
             roster::react(state, index, body);
             return Some(status(202));
         }
-        "updateMeetingStates" | "updateMeetingSettings" => {
-            roster::meeting_changed(state, index, body);
-            return Some(status(202));
+        "updateMeetingStates" | "updateMeetingSettings" | "mute" => {
+            return Some(meeting_op(state, index, account, op, body));
         }
         "updateEndpointMetadata" | "updateParticipantProperties" => {}
         _ => return None,
     }
     Some(status(200))
+}
+
+/// A change of the meeting's timer, its lock (everyone told the conversation's update) or Mute all (everyone else
+/// muted), answered `202` as captured.
+fn meeting_op(state: &mut State, index: usize, account: &str, op: &str, body: &Value) -> ResponseTemplate {
+    if op == "mute" {
+        roster::mute_all(state, index, account, body);
+        return json_answer(202, &json!({"muteUnmuteResponse": {}}));
+    }
+    roster::meeting_changed(state, index, body);
+    status(202)
 }
 
 /// Whether an `add` brings a person (a work account) in, rather than a service.
@@ -1073,6 +1087,7 @@ fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
                 "updateMeetingStates",
                 "updateMeetingSettings",
                 "updateParticipantProperties",
+                "mute",
             ] {
                 response["output"]["links"][op] = json!(conversation_url(&call.conversation, Some(op)));
             }

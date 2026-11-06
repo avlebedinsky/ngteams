@@ -700,6 +700,8 @@ enum Request {
     Call(CallAction, std::time::Instant, Responder<CallId>),
     /// A running call's health, as its media measures it: nothing is sent ([`crate::calling::CallHealth`]).
     CallHealth(CallId, Responder<Option<crate::calling::CallHealth>>),
+    /// A running call's meeting options, read from the service for its organizer's Controls.
+    CallMeetingOptions(CallId, Responder<Option<teams_proto::MeetingOptions>>),
     SyncConversation(String, Responder<Synced>),
     /// A chat's translations made on this computer, kept in the store: no service write.
     KeepTranslations(Vec<StoredTranslation>, Responder<()>),
@@ -957,6 +959,12 @@ impl EngineRequests {
     /// account's), or the engine has no calling. Its rates are against the last time it was asked.
     pub fn call_health(&self, call: CallId) -> Reply<Option<crate::calling::CallHealth>> {
         self.ask(|reply| Request::CallHealth(call, reply))
+    }
+
+    /// The running call's meeting options as the service has them now (its organizer's Controls: Enable lobby, Allow
+    /// all participants to …); `None` unless the account organizes the call and the read came back.
+    pub fn call_meeting_options(&self, call: CallId) -> Reply<Option<teams_proto::MeetingOptions>> {
+        self.ask(|reply| Request::CallMeetingOptions(call, reply))
     }
 
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
@@ -2174,6 +2182,7 @@ where
             }
             Request::Call(action, asked, reply) => self.call(action, asked, reply),
             Request::CallHealth(call, reply) => self.call_health(call, reply),
+            Request::CallMeetingOptions(call, reply) => self.call_meeting_options(call, reply),
             Request::OwnAvailability(status, reply) => {
                 log::info!("action: own availability {status:?}");
                 let _ = reply.send(self.own_availability(status).await);
@@ -2725,6 +2734,17 @@ where
         }
     }
 
+    /// A call's meeting options ([`EngineRequests::call_meeting_options`]), handed to the calling; none in an engine
+    /// without calling.
+    fn call_meeting_options(&self, call: CallId, reply: Responder<Option<teams_proto::MeetingOptions>>) {
+        match self.calls.as_ref().map(CallingTask::actions) {
+            Some(calls) => calls.meeting_options(call, reply),
+            None => {
+                let _ = reply.send(Ok(None));
+            }
+        }
+    }
+
     // --- the tick ---
 
     async fn on_tick(&mut self) {
@@ -3117,6 +3137,8 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
         CallAction::Share { call, on } => Act::Share(call, on),
         CallAction::Add { call, invitee } => Act::Add(call, invitee),
         CallAction::Transfer { call, target } => Act::Transfer(call, target),
+        CallAction::MuteAll { call } => Act::MuteAll(call),
+        CallAction::MeetingOption { call, option } => Act::Options(call, crate::calling::Options::Change(option)),
     })
 }
 

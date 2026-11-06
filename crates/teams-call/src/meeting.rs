@@ -6,9 +6,16 @@
 //! changes the timer and the lock ([`Calls::set_timer`], [`Calls::lock_meeting`]) and starts or stops a recording
 //! through the recording bot's command link ([`Calls::record_command`]). Each change is told as
 //! [`CallEvent::Meeting`].
+//!
+//! Its organizer's Controls (`meetingDetails.meetingCapability`: the lobby, who presents, what attendees may do) and
+//! what binds the account: whether it is an attendee (its roster entry's `meetingRole`) and whether the organizer muted
+//! it (its main audio `serverMuted`, Mute all's). The organizer mutes everyone else at the conversation's `mute` link
+//! ([`Calls::mute_all`]).
 
 use serde_json::Value;
-use teams_proto::{MeetingJoinInfo, MeetingTimer, Mri, TimerUpdate, UpdateMeetingSettings, UpdateMeetingStates};
+use teams_proto::{
+    MeetingJoinInfo, MeetingTimer, Mri, MuteParticipants, TimerUpdate, UpdateMeetingSettings, UpdateMeetingStates,
+};
 
 use super::{CallError, CallEvent, CallId, Calls, up};
 use crate::agent::Kind;
@@ -32,6 +39,40 @@ pub struct MeetingState {
     pub recording: Option<Recording>,
     /// A transcription runs (with a recording or alone).
     pub transcribing: Option<Transcription>,
+    /// The organizer's Controls as the conversation's updates told them (each `None` until told).
+    pub options: teams_proto::MeetingOptions,
+    /// The account is an attendee (its roster entry's `meetingRole`): the attendees' restrictions bind it, and it may
+    /// not present while only the organizer may.
+    pub attendee: bool,
+    /// The organizer muted the account (Mute all): the version of the endpoint's mutes it came as, while its main
+    /// audio stays muted by them. A newer one is a new mute (Teams' "You've been muted").
+    pub muted_by_organizer: Option<u64>,
+}
+
+impl MeetingState {
+    /// What attendees may do binds the account: it is an attendee and not everyone may present.
+    #[must_use]
+    pub fn restricted(&self) -> bool {
+        self.attendee && self.options.present != Some(true)
+    }
+
+    /// The account may not unmute itself (an attendee, attendees' unmuting turned off).
+    #[must_use]
+    pub fn unmute_blocked(&self) -> bool {
+        self.restricted() && self.options.unmute == Some(false)
+    }
+
+    /// The account may not turn its camera on (an attendee, attendees' cameras turned off).
+    #[must_use]
+    pub fn camera_blocked(&self) -> bool {
+        self.restricted() && self.options.camera == Some(false)
+    }
+
+    /// The account may not present (an attendee while only the organizer may).
+    #[must_use]
+    pub fn share_blocked(&self) -> bool {
+        self.restricted()
+    }
 }
 
 /// A recording someone runs in the call, as the recording bot's roster entry tells it.
@@ -59,13 +100,27 @@ pub(crate) struct Meeting {
     timer: Option<TimerUpdate>,
     settings: u64,
     recorder_version: Option<u64>,
+    own_version: Option<u64>,
 }
 
 /// What a `conversationUpdate` (or a start's answer) tells of the meeting, each part only where it says it.
-fn conversation_update(body: &[u8]) -> Option<(Option<TimerUpdate>, Option<bool>, Option<MeetingJoinInfo>)> {
+fn conversation_update(body: &[u8]) -> Option<ConversationUpdate> {
     let body: Value = serde_json::from_slice(body).ok()?;
     let timer = body.pointer("/meetingStates/timer").and_then(MeetingTimer::read);
-    Some((timer, teams_proto::meeting_locked(&body), MeetingJoinInfo::read(&body)))
+    Some(ConversationUpdate {
+        timer,
+        locked: teams_proto::meeting_locked(&body),
+        join: MeetingJoinInfo::read(&body),
+        options: teams_proto::MeetingOptions::of_capability(&body),
+    })
+}
+
+/// What a `conversationUpdate` tells of the meeting.
+struct ConversationUpdate {
+    timer: Option<TimerUpdate>,
+    locked: Option<bool>,
+    join: Option<MeetingJoinInfo>,
+    options: Option<teams_proto::MeetingOptions>,
 }
 
 /// The recording bot's entry in a roster update (`body`): its version, whether it records and whether it transcribes
@@ -104,7 +159,13 @@ fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>, Option<Transcription
 impl Meeting {
     /// Takes what a `conversationUpdate` (or a start's answer) `body` tells; whether the state changed.
     pub(crate) fn conversation(&mut self, body: &[u8]) -> bool {
-        let Some((timer, locked, join)) = conversation_update(body) else {
+        let Some(ConversationUpdate {
+            timer,
+            locked,
+            join,
+            options,
+        }) = conversation_update(body)
+        else {
             return false;
         };
         let before = self.state.clone();
@@ -122,6 +183,25 @@ impl Meeting {
         if join.is_some() {
             self.state.join = join;
         }
+        if let Some(options) = options {
+            self.state.options = self.state.options.updated(options);
+        }
+        self.state != before
+    }
+
+    /// Takes the account's own entry of a roster update (`entries`, `me` the account): whether it is an attendee and
+    /// whether the organizer muted it; whether the state changed.
+    pub(crate) fn own(&mut self, entries: &[crate::read::RosterEntry], me: &Mri) -> bool {
+        let Some(entry) = entries.iter().find(|entry| &entry.mri == me && entry.active) else {
+            return false;
+        };
+        if self.own_version.is_some_and(|told| told >= entry.version) {
+            return false;
+        }
+        self.own_version = Some(entry.version);
+        let before = self.state.clone();
+        self.state.attendee = entry.attendee;
+        self.state.muted_by_organizer = entry.server_mute;
         self.state != before
     }
 
@@ -194,9 +274,49 @@ impl Calls {
         self.meeting_told(|meeting| meeting.conversation(&delivery.body));
     }
 
-    /// A roster update's word on the recording bot: the meeting's state told when it changed.
+    /// A roster update's word on the recording bot and on the account itself: the meeting's state told when it
+    /// changed.
     pub(crate) fn recorder_told(&mut self, body: &[u8]) {
-        self.meeting_told(|meeting| meeting.roster(body));
+        let me = self.identity.mri.clone();
+        let entries = crate::read::roster(body).unwrap_or_default();
+        self.meeting_told(|meeting| meeting.roster(body) | meeting.own(&entries, &me));
+    }
+
+    /// Whose meeting options the organizer's Controls change for `call` (the middle tier's
+    /// [`teams_proto::MeetingOptionsRead`]): the account's tenant, its object id and the call's chat, while the call is
+    /// up in a group chat or a meeting's chat and the account organizes it; `None` otherwise.
+    #[must_use]
+    pub fn options_of(&self, call: CallId) -> Option<teams_proto::OptionsOf> {
+        let current = self
+            .call
+            .as_ref()
+            .filter(|current| current.id == call && current.phase == super::Phase::Connected)?;
+        if !current.roster.own(&self.identity.mri).organizer {
+            return None;
+        }
+        let organizer = teams_proto::object_id(self.identity.mri.as_str())?;
+        teams_proto::OptionsOf::new(&self.identity.tenant_id, organizer, current.caption_thread.as_deref()?)
+    }
+
+    /// The account, the call's organizer, mutes everyone else in it (People's Mute all) at the conversation's `mute`
+    /// link, the outcome told at a `muteUnmuteAsync` callback named by the request's operation id, as the web client
+    /// sends it; everyone sees them muted as the roster tells it.
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while the call isn't up, the account doesn't
+    /// organize it or its conversation named no `mute` link; nothing was sent.
+    pub fn mute_all(&mut self, call: CallId) -> Result<(), CallError> {
+        let me = self.identity.mri.clone();
+        let current = up(&mut self.call, call)?;
+        if !current.roster.own(&me).organizer {
+            return Err(CallError::NotNow);
+        }
+        let link = current.conversation.mute.clone().ok_or(CallError::NotNow)?;
+        let operation = crate::agent::guid()?;
+        let callback = current.callback_in(Kind::Conversation, "muteUnmuteAsync", &operation);
+        let write = MuteParticipants::everyone(&current.context, &link, &current.me, &callback, &operation)?;
+        self.out.send(current, Step::MuteAll, CallWrite::MuteAll(write));
+        Ok(())
     }
 
     /// A start's or a join's answer, as the conversation it is: what it tells of the meeting.

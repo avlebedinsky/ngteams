@@ -71,6 +71,8 @@ pub(crate) use recording::record_act;
 mod gallery;
 mod health;
 pub use health::{CallHealth, MediaHealth, NetworkHealth, StreamHealth};
+mod controls;
+pub(crate) use controls::Options;
 mod media;
 mod people;
 mod share;
@@ -244,6 +246,16 @@ pub enum CallAction {
     /// The 1:1 call's far end transferred to `target`, as Teams' Transfer to an audio call (seen 2026-11-06): once the
     /// far end took it the account leaves the call; one not taken is told ([`Event::CallTransferFailed`]).
     Transfer { call: CallId, target: Mri },
+    /// Everyone else in the call muted by its organizer, as People's Mute all (seen 2026-11-06): they see themselves
+    /// muted ([`Event::CallMeeting`]'s `muted_by_organizer` at their end).
+    MuteAll { call: CallId },
+    /// One of the call's meeting options changed by its organizer, as Teams' Controls change it (Enable lobby, Allow
+    /// all participants to present, chat, unmute themselves, turn on their cameras): answered once the service took
+    /// it; everyone in the call is told with the conversation's next update ([`Event::CallMeeting`]).
+    MeetingOption {
+        call: CallId,
+        option: teams_proto::MeetingOption,
+    },
 }
 
 impl CallAction {
@@ -338,6 +350,9 @@ pub enum CallActionError {
     /// The machine refused it.
     #[error(transparent)]
     Call(#[from] CallError),
+    /// The service didn't take the change (a meeting option): it stays as it was.
+    #[error("the change wasn't taken")]
+    NotChanged,
 }
 
 /// Where an action's answer goes.
@@ -370,6 +385,9 @@ pub(crate) enum Act {
     Share(CallId, bool),
     Add(CallId, Mri),
     Transfer(CallId, Mri),
+    MuteAll(CallId),
+    /// The call's meeting options read or one changed ([`controls`]).
+    Options(CallId, controls::Options),
     /// The call's health read ([`health`]): no action, its answer goes to its own responder.
     Health(CallId, crate::engine::Responder<Option<CallHealth>>),
 }
@@ -488,6 +506,16 @@ impl CallActions {
         let (unused, _) = oneshot::channel();
         self.act(Act::Health(call, reply), unused);
     }
+
+    /// Hands a read of the call's meeting options to the calling; its answer goes to `reply`.
+    pub(crate) fn meeting_options(
+        &self,
+        call: CallId,
+        reply: crate::engine::Responder<Option<teams_proto::MeetingOptions>>,
+    ) {
+        let (unused, _) = oneshot::channel();
+        self.act(Act::Options(call, controls::Options::Read(reply)), unused);
+    }
 }
 
 impl CallingTask {
@@ -527,6 +555,8 @@ pub(crate) struct Calling<C, T> {
     /// While the account holds its call: that call, and whether the user had the microphone muted (what the hold's end
     /// gives back; a mute asked while held is kept here).
     held_mute: Option<(CallId, bool)>,
+    /// The organizer's latest mute of the account (Mute all) the microphone took: its call and its version.
+    organizer_mute: Option<(CallId, u64)>,
     media_steps: JoinSet<MediaDone>,
     /// The SDP steps waiting for the one running to finish, in the order the signaling asked for them.
     sdp_steps: VecDeque<Box<dyn FnOnce() -> MediaDone + Send>>,
@@ -595,6 +625,7 @@ where
             preparing: None,
             told_placing: None,
             held_mute: None,
+            organizer_mute: None,
             making: None,
             transfer_to: None,
             media_steps: JoinSet::new(),
@@ -949,7 +980,10 @@ where
                 log::info!("call {}: held by its far end {held}", call.get());
                 self.emit(Event::CallHeldByFarEnd { call, held });
             }
-            CallEvent::Meeting { call, state } => self.emit(Event::CallMeeting { call, state }),
+            CallEvent::Meeting { call, state } => {
+                self.muted_by_organizer(call, &state);
+                self.emit(Event::CallMeeting { call, state });
+            }
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }
@@ -1586,6 +1620,7 @@ where
                 .lock_meeting(call, locked)
                 .map(|()| call)
                 .map_err(CallActionError::from),
+            Act::MuteAll(call) => self.calls.mute_all(call).map(|()| call).map_err(CallActionError::from),
             _ => Err(CallActionError::Call(CallError::NotNow)),
         }
     }
@@ -1594,7 +1629,7 @@ where
     fn act(&mut self, act: Act, reply: Waiting) {
         let now = Instant::now();
         let answer = match act {
-            Act::Health(call, health) => return self.health(call, health),
+            act @ (Act::Health(..) | Act::Options(..)) => return self.aside(act, reply),
             Act::Captions(..) | Act::CaptionLanguage(..) | Act::Record(..) => self.service_act(act),
             Act::Place(_) | Act::Join(_) | Act::JoinChannel(..) | Act::Answer(_) => return self.set_up(act, reply),
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),
@@ -1633,7 +1668,7 @@ where
                 .hold(call, held)
                 .map(|()| call)
                 .map_err(CallActionError::from),
-            act @ (Act::Timer(..) | Act::LockMeeting(..)) => self.meeting_act(act),
+            act @ (Act::Timer(..) | Act::LockMeeting(..) | Act::MuteAll(_)) => self.meeting_act(act),
             Act::Share(call, on) => {
                 self.share(call, on, reply);
                 return self.drive(now);

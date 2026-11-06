@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use url::Url;
 
 pub use self::meeting::{
-    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, TimerState, TimerUpdate, UpdateMeetingSettings,
+    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, MuteParticipants, TimerState, TimerUpdate, UpdateMeetingSettings,
     UpdateMeetingStates, meeting_locked,
 };
 pub(crate) use self::parts::on_calling_base;
@@ -690,7 +690,7 @@ call_write!(
     ResumeCall,
 );
 
-call_write!(UpdateMeetingStates, UpdateMeetingSettings);
+call_write!(UpdateMeetingStates, UpdateMeetingSettings, MuteParticipants);
 
 /// The meeting a call is, as a join or a start names it (`meetingInfo`): its organizer's object id and tenant.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

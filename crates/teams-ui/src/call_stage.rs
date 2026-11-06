@@ -48,6 +48,7 @@
 
 mod captions;
 mod chat_pane;
+mod controls;
 mod gallery;
 mod health;
 pub use health::HEALTH_REFRESH;
@@ -260,6 +261,8 @@ pub struct CallStage {
     recording_notice: bool,
     /// Record and transcribe's dialogs and notices.
     record: recording::RecordUi,
+    /// The organizer's Controls and Mute all, and the organizer's mute's card.
+    controls: controls::ControlsUi,
     /// Meeting info's Copy join info put the join info on the clipboard.
     join_info_copied: bool,
     /// The live reactions' floating while some show.
@@ -295,6 +298,28 @@ pub struct CallStage {
 impl EventEmitter<CallStageEvent> for CallStage {}
 
 impl CallStage {
+    /// What the stage follows: the calls, the captions' translation, the settings, and its own release.
+    fn observing(
+        (calls, translation, settings): (&Entity<Calls>, &Entity<CaptionTranslation>, &Entity<SettingsModel>),
+        cx: &mut Context<Self>,
+    ) -> [Subscription; 4] {
+        [
+            cx.observe(calls, |this: &mut Self, _, cx| this.changed(cx)),
+            // a caption's translation came, or translating stopped
+            cx.observe(translation, |_, _, cx| cx.notify()),
+            // the devices listed or chosen: their menus follow
+            cx.observe(settings, |_, _, cx| cx.notify()),
+            // the window gone (its call ended, or closed): the call's frames go with it
+            cx.on_release(|this: &mut Self, _| {
+                if let Some(tiles) = &mut this.tiles {
+                    tiles.clear(this.call.get());
+                }
+            }),
+        ]
+    }
+}
+
+impl CallStage {
     /// The window of call `call` over `parts`.
     pub fn new(parts: StageParts, call: CallId, cx: &mut Context<Self>) -> Self {
         let StageParts {
@@ -307,19 +332,7 @@ impl CallStage {
             shell,
         } = parts;
         let translation = cx.new(|cx| CaptionTranslation::new(settings.clone(), cx));
-        let observing = [
-            cx.observe(&calls, |this: &mut Self, _, cx| this.changed(cx)),
-            // a caption's translation came, or translating stopped
-            cx.observe(&translation, |_, _, cx| cx.notify()),
-            // the devices listed or chosen: their menus follow
-            cx.observe(&settings, |_, _, cx| cx.notify()),
-            // the window gone (its call ended, or closed): the call's frames go with it
-            cx.on_release(|this: &mut Self, _| {
-                if let Some(tiles) = &mut this.tiles {
-                    tiles.clear(this.call.get());
-                }
-            }),
-        ];
+        let observing = Self::observing((&calls, &translation, &settings), cx);
         let feed = calls.read(cx).video().cloned();
         let waking = feed.as_ref().map(|feed| wake_on_frames(feed, cx));
         let tiles = feed.map(|feed| Tiles::new(feed, Arc::clone(&trace)));
@@ -357,6 +370,7 @@ impl CallStage {
             recording_seen: false,
             recording_notice: false,
             record: recording::RecordUi::default(),
+            controls: controls::ControlsUi::default(),
             join_info_copied: false,
             reacting: None,
             width: f32::MAX,
@@ -512,6 +526,7 @@ impl CallStage {
             self.float_reactions(active, cx);
             self.order_hands(active);
             self.meeting_seen(active);
+            self.controls_follow(active, cx);
             self.record_problem_seen(cx);
         } else {
             self.confirm_end = false;
@@ -1051,6 +1066,7 @@ impl Render for CallStage {
             .as_ref()
             .and_then(|_| self.stop_recording_confirmation(palette, cx));
         let dialog = live.as_ref().and_then(|_| self.transfer_dialog(palette, cx));
+        let mute_all = live.as_ref().and_then(|_| self.mute_all_confirmation(palette, cx));
         let sheet = crate::sheet::float(
             div().flex_1().min_h_0().w_full(),
             panes,
@@ -1083,6 +1099,7 @@ impl Render for CallStage {
             .children(record)
             .children(stop_record)
             .children(dialog)
+            .children(mute_all)
     }
 }
 

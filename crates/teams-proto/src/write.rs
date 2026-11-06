@@ -11,6 +11,7 @@ mod channel;
 mod channel_admin;
 pub use channel_admin::{ChannelChange, ChannelData, ChannelRead, ChannelTarget, ChannelWrite};
 mod chat;
+mod meeting_options;
 mod team;
 
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
@@ -31,7 +32,7 @@ pub use call::{
     UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
 };
 pub use call::{
-    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, TimerState, TimerUpdate, UpdateMeetingSettings,
+    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, MuteParticipants, TimerState, TimerUpdate, UpdateMeetingSettings,
     UpdateMeetingStates, meeting_locked,
 };
 pub use channel::{
@@ -42,6 +43,7 @@ pub use chat::{
     Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage,
     SetMeetingTitle, SetReaction, Typing,
 };
+pub use meeting_options::{MeetingOption, MeetingOptions, MeetingOptionsRead, OptionsOf, SetMeetingOption};
 pub use team::{
     AppDefinition, MemberUpdate, NewTeam, TeamCopy, TeamRole, TeamWrite, TemplateTeam, team_created, team_error_code,
 };

@@ -4187,3 +4187,195 @@ fn consult_holds_the_call_and_opens_the_person_s_one_to_one_chat() {
             .any(|action| matches!(action, CallAction::Hold { held: false, .. }))
     );
 }
+
+/// The group call up, the account told it organizes it.
+fn organized_group_call(rig: &Rig) -> &'static mut VisualTestContext {
+    let stage = group_call_up(rig);
+    click(stage, "call-roster");
+    assert!(!drawn(stage, "call-mute-all"), "not told it organizes");
+    assert!(!drawn(stage, "call-controls"));
+    rig.send(Event::CallOwn {
+        call: call(1),
+        hand_raised: false,
+        organizer: true,
+    });
+    rig.cx.run_until_parked();
+    stage
+}
+
+#[test]
+fn the_organizer_mutes_everyone_after_asking() {
+    let rig = calling();
+    let stage = organized_group_call(&rig);
+    assert!(
+        drawn(stage, "call-roster-organizer"),
+        "a group call names its organizer"
+    );
+    // Mute all asks first
+    click(stage, "call-mute-all");
+    assert!(drawn(stage, "call-mute-all-confirm"));
+    let before = actions(&rig).len();
+    click(stage, "call-mute-all-cancel");
+    assert_eq!(actions(&rig).len(), before, "Cancel sends nothing");
+    click(stage, "call-mute-all");
+    click(stage, "call-mute-all-mute");
+    assert_eq!(actions(&rig).last(), Some(&CallAction::MuteAll { call: call(1) }));
+    // everyone else muted: Mute all goes
+    let mut muted = view(
+        &[
+            (LAB_B, "Lab Bee", false, Some(1), false),
+            (LAB_C, "Lab Sea", false, Some(2), false),
+        ],
+        false,
+    );
+    for participant in &mut muted.participants {
+        participant.muted = true;
+    }
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: muted,
+    });
+    rig.cx.run_until_parked();
+    assert!(!drawn(stage, "call-mute-all"));
+}
+
+#[test]
+fn controls_change_the_meeting_options() {
+    use teams_proto::MeetingOption;
+    let rig = calling();
+    let stage = organized_group_call(&rig);
+    // Controls: each option on as Teams starts them, the restrictions greyed while everyone presents
+    click(stage, "call-controls");
+    assert!(drawn(stage, "call-controls-menu"));
+    for on in [
+        "call-controls-lobby-on",
+        "call-controls-present-on",
+        "call-controls-chat-on",
+        "call-controls-unmute-on",
+        "call-controls-cameras-on",
+    ] {
+        assert!(drawn(stage, on), "{on}");
+    }
+    let before = actions(&rig).len();
+    click(stage, "call-controls-unmute");
+    assert_eq!(actions(&rig).len(), before, "greyed while everyone presents");
+    click(stage, "call-controls-present");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::MeetingOption {
+            call: call(1),
+            option: MeetingOption::Present(false),
+        })
+    );
+    assert!(!drawn(stage, "call-controls-present-on"), "shown at once");
+    click(stage, "call-controls-unmute");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::MeetingOption {
+            call: call(1),
+            option: MeetingOption::Attendees {
+                unmute: false,
+                camera: true,
+            },
+        })
+    );
+    click(stage, "call-controls-lobby");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::MeetingOption {
+            call: call(1),
+            option: MeetingOption::Lobby(false),
+        })
+    );
+    // the conversation tells the lobby back on, and the menu follows it
+    meeting(
+        &rig,
+        teams_core::MeetingState {
+            options: teams_proto::MeetingOptions {
+                lobby: Some(true),
+                ..teams_proto::MeetingOptions::default()
+            },
+            ..teams_core::MeetingState::default()
+        },
+    );
+    assert!(drawn(stage, "call-controls-lobby-on"));
+    click(stage, "call-controls-lock");
+    assert!(!drawn(stage, "call-controls-menu"), "Lock closes the menu");
+    assert!(drawn(stage, "call-lock-dialog"), "and asks first");
+}
+
+#[test]
+fn people_added_to_the_chat_are_listed_with_request_to_join() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    click(stage, "call-roster");
+    assert!(!drawn(stage, "call-roster-added"), "everyone is in the call");
+    // Lab Sea left
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: view(&[(LAB_B, "Lab Bee", false, Some(1), false)], false),
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-roster-added"));
+    assert!(
+        !drawn(stage, "call-roster-request-0"),
+        "only while the pointer is on the row"
+    );
+    let row = stage.debug_bounds("call-roster-added-0").unwrap();
+    stage.simulate_mouse_move(row.center(), None, Modifiers::none());
+    click(stage, "call-roster-request-0");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Add {
+            call: call(1),
+            invitee: Mri::new(LAB_C),
+        })
+    );
+}
+
+#[test]
+fn the_organizers_mute_shows_its_card_and_an_attendee_s_kept_controls_are_greyed() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    let muted_by = |version: u64| teams_core::MeetingState {
+        muted_by_organizer: Some(version),
+        ..teams_core::MeetingState::default()
+    };
+    meeting(&rig, muted_by(3));
+    assert!(drawn(stage, "call-muted-toast"));
+    // Unmute unmutes, and the card goes
+    click(stage, "call-muted-unmute");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Mute {
+            call: call(1),
+            muted: false,
+        })
+    );
+    assert!(!drawn(stage, "call-muted-toast"));
+    // a new mute shows it again; its close takes it away
+    meeting(&rig, muted_by(5));
+    assert!(drawn(stage, "call-muted-toast"));
+    click(stage, "call-muted-close");
+    assert!(!drawn(stage, "call-muted-toast"));
+    // an attendee kept from unmuting: the microphone greyed, its key refused
+    meeting(
+        &rig,
+        teams_core::MeetingState {
+            muted_by_organizer: Some(5),
+            attendee: true,
+            options: teams_proto::MeetingOptions {
+                present: Some(false),
+                unmute: Some(false),
+                camera: Some(false),
+                ..teams_proto::MeetingOptions::default()
+            },
+            ..teams_core::MeetingState::default()
+        },
+    );
+    assert!(drawn(stage, "call-mute-blocked"));
+    let before = actions(&rig).len();
+    stage.simulate_keystrokes("ctrl-shift-m");
+    stage.run_until_parked();
+    assert_eq!(actions(&rig).len(), before, "the key asks nothing");
+}

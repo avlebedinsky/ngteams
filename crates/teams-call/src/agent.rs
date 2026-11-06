@@ -63,14 +63,18 @@ impl CallAgent {
 
     /// A new callback `kind`/`name` with a random segment of its own.
     pub(crate) fn callback(&self, kind: Kind, name: &'static str) -> Result<Callback, getrandom::Error> {
-        let segment = random_hex(4)?;
+        Ok(self.callback_at(kind, name, &random_hex(4)?))
+    }
+
+    /// A callback `kind`/`name` under `segment` (a request's own id, as the web client names Mute all's).
+    pub(crate) fn callback_at(&self, kind: Kind, name: &'static str, segment: &str) -> Callback {
         let tail = format!("{segment}/{}/{name}/", kind.segment());
-        Ok(Callback {
+        Callback {
             url: format!("{}{tail}", self.prefix),
             path: format!("{}{tail}", self.path),
             kind,
             name,
-        })
+        }
     }
 }
 

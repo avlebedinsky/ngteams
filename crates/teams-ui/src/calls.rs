@@ -535,6 +535,10 @@ pub enum Ask {
     Transfer {
         target: Mri,
     },
+    /// Mute everyone else in the call (its organizer's Mute all).
+    MuteAll,
+    /// Change one of the call's meeting options (its organizer's Controls).
+    MeetingOption(teams_proto::MeetingOption),
     /// Start recording, with its transcript unless one runs (More → Record and transcribe → Start recording,
     /// confirmed): the call's `title` as its recording is named, a meeting's `organizer`, the spoken `language`
     /// picked, and whether it records the audio alone.
@@ -582,6 +586,8 @@ impl Ask {
             Self::ToggleHold => "hold",
             Self::Timer(_) => "timer",
             Self::LockMeeting(_) => "lock-meeting",
+            Self::MuteAll => "mute-all",
+            Self::MeetingOption(_) => "meeting-option",
             Self::ToggleShare => "share",
             Self::Add { .. } => "add",
             Self::Transfer { .. } => "transfer",
@@ -1148,6 +1154,10 @@ impl Calls {
             }
             Event::CallMeeting { call, state } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    // the organizer muted the account anew (Mute all): its microphone shows muted, as the engine made it
+                    if state.muted_by_organizer > active.meeting.muted_by_organizer {
+                        active.muted = true;
+                    }
                     active.meeting = state.clone();
                 }
             }
@@ -1404,6 +1414,10 @@ impl Calls {
             }
             Ask::ToggleMute => {
                 let call = self.call.as_ref().ok_or("no-call")?;
+                // the organizer turned attendees' unmuting off: the microphone stays as it is, as Teams greys it
+                if call.muted && call.meeting.unmute_blocked() {
+                    return Err("unmute-blocked");
+                }
                 Ok(CallAction::Mute {
                     call: call.id,
                     muted: !call.muted,
@@ -1420,9 +1434,13 @@ impl Calls {
                     admit: *admit,
                 })
             }
-            Ask::ToggleHand | Ask::React(_) | Ask::EndMeeting | Ask::Timer(_) | Ask::LockMeeting(_) => {
-                self.meeting_action(ask)
-            }
+            Ask::ToggleHand
+            | Ask::React(_)
+            | Ask::EndMeeting
+            | Ask::Timer(_)
+            | Ask::LockMeeting(_)
+            | Ask::MuteAll
+            | Ask::MeetingOption(_) => self.meeting_action(ask),
             Ask::ToggleHold | Ask::Add { .. } | Ask::Transfer { .. } => self.one_to_one_action(ask),
             Ask::Record { .. } | Ask::StopRecording | Ask::Transcribe { .. } | Ask::StopTranscription => {
                 self.record_action(ask)
@@ -1438,6 +1456,14 @@ impl Calls {
             return Err("no-video");
         }
         let call = self.call.as_ref().ok_or("no-call")?;
+        // the organizer turned attendees' cameras off, or only it presents: greyed in Teams, refused here
+        let blocked = match ask {
+            Ask::ToggleShare => !call.sharing && call.meeting.share_blocked(),
+            _ => !call.camera && call.meeting.camera_blocked(),
+        };
+        if blocked {
+            return Err("not-allowed");
+        }
         Ok(if *ask == Ask::ToggleShare {
             CallAction::Share {
                 call: call.id,
@@ -1490,6 +1516,11 @@ impl Calls {
             Ask::LockMeeting(locked) if call.organizer => Ok(CallAction::LockMeeting {
                 call: call.id,
                 locked: *locked,
+            }),
+            Ask::MuteAll if call.organizer => Ok(CallAction::MuteAll { call: call.id }),
+            Ask::MeetingOption(option) if call.organizer => Ok(CallAction::MeetingOption {
+                call: call.id,
+                option: *option,
             }),
             _ => Err("not-organizer"),
         }
@@ -1674,6 +1705,8 @@ fn local_refusal_text(why: &str) -> String {
         "no-video" => "calls here carry no video".to_owned(),
         "not-waiting" => "they aren't waiting in the lobby any more".to_owned(),
         "not-organizer" => "only the meeting's organizer can end it for everyone".to_owned(),
+        "unmute-blocked" => "the organizer doesn't let attendees unmute".to_owned(),
+        "not-allowed" => "the organizer doesn't let attendees do that".to_owned(),
         "not-told" => "the call didn't start: the app got no answer from the calling service, try again".to_owned(),
         _ => "calls aren't available".to_owned(),
     }

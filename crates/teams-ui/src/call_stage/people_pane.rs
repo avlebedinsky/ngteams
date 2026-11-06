@@ -1,6 +1,8 @@
 //! The call window's People pane ("Participants"), as Teams shows it: a meeting's Share invite (its join link
 //! copied), who waits in its lobby (Admit all, and Admit or Deny each), and who is in the call (the account first),
-//! each with whether they speak, their microphone muted and their hand raised.
+//! each with whether they speak, their microphone muted and their hand raised, the organizer's Mute all beside them;
+//! then in a group call "People added to the chat": its chat's members who aren't in it, each with Request to join
+//! as the pointer is on them (they are called into the call, as an add is).
 use super::*;
 use teams_core::LobbyPerson;
 
@@ -27,7 +29,7 @@ impl CallStage {
                     hand: participant
                         .hand_raised
                         .then(|| self.hand_rank(&participant.mri).unwrap_or(0)),
-                    organizer: participant.organizer && active.kind == CallKind::Meeting,
+                    organizer: participant.organizer && controls::group_or_meeting(active),
                 };
                 roster_row(format!("call-roster-{index}"), name, signs, palette)
             }));
@@ -51,6 +53,8 @@ impl CallStage {
                 .on_click(cx.listener(|this, _, _, cx| this.show_roster(false, cx))),
         );
         let lobby = (!active.lobby.is_empty()).then(|| self.lobby_section(&active.lobby, palette, cx));
+        let mute_all = self.mute_all_button(active, cx);
+        let added = self.added_section(active, palette, cx);
         let more = self.roster_more(active, cx);
         let close = div().flex().items_center().gap_1().children(more).child(close);
         side_pane("call-roster-pane", "Participants", close, palette)
@@ -63,8 +67,9 @@ impl CallStage {
                     .min_h_0()
                     .overflow_y_scroll()
                     .children(lobby)
-                    .child(section_heading(heading, None, palette))
-                    .children(rows),
+                    .child(section_heading(heading, mute_all, palette))
+                    .children(rows)
+                    .children(added),
             )
             .into_any_element()
     }
@@ -166,6 +171,99 @@ impl CallStage {
                     .child(state),
             )
             .children(again)
+            .into_any_element()
+    }
+
+    /// "People added to the chat (n)": in a group call, its chat's members who aren't in it and aren't being called,
+    /// each with its avatar and name, and Request to join while the pointer is on it (not in the read-only mode).
+    fn added_section(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if meeting::is_meeting(active)
+            || !controls::group_or_meeting(active)
+            || active.status != CallStatus::Connected
+            || active.view.participants.is_empty()
+        {
+            return None;
+        }
+        let me = self.core.me().to_owned();
+        let out: Vec<(String, SharedString)> = self
+            .people
+            .of(active.id)
+            .iter()
+            .filter(|(mri, _)| {
+                *mri != me
+                    && !active
+                        .view
+                        .participants
+                        .iter()
+                        .any(|participant| participant.mri == *mri)
+                    && !active.invited.iter().any(|invited| invited.mri.as_str() == mri)
+            })
+            .cloned()
+            .collect();
+        if out.is_empty() {
+            return None;
+        }
+        let heading = format!("People added to the chat ({})", out.len());
+        let rows: Vec<AnyElement> = out
+            .into_iter()
+            .enumerate()
+            .map(|(index, (mri, name))| self.added_row(index, (mri, name), palette, cx))
+            .collect();
+        Some(
+            div()
+                .debug_selector(|| "call-roster-added".to_owned())
+                .pt_2()
+                .child(section_heading(heading, None, palette))
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// One of "People added to the chat": their avatar and name, and Request to join while the pointer is on them.
+    fn added_row(
+        &self,
+        index: usize,
+        (mri, name): (String, SharedString),
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hovered = self.hovered_added() == Some(index);
+        let request = (hovered && !self.core.read_only()).then(|| {
+            let ask = Ask::Add {
+                invitee: Mri::new(&mri),
+                name: name.to_string(),
+            };
+            let id = format!("call-roster-request-{index}");
+            selected_by(
+                id.clone(),
+                Button::new(SharedString::from(id))
+                    .outline()
+                    .xsmall()
+                    .label("Request to join")
+                    .on_click(cx.listener(move |this, _, _, cx| this.ask(ask.clone(), cx))),
+            )
+        });
+        div()
+            .debug_selector(move || format!("call-roster-added-{index}"))
+            .id(SharedString::from(format!("call-roster-added-{index}")))
+            .h(px(48.0))
+            .px_4()
+            .flex()
+            .items_center()
+            .gap_3()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.hover_added(hovered.then_some(index), cx);
+            }))
+            .child(hand_ring(people::avatar(Some(&name), None, Size::Small), false))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(palette.foreground))
+                    .child(name),
+            )
+            .children(request)
             .into_any_element()
     }
 
@@ -433,7 +531,7 @@ fn self_row(active: &ActiveCall, name: Option<SharedString>, rank: Option<usize>
         speaking: active.view.speaking && !active.muted,
         muted: active.muted,
         hand: active.hand_raised.then(|| rank.unwrap_or(0)),
-        organizer: active.organizer && active.kind == CallKind::Meeting,
+        organizer: active.organizer && controls::group_or_meeting(active),
     };
     let (mark, name) = match name {
         Some(name) => (people::avatar(Some(&name), None, Size::Small).into_any_element(), name),

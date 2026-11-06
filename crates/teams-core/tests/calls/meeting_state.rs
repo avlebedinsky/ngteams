@@ -63,7 +63,7 @@ async fn a_timer_set_by_one_participant_shows_to_everyone_in_the_call() {
         assert!(told.edited_ms.is_some(), "the service's edit time came with it");
     }
     assert!(lab.sent_by(LAB_A).iter().any(|sent| sent == "updateMeetingStates"));
-    // nobody organizes a chat's call: none of them may lock it
+    // a chat's call is organized by whoever started it: b may not lock it
     let locked = b
         .handle
         .requests()

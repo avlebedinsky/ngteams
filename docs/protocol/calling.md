@@ -806,10 +806,34 @@ a alone). What each of Teams' remaining call controls sends:
   `isMultiParty`, at both ends. The native client does the same (`CallAction::Add`): in a 1:1 call it makes the group
   chat (the typed `CreateChat` of the three) and posts the `add` naming it; once the `add` is taken (or a conversation
   update names a group chat) the call is a group call in that chat (`Event::CallGroupChat`), and an add not taken or
-  failed is told (`Event::CallAddFailed`). In a group call the `add` names the call's own chat (built from the 1:1
-  shape; not captured). People (its box reads "Invite someone": no numbers are dialled) lists the invitee "Calling…", then "No
+  failed is told (`Event::CallAddFailed`). In a group call the `add` names the call's own chat in the same shape
+  (captured 2026-11-06: People added to the chat's Request to join). People (its box reads "Invite someone": no numbers are dialled) lists the invitee "Calling…", then "No
   response" with Call again; it offers work
-  accounts only, never a number (no calls to phones). "People added to the chat" and Mute all aren't built.
+  accounts only, never a number (no calls to phones).
+- **People added to the chat** (a group call, 2026-11-06): a chat member who isn't in the call (c left) is listed
+  under a second heading, "People added to the chat (1)", by avatar (with presence) and name; the pointer on the row
+  shows an outlined **Request to join**, which posts the conversation's `add` exactly as Add above (a fresh
+  participant id, the call's own group chat, no message id, `202`): they ring, and People lists them "Calling…". The
+  native client lists the call's chat's members (as the store holds them, read again once a 1:1 call moved to its new
+  group chat) less those in the call and those being called, and its Request to join is `CallAction::Add`. It shows no
+  presence on these rows.
+- **Mute all** (the organizer's, People's, beside "Currently in this call" while anyone else isn't muted) asks "Mute
+  everyone?" / "This will mute everyone in the meeting but you." (Cancel, Mute). Mute posts the conversation's `mute`
+  link (one of its links, `…/conv/<id>/mute`): `{"from", "scope": "all", "muteParticipants": [], "mediaTypes":
+  ["audio"], "links": {"clientCallback": <a conversation callback named by the request's id:
+  …/callAgent/<agent>/<operationId>/conversation/muteUnmuteAsync/>}, "operationId"}`, answered `202`
+  `{"muteUnmuteResponse": {}}`. The outcome comes at that callback: `{"muteUnmuteResponseAsync": {<MRI>: [{"result",
+  "participantId", "reason": "success", "serverMuteVersion"}…]}, "operationId", "result"}`, the recording bot among
+  them. The muted ones learn it from the roster alone: their entry's main audio stream turns `serverMuted: true` and
+  their endpoint's `call.serverMuteVersion` counts up (by two in the capture); no delivery comes at any callback of
+  theirs. Their endpoint state stays `isMuted: false` and their client sends nothing (no `updateEndpointState`); it
+  mutes its microphone, its Mic turns muted, and a card shows over the stage, "You've been muted" / "You have been
+  muted." with a primary Unmute (and a close button). The organizer's People shows them muted. What an unmute after a
+  server mute sends wasn't captured (b stayed muted). The native client does the same (`CallAction::MuteAll`, the
+  typed `MuteParticipants`): an organizer's Mute all asks first; a participant whose own roster entry turns
+  `serverMuted` at a new version mutes its microphone without telling the conversation (`MeetingState`'s
+  `muted_by_organizer`) and shows the card, whose Unmute is the ordinary unmute (`updateEndpointState`); a
+  participant whose main audio is `serverMuted` shows muted.
 - **Record** (More's Record and transcribe: Start recording, Start transcription; while it records Stop recording, Stop
   transcription, Show transcript) asks "Start recording and transcription" first: the spoken language (English (US)),
   and under More options "Choose what to record" (Video and audio, Audio only), Cancel and Confirm. Confirm fetches the
@@ -900,8 +924,44 @@ a alone). What each of Teams' remaining call controls sends:
   Cancel, Lock) and puts `{"from", "meetingSettings": {"lockMeeting": true}, "sequenceNumber"}` to the conversation's
   `updateMeetingSettings` (`202`; Unlock the same with `false`); a notice says "This meeting is locked. No one else can
   join." In an escalated group call Controls' Lock meeting failed in the client itself, nothing sent.
-- **Controls** (organizer of a group call or meeting): Lock meeting, Enable lobby, Allow all participants to: Present,
-  Chat, Unmute themselves, Turn on their cameras, View more options.
+- **Controls** (organizer of a group call or meeting; the toolbar's shield): Lock meeting; Enable lobby ✓; a line;
+  "Allow all participants to:" Present ✓, Chat ✓, Unmute themselves ✓, Turn on their cameras ✓ (the last two greyed
+  while Present is on: everyone presents then, and the restrictions bind attendees only); a line; View more options.
+  The organizer is whoever the roster's `meetingRole` says (`organizer`: in an escalated group call the account that
+  started it; the others `presenter`). Opening Controls reads the meeting's options from the middle tier: `GET
+  https://teams.microsoft.com/api/mt/part/<partition>/beta/meetings/v1/options/<tenant>/<organizer object
+  id>/<the call's chat>/0/0?monarch=true` (the account's bearer for the middle tier, as its other reads), answered
+  `{"options": [{"name", "type", "values", "currentValue", "category", "isDisabled"}…]}` with about twenty options
+  (the lobby's `AutoAdmittedUsers`, `PresenterOption`, `AttendeeRestrictions` with `invertToggleFlags`,
+  `AllowMeetingChat`, reactions, recording and more) and their labels. Each row's click posts one option to the same
+  resource, `{"options": [{"name", "type", "currentValue"}]}`, answered `200` `{"success": true, "options": [<the
+  option as it now is>], "translations", "meetingDetails"}`:
+  - Enable lobby: `AutoAdmittedUsers` (`List`), `Everyone` off, `EveryoneInCompany` on (what the read gave first);
+  - Present: `PresenterOption` (`List`), `OrganizerOnly` off, `Everyone` on;
+  - Chat: `AllowMeetingChat` (`List`), `Disabled` off. Turning it back on Teams' menu sent `Disabled` again (its
+    check came back regardless); the option's values are `Enabled`, `Disabled` and `InMeeting`, the read gave
+    `Enabled` and its label for `Enabled` is "On";
+  - Unmute themselves and Turn on their cameras: `AttendeeRestrictions` (`BitMask`), one value for both:
+    `UnRestricted`, `DisableAudio`, `DisableVideo`, `DisableAudio,DisableVideo`.
+  The native client offers the same menu to the organizer of a group call or a meeting that is up: the read when the
+  call became the organizer's (`MeetingOptionsRead` through `EngineRequests::call_meeting_options`), each change a
+  typed write (`SetMeetingOption`, `CallAction::MeetingOption`: one attempt, the outbox's retries only), shown at once
+  and read again a few seconds later. Chat sends `Enabled` turning it on (the option's own value for on, not the
+  `Disabled` Teams' menu sent). View more options opens the meeting options page where the meeting's tenant is known
+  (a meeting gone into from its pre-join); a group call's isn't, and it offers none. Lock meeting goes as a meeting's
+  (`updateMeetingSettings`); in the escalated group call Teams' own failed before sending, so a group call's lock is
+  sent as a meeting's, not as captured.
+
+**What the others see of Controls** (b's deliveries, 2026-11-06): each change reaches everyone as the conversation's
+`conversationUpdate`, `meetingDetails.meetingCapability` with `autoAdmittedUsers`, `presenterOption` or
+`attendeeRestrictions` (both restrictions told as `DisableAv`); Chat's change told nothing there. Present off makes
+everyone but the organizer an attendee (each roster entry's `meetingRole` and `advancedMeetingRole` `attendee`, back
+to `presenter` once on); the restrictions bind attendees, and the service mutes what they keep from them (the main
+audio, or the main video, `serverMuted` with a new `serverMuteVersion`). An attendee's Share is greyed while only the
+organizer presents, its Mic greyed (a blocked microphone on its tile) while attendees may not unmute, its Camera
+greyed while they may not turn cameras on. The native client reads the same: `MeetingState` keeps the options the
+conversation told and whether the account is an attendee, and the call window greys Mic, Camera and Share as Teams
+does (the keyboard's mute and camera are refused likewise); it doesn't draw the blocked microphone on the tiles.
 - **More** in a 1:1 call: Record and transcribe, Video effects and settings, Audio settings, Language and speech,
   Settings (Call health). In a group call or meeting: Record and transcribe, Meeting info (meetings), Timer, Video
   effects and settings, Audio settings, Language and speech, Settings (Call health, Accessibility settings, Don't show
@@ -928,10 +988,9 @@ organizer's only; a pause sends what is left then, which no capture showed), rea
 recording bot's entry into `teams_call::MeetingState` (the bot is left out of the people, as Teams hides it), and
 shows the timer's bar and editor, the lock's question and notices, Meeting info and the recording's notice and red
 dot, and starts and stops a recording (Record, above). People's Download attendance list is made locally from the
-roster's `endpointJoinTime`s. Not built: Notes (a Loop page), Controls' Enable lobby and Allow all
-participants to (their requests weren't captured), Report a concern (a meeting's only; its target wasn't captured),
-Accessibility settings and Don't show chat bubbles (the app has neither), Apps, and the Dial pad (the user doesn't
-want one).
+roster's `endpointJoinTime`s. Not built: Notes (a Loop page), Report a concern (a meeting's only; its target wasn't
+captured), Accessibility settings and Don't show chat bubbles (the app has neither), Apps, and the Dial pad (the user
+doesn't want one).
 
 **Help** (More's last entry in a group call or a meeting, after a separator; a 1:1 call's More has none) opens
 `https://go.microsoft.com/fwlink/?linkid=2163160` in a new browser tab (it lands on Microsoft's Teams support

@@ -133,6 +133,13 @@ impl Inbox {
                 }
                 None => Some(Request::CallHealth(call, reply)),
             },
+            Request::CallMeetingOptions(call, reply) => match self.calls.get() {
+                Some(calls) => {
+                    calls.meeting_options(call, reply);
+                    None
+                }
+                None => Some(Request::CallMeetingOptions(call, reply)),
+            },
             Request::Person(mri, reply) => {
                 let person = store.profile(&mri).and_then(|stored| {
                     profiles::stored_person(store, &mri, &self.known, profiles::due(stored.as_ref()))

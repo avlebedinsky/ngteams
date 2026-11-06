@@ -150,6 +150,7 @@ impl Offer {
                     | CallOperation::Resume
                     | CallOperation::UpdateMeetingStates
                     | CallOperation::UpdateMeetingSettings
+                    | CallOperation::Mute
                     | CallOperation::Add
                     | CallOperation::Transfer
                     | CallOperation::TransferAcceptance
@@ -240,6 +241,7 @@ impl Offer {
                     CallOperation::SendMessage,
                     CallOperation::UpdateMeetingStates,
                     CallOperation::UpdateMeetingSettings,
+                    CallOperation::Mute,
                 ]
                 .into_iter()
                 .filter_map(|operation| {

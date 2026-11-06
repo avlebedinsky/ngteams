@@ -1118,6 +1118,8 @@ impl Core for FakeCore {
             | CallAction::Share { call, .. }
             | CallAction::Add { call, .. }
             | CallAction::Transfer { call, .. }
+            | CallAction::MuteAll { call }
+            | CallAction::MeetingOption { call, .. }
             | CallAction::Renegotiate { call } => call,
             CallAction::Call { .. }
             | CallAction::TestCall { .. }

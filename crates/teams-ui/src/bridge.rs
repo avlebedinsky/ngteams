@@ -228,6 +228,13 @@ pub trait Core: Send + Sync + 'static {
         let _ = call;
         Reply::ready(Ok(None))
     }
+    /// The running call's meeting options as the service has them (its organizer's Controls: Enable lobby, Allow all
+    /// participants to …), read now; it isn't a call action. `None` unless the account organizes the call; a fake
+    /// core's never has them.
+    fn call_meeting_options(&self, call: CallId) -> Reply<Option<teams_proto::MeetingOptions>> {
+        let _ = call;
+        Reply::ready(Ok(None))
+    }
     /// Whether the engine sends nothing (the personal build's read-only mode, `ngteams --read-only`): the views offer
     /// no write (the boxes, a message's actions, the calls, the status say "Read-only"), and one asked anyway is
     /// refused below them, recorded in the diagnostic log. `false` by default.
@@ -844,6 +851,10 @@ impl Core for EngineRequests {
 
     fn call_health(&self, call: CallId) -> Reply<Option<CallHealth>> {
         EngineRequests::call_health(self, call)
+    }
+
+    fn call_meeting_options(&self, call: CallId) -> Reply<Option<teams_proto::MeetingOptions>> {
+        EngineRequests::call_meeting_options(self, call)
     }
 }
 

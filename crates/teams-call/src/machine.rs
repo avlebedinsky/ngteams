@@ -1464,6 +1464,7 @@ impl Calls {
                 | Step::React
                 | Step::MeetingStates
                 | Step::MeetingSettings
+                | Step::MuteAll
                 | Step::Properties,
                 None,
             ) => {}

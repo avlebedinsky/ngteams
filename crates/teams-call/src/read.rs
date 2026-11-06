@@ -93,6 +93,8 @@ pub(crate) struct Conversation {
     /// `updateMeetingStates` and `updateMeetingSettings`: where the meeting's timer and its lock change.
     pub(crate) meeting_states: Option<CallLink>,
     pub(crate) meeting_settings: Option<CallLink>,
+    /// `mute`: where the organizer mutes everyone else.
+    pub(crate) mute: Option<CallLink>,
 }
 
 impl Conversation {
@@ -113,6 +115,7 @@ impl Conversation {
             controller: None,
             meeting_states: at("updateMeetingStates"),
             meeting_settings: at("updateMeetingSettings"),
+            mute: at("mute"),
         }
     }
 }
@@ -336,8 +339,15 @@ pub(crate) struct RosterEntry {
     /// `sendrecv`, seen 2026-11-06 in a group call's roster): what a source request names to show it.
     pub(crate) sharing_source: Option<i64>,
     /// The endpoint in the call says its microphone is muted (`endpointState.state.isMuted`, seen 2026-11-06: each
-    /// participant's client reports it with `updateEndpointState` as it mutes and unmutes).
+    /// participant's client reports it with `updateEndpointState` as it mutes and unmutes), or the organizer muted it
+    /// (its main audio `serverMuted`, seen 2026-11-06 after Mute all: the muted clients reported nothing).
     pub(crate) muted: bool,
+    /// The organizer muted its main audio (`serverMuted`): the stream's `serverMuteVersion` then, which counts up with
+    /// each mute or unmute the service applied to the endpoint.
+    pub(crate) server_mute: Option<u64>,
+    /// An attendee of the meeting (`meetingRole` `attendee`): what its organizer's Controls restrict binds it (seen
+    /// 2026-11-06: Present off made everyone but the organizer an attendee, back to `presenter` once on).
+    pub(crate) attendee: bool,
     /// The id of the participant's raised hand (its `publishedStates` entry of `stateType` `raiseHands`, seen
     /// 2026-11-06), while it is up.
     pub(crate) hand: Option<String>,
@@ -425,6 +435,7 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
             .and_then(Value::as_str)
             .is_some_and(|direction| matches!(direction, "sendrecv" | "sendonly"))
     };
+    let server_mute = server_mute(stream("main-audio"), endpoints);
     let state_active = entry.get("state").and_then(Value::as_str) == Some("active");
     let waiting = endpoints.is_some_and(|endpoints| {
         endpoints
@@ -448,17 +459,9 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
         sharing_source: stream("applicationsharing-video")
             .filter(|sharing| sends(sharing))
             .and_then(|sharing| sharing.get("sourceId")?.as_i64()),
-        muted: endpoints.is_some_and(|endpoints| {
-            endpoints
-                .values()
-                .filter(|endpoint| endpoint.get("call").is_some_and(Value::is_object))
-                .any(|endpoint| {
-                    endpoint
-                        .pointer("/endpointState/state/isMuted")
-                        .and_then(Value::as_bool)
-                        == Some(true)
-                })
-        }),
+        muted: server_mute.is_some() || reports_muted(endpoints),
+        server_mute,
+        attendee: entry.get("meetingRole").and_then(Value::as_str) == Some("attendee"),
         hand: entry
             .get("publishedStates")
             .and_then(Value::as_array)
@@ -477,6 +480,36 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
                 .find_map(|endpoint| endpoint.get("endpointJoinTime")?.as_str())
                 .map(str::to_owned)
         }),
+    })
+}
+
+/// The organizer's mute of an entry's main `audio`, with the version of its endpoint's mutes it came as.
+fn server_mute(audio: Option<&Value>, endpoints: Option<&serde_json::Map<String, Value>>) -> Option<u64> {
+    audio
+        .filter(|audio| audio.get("serverMuted").and_then(Value::as_bool) == Some(true))
+        .map(|_| {
+            endpoints
+                .and_then(|endpoints| {
+                    endpoints
+                        .values()
+                        .find_map(|endpoint| endpoint.pointer("/call/serverMuteVersion")?.as_u64())
+                })
+                .unwrap_or(0)
+        })
+}
+
+/// Whether an endpoint of the entry in the call reports its microphone muted.
+fn reports_muted(endpoints: Option<&serde_json::Map<String, Value>>) -> bool {
+    endpoints.is_some_and(|endpoints| {
+        endpoints
+            .values()
+            .filter(|endpoint| endpoint.get("call").is_some_and(Value::is_object))
+            .any(|endpoint| {
+                endpoint
+                    .pointer("/endpointState/state/isMuted")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            })
     })
 }
 

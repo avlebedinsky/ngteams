@@ -82,6 +82,8 @@ pub(crate) type PeopleRead<V> = fn(&mut V, &mut Context<V>);
 #[derive(Default)]
 pub(crate) struct CallPeople {
     read: Option<(CallId, Vec<(String, SharedString)>)>,
+    /// The chat whose members were read: a 1:1 call someone was added to is read again in its new group chat.
+    chat: Option<String>,
     reading: Option<Task<()>>,
 }
 
@@ -110,9 +112,17 @@ impl CallPeople {
     ) {
         let call = active.id;
         if self.read.as_ref().is_some_and(|(read, _)| *read == call) {
+            if self.chat == active.chat || active.chat.is_none() {
+                return;
+            }
+            // the call moved to a chat of its own (a group chat for someone added): its people read again, the ones
+            // read until then kept meanwhile
+            self.chat.clone_from(&active.chat);
+            self.read_members(active, core, cx, (slot, done));
             return;
         }
         self.read = Some((call, Vec::new()));
+        self.chat.clone_from(&active.chat);
         self.reading = None;
         if active.kind == CallKind::TestCall {
             let echo = echo.map(|echo| (echo.as_str().to_owned(), SharedString::from(ECHO_IN_CALL)));
@@ -126,6 +136,18 @@ impl CallPeople {
                 return;
             }
         }
+        self.read_members(active, core, cx, (slot, done));
+    }
+
+    /// Reads the members of `active`'s chat into this call's people.
+    fn read_members<V: 'static>(
+        &mut self,
+        active: &ActiveCall,
+        core: &Arc<dyn Core>,
+        cx: &mut Context<V>,
+        (slot, done): (PeopleSlot<V>, PeopleRead<V>),
+    ) {
+        let call = active.id;
         let Some(chat) = active.chat.clone() else {
             return;
         };
@@ -488,11 +510,12 @@ impl CallBar {
                 90.0,
             ))
             // rings spreading from the mark while it rings
-            .child(
-                call_mark(palette)
-                    .relative()
-                    .children(crate::motion::ripple("call-banner-mark", palette.accent, 32.0, cx)),
-            )
+            .child(call_mark(palette).relative().children(crate::motion::ripple(
+                "call-banner-mark",
+                palette.accent,
+                32.0,
+                cx,
+            )))
             .child(div().flex_1().font_weight(gpui::FontWeight::SEMIBOLD).child(text))
             .child(control(
                 "call-answer",
@@ -511,7 +534,12 @@ impl CallBar {
                 |this, cx| this.ask(Ask::Decline, cx),
             ));
         // the strip comes in from above the panes as the call starts ringing
-        crate::motion::rise(banner, SharedString::from(format!("call-banner-{}", ringing.call.get())), -12.0, cx)
+        crate::motion::rise(
+            banner,
+            SharedString::from(format!("call-banner-{}", ringing.call.get())),
+            -12.0,
+            cx,
+        )
     }
 
     /// The in-call strip: the call's mark, who it is with and its state, and its controls.

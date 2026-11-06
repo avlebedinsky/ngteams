@@ -16,6 +16,7 @@
 #![cfg(test)]
 
 mod captions;
+mod controls;
 mod diagnostics;
 mod failures;
 mod flows;

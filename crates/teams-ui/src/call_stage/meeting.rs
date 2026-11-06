@@ -404,7 +404,8 @@ impl CallStage {
         });
         let recording = self.recording_notice_view(active, palette, cx);
         let others = self.recording_notices(active, palette, cx);
-        if lock.is_none() && recording.is_none() && others.is_empty() {
+        let muted = self.muted_toast(active, palette, cx);
+        if lock.is_none() && recording.is_none() && others.is_empty() && muted.is_none() {
             return None;
         }
         Some(
@@ -417,6 +418,7 @@ impl CallStage {
                 .flex_col()
                 .items_center()
                 .gap_2()
+                .children(muted)
                 .children(others)
                 .children(recording)
                 .children(lock)
@@ -712,49 +714,13 @@ impl CallStage {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !(active.organizer && is_meeting(active) && self.takes_meeting_tools(active)) {
-            return None;
-        }
-        let stage = cx.weak_entity();
-        let locked = active.meeting.locked;
-        let options = self.meeting_options_url(active, cx);
-        Some(
-            selected_by(
-                "call-controls",
-                Button::new("call-controls")
-                    .ghost()
-                    .h(px(48.0))
-                    .text_color(rgb(palette.on_frame))
-                    .child(toolbar::tool_face(Glyph::SHIELD, self.caption_of("Controls")))
-                    .tooltip("Meeting controls")
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, _| {
-                        let lock = stage.clone();
-                        let menu = menu.min_w(px(240.0)).item(
-                            toolbar::menu_item(
-                                "call-controls-lock",
-                                None,
-                                if locked { "Unlock meeting" } else { "Lock meeting" },
-                            )
-                            .on_click(move |_, _, cx| {
-                                let _ = lock.update(cx, |stage, cx| stage.ask_lock(!locked, cx));
-                            }),
-                        );
-                        match options.clone() {
-                            Some(url) => menu.separator().item(
-                                toolbar::menu_item("call-controls-options", None, "View more options")
-                                    .on_click(move |_, _, cx| cx.open_url(&url)),
-                            ),
-                            None => menu,
-                        }
-                    }),
-            )
-            .into_any_element(),
-        )
+        // a group call's organizer has them as a meeting's has (`controls`)
+        self.controls_tool(active, palette, cx)
     }
 
     /// The meeting's options page (`docs/protocol/calling.md`, "The lobby"), when its organizer and tenant are known
     /// (the meeting was gone into from its pre-join).
-    fn meeting_options_url(&self, active: &ActiveCall, cx: &App) -> Option<String> {
+    pub(super) fn meeting_options_url(&self, active: &ActiveCall, cx: &App) -> Option<String> {
         let chat = active.chat.as_deref()?;
         let to_join = self
             .calls

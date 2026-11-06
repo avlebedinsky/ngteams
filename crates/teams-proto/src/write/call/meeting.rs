@@ -7,7 +7,9 @@ use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use super::{Built, CallContext, CallLink, CallParticipant, CallWriteError, operation, parts};
+use super::{
+    Built, CallContext, CallLink, CallParticipant, CallWriteError, operation, operation as operation_write, parts,
+};
 use crate::CallOperation;
 
 /// Where a meeting's timer is (`state` in its JSON text).
@@ -228,6 +230,44 @@ impl UpdateMeetingSettings {
             link,
             Some(body),
         )?))
+    }
+}
+
+/// Everyone in the call muted but the sender: `POST` to the conversation's `mute` link (`{"from", "scope": "all",
+/// "muteParticipants": [], "mediaTypes": ["audio"], "links": {"clientCallback"}, "operationId"}`, seen 2026-11-06:
+/// People's Mute all, confirmed), answered `202` `{"muteUnmuteResponse": {}}`. The outcome comes at the
+/// `clientCallback` (`muteUnmuteAsync`: each participant muted, with its new `serverMuteVersion`); everyone learns it
+/// from the roster, whose entries then have their main audio `serverMuted`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MuteParticipants(pub(super) Built);
+
+impl MuteParticipants {
+    /// `from` mutes everyone else at `link`, the outcome told at `callback` (a `…/conversation/muteUnmuteAsync/` of
+    /// its own whose segment is `operation`, the request's id, as the web client names it).
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a `mute` in its captured shape: the callback not the
+    /// `muteUnmuteAsync` of the operation, the operation id not a GUID.
+    pub fn everyone(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        callback: &str,
+        operation: &str,
+    ) -> Result<Self, CallWriteError> {
+        let guid = operation.len() == 36 && operation.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        if !guid || !callback.ends_with(&format!("/{operation}/conversation/muteUnmuteAsync/")) {
+            return Err(CallWriteError::Unmapped);
+        }
+        let body = json!({
+            "from": from.json(),
+            "scope": "all",
+            "muteParticipants": [],
+            "mediaTypes": ["audio"],
+            "links": {"clientCallback": callback},
+            "operationId": operation,
+        });
+        Ok(Self(operation_write(context, CallOperation::Mute, link, Some(body))?))
     }
 }
 

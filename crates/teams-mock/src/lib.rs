@@ -95,6 +95,7 @@ mod csa;
 mod fixtures;
 #[cfg(feature = "media")]
 pub mod media;
+mod meeting_options;
 #[cfg(feature = "media")]
 pub mod mixer;
 mod peers;

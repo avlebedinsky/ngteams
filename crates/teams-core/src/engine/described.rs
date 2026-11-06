@@ -79,6 +79,8 @@ pub(super) fn call(action: &CallAction) -> String {
         // no names: that someone was added
         CallAction::Add { call, .. } => format!("call {}: someone added", call.get()),
         CallAction::Transfer { call, .. } => format!("call {}: transferred", call.get()),
+        CallAction::MuteAll { call } => format!("call {}: everyone else muted", call.get()),
+        CallAction::MeetingOption { call, option } => format!("call {}: meeting option {option:?}", call.get()),
     }
 }
 

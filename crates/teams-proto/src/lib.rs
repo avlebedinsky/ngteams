@@ -154,9 +154,11 @@ pub use write::{
     UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
 pub use write::{
-    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, TimerState, TimerUpdate, UpdateMeetingSettings,
+    DEFAULT_TIMER_MS, MeetingJoinInfo, MeetingTimer, MuteParticipants, TimerState, TimerUpdate, UpdateMeetingSettings,
     UpdateMeetingStates, meeting_locked,
 };
+
+pub use write::{MeetingOption, MeetingOptions, MeetingOptionsRead, OptionsOf, SetMeetingOption};
 
 pub use workflow::{MessageRun, MessageSender, Principal, WorkflowFailure, WorkflowRequest, WorkflowResponse};
 

@@ -28,7 +28,7 @@ use teams_media::session::{SHARING_LINE, SessionConfig};
 use teams_media::tone::{Tone, level_at};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
-use teams_mock::{CHAT_BASE, ChatServiceMock, LAB_A, TENANT, TrouterMock};
+use teams_mock::{CHAT_BASE, ChatServiceMock, LAB_A, MIDDLE_TIER_BASE, TENANT, TrouterMock};
 use teams_proto::Mri;
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport};
 use teams_store::Store;
@@ -322,6 +322,8 @@ impl Account {
         let origin = lab.mock.origin();
         let http = || {
             HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
+                .unwrap()
+                .with_middle_tier(MIDDLE_TIER_BASE)
                 .unwrap()
                 .for_account(Mri::new(mri))
                 .with_call_state(tracker.clone())

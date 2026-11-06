@@ -19,6 +19,10 @@
 //!   group video is on, none otherwise; its main video `sendrecv` once its media descriptions said so (its camera on),
 //!   `recvonly` before.
 //!
+//! - **Roles and mutes**: a group call's starter is its organizer (`meetingRole`), everyone else a presenter, or an
+//!   attendee while only the organizer may present (`crate::meeting_options`); the organizer's Mute all marks everyone
+//!   else's main audio `serverMuted` at a new `serverMuteVersion`.
+//!
 //! **The mock's own, not captured**: the endpoint ids, and that an `attach` is told everyone in one delivery.
 
 use serde_json::{Map, Value, json};
@@ -42,6 +46,8 @@ pub(crate) struct Party {
     pub(crate) muted: bool,
     /// The id of its raised hand while it is up (`publishState`, taken back by `removeState`).
     pub(crate) hand: Option<String>,
+    /// The organizer muted its main audio (Mute all): the endpoint's mute version then (0: not muted by them).
+    pub(crate) server_mute: u64,
 }
 
 /// The `rosterUpdate` callback a start's, a join's or an `attach`'s body hands out (wherever in it).
@@ -129,6 +135,50 @@ pub(crate) fn muted(state: &mut State, index: usize, mri: &str, muted: bool) {
     }
 }
 
+/// `from`, the organizer of call `index` (its starter), mutes everyone else in it (Mute all's `mute`, `body`): each
+/// other party's main audio muted by the service at a new mute version, everyone told; the outcome delivered at the
+/// request's `clientCallback` in the captured shape (`muteUnmuteResponseAsync`). Anyone else's mute changes nothing.
+pub(crate) fn mute_all(state: &mut State, index: usize, from: &str, body: &Value) {
+    let Some(call) = state.calling.calls.get_mut(index).filter(|call| call.caller == from) else {
+        return;
+    };
+    let mut muted = Map::new();
+    for party in call.roster.iter_mut().filter(|party| party.active && party.mri != from) {
+        party.server_mute += 2;
+        muted.insert(
+            party.mri.clone(),
+            json!([{"result": null, "participantId": null, "reason": "success", "serverMuteVersion": party.server_mute}]),
+        );
+    }
+    send(state, index, None);
+    let callback = body.pointer("/links/clientCallback").and_then(Value::as_str);
+    let outcome = json!({
+        "muteUnmuteResponseAsync": muted,
+        "operationId": body.get("operationId").cloned().unwrap_or(Value::Null),
+        "result": null,
+    });
+    state.call_back(callback, outcome);
+}
+
+/// Call `index`'s meeting options changed (`capability`, `meetingDetails.meetingCapability`'s fields): everyone in it
+/// told at their `conversationUpdate` callbacks, and the roster again (who presents may have changed).
+pub(crate) fn options_changed(state: &mut State, index: usize, capability: &Value) {
+    let Some(call) = state.calling.calls.get(index) else {
+        return;
+    };
+    let update = json!({"conversationController": Value::Null, "meetingDetails": {"meetingCapability": capability}});
+    let links: Vec<String> = call
+        .roster
+        .iter()
+        .filter(|party| party.active)
+        .filter_map(|party| party.updates.clone())
+        .collect();
+    for link in links {
+        state.call_back(Some(&link), update.clone());
+    }
+    send(state, index, None);
+}
+
 /// `mri` raises its hand in call `index` (`Some` its state's id) or lowers it: everyone is told.
 pub(crate) fn hand(state: &mut State, index: usize, mri: &str, hand: Option<&str>) {
     let Some(call) = state.calling.calls.get_mut(index) else {
@@ -182,6 +232,7 @@ pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<Str
         video_on: false,
         muted: false,
         hand: None,
+        server_mute: 0,
     });
     if call.group_chat.is_some() || call.test_call {
         send(state, index, Some(mri));
@@ -259,16 +310,26 @@ fn body(state: &mut State, index: usize, changed: Option<&str>) -> Option<Value>
     call.roster_version += 1;
     let version = call.roster_version;
     let (id, parties, group) = (call.id.clone(), call.roster.clone(), call.group_chat.is_some());
+    let (caller, presenters_only) = (call.caller.clone(), crate::meeting_options::presenters_only(call));
     let mut participants = Map::new();
     for (number, party) in (1_u64..).zip(&parties) {
         if changed.is_some_and(|mri| mri != party.mri) {
             continue;
         }
         let sources = group.then(|| state.mixer_sources(&id, &party.mri)).flatten();
-        participants.insert(
-            party.mri.clone(),
-            entry(state, party, (number, version), group, sources),
-        );
+        let mut entry = entry(state, party, (number, version), group, sources);
+        // a group call's starter organizes it; while only it may present, everyone else is an attendee (as captured)
+        if group {
+            let role = if party.mri == caller {
+                "organizer"
+            } else if presenters_only {
+                "attendee"
+            } else {
+                "presenter"
+            };
+            entry["meetingRole"] = json!(role);
+        }
+        participants.insert(party.mri.clone(), entry);
     }
     Some(json!({"participants": participants, "type": "Delta", "sequenceNumber": version}))
 }
@@ -316,10 +377,12 @@ fn entry(
         _ if !party.active => json!({}),
         true => {
             let direction = if party.video_on { "sendrecv" } else { "recvonly" };
+            let mut audio = stream("audio", "main-audio", sources.map(|(audio, _)| audio), "sendrecv");
+            audio["serverMuted"] = json!(party.server_mute > 0);
             json!({endpoint: {"call": {"mediaStreams": [
-                stream("audio", "main-audio", sources.map(|(audio, _)| audio), "sendrecv"),
+                audio,
                 stream("video", "main-video", sources.map(|(_, video)| video), direction),
-            ]}}})
+            ], "serverMuteVersion": party.server_mute}}})
         }
         false => json!({endpoint: {"call": {"serverMuteVersion": 0}, "modalityJoined": "Call"}}),
     };

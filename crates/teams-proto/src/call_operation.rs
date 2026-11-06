@@ -97,10 +97,13 @@ pub enum CallOperation {
     /// `PUT …/conv/<id>/updateMeetingSettings`: the organizer locks or unlocks the meeting, at the conversation's
     /// `updateMeetingSettings` link (seen 2026-11-06, `meeting-steps`: Lock the meeting). Names nobody else.
     UpdateMeetingSettings,
+    /// `POST …/conv/<id>/mute`: the organizer mutes everyone in the call but itself (`scope` `all`, the audio), at the
+    /// conversation's `mute` link (seen 2026-11-06, `ab-call`: People's Mute all). Reaches only who is in it.
+    Mute,
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
@@ -131,6 +134,7 @@ impl CallOperation {
         Self::UpdateMeetingSettings,
         Self::Transfer,
         Self::TransferAcceptance,
+        Self::Mute,
     ];
 
     /// The protocol operation name.
@@ -167,6 +171,7 @@ impl CallOperation {
             Self::UpdateMeetingSettings => "update_meeting_settings",
             Self::Transfer => "transfer",
             Self::TransferAcceptance => "transfer_acceptance",
+            Self::Mute => "mute",
         }
     }
 
@@ -201,7 +206,8 @@ impl CallOperation {
             | Self::Resume
             | Self::UpdateMeetingStates
             | Self::Transfer
-            | Self::TransferAcceptance => "POST",
+            | Self::TransferAcceptance
+            | Self::Mute => "POST",
         }
     }
 
@@ -235,6 +241,7 @@ impl CallOperation {
             Self::UpdateMeetingSettings => "updateMeetingSettings",
             Self::Transfer => "transfer",
             Self::TransferAcceptance => "acceptance",
+            Self::Mute => "mute",
             // the conversation's own URL, the call leg's own: no segment after it
             Self::Join | Self::KeepAlive | Self::EndConversation => "",
         }

@@ -171,17 +171,27 @@ impl CallStage {
         } else {
             (Glyph::MIC, "Mute")
         };
-        let microphone = tool(
-            ("call-mute", mic, self.caption("Mic")),
-            (mute, Some(&ToggleMuteCall)),
-            active.muted,
-            palette,
-            cx,
-            |this, _, cx| this.ask(Ask::ToggleMute, cx),
+        let microphone = controls::blocked(
+            tool(
+                ("call-mute", mic, self.caption("Mic")),
+                (mute, Some(&ToggleMuteCall)),
+                active.muted,
+                palette,
+                cx,
+                |this, _, cx| this.ask(Ask::ToggleMute, cx),
+            ),
+            active.muted && active.meeting.unmute_blocked(),
+            "call-mute-blocked",
         );
         let hold_or_resume = self.hold(active, palette, cx);
         let held = active.held.is_some();
-        let share = self.share_tool(active, palette, cx);
+        let share = self.share_tool(active, palette, cx).map(|share| {
+            controls::blocked(
+                share,
+                !active.sharing && active.meeting.share_blocked(),
+                "call-share-blocked",
+            )
+        });
         let media = div()
             .flex()
             .items_center()
@@ -419,16 +429,21 @@ impl CallStage {
         } else {
             (Glyph::VIDEO_OFF, "Turn camera on")
         };
+        let camera = tool(
+            ("call-camera", glyph, self.caption("Camera")),
+            (tip, Some(&ToggleCameraCall)),
+            !active.camera,
+            palette,
+            cx,
+            |this, _, cx| this.ask(Ask::ToggleCamera, cx),
+        );
         div()
             .flex()
             .items_center()
-            .child(tool(
-                ("call-camera", glyph, self.caption("Camera")),
-                (tip, Some(&ToggleCameraCall)),
-                !active.camera,
-                palette,
-                cx,
-                |this, _, cx| this.ask(Ask::ToggleCamera, cx),
+            .child(controls::blocked(
+                camera,
+                !active.camera && active.meeting.camera_blocked(),
+                "call-camera-blocked",
             ))
             .children(self.devices_menu("call-camera-devices", CAMERAS, "Choose camera and video effects", cx))
     }

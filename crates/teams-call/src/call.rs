@@ -169,6 +169,8 @@ pub(crate) enum Step {
     MeetingStates,
     /// The meeting locked or unlocked: its failing ends nothing (the lock stays as last told).
     MeetingSettings,
+    /// Everyone else muted by the organizer: its failing ends nothing (the roster tells who is muted).
+    MuteAll,
     /// The account's own participant properties (that it shares its screen): its failing ends nothing.
     Properties,
     /// Someone added to the call: its failing ends nothing (told as the add's failure).
@@ -209,6 +211,7 @@ impl Step {
             Self::Resume => "resume",
             Self::MeetingStates => "update_meeting_states",
             Self::MeetingSettings => "update_meeting_settings",
+            Self::MuteAll => "mute",
             Self::Properties => "update_participant_properties",
             Self::Transfer => "transfer",
             Self::AcceptTransfer => "transfer_acceptance",
@@ -416,6 +419,14 @@ impl Call {
     /// A new callback of this call.
     pub(crate) fn callback(&mut self, kind: Kind, name: &'static str) -> Result<String, getrandom::Error> {
         Ok(self.made(kind, name)?.url)
+    }
+
+    /// A callback of this call under `segment` (a GUID the machine made: see [`CallAgent::callback_at`]), kept among
+    /// its callbacks.
+    pub(crate) fn callback_in(&mut self, kind: Kind, name: &'static str, segment: &str) -> String {
+        let callback = self.agent.callback_at(kind, name, segment);
+        self.callbacks.push(callback.clone());
+        callback.url
     }
 
     /// A new callback of this call, kept among its callbacks.

@@ -140,6 +140,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         tried
     }
 
+    /// One attempt at a meeting's options change (its organizer's Controls: `crate::calling`), as a call write's: no
+    /// row, its answer back to the asker, another attempt only as [`CallRetries`] says.
+    pub async fn try_meeting<R: Request + Send>(&self, write: R) -> CallTried {
+        let tried = self.try_once(write).await;
+        log::info!("meeting options write: {}", tried.summary());
+        tried
+    }
+
     async fn try_once<R: Request + Send>(&self, write: R) -> CallTried {
         match self.deliver(write).await {
             Tried::Answered(answer) => CallTried::Answered(answer),

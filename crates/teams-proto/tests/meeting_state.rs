@@ -6,8 +6,8 @@
 
 use serde_json::{Value, json};
 use teams_proto::{
-    CallContext, CallLink, CallParticipant, CallWriteError, MeetingJoinInfo, MeetingTimer, Mri, TimerState,
-    UpdateMeetingSettings, UpdateMeetingStates,
+    CallContext, CallLink, CallParticipant, CallWriteError, MeetingJoinInfo, MeetingTimer, Mri, MuteParticipants,
+    TimerState, UpdateMeetingSettings, UpdateMeetingStates,
 };
 
 const LAB_A: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -126,6 +126,39 @@ fn the_lock_goes_as_its_captured_put() {
         ),
         Err(CallWriteError::Unmapped)
     ));
+}
+
+#[test]
+fn mute_all_goes_as_its_captured_post() {
+    const OPERATION: &str = "00000000-0000-4000-8000-0000000000f1";
+    let callback = format!(
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/\
+         00000000-0000-4000-8000-0000000000a1/{OPERATION}/conversation/muteUnmuteAsync/"
+    );
+    let write = MuteParticipants::everyone(&context(), &link("mute"), &participant(), &callback, OPERATION).unwrap();
+    assert_eq!(teams_proto::Request::method(&write), teams_proto::Method::Post);
+    let body = teams_proto::Request::body(&write).unwrap();
+    assert_eq!(body["from"]["id"], LAB_A);
+    assert_eq!(body["scope"], "all");
+    assert_eq!(body["muteParticipants"], json!([]));
+    assert_eq!(body["mediaTypes"], json!(["audio"]));
+    assert_eq!(body["links"], json!({"clientCallback": callback}));
+    assert_eq!(body["operationId"], OPERATION);
+    // only at its own link, its callback named by its operation, the operation a GUID
+    for (link_to, callback_at, operation) in [
+        (link("leave"), callback.as_str(), OPERATION),
+        (
+            link("mute"),
+            "https://example.invalid/conversation/muteUnmuteAsync/",
+            OPERATION,
+        ),
+        (link("mute"), callback.as_str(), "not-a-guid"),
+    ] {
+        assert!(matches!(
+            MuteParticipants::everyone(&context(), &link_to, &participant(), callback_at, operation),
+            Err(CallWriteError::Unmapped)
+        ));
+    }
 }
 
 #[test]

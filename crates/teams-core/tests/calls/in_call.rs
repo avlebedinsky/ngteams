@@ -112,8 +112,8 @@ async fn a_mute_a_raised_hand_and_a_reaction_reach_everyone_in_the_call() {
     for (account, call) in [(&mut a, call_a), (&mut b, call_b), (&mut c, call_c)] {
         assert_eq!(reaction(account, call).await, (LAB_C.to_owned(), "heart".to_owned()));
     }
-    // nobody organizes a chat's call: none of them may end it for everyone
-    let ended = a.handle.requests().call(CallAction::EndMeeting { call: call_a }).await;
+    // a chat's call is organized by whoever started it: nobody else may end it for everyone
+    let ended = b.handle.requests().call(CallAction::EndMeeting { call: call_b }).await;
     assert!(ended.is_err(), "{ended:?}");
 
     for (account, call) in [(&mut a, call_a), (&mut b, call_b), (&mut c, call_c)] {

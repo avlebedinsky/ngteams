@@ -12,7 +12,8 @@
 //! times on it; a group chat's presence; the "Chats" section's See more, what it brings and a chat opened from below
 //! the rows shown; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, its Call health, beside the main window
 //! with its in-call strip, and in Teams Dark; a group call with Raise and React, its People pane, its speaker view and
-//! its chat, in Teams Light and Dark) and says
+//! its chat, its organizer's Mute all, People added to the chat and Controls, an attendee's greyed controls and
+//! "You've been muted", in Teams Light and Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
 //! the app, never by screen coordinates.
 //!
@@ -164,7 +165,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 221] = [
+const STEPS: [Step; 5 + 229] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -884,18 +885,30 @@ const STEPS: [Step; 5 + 221] = [
         show_chats_section(shell, cx);
     }),
     // the account menu over it, in Teams Dark
-    ("account-menu-dark", |shell, _, cx| shell.update(cx, Shell::toggle_status_menu)),
+    ("account-menu-dark", |shell, _, cx| {
+        shell.update(cx, Shell::toggle_status_menu)
+    }),
     // the settings' General and Notifications pages in Teams Dark
     ("settings-general-dark", |shell, _, cx| {
         shell.update(cx, Shell::toggle_status_menu);
         show_page(shell, Page::General, cx);
     }),
-    ("settings-notifications-dark", |shell, _, cx| show_page(shell, Page::Notifications, cx)),
+    ("settings-notifications-dark", |shell, _, cx| {
+        show_page(shell, Page::Notifications, cx)
+    }),
     // the a–b chat in each other dark theme: each its own frame and accent
-    ("chat-nord", |shell, window, cx| show_chat_in_theme(shell, "nord", window, cx)),
-    ("chat-dracula", |shell, window, cx| show_chat_in_theme(shell, "dracula", window, cx)),
-    ("chat-solarized-dark", |shell, window, cx| show_chat_in_theme(shell, "solarized-dark", window, cx)),
-    ("chat-high-contrast", |shell, window, cx| show_chat_in_theme(shell, "high-contrast", window, cx)),
+    ("chat-nord", |shell, window, cx| {
+        show_chat_in_theme(shell, "nord", window, cx)
+    }),
+    ("chat-dracula", |shell, window, cx| {
+        show_chat_in_theme(shell, "dracula", window, cx)
+    }),
+    ("chat-solarized-dark", |shell, window, cx| {
+        show_chat_in_theme(shell, "solarized-dark", window, cx)
+    }),
+    ("chat-high-contrast", |shell, window, cx| {
+        show_chat_in_theme(shell, "high-contrast", window, cx)
+    }),
     // the 12-hour clock chosen, back in Teams Light: the setting, then the a–b chat's times
     ("settings-time-12-hour", |shell, _, cx| {
         let model = shell.read(cx).settings().clone();
@@ -1745,6 +1758,64 @@ const STEPS: [Step; 5 + 221] = [
         with_stage(cx, CallStage::close_record_dialog);
         transcription_state(shell, true, cx);
     }),
+    // the account organizes the group call: People names it Organizer, with Mute all while the others are unmuted
+    ("call-group-people-mute-all", |shell, _, cx| {
+        group_controls(shell, (true, true), teams_core::MeetingState::default(), cx);
+        with_stage(cx, |stage, cx| stage.show_roster(true, cx));
+    }),
+    // Mute all asks first: "Mute everyone?"
+    ("call-group-mute-all-ask", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.confirm_mute_all(true, cx));
+    }),
+    // Lab Sea left: "People added to the chat (1)", its Request to join shown as the pointer is on the row
+    ("call-group-people-added", |shell, _, cx| {
+        with_stage(cx, |stage, cx| stage.confirm_mute_all(false, cx));
+        group_controls(shell, (true, false), teams_core::MeetingState::default(), cx);
+        with_stage(cx, |stage, cx| stage.hover_added(Some(0), cx));
+    }),
+    // and in Teams Dark
+    ("call-group-people-added-dark", |shell, _, cx| {
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+    }),
+    // in Teams Light, the organizer's Controls: Lock meeting, Enable lobby, Allow all participants to …
+    ("call-group-controls", |shell, _, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        group_controls(shell, (true, true), teams_core::MeetingState::default(), cx);
+        with_stage(cx, |stage, cx| {
+            stage.hover_added(None, cx);
+            stage.show_roster(false, cx);
+            stage.open_controls(true, cx);
+        });
+    }),
+    // and in Teams Dark, with only the organizer presenting: the attendees' restrictions taken off greyness
+    ("call-group-controls-dark", |shell, _, cx| {
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        let presenting = teams_core::MeetingState {
+            options: teams_proto::MeetingOptions {
+                present: Some(false),
+                chat: Some(false),
+                unmute: Some(false),
+                ..teams_proto::MeetingOptions::default()
+            },
+            ..teams_core::MeetingState::default()
+        };
+        group_controls(shell, (true, true), presenting, cx);
+    }),
+    // someone else organizes: the account, an attendee muted by them, kept from unmuting, its camera and presenting —
+    // "You've been muted" over the stage, Mic, Camera and Share greyed (Teams Dark)
+    ("call-group-attendee-dark", |shell, _, cx| {
+        with_stage(cx, |stage, cx| stage.open_controls(false, cx));
+        group_controls(shell, (false, true), attendee(), cx);
+    }),
+    // in Teams Light, muted anew by the organizer while attendees may unmute: the card's Unmute, the controls back
+    ("call-group-muted", |shell, _, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        let muted = teams_core::MeetingState {
+            muted_by_organizer: Some(6),
+            ..teams_core::MeetingState::default()
+        };
+        group_controls(shell, (false, true), muted, cx);
+    }),
 ];
 
 /// The made-up group call transcribing for the account, recording the audio alone (`audio`) or not, as the roster
@@ -1767,6 +1838,71 @@ fn transcription_state(shell: &Entity<Shell>, audio: bool, cx: &mut App) {
         },
         cx,
     );
+}
+
+/// What binds an attendee the organizer muted and kept from unmuting, its camera and presenting.
+fn attendee() -> teams_core::MeetingState {
+    teams_core::MeetingState {
+        attendee: true,
+        muted_by_organizer: Some(4),
+        options: teams_proto::MeetingOptions {
+            present: Some(false),
+            unmute: Some(false),
+            camera: Some(false),
+            ..teams_proto::MeetingOptions::default()
+        },
+        ..teams_core::MeetingState::default()
+    }
+}
+
+/// The made-up group call as its organizer's controls see it: the account organizing it or not, Lab Sea in it or
+/// gone (`organizer`, `with_c`), Lab Bee and Lab Sea unmuted, and the meeting `state`; no recording's problem shown.
+fn group_controls(
+    shell: &Entity<Shell>,
+    (organizer, with_c): (bool, bool),
+    state: teams_core::MeetingState,
+    cx: &mut App,
+) {
+    let models = shell.read(cx).models().clone();
+    let call = teams_core::CallId::for_tests(GROUP_CALL);
+    let participant = |mri: &str, name: &str, line: usize| teams_core::CallParticipant {
+        mri: mri.to_owned(),
+        name: Some(name.to_owned()),
+        video_on: false,
+        line: Some(line),
+        speaking: false,
+        muted: false,
+        hand_raised: false,
+        organizer: false,
+        joined: None,
+    };
+    let mut participants = vec![participant(LAB_B, "Lab Bee", 1)];
+    if with_c {
+        participants.push(participant(LAB_C, "Lab Sea", 2));
+    }
+    let events = [
+        teams_core::Event::CallRecording {
+            call,
+            recording: teams_core::CallRecording::default(),
+        },
+        teams_core::Event::CallOwn {
+            call,
+            hand_raised: false,
+            organizer,
+        },
+        teams_core::Event::CallParticipants {
+            call,
+            view: teams_core::CallView {
+                participants,
+                speaking: false,
+                hearing: false,
+            },
+        },
+        teams_core::Event::CallMeeting { call, state },
+    ];
+    for event in events {
+        models.apply(event, cx);
+    }
 }
 
 /// The made-up group call recording, started by `by`, or not recording (`None`), as the roster tells it.
@@ -1818,6 +1954,7 @@ fn meeting_state(shell: &Entity<Shell>, locked: bool, cx: &mut App) {
                     audio_only: false,
                 }),
                 transcribing: None,
+                ..teams_core::MeetingState::default()
             },
         },
         cx,
@@ -2821,7 +2958,9 @@ fn clear_compose(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
         if compose.is_expanded() {
             compose.toggle_expanded(window, cx);
         }
-        compose.editor().update(cx, |editor, cx| editor.set_doc(teams_ui::editor::doc::Doc::default(), cx));
+        compose.editor().update(cx, |editor, cx| {
+            editor.set_doc(teams_ui::editor::doc::Doc::default(), cx)
+        });
     });
 }
 
