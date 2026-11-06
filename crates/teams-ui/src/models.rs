@@ -342,6 +342,7 @@ impl Models {
             | Event::CallParticipants { .. }
             | Event::Lobby { .. }
             | Event::CallOwn { .. }
+            | Event::CallHeld { .. }
             | Event::CallReaction { .. } => {
                 self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
             }

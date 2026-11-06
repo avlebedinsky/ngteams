@@ -655,6 +655,35 @@ The conversation's answer lists these links among its others (`publishState`, `r
 `unmute`, `admitAll`, `searchParticipants`, `setMeetingLayout`, `updateMeetingStates`, …). Muting someone else
 (`mute`), a spotlight and the meeting's layout weren't captured: the native client offers none of them.
 
+### Hold and resume
+
+Captured 2026-11-06 with `ab-call --call steps` (a 1:1 call a → b, a's page driven: Hold, then Resume). Teams offers
+Hold in a 1:1 call's toolbar (beside Transfer, Consult and Dial pad), not in a group call or a meeting.
+
+- **Hold** posts to the call leg's `hold` link (handed out with the call's other leg links: the caller's acceptance,
+  the callee's `accept` answer, a retarget) `{"hold": {"holdType": "musicOnHold", "links": {"holdCompletion": <a call
+  callback of the holder's>}}, "debugContent": {"causeId": <guid>}}`, answered `202` with `{"holdResponse": {"links":
+  {"resume": "…/cc/v1/holdSession/<call>/…/resume"}}}` on the same call id. The call controller then **moves the 1:1
+  call to its mixer** (both ends get a `mediaNegotiation` with `escalationOccurring`, `isTwoPartyToMultiPartyEscalation`
+  and `fromMixer`: a group call's lines, a fresh session; then the mixer's usual second offer) and tells the hold done at
+  `holdCompletion` (`{"holdCompletion": {"reason": "noError", "code": 0, "phrase": "Success", "audioBotType":
+  "audioPlayback"}}`). The web client then renegotiates its own lines `inactive`. Both ends' rosters gain a
+  music-on-hold app participant (`28:56aa0a8f-…`, one `sendrecv` audio stream) for as long as the hold lasts; nothing
+  else tells the held party.
+- **The held call's screen** in Teams: Hold becomes an outlined **Resume** with a play mark; Transfer, Consult, Dial
+  pad, View, Apps, the camera, the microphone and Share are greyed out; the stage shows the far end's avatar over
+  "On hold" and how long it has been held.
+- **Resume** posts to that `resume` link `{"resume": {"links": {"resumeCompletion"}}, "debugContent": {"causeId"}}`,
+  answered `202` (no body); the music-on-hold participant leaves the roster, `resumeCompletion` tells it done, and the
+  web client renegotiates its lines `sendrecv` again (the call stays on the mixer).
+
+The native client posts the same hold and resume (`CallAction::Hold`, its own `holdCompletion` and
+`resumeCompletion` callbacks; the call tracker binds the answer's `resume` link, so only that link takes the resume),
+answers the mixer's offers as a group call's, and leaves the music-on-hold app out of the roster. It renegotiates
+nothing itself: while held its microphone sends silence, and the user's own mute comes back on resume. (An offer of
+its own on the mixer's lines after the resume was turned away by libwebrtc as an incompatible send direction, native
+a ↔ b 2026-11-06; with its lines left as the mixer set them, the call's audio went on after the resume.)
+
 ## A call held past a dropped socket
 
 `dropped`: with the callee's page off the network (DevTools' emulation fails new requests; open sockets stay, so the run

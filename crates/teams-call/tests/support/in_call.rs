@@ -7,6 +7,11 @@ use teams_proto::Request as _;
 /// a's call to b, its start answered with every link of a meeting's conversation (as captured 2026-11-06) and its
 /// acceptance delivered: up.
 fn up(now: Instant) -> (Calls, CallId) {
+    up_with(now, &acceptance())
+}
+
+/// As [`up`], its acceptance `accepted`.
+fn up_with(now: Instant, accepted: &Value) -> (Calls, CallId) {
     let mut calls = Calls::new(identity(A));
     calls.set_push_url(PUSH).unwrap();
     let placement = Placement::Chat {
@@ -24,7 +29,7 @@ fn up(now: Instant) -> (Calls, CallId) {
     }
     calls.on_outcome(start, &ok(&answer), now);
     let path = acceptance_path(&calls);
-    calls.on_delivery(&delivery(&path, &acceptance()), Observed::Acceptance, now);
+    calls.on_delivery(&delivery(&path, accepted), Observed::Acceptance, now);
     let connected = effects(&mut calls);
     assert!(events(&connected).contains(&CallEvent::State {
         call,
@@ -45,6 +50,8 @@ fn bodies(effects: &[Effect]) -> Vec<(WriteId, &'static str, Value)> {
                     CallWrite::RemoveState(write) => write.body(),
                     CallWrite::Reaction(write) => write.body(),
                     CallWrite::EndMeeting(write) => write.body(),
+                    CallWrite::Hold(write) => write.body(),
+                    CallWrite::Resume(write) => write.body(),
                     _ => None,
                 };
                 Some((*id, write.name(), body.unwrap_or(Value::Null)))
@@ -276,4 +283,92 @@ fn a_callee_names_itself_by_the_participant_id_its_invitation_gave_it() {
     );
     let me = calls.call.as_ref().map(|call| call.me.participant_id.clone());
     assert_eq!(me, Some(Some("00000000-0000-4000-8000-0000000000bb".to_owned())));
+}
+
+#[test]
+fn a_one_to_one_call_goes_on_hold_at_its_leg_s_hold_link_and_comes_off_it_at_the_resume_link_its_answer_gave() {
+    let now = Instant::now();
+    let mut accepted = acceptance();
+    accepted["callAcceptance"]["links"]["hold"] = json!(cc("active", "hold"));
+    let (mut calls, call) = up_with(now, &accepted);
+    assert!(
+        matches!(calls.hold(call, false), Err(CallError::NotNow)),
+        "not held: nothing to resume"
+    );
+    calls.hold(call, true).unwrap();
+    let held = bodies(&effects(&mut calls));
+    let [(id, "hold", body)] = &held[..] else {
+        panic!("{held:#?}");
+    };
+    assert_eq!(body["hold"]["holdType"], json!("musicOnHold"));
+    assert!(body["hold"]["links"]["holdCompletion"].as_str().is_some());
+    let resume = cc("holdSession", "resume");
+    calls.on_outcome(*id, &ok(&json!({"holdResponse": {"links": {"resume": resume}}})), now);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::Held { call, held: true }));
+    assert!(matches!(calls.hold(call, true), Err(CallError::NotNow)), "held already");
+    calls.hold(call, false).unwrap();
+    let resumed = effects(&mut calls);
+    let [(id, "resume", body)] = &bodies(&resumed)[..] else {
+        panic!("{resumed:#?}");
+    };
+    assert!(body["resume"]["links"]["resumeCompletion"].as_str().is_some());
+    let resumed_at = resumed.iter().find_map(|effect| match effect {
+        Effect::Send { write, .. } => match write.as_ref() {
+            CallWrite::Resume(write) => write.call_url().map(ToString::to_string),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(resumed_at.as_deref(), Some(resume.as_str()));
+    calls.on_outcome(*id, &ok(&json!({})), now);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::Held { call, held: false }));
+}
+
+#[test]
+fn a_hold_not_taken_leaves_the_call_as_it_was_and_a_call_without_a_hold_link_holds_nothing() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    assert!(
+        matches!(calls.hold(call, true), Err(CallError::NotNow)),
+        "its leg named no hold link"
+    );
+    let mut accepted = acceptance();
+    accepted["callAcceptance"]["links"]["hold"] = json!(cc("active", "hold"));
+    let (mut calls, call) = up_with(now, &accepted);
+    calls.hold(call, true).unwrap();
+    let held = sent(&effects(&mut calls));
+    let [(id, "hold")] = held[..] else {
+        panic!("{held:#?}");
+    };
+    calls.on_outcome(id, &failed(), now);
+    let told = effects(&mut calls);
+    assert!(events(&told).contains(&CallEvent::Held { call, held: false }));
+    assert!(sent(&told).is_empty(), "nothing else goes");
+}
+
+#[test]
+fn the_music_on_hold_in_a_held_call_s_roster_is_nobody_in_the_call() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    let roster = conversation_callback(&calls, "rosterUpdate");
+    let music = crate::read::MUSIC_ON_HOLD_MRI;
+    let update = json!({"type": "Delta", "participants": {
+        B: in_call(3, false, None, "attendee"),
+        music: {"version": 8, "state": "active", "details": {"id": music, "displayName": null},
+            "endpoints": {"e1": {"call": {"mediaStreams": [
+                {"type": "audio", "label": "main-audio", "sourceId": 201, "direction": "sendrecv"}
+            ]}}}},
+    }});
+    calls.on_delivery(&delivery(&roster, &update), Observed::Nothing, now);
+    let told = events(&effects(&mut calls));
+    let participants = told.iter().find_map(|event| match event {
+        CallEvent::Participants { call: of, participants } if *of == call => Some(participants.clone()),
+        _ => None,
+    });
+    let mris: Vec<String> = participants
+        .unwrap_or_default()
+        .iter()
+        .map(|participant| participant.mri.as_str().to_owned())
+        .collect();
+    assert_eq!(mris, [B]);
 }

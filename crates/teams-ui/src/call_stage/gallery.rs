@@ -38,7 +38,8 @@ impl CallStage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // waiting in the lobby, the account sees nobody: only that someone should let it in
-        let tiles = if active.status == CallStatus::Lobby {
+        // waiting in the lobby, or holding the call, the account sees nobody's tile
+        let tiles = if active.status == CallStatus::Lobby || active.held.is_some() {
             Vec::new()
         } else {
             self.tiles_of(active)
@@ -47,13 +48,19 @@ impl CallStage {
         let lobby = crate::call_lobby::card(active, palette, cx);
         let body = if tiles.is_empty() {
             let waiting = active.kind == CallKind::Meeting && active.status == CallStatus::Connected;
-            let state = if waiting {
-                "Waiting for others to join".to_owned()
+            if let Some(since) = active.held {
+                // Teams' held call: who it is with, "On hold" and how long, no rings
+                let lasted = calls::duration_text(since.elapsed().as_secs());
+                calling(title, &format!("On hold {lasted}"), palette, Vec::new())
             } else {
-                calls::status_text(active)
-            };
-            let rings = crate::motion::ripple("call-calling", palette.accent, BIG_AVATAR_PX, cx);
-            calling(title, &state, palette, rings)
+                let state = if waiting {
+                    "Waiting for others to join".to_owned()
+                } else {
+                    calls::status_text(active)
+                };
+                let rings = crate::motion::ripple("call-calling", palette.accent, BIG_AVATAR_PX, cx);
+                calling(title, &state, palette, rings)
+            }
         } else {
             let selector = if active.view.participants.is_empty() {
                 "call-people"

@@ -24,10 +24,11 @@ pub use call::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CALL_REACTIONS, CALL_START_URL, CALLING_BASE,
     CALLING_HOST, CallContext, CallLink, CallParticipant, CallWriteError, ChannelParameters, ClientInfo, DecideLobby,
-    DeclineCall, EndConversation, Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason,
-    Links, MediaContent, MediaDescription, MediaDescriptions, MeetingInfo, PublishState, RAISE_HANDS, RemoveState,
-    RenegotiateMedia, ReportRinging, SendCallReaction, StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO,
-    UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
+    DeclineCall, EndConversation, HoldCall, Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall,
+    LeaveReason, Links, MediaContent, MediaDescription, MediaDescriptions, MeetingInfo, PublishState, RAISE_HANDS,
+    RemoveState, RenegotiateMedia, ReportRinging, ResumeCall, SendCallReaction, StartCall, StartParts,
+    TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
+    UpdateParticipantProperties, VoiceConsent,
 };
 pub use channel::{
     AddChannelMembers, ChannelCreated, ChannelLayout, CreateChannel, NewChannel, NewChannelKind, ShowChannelByDefault,

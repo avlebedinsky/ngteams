@@ -940,6 +940,7 @@ impl Core for FakeCore {
             | CallAction::RaiseHand { call, .. }
             | CallAction::React { call, .. }
             | CallAction::EndMeeting { call }
+            | CallAction::Hold { call, .. }
             | CallAction::Renegotiate { call } => call,
             CallAction::Call { .. }
             | CallAction::TestCall { .. }

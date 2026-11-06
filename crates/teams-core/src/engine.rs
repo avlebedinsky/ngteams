@@ -430,6 +430,9 @@ pub enum Event {
         hand_raised: bool,
         organizer: bool,
     },
+    /// The account's 1:1 call on hold (`held`) or off it, as its [`CallAction::Hold`] was taken (or, not taken, as it
+    /// stands).
+    CallHeld { call: CallId, held: bool },
     /// Someone in the account's call sent a live reaction (the account's own too, as the service echoes it): who, their
     /// name as given, and the reaction (`like`, `heart`, `applause`, `laugh`, `surprised`).
     CallReaction {
@@ -2845,6 +2848,7 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
         CallAction::RaiseHand { call, raised } => Act::RaiseHand(call, raised),
         CallAction::React { call, reaction } => Act::React(call, reaction),
         CallAction::EndMeeting { call } => Act::EndMeeting(call),
+        CallAction::Hold { call, held } => Act::Hold(call, held),
     })
 }
 

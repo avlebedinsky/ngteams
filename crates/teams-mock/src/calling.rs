@@ -487,6 +487,7 @@ fn accept_by_controller(state: &mut State, index: usize, acceptance: Option<&str
     if let Some(answer) = answer {
         body["callAcceptance"]["mediaContent"] = answer;
     }
+    body["callAcceptance"]["links"]["hold"] = json!(hold_url(&id));
     if call_is_group(state, index) {
         // a group call's acceptance hands out where its lines are described again (as captured; the echo call's
         // fixture names none)
@@ -720,6 +721,16 @@ fn controller_op(
             Some(status(200))
         }
         ("callAcceptance" | "mediaAnswers", "acknowledge") | ("mcProxy", "applyChannelParameters") => Some(status(200)),
+        // Hold answers where the hold is taken back, as captured; Resume is taken
+        ("active", "hold") => {
+            let id = &state.calling.calls[index].id;
+            let resume = cc_url(&format!("holdSession/{id}/1/a6/1/resume"));
+            Some(json_answer(
+                202,
+                &json!({"holdResponse": {"links": {"resume": resume}}, "debugContent": null}),
+            ))
+        }
+        ("holdSession", "resume") => Some(status(202)),
         // the main video line first, as captured: `sendrecv` while the camera is on
         ("active", "updateMediaDescriptions") => {
             let on = body
@@ -975,6 +986,7 @@ fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
         .and_then(Value::as_object_mut)
     {
         links.remove("controlVideoStreaming");
+        links.insert("hold".to_owned(), json!(hold_url(&call.id)));
     }
     Some(json_answer(200, &answer))
 }
@@ -1000,7 +1012,13 @@ fn acceptance_body(call: &MockCall, callee: &str, endpoint_type: Option<&str>, m
     if let Some(media) = media {
         body["callAcceptance"]["mediaContent"] = media;
     }
+    body["callAcceptance"]["links"]["hold"] = json!(hold_url(&call.id));
     body
+}
+
+/// The call leg's `hold` link of call `id`, as an acceptance and an `accept`'s answer hand it out.
+fn hold_url(id: &str) -> String {
+    cc_url(&format!("active/{id}/1/a3/1/hold"))
 }
 
 /// A callee's endpoint declines its leg: its other endpoints stop ringing; a 1:1 call's caller is forwarded to the

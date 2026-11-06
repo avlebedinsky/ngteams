@@ -5,7 +5,7 @@ use teams_proto::{
     AttachCall, DecideLobby, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, RenegotiateMedia, ReportRinging, Request,
     StartCall, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
 };
-use teams_proto::{EndConversation, PublishState, RemoveState, SendCallReaction};
+use teams_proto::{EndConversation, HoldCall, PublishState, RemoveState, ResumeCall, SendCallReaction};
 
 /// The id a write's outcome comes back under ([`crate::Calls::on_outcome`]). Unique for the machine's life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -54,6 +54,8 @@ pub enum CallWrite {
     RemoveState(RemoveState),
     Reaction(SendCallReaction),
     EndMeeting(EndConversation),
+    Hold(HoldCall),
+    Resume(ResumeCall),
 }
 
 impl CallWrite {
@@ -83,6 +85,8 @@ impl CallWrite {
             Self::RemoveState(write) => sink.submit(id, write),
             Self::Reaction(write) => sink.submit(id, write),
             Self::EndMeeting(write) => sink.submit(id, write),
+            Self::Hold(write) => sink.submit(id, write),
+            Self::Resume(write) => sink.submit(id, write),
         }
     }
 
@@ -113,6 +117,8 @@ impl CallWrite {
             Self::RemoveState(_) => "remove_state",
             Self::Reaction(_) => "send_message",
             Self::EndMeeting(_) => "end_conversation",
+            Self::Hold(_) => "hold",
+            Self::Resume(_) => "resume",
         }
     }
 }

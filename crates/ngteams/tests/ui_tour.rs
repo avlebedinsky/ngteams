@@ -119,7 +119,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 163] = [
+const STEPS: [Step; 5 + 164] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1167,9 +1167,14 @@ const STEPS: [Step; 5 + 163] = [
     ("call-window-effects-dark", |_, _, cx| {
         with_stage(cx, |stage, cx| stage.show_effects(true, cx));
     }),
+    // the 1:1 call on hold in Teams Dark: Resume in Hold's place, the camera and the microphone greyed out, "On hold"
+    ("call-window-held-dark", |shell, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_effects(false, cx));
+        held(shell, true, cx);
+    }),
     // someone waiting in a meeting's lobby, as whoever may admit sees them: "Waiting in the lobby", Deny and Admit
     ("call-lobby-dark", |shell, _, cx| {
-        with_stage(cx, |stage, cx| stage.show_effects(false, cx));
+        held(shell, false, cx);
         lobby(
             shell,
             vec![("8:orgid:00000000-0000-4000-8000-00000000000c", "Lab Sea")],
@@ -1247,6 +1252,18 @@ const STEPS: [Step; 5 + 163] = [
         });
     }),
 ];
+
+/// The made-up 1:1 call on hold (`held`) or off it, as the engine tells it.
+fn held(shell: &Entity<Shell>, held: bool, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::CallHeld {
+            call: teams_core::CallId::for_tests(FAKE_CALL),
+            held,
+        },
+        cx,
+    );
+}
 
 /// The made-up group call's number.
 const GROUP_CALL: u64 = 2;

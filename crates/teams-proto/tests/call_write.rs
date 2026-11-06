@@ -21,6 +21,7 @@ use teams_proto::{
     ReportRinging, RespondError, Response, StartCall, StartParts, Transport, UpdateEndpointMetadata,
     UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
 };
+use teams_proto::{HoldCall, ResumeCall};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -1572,4 +1573,35 @@ fn a_live_reaction_and_a_meeting_s_end_are_built_in_their_captured_shapes() {
         body["conversationTransactionEnd"]["phrase"],
         json!("ConversationEndForAllInitiated")
     );
+}
+
+#[test]
+fn hold_and_resume_go_at_their_links_in_the_captured_shape() {
+    let callback = "https://pub-ent-zz-01-t.trouter.teams.microsoft.com:3443/v4/f/Synthetic/callAgent/Agent1/a1/call/";
+    let links = Links::new().with("holdCompletion", format!("{callback}holdCompletion/"));
+    let hold = HoldCall::new(&context(), &link(&cc("active", "Call1", "hold")), &links).unwrap();
+    assert_eq!(teams_proto::Request::method(&hold).as_str(), "POST");
+    let body = teams_proto::Request::body(&hold).unwrap();
+    assert_eq!(body["hold"]["holdType"], json!("musicOnHold"));
+    assert_eq!(
+        body["hold"]["links"]["holdCompletion"],
+        json!(format!("{callback}holdCompletion/"))
+    );
+    assert!(body["debugContent"]["causeId"].as_str().is_some());
+    let links = Links::new().with("resumeCompletion", format!("{callback}resumeCompletion/"));
+    let resume = ResumeCall::new(&context(), &link(&cc("holdSession", "Call1", "resume")), &links).unwrap();
+    let body = teams_proto::Request::body(&resume).unwrap();
+    assert_eq!(
+        body["resume"]["links"]["resumeCompletion"],
+        json!(format!("{callback}resumeCompletion/"))
+    );
+    // each only at its own link
+    assert!(matches!(
+        HoldCall::new(&context(), &link(&cc("active", "Call1", "renegotiate")), &links),
+        Err(CallWriteError::Unmapped)
+    ));
+    assert!(matches!(
+        ResumeCall::new(&context(), &link(&cc("holdSession", "Call1", "hold")), &links),
+        Err(CallWriteError::Unmapped)
+    ));
 }

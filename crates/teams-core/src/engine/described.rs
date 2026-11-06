@@ -63,6 +63,7 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::RaiseHand { call, raised } => format!("call {} hand raised {raised}", call.get()),
         CallAction::React { call, reaction } => format!("call {}: reaction {reaction}", call.get()),
         CallAction::EndMeeting { call } => format!("call {}: the meeting ended for everyone", call.get()),
+        CallAction::Hold { call, held } => format!("call {} held {held}", call.get()),
     }
 }
 
@@ -185,6 +186,7 @@ fn plain(event: &Event) -> String {
         // no names: how many wait
         Event::Lobby { call, waiting } => format!("call {}: {} waiting in the lobby", call.get(), waiting.len()),
         Event::CallOwn { .. } | Event::CallReaction { .. } => call_state(event),
+        Event::CallHeld { call, held } => format!("call {} held {held}", call.get()),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }

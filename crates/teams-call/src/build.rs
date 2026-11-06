@@ -12,7 +12,7 @@ use teams_proto::{
     MediaDescriptions, MeetingInfo, RenegotiateMedia, ReportRinging, StartCall, StartParts, UpdateEndpointMetadata,
     UpdateEndpointState, UpdateMediaDescriptions,
 };
-use teams_proto::{EndConversation, PublishState, RemoveState, SendCallReaction};
+use teams_proto::{EndConversation, HoldCall, PublishState, RemoveState, ResumeCall, SendCallReaction};
 
 use crate::agent::{Kind, guid};
 use crate::call::{
@@ -331,6 +331,18 @@ pub(crate) fn reaction(call: &Call, link: &CallLink, reaction: &str) -> Result<C
         &call.me,
         reaction,
     )?))
+}
+
+/// The call put on hold (`held`) at its leg's `hold` link, or taken off hold at the hold's `resume` link, with the
+/// callback its completion is told at (`holdCompletion`, `resumeCompletion`).
+pub(crate) fn hold(call: &mut Call, link: &CallLink, held: bool) -> Result<CallWrite, CallError> {
+    Ok(if held {
+        let links = call.links(Kind::Call, &["holdCompletion"])?;
+        CallWrite::Hold(HoldCall::new(&call.context, link, &links)?)
+    } else {
+        let links = call.links(Kind::Call, &["resumeCompletion"])?;
+        CallWrite::Resume(ResumeCall::new(&call.context, link, &links)?)
+    })
 }
 
 /// The meeting ended for everyone, at the conversation's own URL.

@@ -192,6 +192,9 @@ pub enum CallAction {
     React { call: CallId, reaction: String },
     /// The meeting ended for everyone in it, as its organizer's End meeting ([`Event::CallOwn`] says who organizes).
     EndMeeting { call: CallId },
+    /// A 1:1 call put on hold (`true`: the far end hears the service's music, the microphone sends silence) or taken
+    /// off it, as Teams' Hold and Resume ([`Event::CallHeld`] tells it as it stands; the user's own mute comes back).
+    Hold { call: CallId, held: bool },
 }
 
 impl CallAction {
@@ -310,6 +313,7 @@ pub(crate) enum Act {
     RaiseHand(CallId, bool),
     React(CallId, String),
     EndMeeting(CallId),
+    Hold(CallId, bool),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -436,6 +440,9 @@ pub(crate) struct Calling<C, T> {
     preparing: Option<Preparing>,
     /// The call told placing as its setup began, until the machine tells it placing in turn (told once).
     told_placing: Option<CallId>,
+    /// While the account holds its call: that call, and whether the user had the microphone muted (what the hold's end
+    /// gives back; a mute asked while held is kept here).
+    held_mute: Option<(CallId, bool)>,
     media_steps: JoinSet<MediaDone>,
     /// The SDP steps waiting for the one running to finish, in the order the signaling asked for them.
     sdp_steps: VecDeque<Box<dyn FnOnce() -> MediaDone + Send>>,
@@ -502,6 +509,7 @@ where
             writing: None,
             preparing: None,
             told_placing: None,
+            held_mute: None,
             media_steps: JoinSet::new(),
             sdp_steps: VecDeque::new(),
             sdp_running: false,
@@ -806,10 +814,39 @@ where
             event @ (CallEvent::Lobby { .. } | CallEvent::Own { .. } | CallEvent::Reaction { .. }) => {
                 self.roster_told(event);
             }
+            CallEvent::Held { call, held } => self.held(call, held),
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }
         }
+    }
+
+    /// The account's call on hold or off it, as its Hold or Resume was taken: told, and while held the microphone sends
+    /// silence (the far end hears the service's music, never the account), the user's own mute given back once the
+    /// call resumes. The call controller moves a held 1:1 call to its mixer and keeps its lines as they are: nothing is
+    /// renegotiated (an offer of ours on the mixer's lines was turned away as incompatible, native a ↔ b 2026-11-06).
+    fn held(&mut self, call: CallId, held: bool) {
+        self.emit(Event::CallHeld { call, held });
+        let Some(live) = self.live.as_ref().filter(|live| live.call == call) else {
+            self.held_mute = None;
+            return;
+        };
+        match (held, self.held_mute) {
+            (true, None) => {
+                self.held_mute = Some((call, live.session.is_muted()));
+                live.session.set_muted(true);
+            }
+            (false, Some((of, muted))) if of == call => {
+                self.held_mute = None;
+                live.session.set_muted(muted);
+            }
+            _ => {}
+        }
+        log::info!(
+            "call {}: held {held}, its microphone muted {}",
+            call.get(),
+            live.session.is_muted()
+        );
     }
 
     /// What the call's roster and its messages told, told on as the engine's events: who waits in the lobby, the
@@ -1048,6 +1085,7 @@ where
     }
 
     fn ended(&mut self, call: CallId, end: End) {
+        self.held_mute = None;
         self.caption_ended(call);
         if self.up == Some(call) {
             self.up = None;
@@ -1411,6 +1449,11 @@ where
                 .end_meeting(call)
                 .map(|()| call)
                 .map_err(CallActionError::from),
+            Act::Hold(call, held) => self
+                .calls
+                .hold(call, held)
+                .map(|()| call)
+                .map_err(CallActionError::from),
             Act::Renegotiate(call) => match self.live.as_ref().filter(|live| live.call == call) {
                 // the machine first: the session's new offer would replace the one it waits on
                 Some(live) => match self.calls.begin_renegotiation(call) {
@@ -1476,7 +1519,11 @@ where
             .as_ref()
             .filter(|live| live.call == call)
             .ok_or(CallActionError::NoMedia)?;
-        live.session.set_muted(muted);
+        match self.held_mute.as_mut().filter(|(of, _)| *of == call) {
+            // held: the microphone stays silent, the mute asked given back once the call resumes
+            Some((_, wanted)) => *wanted = muted,
+            None => live.session.set_muted(muted),
+        }
         log::info!("call {}: muted {muted}", call.get());
         // the others see it once the call is up; before then it is told as it connects
         if self.up == Some(call)

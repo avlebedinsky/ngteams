@@ -617,6 +617,8 @@ call_write!(
     RemoveState,
     SendCallReaction,
     EndConversation,
+    HoldCall,
+    ResumeCall,
 );
 
 /// The meeting a call is, as a join or a start names it (`meetingInfo`): its organizer's object id and tenant.
@@ -1396,5 +1398,46 @@ impl EndConversation {
             link,
             Some(body),
         )?))
+    }
+}
+
+/// The hold of a 1:1 call: `POST` to the call leg's `hold` link (`{"hold": {"holdType": "musicOnHold", "links":
+/// {"holdCompletion"}}, "debugContent": {"causeId"}}`, seen 2026-11-06). Its answer hands out where the hold is taken
+/// back (`{"holdResponse": {"links": {"resume"}}}`, [`ResumeCall`]); the call controller then tells the hold done at
+/// the `holdCompletion` callback, and the far end hears the service's music.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoldCall(Built);
+
+impl HoldCall {
+    /// The call put on hold at `link`, its completion told at the `holdCompletion` callback of `links`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a `hold` in its captured shape.
+    pub fn new(context: &CallContext, link: &CallLink, links: &Links) -> Result<Self, CallWriteError> {
+        let body = json!({
+            "hold": {"holdType": "musicOnHold", "links": links.json()},
+            "debugContent": {"causeId": parts::guid().map_err(CallWriteError::Random)?},
+        });
+        Ok(Self(operation(context, CallOperation::Hold, link, Some(body))?))
+    }
+}
+
+/// A held call taken off hold: `POST` to the `resume` link the hold's answer handed out (`{"resume": {"links":
+/// {"resumeCompletion"}}, "debugContent": {"causeId"}}`, seen 2026-11-06), answered `202`; its completion is told at the
+/// `resumeCompletion` callback. The media goes again once the account renegotiates it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumeCall(Built);
+
+impl ResumeCall {
+    /// The call held at `link` taken off hold, its completion told at the `resumeCompletion` callback of `links`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a `resume` in its captured shape.
+    pub fn new(context: &CallContext, link: &CallLink, links: &Links) -> Result<Self, CallWriteError> {
+        let body = json!({
+            "resume": {"links": links.json()},
+            "debugContent": {"causeId": parts::guid().map_err(CallWriteError::Random)?},
+        });
+        Ok(Self(operation(context, CallOperation::Resume, link, Some(body))?))
     }
 }

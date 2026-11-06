@@ -73,13 +73,20 @@ pub enum CallOperation {
     /// `POST …/conv/<id>/sendMessage`: a live reaction (Like, Love, Applause, Laugh, Surprised) to everyone in the call,
     /// at the conversation's `sendMessage` link (seen 2026-11-06, `meeting-steps`: React). Reaches only who is in it.
     SendMessage,
+    /// `POST …/cc/v1/active/<call>/…/hold`: the sender puts its 1:1 call on hold (`holdType` `musicOnHold`: the far
+    /// end hears the service's music), at the call leg's `hold` link (seen 2026-11-06, `ab-call --call steps`: Hold).
+    /// Names nobody else.
+    Hold,
+    /// `POST …/cc/v1/holdSession/<call>/…/resume`: the sender takes its call off hold, at the `resume` link the hold's
+    /// answer handed out (seen 2026-11-06, `ab-call --call steps`: Resume). Names nobody else.
+    Resume,
     /// `DELETE …/conv/<id>`: the organizer ends the meeting for everyone in it, at the conversation's own URL (seen
     /// 2026-11-06, `meeting-steps`: End meeting). Reaches only who is in it.
     EndConversation,
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 26] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
@@ -104,6 +111,8 @@ impl CallOperation {
         Self::RemoveState,
         Self::SendMessage,
         Self::EndConversation,
+        Self::Hold,
+        Self::Resume,
     ];
 
     /// The protocol operation name.
@@ -134,6 +143,8 @@ impl CallOperation {
             Self::RemoveState => "remove_state",
             Self::SendMessage => "send_message",
             Self::EndConversation => "end_conversation",
+            Self::Hold => "hold",
+            Self::Resume => "resume",
         }
     }
 
@@ -163,7 +174,9 @@ impl CallOperation {
             | Self::RemoveParticipant
             | Self::PublishState
             | Self::RemoveState
-            | Self::SendMessage => "POST",
+            | Self::SendMessage
+            | Self::Hold
+            | Self::Resume => "POST",
         }
     }
 
@@ -191,6 +204,8 @@ impl CallOperation {
             Self::PublishState => "publishState",
             Self::RemoveState => "removeState",
             Self::SendMessage => "sendMessage",
+            Self::Hold => "hold",
+            Self::Resume => "resume",
             // the conversation's own URL, the call leg's own: no segment after it
             Self::Join | Self::KeepAlive | Self::EndConversation => "",
         }

@@ -175,6 +175,8 @@ pub(crate) struct AcceptAnswer {
     /// Where a group call's media lines are described again (`updateMediaDescriptions`) and its send capabilities
     /// given (`applyChannelParameters`): the camera turned on or off.
     pub(crate) group_media: GroupMediaLinks,
+    /// The call leg's `hold` link: where the account puts the call on hold.
+    pub(crate) hold: Option<CallLink>,
 }
 
 /// Where a group call's media lines are described (`updateMediaDescriptions`) and its send capabilities given
@@ -207,6 +209,7 @@ pub(crate) fn accept_answer(body: &[u8]) -> AcceptAnswer {
         renegotiation: link(&acknowledgement, "/links/mediaRenegotiation"),
         call_leg: link(&acknowledgement, "/links/callLeg"),
         group_media: GroupMediaLinks::of(&acknowledgement),
+        hold: link(&acknowledgement, "/links/hold"),
     }
 }
 
@@ -221,6 +224,7 @@ pub(crate) struct Retarget {
     pub(crate) renegotiation: Option<CallLink>,
     pub(crate) call_leg: CallLink,
     pub(crate) group_media: GroupMediaLinks,
+    pub(crate) hold: Option<CallLink>,
 }
 
 /// The retarget a media answer's acknowledgement `body` tells, if it is one ([`Retarget`]): a success naming the new
@@ -239,6 +243,7 @@ pub(crate) fn retarget(body: &[u8]) -> Option<Retarget> {
         renegotiation: link(&body, "/links/mediaRenegotiation"),
         call_leg: link(&body, "/links/callLeg")?,
         group_media: GroupMediaLinks::of(&body),
+        hold: link(&body, "/links/hold"),
     })
 }
 
@@ -258,6 +263,8 @@ pub(crate) struct Acceptance {
     pub(crate) voicemail: bool,
     /// A group call's media links.
     pub(crate) group_media: GroupMediaLinks,
+    /// The call leg's `hold` link: where the account puts the call on hold.
+    pub(crate) hold: Option<CallLink>,
 }
 
 /// The acceptance delivery `body`; `None` unless it is a `callAcceptance`.
@@ -272,7 +279,15 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
         call_leg: link(acceptance, "/links/callLeg"),
         voicemail: acceptance.pointer("/acceptedBy/endpointType").and_then(Value::as_str) == Some("voicemail"),
         group_media: GroupMediaLinks::of(acceptance),
+        hold: link(acceptance, "/links/hold"),
     })
+}
+
+/// Where a hold is taken back, as the hold's answer `body` hands it out: `{"holdResponse": {"links": {"resume"}}}`
+/// (seen 2026-11-06, `ab-call --call steps`).
+pub(crate) fn resume_link(body: &[u8]) -> Option<CallLink> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    link(&body, "/holdResponse/links/resume")
 }
 
 /// One participant of a call as its roster lists them (a `rosterUpdate` delivered at the conversation's callback:
@@ -336,9 +351,14 @@ pub(crate) fn answered_roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
     )
 }
 
+/// The service's music-on-hold app: in a held 1:1 call's roster (the holder's and the held party's) for as long as the
+/// hold lasts, playing the far end its music (seen 2026-11-06, `ab-call --call steps`, and a native hold).
+pub(crate) const MUSIC_ON_HOLD_MRI: &str = "28:56aa0a8f-4cd3-446b-8146-0023476a5ff2";
+
 fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
-    // The built-in caption service is hidden in Teams and is never a person in the gallery.
-    if mri == teams_proto::captions::CAPTION_SERVICE_MRI {
+    // The built-in caption service and the music on hold are hidden in Teams: never a person in the gallery (the
+    // music would make a held 1:1 call look like a group call's).
+    if mri == teams_proto::captions::CAPTION_SERVICE_MRI || mri == MUSIC_ON_HOLD_MRI {
         return None;
     }
     let version = entry.get("version")?.as_u64()?;

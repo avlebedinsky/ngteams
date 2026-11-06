@@ -114,6 +114,8 @@ pub struct ActiveCall {
     pub organizer: bool,
     /// The live reactions sent in the call lately, the newest last, each shown for [`REACTION_SHOWN`].
     pub reactions: Vec<LiveReaction>,
+    /// Since when the account holds the call (Teams' Hold), while it does ([`teams_core::Event::CallHeld`]).
+    pub held: Option<Instant>,
 }
 
 /// A live reaction someone in the call sent ([`teams_core::Event::CallReaction`]).
@@ -461,6 +463,8 @@ pub enum Ask {
     React(String),
     /// End the meeting for everyone in it (its organizer's End meeting).
     EndMeeting,
+    /// Put the 1:1 call on hold, or take it off hold (Teams' Hold and Resume).
+    ToggleHold,
 }
 
 impl Ask {
@@ -485,6 +489,7 @@ impl Ask {
             Self::ToggleHand => "hand",
             Self::React(_) => "react",
             Self::EndMeeting => "end-meeting",
+            Self::ToggleHold => "hold",
         }
     }
 
@@ -879,6 +884,7 @@ impl Calls {
                     | Event::CallParticipants { .. }
                     | Event::Lobby { .. }
                     | Event::CallOwn { .. }
+                    | Event::CallHeld { .. }
                     | Event::CallReaction { .. }
             );
         }
@@ -928,7 +934,7 @@ impl Calls {
                     active.lobby.clone_from(waiting);
                 }
             }
-            Event::CallOwn { .. } | Event::CallReaction { .. } => self.in_call(event),
+            Event::CallOwn { .. } | Event::CallHeld { .. } | Event::CallReaction { .. } => self.in_call(event),
             _ => return false,
         }
         cx.notify();
@@ -946,6 +952,11 @@ impl Calls {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.hand_raised = *hand_raised;
                     active.organizer = *organizer;
+                }
+            }
+            Event::CallHeld { call, held } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.held = held.then(|| active.held.unwrap_or_else(Instant::now));
                 }
             }
             Event::CallReaction {
@@ -1062,6 +1073,7 @@ impl Calls {
             hand_raised: false,
             organizer: false,
             reactions: Vec::new(),
+            held: None,
         }
     }
 
@@ -1149,6 +1161,13 @@ impl Calls {
                 })
             }
             Ask::ToggleHand | Ask::React(_) | Ask::EndMeeting => self.meeting_action(ask),
+            Ask::ToggleHold => {
+                let call = self.call.as_ref().ok_or("no-call")?;
+                Ok(CallAction::Hold {
+                    call: call.id,
+                    held: call.held.is_none(),
+                })
+            }
             Ask::ToggleCamera if self.video.is_none() => Err("no-video"),
             Ask::ToggleCamera => {
                 let call = self.call.as_ref().ok_or("no-call")?;

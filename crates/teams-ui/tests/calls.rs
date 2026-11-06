@@ -3211,6 +3211,62 @@ fn a_one_to_one_call_offers_no_raise_or_react_and_its_chat_opens_beside_the_stag
 }
 
 #[test]
+fn a_one_to_one_call_goes_on_hold_and_resumes_as_teams_shows_it() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    click(stage, "call-hold");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Hold {
+            call: call(1),
+            held: true
+        })
+    );
+    assert!(!drawn(stage, "call-resume"), "held once the hold was taken");
+    rig.send(Event::CallHeld {
+        call: call(1),
+        held: true,
+    });
+    rig.cx.run_until_parked();
+    // Resume in Hold's place, the camera and the microphone greyed out, and "On hold" on the stage
+    assert!(drawn(stage, "call-resume"));
+    assert!(!drawn(stage, "call-hold"));
+    assert!(drawn(stage, "call-held-controls"));
+    assert!(drawn(stage, "call-calling"));
+    click(stage, "call-resume");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Hold {
+            call: call(1),
+            held: false
+        })
+    );
+    rig.send(Event::CallHeld {
+        call: call(1),
+        held: false,
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-hold"));
+    assert!(!drawn(stage, "call-held-controls"));
+}
+
+#[test]
+fn a_group_call_offers_no_hold() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (_windows, stage) = in_group_call(&rig, &trace);
+    assert!(drawn(stage, "call-raise-hand"));
+    assert!(!drawn(stage, "call-hold"), "Teams offers Hold in a 1:1 call only");
+}
+
+#[test]
 fn a_meeting_s_organizer_ends_it_for_everyone_and_shares_its_link_from_the_people_pane() {
     let rig = calling();
     let (trace, _) = trace();

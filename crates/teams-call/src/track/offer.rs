@@ -49,7 +49,7 @@ pub(crate) struct Offer {
     pub(crate) state: OfferState,
     pub(crate) invitation: Invitation,
     /// The links a ring-time send may go to, exactly.
-    links: Vec<Link>,
+    pub(crate) links: Vec<Link>,
     /// The call agent every callback of the callee's attach shares, once one was permitted.
     agent: Option<Callback>,
     /// The callbacks the call's end comes back to, from the sent attach.
@@ -146,6 +146,8 @@ impl Offer {
                     | CallOperation::PublishState
                     | CallOperation::RemoveState
                     | CallOperation::SendMessage
+                    | CallOperation::Hold
+                    | CallOperation::Resume
             ),
             OfferState::Leaving => operation == CallOperation::Leave,
             OfferState::Declined => operation == CallOperation::Reject,
@@ -288,9 +290,10 @@ impl Offer {
     /// `…/cc/v1/active/<call>/<n>/<leg>/<n>`) and its `applyChannelParameters`
     /// (`…/cc/v1/mcProxy/<call>/…/applyChannelParameters`, a group call's). Whether anything bound.
     pub(crate) fn bind_acceptance(&mut self, answer: &[u8]) -> bool {
-        const NAMES: [(CallOperation, &str, &str); 4] = [
+        const NAMES: [(CallOperation, &str, &str); 5] = [
             (CallOperation::Renegotiate, "mediaRenegotiation", "active"),
             (CallOperation::KeepAlive, "callLeg", "active"),
+            (CallOperation::Hold, "hold", "active"),
             (
                 CallOperation::UpdateMediaDescriptions,
                 "updateMediaDescriptions",

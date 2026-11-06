@@ -67,6 +67,48 @@ impl CallStage {
         if self.width < COMPACT_BELOW { "" } else { caption }
     }
 
+    /// Whether the call takes Hold: a 1:1 call's that is up (Teams offers Hold there, not in a group call or a
+    /// meeting), never the test call's or in the read-only mode.
+    fn takes_hold(&self, active: &ActiveCall) -> bool {
+        let one_to_one = matches!(active.kind, CallKind::Chat | CallKind::Incoming)
+            && active.view.participants.len() <= 1
+            && active
+                .chat
+                .as_deref()
+                .is_none_or(|chat| teams_proto::one_to_one_pair(chat).is_some());
+        one_to_one && active.status == CallStatus::Connected && !self.core.read_only()
+    }
+
+    /// Hold, or Resume while the account holds the call: Teams' outlined Resume with its play mark in Hold's place.
+    fn hold(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.takes_hold(active) {
+            return None;
+        }
+        if active.held.is_some() {
+            return Some(
+                selected_by(
+                    "call-resume",
+                    Button::new("call-resume")
+                        .outline()
+                        .icon(Glyph::PLAY.icon())
+                        .label("Resume")
+                        .text_color(rgb(palette.on_frame))
+                        .tooltip("Resume the call")
+                        .on_click(cx.listener(|this, _, _, cx| this.ask(Ask::ToggleHold, cx))),
+                )
+                .into_any_element(),
+            );
+        }
+        Some(tool(
+            ("call-hold", Glyph::PAUSE, self.caption("Hold")),
+            ("Put the call on hold", None),
+            false,
+            palette,
+            cx,
+            |this, _, cx| this.ask(Ask::ToggleHold, cx),
+        ))
+    }
+
     /// Whether the call takes Raise and React: a group call's or a meeting's that is up, as Teams offers them (a 1:1
     /// call has neither), never in the read-only mode.
     fn takes_reactions(&self, active: &ActiveCall) -> bool {
@@ -100,23 +142,27 @@ impl CallStage {
             cx,
             |this, _, cx| this.ask(Ask::ToggleMute, cx),
         );
+        let hold_or_resume = self.hold(active, palette, cx);
+        let held = active.held.is_some();
+        let media = div().flex().items_center().gap_1().children(camera).child(
+            div()
+                .flex()
+                .items_center()
+                .child(microphone)
+                .children(self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx)),
+        );
         div()
             .flex()
             .flex_none()
             .items_center()
             .gap_1()
+            .when_some(hold_or_resume, |bar, hold| bar.child(hold).child(divider(palette)))
             .children(self.meeting_tools(active, palette, cx))
             .child(self.view_menu(palette, cx))
             .child(self.more(palette, cx))
             .child(divider(palette))
-            .children(camera)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(microphone)
-                    .children(self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx)),
-            )
+            // on hold, Teams greys the camera and the microphone out until the call resumes
+            .child(on_hold(media, held))
             .child(div().w_2())
             .child(self.leave(active, cx))
     }
@@ -531,6 +577,20 @@ fn with_count(tool: AnyElement, count: Option<usize>, attention: usize, palette:
                 .text_color(rgb(palette.on_frame))
                 .child(SharedString::from(count.to_string())),
         )
+        .into_any_element()
+}
+
+/// `controls` greyed out and not taking the pointer while the call is on hold (`held`), as Teams shows them.
+fn on_hold(controls: gpui::Div, held: bool) -> AnyElement {
+    if !held {
+        return controls.into_any_element();
+    }
+    div()
+        .debug_selector(|| "call-held-controls".to_owned())
+        .id("call-held-controls")
+        .opacity(0.4)
+        .occlude()
+        .child(controls)
         .into_any_element()
 }
 

@@ -160,6 +160,11 @@ pub(crate) enum Step {
     React,
     /// The organizer's end of the meeting for everyone: its failing leaves the call instead.
     EndMeeting,
+    /// The account's hold of the call: its answer hands out where it is taken back; its failing leaves the call as
+    /// it was (not held).
+    Hold,
+    /// The account's call taken off hold: its failing leaves it held.
+    Resume,
 }
 
 impl Step {
@@ -188,6 +193,8 @@ impl Step {
             Self::Hand => "hand",
             Self::React => "send_message",
             Self::EndMeeting => "end_conversation",
+            Self::Hold => "hold",
+            Self::Resume => "resume",
         }
     }
 }
@@ -261,6 +268,10 @@ pub(crate) struct Call {
     pub(crate) renegotiation: Option<CallLink>,
     /// A group call's media links, from the same: where its lines are described again and its send capabilities go.
     pub(crate) group_media: GroupMediaLinks,
+    /// The call leg's `hold` link, from the same (or a retarget): where the account puts the call on hold.
+    pub(crate) hold: Option<CallLink>,
+    /// While the account holds the call: the `resume` link its hold's answer handed out.
+    pub(crate) resume: Option<CallLink>,
     /// Who is in the call, as its roster updates tell it.
     pub(crate) roster: Roster,
     /// The test call's echo was in its roster (it joined after its `add`): once it isn't any more, the test call is
@@ -335,6 +346,8 @@ impl Call {
             modalities: Vec::new(),
             renegotiation: None,
             group_media: GroupMediaLinks::default(),
+            hold: None,
+            resume: None,
             roster: Roster::default(),
             echo_joined: false,
             negotiation: None,

@@ -5,7 +5,7 @@
 
 use crate::support::{A_TONE, Account, B_TONE, Lab, PEER_TONE};
 use teams_core::{CallAction, CallId, CallStatus, Event};
-use teams_mock::{ABC_CHAT, LAB_A, LAB_B, LAB_C};
+use teams_mock::{AB_CHAT, ABC_CHAT, LAB_A, LAB_B, LAB_C};
 
 /// `account` answers `ringing` and is connected: its call.
 async fn answer(account: &mut Account, ringing: CallId) -> CallId {
@@ -125,4 +125,40 @@ async fn a_mute_a_raised_hand_and_a_reaction_reach_everyone_in_the_call() {
             .unwrap();
         account.ended(call).await;
     }
+}
+
+/// The next hold state `account` is told for `call`.
+async fn held(account: &mut crate::support::Account, call: CallId) -> bool {
+    account
+        .next(|event| match event {
+            Event::CallHeld { call: of, held } if *of == call => Some(*held),
+            _ => None,
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_one_to_one_call_goes_on_hold_and_comes_off_it_its_lines_as_they_were() {
+    let lab = crate::support::Lab::start().await;
+    let mut a = lab.account_without_video(LAB_A, A_TONE).await;
+    let mut b = lab.account_without_video(LAB_B, B_TONE).await;
+    let call = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: AB_CHAT.into() })
+        .await
+        .unwrap();
+    let ringing = b.incoming().await;
+    answer(&mut b, ringing.call).await;
+    a.status(call, &CallStatus::Connected).await;
+    let hold = |held: bool| CallAction::Hold { call, held };
+    a.handle.requests().call(hold(true)).await.unwrap();
+    assert!(held(&mut a, call).await, "on hold once its hold was taken");
+    a.handle.requests().call(hold(false)).await.unwrap();
+    assert!(!held(&mut a, call).await, "off hold once its resume was taken");
+    let sent = lab.sent_by(LAB_A);
+    let at = |op: &str| sent.iter().position(|sent| sent == op);
+    assert!(at("hold").is_some() && at("hold") < at("resume"), "{sent:?}");
+    // the call's lines stay as they are: nothing is renegotiated
+    assert!(at("renegotiate").is_none(), "{sent:?}");
 }

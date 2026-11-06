@@ -239,7 +239,19 @@ struct Inner {
 pub enum Attempt {
     Nothing,
     Start(usize),
-    Answer { offer: usize, operation: CallOperation },
+    Answer {
+        offer: usize,
+        operation: CallOperation,
+    },
+    /// A live call's `hold` (a placed call's, or an answered offer's): its answer hands out where it is resumed.
+    Hold(Holder),
+}
+
+/// Whose `hold` went: a call the account placed or joined, or an invitation it answered, by index.
+#[derive(Clone, Copy, Debug)]
+pub enum Holder {
+    Call(usize),
+    Offer(usize),
 }
 
 impl Tracker {
@@ -375,6 +387,20 @@ impl Tracker {
                     operation,
                 };
             }
+            if operation == CallOperation::Hold {
+                return Attempt::Hold(Holder::Offer(index));
+            }
+        }
+        if operation == Some(CallOperation::Hold)
+            && let Some(index) = inner.calls.iter().position(|call| {
+                call.state == State::Live
+                    && call
+                        .links
+                        .iter()
+                        .any(|(op, link)| *op == CallOperation::Hold && link == url.as_str())
+            })
+        {
+            return Attempt::Hold(Holder::Call(index));
         }
         if operation == Some(CallOperation::Leave) {
             for call in inner.calls.iter_mut().filter(|call| {
@@ -423,6 +449,23 @@ impl Tracker {
                         }
                         _ => {}
                     }
+                }
+            }
+            Attempt::Hold(holder) if response.is_success() => {
+                let (links, call) = match holder {
+                    Holder::Call(index) => match inner.calls.get_mut(index) {
+                        Some(call) => (&mut call.links, call.controller.as_ref().map(|(_, id)| id.clone())),
+                        None => return,
+                    },
+                    Holder::Offer(index) => match inner.offers.get_mut(index) {
+                        Some(offer) => (&mut offer.links, Some(offer.invitation.leg.1.clone())),
+                        None => return,
+                    },
+                };
+                if let Some(link) = call.and_then(|call| resume_link(response.body(), &call))
+                    && !links.contains(&link)
+                {
+                    links.push(link);
                 }
             }
             _ => {}
@@ -632,9 +675,10 @@ fn acceptance_links(body: &[u8]) -> Option<(Controller, Vec<Link>)> {
 /// `callAcceptance.links`, a retarget's `links`); `None` unless every link that names a call names the same one, and at
 /// least one does.
 fn controller_links(links: &Map<String, Value>) -> Option<(Controller, Vec<Link>)> {
-    const NAMES: [(CallOperation, &str, &str); 5] = [
+    const NAMES: [(CallOperation, &str, &str); 6] = [
         (CallOperation::Acknowledge, "acknowledgement", "callAcceptance"),
         (CallOperation::KeepAlive, "callLeg", "active"),
+        (CallOperation::Hold, "hold", "active"),
         (
             CallOperation::ApplyChannelParameters,
             "applyChannelParameters",
@@ -669,6 +713,15 @@ fn controller_links(links: &Map<String, Value>) -> Option<(Controller, Vec<Link>
         })
         .collect();
     Some((controller, bound))
+}
+
+/// Where a hold's answer `body` says the hold of call `call` (the call controller's call id) is taken back, on the
+/// flight proxy: `holdResponse.links.resume`, `…/cc/v1/holdSession/<call>/…/resume` (seen 2026-11-06).
+fn resume_link(body: &[u8], call: &str) -> Option<Link> {
+    let url = proxy_link(strict_json(body)?.pointer("/holdResponse/links/resume")?)?;
+    let (_, at, kind, last) = controller_path(&url)?;
+    (at == call && kind == "holdSession" && last == CallOperation::Resume.segment())
+        .then(|| (CallOperation::Resume, url.as_str().to_owned()))
 }
 
 /// Whether a call controller link ending in `last` is `operation`'s (its kind already checked): its captured segment

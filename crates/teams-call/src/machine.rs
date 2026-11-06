@@ -182,6 +182,8 @@ pub enum CallEvent {
         hand_raised: bool,
         organizer: bool,
     },
+    /// The account's call on hold (`held`) or off it, as its Hold or Resume was taken (or, not taken, as it was).
+    Held { call: CallId, held: bool },
     /// Someone in the call sent a live reaction (`like`, `heart`, `applause`, `laugh`, `surprised`), the account's own
     /// as the service echoes it too: who, their name as given, and the reaction.
     Reaction {
@@ -996,6 +998,26 @@ impl Calls {
         Ok(())
     }
 
+    /// The account puts its 1:1 call on hold (`held`) at the call leg's `hold` link, or takes it off hold at the
+    /// `resume` link the hold's answer handed out, as the web client's Hold and Resume send them (seen 2026-11-06): on
+    /// hold the far end hears the service's music and the call controller moves the call to its mixer
+    /// ([`CallEvent::Held`] tells both).
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while the call isn't up, is already as asked,
+    /// or its leg named no such link; nothing was sent. Teams offers Hold in a 1:1 call only: the view offers no more.
+    pub fn hold(&mut self, call: CallId, held: bool) -> Result<(), CallError> {
+        let current = up(&mut self.call, call)?;
+        let (link, step) = match (held, current.resume.clone()) {
+            (true, None) => (current.hold.clone().ok_or(CallError::NotNow)?, Step::Hold),
+            (false, Some(resume)) => (resume, Step::Resume),
+            _ => return Err(CallError::NotNow),
+        };
+        let write = build::hold(current, &link, held)?;
+        self.out.send(current, step, write);
+        Ok(())
+    }
+
     /// The account hangs up `call`: cancels it while it rings at its callees, leaves it once it is up. An invitation
     /// that rings here is declined instead ([`Self::decline`]), and so is one being answered whose `accept` hasn't
     /// gone out yet (the account isn't in the call before it, and only a decline ends the ring).
@@ -1283,6 +1305,7 @@ impl Calls {
             (Step::EndMeeting, Some(_)) => self.finish(End::HungUp),
             // not ended for everyone: the account leaves it alone, as a hang-up does
             (Step::EndMeeting, None) => self.leave(Ending::HungUp, now),
+            (Step::Hold | Step::Resume, body) => self.held(step, body),
             (_, Some(_))
             | (
                 Step::KeepAlive
@@ -1296,6 +1319,19 @@ impl Calls {
             ) => {}
             (step, None) => self.fail(step, now),
         }
+    }
+
+    /// The hold's or the resume's outcome (`body` its answer when taken): the call held while the hold's answer handed
+    /// out where it is taken back, off hold once the resume was taken; told either way, as it stands.
+    fn held(&mut self, step: Step, body: Option<&[u8]>) {
+        let Some(call) = self.call.as_mut() else { return };
+        match (step, body) {
+            (Step::Hold, Some(body)) => call.resume = read::resume_link(body),
+            (Step::Resume, Some(_)) => call.resume = None,
+            _ => {}
+        }
+        let (id, held) = (call.id, call.resume.is_some());
+        self.out.event(CallEvent::Held { call: id, held });
     }
 
     /// The `leave` was taken: the call is over here.
@@ -1448,6 +1484,9 @@ impl Calls {
         };
         if retarget.renegotiation.is_some() {
             call.renegotiation = retarget.renegotiation;
+        }
+        if retarget.hold.is_some() {
+            call.hold = retarget.hold;
         }
         if let Some(keep_alive) = call.keep_alive.as_mut() {
             keep_alive.link = Some(retarget.call_leg);
@@ -1701,6 +1740,7 @@ impl Calls {
         }
         call.renegotiation = answer.renegotiation;
         call.group_media = answer.group_media;
+        call.hold = answer.hold;
         self.connect((answer.keep_alive, answer.call_leg), now);
     }
 
@@ -1782,6 +1822,7 @@ impl Calls {
             });
             call.renegotiation.clone_from(&acceptance.renegotiation);
             call.group_media.clone_from(&acceptance.group_media);
+            call.hold.clone_from(&acceptance.hold);
         }
         self.acknowledge(delivery);
         if let (Some(call), Some(media)) = (self.call.as_ref(), acceptance.answer) {
