@@ -684,6 +684,86 @@ nothing itself: while held its microphone sends silence, and the user's own mute
 its own on the mixer's lines after the resume was turned away by libwebrtc as an incompatible send direction, native
 a ↔ b 2026-11-06; with its lines left as the mixer set them, the call's audio went on after the resume.)
 
+**The held party** is told by nothing addressed to it: its roster gains the music-on-hold app (one `sendrecv` audio
+stream) and lists every stream of the holder's endpoint `inactive`, and the holder's renegotiation names no
+modality (`callModalities: []`). Teams shows the held party the far end's avatar over "On hold" (no duration), its own
+controls left as they were; the music-on-hold app leaving the roster ends it.
+
+### More of a running call (2026-11-06)
+
+Captured with `ab-call --call steps`, the callee's page driven too (`@b <step>`), and `meeting-steps` (a's Meet now,
+a alone). What each of Teams' remaining call controls sends:
+
+- **Share a screen, 1:1.** Share opens "Share content" (Screen, window, or tab; Microsoft Whiteboard; PowerPoint Live;
+  Excel Live; Browse OneDrive; Browse my computer). Picking the screen posts the sharer's participant properties
+  (`updateParticipantProperties`, `propertyBag.screenSharerAttributes: {"sequenceNumber", "value": {"source": 1}}`) and
+  renegotiates at the call leg's `renegotiate` link with `callModalities: ["Audio", "ScreenSharer"]`: the offer adds a
+  video line numbered one past the highest (`4` beside `0`, `1`, `3`), `sendonly`, labelled `applicationsharing-video`,
+  with its own SSRC and retransmission group, placed before the data line. The far end answers with
+  `callModalities: ["Audio", "ScreenViewer"]` and that line `recvonly`; its screen then shows the share large with
+  the people in a strip on its right, and its View adds **Focus on content**. Share becomes a red **Stop sharing**.
+  Stopping renegotiates `["Audio"]` with the sharing line gone from the offer and the bundle. Both ends' rosters list
+  the sharer's `screenSharerAttributes` from then on.
+- **Share in a group call** (the 1:1 call above escalated by an add): the participant properties went as above, but no
+  renegotiation followed and the viewer showed nothing before the call ended; the group path wasn't captured.
+- **Dial pad** (1:1 calls): a pad of 1–9, `*`, 0, `#` with letters, under a Number field that collects what was pressed.
+  Each key goes as a DTMF tone on the call's audio sender (the browser's `insertDTMF`, 200 ms tone, 100 ms gap, RFC
+  4733 `telephone-event` on the audio line); nothing goes to the signaling.
+- **Transfer** (1:1 calls) holds the call first, then asks "Transfer the call" (Type a name or number, the person's
+  suggestions; once picked: Transfer to an audio call or to their work voicemail, Include a call topic, Cancel, Transfer).
+  Cancel leaves the call held. Transfer posts `{"callTransfer": {"target": {"id"}, "transferor": {"details": {id,
+  endpointId, participantId, languageId}, "authorizationToken": null}, "links": {"transferAcceptance",
+  "transferCompletion"}, "transferContext": {"customContext": {"callDetails": {}}}}}` to the call leg's `transfer` link
+  (`202`), then leaves the call with `ConversationEndNoModalityConnected`. The transferred party gets a `callTransfer`
+  delivery at its own `transfer` callback (the target, `isConsultative: false`, the transferor's details and an
+  `authorizationToken` the call controller minted, and `transferAcceptance`/`transferCompletion` links on the call
+  controller); it posts `{"transferAcceptance": {}}` to the first and starts a new call to the target whose
+  `callInvitation.transferor` carries those details and that token. Its screen moves to the new call.
+- **Consult** (1:1 calls) holds the call and asks "Consult then transfer the call" (the person; Cancel, Start a call,
+  Open chat). Start a call places an ordinary call to them in their 1:1 chat while the first call stays held in a
+  floating card (its name, "Hold" and how long, Resume, Leave); the consult call's toolbar leads with an outlined
+  **Transfer**. In the run the target's voicemail took the consult call and it dropped before Transfer was sent; the
+  consultative transfer's request wasn't captured.
+- **Add participants** (People's "Invite someone or dial a number"): picking someone in a 1:1 call creates a group chat
+  of the three (`POST v1/threads`, no topic) and posts the conversation's `add` (`addParticipantAndModality`) with
+  `{"participants": {"from", "to": [{id, participantId}]}, "participantInvitationData": {}, "groupChat": {"threadId":
+  <the new chat>, "messageId": null}, "links": {"addParticipantSuccess", "addParticipantFailure"}}` (`202`). The call
+  becomes a group call at once: the toolbar trades Transfer, Consult, Dial pad and Hold for Raise, React and Controls,
+  Leave gains its options, People shows "Currently in this call (3)", Mute all, the account as Organizer, and the
+  invitee ringing (then "No response" with a call-again button, and "People added to the chat").
+- **Record** (More's Record and transcribe: Start recording, Start transcription) asks the spoken language and what to
+  record first, then adds Microsoft's recording bot (`28:bdd75849-…`) to the conversation (`addParticipant`, its
+  `participantInvitationData.botData` naming the call, the chat, the recorder's features and an
+  `initiatorUserToken`: the starting user's token for the recorder service, `scp access_recorder_service`) and posts
+  the start to the recorder service (`…callrecorder…/v2/oncommand/<id>`, `action: "start"`). Everyone sees a red dot by
+  the call's duration and "Recording and transcription — Started by …". Stop asks "Stop recording and transcription?"
+  and posts `action: "stop"` there. **The native client doesn't start a recording**: it would hand the user's token to
+  a bot, which AGENTS.md's credential rule forbids without the user's sign-off.
+- **Timer** (More's Timer, group calls and meetings): a bar over the stage (time, play/pause, reset, a progress bar;
+  the time edits with +1/+5/+10 min and Start or Cancel timer). Each change posts the conversation's
+  `updateMeetingStates` with `meetingStates.timer: {"sequenceNumber", "value": {"data": <JSON text: adhocTimer,
+  agendaTimer, rosTimer, each {state: InProgress | Paused | Cancelled, remainingDuration (ms), sections, …}>}}` and the
+  status callback; everyone's call shows the bar.
+- **Notes** (meetings): posts `updateMeetingStates` `collabLeaders.notes` then `collabResources.notes` naming a Loop page
+  in the organizer's OneDrive (Agenda, Meeting notes, Follow-up tasks); the page is a Loop (Fluid) component.
+- **Meeting info** (meetings): a pane with the title, Copy join info, "Microsoft Teams meeting", the short join link
+  (`https://teams.microsoft.com/meet/<meeting code>?p=<passcode>`), Meeting ID and Passcode, and Need help? | System
+  reference. The code and passcode are the meeting chat's `awareness_conversationLiveState:0` property's
+  `meetingData` (`meetingCode`, `passcode`), which the join also names.
+- **People's "…"** (meetings): Download attendance list (made by the client from the roster, nothing sent: a UTF-16
+  tab-separated file of Full Name, User Action, Timestamp) and Lock the meeting, which asks ("Lock the meeting?",
+  Cancel, Lock) and puts `{"from", "meetingSettings": {"lockMeeting": true}, "sequenceNumber"}` to the conversation's
+  `updateMeetingSettings` (`202`; Unlock the same with `false`); a notice says "This meeting is locked. No one else can
+  join." In an escalated group call Controls' Lock meeting failed in the client itself, nothing sent.
+- **Controls** (organizer of a group call or meeting): Lock meeting, Enable lobby, Allow all participants to: Present,
+  Chat, Unmute themselves, Turn on their cameras, View more options.
+- **More** in a 1:1 call: Record and transcribe, Video effects and settings, Audio settings, Language and speech,
+  Settings (Call health). In a group call or meeting: Record and transcribe, Meeting info (meetings), Timer, Video
+  effects and settings, Audio settings, Language and speech, Settings (Call health, Accessibility settings, Don't show
+  chat bubbles, Mute notifications), Report a concern (meetings), Help.
+- **Apps**: a pane (Search for apps, the chat's apps, Get more apps) read from the chat's
+  `…/chats/<chat>/apps/definitionsv2` and `apps/chatentitlements`.
+
 ## A call held past a dropped socket
 
 `dropped`: with the callee's page off the network (DevTools' emulation fails new requests; open sockets stay, so the run
