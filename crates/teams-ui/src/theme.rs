@@ -71,7 +71,8 @@ pub struct Palette {
     /// A mention of the account itself, and the mark beside a message that has one: Teams' orange.
     pub mention: u32,
     /// The window's frame (the title bar and the rail, one surface the panes float on): a gradient from the top left
-    /// to the bottom right.
+    /// to the bottom right. A light theme's is vivid; a dark theme's sits darker than its panes, its own hue only a
+    /// tint, so the sheet reads as raised and the frame doesn't outshine what is on it.
     pub frame_start: u32,
     pub frame_end: u32,
     /// Icons and text on the frame.
@@ -123,8 +124,8 @@ pub const DARK_PALETTE: Palette = Palette {
     selection: 0x0044_4791,
     rail: 0x0014_1414,
     mention: 0x00e9_835e,
-    frame_start: 0x002c_2080,
-    frame_end: 0x000c_4688,
+    frame_start: 0x001d_1b36,
+    frame_end: 0x0011_1a2a,
     on_frame: 0x00ff_ffff,
     accent: 0x005c_b2f7,
     depth: true,
@@ -192,8 +193,8 @@ pub const SOLARIZED_DARK_PALETTE: Palette = Palette {
     selection: 0x001b_5a6e,
     rail: 0x0000_212b,
     mention: 0x00cb_4b16,
-    frame_start: 0x0000_1820,
-    frame_end: 0x000b_4a5c,
+    frame_start: 0x0000_1a22,
+    frame_end: 0x0003_222c,
     on_frame: 0x00ee_e8d5,
     accent: 0x002a_a198,
     depth: true,
@@ -215,8 +216,8 @@ pub const NORD_PALETTE: Palette = Palette {
     selection: 0x005e_81ac,
     rail: 0x0027_2c36,
     mention: 0x00d0_8770,
-    frame_start: 0x0025_2b37,
-    frame_end: 0x003a_5a73,
+    frame_start: 0x0023_2833,
+    frame_end: 0x0021_2d3c,
     on_frame: 0x00ec_eff4,
     accent: 0x00b4_8ead,
     depth: true,
@@ -238,8 +239,8 @@ pub const DRACULA_PALETTE: Palette = Palette {
     selection: 0x005a_5e7a,
     rail: 0x0021_222c,
     mention: 0x00ff_b86c,
-    frame_start: 0x002a_1f52,
-    frame_end: 0x005b_2352,
+    frame_start: 0x001c_1d27,
+    frame_end: 0x0028_1d37,
     on_frame: 0x00f8_f8f2,
     accent: 0x00ff_79c6,
     depth: true,
