@@ -126,8 +126,13 @@ pub enum Command {
         message_id: String,
         client_message_id: String,
     },
-    /// Creates a chat of the account and `others` (MRIs): their 1:1 chat for one, a new group chat for two or more.
-    CreateChat { others: Vec<String> },
+    /// Creates a chat of the account and `others` (MRIs): their 1:1 chat for one, a new group chat for two or more,
+    /// named `topic` when it has one (absent from the rows of builds before names).
+    CreateChat {
+        others: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        topic: Option<String>,
+    },
 }
 
 /// What commands go out in the order they were asked for on: a later one of this run waits while an earlier one on
@@ -237,15 +242,20 @@ impl Command {
     }
 }
 
-/// The request a new chat of `me` and `others` is: their 1:1 chat for one other, a group chat for more; `None` when
-/// `others` don't make a chat (none, `me` among them, one given twice).
+/// The request a new chat of `me` and `others` is: their 1:1 chat for one other, a group chat for more, named `topic`
+/// when it is a group ([`CreateChat::named`]); `None` when `others` don't make a chat (none, `me` among them, one
+/// given twice).
 #[must_use]
-pub fn create_chat(me: &Mri, others: &[String]) -> Option<CreateChat> {
-    match others {
+pub fn create_chat(me: &Mri, others: &[String], topic: Option<&str>) -> Option<CreateChat> {
+    let request = match others {
         [] => None,
         [other] => CreateChat::one_to_one(me.clone(), Mri::new(other)),
         _ => CreateChat::group(me.clone(), others.iter().map(Mri::new)),
-    }
+    }?;
+    Some(match topic {
+        Some(topic) => request.named(topic),
+        None => request,
+    })
 }
 
 /// Why a [`ConversationSync`] couldn't sync.
@@ -945,7 +955,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 let request = ReadReceipt::new(conversation, message_id, client_message_id).at(at);
                 self.deliver(request).await
             }
-            Command::CreateChat { others } => match create_chat(me.mri(), &others) {
+            Command::CreateChat { others, topic } => match create_chat(me.mri(), &others, topic.as_deref()) {
                 Some(request) => self.deliver(request).await,
                 None => Tried::NotSent("the chat's members don't make a chat".to_owned()),
             },

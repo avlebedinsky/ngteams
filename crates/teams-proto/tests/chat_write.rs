@@ -793,6 +793,36 @@ async fn a_new_group_chat_is_sent_as_the_web_client_created_one() -> TestResult 
     Ok(())
 }
 
+#[tokio::test]
+async fn a_named_group_chat_carries_its_name_as_the_web_client_sent_it() -> TestResult {
+    // New message's "Add group name" (2026-11-06): the name trimmed, as `properties.topic` beside the thread type
+    let create = CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_C)])
+        .ok_or("a group")?
+        .named("  Lab trio ");
+    assert_eq!(create.topic(), Some("Lab trio"));
+
+    let sent = sent(ChatWrite::Create(create)).await?;
+
+    let members: Vec<Value> = [LAB_A, LAB_B, LAB_C]
+        .iter()
+        .map(|id| json!({"id": id, "role": "Admin"}))
+        .collect();
+    assert_eq!(
+        sent.body,
+        Some(json!({"members": members, "properties": {"threadType": "chat", "topic": "Lab trio"}}))
+    );
+    // a blank name names nothing, and a 1:1 chat takes none
+    let blank = CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_C)])
+        .ok_or("a group")?
+        .named("   ");
+    assert_eq!(blank.topic(), None);
+    let one = CreateChat::one_to_one(mri(LAB_A), mri(LAB_B))
+        .ok_or("one chat")?
+        .named("Pair");
+    assert_eq!(one.topic(), None);
+    Ok(())
+}
+
 // --- on the mock chat service ---
 
 /// The mock chat service and a's native transport.

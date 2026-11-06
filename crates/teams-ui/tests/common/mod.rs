@@ -783,6 +783,30 @@ impl Core for FakeCore {
         })
     }
 
+    /// The stored unnamed group chat of exactly `wanted`, the last listed of several (the fake keeps no roster version).
+    fn group_chat_with(&self, wanted: Vec<String>) -> Reply<Option<String>> {
+        self.answer("group_chat_with", || {
+            let mut wanted = wanted.clone();
+            wanted.sort();
+            wanted.dedup();
+            let members = locked(&self.members);
+            locked(&self.conversations)
+                .iter()
+                .filter(|conversation| conversation.kind == teams_store::ConversationKind::Group)
+                .filter(|conversation| conversation.topic.as_deref().unwrap_or_default().is_empty())
+                .filter(|conversation| {
+                    let mut have: Vec<String> = members
+                        .get(&conversation.id)
+                        .map(|members| members.iter().map(|member| member.mri.clone()).collect())
+                        .unwrap_or_default();
+                    have.sort();
+                    have == wanted
+                })
+                .map(|conversation| conversation.id.clone())
+                .next_back()
+        })
+    }
+
     fn unread_count(&self, conversation: String) -> Reply<u64> {
         self.answer("unread_count", || {
             locked(&self.unread).get(&conversation).copied().unwrap_or(0)

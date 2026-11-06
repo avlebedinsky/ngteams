@@ -156,6 +156,8 @@ impl Glyph {
     pub const PANEL_LEFT: Self = Self(include_bytes!("../assets/icons/panel-left.svg"));
     pub const PAUSE: Self = Self(include_bytes!("../assets/icons/pause.svg"));
     pub const PENCIL: Self = Self(include_bytes!("../assets/icons/pencil.svg"));
+    /// Teams' New message: a pen over a page.
+    pub const NEW_MESSAGE: Self = Self(include_bytes!("../assets/icons/square-pen.svg"));
     pub const PHONE: Self = Self(include_bytes!("../assets/icons/phone.svg"));
     pub const PHONE_FORWARDED: Self = Self(include_bytes!("../assets/icons/phone-forwarded.svg"));
     pub const PHONE_OFF: Self = Self(include_bytes!("../assets/icons/phone-off.svg"));

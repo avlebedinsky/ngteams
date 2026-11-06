@@ -136,7 +136,10 @@ What Teams v2's list shows above and in its "Chats" section, as the native clien
 - **Empty chats**: the conversation list's `properties.isemptyconversation` (`"True"`/`"False"`) is `True` for a chat
   nobody wrote in: the 1:1 chat a test call creates with the echo service (its call events don't count), and a
   meeting's chat nobody wrote in. Teams lists neither; CSA's `chats[].isEmptyConversation` agrees. Its `hidden` is no
-  guide: it was `true` on 1:1 chats Teams lists.
+  guide: it was `true` on 1:1 chats Teams lists. A group chat a call's Add participants made, holding only the call
+  and its member events, is empty too, and browser Teams didn't list the four such a–b–c chats either (2026-11-06);
+  its search box's suggestions and New message's To: found them all the same, and one opened from there was listed at
+  the list's foot from then on ([chat-service.md](chat-service.md#new-message-and-a-new-chat)).
 - **Meeting chats** (`threadType` `meeting`, ids `19:meeting_<base64>@thread.v2`) each belong to one meeting: two
   with the same topic are two meetings (a recurring series' occurrences, or two meetings named alike), and Teams lists
   each with its calendar avatar.

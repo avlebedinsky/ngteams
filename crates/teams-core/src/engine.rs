@@ -273,8 +273,9 @@ pub enum Action {
     },
     /// The account's read horizon moved to a message (a read receipt others may see).
     Read { conversation: String, message_id: String },
-    /// A chat of the account and `others`: their 1:1 chat for one, a new group chat for two or more.
-    CreateChat { others: Vec<Mri> },
+    /// A chat of the account and `others`: their 1:1 chat for one, a new group chat for two or more, named `topic`
+    /// when one is given (New message's "Add group name"; a 1:1 chat takes no name).
+    CreateChat { others: Vec<Mri>, topic: Option<String> },
 }
 
 /// What a message event changed.
@@ -843,6 +844,7 @@ enum Query {
         reply: Responder<Vec<Reaction>>,
     },
     Members(String, Responder<Vec<Member>>),
+    GroupChatWith(Vec<String>, Responder<Option<String>>),
     RecentReactions(usize, Responder<Vec<String>>),
     FrequentReactions(usize, Responder<Vec<String>>),
     UnreadCount(String, Responder<u64>),
@@ -1109,6 +1111,12 @@ impl EngineRequests {
     pub fn members(&self, conversation: impl Into<String>) -> Reply<Vec<Member>> {
         let conversation = conversation.into();
         self.query(|reply| Query::Members(conversation, reply))
+    }
+
+    /// The stored group chat of exactly `members` (the account among them), the newest roster of several
+    /// ([`Store::group_chat_with`]): what New message opens for those people.
+    pub fn group_chat_with(&self, members: Vec<String>) -> Reply<Option<String>> {
+        self.query(|reply| Query::GroupChatWith(members, reply))
     }
 
     /// How many stored messages of a conversation the account hasn't read ([`Store::unread_count`]).
@@ -2640,10 +2648,13 @@ where
                 conversation,
                 message_id,
             } => inbox::read_command(&self.store, conversation, message_id)?,
-            Action::CreateChat { others } => {
+            Action::CreateChat { others, topic } => {
                 let others: Vec<String> = others.iter().map(|other| other.as_str().to_owned()).collect();
-                create_chat(self.outbox.me().mri(), &others).ok_or(EngineError::NotAChat)?;
-                Command::CreateChat { others }
+                let request =
+                    create_chat(self.outbox.me().mri(), &others, topic.as_deref()).ok_or(EngineError::NotAChat)?;
+                // kept as the request names it: trimmed, and none for a 1:1 chat or a blank name
+                let topic = request.topic().map(str::to_owned);
+                Command::CreateChat { others, topic }
             }
         })
     }

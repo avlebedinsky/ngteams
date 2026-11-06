@@ -86,6 +86,12 @@ pub trait Core: Send + Sync + 'static {
     fn reactions(&self, conversation: String, id: String) -> Reply<Vec<Reaction>>;
     /// A chat's stored members.
     fn members(&self, conversation: String) -> Reply<Vec<Member>>;
+    /// The stored group chat of exactly `members` (the account among them), the newest of several: what New message
+    /// opens for those people. A fake core has none.
+    fn group_chat_with(&self, members: Vec<String>) -> Reply<Option<String>> {
+        let _ = members;
+        Reply::ready(Ok(None))
+    }
     /// The reaction keys the account set most recently, the newest first; at most `limit`.
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>>;
     /// The reaction keys the account uses most, the most used first; at most `limit`.
@@ -740,6 +746,10 @@ impl Core for EngineRequests {
 
     fn members(&self, conversation: String) -> Reply<Vec<Member>> {
         EngineRequests::members(self, conversation)
+    }
+
+    fn group_chat_with(&self, members: Vec<String>) -> Reply<Option<String>> {
+        EngineRequests::group_chat_with(self, members)
     }
 
     fn unread_count(&self, conversation: String) -> Reply<u64> {

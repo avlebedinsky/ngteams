@@ -29,7 +29,7 @@ use gpui_component::tooltip::Tooltip;
 use teams_store::Team;
 
 use crate::chat_list::{ChatList, ROW_HEIGHT};
-use crate::icons::{Glyph, icon_button, selected_by};
+use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::models::Models;
 use crate::teams_list::{CHANNEL_HEIGHT, ChannelMenuAnchor, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
 use crate::theme::{self, Palette};
@@ -128,6 +128,8 @@ enum Entry {
     },
     /// "See all your teams", under the teams.
     SeeAllTeams,
+    /// New message's row, at the top of the chats while it is open, as Teams adds it.
+    NewMessage,
     CustomSection {
         id: String,
         name: String,
@@ -148,6 +150,7 @@ impl Entry {
             Self::SeeMore => (6, SEE_MORE_SELECTOR),
             Self::SeeAllChannels { id, .. } => (7, id),
             Self::SeeAllTeams => (8, SEE_ALL_TEAMS),
+            Self::NewMessage => (10, "new-message"),
         }
     }
 
@@ -156,7 +159,7 @@ impl Entry {
     fn height(&self) -> f32 {
         match self {
             Self::Section(_) | Self::Note(_) | Self::CustomSection { .. } => SECTION_HEIGHT,
-            Self::Favorite { .. } | Self::Chat { .. } => ROW_HEIGHT,
+            Self::Favorite { .. } | Self::Chat { .. } | Self::NewMessage => ROW_HEIGHT,
             Self::SeeMore | Self::SeeAllChannels { .. } | Self::SeeAllTeams => SEE_MORE_HEIGHT,
             Self::Team { .. } => TEAM_HEIGHT,
             Self::Channel { .. } => CHANNEL_HEIGHT,
@@ -196,10 +199,50 @@ pub struct Sidebar {
     focus: FocusHandle,
     /// The row the keyboard is on, by what it is ([`Entry::key`]), kept across a change of the rows.
     cursor: Option<(u8, String)>,
+    /// New message is open: its row heads the chats, selected.
+    new_message: NewMessageRow,
     _observing: [Subscription; 2],
 }
 
+/// What the sidebar asks of the shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarEvent {
+    /// The header's New message.
+    NewMessage,
+}
+
+impl gpui::EventEmitter<SidebarEvent> for Sidebar {}
+
+/// The header's New message's tooltip, as Teams words it, and its row's name.
+pub const NEW_MESSAGE: &str = "New message";
+
+/// Whether New message's row heads the chats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewMessageRow {
+    Hidden,
+    Shown,
+}
+
 impl Sidebar {
+    /// Shows New message's row at the top of the chats (`open`), selected, or takes it away.
+    pub fn set_new_message(&mut self, open: bool, cx: &mut Context<Self>) {
+        let row = if open {
+            NewMessageRow::Shown
+        } else {
+            NewMessageRow::Hidden
+        };
+        if self.new_message != row {
+            self.new_message = row;
+            self.rebuild(cx);
+        }
+    }
+
+    /// Whether New message's row is shown.
+    #[must_use]
+    pub fn new_message_open(&self) -> bool {
+        self.new_message == NewMessageRow::Shown
+    }
+
     /// The sidebar over the chat list and the Teams list, both sections unfolded.
     pub fn new(
         list: Entity<ChatList>,
@@ -228,6 +271,7 @@ impl Sidebar {
             menu_focus: cx.focus_handle(),
             focus: cx.focus_handle().tab_stop(true),
             cursor: None,
+            new_message: NewMessageRow::Hidden,
             _observing: [chats, teamed],
         };
         sidebar.rebuild(cx);
@@ -371,6 +415,9 @@ impl Sidebar {
         entries.extend(self.custom_entries(cx));
         entries.push(Entry::Section(Section::Chats));
         if self.chats_open {
+            if self.new_message == NewMessageRow::Shown {
+                entries.push(Entry::NewMessage);
+            }
             let list = self.list.read(cx);
             entries.extend(list.shown_rows().into_iter().filter_map(|index| {
                 let id = list.rows().get(index)?.id.clone();
@@ -529,6 +576,7 @@ impl Sidebar {
             Entry::SeeMore => self.see_more_row(palette, cx),
             Entry::SeeAllChannels { index, id } => Self::see_all_channels_row(index, id, palette, cx),
             Entry::SeeAllTeams => Self::see_all_teams_row(palette, cx),
+            Entry::NewMessage => new_message_row(palette),
             Entry::Note(text) => div()
                 .debug_selector(|| "teams-note".to_owned())
                 .px_3()
@@ -978,7 +1026,7 @@ impl Sidebar {
             Entry::Section(section) => self.toggle(section, cx),
             Entry::Favorite { id, .. } | Entry::Chat { id, .. } => self.list.update(cx, |list, cx| list.open(id, cx)),
             Entry::SeeMore => self.list.update(cx, ChatList::see_more),
-            Entry::Note(_) => {}
+            Entry::Note(_) | Entry::NewMessage => {}
             Entry::Team { id, .. } => self.toggle_team(&id, cx),
             Entry::Channel { id, .. } => self.teams.update(cx, |teams, cx| teams.open(&id, cx)),
             Entry::SeeAllChannels { id, .. } => self.teams.update(cx, |teams, cx| teams.see_all_channels(&id, cx)),
@@ -1066,6 +1114,50 @@ impl Sidebar {
     }
 }
 
+/// New message's row at the top of the chats, as Teams adds it while New message is open: its pen and name, selected.
+fn new_message_row(palette: Palette) -> AnyElement {
+    div()
+        .debug_selector(|| "chat-row-new-message".to_owned())
+        .relative()
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded_md()
+        .bg(rgb(palette.selected))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(10.0))
+                .bottom(px(10.0))
+                .w(px(3.0))
+                .rounded_r_sm()
+                .bg(theme::gradient(palette.brand, palette.accent, 180.0)),
+        )
+        .child(
+            div()
+                .size(px(crate::chat_list::AVATAR))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(palette.foreground))
+                .child(Glyph::NEW_MESSAGE.icon().size(px(20.0))),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(NEW_MESSAGE),
+        )
+        .into_any_element()
+}
+
 /// The header's state in the read-only mode: a quiet "Read-only", its tooltip saying what that means.
 fn read_only_state(palette: Palette) -> AnyElement {
     div()
@@ -1086,17 +1178,32 @@ impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
         let connection = self.connection(palette, cx);
+        // Teams' New message on the header's right; the read-only mode writes nothing, so it offers none
+        let new_message = (!self.list.read(cx).read_only()).then(|| {
+            selected_by(
+                "new-message",
+                icon_button_with_key(
+                    "new-message",
+                    Glyph::NEW_MESSAGE,
+                    NEW_MESSAGE,
+                    &crate::shell::NewMessage,
+                )
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::NewMessage))),
+            )
+        });
         let header = div()
             .h(px(48.0))
             .flex_none()
             .px_3()
             .flex()
             .items_center()
-            .justify_between()
+            .gap_2()
             .border_b_1()
             .border_color(rgb(palette.border))
             .child(div().text_lg().font_weight(gpui::FontWeight::BOLD).child("Chat"))
-            .children(connection);
+            .child(div().flex_1())
+            .children(connection)
+            .children(new_message);
         let rows = list(
             self.state.clone(),
             cx.processor(move |this: &mut Self, at: usize, window, cx| this.render_entry(at, window, palette, cx)),

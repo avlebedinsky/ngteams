@@ -303,6 +303,39 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The unnamed group chat whose members are exactly `members` (by MRI, in any order, each once), the one whose roster
+    /// came to be last (its `rosterVersion`: a chat nobody joined or left since is the newest made) when there are
+    /// several: the chat Teams' New message opens for those people, passing over a named one however new. None when no
+    /// stored unnamed group chat has them all and no one else.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn group_chat_with(&self, members: &[String]) -> Result<Option<String>, StoreError> {
+        let mut wanted: Vec<&str> = members.iter().map(String::as_str).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut statement = self.conn.prepare_cached(
+            "SELECT c.id, group_concat(m.mri, char(10)) FROM conversations c JOIN members m ON m.conversation_id = c.id
+             WHERE c.kind = 'group' AND COALESCE(c.topic, '') = '' GROUP BY c.id
+             ORDER BY c.roster_version IS NULL, c.roster_version DESC, c.id",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, joined) = row?;
+            let mut have: Vec<&str> = joined.split('\n').collect();
+            have.sort_unstable();
+            have.dedup();
+            if have == wanted {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
     /// Keeps whether the chat service calls `conversation` empty (`None`: it said nothing readable); whether that
     /// changed. Nothing for a conversation the store doesn't hold.
     ///

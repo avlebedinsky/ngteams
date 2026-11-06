@@ -1072,6 +1072,7 @@ async fn a_group_chat_made_natively_takes_its_first_message_under_the_live_read(
     let created = a
         .write(Action::CreateChat {
             others: vec![Mri::new(LAB_B), Mri::new(LAB_C)],
+            topic: None,
         })
         .await;
     assert_eq!(
@@ -1104,12 +1105,19 @@ async fn a_new_group_chat_is_created_and_its_first_message_brings_it_to_b_and_c(
     for native in [&mut a, &mut b, &mut c] {
         native.ready().await;
     }
-    let refused = a.handle.write(Action::CreateChat { others: Vec::new() }).await;
+    let refused = a
+        .handle
+        .write(Action::CreateChat {
+            others: Vec::new(),
+            topic: None,
+        })
+        .await;
     assert!(matches!(refused, Err(EngineError::NotAChat)), "{refused:?}");
     let refused = a
         .handle
         .write(Action::CreateChat {
             others: vec![Mri::new(LAB_A)],
+            topic: None,
         })
         .await;
     assert!(matches!(refused, Err(EngineError::NotAChat)), "{refused:?}");
@@ -1117,6 +1125,7 @@ async fn a_new_group_chat_is_created_and_its_first_message_brings_it_to_b_and_c(
     let created = a
         .write(Action::CreateChat {
             others: vec![Mri::new(LAB_B), Mri::new(LAB_C)],
+            topic: None,
         })
         .await;
     assert_eq!(
@@ -1149,6 +1158,32 @@ async fn a_new_group_chat_is_created_and_its_first_message_brings_it_to_b_and_c(
     for native in [a, b, c] {
         native.shutdown();
     }
+}
+
+#[tokio::test]
+async fn a_named_group_chat_is_created_with_its_name_and_the_store_lists_it_so() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+
+    let created = a
+        .write(Action::CreateChat {
+            others: vec![Mri::new(LAB_B), Mri::new(LAB_C)],
+            topic: Some(" Lab trio ".to_owned()),
+        })
+        .await;
+    assert_eq!(created.state, OutboxState::Sent, "{created:?}");
+    // the row keeps the name as it went out: trimmed
+    assert!(
+        created.payload.contains("\"topic\":\"Lab trio\""),
+        "{}",
+        created.payload
+    );
+    let chat = id_of(&created);
+    let listed = a.handle.conversations(100).await.unwrap();
+    let stored = listed.iter().find(|conversation| conversation.id == chat);
+    assert_eq!(stored.and_then(|chat| chat.topic.as_deref()), Some("Lab trio"));
+    a.shutdown();
 }
 
 #[tokio::test]
@@ -1708,6 +1743,7 @@ async fn a_delivery_whose_conversation_cant_be_read_is_caught_up_from_the_tick()
     let chat = id_of(
         &a.write(Action::CreateChat {
             others: vec![Mri::new(LAB_B), Mri::new(LAB_C)],
+            topic: None,
         })
         .await,
     );
@@ -2867,7 +2903,10 @@ async fn incomplete_original_identity_refuses_edits_and_read_receipts_before_an_
         }
         let error = account
             .handle
-            .write(Action::CreateChat { others: vec![] })
+            .write(Action::CreateChat {
+                others: vec![],
+                topic: None,
+            })
             .await
             .unwrap_err();
         assert!(matches!(error, EngineError::NotAChat));

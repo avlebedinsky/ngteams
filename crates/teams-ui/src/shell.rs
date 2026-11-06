@@ -28,6 +28,9 @@
 //! own lines, `status-menu opened`/`closed`/`chosen` with the status's key, and `header shown`: the chat's
 //! header's presence and whether its name and avatar came from people's names and a picture, never the name).
 //!
+//! New message (Ctrl+N, the list header's pen; [`crate::new_chat`]) takes the conversation pane with its row at the
+//! top of the chats (`Main::NewChat`); a chat it names opens in its place.
+//!
 //! Calls (M3 Task 17), in a build that shows them (in one that doesn't, the call keys do nothing here): the chat's
 //! header has Call (or Join, when an invitation named a running call in that group chat) while the calling endpoint is
 //! registered and no call is up, ringing or being set up; the [`CallBar`] above the panes shows the incoming call's
@@ -96,6 +99,7 @@ use crate::view::status_text;
 
 mod channel_management;
 mod meeting_tabs;
+mod new_chat;
 mod title_bar;
 mod workflows;
 
@@ -104,6 +108,13 @@ pub use meeting_tabs::ChatTab;
 pub use title_bar::{FocusSearch, GoBack, GoForward, History, RIGHT_WIDTH, SEARCH_MAX, TITLE_HEIGHT, ToggleListPane};
 
 actions!(teams_ui, [ToggleSwitcher, NextAccount, PreviousAccount, GoToChat]);
+actions!(
+    teams_ui,
+    [
+        /// Opens New message (Teams' Ctrl+N).
+        NewMessage
+    ]
+);
 actions!(teams_ui, [FontLarger, FontSmaller, FontReset]);
 actions!(teams_ui, [ShowChats, ShowCalendar]);
 actions!(
@@ -182,6 +193,8 @@ pub fn init(cx: &mut App) {
     global_search::init(cx);
     cx.bind_keys([
         KeyBinding::new("ctrl-k", ToggleSwitcher, None),
+        // Teams' desktop key for New message
+        KeyBinding::new("ctrl-n", NewMessage, None),
         KeyBinding::new("ctrl-e", FocusSearch, None),
         KeyBinding::new("ctrl-shift-f", FocusSearch, None),
         KeyBinding::new("ctrl-alt-g", GoToChat, None),
@@ -237,6 +250,8 @@ pub enum Main {
     CreateTeamMore,
     /// The Workflows app, across both panes.
     Workflows,
+    /// New message, in the conversation pane.
+    NewChat,
 }
 
 /// Where the account menu opens: over the rail's account, or under the title bar's avatar.
@@ -330,7 +345,9 @@ pub struct Shell {
     chat_events: Option<Subscription>,
     /// What the channel view tells ([`Shell::follow_channel`]), once there is one.
     channel_events: Option<Subscription>,
-    _subscriptions: [Subscription; 11],
+    /// New message, while it is open.
+    new_chat: new_chat::Open,
+    _subscriptions: [Subscription; 12],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -362,7 +379,7 @@ impl Shell {
         let (list, previews) = Self::chat_list(&chat_parts, selected.clone(), cx);
         let opened = Self::opened(&list, window, cx);
         let (teams, [channel_opened, kept_channel]) = Self::teams_list(&core, &models, &trace, window, cx);
-        let sidebar = cx.new(|cx| Sidebar::new(list.clone(), teams.clone(), models.clone(), Arc::clone(&trace), cx));
+        let (sidebar, new_message_asked) = Self::make_sidebar(&list, &teams, &models, &trace, window, cx);
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
@@ -415,6 +432,7 @@ impl Shell {
             accounts: None,
             chat_events,
             channel_events: None,
+            new_chat: None,
             _subscriptions: [
                 opened,
                 channel_opened,
@@ -427,6 +445,7 @@ impl Shell {
                 test_call_asked,
                 calendar_events,
                 searched,
+                new_message_asked,
             ],
         }
     }
@@ -2234,6 +2253,7 @@ impl Shell {
         match std::mem::replace(&mut self.before_settings, Main::Nothing) {
             Main::Chat(id) => self.open_chat(id, window, cx),
             Main::Channel(id) => self.open_channel_id(id, window, cx),
+            Main::NewChat => self.open_new_chat(window, cx),
             Main::Nothing
             | Main::Settings
             | Main::Calendar
@@ -2266,6 +2286,7 @@ impl Shell {
     fn shell_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         shell
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
+            .on_action(cx.listener(|this, _: &NewMessage, window, cx| this.open_new_chat(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.focus_search(SearchMode::Search, window, cx);
             }))
@@ -2788,6 +2809,7 @@ impl Shell {
                 let body = crate::motion::rise(body, SharedString::from(format!("channel-in-{id}")), 10.0, cx);
                 pane.child(header).child(body).into_any_element()
             }
+            Main::NewChat => self.new_chat_pane(pane, palette, cx),
             Main::TeamsPage => match self.teams_page() {
                 Some(shown) => pane.child(shown.clone()).into_any_element(),
                 None => pane.child(no_chat(palette, cx)).into_any_element(),
@@ -2951,6 +2973,7 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        self.sync_new_message_row(cx);
         self.history.note(&self.main);
         let suggestions = self.search_suggestions(palette, window, cx);
         let overlay = |view: AnyView| {

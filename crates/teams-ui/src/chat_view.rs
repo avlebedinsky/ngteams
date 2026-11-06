@@ -1371,6 +1371,7 @@ impl ChatView {
         });
         let compose_events = cx.subscribe_in(compose, window, |this: &mut Self, _, event, window, cx| match event {
             ComposeEvent::EditLast => this.edit_last(window, cx),
+            ComposeEvent::Sent | ComposeEvent::Start(_) => {}
         });
         let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
             this.active = Activation::of(window);

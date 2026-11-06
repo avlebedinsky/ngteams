@@ -15,7 +15,10 @@
 //!   catch-up.
 //! - **Which chats**: 1:1, group and meeting chats, but not one the chat service calls empty while the store holds no
 //!   text of it and none unread (`isemptyconversation`: a chat nobody wrote in yet, as a test call's chat with the
-//!   echo service or a meeting nobody wrote in; Teams lists none of them). A team's channels belong to the Teams list
+//!   echo service, a meeting nobody wrote in, or a group chat made by a call's Add participants that holds only the
+//!   call; Teams lists none of them). Teams finds them all the same, by search, by the switcher and by New message's
+//!   To: ([`ChatList::findable_rows`]), and one opened is listed from then on, after the other chats, as browser Teams
+//!   lists it (2026-11-06: a call-only a–b–c chat opened from To: stayed at the list's foot). A team's channels belong to the Teams list
 //!   (Task 16), but for the favourite ones (below), and the account's own streams (`48:notifications`, …) aren't
 //!   chats: neither is listed under "Chats".
 //! - **Favorites** ([`Core::chat_listing`]: the `Favorites` folder of CSA's teams read, in its order): each one the
@@ -542,16 +545,32 @@ async fn channel_rows(
     channels
 }
 
-/// The list's two sections from the rows of the stored conversations, the latest activity first (see the module
-/// docs): the favourites in their order (`notes` the account's own notes' row, when it is one of them), and the other
-/// chats, without the ones the service calls empty that have no text and nothing unread.
+/// The list's sections as [`arrange`] makes them.
+#[derive(Clone, Debug, Default)]
+pub struct Arranged {
+    /// The favourites, in their order.
+    pub favorites: Vec<ChatRow>,
+    /// The other chats, the latest activity first, then the empty ones opened this run, in the order they were opened.
+    pub rows: Vec<ChatRow>,
+    /// The empty chats the list leaves out: found by the search, the switcher and New message all the same.
+    pub hidden: Vec<ChatRow>,
+}
+
+/// The list's sections from the rows of the stored conversations, the latest activity first (see the module docs):
+/// the favourites in their order (`notes` the account's own notes' row, when it is one of them), and the other chats,
+/// without the ones the service calls empty that have no text and nothing unread, unless one was opened this run
+/// (`opened`, in the order they were): as Teams lists a chat it hides once it is opened, after the others.
 #[must_use]
-pub fn arrange(rows: Vec<ChatRow>, listing: &ChatListing, mut notes: Option<ChatRow>) -> (Vec<ChatRow>, Vec<ChatRow>) {
+pub fn arrange(rows: Vec<ChatRow>, listing: &ChatListing, mut notes: Option<ChatRow>, opened: &[String]) -> Arranged {
     let empty: HashSet<&str> = listing.empty.iter().map(String::as_str).collect();
-    let mut rows: Vec<ChatRow> = rows
+    let (mut rows, mut hidden): (Vec<ChatRow>, Vec<ChatRow>) = rows
         .into_iter()
-        .filter(|row| !(empty.contains(row.id.as_str()) && row.preview.is_empty() && row.unread == 0))
-        .collect();
+        .partition(|row| !(empty.contains(row.id.as_str()) && row.preview.is_empty() && row.unread == 0));
+    for id in opened {
+        if let Some(at) = hidden.iter().position(|row| &row.id == id) {
+            rows.push(hidden.remove(at));
+        }
+    }
     let mut favorites = Vec::new();
     for id in listing.favorites.iter().flatten() {
         if id == NOTES {
@@ -560,7 +579,11 @@ pub fn arrange(rows: Vec<ChatRow>, listing: &ChatListing, mut notes: Option<Chat
             favorites.push(rows.remove(at));
         }
     }
-    (favorites, rows)
+    Arranged {
+        favorites,
+        rows,
+        hidden,
+    }
 }
 
 /// A chat's row, from the store. A query that fails leaves its part empty: the row is still shown.
@@ -640,6 +663,10 @@ pub struct ChatList {
     favorites: Vec<ChatRow>,
     /// The "Chats" section's rows, shown or not.
     rows: Vec<ChatRow>,
+    /// The empty chats the section leaves out ([`Arranged::hidden`]).
+    hidden: Vec<ChatRow>,
+    /// The empty chats opened this run, in the order they were: listed after the others ([`arrange`]).
+    opened_empty: Vec<String>,
     /// Which of them are shown.
     window: ChatWindow,
     cache: HashMap<String, Cached>,
@@ -691,6 +718,8 @@ impl ChatList {
             trace,
             favorites: Vec::new(),
             rows: Vec::new(),
+            hidden: Vec::new(),
+            opened_empty: Vec::new(),
             window: ChatWindow::default(),
             cache: HashMap::new(),
             generation: 0,
@@ -775,10 +804,16 @@ impl ChatList {
         self.favorites.iter().chain(&self.rows)
     }
 
-    /// A row, shown or kept below See more, by its chat's id.
+    /// Every chat the account can find, listed or not: [`Self::all_rows`], then the empty chats the list leaves out,
+    /// which Teams' search, its switcher and New message's To: find all the same.
+    pub fn findable_rows(&self) -> impl Iterator<Item = &ChatRow> {
+        self.all_rows().chain(&self.hidden)
+    }
+
+    /// A row, shown, kept below See more or left out as empty, by its chat's id.
     #[must_use]
     pub fn row(&self, id: &str) -> Option<&ChatRow> {
-        self.all_rows().find(|row| row.id == id)
+        self.findable_rows().find(|row| row.id == id)
     }
 
     #[must_use]
@@ -798,8 +833,18 @@ impl ChatList {
         self.loading.is_some()
     }
 
-    /// Highlights a chat (the one the shell shows), telling nobody.
+    /// Highlights a chat (the one the shell shows), telling nobody. An empty chat the list left out is listed from now
+    /// on, after the others, as Teams lists one once it is opened.
     pub fn select(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        if let Some(at) = id
+            .as_deref()
+            .and_then(|id| self.hidden.iter().position(|row| row.id == id))
+        {
+            let row = self.hidden.remove(at);
+            self.opened_empty.push(row.id.clone());
+            self.rows.push(row);
+            self.trace_rows();
+        }
         if self.selected != id {
             self.selected = id;
             self.window.settle(&self.rows, self.selected.as_deref());
@@ -900,8 +945,8 @@ impl ChatList {
             }
             let listed: HashSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
             self.cache.retain(|id, _| listed.contains(id.as_str()));
-            let (favorites, rows) = arrange(rows, &listing, notes);
-            self.show(favorites, rows);
+            let arranged = arrange(rows, &listing, notes, &self.opened());
+            self.show(arranged);
             self.trace_rows();
             self.watch_shown();
         }
@@ -911,18 +956,30 @@ impl ChatList {
         }
     }
 
+    /// The empty chats opened this run, the selected one among them: the ones [`arrange`] lists after the others.
+    fn opened(&mut self) -> Vec<String> {
+        if let Some(selected) = &self.selected
+            && !self.opened_empty.contains(selected)
+            && !self.all_rows().any(|row| &row.id == selected)
+        {
+            self.opened_empty.push(selected.clone());
+        }
+        self.opened_empty.clone()
+    }
+
     /// The rows a load has, in their sections.
-    fn show(&mut self, favorites: Vec<ChatRow>, rows: Vec<ChatRow>) {
-        self.favorites = favorites;
-        self.rows = rows;
+    fn show(&mut self, arranged: Arranged) {
+        self.favorites = arranged.favorites;
+        self.rows = arranged.rows;
+        self.hidden = arranged.hidden;
         self.window.settle(&self.rows, self.selected.as_deref());
     }
 
     /// The first rows of a first load, shown before the rest are built; a load over rows already shown keeps them.
     fn show_first(&mut self, rows: &[ChatRow], listing: &ChatListing, cx: &mut Context<Self>) {
         if self.all_rows().next().is_none() {
-            let (favorites, rows) = arrange(rows.to_vec(), listing, None);
-            self.show(favorites, rows);
+            let opened = self.opened();
+            self.show(arrange(rows.to_vec(), listing, None, &opened));
             cx.notify();
         }
     }
@@ -1057,6 +1114,23 @@ impl ChatList {
     }
 }
 
+/// A group chat's face `size` across, where a picker lists it (New message's To:): its two members split as the list
+/// draws them, else the initials of its name.
+#[must_use]
+pub fn group_face(row: &ChatRow, palette: Palette, size: f32) -> AnyElement {
+    match row.faces.as_slice() {
+        [left, right, ..] => split_avatar(left, right, theme::palette_is_dark(palette), size).into_any_element(),
+        _ => div()
+            .flex_none()
+            .child(people::avatar(
+                row.named.then_some(&row.name),
+                row.picture.as_ref(),
+                Size::Size(px(size)),
+            ))
+            .into_any_element(),
+    }
+}
+
 /// A row's avatar, [`AVATAR`] across: a meeting's calendar, a group's two members split, else the picture, else the
 /// initials of its name (not of an MRI), else a blank one.
 fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
@@ -1082,7 +1156,7 @@ fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
             "avatar-bot",
         ),
         (RowKind::Group, [left, right, ..]) => {
-            split_avatar(left, right, theme::palette_is_dark(palette)).into_any_element()
+            split_avatar(left, right, theme::palette_is_dark(palette), AVATAR).into_any_element()
         }
         _ => {
             let name = row.named.then(|| match row.kind {
@@ -1153,25 +1227,25 @@ fn team_avatar(team: &str, palette: Palette) -> AnyElement {
 const SPLIT_GAP: f32 = 1.0;
 
 /// A group chat's avatar as Teams splits it: two members, half each, in a `dark` theme's colours or a light one's.
-fn split_avatar(left: &HalfFace, right: &HalfFace, dark: bool) -> Div {
+fn split_avatar(left: &HalfFace, right: &HalfFace, dark: bool, size: f32) -> Div {
     div()
         .debug_selector(|| "avatar-split".to_owned())
-        .size(px(AVATAR))
+        .size(px(size))
         .flex_none()
         .flex()
         .gap(px(SPLIT_GAP))
-        .child(half(left, true, dark))
-        .child(half(right, false, dark))
+        .child(half(left, true, dark, size))
+        .child(half(right, false, dark, size))
 }
 
 /// One half of a split avatar: the member's picture, else the initial of their name on a colour of its own.
-fn half(face: &HalfFace, left: bool, dark: bool) -> AnyElement {
-    let width = px((AVATAR - SPLIT_GAP) / 2.0);
-    let radius = px(AVATAR / 2.0);
+fn half(face: &HalfFace, left: bool, dark: bool, size: f32) -> AnyElement {
+    let width = px((size - SPLIT_GAP) / 2.0);
+    let radius = px(size / 2.0);
     if let Some(picture) = &face.picture {
         let image = img(Arc::clone(picture.image()))
             .w(width)
-            .h(px(AVATAR))
+            .h(px(size))
             .object_fit(ObjectFit::Cover);
         let image = if left {
             image.rounded_tl(radius).rounded_bl(radius)
@@ -1189,13 +1263,13 @@ fn half(face: &HalfFace, left: bool, dark: bool) -> AnyElement {
     let (background, foreground) = initials_colour(face.name.as_deref().unwrap_or(""), dark);
     let half = div()
         .w(width)
-        .h(px(AVATAR))
+        .h(px(size))
         .flex()
         .items_center()
         .justify_center()
         .bg(rgb(background))
         .text_color(rgb(foreground))
-        .text_size(px(AVATAR * 0.4))
+        .text_size(px(size * 0.4))
         .child(initial);
     if left {
         half.rounded_tl(radius).rounded_bl(radius).into_any_element()

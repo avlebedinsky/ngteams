@@ -180,11 +180,12 @@ pub fn marked_terms(text: &str, query: &str) -> Vec<Range<usize>> {
     matched
 }
 
-/// The chats the list shows, `(id, name)`: what hits may open (a favourite channel isn't a chat).
+/// The chats the account can find, listed or left out as empty, `(id, name)`: what hits may open (a favourite channel
+/// isn't a chat).
 #[must_use]
 pub fn listed_chats(list: &Entity<ChatList>, cx: &App) -> Vec<(String, SharedString)> {
     list.read(cx)
-        .all_rows()
+        .findable_rows()
         .filter(|row| row.kind != RowKind::Channel)
         .map(|row| (row.id.clone(), row.name.clone()))
         .collect()

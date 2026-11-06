@@ -125,6 +125,7 @@ fn kind(main: &Main) -> &'static str {
         Main::JoinTeam => "join-team",
         Main::CreateTeamMore => "create-team-more",
         Main::Workflows => "workflows",
+        Main::NewChat => "new-chat",
     }
 }
 
@@ -167,6 +168,7 @@ impl Shell {
             Main::JoinTeam => self.open_join_team(window, cx),
             Main::CreateTeamMore => self.open_create_team_more(window, cx),
             Main::Workflows => self.resume_workflows(window, cx),
+            Main::NewChat => self.open_new_chat(window, cx),
             Main::Nothing => {}
         }
         // what was shown is the history's place now, whatever the opening made of it

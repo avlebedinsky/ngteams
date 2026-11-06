@@ -446,6 +446,68 @@ fn members_are_replaced_only_by_a_newer_roster() {
 }
 
 #[test]
+fn the_group_chat_of_exactly_some_people_is_the_one_whose_roster_came_last() {
+    const OLDER: &str = "19:synthetic-abc-older@thread.v2";
+    const LARGER: &str = "19:synthetic-abcd@thread.v2";
+    const NAMED: &str = "19:synthetic-abc-named@thread.v2";
+    const FOURTH: &str = "8:orgid:00000000-0000-4000-8000-00000000000d";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    let three = [Member::new(ME, None), Member::new(PEER, None), Member::new(THIRD, None)];
+    let four = [
+        Member::new(ME, None),
+        Member::new(PEER, None),
+        Member::new(THIRD, None),
+        Member::new(FOURTH, None),
+    ];
+    for (id, roster, members) in [(OLDER, 5, &three[..]), (GROUP, 9, &three[..]), (LARGER, 12, &four[..])] {
+        store
+            .upsert_conversation(&conversation(id, ConversationKind::Group, 1))
+            .expect("chat");
+        store.replace_members(id, roster, members).expect("roster");
+    }
+    // a 1:1 chat is never a group chat of its two
+    store
+        .upsert_conversation(&conversation(CHAT, ConversationKind::OneToOne, 1))
+        .expect("chat");
+    store
+        .replace_members(CHAT, 20, &[Member::new(ME, None), Member::new(PEER, None)])
+        .expect("roster");
+    let wanted = |people: &[&str]| -> Vec<String> { people.iter().map(|&mri| mri.to_owned()).collect() };
+
+    // in any order: the newest roster of the two of exactly a, b and c
+    assert_eq!(
+        store.group_chat_with(&wanted(&[THIRD, ME, PEER])).expect("read"),
+        Some(GROUP.to_owned())
+    );
+    assert_eq!(
+        store
+            .group_chat_with(&wanted(&[ME, PEER, THIRD, FOURTH]))
+            .expect("read"),
+        Some(LARGER.to_owned())
+    );
+    assert_eq!(store.group_chat_with(&wanted(&[ME, PEER])).expect("read"), None);
+    assert_eq!(store.group_chat_with(&[]).expect("read"), None);
+    // a named chat of the three, however new, is passed over (Teams kept to the unnamed one)
+    let mut named = conversation(NAMED, ConversationKind::Group, 1);
+    named.topic = Some("Lab trio".to_owned());
+    store.upsert_conversation(&named).expect("chat");
+    store.replace_members(NAMED, 30, &three).expect("roster");
+    assert_eq!(
+        store.group_chat_with(&wanted(&[THIRD, ME, PEER])).expect("read"),
+        Some(GROUP.to_owned())
+    );
+    // someone left the newer one: the older is the chat of the three again
+    store
+        .replace_members(GROUP, 10, &[Member::new(ME, None), Member::new(PEER, None)])
+        .expect("someone left");
+    assert_eq!(
+        store.group_chat_with(&wanted(&[ME, PEER, THIRD])).expect("read"),
+        Some(OLDER.to_owned())
+    );
+}
+
+#[test]
 fn members_of_an_unknown_conversation_are_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = open(&dir).expect("open the store");

@@ -429,10 +429,36 @@ fn other_writes() -> Vec<(Command, OutboxKind)> {
         (
             Command::CreateChat {
                 others: vec![PEER.to_owned()],
+                topic: None,
+            },
+            OutboxKind::CreateChat,
+        ),
+        (
+            Command::CreateChat {
+                others: vec![PEER.to_owned(), OUTSIDER.to_owned()],
+                topic: Some("Lab trio".to_owned()),
             },
             OutboxKind::CreateChat,
         ),
     ]
+}
+
+#[test]
+fn a_new_chat_row_of_a_build_before_names_reads_as_unnamed() {
+    let row = serde_json::json!({"command": "create_chat", "others": [PEER]});
+    assert_eq!(
+        serde_json::from_value::<Command>(row).unwrap(),
+        Command::CreateChat {
+            others: vec![PEER.to_owned()],
+            topic: None
+        }
+    );
+    // an unnamed one is stored as before
+    let unnamed = Command::CreateChat {
+        others: vec![PEER.to_owned()],
+        topic: None,
+    };
+    assert!(!serde_json::to_string(&unnamed).unwrap().contains("topic"));
 }
 
 #[test]
@@ -456,13 +482,18 @@ fn every_chat_write_becomes_a_row_of_its_kind() {
 #[test]
 fn a_new_chat_is_one_to_one_for_one_other_and_a_group_for_more() {
     let me = Mri::new(ME);
-    let one = create_chat(&me, &[PEER.to_owned()]).unwrap();
+    let one = create_chat(&me, &[PEER.to_owned()], None).unwrap();
     assert_eq!(one.members(), [Mri::new(ME), Mri::new(PEER)]);
-    let group = create_chat(&me, &[PEER.to_owned(), OUTSIDER.to_owned()]).unwrap();
+    let group = create_chat(&me, &[PEER.to_owned(), OUTSIDER.to_owned()], None).unwrap();
     assert_eq!(group.members().len(), 3);
     for others in [vec![], vec![ME.to_owned()], vec![PEER.to_owned(), PEER.to_owned()]] {
-        assert!(create_chat(&me, &others).is_none(), "{others:?}");
+        assert!(create_chat(&me, &others, None).is_none(), "{others:?}");
     }
+    // a group takes its name; a 1:1 chat none
+    let named = create_chat(&me, &[PEER.to_owned(), OUTSIDER.to_owned()], Some("Lab trio")).unwrap();
+    assert_eq!(named.topic(), Some("Lab trio"));
+    let one = create_chat(&me, &[PEER.to_owned()], Some("Pair")).unwrap();
+    assert_eq!(one.topic(), None);
 }
 
 #[tokio::test]

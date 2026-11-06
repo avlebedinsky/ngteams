@@ -667,10 +667,10 @@ const CREATES_A_CHAT: [&str; 5] = [
     "CreateChat {",
 ];
 
-/// Only an explicit people-search activation offers a new chat, through the engine's persistent outbox.
-/// Other views cannot create one incidentally.
+/// Only an explicit people-search activation, or New message's first message, offers a new chat, through the engine's
+/// persistent outbox. Other views cannot create one incidentally.
 #[test]
-fn only_people_search_offers_creating_a_chat_through_the_engine() {
+fn only_people_search_and_new_message_offer_creating_a_chat_through_the_engine() {
     let mut read = 0;
     for package in APP_CRATES {
         for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
@@ -678,6 +678,13 @@ fn only_people_search_offers_creating_a_chat_through_the_engine() {
             if path.ends_with("teams-ui/src/global_search.rs") {
                 assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
                 assert!(text.contains("if self.core.read_only()"));
+                continue;
+            }
+            if path.ends_with("teams-ui/src/new_chat.rs") {
+                // made only from the box's first message, never in the read-only mode
+                assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
+                assert!(text.contains("self.core.read_only()"));
+                assert!(text.contains("ComposeEvent::Start"));
                 continue;
             }
             for builds in CREATES_A_CHAT {

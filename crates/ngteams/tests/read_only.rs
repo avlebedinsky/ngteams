@@ -129,6 +129,7 @@ fn every_write(mine: &str, theirs: &str) -> Vec<Action> {
         },
         Action::CreateChat {
             others: vec![Mri::new(OUTSIDER)],
+            topic: None,
         },
     ]
 }

@@ -14,7 +14,8 @@ and live runs at those milestones, rather than today's commands. Shared rules fo
 The client also stages dropped files as private attachments, pastes pictures into the compose box (a screenshot, a
 browser's copied image, picture files a file manager copied) and sends them inline as Teams does, retains compose
 drafts while sends are pending,
-opens people search results as chats, and keeps unread badges in sync with read receipts. Editing message text
+opens people search results as chats, starts chats with one person or several from New message (Ctrl+N: a To: line
+of people, an optional group name, the chat those people already have shown under it), and keeps unread badges in sync with read receipts. Editing message text
 keeps its existing file references and cards. Channel menus provide management, notification and section
 preferences, email and workflow actions. Calls and meetings support Teams
 live captions and spoken-language controls (Alt+Shift+C); caption text stays in memory and clears on hide or call

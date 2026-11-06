@@ -506,12 +506,15 @@ impl Prepared for Typing {
 
 /// Creates a chat: `POST v1/threads` with `{"members": [{"id", "role": "Admin"}, …], "properties": {"threadType":
 /// "chat", …}}`, as the web client created the a–b 1:1 chat and the a–b–c group chat
-/// (`docs/protocol/chat-service.md`). The members include the creator.
+/// (`docs/protocol/chat-service.md`), and a named group chat with its name as `properties.topic`, as New message's
+/// "Add group name" sent it (2026-11-06). The members include the creator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateChat {
     /// The creator first, then the others in the order given.
     members: Vec<Mri>,
     one_to_one: bool,
+    /// A group chat's name.
+    topic: Option<String>,
 }
 
 impl CreateChat {
@@ -522,6 +525,7 @@ impl CreateChat {
         (me != other).then(|| Self {
             members: vec![me, other],
             one_to_one: true,
+            topic: None,
         })
     }
 
@@ -539,7 +543,25 @@ impl CreateChat {
         (members.len() >= 3).then_some(Self {
             members,
             one_to_one: false,
+            topic: None,
         })
+    }
+
+    /// The group chat named `topic` (trimmed; a blank one names nothing), as Teams' "Add group name" sends it. A 1:1
+    /// chat takes no name and stays as it was.
+    #[must_use]
+    pub fn named(mut self, topic: &str) -> Self {
+        let topic = topic.trim();
+        if !self.one_to_one && !topic.is_empty() {
+            self.topic = Some(topic.to_owned());
+        }
+        self
+    }
+
+    /// The group chat's name, when it is given one.
+    #[must_use]
+    pub fn topic(&self) -> Option<&str> {
+        self.topic.as_deref()
     }
 
     /// The members, the creator first.
@@ -556,10 +578,10 @@ impl Prepared for CreateChat {
             .iter()
             .map(|mri| json!({"id": mri.as_str(), "role": "Admin"}))
             .collect();
-        let properties = if self.one_to_one {
-            json!({"threadType": "chat", "fixedRoster": true, "uniquerosterthread": true})
-        } else {
-            json!({"threadType": "chat"})
+        let properties = match (&self.topic, self.one_to_one) {
+            (_, true) => json!({"threadType": "chat", "fixedRoster": true, "uniquerosterthread": true}),
+            (Some(topic), false) => json!({"threadType": "chat", "topic": topic}),
+            (None, false) => json!({"threadType": "chat"}),
         };
         Some(Wire {
             raw: None,

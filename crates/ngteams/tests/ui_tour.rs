@@ -10,7 +10,8 @@
 //! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
 //! Dark and Light; a picture opened in the picture viewer, fitted and zoomed; the 12-hour time format and a chat's
 //! times on it; a group chat's presence; the "Chats" section's See more, what it brings and a chat opened from below
-//! the rows shown; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, its Call health, beside the main window
+//! the rows shown; New message, its To: line's suggestions, the chat two people already have and a group name, in
+//! Teams Dark and Light; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, its Call health, beside the main window
 //! with its in-call strip, and in Teams Dark; a group call with Raise and React, its People pane, its speaker view and
 //! its chat, its organizer's Mute all, People added to the chat and Controls, an attendee's greyed controls and
 //! "You've been muted", in Teams Light and Dark) and says
@@ -55,6 +56,7 @@ use teams_ui::call_stage::CallStage;
 use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
 use teams_ui::global_search::{Mode as SearchMode, Tab};
+use teams_ui::new_chat::{NewChat, Suggested};
 use teams_ui::settings::VideoEffect;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
@@ -165,7 +167,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 234] = [
+const STEPS: [Step; 5 + 240] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -886,6 +888,41 @@ const STEPS: [Step; 5 + 234] = [
     ("chat-mixed-dark-read", |shell, _, cx| show_first_message(shell, cx)),
     // See more in Teams Dark, as the Teams it is drawn after
     ("chats-see-more-dark", |shell, _, cx| reveal_see_more(shell, cx)),
+    // New message (Ctrl+N), in Teams Dark: its row heading the chats, the To: line's suggestions with nothing typed
+    // (the people of the latest 1:1 chats), "You're starting a new conversation" over its box
+    ("new-chat-dark", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_new_chat(window, cx));
+        show_chats_section(shell, cx);
+    }),
+    // "lab" typed: the people it finds, then the group chats
+    ("new-chat-suggestions-dark", |shell, window, cx| {
+        with_new_chat(shell, cx, |view, cx| view.set_query("lab", window, cx));
+    }),
+    // b and c chosen, their chips on the line: the a–b–c chat they already have, under it with its own box
+    ("new-chat-found-dark", |shell, window, cx| {
+        with_new_chat(shell, cx, |view, cx| {
+            view.set_query("", window, cx);
+            for mri in [LAB_B, LAB_C] {
+                let at = view
+                    .suggestions()
+                    .iter()
+                    .position(|suggested| matches!(suggested, Suggested::Person { mri: person, .. } if person == mri));
+                if let Some(at) = at {
+                    view.choose(at, window, cx);
+                }
+            }
+        });
+    }),
+    ("new-chat-found", |shell, _, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+    }),
+    // a group name typed: "Group name:" over To:, and a new group chat again
+    ("new-chat-named", |shell, window, cx| {
+        with_new_chat(shell, cx, |view, cx| view.set_group_name("Lab trio", window, cx));
+    }),
+    ("new-chat-named-dark", |shell, _, cx| {
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+    }),
     // the a–b chat in Teams Dark: the frame, the sheet, its own bubbles' tint and the reply's quote card
     ("chat-ab-dark", |shell, window, cx| {
         shell.update(cx, |shell, cx| {
@@ -2899,6 +2936,13 @@ fn hover_none(shell: &Entity<Shell>, cx: &mut App) {
 }
 
 /// Runs `change` on the compose box of the chat shown.
+/// Changes New message, while it is open.
+fn with_new_chat(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut NewChat, &mut Context<NewChat>)) {
+    if let Some(view) = shell.read(cx).new_chat().cloned() {
+        view.update(cx, change);
+    }
+}
+
 fn with_compose(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut Compose, &mut Context<Compose>)) {
     if let Some(chat) = shell.read(cx).chat().cloned() {
         let compose = chat.read(cx).compose().clone();

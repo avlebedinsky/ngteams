@@ -115,6 +115,7 @@ pub mod meeting_recap;
 pub mod manage_team;
 pub mod models;
 pub mod motion;
+pub mod new_chat;
 pub mod notify;
 pub mod own_presence;
 pub mod people;

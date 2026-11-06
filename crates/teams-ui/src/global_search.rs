@@ -839,7 +839,7 @@ impl GlobalSearch {
         };
         let list = self.list.read(cx);
         let rows: Vec<(String, SharedString)> = list
-            .all_rows()
+            .findable_rows()
             .filter(|row| matches!(row.kind, RowKind::Group | RowKind::Meeting))
             .map(|row| (row.id.clone(), row.name.clone()))
             .collect();
@@ -919,6 +919,7 @@ impl GlobalSearch {
         }
         let reply = self.core.write(Action::CreateChat {
             others: vec![Mri::new(mri)],
+            topic: None,
         });
         let core = Arc::clone(&self.core);
         let navigation = self.navigation;
@@ -991,7 +992,7 @@ fn service_hit(message: &FoundMessage, list: &ChatList, me: &str) -> Hit {
 /// The 1:1 chat the list has with `mri`.
 fn one_to_one_of(list: &Entity<ChatList>, mri: &str, cx: &App) -> Option<String> {
     list.read(cx)
-        .all_rows()
+        .findable_rows()
         .find(|row| row.kind == RowKind::OneToOne && row.partner.as_deref() == Some(mri))
         .map(|row| row.id.clone())
 }
@@ -1045,7 +1046,7 @@ fn suggest(
 ) -> Vec<Suggestion> {
     let chat_list = list.read(cx);
     let rows: Vec<(String, SharedString)> = chat_list
-        .all_rows()
+        .findable_rows()
         .filter(|row| row.kind != RowKind::Channel)
         .map(|row| (row.id.clone(), row.name.clone()))
         .collect();
@@ -1109,7 +1110,7 @@ fn suggest(
 /// The people suggested: the list's 1:1 partners `query` matches, then the service's (each once, by MRI).
 fn people(query: &str, list: &ChatList, service: Option<&SearchAnswer>) -> Vec<Suggestion> {
     let partners: Vec<(String, SharedString)> = list
-        .all_rows()
+        .findable_rows()
         .filter(|row| row.kind == RowKind::OneToOne && row.named)
         .filter_map(|row| row.partner.clone().map(|partner| (partner, row.name.clone())))
         .collect();
@@ -1138,7 +1139,7 @@ fn people(query: &str, list: &ChatList, service: Option<&SearchAnswer>) -> Vec<S
 
 fn person_suggestion(list: &ChatList, mri: Option<String>, name: SharedString, detail: SharedString) -> Suggestion {
     let row = mri.as_deref().and_then(|mri| {
-        list.all_rows()
+        list.findable_rows()
             .find(|row| row.kind == RowKind::OneToOne && row.partner.as_deref() == Some(mri))
     });
     Suggestion::Person {

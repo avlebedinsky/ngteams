@@ -42,6 +42,9 @@
 //!   thread's "Reply in thread" posting to the post's chain, with Teams' "Send to: thread only" over its text. It
 //!   offers Format, Emoji and Send, no more: it sends no typing (no capture showed a channel's) and takes no file (a
 //!   channel's files go to its team's site, which this app doesn't upload to).
+//! - **New message's box** ([`Compose::for_new_chat`]): a chat's box for a chat not made yet. It sends no typing and
+//!   takes no pasted picture; its first message is handed to New message ([`ComposeEvent::Start`]), which makes the
+//!   chat and sends it there, and comes back to the box if that fails ([`Compose::started`]).
 //! - **Read-only** ([`Compose::is_read_only`]): in the app's read-only mode every box ([`READ_ONLY_APP`]), else the
 //!   account's own notes ([`teams_core::NOTES`]), which take no write from
 //!   this app (no write type is mapped to a `48:` stream), so their box shows [`READ_ONLY_NOTES`] in place of the text
@@ -520,6 +523,9 @@ pub enum Writes {
     Chat,
     Channel,
     Thread,
+    /// New message's box, before its chat is made ([`Compose::for_new_chat`]): its first message is handed to the
+    /// view that makes the chat ([`ComposeEvent::Start`]), never written by the box.
+    NewChat,
 }
 
 /// What the box tells its chat view.
@@ -527,6 +533,11 @@ pub enum Writes {
 pub enum ComposeEvent {
     /// Up in an empty box: the account's last message is to be edited.
     EditLast,
+    /// A message went to the outbox (a post, a reply or an edit).
+    Sent,
+    /// New message's first message ([`Writes::NewChat`]): the chat is to be made, and the message sent to it. The box
+    /// keeps it until [`Compose::started`] says how that went.
+    Start(Box<MessageText>),
 }
 
 fn empty_file_text() -> Result<MessageText, ComposeError> {
@@ -587,6 +598,8 @@ pub struct Compose {
     read_only: Option<&'static str>,
     /// Where it writes ([`Compose::in_channel`]): a channel's box sends no typing and takes no file.
     writes: Writes,
+    /// New message's first message while its chat is being made ([`ComposeEvent::Start`]): given back if that fails.
+    starting: Option<Draft>,
     /// The emoji picker, while it is open.
     emoji: Option<(Entity<ReactionPicker>, Subscription)>,
     /// Where the emoji button was last drawn, for the picker to open by.
@@ -694,6 +707,7 @@ impl Compose {
             problem: None,
             translated: translated::Translated::default(),
             writes: Writes::Chat,
+            starting: None,
             emoji: None,
             emoji_at: Rc::default(),
             emoji_on_press: false,
@@ -711,6 +725,54 @@ impl Compose {
         let placeholder = placeholder.into();
         self.editor
             .update(cx, |editor, cx| editor.set_placeholder(placeholder, cx));
+        cx.notify();
+    }
+
+    /// The box made New message's ([`Writes::NewChat`]): it offers what a chat's box offers, but sends no typing (there
+    /// is no chat to type in yet) and takes no pasted picture (a picture goes to the media service for its chat); its
+    /// first message is handed on ([`ComposeEvent::Start`]), never written by the box.
+    pub fn for_new_chat(&mut self, cx: &mut Context<Self>) {
+        self.writes = Writes::NewChat;
+        self.editor.update(cx, |editor, _| editor.set_takes_pictures(false));
+        cx.notify();
+    }
+
+    /// Whether the box writes to a chat (made or still to be made), not a channel's posts or a thread.
+    fn writes_a_chat(&self) -> bool {
+        matches!(self.writes, Writes::Chat | Writes::NewChat)
+    }
+
+    /// Whether New message's first message is out of the box while its chat is being made.
+    #[must_use]
+    pub fn is_starting(&self) -> bool {
+        self.starting.is_some()
+    }
+
+    /// How making New message's chat went: on `Err`, the first message comes back to the box (unless something was
+    /// typed in it since) with what went wrong over it; else it is let go.
+    pub fn started(&mut self, outcome: Result<(), SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = self.starting.take() else {
+            return;
+        };
+        if let Err(problem) = outcome {
+            self.give_back(draft, window, cx);
+            self.show_problem(problem, cx);
+        }
+        cx.notify();
+    }
+
+    /// The doc the box holds, and what it is a draft of, moved to `other` (New message's box and an existing chat's
+    /// as the To: line finds that chat or leaves it): what was typed stays typed.
+    pub fn hand_text_to(&mut self, other: &Entity<Self>, cx: &mut Context<Self>) {
+        let doc = self.editor.read(cx).doc().clone();
+        if self.editor.read(cx).is_empty() {
+            return;
+        }
+        self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
+        other.update(cx, |other, cx| {
+            other.editor.update(cx, |editor, cx| editor.set_doc(doc, cx));
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -945,7 +1007,7 @@ impl Compose {
     /// draft back (its text, its mentions, the reply or the edit) when the engine refuses it before it makes a row,
     /// unless something was typed in it since.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only.is_some() || self.translating() {
+        if self.read_only.is_some() || self.translating() || self.starting.is_some() {
             return;
         }
         if !self.files_ready() {
@@ -1005,6 +1067,18 @@ impl Compose {
     ) {
         let translated::Sending { text: built, original } = sending;
         let doc = self.editor.read(cx).doc().clone();
+        if self.writes == Writes::NewChat {
+            // the chat is made first, by the view that holds the box; the message waits here until it is
+            self.starting = Some(Draft {
+                doc,
+                mode: self.mode.clone(),
+                attachments: self.attachments.clone(),
+            });
+            self.trace.record(&TraceLine::new("compose", "sent").kind("new chat"));
+            self.clear(window, cx);
+            cx.emit(ComposeEvent::Start(Box::new(built)));
+            return;
+        }
         let sent = original.as_ref().map(|_| built.rich_text().clone());
         let conversation = self.conversation.clone();
         let edit_of = match &self.mode {
@@ -1055,6 +1129,7 @@ impl Compose {
                 .conversation(&self.conversation)
                 .kind(kind),
         );
+        cx.emit(ComposeEvent::Sent);
         if keep_box {
             self.mode = Mode::New;
             self.attachments.clear();
@@ -1505,7 +1580,7 @@ impl Compose {
             .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
             .child(self.format_button(palette, cx))
             .child(self.emoji_button(cx))
-            .children((self.writes == Writes::Chat).then(|| {
+            .children(self.writes_a_chat().then(|| {
                 selected_by(
                     "compose-attach",
                     icon_button_with_key("compose-attach", Glyph::PAPERCLIP, "Attach files", &AttachFiles)
@@ -1515,8 +1590,14 @@ impl Compose {
                 )
             }))
             // a channel's box offers only what works there
-            .children((self.writes == Writes::Chat).then(|| unavailable("compose-loop", Glyph::REPEAT, NO_LOOP)))
-            .children((self.writes == Writes::Chat).then(|| unavailable("compose-apps", Glyph::PLUS, NO_APPS)))
+            .children(
+                self.writes_a_chat()
+                    .then(|| unavailable("compose-loop", Glyph::REPEAT, NO_LOOP)),
+            )
+            .children(
+                self.writes_a_chat()
+                    .then(|| unavailable("compose-apps", Glyph::PLUS, NO_APPS)),
+            )
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
             .child(self.send_button(palette, cx))
             .into_any_element()

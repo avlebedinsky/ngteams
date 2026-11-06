@@ -305,7 +305,11 @@ pub(crate) fn create_chat(state: &mut State, call: &Call<'_>) -> ResponseTemplat
                 .map(String::as_str)
                 .filter(|member| *member != call.caller),
         );
-        let conversation = world::created(&empty, &id, kind, &ordered, time);
+        let mut conversation = world::created(&empty, &id, kind, &ordered, time);
+        // a named group chat (`properties.topic`, New message's "Add group name") lists with its name
+        if let Some(topic) = chat_topic(call).filter(|_| !unique) {
+            conversation.entry["threadProperties"]["topic"] = json!(topic);
+        }
         let thread = thread_body(state, &conversation);
         state.conversations.push(conversation);
         state.queue(&id, &call.caller, EventKind::ChatCreated, &thread);
@@ -567,6 +571,13 @@ fn chat_members(call: &Call<'_>) -> Option<(Vec<String>, bool)> {
     }
     let unique = properties.get("uniquerosterthread").and_then(Value::as_bool) == Some(true);
     Some((members, unique))
+}
+
+/// The name a new chat's `properties.topic` gives it, when it gives one.
+fn chat_topic(call: &Call<'_>) -> Option<String> {
+    let body = call.object()?;
+    let topic = body.get("properties")?.get("topic")?.as_str()?;
+    Some(topic.to_owned())
 }
 
 /// Whether `mri` is `8:orgid:` and an object id (a GUID, `8-4-4-4-12` hex digits).

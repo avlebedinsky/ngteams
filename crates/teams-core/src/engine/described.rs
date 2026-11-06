@@ -34,7 +34,8 @@ pub(super) fn action(action: &Action) -> String {
             conversation,
             message_id,
         } => format!("read receipt up to {message_id} in {conversation}"),
-        Action::CreateChat { others } => format!("a chat with {} other(s)", others.len()),
+        // the name is the user's text: never logged
+        Action::CreateChat { others, .. } => format!("a chat with {} other(s)", others.len()),
     }
 }
 

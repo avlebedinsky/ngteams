@@ -164,6 +164,32 @@ Messages, edits, deletes, reactions, typing, read receipts and chat/member opera
 no-proxy, no-redirect and service-specific credentials. Unknown message outcomes are checked instead of resent
 blindly, and resending across runs requires `Store::resend`.
 
+### New message and a new chat
+
+Seen 2026-11-06 in browser Teams with lab account a (`proto-lab run team-manage` steps, the chat service's writes held
+back, so nothing went out):
+
+- **New message** (the list header's pen, Alt+Shift+N in the browser; Teams' desktop key is Ctrl+N) adds a "New
+  message" row at the top of the chats and shows the conversation pane under a To: line ("Enter name, chat, channel,
+  email or tag"), with "You're starting a new conversation / Type your first message below." over the compose box
+  while no chat is chosen.
+- **To:** suggests recent people with nothing typed; typed, the people whose names match, then the group chats whose
+  name or people match (a named chat came up for one of its members' names). Every a–b–c group chat came up, those
+  the list hides as empty (`isemptyconversation`: made by a call's Add participants, holding only the call) among
+  them. Choosing a group chat opens it. Nothing is read from the service to find them.
+- **The chat it is**: one person chosen shows their 1:1 chat's history under the line; b and c chosen showed the
+  a–b–c group chat whose roster came last of five (made last, holding only a call), not the one with the latest
+  message, and the first message went to it (`POST …/conversations/<that chat>/messages`). No read was made to find it.
+  Once a named a–b–c chat had been made after it (by the native client, "Lab trio 39"), b and c still showed that
+  unnamed chat: a named chat isn't the one New message finds for its people.
+- **Add group name** (the chevron at the line's end, "Add group name and create a new group chat") puts a "Group
+  name:" line over To:; with a name typed the pane shows a new conversation again, and the first message sends
+  `POST v1/threads` with `{"members": [the account, then the people, each "role": "Admin"], "properties":
+  {"threadType": "chat", "topic": "<the name>"}}` before the message to the chat it makes. A name with one person
+  chosen sent nothing.
+- **An opened empty chat** (one the list hides) is listed from then on at the list's foot, and stays there when
+  another chat is opened.
+
 `proto-lab` records browser traffic without a browser fence. A scenario that needs a request's shape without its
 side effect installs an explicit capture hold before navigation or the matching action. Held marker messages,
 including legacy queued probes, stay held on later sessions so the browser cannot resend them then. Holds are

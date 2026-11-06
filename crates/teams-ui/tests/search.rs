@@ -1022,7 +1022,7 @@ fn clicking_a_person_without_a_listed_chat_opens_the_created_chat_from_suggestio
             Main::Chat("19:new-synthetic-chat@thread.v2".to_owned())
         );
         assert!(
-            matches!(rig.core.actions.lock().unwrap().as_slice(), [Action::CreateChat { others }] if others.iter().map(teams_proto::Mri::as_str).collect::<Vec<_>>() == [LAB_C])
+            matches!(rig.core.actions.lock().unwrap().as_slice(), [Action::CreateChat { others, .. }] if others.iter().map(teams_proto::Mri::as_str).collect::<Vec<_>>() == [LAB_C])
         );
         assert!(!suggestions_open(&shell, cx));
     }

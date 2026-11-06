@@ -434,7 +434,7 @@ impl Switcher {
         let rows: Vec<(String, SharedString)> = self
             .list
             .read(cx)
-            .all_rows()
+            .findable_rows()
             // a favourite channel is offered with the other channels, below
             .filter(|row| row.kind != RowKind::Channel)
             .map(|row| (row.id.clone(), row.name.clone()))

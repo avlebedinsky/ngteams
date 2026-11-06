@@ -450,8 +450,9 @@ fn a_bot_is_never_titled_or_watched_by_its_mri() {
         (BOT, false, None)
     );
     assert!(!rig.core.presence_asked.lock().unwrap().iter().any(|mri| mri == BOT_MRI));
-    // the meeting nobody wrote in stays out
-    assert!(cx.update(|_, cx| list.read(cx).row(QUIET).is_none()));
+    // the meeting nobody wrote in stays out of the list, and is still found (by the search, the switcher, New message)
+    assert!(cx.update(|_, cx| !list.read(cx).all_rows().any(|row| row.id == QUIET)));
+    assert!(cx.update(|_, cx| list.read(cx).row(QUIET).is_some()));
     assert_eq!(rig.shutdowns(), 0, "the list never stops the engine");
 }
 
@@ -494,14 +495,47 @@ fn arranging_keeps_a_chat_called_empty_once_it_has_text_or_unread() {
         favorites: None,
         empty: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
     };
-    let (favorites, rows) = arrange(
+    let arranged = arrange(
         vec![row("a", "", 0), row("b", "hi", 0), row("c", "", 1)],
         &listing,
         None,
+        &[],
     );
-    assert!(favorites.is_empty());
-    let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    assert!(arranged.favorites.is_empty());
+    let ids: Vec<&str> = arranged.rows.iter().map(|row| row.id.as_str()).collect();
     assert_eq!(ids, ["b", "c"]);
+    // the one left out is still found
+    let hidden: Vec<&str> = arranged.hidden.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(hidden, ["a"]);
+}
+
+#[test]
+fn an_empty_chat_opened_is_listed_after_the_others_in_the_order_they_were_opened() {
+    let row = |id: &str, last: i64| ChatRow {
+        id: id.to_owned(),
+        kind: RowKind::Group,
+        name: "x".into(),
+        named: true,
+        picture: None,
+        partner: None,
+        faces: Vec::new(),
+        team: None,
+        preview: if id.starts_with("text") { "hi" } else { "" }.into(),
+        previewed: None,
+        last_activity: Some(last),
+        unread: 0,
+    };
+    let listing = ChatListing {
+        favorites: None,
+        empty: vec!["call-1".to_owned(), "call-2".to_owned(), "call-3".to_owned()],
+    };
+    // newer than the chat with text, the call-only chats are still listed after it, as Teams lists them once opened
+    let rows = vec![row("call-1", 30), row("call-2", 20), row("text", 10), row("call-3", 5)];
+    let arranged = arrange(rows, &listing, None, &["call-3".to_owned(), "call-1".to_owned()]);
+    let ids: Vec<&str> = arranged.rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, ["text", "call-3", "call-1"]);
+    let hidden: Vec<&str> = arranged.hidden.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(hidden, ["call-2"]);
 }
 
 /// The id of the group chat numbered `number`, the first the latest.

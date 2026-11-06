@@ -232,6 +232,11 @@ pub(crate) fn thread_body(state: &State, conversation: &Conversation) -> Value {
     }
     // a channel's thread is of its own type (`space` for a team's general channel, `topic` for another, as M2 Task
     // 16's probe read them), not a chat's
+    // a named chat's name, as the thread read carries it (`properties.topic`)
+    let topic = &conversation.entry["threadProperties"]["topic"];
+    if conversation.kind == Kind::Group && topic.is_string() {
+        properties.insert("topic".to_owned(), topic.clone());
+    }
     let thread_type = &conversation.entry["threadProperties"]["threadType"];
     if conversation.kind == Kind::ReadOnly && thread_type.is_string() {
         properties.insert("threadType".to_owned(), thread_type.clone());
