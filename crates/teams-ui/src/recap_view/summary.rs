@@ -19,7 +19,7 @@ use super::{Pane, Post, Read, RecapView, centred, event_row, spinner};
 use crate::clock;
 use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
 use crate::local_ai::{AiChoice, Backend, Failure, Tools, Work};
-use crate::recap::{local_session_line, shows_parts};
+use crate::recap::local_line_of;
 use crate::recap_summary::{self, Input, Made, Point, RecapSummary, State, Step, Topic, cache_key, stamp};
 use crate::rich_text::{self, Mentions};
 use crate::theme::Palette;
@@ -82,17 +82,19 @@ impl RecapView {
         })
     }
 
-    /// The meeting's day and span, as the recap's top row says it.
+    /// The session's day and span, as the recap's top row says it.
     fn when(&self, cx: &Context<Self>) -> Option<String> {
-        local_session_line(self.parts()?, clock::cycle(cx))
+        local_line_of(self.parts()?, &self.session(), clock::cycle(cx))
     }
 
     /// What the summary is made from: the shown part's transcript and the meeting's brief; `None` before the
     /// transcript was read.
     fn summary_input(&self, cx: &Context<Self>) -> Option<Input> {
         let transcript = self.transcript()?;
-        let parts = self.parts()?;
-        let part = shows_parts(parts).then_some((self.selected + 1, parts.len()));
+        // the part's place among its session's, as the parts' row names it
+        let session = self.session();
+        let position = session.iter().position(|&index| index == self.selected)?;
+        let part = (session.len() > 1).then_some((position + 1, session.len()));
         let when = self.when(cx);
         let brief = recap_summary::brief(&self.title, when.as_deref(), part, &transcript.turns);
         Some(Input::of(&transcript.turns, brief))

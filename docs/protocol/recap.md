@@ -159,7 +159,10 @@ Transcript pane and "…").
   drive, item and times, `organizerId` the one whose OneDrive holds it). The calls' `TranscriptV2` resources come only
   under `invalidResources`, with no `location`; the recording's item lists no transcripts (`media` empty in the
   `select=media/transcripts` read). Choosing a session reads the same list narrowed by `&recapCallId=<call>`. The
-  sessions menu lists the recordings alone (each by its day and span), the player and "…" (Go
+  sessions menu lists the recordings alone, each call a session by its own day and span ("Friday, November 6, 2026
+  5:29 PM - 5:30 PM"), the latest first and shown when the tab opens; its box is as wide as its line up to about
+  390 px, a longer line (a meeting's too) cut with an ellipsis at its end, and the menu's rows as wide as the box, cut
+  the same way. The player and "…" (Go
   to Meeting Recaps) are a meeting's, and the Transcript pane says "No transcript available" ("The transcript for this
   meeting was never created, has expired, or has been deleted."). The recording is played as a meeting's (the item's
   `content?format=dash`, `streamembed.aspx`).
@@ -207,7 +210,9 @@ recipients and "Remove expiration" (writes) are left out.
 A 1:1 or group chat's calls ([above](#a-11-or-group-calls-recording)) are shown the same way: each recording saved is
 the saved line (its owner the `RecordingStorage` user when no organizer is named) with its recap card under it, a
 transcript no recording of its call holds a card of its own (`teams_ui::meeting_recap::call_cards`), and the chat has
-the tabs while it holds one. Its Recap tab makes the meeting's read with the chat's id; a recording with no transcript
+the tabs while it holds one. Its Recap tab makes the meeting's read with the chat's id, each call a session of its menu
+(its parts beside it when it was recorded more than once), the latest shown first; a recording with no transcript
 to read keeps the Transcript pane, saying there is none as Teams does, and the chat's captions saved on this computer
-stay parts of their own (Teams' transcript of the same time would win, as a meeting's). The recap link Share copies
+stay sessions of their own (Teams' transcript of the same time would win, as a meeting's). A recording's start and
+stop name the account by its name, as Teams' 1:1 chat does. The recap link Share copies
 keeps the meeting's shape (`threadType=meeting`): the call's own wasn't captured.

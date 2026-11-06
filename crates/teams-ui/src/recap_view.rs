@@ -68,8 +68,8 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::PictureSource;
 use crate::people;
 use crate::recap::{
-    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, local_session_line, part_label, recording_file_name, row_of,
-    shows_parts, transcript_file_name,
+    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, local_line_of, part_label, recording_file_name, row_of,
+    sessions, transcript_file_name,
 };
 use crate::recap_summary::RecapSummary;
 use crate::recording_download::{self, Progress, RecordingDownload, byte_size, download_of};
@@ -93,6 +93,8 @@ pub const NO_TRANSCRIPT_YET: &str = "No transcript available";
 /// Under [`NO_TRANSCRIPT_YET`].
 pub const NO_TRANSCRIPT_WHY: &str =
     "The transcript for this meeting was never created, has expired, or has been deleted.";
+/// The widest the session's box (and its menu) grows, as Teams' grows to about this width before it ellipsizes.
+pub const SESSION_WIDTH: f32 = 392.0;
 
 /// The panes beside the recording, as Teams' Recap has them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,6 +345,14 @@ impl RecapView {
             return;
         }
         self.pause(cx);
+        if shown.is_none() && !crate::system_message::is_meeting_chat(&self.conversation) {
+            // a 1:1 or group chat's Recap opens at its latest call, as Teams' does
+            self.selected = self
+                .sessions()
+                .first()
+                .and_then(|session| session.first().copied())
+                .unwrap_or(0);
+        }
         if shown.is_some() || self.selected >= count {
             if self.selected >= count {
                 self.selected = 0;
@@ -391,6 +401,13 @@ impl RecapView {
     /// The part shown.
     fn part(&self) -> Option<&RecapPart> {
         self.parts()?.get(self.selected)
+    }
+
+    /// Shows the session whose first part is `first` (its menu's row), from that part; the session shown stays as it is.
+    pub fn select_session(&mut self, first: usize, cx: &mut Context<Self>) {
+        if !self.session().contains(&first) {
+            self.select_part(first, cx);
+        }
     }
 
     /// Shows part `index`: its recording, its transcript (read now if it wasn't), the other parts' paused.
@@ -870,45 +887,38 @@ impl RecapView {
             .into_any_element()
     }
 
-    /// The meeting's line, the parts, Share, Watch in browser, More options.
+    /// The recap's sessions as its menu lists them, the newest first ([`sessions`]): a 1:1 or group chat's calls each
+    /// one, a meeting chat's meeting one.
+    fn sessions(&self) -> Vec<Vec<usize>> {
+        let by_call = !crate::system_message::is_meeting_chat(&self.conversation);
+        sessions(self.parts().unwrap_or_default(), by_call)
+    }
+
+    /// The session of the part shown: its parts' indices.
+    fn session(&self) -> Vec<usize> {
+        self.sessions()
+            .into_iter()
+            .find(|session| session.contains(&self.selected))
+            .unwrap_or_default()
+    }
+
+    /// The shown session's line: its day and span, "Friday, November 6, 2026 5:29 PM - 5:30 PM".
+    fn session_line(&self, cx: &Context<Self>) -> Option<String> {
+        local_line_of(self.parts()?, &self.session(), clock::cycle(cx))
+    }
+
+    /// The session's line in its menu, the parts' row of a session recorded more than once, Share, Watch in browser,
+    /// More options.
     fn top_row(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let parts = self.parts().unwrap_or_default();
-        let line = local_session_line(parts, clock::cycle(cx)).unwrap_or_else(|| self.title.to_string());
-        let face = div()
-            .w(px(360.0))
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().flex_1().min_w_0().truncate().text_left().child(line.clone()))
-            .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)));
-        // the meeting's sessions, as Teams lists them: this chat's meeting, checked
-        let session = Button::new("recap-session")
-            .outline()
-            .child(face)
-            .dropdown_menu(move |menu, _, _| {
-                let line = line.clone();
-                menu.item(PopupMenuItem::element(move |_, _| {
-                    div()
-                        .debug_selector(|| "recap-session-row".to_owned())
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(Glyph::CHECK.icon().size(px(14.0)))
-                        .child(line.clone())
-                }))
-            });
-        let session = selected_by("recap-session", session)
-            .flex_shrink(1.0)
-            .min_w(px(160.0))
-            .bg(rgb(palette.surface));
-        let tabs = shows_parts(parts).then(|| self.part_tabs(parts.len(), palette, cx));
+        let session = self.session();
+        let tabs = (session.len() > 1).then(|| self.part_tabs(&session, palette, cx));
         div()
             .h(px(48.0))
             .flex_none()
             .flex()
             .items_center()
             .gap_3()
-            .child(session)
+            .child(self.session_menu(palette, cx))
             .children(tabs)
             .children(self.shows_saved().then(|| local::saved_mark(palette)))
             .child(div().flex_1())
@@ -916,8 +926,56 @@ impl RecapView {
             .into_any_element()
     }
 
-    fn part_tabs(&self, count: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let tab = |index: usize, cx: &mut Context<Self>| {
+    /// The shown session's line in a box with its menu of the recap's sessions, as Teams draws it: the box hugs its line
+    /// up to [`SESSION_WIDTH`], a longer line (and a row of the menu) cut short with an ellipsis at its end.
+    fn session_menu(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let parts = self.parts().unwrap_or_default();
+        let cycle = clock::cycle(cx);
+        let line = self.session_line(cx).unwrap_or_else(|| self.title.to_string());
+        // each session by its line, the one shown checked, the newest first
+        let rows: Vec<(usize, String, bool)> = self
+            .sessions()
+            .into_iter()
+            .filter_map(|indices| {
+                let first = *indices.first()?;
+                let line = local_line_of(parts, &indices, cycle).unwrap_or_else(|| self.title.to_string());
+                Some((first, line, indices.contains(&self.selected)))
+            })
+            .collect();
+        let face = div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(ellipsized(line))
+            .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)).flex_none());
+        let view = cx.entity().downgrade();
+        let menu = Button::new("recap-session")
+            .outline()
+            .min_w_0()
+            .flex_shrink(1.0)
+            .max_w(px(SESSION_WIDTH))
+            .child(face)
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.max_w(px(SESSION_WIDTH)).scrollable(true).max_h(px(320.0));
+                rows.iter().fold(menu, |menu, (first, line, chosen)| {
+                    let (first, view) = (*first, view.clone());
+                    menu.item(session_row(first, line.clone(), *chosen).on_click(move |_, _, cx| {
+                        let _ = view.update(cx, |this, cx| this.select_session(first, cx));
+                    }))
+                })
+            });
+        selected_by("recap-session", menu)
+            .flex()
+            .flex_shrink(1.0)
+            .min_w(px(160.0))
+            .bg(rgb(palette.surface))
+            .into_any_element()
+    }
+
+    /// The shown session's parts, "Part 1", "Part 2", each selected by its index among all the recap's parts.
+    fn part_tabs(&self, session: &[usize], palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let tab = |position: usize, index: usize, cx: &mut Context<Self>| {
             let chosen = index == self.selected;
             div()
                 .id(SharedString::from(format!("recap-part-{index}")))
@@ -941,7 +999,7 @@ impl RecapView {
                 }))
                 .when(chosen, |tab| tab.font_weight(FontWeight::SEMIBOLD))
                 .child(Glyph::PLAY_MEDIA.icon().size(px(14.0)))
-                .child(part_label(index))
+                .child(part_label(position))
                 .on_click(cx.listener(move |this, _, _, cx| this.select_part(index, cx)))
         };
         let mut row = div()
@@ -951,8 +1009,8 @@ impl RecapView {
             .pl_3()
             .border_l_1()
             .border_color(rgb(palette.border));
-        for index in 0..count {
-            row = row.child(tab(index, cx));
+        for (position, &index) in session.iter().enumerate() {
+            row = row.child(tab(position, index, cx));
         }
         row.into_any_element()
     }
@@ -1561,6 +1619,31 @@ fn event_row(selector: &'static str, glyph: Glyph, text: String, palette: Palett
         )
         .child(text)
         .into_any_element()
+}
+
+/// A row of the sessions' menu: the session whose first part is `first`, by its line, checked when it is shown.
+fn session_row(first: usize, line: String, chosen: bool) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        let check = chosen.then(|| Glyph::CHECK.icon().size(px(14.0)));
+        div()
+            .debug_selector(move || format!("recap-session-row-{first}"))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(px(14.0)).flex_none().children(check))
+            .child(ellipsized(line.clone()))
+    })
+}
+
+/// One line of text cut short with an ellipsis at its end when it doesn't fit.
+fn ellipsized(text: String) -> gpui::Div {
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .child(text)
 }
 
 /// A raised, rounded box.

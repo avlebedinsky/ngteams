@@ -5,7 +5,8 @@
 //!   of a meeting that wasn't recorded, the earliest first. Two parts or more show as "Part 1", "Part 2" beside the
 //!   meeting's line ([`session_line`]: its day and the span of its parts, "Thursday, November 5, 2026 11:14 AM -
 //!   11:18 AM"). A part with a recording plays it; one without shows the shared files and the panes across the
-//!   whole width, and offers no "Watch in browser".
+//!   whole width, and offers no "Watch in browser". A 1:1 or group chat's parts are its calls' ([`sessions`]): each
+//!   call a session of the recap's menu with its own line, its parts beside it.
 //! - **The transcript** ([`Transcript`]): its turns ([`teams_proto::transcript::turns`]), the paragraph being spoken at
 //!   the player's time (highlighted, as Teams highlights it), and a search ([`Search`]): its matches in order, the
 //!   current one ("1/3"), the next and the previous, wrapping round.
@@ -51,6 +52,37 @@ where
 #[must_use]
 pub fn local_session_line(parts: &[RecapPart], cycle: HourCycle) -> Option<String> {
     session_line(parts, &Local, cycle)
+}
+
+/// The recap's sessions as Teams' session menu lists them, the newest first, each the indices of its parts in order.
+/// A meeting chat's parts are its meeting's one session; a 1:1 or group chat's (`by_call`) are its calls', a session
+/// for each call (a part that names no call, as a transcript saved on this computer, one of its own), Teams' 1:1 Recap
+/// listing each call recorded by its own day and span.
+#[must_use]
+pub fn sessions(parts: &[RecapPart], by_call: bool) -> Vec<Vec<usize>> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    if !by_call {
+        return vec![(0..parts.len()).collect()];
+    }
+    let mut sessions: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        let call = part.call_id.as_deref();
+        match sessions.iter_mut().find(|(of, _)| call.is_some() && *of == call) {
+            Some((_, indices)) => indices.push(index),
+            None => sessions.push((call, vec![index])),
+        }
+    }
+    // the parts come the earliest first: the session last begun first
+    sessions.into_iter().rev().map(|(_, indices)| indices).collect()
+}
+
+/// The line of the session made of `indices` of `parts` ([`session_line`] of its parts) in the local zone.
+#[must_use]
+pub fn local_line_of(parts: &[RecapPart], indices: &[usize], cycle: HourCycle) -> Option<String> {
+    let chosen: Vec<RecapPart> = indices.iter().filter_map(|&index| parts.get(index).cloned()).collect();
+    local_session_line(&chosen, cycle)
 }
 
 /// A part's name in the parts' row, counted from 1.

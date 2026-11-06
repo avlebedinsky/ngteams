@@ -295,6 +295,40 @@ fn a_calls_recording_in_a_1_1_chat_opens_in_its_recap_tab() {
 }
 
 #[test]
+fn a_1_1_chats_calls_are_sessions_of_its_recap_the_latest_shown() {
+    let rig = call_rig();
+    // a later call recorded too: MCPS lists both by the chat's id
+    {
+        let mut contents = locked(&rig.core.meeting_contents);
+        let calls = contents.get_mut(CALL_CHAT).expect("the call's");
+        let mut later = calls[0].clone();
+        later.location = fixtures::sharing_link("ITEM6");
+        later.item_id = Some("ITEM6".to_owned());
+        later.call_id = Some("00000000-0000-4000-8000-0000000000c6".to_owned());
+        later.start_ms = later.start_ms.map(|start| start + 3_600_000);
+        later.end_ms = later.end_ms.map(|end| end + 3_600_000);
+        calls[0].call_id = Some("00000000-0000-4000-8000-0000000000c5".to_owned());
+        calls.push(later);
+    }
+    let (shell, cx) = shell_window(&rig, CALL_CHAT);
+    click(cx, "chat-tab-recap");
+    let shown = recap(&shell, cx);
+    // Teams' Recap opens at the latest call, each call a session of the menu, no parts beside it
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 1);
+    assert!(cx.debug_bounds("recap-part-0").is_none());
+    assert!(cx.debug_bounds("recap-part-1").is_none());
+    let face = cx.debug_bounds("recap-session").expect("the session's box");
+    assert!(
+        face.size.width <= gpui::px(teams_ui::recap_view::SESSION_WIDTH),
+        "hugs its line up to Teams' width: {face:?}"
+    );
+    click(cx, "recap-session");
+    assert!(cx.debug_bounds("recap-session-row-1").is_some(), "the latest");
+    click(cx, "recap-session-row-0");
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 0);
+}
+
+#[test]
 fn a_recap_that_cant_be_read_says_so_and_reads_again() {
     let rig = rig(true);
     let (shell, cx) = shell_window(&rig, fixtures::MEETING);

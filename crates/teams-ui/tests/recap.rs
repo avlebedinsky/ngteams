@@ -14,8 +14,8 @@ use chrono::FixedOffset;
 use teams_proto::recap::recap_parts;
 use teams_ui::clock::HourCycle;
 use teams_ui::recap::{
-    Search, SharedFilter, SharedKind, Transcript, filtered, matched_ranges, part_label, session_line, shared_items,
-    shows_parts, transcript_file_name,
+    Search, SharedFilter, SharedKind, Transcript, filtered, matched_ranges, part_label, session_line, sessions,
+    shared_items, shows_parts, transcript_file_name,
 };
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-0000000000aa";
@@ -52,6 +52,25 @@ fn two_recordings_are_two_parts_a_transcript_alone_one() {
     let alone = recap_parts(&fixtures::transcribed());
     assert!(!shows_parts(&alone));
     assert_eq!(alone[0].recording, None);
+}
+
+#[test]
+fn a_1_1_chats_calls_are_sessions_of_their_own_the_latest_first() {
+    let mut parts = recap_parts(&fixtures::recorded());
+    // a meeting's parts are its one session
+    assert_eq!(sessions(&parts, false), vec![(0..parts.len()).collect::<Vec<_>>()]);
+    assert_eq!(sessions(&[], true), Vec::<Vec<usize>>::new());
+    // a 1:1 chat's: each call its own, a part naming no call (a transcript saved here) one of its own
+    let call = |id: &str| Some(format!("00000000-0000-4000-8000-0000000000{id}"));
+    parts[0].call_id = call("c1");
+    parts[1].call_id = call("c1");
+    let mut saved = parts[1].clone();
+    saved.call_id = None;
+    parts.push(saved);
+    let mut later = parts[0].clone();
+    later.call_id = call("c2");
+    parts.push(later);
+    assert_eq!(sessions(&parts, true), vec![vec![3], vec![2], vec![0, 1]]);
 }
 
 #[test]
