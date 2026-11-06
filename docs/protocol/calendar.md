@@ -61,7 +61,11 @@ Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `lastModi
 - **Kept between runs**: each answer replaces, in the account's store, the events it held that overlap the window
   (each event kept as its entry came, read again by the same reader), so a window not read yet in this run is drawn
   from the store at once and the answer then applies on top: events added, changed, moved, cancelled or gone. A
-  failed read keeps what was stored. The web client keeps a calendar cache of its own too: the lab profiles' local
+  failed read keeps what was stored. A write (a change, a cancellation, a delete, an answer) is settled in the store
+  before the view hears it went through: every kept copy of the event it names is forgotten, in whatever window it
+  was kept, a series' occurrences too when it names the master (by `seriesMasterId`), a channel's meeting by its
+  `iCalUID`; a new single event is kept as its creation's answer gave it. A window read that began before the write
+  was over isn't kept, as it may hold the event as it was. The web client keeps a calendar cache of its own too: the lab profiles' local
   storage holds its calendar sync state (a `CalendarScenario` and a `CalendarSyncScenario` with a version and a stale
   flag, and an "up to date" marker), which the lab's empty calendars never filled with events, so its exact rules
   (how much it keeps, when it marks it stale) weren't seen.

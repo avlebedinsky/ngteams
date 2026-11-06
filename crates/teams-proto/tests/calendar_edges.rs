@@ -59,6 +59,19 @@ fn creation_answers_accept_the_three_envelopes_and_only_the_first_created_event(
 }
 
 #[test]
+fn a_created_event_is_kept_as_its_entry_and_a_series_master_is_not() {
+    let raw = event();
+    let body = serde_json::to_vec(&json!({"_synthetic":true,"value":[raw.clone()]})).unwrap();
+    let (event, entry) = CalendarEvent::created_kept(&body).expect("kept");
+    assert_eq!(event, created(&raw));
+    assert_eq!(serde_json::from_str::<Value>(&entry).unwrap(), raw);
+    let mut master = raw;
+    master["eventType"] = json!("RecurringMaster");
+    assert!(CalendarEvent::created_kept(&serde_json::to_vec(&master).unwrap()).is_none());
+    assert!(CalendarEvent::created_kept(b"{").is_none());
+}
+
+#[test]
 fn unreadable_required_fields_are_counted_without_dropping_valid_neighbors() {
     let mut invalid = vec![Value::Null, json!([]), json!(false)];
     for field in ["objectId", "startTime", "endTime"] {

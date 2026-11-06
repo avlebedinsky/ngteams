@@ -14,7 +14,12 @@
 //! - **Writes** ([`EventWrite`]): an event created, changed, cancelled or deleted, each a sealed `teams-proto` write
 //!   through the outbox's calendar kind ([`Outbox::try_calendar`]): no row, nothing sent again by a later run; one more attempt only after a 401 or a short
 //!   throttle ([`CallRetries`]), never after an unknown outcome (an invitation sent twice is worse than a failed save).
-//!   A write that wasn't answered with a 2xx is [`EngineError::EventNotSaved`], saying why. A channel's meeting is
+//!   A write that wasn't answered with a 2xx is [`EngineError::EventNotSaved`], saying why. Once a write is over, and
+//!   before its asker hears of it, the engine settles what the store kept ([`settle_write`]): every kept copy of an
+//!   event it touched ([`Touched`]: the event, a series' occurrences by their master, a channel's meeting by its
+//!   team's id) is forgotten in every window, and a new event is kept, so no window drawn from the store afterwards
+//!   shows what the write changed as it was; a window read that began before is answered but not kept (it may hold
+//!   the event as it was). An outcome that isn't known settles the same way: the write may have been applied. A channel's meeting is
 //!   created and cancelled on its team's group calendar ([`EventWrite::CreateInChannel`],
 //!   [`EventWrite::CancelInChannel`]: `docs/protocol/calling.md`, "A channel's meeting").
 //! - **A channel's running meeting** ([`find_channel_meetup`]): CSA's `activeMeetups`, else the channel's newest posts.
@@ -130,12 +135,94 @@ pub struct EventWritten {
     pub created: Option<CalendarEvent>,
 }
 
+/// The events of the account's calendar a write leaves the kept copies of out of date ([`EventWrite::touched`]): what
+/// the store forgets once it is over ([`settle_write`]), and what the calendar drops from every span it holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Touched {
+    /// Events by id: each one itself and, a series' master, every occurrence of its series (`seriesMasterId`).
+    ids: Vec<String>,
+    /// Channels' meetings by their id on their team's calendar (`iCalUID`): the account's own copy of each.
+    ical_uids: Vec<String>,
+}
+
+impl Touched {
+    /// Whether the write touched `event`.
+    #[must_use]
+    pub fn touches(&self, event: &CalendarEvent) -> bool {
+        self.ids
+            .iter()
+            .any(|id| *id == event.id || event.series_master_id.as_deref() == Some(id.as_str()))
+            || event.channel_meeting.as_ref().is_some_and(|meeting| {
+                self.ical_uids
+                    .iter()
+                    .any(|uid| uid.eq_ignore_ascii_case(&meeting.ical_uid))
+            })
+    }
+
+    /// Whether it touched nothing kept (a creation: nothing kept was the event's).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.ical_uids.is_empty()
+    }
+
+    fn ids(ids: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            ids: ids.into_iter().filter(|id| !id.is_empty()).collect(),
+            ical_uids: Vec::new(),
+        }
+    }
+
+    fn ical_uids(uids: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            ids: Vec::new(),
+            ical_uids: uids.into_iter().filter(|uid| !uid.is_empty()).collect(),
+        }
+    }
+}
+
+impl EventWrite {
+    /// The events whose kept copies it leaves out of date once it is applied ([`Touched`]): the event a change, a
+    /// cancellation, a delete or an answer names (a series' master: the whole series), a channel's meeting changed
+    /// or cancelled; none for a creation.
+    #[must_use]
+    pub fn touched(&self) -> Touched {
+        match self {
+            Self::Create(_) | Self::CreateInChannel { .. } => Touched::default(),
+            Self::Update { id, .. } | Self::Cancel { id, .. } | Self::Delete { id } | Self::Respond { id, .. } => {
+                Touched::ids([id.clone()])
+            }
+            Self::UpdateInChannel { event, .. } => {
+                Touched::ical_uids(event.get("iCalUID").and_then(Value::as_str).map(str::to_owned))
+            }
+            Self::CancelInChannel { meeting, .. } => Touched::ical_uids([meeting.ical_uid.clone()]),
+        }
+    }
+}
+
 /// A window's read that came, for the engine to keep ([`Store::replace_calendar_window`]); its asker was answered
 /// already.
 pub(crate) struct WindowRead {
     pub(crate) start_ms: i64,
     pub(crate) end_ms: i64,
     pub(crate) events: Vec<StoredEvent>,
+    /// How many writes were over ([`Calendar::writes_over`]) when it began: one that began before a write was over
+    /// may hold what the write changed as it was, so it isn't kept.
+    pub(crate) since: u64,
+}
+
+/// A write that is over, for the engine to settle what the store kept ([`settle_write`]) before answering its asker.
+pub(crate) struct WriteOver {
+    pub(crate) answer: Result<EventWritten, EngineError>,
+    pub(crate) touched: Touched,
+    /// The new event to keep, as its creation's answer gave it.
+    pub(crate) kept: Option<StoredEvent>,
+    pub(crate) reply: Responder<EventWritten>,
+}
+
+/// A window read or a write of the calendar that is over ([`Calendar::next`]; `None`: it failed, or its task was lost).
+pub(crate) enum CalendarDone {
+    Read(Option<WindowRead>),
+    Written(Option<Box<WriteOver>>),
 }
 
 pub(crate) struct Calendar<C, T> {
@@ -143,6 +230,10 @@ pub(crate) struct Calendar<C, T> {
     outbox: Arc<Outbox<T>>,
     /// The window reads under way, each giving what to keep once it is over.
     reads: JoinSet<Option<WindowRead>>,
+    /// The writes under way, each settled by the engine once it is over.
+    writes: JoinSet<Box<WriteOver>>,
+    /// How many writes were over: a window read that began before the last one isn't kept.
+    writes_over: u64,
     /// The account as an event's organizer, its address and its time zone's name once read ([`Whom`]).
     whom: Arc<Mutex<Option<Whom>>>,
 }
@@ -165,19 +256,38 @@ where
             client,
             outbox,
             reads: JoinSet::new(),
+            writes: JoinSet::new(),
+            writes_over: 0,
             whom: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Whether a window's read runs.
+    /// Whether a window's read or a write runs.
     pub(crate) fn busy(&self) -> bool {
-        !self.reads.is_empty()
+        !self.reads.is_empty() || !self.writes.is_empty()
     }
 
-    /// The next window read that is over (`None`: it failed, or its task was lost); never while none runs
-    /// ([`Self::busy`]).
-    pub(crate) async fn next(&mut self) -> Option<WindowRead> {
-        self.reads.join_next().await?.ok().flatten()
+    /// The next window read or write that is over; never while none runs ([`Self::busy`]).
+    pub(crate) async fn next(&mut self) -> CalendarDone {
+        tokio::select! {
+            read = self.reads.join_next(), if !self.reads.is_empty() => {
+                CalendarDone::Read(read.and_then(Result::ok).flatten())
+            }
+            written = self.writes.join_next(), if !self.writes.is_empty() => {
+                CalendarDone::Written(written.and_then(Result::ok))
+            }
+            else => std::future::pending().await,
+        }
+    }
+
+    /// A write is over: a window read that began before it isn't kept ([`WindowRead::since`]).
+    pub(crate) fn write_over(&mut self) {
+        self.writes_over += 1;
+    }
+
+    /// How many writes were over.
+    pub(crate) fn writes_over(&self) -> u64 {
+        self.writes_over
     }
 
     /// Answers `reply` with the account's events between `start_ms` and `end_ms` as soon as the read is over; what it
@@ -188,6 +298,7 @@ where
             return;
         };
         let client = Arc::clone(&self.client);
+        let since = self.writes_over;
         // on the engine's `LocalSet`: the read waits on nothing of the engine's loop
         self.reads.spawn_local(async move {
             match read(&client, &view).await {
@@ -198,6 +309,7 @@ where
                         start_ms,
                         end_ms,
                         events,
+                        since,
                     })
                 }
                 Err(error) => {
@@ -482,14 +594,18 @@ where
         });
     }
 
-    /// Sends `write` (see the module docs) and answers `reply` with what it gave.
-    pub(crate) fn write(&self, write: EventWrite, reply: Responder<EventWritten>) {
+    /// Sends `write` (see the module docs); once it is over, the engine settles the store and answers `reply` with what
+    /// it gave ([`WriteOver`]).
+    pub(crate) fn write(&mut self, write: EventWrite, reply: Responder<EventWritten>) {
         let outbox = Arc::clone(&self.outbox);
         let client = Arc::clone(&self.client);
         let whom = Arc::clone(&self.whom);
-        tokio::task::spawn_local(async move {
+        self.writes.spawn_local(async move {
             let kind = write.kind();
+            let touched = write.touched();
             let creates = matches!(write, EventWrite::Create(_) | EventWrite::CreateInChannel { .. });
+            // a channel's meeting is created on its team's calendar: the account's own copy has another id
+            let keeps = matches!(write, EventWrite::Create(_));
             let write = completed(&client, &whom, outbox.me(), write).await;
             let answer = match write {
                 EventWrite::Create(draft) => {
@@ -550,11 +666,62 @@ where
                     None => Err(not_saved(kind, "no event")),
                 },
             };
-            let _ = reply.send(answer.map(|body| EventWritten {
-                created: creates.then(|| CalendarEvent::created(&body)).flatten(),
-            }));
+            Box::new(WriteOver::of(answer, creates, keeps, touched, reply))
         });
     }
+}
+
+impl WriteOver {
+    /// What a write answered with `answer` (its answer's body) gives: the event it `creates`, and the one it `keeps`
+    /// in the store (a creation's on the account's own calendar), for the engine to settle and answer `reply` with.
+    fn of(
+        answer: Result<Vec<u8>, EngineError>,
+        creates: bool,
+        keeps: bool,
+        touched: Touched,
+        reply: Responder<EventWritten>,
+    ) -> Self {
+        let new_event = answer
+            .as_ref()
+            .ok()
+            .filter(|_| keeps)
+            .and_then(|body| CalendarEvent::created_kept(body))
+            .and_then(|(event, entry)| kept(&[event], vec![entry]).pop());
+        Self {
+            answer: answer.map(|body| EventWritten {
+                created: creates.then(|| CalendarEvent::created(&body)).flatten(),
+            }),
+            touched,
+            kept: new_event,
+            reply,
+        }
+    }
+}
+
+/// Settles what `store` kept of the calendar once a write is over (see the module docs): every kept event it
+/// `touched` forgotten, whatever window it was kept by, and the new event it made (`kept`) kept.
+///
+/// # Errors
+/// [`StoreError::Sqlite`] when the store couldn't be read or written.
+pub(crate) fn settle_write(store: &mut Store, touched: &Touched, kept: Option<&StoredEvent>) -> Result<(), StoreError> {
+    if !touched.is_empty() {
+        let gone: Vec<String> = store
+            .calendar_events(i64::MIN, i64::MAX)?
+            .into_iter()
+            .filter(|stored| {
+                touched.ids.contains(&stored.id)
+                    || CalendarEvent::stored(&stored.entry).is_some_and(|event| touched.touches(&event))
+            })
+            .map(|stored| stored.id)
+            .collect();
+        if !gone.is_empty() {
+            store.forget_calendar_events(&gone)?;
+        }
+    }
+    if let Some(kept) = kept {
+        store.keep_calendar_events(std::slice::from_ref(kept))?;
+    }
+    Ok(())
 }
 
 /// The meeting that runs in the channel `channel` now: as CSA's teams read names it under the channel's

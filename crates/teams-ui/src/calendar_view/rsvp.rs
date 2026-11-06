@@ -266,29 +266,37 @@ impl CalendarView {
         }
         self.trace
             .record(&crate::trace::TraceLine::new("calendar-event", "answered").kind(key(answer)));
-        let reply = self.core.write_event(EventWrite::Respond {
+        let write = EventWrite::Respond {
             id,
             answer,
             send,
             comment,
-        });
+        };
+        let touched = write.touched();
+        let reply = self.core.write_event(write);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let written = reply.await;
-            let _ = this.update(cx, |view, cx| view.rsvp_sent(&event, answer, written.is_ok(), cx));
+            let written = reply.await.ok().map(|_| touched);
+            let _ = this.update(cx, |view, cx| view.rsvp_sent(&event, answer, written.as_ref(), cx));
         })
         .detach();
         cx.notify();
     }
 
-    /// The answer to `event` went through (`ok`) or didn't.
-    fn rsvp_sent(&mut self, event: &CalendarEvent, answer: RsvpAnswer, ok: bool, cx: &mut Context<Self>) {
+    /// The answer to `event` went through (`written`: what it touched) or didn't.
+    fn rsvp_sent(
+        &mut self,
+        event: &CalendarEvent,
+        answer: RsvpAnswer,
+        written: Option<&teams_core::Touched>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(draft) = self.rsvp.as_mut() {
             draft.sending = false;
         }
-        if !ok {
+        let Some(touched) = written else {
             self.say(RSVP_NOT_SENT, cx);
             return;
-        }
+        };
         // the message went with this answer: the next one starts afresh
         self.rsvp = None;
         let open = self.card.as_ref().is_some_and(|shown| shown.event.id == event.id);
@@ -304,7 +312,7 @@ impl CalendarView {
                 shown.event = Rc::new(answered);
             }
         }
-        self.read(true, cx);
+        self.written(touched, cx);
         cx.notify();
     }
 }

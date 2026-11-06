@@ -16,6 +16,11 @@
 //!   store kept from earlier reads, this run's or an earlier one's ([`Core::stored_calendar`]), and the read's answer
 //!   then replaces them: events added, changed, moved, cancelled or gone, occurrences of a series too. A declined
 //!   meeting isn't shown, as in Teams.
+//! - **A write the engine confirmed** (a save in the form, a removal, an answer: [`CalendarView::written`]) leaves no
+//!   copy of what it changed as it was: the span shown drops every event it touched ([`teams_core::Touched`]: a
+//!   series' occurrences too) and is read again, every other span held is let go (shown again, it is drawn from the
+//!   store, which the engine settled before confirming the write, and read), and a read or a store's answer asked
+//!   before the write is dropped when it comes.
 //! - **An event clicked** opens its card beside it, as Teams' peek opens (centred when opened otherwise): its title, when, the series it belongs to, where, the organizer and the
 //!   account's answer, who is invited, its text; for a Teams meeting the split Join (any time, started or not: its
 //!   pre-join, [`crate::prejoin`], which starts the meeting's call when nobody has), "Chat with
@@ -191,6 +196,9 @@ pub struct CalendarView {
     /// What each span read last.
     loaded: HashMap<Span, Loaded>,
     reading: Option<(Span, Task<()>)>,
+    /// How many confirmed writes the view was told of ([`Self::written`]): a read or a store's answer asked before the
+    /// last one is dropped when it comes.
+    writes: u64,
     /// A read asked again (`again`, after a write) while that span was being read: it runs once that read is over, so
     /// the answer from before the write isn't the last one.
     read_again: bool,
@@ -258,6 +266,7 @@ impl CalendarView {
             picker: None,
             loaded: HashMap::new(),
             reading: None,
+            writes: 0,
             read_again: false,
             selection: None,
             hidden: Hidden::default(),
@@ -657,15 +666,32 @@ impl CalendarView {
         }
     }
 
-    /// What a save in the scheduling form tells this view: read the days shown again.
+    /// What a save in the scheduling form tells this view: what it touched ([`Self::written`]).
     fn saved(cx: &mut Context<Self>) -> crate::event_form::Saved {
         let view = cx.entity().downgrade();
-        crate::event_form::Saved::new(move |cx| {
+        crate::event_form::Saved::new(move |touched, cx| {
             let _ = view.update(cx, |view, cx| {
-                view.read(true, cx);
+                view.written(touched, cx);
                 cx.notify();
             });
         })
+    }
+
+    /// A write of the account's calendar the engine confirmed, which touched `touched`: no copy of what it changed is
+    /// shown as it was (see the module docs). The engine settled the store before confirming it.
+    pub fn written(&mut self, touched: &teams_core::Touched, cx: &mut Context<Self>) {
+        self.writes += 1;
+        let span = self.span();
+        self.loaded.retain(|held, _| *held == span);
+        if let Some(Loaded::Events(events) | Loaded::Stored(events)) = self.loaded.get_mut(&span) {
+            let left: Vec<Shown> = events
+                .iter()
+                .filter(|shown| !touched.touches(&shown.event))
+                .cloned()
+                .collect();
+            *events = Rc::new(left);
+        }
+        self.read(true, cx);
     }
 
     /// Sends the card's confirmed removal of its event: Cancel meeting, Delete or Remove from calendar.
@@ -695,6 +721,7 @@ impl CalendarView {
             teams_core::EventWrite::Delete { id }
         };
         self.removal = Removal::Sending;
+        let touched = write.touched();
         let reply = self.core.write_event(write);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
@@ -703,7 +730,7 @@ impl CalendarView {
                 match answer {
                     Ok(_) => {
                         view.close_card(cx);
-                        view.read(true, cx);
+                        view.written(&touched, cx);
                     }
                     Err(teams_core::EngineError::Stopped) => {}
                     Err(_) => view.say(EVENT_NOT_REMOVED, cx),
@@ -751,23 +778,24 @@ impl CalendarView {
         let core = Arc::clone(&self.core);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = match place_of(&*core, &channel).await {
-                Some(place) => core
-                    .write_event(teams_core::EventWrite::CancelInChannel {
+                Some(place) => {
+                    let write = teams_core::EventWrite::CancelInChannel {
                         meeting: Box::new(meeting),
                         channel: place.channel,
                         post,
                         message: None,
-                    })
-                    .await
-                    .map(|_| ()),
+                    };
+                    let touched = write.touched();
+                    core.write_event(write).await.map(|_| touched)
+                }
                 None => Err(teams_core::EngineError::CalendarUnread),
             };
             let _ = this.update(cx, |view, cx| {
                 view.removal = Removal::None;
                 match answer {
-                    Ok(()) => {
+                    Ok(touched) => {
                         view.close_card(cx);
-                        view.read(true, cx);
+                        view.written(&touched, cx);
                     }
                     Err(teams_core::EngineError::Stopped) => {}
                     Err(_) => view.say(EVENT_NOT_REMOVED, cx),
@@ -795,31 +823,37 @@ impl CalendarView {
             return;
         }
         let (start, end) = span.window_ms();
+        let since = self.writes;
         if !matches!(self.loaded.get(&span), Some(Loaded::Events(_) | Loaded::Stored(_))) {
             let stored = self.core.stored_calendar(start, end);
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let answer = stored.await;
-                let _ = this.update(cx, |view, cx| view.stored_over(span, answer, cx));
+                let _ = this.update(cx, |view, cx| view.stored_over(span, since, answer, cx));
             })
             .detach();
         }
         let reply = self.core.calendar(start, end);
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
-            let _ = this.update(cx, |view, cx| view.read_over(span, answer, cx));
+            let _ = this.update(cx, |view, cx| view.read_over(span, since, answer, cx));
         });
         self.reading = Some((span, task));
     }
 
-    /// What the store kept of `span` came: shown while its read hasn't answered (an answer that came first is kept, a
-    /// failed read gives way to it); nothing kept changes nothing.
+    /// What the store kept of `span` came, asked when the view had been told of `since` writes: shown while its read
+    /// hasn't answered (an answer that came first is kept, a failed read gives way to it); nothing kept, or an answer
+    /// asked before a write the view was told of since, changes nothing.
     fn stored_over(
         &mut self,
         span: Span,
+        since: u64,
         answer: Result<Vec<CalendarEvent>, teams_core::EngineError>,
         cx: &mut Context<Self>,
     ) {
         let Ok(events) = answer else { return };
+        if since != self.writes {
+            return;
+        }
         if events.is_empty() || matches!(self.loaded.get(&span), Some(Loaded::Events(_) | Loaded::Stored(_))) {
             return;
         }
@@ -829,15 +863,24 @@ impl CalendarView {
         cx.notify();
     }
 
+    /// The read of `span` answered, asked when the view had been told of `since` writes.
     fn read_over(
         &mut self,
         span: Span,
+        since: u64,
         answer: Result<Vec<CalendarEvent>, teams_core::EngineError>,
         cx: &mut Context<Self>,
     ) {
         if self.reading.as_ref().is_some_and(|(reading, _)| *reading == span) {
             self.reading = None;
         }
+        // asked before a write the view was told of since: it may hold what the write changed as it was, so it is
+        // dropped (and the span read again below)
+        let answer = if since == self.writes {
+            answer
+        } else {
+            Err(teams_core::EngineError::Stopped)
+        };
         match answer {
             Ok(events) => {
                 self.loaded.insert(span, Loaded::Events(Rc::new(shown(events))));

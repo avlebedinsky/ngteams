@@ -714,3 +714,156 @@ async fn a_kept_window_is_answered_by_a_later_engine_on_the_same_store() {
     assert_eq!(stored[0].id, "MadeUpEvent");
     rig.handle.shutdown();
 }
+
+const WEEK: i64 = 7 * 86_400_000;
+const MASTER: &str = "/api/mt/part/amer-03/v2.0/me/calendars/events/MadeUpMaster";
+const VIEW: &str = "/api/mt/part/amer-03/v2.0/me/calendars/default/calendarView";
+
+/// An occurrence of the made-up weekly series `MadeUpMaster`, on the Monday `week` weeks after `START`'s week.
+fn occurrence(week: i64, subject: &str) -> Value {
+    json!({
+        "objectId": format!("MadeUpOccurrence{week}"),
+        "subject": subject,
+        "startTime": format!("2026-11-{:02}T09:00:00Z", 2 + 7 * week),
+        "endTime": format!("2026-11-{:02}T09:30:00Z", 2 + 7 * week),
+        "eventType": "Occurrence",
+        "seriesMasterId": "MadeUpMaster",
+        "organizerAddress": MAIL_A,
+        "isOrganizer": true,
+        "myResponseType": "Organizer",
+    })
+}
+
+fn series_master(subject: &str) -> Value {
+    let mut master = occurrence(0, subject);
+    master["objectId"] = json!("MadeUpMaster");
+    master["eventType"] = json!("RecurringMaster");
+    master.as_object_mut().unwrap().remove("seriesMasterId");
+    master
+}
+
+/// The ids the store answers for `start..start + WEEK` now, with no wait: what a view drawn from it right after a
+/// confirmed write shows.
+async fn week_now(rig: &Rig, start: i64) -> Vec<String> {
+    let stored = rig.handle.stored_calendar(start, start + WEEK).await.unwrap();
+    stored.into_iter().map(|event| event.id).collect()
+}
+
+/// The week from `start` read, answered with `events`, and kept as `expected` (asked for a bounded while: the read's
+/// answer comes before the engine keeps it).
+async fn read_week(rig: &Rig, start: i64, events: Vec<Value>, expected: &[&str]) {
+    next_answer(&rig.server, "GET", VIEW, 200, json!({"value": events})).await;
+    rig.handle.calendar(start, start + WEEK).await.unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..100 {
+        ids = week_now(rig, start).await;
+        if ids == expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("stored {ids:?}, not {expected:?}");
+}
+
+#[tokio::test]
+async fn a_confirmed_write_leaves_no_kept_copy_of_what_it_changed_in_any_week() {
+    let rig = running_engine(true).await;
+    identity(&rig.server).await;
+    editable_calendar(&rig.server).await;
+    answer(&rig.server, "PUT", MASTER, 204, Value::Null).await;
+    answer(&rig.server, "DELETE", MASTER, 204, Value::Null).await;
+
+    // two weeks read and kept: the series' occurrence in each, the single event in the first
+    let first = ["MadeUpEvent", "MadeUpOccurrence0"];
+    read_week(&rig, START, vec![event(), occurrence(0, "Weekly sync")], &first).await;
+    read_week(
+        &rig,
+        START + WEEK,
+        vec![occurrence(1, "Weekly sync")],
+        &["MadeUpOccurrence1"],
+    )
+    .await;
+
+    // the series renamed: each week forgets its occurrence the moment the change is confirmed
+    let mut renamed = draft();
+    renamed.subject = "Renamed sync".to_owned();
+    renamed.attendees.clear();
+    rig.handle
+        .write_event(EventWrite::Update {
+            id: "MadeUpMaster".to_owned(),
+            event: series_master("Weekly sync").as_object().unwrap().clone(),
+            draft: renamed,
+        })
+        .await
+        .unwrap();
+    assert_eq!(week_now(&rig, START).await, ["MadeUpEvent"]);
+    assert!(week_now(&rig, START + WEEK).await.is_empty());
+
+    // read again as renamed, then the whole series deleted, with a read of the second week under way that began
+    // before the delete was confirmed and answers with the series as it was
+    read_week(&rig, START, vec![event(), occurrence(0, "Renamed sync")], &first).await;
+    read_week(
+        &rig,
+        START + WEEK,
+        vec![occurrence(1, "Renamed sync")],
+        &["MadeUpOccurrence1"],
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path(VIEW))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": [occurrence(1, "Renamed sync")]}))
+                .set_delay(std::time::Duration::from_millis(300)),
+        )
+        .with_priority(1)
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    let under_way = rig.handle.calendar(START + WEEK, START + 2 * WEEK);
+    rig.handle
+        .write_event(EventWrite::Delete {
+            id: "MadeUpMaster".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(week_now(&rig, START).await, ["MadeUpEvent"]);
+    assert!(week_now(&rig, START + WEEK).await.is_empty());
+    assert_eq!(under_way.await.unwrap().len(), 1, "its asker is answered");
+    for _ in 0..20 {
+        assert!(
+            week_now(&rig, START + WEEK).await.is_empty(),
+            "a read that began before the delete isn't kept"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    the_single_event_is_forgotten_once_changed_or_deleted_and_a_new_one_kept(&rig).await;
+    rig.handle.shutdown();
+}
+
+/// The single event of `START`'s week, kept: changed, read again, deleted; then a new one made.
+async fn the_single_event_is_forgotten_once_changed_or_deleted_and_a_new_one_kept(rig: &Rig) {
+    rig.handle
+        .write_event(EventWrite::Update {
+            id: "MadeUpEvent".to_owned(),
+            event: event().as_object().unwrap().clone(),
+            draft: draft(),
+        })
+        .await
+        .unwrap();
+    assert!(week_now(rig, START).await.is_empty());
+    read_week(rig, START, vec![event()], &["MadeUpEvent"]).await;
+    rig.handle
+        .write_event(EventWrite::Delete {
+            id: "MadeUpEvent".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert!(week_now(rig, START).await.is_empty());
+
+    // a new event is kept at once in the week it falls in
+    rig.handle.write_event(EventWrite::Create(draft())).await.unwrap();
+    assert_eq!(week_now(rig, START).await, ["MadeUpEvent"]);
+    assert!(week_now(rig, START + WEEK).await.is_empty());
+}

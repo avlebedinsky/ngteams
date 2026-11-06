@@ -62,7 +62,7 @@ fn window(
                 core,
                 trace,
                 seed,
-                Saved::new(move |_| {
+                Saved::new(move |_, _| {
                     finished.fetch_add(1, Ordering::SeqCst);
                 }),
                 window,

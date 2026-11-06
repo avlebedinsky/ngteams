@@ -1074,6 +1074,218 @@ fn split_close_and_add_again(view: &Entity<CalendarView>, cx: &mut VisualTestCon
     assert!(cx.update(|_, cx| view.read(cx).people().is_empty()));
 }
 
+/// An occurrence of the account's own made-up weekly series `own-master`, titled `subject`.
+fn own_occurrence(id: &str, subject: &str) -> teams_core::CalendarEvent {
+    let mut occurrence = event(id, 11);
+    occurrence.subject = subject.to_owned();
+    occurrence.kind = teams_core::EventKind::Occurrence;
+    occurrence.series_master_id = Some("own-master".to_owned());
+    occurrence
+}
+
+/// The series renamed, as the form's save sends it.
+fn renamed_series() -> EventWrite {
+    let at = teams_core::ZonedTime {
+        ms: 1_793_091_600_000,
+        offset_minutes: 0,
+    };
+    EventWrite::Update {
+        id: "own-master".to_owned(),
+        event: serde_json::Map::new(),
+        draft: teams_core::EventDraft {
+            subject: "Renamed sync".to_owned(),
+            start: at,
+            end: at,
+            time_zone: None,
+            zone: None,
+            all_day: false,
+            organizer: teams_core::Organizer {
+                mri: String::new(),
+                address: None,
+                name: None,
+            },
+            attendees: Vec::new(),
+            location: String::new(),
+            body_html: String::new(),
+            online: false,
+            show_as: teams_core::EventShowAs::Busy,
+            reminder_minutes: None,
+            private: false,
+            categories: Vec::new(),
+            recurrence: None,
+        },
+    }
+}
+
+/// Whether any of `subjects` is the series'.
+fn any_series(subjects: &[String]) -> bool {
+    subjects.iter().any(|subject| subject.ends_with(" sync"))
+}
+
+/// The subjects the view shows now, by start.
+fn shown_subjects(view: &Entity<CalendarView>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|_, cx| {
+        view.read(cx)
+            .events()
+            .map(|events| events.iter().map(|shown| shown.event.subject.clone()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// The read the view asked last, held, answered with `events`.
+fn answer_held(rig: &Rig, cx: &mut VisualTestContext, events: Vec<teams_core::CalendarEvent>) {
+    let held = rig.core.calendar.lock().unwrap().held.pop().expect("a read held");
+    held.send(Ok(events));
+    draw(cx);
+}
+
+/// Two work weeks read and held by the view, each with an occurrence of the account's series and the first with a
+/// single event; the store kept them too. The view is back on the first week.
+fn two_weeks_held(
+    rig: &Rig,
+) -> (
+    Entity<CalendarView>,
+    &'static mut VisualTestContext,
+    teams_core::CalendarEvent,
+) {
+    let single = event("single", 9);
+    rig.core.calendar.lock().unwrap().events = vec![own_occurrence("occ-1", "Weekly sync"), single.clone()];
+    let (view, cx, _) = window(rig);
+    rig.core.calendar.lock().unwrap().events = vec![own_occurrence("occ-2", "Weekly sync")];
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(true, cx)));
+    draw(cx);
+    assert_eq!(shown_subjects(&view, cx), ["Weekly sync"]);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(false, cx)));
+    draw(cx);
+    rig.core.calendar.lock().unwrap().stored = vec![
+        own_occurrence("occ-1", "Weekly sync"),
+        single.clone(),
+        own_occurrence("occ-2", "Weekly sync"),
+    ];
+    rig.core.calendar.lock().unwrap().hold = true;
+    (view, cx, single)
+}
+
+/// `write` saved by the form (answered, the fake store settled) and the view told what it touched.
+fn form_saved(rig: &Rig, view: &Entity<CalendarView>, cx: &mut VisualTestContext, write: EventWrite) {
+    answered(rig);
+    let touched = write.touched();
+    drop(rig.core.calendar.lock().unwrap().write(write));
+    cx.update(|_, cx| view.update(cx, |view, cx| view.written(&touched, cx)));
+    draw(cx);
+}
+
+#[test]
+fn no_week_or_view_shows_a_series_as_it_was_after_its_edit_or_its_delete() {
+    let rig = Rig::start();
+    let (view, cx, single) = two_weeks_held(&rig);
+    let single_title = std::slice::from_ref(&single.subject);
+    let with_series = [single.subject.clone(), "Renamed sync".to_owned()];
+
+    // the series renamed: until the read answers, the week shows no occurrence as it was
+    form_saved(&rig, &view, cx, renamed_series());
+    assert_eq!(shown_subjects(&view, cx), single_title);
+    answer_held(&rig, cx, vec![own_occurrence("occ-1", "Renamed sync"), single.clone()]);
+    assert_eq!(shown_subjects(&view, cx), with_series);
+    // the next week, held before the change: drawn from the store, which forgot the series, while it is read again
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(true, cx)));
+    draw(cx);
+    assert!(
+        !any_series(&shown_subjects(&view, cx)),
+        "no copy from before the change"
+    );
+    answer_held(&rig, cx, vec![own_occurrence("occ-2", "Renamed sync")]);
+    assert_eq!(shown_subjects(&view, cx), ["Renamed sync"]);
+    rig.core.calendar.lock().unwrap().stored = vec![
+        own_occurrence("occ-1", "Renamed sync"),
+        single.clone(),
+        own_occurrence("occ-2", "Renamed sync"),
+    ];
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(false, cx)));
+    draw(cx);
+    assert_eq!(shown_subjects(&view, cx), with_series);
+
+    // the whole series deleted from its card, with a read under way that began before: neither this week, Week view
+    // nor the next week shows an occurrence while their reads are held
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.set_shown(false, window, cx);
+            view.set_shown(true, window, cx);
+        });
+    });
+    let shown = Shown::of(std::rc::Rc::new(own_occurrence("occ-1", "Renamed sync"))).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    draw(cx);
+    answered(&rig);
+    click(cx, "calendar-card-remove");
+    click(cx, "calendar-card-remove-series");
+    click(cx, "calendar-card-remove-confirm");
+    assert!(matches!(
+        rig.core.calendar.lock().unwrap().writes.as_slice(),
+        [_, EventWrite::Delete { id }] if id == "own-master"
+    ));
+    assert_eq!(shown_subjects(&view, cx), single_title);
+    // the read from before the delete answers with the series as it was: dropped
+    let before = rig.core.calendar.lock().unwrap().held.remove(0);
+    before.send(Ok(vec![own_occurrence("occ-1", "Renamed sync"), single.clone()]));
+    draw(cx);
+    assert_eq!(shown_subjects(&view, cx), single_title);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_mode(Mode::Week, cx)));
+    draw(cx);
+    assert_eq!(shown_subjects(&view, cx), single_title, "drawn from the store");
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(true, cx)));
+    draw(cx);
+    assert!(!any_series(&shown_subjects(&view, cx)));
+}
+
+#[test]
+fn no_view_shows_a_single_event_as_it_was_after_its_edit_or_its_delete() {
+    let rig = Rig::start();
+    let (view, cx, single) = two_weeks_held(&rig);
+    let renamed_single = |subject: &str| {
+        let mut renamed = single.clone();
+        renamed.subject = subject.to_owned();
+        renamed
+    };
+
+    // renamed: until the read answers, the old title isn't shown, the series' occurrence is
+    let EventWrite::Update { event, draft, .. } = renamed_series() else {
+        unreachable!("an update")
+    };
+    let rename = EventWrite::Update {
+        id: "single".to_owned(),
+        event,
+        draft,
+    };
+    form_saved(&rig, &view, cx, rename);
+    assert_eq!(shown_subjects(&view, cx), ["Weekly sync"]);
+    answer_held(
+        &rig,
+        cx,
+        vec![own_occurrence("occ-1", "Weekly sync"), renamed_single("Renamed")],
+    );
+    assert_eq!(shown_subjects(&view, cx), ["Renamed", "Weekly sync"]);
+    rig.core.calendar.lock().unwrap().stored = vec![own_occurrence("occ-1", "Weekly sync"), renamed_single("Renamed")];
+
+    // deleted from its card: gone at once, and Week and Month view, drawn from the store, don't show it
+    let shown = Shown::of(std::rc::Rc::new(renamed_single("Renamed"))).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    draw(cx);
+    answered(&rig);
+    click(cx, "calendar-card-remove");
+    click(cx, "calendar-card-remove-confirm");
+    assert!(matches!(
+        rig.core.calendar.lock().unwrap().writes.as_slice(),
+        [_, EventWrite::Delete { id }] if id == "single"
+    ));
+    assert_eq!(shown_subjects(&view, cx), ["Weekly sync"]);
+    for mode in [Mode::Week, Mode::Month] {
+        cx.update(|_, cx| view.update(cx, |view, cx| view.set_mode(mode, cx)));
+        draw(cx);
+        assert_eq!(shown_subjects(&view, cx), ["Weekly sync"], "{mode:?}");
+    }
+}
+
 #[test]
 fn a_meeting_meet_now_couldn_t_make_says_so_and_the_dialog_stays() {
     let rig = Rig::start();

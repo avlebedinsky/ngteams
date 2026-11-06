@@ -132,7 +132,9 @@ use teams_trouter::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable, MeetingAvailability, WindowRead};
+use crate::calendar::{
+    Calendar, CalendarDone, EventWrite, EventWritten, Invitable, MeetingAvailability, WindowRead, WriteOver,
+};
 use crate::channels::{ChannelDraft, ChannelMade, ChannelProblem, Channels, Finished};
 use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
 use crate::team_admin::{TeamAsk, TeamChange, TeamMember, TeamWritten};
@@ -2333,19 +2335,44 @@ where
             Background::Teams(read) => self.on_teams(read),
             Background::Presence(polled) => self.on_presence(polled),
             Background::Channel(finished) => self.on_channel(finished),
-            Background::Calendar(read) => self.on_calendar(read),
+            Background::Calendar(CalendarDone::Read(read)) => self.on_calendar(read),
+            Background::Calendar(CalendarDone::Written(written)) => self.on_event_written(written),
         }
     }
 
-    /// A calendar window's read is over (`None`: it failed): kept in the store, its asker answered already.
+    /// A calendar window's read is over (`None`: it failed): kept in the store, its asker answered already; unless a
+    /// write was over since it began (it may hold what the write changed as it was: [`crate::calendar`]).
     fn on_calendar(&mut self, read: Option<WindowRead>) {
         let Some(read) = read else { return };
+        if read.since != self.calendar.writes_over() {
+            return;
+        }
         if let Err(error) = self
             .store
             .replace_calendar_window(read.start_ms, read.end_ms, &read.events)
         {
             self.failed("storing the calendar", error);
         }
+    }
+
+    /// A calendar write is over (`None`: its task was lost, the asker told by its reply's end): the store settled
+    /// ([`crate::calendar::settle_write`]) before its asker hears of it, so whatever the calendar draws from the store
+    /// afterwards shows nothing the write changed as it was.
+    fn on_event_written(&mut self, written: Option<Box<WriteOver>>) {
+        let Some(WriteOver {
+            answer,
+            touched,
+            kept,
+            reply,
+        }) = written.map(|written| *written)
+        else {
+            return;
+        };
+        self.calendar.write_over();
+        if let Err(error) = crate::calendar::settle_write(&mut self.store, &touched, kept.as_ref()) {
+            self.failed("storing the calendar", error);
+        }
+        let _ = reply.send(answer);
     }
 
     /// A channel's write or wait is over (`None`: its task was lost, the asker told by its reply's end): a channel made
@@ -3136,7 +3163,7 @@ enum Background {
     Teams(Option<Result<TeamsRead, TeamsReadError>>),
     Presence(Option<PresenceDone>),
     Channel(Option<Finished>),
-    Calendar(Option<WindowRead>),
+    Calendar(CalendarDone),
 }
 
 /// The next read in the background to be over, a person's lookup, the teams', the presence read or a calendar window's;
@@ -3153,7 +3180,7 @@ async fn background<C: Credentials + 'static, T: Transport<Error = HttpError> + 
         read = teams.next(), if teams.busy() => Background::Teams(read),
         polled = presences.next(), if presences.busy() => Background::Presence(polled),
         finished = channels.next(), if channels.busy() => Background::Channel(finished),
-        read = calendar.next(), if calendar.busy() => Background::Calendar(read),
+        done = calendar.next(), if calendar.busy() => Background::Calendar(done),
         else => pending().await,
     }
 }

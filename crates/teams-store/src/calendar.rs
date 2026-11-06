@@ -1,7 +1,9 @@
 //! The account's calendar events as the calendar view last read them (schema 16), so a later run shows them at once
 //! while it reads them again. Each read of a window replaces the stored events that window overlaps: an event the
 //! service no longer gives there (deleted, moved away, a declined occurrence it dropped) goes, one it gives is kept as
-//! it came. An event is kept as its JSON object, as text: `teams-proto` reads it, the store only places it.
+//! it came. A write the service confirmed changes them at once: the events it left out of date are forgotten, a new
+//! event kept ([`Store::forget_calendar_events`], [`Store::keep_calendar_events`]). An event is kept as its JSON
+//! object, as text: `teams-proto` reads it, the store only places it.
 
 use std::fmt;
 
@@ -77,17 +79,52 @@ impl Store {
             &format!("DELETE FROM calendar_events WHERE {OVERLAPS}"),
             params![start_ms, end_ms],
         )?;
+        put(&tx, events)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keeps `events` (a new event, as its creation's answer gave it) beside what is stored, in one transaction; one
+    /// stored under the same id is replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails; nothing changed then.
+    pub fn keep_calendar_events(&mut self, events: &[StoredEvent]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        put(&tx, events)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forgets the stored events `ids` (ones a confirmed write changed, cancelled or deleted), in one transaction; an
+    /// id not stored is passed over.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails; nothing changed then.
+    pub fn forget_calendar_events(&mut self, ids: &[String]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
         {
-            let mut row = tx.prepare_cached(
-                "INSERT INTO calendar_events (id, start_ms, end_ms, entry) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (id) DO UPDATE SET start_ms = excluded.start_ms, end_ms = excluded.end_ms,
-                 entry = excluded.entry",
-            )?;
-            for event in events {
-                row.execute(params![event.id, event.start_ms, event.end_ms, event.entry])?;
+            let mut row = tx.prepare_cached("DELETE FROM calendar_events WHERE id = ?1")?;
+            for id in ids {
+                row.execute(params![id])?;
             }
         }
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Puts `events` in, each replacing one stored under its id; of an id given twice the last is kept.
+fn put(tx: &rusqlite::Transaction<'_>, events: &[StoredEvent]) -> Result<(), StoreError> {
+    let mut row = tx.prepare_cached(
+        "INSERT INTO calendar_events (id, start_ms, end_ms, entry) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (id) DO UPDATE SET start_ms = excluded.start_ms, end_ms = excluded.end_ms,
+         entry = excluded.entry",
+    )?;
+    for event in events {
+        row.execute(params![event.id, event.start_ms, event.end_ms, event.entry])?;
+    }
+    Ok(())
 }

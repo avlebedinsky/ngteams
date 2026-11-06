@@ -292,13 +292,17 @@ impl CalendarEvent {
     /// itself), a series' master too; `None` when it doesn't read.
     #[must_use]
     pub fn created(body: &[u8]) -> Option<Self> {
-        let answer: Value = serde_json::from_slice(body).ok()?;
-        let event = match answer.get("value") {
-            Some(Value::Array(events)) => events.first()?,
-            Some(event @ Value::Object(_)) => event,
-            _ => &answer,
-        };
-        Self::of(event)
+        Self::of(&created_entry(body)?)
+    }
+
+    /// The new event a creation's answer gives ([`Self::created`]) and its entry as text, as the calendar view's
+    /// answer keeps its events ([`CalendarAnswer::entries`]): what the store keeps of it. `None` when it doesn't read,
+    /// or is a series' master (the calendar view gives a series as its occurrences).
+    #[must_use]
+    pub fn created_kept(body: &[u8]) -> Option<(Self, String)> {
+        let entry = created_entry(body)?;
+        let event = Self::of(&entry).filter(|event| event.kind != EventKind::RecurringMaster)?;
+        Some((event, entry.to_string()))
     }
 
     /// The event a kept answer's entry gives ([`CalendarAnswer::entries`]), read as the answer was; `None` when it
@@ -361,6 +365,16 @@ impl CalendarEvent {
             series_master_id: text("seriesMasterId"),
             channel_meeting: ChannelEventRef::of(entry),
         })
+    }
+}
+
+/// The event a creation's answer gives: `{"value": [<event>]}` as captured, `{"value": <event>}`, or the event itself.
+fn created_entry(body: &[u8]) -> Option<Value> {
+    let answer: Value = serde_json::from_slice(body).ok()?;
+    match answer.get("value") {
+        Some(Value::Array(events)) => events.first().cloned(),
+        Some(event @ Value::Object(_)) => Some(event.clone()),
+        _ => Some(answer),
     }
 }
 

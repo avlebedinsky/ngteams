@@ -88,20 +88,24 @@ pub enum Seed {
     ChangeInChannel { full: Box<FullEvent>, place: MeetingPlace },
 }
 
-/// What a Save that went through tells the calendar: read its days again.
+/// What a write that went through tells the calendar: what it touched ([`teams_core::Touched`]), so no copy of it is
+/// shown as it was.
 #[derive(Clone)]
-pub struct Saved(Rc<dyn Fn(&mut App)>);
+pub struct Saved(Rc<OnSaved>);
+
+/// What [`Saved`] calls.
+type OnSaved = dyn Fn(&teams_core::Touched, &mut App);
 
 impl Saved {
     #[must_use]
-    pub fn new(saved: impl Fn(&mut App) + 'static) -> Self {
+    pub fn new(saved: impl Fn(&teams_core::Touched, &mut App) + 'static) -> Self {
         Self(Rc::new(saved))
     }
 
     /// Nothing to tell (a test's form).
     #[must_use]
     pub fn nothing() -> Self {
-        Self::new(|_| {})
+        Self::new(|_, _| {})
     }
 }
 
@@ -924,6 +928,7 @@ impl EventForm {
 
     fn send(&mut self, write: EventWrite, cx: &mut Context<Self>) {
         let kind = write.kind();
+        let touched = write.touched();
         self.problem = None;
         let reply = self.core.write_event(write);
         self.saving = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -933,7 +938,7 @@ impl EventForm {
                 match answer {
                     Ok(_) => {
                         form.trace.record(&TraceLine::new("event-form", "saved").kind(kind));
-                        (form.saved.0)(cx);
+                        (form.saved.0)(&touched, cx);
                         form.close(cx);
                     }
                     Err(error) => {

@@ -106,6 +106,59 @@ fn an_id_given_twice_keeps_the_last() -> Result<(), StoreError> {
 }
 
 #[test]
+fn a_confirmed_write_forgets_the_events_it_touched_in_every_week_and_keeps_a_new_one() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    // two weeks read: a weekly series' occurrence in each, and an event of their own
+    let first = [
+        event("occ-1", MONDAY + 9 * HOUR, MONDAY + 10 * HOUR, "Weekly"),
+        event("own-1", MONDAY + 11 * HOUR, MONDAY + 12 * HOUR, "Kept"),
+    ];
+    let second = [
+        event(
+            "occ-2",
+            MONDAY + 7 * DAY + 9 * HOUR,
+            MONDAY + 7 * DAY + 10 * HOUR,
+            "Weekly",
+        ),
+        event(
+            "own-2",
+            MONDAY + 7 * DAY + 11 * HOUR,
+            MONDAY + 7 * DAY + 12 * HOUR,
+            "Kept",
+        ),
+    ];
+    store.replace_calendar_window(MONDAY, MONDAY + 7 * DAY, &first)?;
+    store.replace_calendar_window(MONDAY + 7 * DAY, MONDAY + 14 * DAY, &second)?;
+    store.forget_calendar_events(&["occ-1".to_owned(), "occ-2".to_owned(), "never-stored".to_owned()])?;
+    assert_eq!(
+        ids(&store.calendar_events(MONDAY, MONDAY + 14 * DAY)?),
+        ["own-1", "own-2"]
+    );
+
+    let created = event("new", MONDAY + 7 * DAY + 14 * HOUR, MONDAY + 7 * DAY + 15 * HOUR, "New");
+    store.keep_calendar_events(std::slice::from_ref(&created))?;
+    assert_eq!(
+        ids(&store.calendar_events(MONDAY + 7 * DAY, MONDAY + 14 * DAY)?),
+        ["own-2", "new"],
+        "kept beside the week's other events"
+    );
+    let renamed = event(
+        "new",
+        MONDAY + 7 * DAY + 14 * HOUR,
+        MONDAY + 7 * DAY + 15 * HOUR,
+        "Renamed",
+    );
+    store.keep_calendar_events(std::slice::from_ref(&renamed))?;
+    assert_eq!(
+        store.calendar_events(MONDAY + 7 * DAY + 14 * HOUR, MONDAY + 7 * DAY + 15 * HOUR)?,
+        [renamed],
+        "one kept again replaces it"
+    );
+    Ok(())
+}
+
+#[test]
 fn debug_leaves_the_entry_out() {
     let shown = format!("{:?}", event("one", MONDAY, MONDAY + HOUR, "A private subject"));
     assert!(shown.contains("one"));

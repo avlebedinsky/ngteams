@@ -60,12 +60,18 @@ impl CalendarFake {
             self.held_writes.push(answer);
             reply
         } else {
-            Reply::ready(self.write_answers.pop_front().unwrap_or_else(|| {
+            let answer = self.write_answers.pop_front().unwrap_or_else(|| {
                 Err(EngineError::EventNotSaved {
                     kind,
                     why: "nothing saves here".to_owned(),
                 })
-            }))
+            });
+            // as the engine does before it answers: the store forgets what the write touched
+            if answer.is_ok() {
+                let touched = self.writes.last().map(EventWrite::touched).unwrap_or_default();
+                self.stored.retain(|event| !touched.touches(event));
+            }
+            Reply::ready(answer)
         }
     }
 }

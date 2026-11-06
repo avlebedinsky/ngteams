@@ -59,7 +59,7 @@ pub mod teams;
 pub mod thumbnails;
 mod workflows;
 
-pub use calendar::{EventWrite, EventWritten, Invitable, MeetingAvailability};
+pub use calendar::{EventWrite, EventWritten, Invitable, MeetingAvailability, Touched};
 pub use calling::{
     CallAction, CallActionError, CallCaptions, CallHealth, CallMedia, CallParticipant, CallParts, CallRecording,
     CallStatus, CallVideo, CallView, Caption, CaptionPhase, GROUP_SLOTS, IncomingCall, LobbyPerson, RecordingPhase,
