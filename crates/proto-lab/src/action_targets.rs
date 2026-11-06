@@ -167,10 +167,7 @@ impl ActionTargets {
             if !observations.identity || observations.mismatch {
                 return Err("the active account is not the expected scenario identity".to_owned());
             }
-            observations
-                .credential
-                .clone()
-                .ok_or("no own-account chat read credential")?
+            observations.credential.clone().ok_or(NO_CREDENTIAL)?
         };
         let members_endpoint = expected.ends_with("@thread.v2");
         if !members_endpoint && !expected.ends_with("@unq.gbl.spaces") {
@@ -234,6 +231,9 @@ impl ActionTargets {
             .map_err(str::to_owned)
     }
 }
+
+/// Why a recipients' read can't go yet: the page has made no chat read of its own account whose credential it reuses.
+pub(crate) const NO_CREDENTIAL: &str = "no own-account chat read credential";
 
 fn credential(request: &Value) -> Option<Credential> {
     let mut base = Url::parse(request["url"].as_str()?).ok()?;

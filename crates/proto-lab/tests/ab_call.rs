@@ -73,6 +73,7 @@ fn a_callee_s_capture_counts_the_ring_time_sends_its_fence_let_through() {
 #[test]
 fn each_account_expects_only_its_step_s_own_first_message_holds() {
     assert_eq!(CallStep::KeepAlive.as_str(), "keep-alive");
+    assert_eq!(CallStep::Steps.as_str(), "steps");
     assert_eq!(CallStep::KeepAlive.callee_action(), CallStep::Answer.callee_action());
     assert_eq!(CallStep::default(), CallStep::Answer);
     let names: Vec<&str> = [

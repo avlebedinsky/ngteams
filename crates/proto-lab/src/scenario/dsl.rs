@@ -44,6 +44,8 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a navigation waits for its answer before it looks for a dialog holding it ([`navigate_tab`]).
 pub const DIALOG_WAIT: Duration = Duration::from_secs(5);
+/// How long a recipients' check waits for a page to make a chat read of its own account before it gives up.
+pub const CREDENTIAL_WAIT: Duration = Duration::from_secs(15);
 
 /// Why [`navigate_tab`] failed.
 #[derive(Debug, thiserror::Error)]
@@ -344,18 +346,31 @@ impl Driver {
     /// Fails on unknown actor evidence, an unavailable or incomplete read, or a mismatch with the scenario's
     /// declared participants.
     pub async fn preflight_recipients(&mut self, step: &str, expected_chat: &str) -> Result<(), StepError> {
-        self.drain();
-        let targets = self.action_targets.as_ref().ok_or_else(|| StepError::Failed {
-            step: step.to_owned(),
-            reason: "no explicit lab action target context".to_owned(),
-        })?;
-        targets
-            .recipients(expected_chat)
-            .await
-            .map_err(|reason| StepError::Failed {
+        // a page that made no chat read of its own yet (a callee's on the Calls app) gets a while to make one
+        let deadline = tokio::time::Instant::now() + CREDENTIAL_WAIT;
+        loop {
+            self.drain();
+            let targets = self.action_targets.as_ref().ok_or_else(|| StepError::Failed {
                 step: step.to_owned(),
-                reason,
-            })
+                reason: "no explicit lab action target context".to_owned(),
+            })?;
+            match targets.recipients(expected_chat).await {
+                Err(reason)
+                    if reason == crate::action_targets::NO_CREDENTIAL && tokio::time::Instant::now() < deadline =>
+                {
+                    // the deadline passing is the read's own failure, said below on the next round
+                    let _ = self
+                        .wait_for_events(step, deadline, CREDENTIAL_WAIT, "a chat read of the page's account")
+                        .await;
+                }
+                answer => {
+                    return answer.map_err(|reason| StepError::Failed {
+                        step: step.to_owned(),
+                        reason,
+                    });
+                }
+            }
+        }
     }
 
     /// Checks the exact selected conversation and fresh full membership immediately before an action.

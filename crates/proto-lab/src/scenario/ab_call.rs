@@ -47,6 +47,10 @@ pub enum CallStep {
     /// As `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past the call's keep-alive interval, to record its
     /// keep-alive on the call's own `callLeg` link: every page must have sent one.
     KeepAlive,
+    /// As `answer`, and once the call is up the caller's page is driven step by step over `PROTO_LAB_STEPS_SOCKET`
+    /// (`team-manage`'s steps: `shot`, `click`, `point`, …) until a `quit`: how the call screen looks and what its
+    /// controls send.
+    Steps,
 }
 
 impl CallStep {
@@ -63,6 +67,7 @@ impl CallStep {
             Self::Dropped => "dropped",
             Self::Join => "join",
             Self::KeepAlive => "keep-alive",
+            Self::Steps => "steps",
         }
     }
 
@@ -71,10 +76,12 @@ impl CallStep {
     #[must_use]
     pub fn callee_action(self) -> Option<CalleeAction> {
         match self {
-            Self::Answer | Self::Video | Self::Dropped | Self::Join | Self::KeepAlive => Some(CalleeAction {
-                button: ACCEPT_AUDIO_CSS,
-                what: "answer",
-            }),
+            Self::Answer | Self::Video | Self::Dropped | Self::Join | Self::KeepAlive | Self::Steps => {
+                Some(CalleeAction {
+                    button: ACCEPT_AUDIO_CSS,
+                    what: "answer",
+                })
+            }
             Self::Decline => Some(CalleeAction {
                 button: DECLINE_CSS,
                 what: "decline",
@@ -652,7 +659,7 @@ impl CallPlan {
         }
         if matches!(
             self.step,
-            CallStep::Answer | CallStep::Video | CallStep::Dropped | CallStep::KeepAlive
+            CallStep::Answer | CallStep::Video | CallStep::Dropped | CallStep::KeepAlive | CallStep::Steps
         ) {
             converse(self.step, caller, callees, report, self.pauses).await?;
         }
@@ -1286,6 +1293,7 @@ async fn converse(
         CallStep::Video => show_video(caller, callees, report, pauses).await?,
         CallStep::Dropped => drop_off(caller, callees, report, pauses).await?,
         CallStep::KeepAlive => keep_alive(caller, callees, report, pauses).await,
+        CallStep::Steps => steps(caller, report).await?,
         _ => {}
     }
     for (alias, session) in callees.iter_mut() {
@@ -1375,6 +1383,27 @@ pub(crate) async fn note_microphone(alias: Alias, session: &LabSession, report: 
 /// How long `keep-alive` holds the answered call: past the call's keep-alive interval (`callKeepAliveInterval`, 2700 s
 /// in every capture; the web client sends its keep-alive at 90 % of it).
 pub const KEEP_ALIVE_HOLD: Duration = Duration::from_mins(47);
+/// `steps`: the caller's page driven over `PROTO_LAB_STEPS_SOCKET` until a `quit` ([`super::team_manage::serve`]),
+/// `seen` looking at the call's services.
+async fn steps(caller: &mut LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+    let socket: std::path::PathBuf = std::env::var_os("PROTO_LAB_STEPS_SOCKET")
+        .map(Into::into)
+        .ok_or_else(|| ScenarioError::Setup("PROTO_LAB_STEPS_SOCKET names no socket".to_owned()))?;
+    let mut drive = caller.driver();
+    let served = super::team_manage::serve(CALLER, caller, &mut drive, report, &socket, &CALL_SERVICES).await;
+    let _ = std::fs::remove_file(&socket);
+    served
+}
+
+/// The services `steps`' `seen` looks at: the middle tier, CSA, the chat service, and the call services.
+const CALL_SERVICES: [&str; 5] = [
+    "/api/mt/",
+    "/api/csa/",
+    "/api/chatsvc/",
+    "api.flightproxy.teams.microsoft.com/",
+    ".skype.com/",
+];
+
 /// How often a long hold looks whether the caller's call screen still shows.
 const HOLD_CHECK: Duration = Duration::from_secs(60);
 
