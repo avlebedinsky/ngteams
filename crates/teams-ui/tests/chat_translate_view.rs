@@ -261,7 +261,7 @@ fn message_writes(rig: &Rig) -> Vec<Action> {
 
 #[test]
 fn a_send_being_translated_goes_as_it_was_sent_and_a_cancelled_edit_s_goes_not_at_all() {
-    use teams_ui::compose::{Loaded, Mode};
+    use teams_ui::compose::{Loaded, Mode, TRANSLATING_FIRST};
     use teams_ui::editor::doc::{Block, Doc};
 
     let rig = Rig::start();
@@ -278,20 +278,37 @@ fn a_send_being_translated_goes_as_it_was_sent_and_a_cancelled_edit_s_goes_not_a
         quotes: Vec::new(),
     };
 
-    // an edit started while a new message is translated: the message goes as the new one it was sent as, and the edit
-    // stays in the box
+    // while a new message is translated: no edit starts (the message stays in the box as it was sent, to go or to be
+    // sent again), a file attached stays, and the message goes as the post it was sent as, leaving the box
     send(&view, cx, "Hallo");
     cx.update(|_, cx| assert!(compose.read(cx).translating()));
     cx.update(|window, cx| compose.update(cx, |compose, cx| compose.edit("1002".to_owned(), lunch(), window, cx)));
+    cx.update(|_, cx| {
+        assert_eq!(compose.read(cx).problem().cloned(), Some(TRANSLATING_FIRST.into()));
+        assert_eq!(*compose.read(cx).mode(), Mode::New);
+    });
+    let file = dir.path().join("made-up-notes.txt");
+    fs::write(&file, "synthetic").unwrap();
+    cx.update(|window, cx| {
+        compose.update(cx, |compose, cx| {
+            compose.attach_files(std::slice::from_ref(&file), window, cx);
+        });
+    });
     until(cx, |_| !message_writes(&rig).is_empty());
     assert_eq!(sent_texts(&rig), ["EN Hallo"]);
-    assert_eq!(message_writes(&rig).len(), 1, "no edit went");
+    assert_eq!(message_writes(&rig).len(), 1);
     cx.update(|_, cx| {
-        assert!(matches!(compose.read(cx).mode(), Mode::Edit { message_id, .. } if message_id == "1002"));
-        assert_eq!(compose.read(cx).value(cx).trim(), "Lunch?");
+        assert_eq!(compose.read(cx).value(cx).trim(), "", "what was sent left the box");
+        assert_eq!(
+            compose.read(cx).attachments().len(),
+            1,
+            "the file attached meanwhile stays"
+        );
     });
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.discard(window, cx)));
 
-    // the edit sent, then cancelled while it is translated: nothing of it goes
+    // an edit sent, then cancelled while it is translated: nothing of it goes
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.edit("1002".to_owned(), lunch(), window, cx)));
     cx.update(|window, cx| compose.update(cx, |compose, cx| compose.send(window, cx)));
     cx.update(|_, cx| assert!(compose.read(cx).translating()));
     cx.update(|window, cx| compose.update(cx, |compose, cx| compose.cancel(window, cx)));

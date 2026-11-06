@@ -1,5 +1,6 @@
 //! A send in a translated chat ([`crate::chat_translate`]): the message is translated into the chat's language before
-//! it goes to the outbox, the one write path; until then it stays in the box, which says it is being translated. When
+//! it goes to the outbox, the one write path; until then it stays in the box, which says it is being translated and
+//! starts no reply or edit meanwhile (the message stays as it was sent, to go as that or be sent again). When
 //! translating fails nothing is sent: the box keeps the message and says why, with Try again and Send without
 //! translating (the message as written). Once it went out, the chat's translation keeps it as written, so the account
 //! keeps seeing what it wrote.

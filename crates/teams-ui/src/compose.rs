@@ -497,6 +497,8 @@ pub const NO_APPS: &str = "Actions and apps aren't available in this app";
 
 /// What every box says in the app's read-only mode ([`crate::Core::read_only`]): nothing is sent from it.
 pub const READ_ONLY_APP: &str = "Read-only: this window sends nothing";
+/// What the box says when a reply or an edit is started while the message sent is translated.
+pub const TRANSLATING_FIRST: &str = "Wait for your message to be translated and sent first.";
 
 /// What a channel's box says while it is empty ([`Compose::in_channel`]): "Message in <channel>", as Teams' does.
 #[must_use]
@@ -940,6 +942,10 @@ impl Compose {
         if self.sending_files > 0 {
             return self.show_problem("Wait for your files to finish sending before starting a reply.", cx);
         }
+        // the message being translated stays in the box as it was sent, to go or, failing, to be sent again as it was
+        if self.translating() {
+            return self.show_problem(TRANSLATING_FIRST, cx);
+        }
         if self.read_only.is_some() {
             return;
         }
@@ -961,6 +967,9 @@ impl Compose {
         }
         if self.sending_files > 0 {
             return self.show_problem("Wait for your files to finish sending before editing a message.", cx);
+        }
+        if self.translating() {
+            return self.show_problem(TRANSLATING_FIRST, cx);
         }
         if !self.attachments.is_empty() {
             return self.show_problem("Send or remove your attachments before editing a message.", cx);
@@ -1078,7 +1087,7 @@ impl Compose {
 
     /// Writes `sending` through the outbox as `from`, what the send took from the box, says (a post, a reply, an
     /// edit), and empties the box; a send held for its translation (`held`) leaves the box as it is when anything in it
-    /// changed meanwhile (what was typed, an edit or a reply started, files added), taking out only what it sent.
+    /// changed meanwhile (what was typed, files added), taking out only what it sent.
     fn write_built(
         &mut self,
         sending: translated::Sending,
@@ -1150,6 +1159,10 @@ impl Compose {
         );
         cx.emit(ComposeEvent::Sent);
         if keep_box {
+            // what was sent leaves the box; what changed in it since stays
+            if *self.editor.read(cx).doc() == from.doc {
+                self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
+            }
             if self.mode == from.mode {
                 self.mode = Mode::New;
             }
