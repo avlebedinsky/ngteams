@@ -13,6 +13,9 @@
 
 pub mod common;
 // the shell's parts over the rig
+#[expect(dead_code, reason = "this test uses part of the fake tool")]
+#[path = "support/fake_translator.rs"]
+mod fake_translator;
 #[path = "common/parts.rs"]
 mod parts;
 
@@ -28,7 +31,8 @@ use teams_ui::ViewTrace;
 use teams_ui::chat_view::{ChatView, MessageAction, PAGE, READ_DEBOUNCE};
 use teams_ui::compose::Mode;
 use teams_ui::global_search::{Mode as SearchMode, SUGGEST_DELAY, Suggestion};
-use teams_ui::search::{MAX_HITS, MIN_QUERY, YOU, searchable, split_snippet};
+use teams_ui::local_ai::{Backend, Tools};
+use teams_ui::search::{MAX_HITS, MIN_QUERY, YOU, marked_terms, searchable, snippet_line, split_snippet};
 use teams_ui::settings::Settings;
 use teams_ui::shell::{Main, Shell};
 
@@ -1254,4 +1258,71 @@ fn a_snippet_s_marks_become_the_ranges_of_its_matches() {
     let (text, matched) = split_snippet(&format!("a{MATCH_END}b{MATCH_START}{MATCH_END}c"));
     assert_eq!(text, "abc");
     assert!(matched.is_empty());
+}
+
+#[test]
+fn a_translated_chat_s_found_message_shows_in_its_language() {
+    let rig = seeded();
+    {
+        let mut messages = rig.core.messages.lock().unwrap();
+        let old = messages
+            .get_mut(AB)
+            .unwrap()
+            .iter_mut()
+            .find(|message| message.id == OLD)
+            .unwrap();
+        old.message_type = "Text".to_owned();
+        old.content = "the zeppelin plan".to_owned();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let program = fake_translator::fake(dir.path(), fake_translator::FAKE_CLAUDE);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, program)])));
+    let mut settings = Settings::default();
+    settings.set_chat_language(LAB_A, AB, Some("de"));
+    let (trace, written) = trace();
+    let parts = parts::parts(&rig, settings, trace);
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    draw(cx);
+    search_for(cx, "zeppelin");
+    let snippet_of = |hits: &[(String, String, String, String, String)], id: &str| {
+        hits.iter()
+            .find(|hit| hit.1 == id)
+            .map(|hit| hit.4.clone())
+            .unwrap_or_default()
+    };
+    let mut hits = result_hits(&shell, cx);
+    for _ in 0..1500 {
+        if snippet_of(&hits, OLD).starts_with("DE") {
+            break;
+        }
+        cx.executor().advance_clock(teams_ui::chat_translate::previews::GATHER);
+        draw(cx);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        hits = result_hits(&shell, cx);
+    }
+    assert_eq!(snippet_of(&hits, OLD), "DE the zeppelin plan");
+    // the account's own shows as written; a chat not translated as found
+    assert!(snippet_of(&hits, "9001").contains("zeppelin again"));
+    assert!(snippet_of(&hits, "9002").contains("a zeppelin in the trio"));
+    let text = written.text();
+    assert!(!text.contains("DE the"), "nothing translated is traced");
+}
+
+#[test]
+fn a_translated_card_marks_the_query_s_words_where_they_are() {
+    assert_eq!(marked_terms("Der Zeppelin-Plan, zeppelin", "zeppelin"), [4..12, 19..27]);
+    assert_eq!(
+        marked_terms("nothing here", "zeppelin plan"),
+        Vec::<std::ops::Range<usize>>::new()
+    );
+    // a text whose lowercase changes its length isn't marked
+    assert!(marked_terms("İstanbul zeppelin", "zeppelin").is_empty());
+    assert_eq!(snippet_line("  two\n lines  "), "two lines");
+    let long = "word ".repeat(100);
+    let cut = snippet_line(&long);
+    assert_eq!(cut.chars().count(), teams_ui::search::SNIPPET_CHARS);
+    assert!(cut.ends_with('…'));
 }

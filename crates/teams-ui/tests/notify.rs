@@ -12,6 +12,9 @@
 #![cfg(test)]
 
 mod common;
+#[expect(dead_code, reason = "this test uses part of the fake tool")]
+#[path = "support/fake_translator.rs"]
+mod fake_translator;
 #[path = "common/notices.rs"]
 mod notices;
 
@@ -25,6 +28,7 @@ use teams_core::{CLOCK_SKEW_MS, Event, MessageChange, Source};
 use teams_store::{Applied, ConversationKind, Member, Message, ReadHorizon};
 use teams_trouter::Down;
 use teams_ui::ViewTrace;
+use teams_ui::local_ai::{Backend, Tools};
 use teams_ui::notify::{GATHER, Notice, NoticeKind, Notifier, NotifierEvent, may_notify};
 use teams_ui::settings::{Notifications, Settings, SettingsModel};
 
@@ -773,4 +777,72 @@ fn what_comes_before_a_server_is_given_is_never_shown() {
     n.settle();
     let bodies: Vec<String> = server.shown().into_iter().map(|notice| notice.body).collect();
     assert_eq!(bodies, ["two"]);
+}
+
+/// The a–b chat read in German, its tool the fake `script`, and b's plain-text "Hello there" stored and delivered.
+fn translated_delivery(script: &str, dir: &std::path::Path) -> Notifying {
+    let mut settings = Settings::default();
+    settings.set_chat_language(LAB_A, AB, Some("de"));
+    let n = Notifying::start(settings);
+    let program = fake_translator::fake(dir, script);
+    n.rig
+        .cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, program)])));
+    let mut hello = message(AB, "1", LAB_B, "Hello there", 5_000);
+    hello.message_type = "Text".to_owned();
+    n.rig
+        .core
+        .messages
+        .lock()
+        .unwrap()
+        .insert(AB.to_owned(), vec![hello.clone()]);
+    n.arrive(hello, Source::Delivery);
+    n.settle();
+    n
+}
+
+/// Runs until the server was asked to show something, the fake tool answering on its own thread meanwhile.
+fn until_shown(n: &Notifying) {
+    for _ in 0..1500 {
+        if !n.server.shown().is_empty() {
+            return;
+        }
+        n.rig.cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("nothing shown");
+}
+
+#[test]
+fn a_translated_chat_s_message_notifies_in_the_chat_s_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = translated_delivery(fake_translator::FAKE_CLAUDE, dir.path());
+    until_shown(&n);
+    assert_eq!(n.server.shown()[0].body, "DE Hello there");
+    assert_eq!(n.server.shown()[0].summary, "Bee");
+    // the trace never carries the text
+    assert!(!n.written.text().contains("Hello"));
+}
+
+#[test]
+fn a_translation_slower_than_the_budget_notifies_as_written_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = translated_delivery(&fake_translator::slow(), dir.path());
+    n.rig
+        .cx
+        .executor()
+        .advance_clock(teams_ui::chat_translate::previews::NOTIFY_BUDGET);
+    until_shown(&n);
+    assert_eq!(n.server.shown()[0].body, "Hello there");
+    // the translation comes later: kept for the list, never notified again
+    for _ in 0..300 {
+        n.rig.cx.run_until_parked();
+        if !n.rig.core.translations.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!n.rig.core.translations.lock().unwrap().is_empty());
+    n.settle();
+    assert_eq!(n.server.shown().len(), 1);
 }

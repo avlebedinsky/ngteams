@@ -29,9 +29,15 @@
 //!   translation fails sends nothing: the box keeps it and says why, with Try again and Send without translating.
 //! - **Failures** stop the reading ([`Status::Failed`]: the tool missing, signed out, too slow, or stopped): the chat
 //!   shows a notice saying why, with Try again, and its messages as written.
+//! - **Outside the view** ([`Previews`]): the chat list's preview, a new message's notification and the search's cards
+//!   show a translated chat's messages in its language too, through the same store, tool and prompts; the view tells it
+//!   what it translates, so nothing is asked twice. A reply's quote shows in the box as the chat shows the message.
+//! - **The picker** ([`header_button`], [`picker`]): the header's menu of languages, with a search field that filters it.
 //! - **Private**: no message, translation or tool output is logged or traced.
 
 pub mod codec;
+pub mod picker;
+pub mod previews;
 pub mod prompt;
 pub mod session;
 
@@ -42,16 +48,16 @@ use gpui::{
     AnyElement, App, AsyncApp, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     Styled as _, Subscription, Task, div, px, rgb,
 };
-use gpui_component::Selectable as _;
 use gpui_component::button::Button;
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use teams_proto::chat::{MessageType, RichText, parse_html};
 use teams_store::{Message, SentOriginal, StoredTranslation, TranslationKind};
 
+pub use picker::header_button;
+pub use previews::{Lookup, Previews};
 pub use session::{Limits, Outcome, Session, Spec};
 
 use crate::bridge::Core;
-use crate::icons::{Glyph, icon_button, selected_by};
+use crate::icons::{Glyph, selected_by};
 use crate::local_ai::{AiChoice, Backend, Failure, Tools};
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
@@ -296,6 +302,12 @@ pub struct ChatTranslation {
     receiving: Option<Task<()>>,
     /// Batches asked of the tool so far (tests count them).
     batches: u64,
+    /// The arrival of the newest message the view holds.
+    newest: i64,
+    /// The header's language menu, once drawn.
+    picker: Option<Entity<picker::LanguagePicker>>,
+    /// The account's translations outside the open views: told what this one translates and knows.
+    previews: Entity<Previews>,
     _settings: Subscription,
 }
 
@@ -310,6 +322,13 @@ impl ChatTranslation {
     ) -> Self {
         let chat = teams_proto::stored_conversation(conversation).to_owned();
         let observing = cx.observe(&settings, |this: &mut Self, _, cx| this.reconcile(cx));
+        let previews = Previews::of(&core, &settings, cx);
+        let view = cx.entity_id();
+        cx.on_release(move |this, cx| {
+            this.previews
+                .update(cx, |previews, cx| previews.from_view(view, None, Vec::new(), None, cx));
+        })
+        .detach();
         let mut this = Self {
             core,
             settings,
@@ -333,6 +352,9 @@ impl ChatTranslation {
             read_again: false,
             receiving: None,
             batches: 0,
+            newest: 0,
+            picker: None,
+            previews,
             _settings: observing,
         };
         this.reconcile(cx);
@@ -361,6 +383,16 @@ impl ChatTranslation {
     #[must_use]
     pub fn batches(&self) -> u64 {
         self.batches
+    }
+
+    /// The header's language menu, once drawn ([`picker::picker_of`]).
+    #[must_use]
+    pub fn picker(&self) -> Option<&Entity<picker::LanguagePicker>> {
+        self.picker.as_ref()
+    }
+
+    fn keep_picker(&mut self, picker: Entity<picker::LanguagePicker>) {
+        self.picker = Some(picker);
     }
 
     /// What the view draws.
@@ -401,6 +433,7 @@ impl ChatTranslation {
             self.status = Status::On;
             self.attempts.clear();
             self.pump(cx);
+            self.share(cx);
             cx.notify();
         }
     }
@@ -427,12 +460,49 @@ impl ChatTranslation {
                 }
             })
             .collect();
+        self.newest = messages
+            .iter()
+            .map(|message| message.arrival_time)
+            .max()
+            .unwrap_or_default();
         let held: HashSet<&str> = sources.iter().map(|source| source.id.as_str()).collect();
         self.parsed.retain(|id, _| held.contains(id.as_str()));
         self.sources = sources;
         if self.language.is_some() {
             self.read_store(cx);
         }
+        self.share(cx);
+    }
+
+    /// Tells the account's [`Previews`] what this view translates (the messages it holds, while it translates) and what
+    /// it knows of them, so they aren't asked of the tool twice and show translated outside the view at once.
+    fn share(&self, cx: &mut Context<Self>) {
+        let view = cx.entity_id();
+        // while it holds nothing yet (loading), all of its chat's
+        let followed = self
+            .language
+            .filter(|_| self.status == Status::On)
+            .map(|language| previews::Followed {
+                conversation: self
+                    .sources
+                    .first()
+                    .map_or_else(|| self.chat.clone(), |first| first.conversation_id.clone()),
+                language,
+                held: self.sources.iter().map(|source| source.id.clone()).collect(),
+                newest: self.newest,
+            });
+        let learned = self
+            .sources
+            .iter()
+            .filter_map(|source| {
+                let entry = self.entry_of(source)?;
+                Some((source.conversation_id.clone(), source.id.clone(), entry.clone()))
+            })
+            .collect();
+        let language = self.language;
+        self.previews.update(cx, |previews, cx| {
+            previews.from_view(view, followed, learned, language, cx);
+        });
     }
 
     fn parsed_text(&mut self, message: &Message) -> Arc<RichText> {
@@ -472,6 +542,7 @@ impl ChatTranslation {
         if language.is_some() {
             self.read_store(cx);
         }
+        self.share(cx);
         cx.notify();
     }
 
@@ -581,6 +652,7 @@ impl ChatTranslation {
         } else {
             self.pump(cx);
         }
+        self.share(cx);
         cx.notify();
     }
 
@@ -737,6 +809,7 @@ impl ChatTranslation {
                 }
             }
         }
+        self.share(cx);
         cx.notify();
     }
 
@@ -897,6 +970,7 @@ impl ChatTranslation {
             self.keep_original(key, &original, line);
         }
         self.pump(cx);
+        self.share(cx);
         cx.notify();
     }
 
@@ -968,7 +1042,7 @@ impl ChatTranslation {
 }
 
 /// Whether `message` is one a chat's translation reads: a text message with something in it, not deleted.
-fn translatable(message: &Message) -> bool {
+pub(crate) fn translatable(message: &Message) -> bool {
     message.delete_time.is_none()
         && !message.content.trim().is_empty()
         && (message.message_type == MessageType::RichTextHtml.as_str()
@@ -1058,52 +1132,6 @@ fn outgoing_of(answer: Result<(Option<String>, Option<String>), Failure>, shells
         Ok((None, _)) => Ok(None),
         Err(failure) => Err(SendFailure::Tool(failure)),
     }
-}
-
-/// The chat header's language picker: Teams' translation mark, lit while the chat is translated; its menu lists "Show
-/// as written" and every language ([`TARGET_LANGUAGES`]), the chosen one checked.
-pub fn header_button(model: &Entity<ChatTranslation>, cx: &App) -> AnyElement {
-    let chosen = model.read(cx).language();
-    let tip = chosen.and_then(language).map_or_else(
-        || "Translate chat".to_owned(),
-        |(_, name)| format!("Chat translated into {name}"),
-    );
-    let model = model.clone();
-    let button = icon_button("chat-translate", Glyph::LANGUAGES, tip)
-        .selected(chosen.is_some())
-        .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
-            let menu = menu.min_w(px(240.0)).scrollable(true).max_h(px(360.0));
-            let off = picked(&model, "chat-translate-off", "Show as written", chosen.is_none(), None);
-            let menu = menu.item(off).separator();
-            TARGET_LANGUAGES.iter().fold(menu, |menu, (code, name)| {
-                menu.item(picked(
-                    &model,
-                    &format!("chat-translate-{code}"),
-                    name,
-                    chosen == Some(*code),
-                    Some(*code),
-                ))
-            })
-        });
-    selected_by("chat-translate", button).into_any_element()
-}
-
-/// A row of the language picker.
-fn picked(
-    model: &Entity<ChatTranslation>,
-    selector: &str,
-    label: &'static str,
-    checked: bool,
-    language: Option<&'static str>,
-) -> PopupMenuItem {
-    let selector = selector.to_owned();
-    let model = model.clone();
-    PopupMenuItem::element(move |_, _| {
-        let selector = selector.clone();
-        div().debug_selector(move || selector.clone()).child(label)
-    })
-    .checked(checked)
-    .on_click(move |_, _, cx| model.update(cx, |this, cx| this.set_language(language, cx)))
 }
 
 /// The settings' description of where a chat's text goes.

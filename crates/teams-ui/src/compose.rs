@@ -196,6 +196,9 @@ pub struct Quoted {
     pub time: String,
     /// Its text on one line, at most [`PREVIEW_MAX`] characters.
     pub preview: String,
+    /// In a translated chat, its text as the chat shows it (its translation), on one line: what the box shows over
+    /// it, and the account's own reply keeps as written. The quote sent keeps `preview`, as the others read it.
+    pub shown: Option<String>,
 }
 
 impl Quoted {
@@ -215,7 +218,48 @@ impl Quoted {
             sender_name: sender_name.to_owned(),
             time,
             preview: preview(message),
+            shown: None,
         })
+    }
+
+    /// The quote, shown in a translated chat as `text` (the quoted message's translation).
+    #[must_use]
+    pub fn shown_as(self, text: &RichText) -> Self {
+        Self {
+            shown: Some(one_line_of(text.clone())),
+            ..self
+        }
+    }
+
+    /// The quote as the box shows it: in the chat's language when the chat is translated.
+    #[must_use]
+    pub fn shown_preview(&self) -> &str {
+        self.shown.as_deref().unwrap_or(&self.preview)
+    }
+
+    /// The account's reply as written (`text`, its quote as sent): its quote as the chat shows it.
+    #[must_use]
+    pub fn as_shown_in(&self, text: &RichText) -> RichText {
+        let Some(shown) = &self.shown else {
+            return text.clone();
+        };
+        let nodes = text
+            .nodes
+            .iter()
+            .map(|node| match node {
+                Node::Quote(quote) if quote.message_id.as_deref() == Some(self.message_id.as_str()) => {
+                    Node::Quote(Quote {
+                        body: vec![text_node(shown)],
+                        ..quote.clone()
+                    })
+                }
+                other => other.clone(),
+            })
+            .collect();
+        RichText {
+            nodes,
+            truncated: text.truncated,
+        }
     }
 
     /// The quote as rich text.
@@ -245,7 +289,12 @@ pub fn rich_text_of(message: &Message) -> RichText {
 /// A message's text on one line (what it quotes left out; a forward's content is the message's own, kept), at most
 /// [`PREVIEW_MAX`] characters.
 fn preview(message: &Message) -> String {
-    let nodes = rich_text_of(message)
+    one_line_of(rich_text_of(message))
+}
+
+/// A text on one line (what it quotes left out; a forward's content kept), at most [`PREVIEW_MAX`] characters.
+fn one_line_of(text: RichText) -> String {
+    let nodes = text
         .nodes
         .into_iter()
         .filter(|node| !matches!(node, Node::Quote(quote) if !quote.forward))
@@ -970,7 +1019,12 @@ impl Compose {
             attachments: self.attachments.clone(),
         };
         if let (Some(original), Some(sent)) = (&original, &sent) {
-            self.keep_original(original, sent, edit_of.as_deref(), cx);
+            // the account's reply keeps its quote as the chat showed it
+            let original = match &self.mode {
+                Mode::Reply(quoted) => quoted.as_shown_in(original),
+                _ => original.clone(),
+            };
+            self.keep_original(&original, sent, edit_of.as_deref(), cx);
         }
         let reply = self.core.write(action);
         self.trace.record(
@@ -1292,7 +1346,10 @@ impl Compose {
     fn mode_bar(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (title, detail) = match &self.mode {
             Mode::New => return None,
-            Mode::Reply(quoted) => (format!("Replying to {}", quoted.sender_name), quoted.preview.clone()),
+            Mode::Reply(quoted) => (
+                format!("Replying to {}", quoted.sender_name),
+                quoted.shown_preview().to_owned(),
+            ),
             Mode::Edit { .. } => ("Editing your message".to_owned(), String::new()),
         };
         let tip = if matches!(self.mode, Mode::Edit { .. }) {

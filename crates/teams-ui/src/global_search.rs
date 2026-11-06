@@ -15,6 +15,8 @@
 //!   Files, Group chats, Teams and channels. A message opens its chat at the message; a person their 1:1 chat
 //!   (created through the outbox when needed); a file in the browser (GPUI's `open_url`); a chat or a channel itself.
 //! - **Escape** in the box closes the suggestions and gives the keyboard back; on the results it leaves them.
+//! - **A translated chat's message** ([`crate::chat_translate`]) shows in the chat's language on its card, once its
+//!   translation is known ([`Previews`]: the cards shown ask for it), the query's words marked where they are in it.
 //! - Nothing typed is ever sent anywhere but the account's own search service (a read: `teams_core::service_search`)
 //!   and its store. What the search shows is traced: `search opened` (its mode), `search suggested` (the chats,
 //!   channels and people suggested), `search results` (the tab), `search shown` (the messages the results show, with
@@ -38,10 +40,11 @@ use gpui_component::kbd::Kbd;
 use teams_core::{Action, SearchAnswer, SearchScope};
 use teams_proto::Mri;
 use teams_proto::{FoundFile, FoundMessage, FoundPerson, SearchKind};
-use teams_store::OutboxState;
+use teams_store::{Message, OutboxState};
 
 use crate::bridge::Core;
 use crate::chat_list::{ChatList, RowKind};
+use crate::chat_translate::{Lookup, Previews};
 use crate::clock::{self, HourCycle};
 use crate::icons::Glyph;
 use crate::people::{self, Picture};
@@ -290,6 +293,11 @@ pub struct GlobalSearch {
     results_focus: FocusHandle,
     /// The box's text when it last changed while it had the keyboard.
     typed: String,
+    /// The account's translations: a message of a translated chat shows in its language ([`Self::set_previews`]).
+    previews: Option<(Entity<Previews>, Subscription)>,
+    /// The stored messages of the hits in translated chats, by conversation and id, and the ones being read.
+    found_messages: HashMap<(String, String), Message>,
+    reading_messages: HashSet<(String, String)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -330,7 +338,84 @@ impl GlobalSearch {
             results: None,
             results_focus: cx.focus_handle(),
             typed: String::new(),
+            previews: None,
+            found_messages: HashMap::new(),
+            reading_messages: HashSet::new(),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// From now on a message found in a translated chat shows in the chat's language, through `previews`.
+    pub fn set_previews(&mut self, previews: Entity<Previews>, cx: &mut Context<Self>) {
+        let observing = cx.observe(&previews, |_: &mut Self, _, cx| cx.notify());
+        self.previews = Some((previews, observing));
+        self.translate_hits(cx);
+    }
+
+    /// Asks for the translations of the hits shown that are in translated chats: their messages read from the store,
+    /// then handed to the account's [`Previews`].
+    fn translate_hits(&mut self, cx: &mut Context<Self>) {
+        let Some(previews) = self.previews.as_ref().map(|(previews, _)| previews.clone()) else {
+            return;
+        };
+        let hits = self.message_hits(cx);
+        let translated: Vec<(String, String)> = hits
+            .iter()
+            .filter(|hit| previews.read(cx).language_of(&hit.target.conversation, cx).is_some())
+            .map(|hit| (hit.target.conversation.clone(), hit.target.message.clone()))
+            .collect();
+        let known: Vec<Message> = translated
+            .iter()
+            .filter_map(|key| self.found_messages.get(key).cloned())
+            .collect();
+        if !known.is_empty() {
+            previews.update(cx, |previews, cx| previews.want(known, cx));
+        }
+        let unread: Vec<(String, String)> = translated
+            .into_iter()
+            .filter(|key| !self.found_messages.contains_key(key) && self.reading_messages.insert(key.clone()))
+            .collect();
+        let Some(results) = self.results.as_mut().filter(|_| !unread.is_empty()) else {
+            return;
+        };
+        let core = Arc::clone(&self.core);
+        results.asks.push(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let mut messages = Vec::new();
+            for (conversation, id) in unread {
+                if let Ok(Some(message)) = core.message(conversation, id).await {
+                    messages.push(message);
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                for message in &messages {
+                    this.found_messages
+                        .insert((message.conversation_id.clone(), message.id.clone()), message.clone());
+                }
+                previews.update(cx, |previews, cx| previews.want(messages, cx));
+                cx.notify();
+            });
+        }));
+    }
+
+    /// `hit` as its chat's language shows it, when its chat is translated and its translation is known: the text
+    /// shown in place of its snippet (the query's words marked where they are in it).
+    fn translated_hit(&self, hit: Hit, query: &str, cx: &App) -> Hit {
+        let Some((previews, _)) = &self.previews else {
+            return hit;
+        };
+        let key = (hit.target.conversation.clone(), hit.target.message.clone());
+        let Some(message) = self.found_messages.get(&key) else {
+            return hit;
+        };
+        let Lookup::Text(text) = previews.read(cx).lookup(message, cx) else {
+            return hit;
+        };
+        let snippet = search::snippet_line(&text.plain_text());
+        let matched = search::marked_terms(&snippet, query);
+        Hit {
+            snippet: snippet.into(),
+            matched,
+            ..hit
         }
     }
 
@@ -586,6 +671,8 @@ impl GlobalSearch {
         }
         let same = self.results.as_ref().is_some_and(|results| results.query == query);
         if !same {
+            self.found_messages.clear();
+            self.reading_messages.clear();
             let mut results = Results {
                 query: query.clone(),
                 tab,
@@ -614,6 +701,7 @@ impl GlobalSearch {
                 if let Some(results) = this.results.as_mut().filter(|results| results.query == query) {
                     results.local = hits;
                     this.trace_shown(cx);
+                    this.translate_hits(cx);
                     cx.notify();
                 }
             });
@@ -640,6 +728,7 @@ impl GlobalSearch {
             }));
         }
         self.trace_shown(cx);
+        self.translate_hits(cx);
         cx.notify();
     }
 
@@ -658,6 +747,7 @@ impl GlobalSearch {
             }
         }
         self.trace_shown(cx);
+        self.translate_hits(cx);
         cx.notify();
     }
 
@@ -710,7 +800,9 @@ impl GlobalSearch {
         if results.tab == Tab::All {
             hits.truncate(ALL_MESSAGES);
         }
-        hits
+        hits.into_iter()
+            .map(|hit| self.translated_hit(hit, &results.query, cx))
+            .collect()
     }
 
     /// The people the results show on their tab.
@@ -1177,7 +1269,9 @@ fn on_frame(search: gpui::Stateful<gpui::Div>, focused: bool, palette: Palette) 
         })
         .bg(rgb(palette.surface).opacity(if focused { 1.0 } else { 0.9 }))
         .text_color(rgb(palette.foreground))
-        .when(focused, |search| search.shadow(theme::glow(palette, palette.accent, 0.45, 14.0, 0.0)))
+        .when(focused, |search| {
+            search.shadow(theme::glow(palette, palette.accent, 0.45, 14.0, 0.0))
+        })
 }
 
 /// A row's frame in the suggestions: highlighted when the keyboard is on it, its own clicks.

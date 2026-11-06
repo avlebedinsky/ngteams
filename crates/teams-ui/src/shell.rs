@@ -359,8 +359,7 @@ impl Shell {
             trace,
         } = parts;
         let selected = Self::selected_chat(&settings, core.me(), cx);
-        let (list_core, list_models, list_trace) = (Arc::clone(&core), models.clone(), Arc::clone(&trace));
-        let list = cx.new(|cx| ChatList::new(list_core, list_models, list_trace, selected.clone(), cx));
+        let (list, previews) = Self::chat_list(&chat_parts, selected.clone(), cx);
         let opened = cx.subscribe_in(&list, window, |this: &mut Self, _, event, window, cx| match event {
             ChatListEvent::Opened(id) => this.open_chat(id.clone(), window, cx),
         });
@@ -374,6 +373,7 @@ impl Shell {
         let focus = Self::focused(window, cx);
         let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
+        search_box.update(cx, |search, cx| search.set_previews(previews, cx));
         Self {
             core,
             models,
@@ -431,6 +431,20 @@ impl Shell {
                 searched,
             ],
         }
+    }
+
+    /// The chat list, `selected` highlighted, and the account's translations outside the open chats
+    /// ([`crate::chat_translate::Previews`]) handed to it: a translated chat's preview shows in its language.
+    fn chat_list(
+        parts: &ShellParts,
+        selected: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> (Entity<ChatList>, Entity<crate::chat_translate::Previews>) {
+        let (core, models, trace) = (Arc::clone(&parts.core), parts.models.clone(), Arc::clone(&parts.trace));
+        let list = cx.new(|cx| ChatList::new(core, models, trace, selected, cx));
+        let previews = crate::chat_translate::Previews::of(&parts.core, &parts.settings, cx);
+        list.update(cx, |list, cx| list.set_previews(previews.clone(), cx));
+        (list, previews)
     }
 
     /// The shell's focus, focused now: what is typed goes to the shell until a view takes it.
@@ -2359,9 +2373,13 @@ impl Shell {
             .left(px(6.0))
             .right(px(6.0))
             .rounded_lg();
-        let lit = crate::motion::toggle(lit, SharedString::from(format!("{id}-lit")), chosen, cx, move |lit, t| {
-            lit.bg(ink.opacity(0.18 * t.clamp(0.0, 1.2)))
-        });
+        let lit = crate::motion::toggle(
+            lit,
+            SharedString::from(format!("{id}-lit")),
+            chosen,
+            cx,
+            move |lit, t| lit.bg(ink.opacity(0.18 * t.clamp(0.0, 1.2))),
+        );
         let mark = div()
             .absolute()
             .left_0()
@@ -2560,7 +2578,9 @@ impl Shell {
             })
             .cursor_pointer()
             .when(signed_out, |avatar| avatar.opacity(0.45))
-            .when(shown && self.status_menu, |avatar| avatar.bg(rgb(palette.on_frame).opacity(0.3)))
+            .when(shown && self.status_menu, |avatar| {
+                avatar.bg(rgb(palette.on_frame).opacity(0.3))
+            })
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.core.me() == key {
@@ -2691,7 +2711,7 @@ impl Shell {
             .into_any_element()
     }
 
-    fn main_pane(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn main_pane(&self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let pane = div()
             .debug_selector(|| "conversation-pane".to_owned())
             .size_full()
@@ -2713,9 +2733,10 @@ impl Shell {
                 });
                 let call = self.call_header_button(cx);
                 // the chat's language: its messages read in it, and the account's sent in the chat's own
-                let translate = chat
-                    .as_ref()
-                    .map(|chat| crate::chat_translate::header_button(chat.read(cx).translation(), cx));
+                let translate = chat.as_ref().map(|chat| {
+                    let model = chat.read(cx).translation().clone();
+                    crate::chat_translate::header_button(&model, window, cx)
+                });
                 let tabs = self.meeting_tab_bar(id, palette, cx);
                 // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
                 // presence, the call on the right
@@ -2746,7 +2767,8 @@ impl Shell {
                 );
                 let join = self.channel_join_button(id, cx);
                 let translate = shown.map(|(view, _)| {
-                    crate::chat_translate::header_button(view.read(cx).posts().read(cx).translation(), cx)
+                    let model = view.read(cx).posts().read(cx).translation().clone();
+                    crate::chat_translate::header_button(&model, window, cx)
                 });
                 let header = pane_header_led(lead, title, palette)
                     .child(div().flex_1())
@@ -2781,7 +2803,7 @@ impl Shell {
 impl Shell {
     /// The call bar and the panes on one sheet floating on the frame ([`crate::sheet`]), right of the rail and under
     /// the title bar.
-    fn sheet(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn sheet(&self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let panes = div()
             .relative()
             .size_full()
@@ -2789,7 +2811,7 @@ impl Shell {
             .flex_col()
             .bg(rgb(palette.background))
             .child(self.call_bar.clone())
-            .child(div().flex_1().min_h_0().child(self.body(palette, cx)));
+            .child(div().flex_1().min_h_0().child(self.body(palette, window, cx)));
         let holder = div().flex_1().h_full().min_w_0();
         crate::sheet::float(holder, panes, palette, window, (RAIL_WIDTH, TITLE_HEIGHT), false)
     }
@@ -3045,7 +3067,7 @@ impl Shell {
     /// to switch to another account or remove this one).
     /// Under the call bar: the settings across both panes while Settings is chosen (as in Teams, their pages are
     /// their own list), else the list and the conversation panes (or the signed-out notice).
-    fn body(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn body(&self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.main == Main::Settings {
             return self.settings_view.clone().into_any_element();
         }
@@ -3073,7 +3095,7 @@ impl Shell {
             return page.clone().into_any_element();
         }
         if !self.list_shown {
-            return self.panes_or_signed_out(self.main_pane(palette, cx), palette, cx);
+            return self.panes_or_signed_out(self.main_pane(palette, window, cx), palette, cx);
         }
         let panes = h_resizable("panes")
             .with_state(&self.panes)
@@ -3083,7 +3105,7 @@ impl Shell {
                     .size_range(px(LIST_MIN)..px(LIST_MAX))
                     .child(self.list_pane()),
             )
-            .child(resizable_panel().child(self.main_pane(palette, cx)));
+            .child(resizable_panel().child(self.main_pane(palette, window, cx)));
         self.panes_or_signed_out(panes, palette, cx)
     }
 

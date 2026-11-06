@@ -39,6 +39,9 @@
 //!   changes; the list draws what the presence model holds, again on each change of it. A row below them shows
 //!   unknown unless another view asked about its person.
 //! - **Unread** is the store's count (`unread_count`), by Teams' rules for what makes a chat unread.
+//! - **A translated chat** ([`crate::chat_translate`]) shows its preview in its language once its translation is known
+//!   ([`Previews`]): a row drawn asks for it, so a chat scrolled past or below See more asks nothing; the account's own
+//!   message shows as it was written.
 //!
 //! A row clicked is told as [`ChatListEvent::Opened`]; the shell shows it. The switcher tells the shell itself
 //! ([`crate::switcher::SwitcherEvent::Open`]), and the shell only highlights the row ([`ChatList::select`]). What
@@ -51,9 +54,9 @@ use std::sync::Arc;
 use chrono::Local;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AsyncApp, Context, Div, ElementId, EventEmitter, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
-    Task, WeakEntity, div, img, px, rgb,
+    AnyElement, App, AsyncApp, Context, Div, ElementId, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Subscription, Task, WeakEntity, div, img, px, rgb,
 };
 use gpui_component::Size;
 use teams_core::{Availability, ChatListing, MAX_WATCHED, has_presence};
@@ -62,6 +65,7 @@ use teams_proto::chat::parse_html;
 use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 
 use crate::bridge::Core;
+use crate::chat_translate::{Lookup, Previews};
 use crate::chat_window::{ChatWindow, SeeMore};
 use crate::clock::{self, HourCycle};
 use crate::compose::PICKER_MAX;
@@ -175,6 +179,9 @@ pub struct ChatRow {
     pub team: Option<SharedString>,
     /// The last message's first line.
     pub preview: SharedString,
+    /// The text message `preview` reads, when it reads one: a translated chat shows it in its language
+    /// ([`crate::chat_translate::Previews`]).
+    pub previewed: Option<Arc<Message>>,
     /// Milliseconds.
     pub last_activity: Option<i64>,
     pub unread: u64,
@@ -261,6 +268,13 @@ pub async fn chat_name(core: &dyn Core, conversation: &Conversation) -> SharedSt
 /// ([`system_message::preview`]); empty when there is none.
 #[must_use]
 pub fn preview(page: &[Message], me: &str) -> SharedString {
+    previewing(page, me).0
+}
+
+/// The preview line ([`preview`]) and the text message it reads, when it reads one that isn't deleted or a card: the
+/// one a translated chat shows in its language.
+#[must_use]
+pub fn previewing(page: &[Message], me: &str) -> (SharedString, Option<Arc<Message>>) {
     for message in page {
         let said = if message.delete_time.is_some() {
             Preview::Text
@@ -269,19 +283,34 @@ pub fn preview(page: &[Message], me: &str) -> SharedString {
         };
         match said {
             Preview::Skipped => {}
-            Preview::Said(said) => return said.into(),
+            Preview::Said(said) => return (said.into(), None),
             Preview::Text if !is_text(message) => {}
             Preview::Text => {
-                let text = message_line(message);
-                return if message.sender.as_deref() == Some(me) {
-                    format!("You: {text}").into()
-                } else {
-                    text.into()
-                };
+                let text = own_line(message_line(message), message, me);
+                let read = (message.delete_time.is_none()
+                    && message.message_type != teams_proto::chat::card::CARD_TYPE)
+                    .then(|| Arc::new(message.clone()));
+                return (text.into(), read);
             }
         }
     }
-    SharedString::default()
+    (SharedString::default(), None)
+}
+
+/// `text`, a line of `message`, with "You: " before it when the message is the account's own.
+fn own_line(text: String, message: &Message, me: &str) -> String {
+    if message.sender.as_deref() == Some(me) {
+        format!("You: {text}")
+    } else {
+        text
+    }
+}
+
+/// The first line with something in it of `text` (a message's translation, or the account's own as written), at most
+/// [`PREVIEW_CHARS`] characters.
+#[must_use]
+pub fn text_line(text: &teams_proto::chat::RichText) -> String {
+    first_line(&text.plain_text())
 }
 
 /// What a chat is called, whether that is a name, and its picture.
@@ -435,6 +464,7 @@ pub async fn notes_row(core: &dyn Core) -> ChatRow {
         .await
         .map(|page| page.messages)
         .unwrap_or_default();
+    let (preview, previewed) = previewing(&page, &me);
     ChatRow {
         id: NOTES.to_owned(),
         kind: RowKind::Notes,
@@ -444,7 +474,8 @@ pub async fn notes_row(core: &dyn Core) -> ChatRow {
         partner: Some(me.clone()),
         faces: Vec::new(),
         team: None,
-        preview: preview(&page, &me),
+        preview,
+        previewed,
         last_activity: None,
         unread: 0,
     }
@@ -460,6 +491,7 @@ pub async fn channel_row(core: &dyn Core, team: &Team, channel: &TeamChannel, la
         .map(|page| page.messages)
         .unwrap_or_default();
     let unread = core.unread_count(id.clone()).await.unwrap_or(0);
+    let (preview, previewed) = previewing(&page, core.me());
     ChatRow {
         kind: RowKind::Channel,
         name: channel.name.clone().into(),
@@ -468,7 +500,8 @@ pub async fn channel_row(core: &dyn Core, team: &Team, channel: &TeamChannel, la
         partner: None,
         faces: Vec::new(),
         team: Some(team.name.clone().into()),
-        preview: preview(&page, core.me()),
+        preview,
+        previewed,
         last_activity: last_activity.or_else(|| page.iter().map(|message| message.arrival_time).max()),
         unread,
         id,
@@ -553,6 +586,7 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         faces,
         people,
     } = name_of(core, conversation, &members).await;
+    let (preview, previewed) = previewing(&page, core.me());
     let row = ChatRow {
         kind: RowKind::of(&conversation.kind),
         name,
@@ -561,7 +595,8 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         partner,
         faces,
         team: None,
-        preview: preview(&page, core.me()),
+        preview,
+        previewed,
         last_activity: conversation.last_activity,
         unread,
         id,
@@ -618,6 +653,8 @@ pub struct ChatList {
     loads: u64,
     catch_ups: u64,
     traced: Option<Vec<(String, RowKind, u64)>>,
+    /// The account's translations: a translated chat's preview shows in its language ([`ChatList::set_previews`]).
+    previews: Option<(Entity<Previews>, Subscription)>,
     _observing: [Subscription; 3],
 }
 
@@ -663,10 +700,37 @@ impl ChatList {
             loads: 0,
             catch_ups,
             traced: None,
+            previews: None,
             _observing: [chats, status, presence],
         };
         list.reload(cx);
         list
+    }
+
+    /// From now on a translated chat's row shows its preview in the chat's language, through `previews`.
+    pub fn set_previews(&mut self, previews: Entity<Previews>, cx: &mut Context<Self>) {
+        let observing = cx.observe(&previews, |_: &mut Self, _, cx| cx.notify());
+        self.previews = Some((previews, observing));
+        cx.notify();
+    }
+
+    /// The preview line `row` shows: its last message in its chat's language when the chat is translated (the
+    /// account's own as written), as the store has it otherwise. A row drawn whose translation isn't known asks for it
+    /// (see [`Previews::want`]).
+    #[must_use]
+    pub fn preview_shown(&self, row: &ChatRow, cx: &mut App) -> SharedString {
+        let (Some((previews, _)), Some(message)) = (&self.previews, &row.previewed) else {
+            return row.preview.clone();
+        };
+        match previews.read(cx).lookup(message, cx) {
+            Lookup::Text(text) => own_line(text_line(&text), message, self.core.me()).into(),
+            Lookup::Unknown => {
+                let message = Message::clone(message);
+                previews.update(cx, |previews, cx| previews.want([message], cx));
+                row.preview.clone()
+            }
+            Lookup::Off | Lookup::AsWritten => row.preview.clone(),
+        }
     }
 
     /// The "Chats" section's rows, the latest activity first, shown or not.
@@ -956,7 +1020,7 @@ impl ChatList {
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), cx)))
             .child(mark)
             .child(self.avatar(row, background, palette, cx))
-            .child(row_text(row, palette, clock::cycle(cx)))
+            .child(row_text(row, &self.preview_shown(row, cx), palette, clock::cycle(cx)))
             .children(more)
             .into_any_element()
     }
@@ -1011,10 +1075,15 @@ fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
             .child(crate::workflows_app::bot_avatar(AVATAR, palette))
             .into_any_element(),
         // a 1:1 chat whose other member has no presence: a bot or a service
-        (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => {
-            mark_avatar(Glyph::BOT, rgb(palette.hover).into(), palette.muted_foreground, "avatar-bot")
+        (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => mark_avatar(
+            Glyph::BOT,
+            rgb(palette.hover).into(),
+            palette.muted_foreground,
+            "avatar-bot",
+        ),
+        (RowKind::Group, [left, right, ..]) => {
+            split_avatar(left, right, theme::palette_is_dark(palette)).into_any_element()
         }
-        (RowKind::Group, [left, right, ..]) => split_avatar(left, right, theme::palette_is_dark(palette)).into_any_element(),
         _ => {
             let name = row.named.then(|| match row.kind {
                 // the initials of the account's own name, not of "(You)"
@@ -1161,12 +1230,17 @@ pub fn initials_colour(name: &str, dark: bool) -> (u32, u32) {
     let sum = name
         .bytes()
         .fold(0_usize, |sum, byte| sum.wrapping_add(usize::from(byte)));
-    let colours = if dark { &DARK_INITIALS_COLOURS } else { &INITIALS_COLOURS };
+    let colours = if dark {
+        &DARK_INITIALS_COLOURS
+    } else {
+        &INITIALS_COLOURS
+    };
     colours[sum % colours.len()]
 }
 
-/// The row's name and time (on `cycle`'s clock) over its preview and unread count (when it has either).
-fn row_text(row: &ChatRow, palette: Palette, cycle: HourCycle) -> impl IntoElement {
+/// The row's name and time (on `cycle`'s clock) over its preview (`line`, in its chat's language when it is
+/// translated) and unread count (when it has either).
+fn row_text(row: &ChatRow, line: &SharedString, palette: Palette, cycle: HourCycle) -> impl IntoElement {
     let time = row
         .last_activity
         .map(|ms| clock::list_time(ms, &Local::now(), cycle))
@@ -1188,7 +1262,7 @@ fn row_text(row: &ChatRow, palette: Palette, cycle: HourCycle) -> impl IntoEleme
         .truncate()
         .text_sm()
         .text_color(rgb(palette.muted_foreground))
-        .child(row.preview.clone());
+        .child(line.clone());
     let mut bottom = div().flex().gap_2().items_center().child(preview);
     // a channel's unread posts make it bold, uncounted (see the module docs)
     if row.unread > 0 && row.kind != RowKind::Channel {
@@ -1211,7 +1285,7 @@ fn row_text(row: &ChatRow, palette: Palette, cycle: HourCycle) -> impl IntoEleme
     }
     let text = div().flex_1().min_w_0().flex().flex_col().child(top);
     // a row with nothing under its name (the account's own notes before anything was written) is one line, centred
-    if row.preview.is_empty() && row.unread == 0 {
+    if line.is_empty() && row.unread == 0 {
         text
     } else {
         text.child(bottom)

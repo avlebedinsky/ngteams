@@ -26,7 +26,9 @@ CLI, with any model the tool lists or one typed (by default Claude Haiku or GPT-
 the caption text then goes to that tool and its provider. A chat or channel can be read and written in another
 language (the header's translation button): its messages are shown translated by the same tools (Settings → General
 → Chat translation), the account's own are sent in the chat's language and shown as written, and the translations
-are kept in the store, so a chat opened again is not translated twice. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
+are kept in the store, so a chat opened again is not translated twice. Its last message in the chat list, its new
+messages' desktop notifications, its messages found by the search and a reply's quote read in that language too (a
+notification waits at most a few seconds for its translation); the language menu filters as you type. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
 [workflows](docs/protocol/workflows.md), and [live captions](docs/protocol/live-captions.md).
 
 ## Layout

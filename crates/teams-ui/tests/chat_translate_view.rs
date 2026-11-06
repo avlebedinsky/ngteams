@@ -251,8 +251,8 @@ fn a_tool_that_fails_says_so_and_a_send_goes_only_as_written_when_asked() {
 struct Header(Entity<ChatTranslation>);
 
 impl Render for Header {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().p_4().child(header_button(&self.0, cx))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().p_4().child(header_button(&self.0, window, cx))
     }
 }
 
@@ -288,4 +288,67 @@ fn the_header_s_picker_sets_the_chat_s_language() {
         assert_eq!(model.read(cx).language(), Some("ca"));
         assert_eq!(settings.read(cx).settings().chat_language_of(LAB_A, AB), Some("ca"));
     });
+    assert!(
+        cx.debug_bounds("chat-translate-menu").is_none(),
+        "picking closes the menu"
+    );
+
+    // the long list filters as the user types in its search field, which has the keyboard; Enter picks the first
+    cx.simulate_click(button.center(), Modifiers::none());
+    draw(cx);
+    assert!(cx.debug_bounds("chat-translate-search").is_some());
+    cx.simulate_input("germ");
+    draw(cx);
+    assert!(cx.debug_bounds("chat-translate-de").is_some());
+    assert!(cx.debug_bounds("chat-translate-ca").is_none());
+    assert!(cx.debug_bounds("chat-translate-off").is_none());
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    cx.update(|_, cx| assert_eq!(model.read(cx).language(), Some("de")));
+    assert!(cx.debug_bounds("chat-translate-menu").is_none());
+
+    // nothing matches: it says so; Down and Up move through what is left; Escape closes it, picking nothing
+    cx.simulate_click(button.center(), Modifiers::none());
+    draw(cx);
+    cx.simulate_input("zzz");
+    draw(cx);
+    assert!(cx.debug_bounds("chat-translate-none").is_some());
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    cx.update(|_, cx| assert_eq!(model.read(cx).language(), Some("de")));
+    for _ in 0..3 {
+        cx.simulate_keystrokes("backspace");
+    }
+    cx.simulate_input("fr");
+    draw(cx);
+    cx.simulate_keystrokes("down down up");
+    draw(cx);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(cx.debug_bounds("chat-translate-menu").is_none());
+    cx.update(|_, cx| assert_eq!(model.read(cx).language(), Some("de")));
+
+    // "Show as written" is a row like the languages
+    cx.simulate_click(button.center(), Modifiers::none());
+    draw(cx);
+    cx.simulate_keystrokes("down enter");
+    draw(cx);
+    cx.update(|_, cx| assert_eq!(model.read(cx).language(), None));
+}
+
+#[test]
+fn the_picker_s_filter_matches_names_and_codes() {
+    use teams_ui::chat_translate::picker::{AS_WRITTEN, matching};
+    assert_eq!(matching("").len(), teams_ui::translate::TARGET_LANGUAGES.len() + 1);
+    assert_eq!(matching("")[0], (None, AS_WRITTEN));
+    let names: Vec<&str> = matching(" GERM ").into_iter().map(|(_, name)| name).collect();
+    assert_eq!(names, ["German"]);
+    assert!(
+        matching("pt")
+            .iter()
+            .all(|(code, _)| code.is_some_and(|code| code.starts_with("pt")))
+    );
+    assert!(matching("chinese").len() >= 2);
+    assert!(matching("written").contains(&(None, AS_WRITTEN)));
+    assert!(matching("zzz").is_empty());
 }

@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 207] = [
+const STEPS: [Step; 5 + 210] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -243,6 +243,7 @@ const STEPS: [Step; 5 + 207] = [
     ("chat-translated", |shell, _, cx| {
         chat_tools(FAKE_CHAT_CLAUDE, cx);
         translate_chat(shell, Some("de"), cx);
+        translate_another_chat(shell, Some("de"), cx);
     }),
     // "See original message" on the last of someone else's messages
     ("chat-translated-original", |shell, _, cx| {
@@ -258,8 +259,47 @@ const STEPS: [Step; 5 + 207] = [
             translation.update(cx, |translation, cx| translation.toggle_original(&id, cx));
         }
     }),
+    // a reply to someone else's translated message: the box shows its quote as the chat does
+    ("chat-translated-reply", |shell, window, cx| {
+        let Some(chat) = shell.read(cx).chat().cloned() else {
+            return;
+        };
+        // the last of someone else's translated messages, shown translated again if "See original message" showed it
+        // as written
+        let theirs = chat.read(cx).items().iter().rev().find_map(|item| match item {
+            Item::Message(message) if !message.own => match &message.translation {
+                Some(teams_ui::chat_translate::Mark::Translated { .. }) => Some((message.id.clone(), false)),
+                Some(teams_ui::chat_translate::Mark::Original { .. }) => Some((message.id.clone(), true)),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some((id, original)) = theirs {
+            if original {
+                let translation = chat.read(cx).translation().clone();
+                translation.update(cx, |translation, cx| translation.toggle_original(&id, cx));
+            }
+            // once the chat drew it translated again
+            window.defer(cx, move |window, cx| {
+                chat.update(cx, |chat, cx| chat.act(MessageAction::Reply, &id, window, cx));
+            });
+        }
+    }),
+    // the header's language menu, a few letters typed into its search field
+    ("chat-translate-menu", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.cancel(window, cx));
+        language_menu(shell, Some("ger"), window, cx);
+    }),
+    // the same in Teams Dark, nothing typed
+    ("chat-translate-menu-dark", |shell, window, cx| {
+        language_menu(shell, None, window, cx);
+        show_chat_in_theme(shell, teams_ui::theme::DARK_KEY, window, cx);
+        language_menu(shell, Some(""), window, cx);
+    }),
     // a message written in German, being translated into the chat's language before it goes
     ("chat-translated-sending", |shell, window, cx| {
+        language_menu(shell, None, window, cx);
+        show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
         type_in_compose(shell, "Hallo! Passt dir Mittagessen um zwölf?", window, cx);
         with_compose(shell, cx, |compose, cx| compose.send(window, cx));
     }),
@@ -281,6 +321,7 @@ const STEPS: [Step; 5 + 207] = [
     // read as written again
     ("chat-translated-off", |shell, window, cx| {
         translate_chat(shell, None, cx);
+        translate_another_chat(shell, None, cx);
         cx.set_global(teams_ui::local_ai::Tools::default());
         clear_compose(shell, window, cx);
     }),
@@ -1936,6 +1977,51 @@ fn translate_chat(shell: &Entity<Shell>, language: Option<&'static str>, cx: &mu
         let translation = chat.read(cx).translation().clone();
         translation.update(cx, |translation, cx| translation.set_language(language, cx));
     }
+}
+
+/// The second chat of the list read in `language` (`None`: as written) without opening it: its row's preview is
+/// translated outside its view.
+fn translate_another_chat(shell: &Entity<Shell>, language: Option<&'static str>, cx: &mut App) {
+    let open = shell
+        .read(cx)
+        .chat()
+        .map(|chat| chat.read(cx).conversation().to_owned());
+    let me = shell.read(cx).account().to_owned();
+    // one whose preview is someone else's text message
+    let other = shell
+        .read(cx)
+        .list()
+        .read(cx)
+        .rows()
+        .iter()
+        .filter(|row| Some(&row.id) != open.as_ref())
+        .find(|row| {
+            row.previewed.as_ref().is_some_and(|message| {
+                message.sender.as_deref() != Some(me.as_str()) && !message.content.contains("<img")
+            })
+        })
+        .map(|row| row.id.clone());
+    if let Some(other) = other {
+        let settings = shell.read(cx).settings().clone();
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.set_chat_language(&me, &other, language), cx);
+        });
+    }
+}
+
+/// Opens the open chat's language menu with `query` typed in its search field, or closes it (`None`).
+fn language_menu(shell: &Entity<Shell>, query: Option<&str>, window: &mut Window, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let model = chat.read(cx).translation().clone();
+    let picker = teams_ui::chat_translate::picker::picker_of(&model, window, cx);
+    picker.update(cx, |picker, cx| {
+        picker.set_open(query.is_some(), window, cx);
+        if let Some(query) = query {
+            picker.search(query, window, cx);
+        }
+    });
 }
 
 /// The made-up call's captions shown and translated into German by [`FAKE_CLAUDE`]: two lines said, one still spoken.

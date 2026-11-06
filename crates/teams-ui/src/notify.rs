@@ -14,6 +14,10 @@
 //!   is noticed only later), less [`CLOCK_SKEW_MS`], since the service's times are compared with this machine's;
 //! - in a team's channel only a mention of the account notifies (channels are the sidebar's teams section's).
 //!
+//! A chat read in another language ([`crate::chat_translate`]) notifies in that language: its message's translation is
+//! waited for at most [`NOTIFY_BUDGET`] (the store's, else the tool's, [`Previews`]); one not ready by then shows as
+//! written, and nothing is notified again when it comes.
+//!
 //! A mention of the account is marked as such ("… mentioned you"). Messages are gathered for [`GATHER`] before they
 //! are shown, so a catch-up's are seen together: up to [`SINGLES`] of one chat are shown one by one; more than that
 //! collapse into one notification of the chat ("N new messages"), which the ones shown before give way to (closed)
@@ -45,6 +49,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, WeakEntity};
 use teams_core::{CLOCK_SKEW_MS, Source};
+use teams_proto::chat::RichText;
 use teams_store::{Conversation, ConversationKind, Message};
 use zbus::Connection;
 use zbus::proxy::CacheProperties;
@@ -53,6 +58,8 @@ use zbus::zvariant::Value;
 use crate::app_icon;
 use crate::bridge::Core;
 use crate::chat_list::{self, LIST_LIMIT};
+use crate::chat_translate::Previews;
+use crate::chat_translate::previews::NOTIFY_BUDGET;
 use crate::models::{FeedEvent, Models};
 use crate::people::Shown;
 use crate::rich_text::Mentions;
@@ -240,6 +247,9 @@ pub struct Notifier {
     /// count when it last was.
     forgets: u64,
     forgotten: HashMap<String, u64>,
+    /// The account's translations: a translated chat's message is shown in its language when its translation comes
+    /// within [`NOTIFY_BUDGET`].
+    previews: Entity<Previews>,
     _feed: Subscription,
 }
 
@@ -287,6 +297,7 @@ impl Notifier {
             // the account's own presence's, nothing to notify
             FeedEvent::Registered | FeedEvent::PushStopped | FeedEvent::OwnReport { .. } => {}
         });
+        let previews = Previews::of(&core, &settings, cx);
         Self {
             core,
             settings,
@@ -301,6 +312,7 @@ impl Notifier {
             channels: HashSet::new(),
             forgets: 0,
             forgotten: HashMap::new(),
+            previews,
             _feed: feed,
         }
     }
@@ -520,7 +532,8 @@ async fn process(this: &WeakEntity<Notifier>, batch: Batch, cx: &mut AsyncApp) {
         if chosen.is_empty() {
             continue;
         }
-        let (chat, notices) = describe(&*core, &conversation, stored, chosen).await;
+        let translated = translations(this, &chosen, cx).await;
+        let (chat, notices) = describe(&*core, &conversation, stored, chosen, translated).await;
         // asked again after the reads above, right before what is shown is read (nothing waits in between)
         let channel = stored.is_some_and(|stored| stored.kind == ConversationKind::Channel);
         let due = this.update(cx, |this, cx| {
@@ -619,12 +632,36 @@ async fn choose(
     chosen
 }
 
-/// The chat's name and the notices for its messages that notify.
+/// The chosen messages' text in their chat's language, when it is translated: each waited for at most
+/// [`NOTIFY_BUDGET`], all at once; `None` for one shown as written (its chat isn't translated, or its translation
+/// didn't come in time: it is shown once, as written, and never again).
+async fn translations(
+    this: &WeakEntity<Notifier>,
+    chosen: &[(Candidate, bool)],
+    cx: &mut AsyncApp,
+) -> Vec<Option<Arc<RichText>>> {
+    let tasks = this.update(cx, |this, cx| {
+        this.previews.update(cx, |previews, cx| {
+            chosen
+                .iter()
+                .map(|(candidate, _)| previews.translated_within(candidate.message.clone(), NOTIFY_BUDGET, cx))
+                .collect::<Vec<_>>()
+        })
+    });
+    match tasks {
+        Ok(tasks) => futures_util::future::join_all(tasks).await,
+        Err(_) => vec![None; chosen.len()],
+    }
+}
+
+/// The chat's name and the notices for its messages that notify, each with its text in the chat's language when
+/// `translated` has it.
 async fn describe(
     core: &dyn Core,
     conversation: &str,
     stored: Option<&Conversation>,
     chosen: Vec<(Candidate, bool)>,
+    translated: Vec<Option<Arc<RichText>>>,
 ) -> (SharedString, Vec<Notice>) {
     let one_to_one = stored.is_none_or(|stored| stored.kind == ConversationKind::OneToOne);
     let chat: SharedString = match stored {
@@ -632,7 +669,9 @@ async fn describe(
         None => "Chat".into(),
     };
     let mut notices = Vec::with_capacity(chosen.len());
+    let mut translated = translated.into_iter();
     for (candidate, mention) in chosen {
+        let text = translated.next().flatten();
         let sender = sender_name(core, &candidate.message).await;
         let summary = match (one_to_one, mention) {
             (true, false) => sender,
@@ -648,7 +687,10 @@ async fn describe(
                 NoticeKind::Message
             },
             summary,
-            body: chat_list::message_line(&candidate.message),
+            body: text.map_or_else(
+                || chat_list::message_line(&candidate.message),
+                |text| chat_list::text_line(&text),
+            ),
         });
     }
     (chat, notices)

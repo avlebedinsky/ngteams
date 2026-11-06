@@ -135,6 +135,51 @@ pub async fn find(core: &dyn Core, query: String, chats: Vec<(String, SharedStri
     hits
 }
 
+/// The longest text a translated message's card shows, in characters.
+pub const SNIPPET_CHARS: usize = 200;
+
+/// A translated message's text as its card shows it: on one line, at most [`SNIPPET_CHARS`] characters.
+#[must_use]
+pub fn snippet_line(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= SNIPPET_CHARS {
+        return line;
+    }
+    let mut cut: String = line.chars().take(SNIPPET_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// Where the words of `query` are in `text` (byte ranges, in order, ignoring case): what a translated message's card
+/// marks, its match having been in the message as written.
+#[must_use]
+pub fn marked_terms(text: &str, query: &str) -> Vec<Range<usize>> {
+    let lower = text.to_lowercase();
+    // lowercasing may change lengths: only a text whose length it keeps is marked
+    if lower.len() != text.len() {
+        return Vec::new();
+    }
+    let mut matched: Vec<Range<usize>> = Vec::new();
+    for term in query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .filter(|term| !term.is_empty())
+    {
+        let mut from = 0;
+        while let Some(at) = lower[from..].find(&term) {
+            let start = from + at;
+            let end = start + term.len();
+            if text.is_char_boundary(start) && text.is_char_boundary(end) {
+                matched.push(start..end);
+            }
+            from = end;
+        }
+    }
+    matched.sort_by_key(|range| range.start);
+    matched.dedup_by(|later, earlier| later.start < earlier.end);
+    matched
+}
+
 /// The chats the list shows, `(id, name)`: what hits may open (a favourite channel isn't a chat).
 #[must_use]
 pub fn listed_chats(list: &Entity<ChatList>, cx: &App) -> Vec<(String, SharedString)> {

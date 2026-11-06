@@ -486,6 +486,7 @@ fn arranging_keeps_a_chat_called_empty_once_it_has_text_or_unread() {
         faces: Vec::new(),
         team: None,
         preview: preview.to_owned().into(),
+        previewed: None,
         last_activity: None,
         unread,
     };
@@ -747,6 +748,7 @@ fn plain_row(id: &str) -> ChatRow {
         faces: Vec::new(),
         team: None,
         preview: "done".into(),
+        previewed: None,
         last_activity: None,
         unread: 0,
     }
