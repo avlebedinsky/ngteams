@@ -722,6 +722,62 @@ fn the_globe_s_zone_pickers_search_and_pick_a_zone() {
     assert!(cx.debug_bounds("event-start-zone-asia-kolkata").is_some());
 }
 
+#[test]
+fn picking_a_zone_keeps_the_date_and_time_shown_and_reads_them_in_it() {
+    use event_form::zones::{Zones, wall_in};
+    let tokyo = chrono_tz::Asia::Tokyo;
+    let london = chrono_tz::Europe::London;
+    let rig = Rig::start();
+    let (form, cx, _, _) = window(&rig, new_seed());
+    click(cx, "event-zones");
+    click(cx, "event-start-zone");
+    cx.simulate_input("tokyo");
+    click(cx, "event-start-zone-asia-tokyo");
+    // the start's 9:00 on 10/27 is now Tokyo's, the end's zone with it, still an hour later
+    let (zones, picked) = cx.update(|_, cx| (form.read(cx).zones(), form.read(cx).slot()));
+    assert_eq!(
+        zones,
+        Some(Zones {
+            start: tokyo,
+            end: tokyo
+        })
+    );
+    assert_eq!(wall_in(picked.start, tokyo), slot().start);
+    assert_eq!(wall_in(picked.end, tokyo), slot().end);
+    // the end's 10:00 is now London's (10:00 UTC, after Tokyo's 9:00): the start stays
+    click(cx, "event-end-zone");
+    cx.simulate_input("london");
+    click(cx, "event-end-zone-europe-london");
+    let (zones, moved) = cx.update(|_, cx| (form.read(cx).zones(), form.read(cx).slot()));
+    assert_eq!(
+        zones,
+        Some(Zones {
+            start: tokyo,
+            end: london
+        })
+    );
+    assert_eq!(moved.start, picked.start);
+    assert_eq!(wall_in(moved.end, london), slot().end);
+    // a start zone picked while the end has its own leaves the end where it is
+    let paris = chrono_tz::Europe::Paris;
+    cx.update(|_, cx| form.update(cx, |form, cx| form.set_zone(false, paris, cx)));
+    let (zones, apart) = cx.update(|_, cx| (form.read(cx).zones(), form.read(cx).slot()));
+    assert_eq!(
+        zones,
+        Some(Zones {
+            start: paris,
+            end: london
+        })
+    );
+    assert_eq!(wall_in(apart.start, paris), slot().start);
+    assert_eq!(apart.end, moved.end);
+    // an end read in its new zone before the start is the start, as Outlook's "4:00 PM - 4:00 PM"
+    let kiritimati = chrono_tz::Pacific::Kiritimati;
+    cx.update(|_, cx| form.update(cx, |form, cx| form.set_zone(true, kiritimati, cx)));
+    let last = cx.update(|_, cx| form.read(cx).slot());
+    assert_eq!((last.start, last.end), (apart.start, apart.start));
+}
+
 /// A zone far from the desktop's, and a start on 2026-11-10 (a Tuesday) whose day there is another.
 fn far_start() -> (event_form::zones::Tz, Slot, NaiveDate) {
     let desktop = event_form::zones::Zones::desktop().start;
@@ -750,6 +806,8 @@ fn a_series_in_another_zone_repeats_on_the_start_s_day_there() {
             form.choose_series(true, window, cx);
             form.show_zones(true, cx);
             form.set_zone(false, far, cx);
+            // picking the zone kept the clock shown; the start is put back on the moment, a day apart there
+            form.set_slot(slot, cx);
         });
     });
     draw(cx);
@@ -776,4 +834,137 @@ fn a_series_in_another_zone_repeats_on_the_start_s_day_there() {
         }
     );
     assert_eq!(recurrence.start, event_form::zones::midnight(there, Some(far)));
+}
+
+/// A zone far from the desktop's by the middle tier's name, and an instant (UTC) on a day there other than the
+/// desktop's: Honolulu's Monday 21:00 (the desktop's Tuesday east of UTC-10), else Kiritimati's Tuesday 02:00.
+fn far_event_zone() -> (&'static str, event_form::zones::Tz, chrono::DateTime<chrono::Utc>) {
+    use chrono::TimeZone as _;
+    let desktop = event_form::zones::Zones::desktop().start;
+    [
+        ("HawaiianSt", chrono_tz::Pacific::Honolulu, (2026, 11, 10, 7)),
+        ("LineIslandsSt", chrono_tz::Pacific::Kiritimati, (2026, 11, 9, 12)),
+    ]
+    .into_iter()
+    .find_map(|(name, zone, (year, month, day, hour))| {
+        let at = chrono::Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
+        let there = at.with_timezone(&zone).date_naive();
+        let here = at.with_timezone(&chrono::Local).date_naive();
+        (!event_form::zones::same_clock(zone, desktop, at) && there != here).then_some((name, zone, at))
+    })
+    .unwrap()
+}
+
+/// An event of the account's own read whole, made in `zone` (its middle-tier name) from `start` for 30 minutes, a
+/// weekly series' master on `weekly` (0 Sunday) when it names a day.
+fn zoned_event(zone: &str, start: chrono::DateTime<chrono::Utc>, weekly: Option<u8>) -> teams_core::FullEvent {
+    let end = start + chrono::Duration::minutes(30);
+    let mut body = serde_json::json!({
+        "objectId": "zoned",
+        "subject": "Synthetic zoned event",
+        "startTime": start.format("%Y-%m-%dT%H:%M:%S+00:00").to_string(),
+        "endTime": end.format("%Y-%m-%dT%H:%M:%S+00:00").to_string(),
+        "eventTimeZone": zone,
+        "utcOffset": -600.0,
+        "eventType": "Single",
+        "isOrganizer": true,
+        "isAppointment": true,
+        "myResponseType": "Organizer",
+        "showAs": "Busy"
+    });
+    if let Some(day) = weekly {
+        body["eventType"] = "RecurringMaster".into();
+        body["eventRecurrencePattern"] =
+            serde_json::json!({"patternType": "Weekly", "weekly": {"daysOfTheWeek": [day], "interval": 1}});
+        body["eventRecurrenceRange"] =
+            serde_json::json!({"startDate": start.format("%Y-%m-%dT00:00:00+00:00").to_string()});
+    }
+    teams_proto::EventRead::new("zoned")
+        .unwrap()
+        .read_answer(&serde_json::to_vec(&body).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn a_series_made_in_another_zone_opens_in_it_and_saves_unchanged() {
+    use chrono::{Datelike as _, Offset as _};
+    let (name, zone, start) = far_event_zone();
+    let there = start.with_timezone(&zone).date_naive();
+    let weekday = u8::try_from(there.weekday().num_days_from_sunday()).unwrap();
+    let rig = Rig::start();
+    let (form, cx, _, _) = window(&rig, Seed::Change(Box::new(zoned_event(name, start, Some(weekday)))));
+    let zones = cx.update(|_, cx| form.read(cx).zones()).unwrap();
+    assert_eq!((zones.start, zones.end), (zone, zone));
+    // its times on the zoned lines, its weekday that zone's: Weekly, not Custom
+    assert!(cx.debug_bounds("event-zoned-start").is_some());
+    assert_eq!(cx.update(|_, cx| form.read(cx).repeat_label()), Some("Weekly"));
+    let repeats = cx.update(|_, cx| form.read(cx).printable(cx).repeats).unwrap();
+    assert_eq!(
+        repeats,
+        format!(
+            "Occurs every {} starting {}",
+            there.format("%A"),
+            there.format("%-m/%-d/%Y")
+        )
+    );
+    cx.update(|window, cx| form.update(cx, |form, cx| form.save(window, cx)));
+    draw(cx);
+    let calendar = rig.core.calendar.lock().unwrap();
+    let [EventWrite::Update { id, draft, .. }] = calendar.writes.as_slice() else {
+        panic!("one change: {:?}", calendar.writes);
+    };
+    assert_eq!(id, "zoned");
+    // the same moments, written in its own zone, repeating on the same day from the same first day
+    assert_eq!(draft.zone.as_deref(), Some(zone.name()));
+    assert_eq!(draft.start.ms, start.timestamp_millis());
+    assert_eq!(draft.end.ms, (start + chrono::Duration::minutes(30)).timestamp_millis());
+    let offset = start.with_timezone(&zone).offset().fix().local_minus_utc() / 60;
+    assert_eq!((draft.start.offset_minutes, draft.end.offset_minutes), (offset, offset));
+    let recurrence = draft.recurrence.as_ref().unwrap();
+    assert_eq!(
+        recurrence.pattern,
+        teams_proto::RecurrencePattern::Weekly {
+            interval: 1,
+            days: vec![teams_proto::Weekday::ALL[usize::from(weekday)]]
+        }
+    );
+    assert_eq!(recurrence.start, event_form::zones::midnight(there, Some(zone)));
+}
+
+#[test]
+fn a_single_event_opens_in_its_own_zone_and_one_of_the_desktop_s_clock_with_the_globe_closed() {
+    let (name, zone, start) = far_event_zone();
+    let rig = Rig::start();
+    let (form, cx, _, _) = window(&rig, Seed::Change(Box::new(zoned_event(name, start, None))));
+    assert_eq!(
+        cx.update(|_, cx| form.read(cx).zones()),
+        Some(event_form::zones::Zones { start: zone, end: zone })
+    );
+    cx.update(|window, cx| form.update(cx, |form, cx| form.save(window, cx)));
+    draw(cx);
+    {
+        let calendar = rig.core.calendar.lock().unwrap();
+        let [EventWrite::Update { draft, .. }] = calendar.writes.as_slice() else {
+            panic!("one change");
+        };
+        assert_eq!(draft.zone.as_deref(), Some(zone.name()));
+        assert_eq!(draft.start.ms, start.timestamp_millis());
+        assert!(draft.recurrence.is_none());
+    }
+    // one in a zone the middle tier names but the list doesn't know opens in the desktop's; one in UTC in UTC unless
+    // that is the desktop's clock
+    let desktop = event_form::zones::Zones::desktop().start;
+    let utc = event_form::zones::Tz::UTC;
+    for (other, opens) in [
+        ("NoSuchSt", None),
+        (
+            "Utc",
+            (!event_form::zones::same_clock(desktop, utc, start)).then_some(utc),
+        ),
+    ] {
+        let rig = Rig::start();
+        let (form, cx, _, _) = window(&rig, Seed::Change(Box::new(zoned_event(other, start, None))));
+        let zones = cx.update(|_, cx| form.read(cx).zones());
+        assert_eq!(zones.map(|zones| zones.start), opens, "{other}");
+    }
 }

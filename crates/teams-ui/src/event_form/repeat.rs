@@ -407,6 +407,12 @@ fn civil_date(time: teams_proto::ZonedTime) -> Option<NaiveDate> {
 const DAY_LETTERS: [&str; 7] = ["S", "M", "T", "W", "T", "F", "S"];
 
 impl EventForm {
+    /// What the repeat drop-down shows ("Weekly", "Custom"), for a series.
+    #[must_use]
+    pub fn repeat_label(&self) -> Option<&'static str> {
+        Some(self.repeat.as_ref()?.label(self.series_day()))
+    }
+
     /// The repeat row a series shows under its time: the drop-down, the end, and the summary.
     pub(super) fn repeat_row(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let repeat = self.repeat.clone()?;

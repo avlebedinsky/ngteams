@@ -1,10 +1,12 @@
 //! The scheduling form's time zones, as Teams' form shows them behind its globe: the start's date, time and time zone
 //! on one line, the end's date, time and time zone under it. The event's slot stays in the desktop's time (the day
-//! beside the form and the Scheduler draw it there); the zones only say in which zone its start and end are read and
-//! picked. The middle tier's event has one zone, the start's (its Exchange name read by the engine,
-//! `EventDraft::zone`), and reads both its times as that zone's clock whatever offset they carry (seen live
-//! 2026-11-06: an end written with another zone's offset was taken as the start zone's time), so both are written in
-//! the start's zone: an end picked in another zone is still the same moment.
+//! beside the form and the Scheduler draw it there); the zones say in which zone its start and end are shown and
+//! picked. Picking a zone keeps the date and time its line shows and reads them in the new zone, as Outlook's form does
+//! (seen 2026-11-06: 10:00 in Istanbul, the start zone made Hawaii, was 10:00 in Hawaii, the end's zone with it, and
+//! an end zone picked kept the end's clock): [`rezoned`]. The middle tier's event has one zone, the start's (its
+//! Exchange name read by the engine, `EventDraft::zone`), and reads both its times as that zone's clock whatever
+//! offset they carry (seen live 2026-11-06: an end written with another zone's offset was taken as the start zone's
+//! time), so both are written in the start's zone: an end picked in another zone is still the same moment.
 //!
 //! The zones listed are the IANA zones of the world's regions, each as "(UTC+03:00) Istanbul" at the event's start,
 //! by offset then name. A picker is Teams' combobox: typing searches the zones by city (Teams' placeholder, "Search
@@ -14,6 +16,13 @@
 //! A series repeats in the start's zone, as Outlook's form writes it (its weekday, its first and last days are the
 //! start zone's, seen 2026-11-06: a start at 10:00 Honolulu on a Friday is "Occurs every Friday … (UTC-10)", whatever
 //! day the desktop's clock is on): [`series_day`], [`midnight`].
+//!
+//! An event changed opens in its own zone, as Outlook's form does: the one its read names (`eventTimeZone`, in the
+//! middle tier's names: [`exchange`]), shown on both lines when it isn't the desktop's ([`Zones::of_event`]), so a
+//! series made in Honolulu shows its times there and repeats on its own weekday, and saving it unchanged writes it in
+//! that zone again.
+
+mod exchange;
 
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Offset as _, TimeZone as _, Utc};
 use chrono_tz::OffsetComponents as _;
@@ -59,6 +68,18 @@ impl Zones {
         let zone = desktop_zone().unwrap_or(Tz::UTC);
         Self { start: zone, end: zone }
     }
+
+    /// The zones an event read whole (`event`) opens in: its own, `eventTimeZone`, on both lines, when it names one
+    /// other than the desktop's; `None` (the desktop's, the globe closed) otherwise, and for an all-day event.
+    #[must_use]
+    pub fn of_event(event: &serde_json::Map<String, serde_json::Value>, all_day: bool) -> Option<Self> {
+        if all_day {
+            return None;
+        }
+        let zone = exchange::zone_of(event.get("eventTimeZone")?.as_str()?)?;
+        let desktop = desktop_zone().unwrap_or(Tz::UTC);
+        (!same_clock(zone, desktop, Utc::now())).then_some(Self { start: zone, end: zone })
+    }
 }
 
 /// The desktop's time zone: `TZ`, else where `/etc/localtime` links to.
@@ -73,6 +94,17 @@ pub fn desktop_zone() -> Option<Tz> {
     let target = std::fs::read_link("/etc/localtime").ok()?;
     let target = target.to_string_lossy();
     target.split_once("zoneinfo/")?.1.parse().ok()
+}
+
+/// Whether `one` and `other` keep the same clock through the two years from `from` (an alias of the other, such as
+/// Asia/Istanbul and Europe/Istanbul, or a zone of the same rules): looked at every day.
+#[must_use]
+pub fn same_clock(one: Tz, other: Tz, from: DateTime<Utc>) -> bool {
+    one == other
+        || (0..730).all(|day| {
+            let at = from + Duration::days(day);
+            at.with_timezone(&one).offset().fix() == at.with_timezone(&other).offset().fix()
+        })
 }
 
 /// The desktop's `local` time as `zone` shows it at the same moment.
@@ -254,18 +286,13 @@ impl EventForm {
         cx.notify();
     }
 
-    /// The start's (`end` false) or the end's time zone changed to `zone`; a series follows the start's day there.
+    /// The start's (`end` false) or the end's time zone changed to `zone`, as Outlook's form changes it ([`rezoned`]):
+    /// the date and time the line shows stay and are read in the new zone; a series follows the start's day there.
     pub fn set_zone(&mut self, end: bool, zone: Tz, cx: &mut Context<Self>) {
         let from = self.series_day();
-        let mut zones = self.zones.unwrap_or_else(Zones::desktop);
-        if end {
-            zones.end = zone;
-        } else {
-            zones.start = zone;
-        }
+        let (zones, slot) = rezoned(self.slot, self.zones.unwrap_or_else(Zones::desktop), end, zone);
         self.zones = Some(zones);
-        self.follow_series_day(from);
-        cx.notify();
+        self.move_to(slot, from, cx);
     }
 
     /// The day a series starts on: the start's date in the zone it repeats in ([`series_day`]).
@@ -497,6 +524,32 @@ impl EventForm {
             .child(Self::zone_menu(&end_zone, true));
         div().flex().flex_col().gap_1().child(start).child(end)
     }
+}
+
+/// `slot` and `zones` after the start's (`end` false) or the end's zone is changed to `zone`, as Outlook's form changes
+/// them (seen 2026-11-06): the date and time the line showed, read in the new zone. A new start zone is the end's too
+/// while the end was in the start's zone (its date and time kept as well); an end in a zone of its own stays where it
+/// is. An end that would come before the start is the start (Outlook's "4:00 PM - 4:00 PM").
+#[must_use]
+pub fn rezoned(slot: Slot, zones: Zones, end: bool, zone: Tz) -> (Zones, Slot) {
+    let (zones, start, finish) = if end {
+        let shown = wall_in(slot.end, zones.end);
+        (Zones { end: zone, ..zones }, slot.start, local_of(shown, zone))
+    } else {
+        let start = local_of(wall_in(slot.start, zones.start), zone);
+        if zones.end == zones.start {
+            let end = local_of(wall_in(slot.end, zones.end), zone);
+            (Zones { start: zone, end: zone }, start, end)
+        } else {
+            (Zones { start: zone, ..zones }, start, slot.end)
+        }
+    };
+    let slot = Slot {
+        start,
+        end: finish.max(start),
+        all_day: slot.all_day,
+    };
+    (zones, slot)
 }
 
 /// The start's zone the draft is written in, when the zones shown name one other than the desktop's.

@@ -49,8 +49,9 @@ enums):
 | `isPrivate`, `bodyPreview`, `onlineMeetingConferenceId` | private, the start of its text, the dial-in id | read; the text is shown in the event's card |
 | `seriesMasterId` | an occurrence's or exception's series (its master's id) | the event the scheduling form reads and writes to change the whole series |
 
-Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `eventTimeZone`, `lastModifiedTime`,
-`schedulingServiceUpdateUrl`, `meetingTemplateId`, the dial-in numbers, …) aren't read.
+Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `lastModifiedTime`,
+`schedulingServiceUpdateUrl`, `meetingTemplateId`, the dial-in numbers, …) aren't read by the calendar view;
+`eventTimeZone` is read by the scheduling form (under "Time zones" below).
 
 ## What the native client does with it
 
@@ -227,9 +228,27 @@ service reads `startTime` and `endTime` as that zone's clock whatever offset the
 with the start in Honolulu (`-10:00`) and the end written with Istanbul's offset (`13:00+03:00`) came back ending at
 13:00 Honolulu time. So both are written in the start's zone; an end picked in another zone is converted to it.
 
+An event read whole names its zone the same way, `eventTimeZone` with the start's `utcOffset` (`"HawaiianSt"`,
+`-600.0` on 2026-11-06), and nothing more: no `originalStartTimeZone` or end zone, the master and its occurrences
+alike. The names are the Windows zones in the service's short form (`<Name>St` for "<Name> Standard Time",
+`UtcMinus11`, `RussiaTimeZone3`, `GTBSt`, and the odd `VenezulaSt`, `IndianSt`, `NAsiaSt`), the web client listing 140
+of them; the native client reads each as the IANA zone of its Windows zone's main place.
+
 A zone field is a combobox: focused, it empties to "Search for a city" and typing lists matching cities with their
-zone ("hono": Honolulu, Hawaii (HST), Honokaa, Hawaii, …), seen 2026-11-06. Picking a zone there keeps the start's
-date and clock and reads them in the new zone.
+zone ("hono": Honolulu, Hawaii (HST), Honokaa, Hawaii, …), seen 2026-11-06. Picking a zone there keeps the date and
+time its line shows and reads them in the new zone (Outlook's form, 2026-11-06, `team-manage`, the save held unsent):
+
+- the start's zone: 10:00 to 10:30 in Istanbul, the start zone made Hawaii, was 10:00 to 10:30 in Hawaii, the end's
+  zone changed with it; with the end already in a zone of its own (London), the start's 4:00 PM became Tokyo's and
+  the end stayed 4:30 PM in London;
+- the end's zone: 4:00 to 4:30 PM in Istanbul, the end zone made London, was 4:00 PM Istanbul to 4:30 PM London; an
+  end that came before the start that way (4:30 PM at Kiritimati, UTC+14, against a 4:00 PM Tokyo start) was made the
+  start ("4:00 PM - 4:00 PM", shown 9:00 PM at Kiritimati). The held `CreateCalendarEvent` carried `Start`
+  `2026-11-06T16:00:00.000` with `StartTimeZoneId` `Tokyo Standard Time` and `End` `2026-11-06T21:00:00.000` with
+  `EndTimeZoneId` `Line Islands Standard Time`.
+
+Outlook's form opens an event in its own zone; the native form opens a change in the zone its read names, on both
+lines (the read gives no end zone), so its times show there and a series keeps its weekday.
 
 A series repeats in the start's zone. Outlook's form (2026-11-06, start zone Hawaii, the save held unsent) said
 "Occurs every Friday from 10:00 AM to 10:30 AM effective Fri 11/6/2026 until Fri 4/30/2027 (UTC-10)" and its
@@ -306,6 +325,9 @@ their typed protocol requests with the service's own credential.
 - **Time zones** (`crates/teams-ui/src/event_form/zones.rs`): the form's slot stays in the desktop's time; a start zone
   other than the desktop's is sent as the draft's `zone`, whose Exchange name the engine reads for `eventTimeZone`, and
   both times are written in it. A series' days are the start zone's (its weekday, its first and last days, the
-  summary), written as that zone's midnights. Each zone picker searches its zones by city, region or offset.
+  summary), written as that zone's midnights. Each zone picker searches its zones by city, region or offset, and
+  picking one keeps the line's date and time, as Outlook's does. A change opens in the event's own `eventTimeZone`
+  (`zones/exchange.rs`) when its clock isn't the desktop's, so saving it unchanged writes the same moments, zone and
+  series again; a zone name the list doesn't know opens in the desktop's.
 - **People's calendars** (`crates/teams-ui/src/calendar_view/people.rs`): their busy times read for the days shown
   (`Schedules`, a read per five days), drawn in each calendar's colour, opening no card.

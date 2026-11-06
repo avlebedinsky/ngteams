@@ -533,6 +533,8 @@ impl EventForm {
                 all_day: event.all_day,
             };
         }
+        // its own zone, as Outlook's form opens it: its times shown there, a series' weekday that zone's
+        self.zones = zones::Zones::of_event(&full.raw, event.all_day);
         self.online = event.online;
         self.show_as = match &event.show_as {
             teams_core::ShowAs::Free => EventShowAs::Free,
@@ -633,6 +635,11 @@ impl EventForm {
     /// zone's).
     pub fn set_slot(&mut self, slot: Slot, cx: &mut Context<Self>) {
         let from = self.series_day();
+        self.move_to(slot, from, cx);
+    }
+
+    /// Moves the event to `slot` as [`Self::set_slot`] does, a series having started on `from` before.
+    fn move_to(&mut self, slot: Slot, from: NaiveDate, cx: &mut Context<Self>) {
         self.slot = slot;
         self.follow_series_day(from);
         if slot.start.date() != self.day {
