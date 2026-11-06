@@ -515,6 +515,11 @@ form's attribute order (`teams_proto::sent_picture`, `MessageText`), without the
 whose value for another format no capture showed, and the object in `amsreferences`. An object made for a picture removed
 before Send stays empty of readers but the chat's, unreferenced, and expires with the media service's 25 days.
 
+Live (lab a to b, 2026-11-06): the creation answered `400` "The 'User-Agent' header is missing or invalid" ("the
+platform id could not be created") without a `User-Agent`, and again with a browser's `User-Agent` alone; with the
+web client's build in `x-ms-client-version` too (`1415/…`) it answered `201`, the upload `201` with an empty body,
+the post `201`, and b's client showed the picture inline from the object's `imgo` view.
+
 ## Pictures in messages
 
 How a received message carries a pasted picture and an emoticon, from the lab's captures (channel posts in `ab-chat`,

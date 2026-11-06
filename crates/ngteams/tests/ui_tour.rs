@@ -239,6 +239,17 @@ const STEPS: [Step; 5 + 235] = [
             compose.send(window, cx);
         });
     }),
+    // a picture on the clipboard pasted into the a–b chat's box below its text (the app's own clipboard, in the
+    // sandbox), sent to the mock's media service at once, as Teams shows a pasted picture before Send
+    ("compose-picture", |shell, window, cx| {
+        paste_picture(shell, window, cx);
+    }),
+    ("compose-picture-dark", |shell, _, cx| fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx)),
+    // sent: the message with the picture in the chat
+    ("chat-picture-sent-dark", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.send(window, cx));
+    }),
+    ("chat-picture-sent", |shell, _, cx| fixed_theme(shell, None, cx)),
     // the chat translated into German on this computer (a made-up tool, [`FAKE_CHAT_CLAUDE`]): the header's language
     // picker lit, each message translated with Teams' translation mark beside its time
     ("chat-translated", |shell, _, cx| {
@@ -1820,23 +1831,25 @@ const STEPS: [Step; 5 + 235] = [
         };
         group_controls(shell, (false, true), muted, cx);
     }),
-    // a picture on the clipboard pasted into the a–b chat's box below its text (the app's own clipboard, in the
-    // sandbox), sent to the mock's media service at once, as Teams shows a pasted picture before Send
-    ("compose-picture", |shell, window, cx| {
-        theme(shell, "teams-light", cx);
-        shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
-        paste_picture(shell, window, cx);
-    }),
-    ("compose-picture-dark", |shell, _, cx| theme(shell, "teams-dark", cx)),
-    // sent: the message with the picture in the chat
-    ("chat-picture-sent-dark", |shell, window, cx| {
-        with_compose(shell, cx, |compose, cx| compose.send(window, cx));
-    }),
-    ("chat-picture-sent", |shell, _, cx| theme(shell, "teams-light", cx)),
 ];
 
-/// Puts a made-up picture on the app's clipboard and pastes it into the open chat's box after a line of text, as
-/// Ctrl+V does.
+/// The app in Teams Dark (`Some` of its key), or back to following the system's light or dark (`None`).
+fn fixed_theme(shell: &Entity<Shell>, key: Option<&'static str>, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(
+            |settings| {
+                settings.appearance.follow_system = key.is_none();
+                settings.appearance.theme = key.unwrap_or(teams_ui::theme::LIGHT_KEY);
+            },
+            cx,
+        );
+    });
+}
+
+/// Puts a made-up picture in the open chat's box after a line of text, as a paste of it does (the paste itself, the
+/// sandbox's clipboard read by GPUI, is `ui-sandbox`'s clipboard test and the compose tests'; the sandbox's niri puts
+/// its own screenshots on its clipboard between steps, so a paste here would show one of those).
 fn paste_picture(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
     let mut png = Vec::new();
     if made_up_dashboard()
@@ -1845,17 +1858,15 @@ fn paste_picture(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
     {
         return;
     }
-    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
-        gpui::ImageFormat::Png,
-        png,
-    )));
-    let scale = window.scale_factor();
+    let Some(picture) = teams_ui::editor::pictures::Picture::of(png, window.scale_factor()) else {
+        return;
+    };
     with_compose(shell, cx, |compose, cx| {
         compose.focus(window, cx);
         compose.editor().update(cx, |editor, cx| {
             editor.paste_plain("Here is the dashboard", cx);
             editor.enter(true, false, window, cx);
-            editor.paste(false, scale, cx);
+            editor.insert_picture(picture, cx);
         });
     });
 }

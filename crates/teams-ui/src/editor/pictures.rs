@@ -288,10 +288,11 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let text = self.block_text(index, palette, focused, cx);
-        let frame = self
-            .pictures
-            .get(&id)
-            .map(|picture| Self::thumbnail(id, picture, palette, cx));
+        let frame = self.pictures.get(&id).map(|picture| {
+            // as wide as the box was on the last frame lets it be, as a message's picture is in its bubble
+            let room = Some(self.scroll.bounds().size.width).filter(|width| *width > px(0.0));
+            Self::thumbnail(id, picture, room, palette, cx)
+        });
         div()
             .w_full()
             .flex()
@@ -302,8 +303,14 @@ impl Editor {
             .into_any_element()
     }
 
-    fn thumbnail(id: u64, picture: &Picture, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let shape = crate::inline::Shape::of(picture.given, picture.own, None);
+    fn thumbnail(
+        id: u64,
+        picture: &Picture,
+        room: Option<gpui::Pixels>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let shape = crate::inline::Shape::of(picture.given, picture.own, room);
         let outer = shape.outer();
         let remove = selected_by(
             format!("editor-picture-remove-{id}"),
@@ -337,7 +344,17 @@ impl Editor {
                     .flex_none(),
             )
             // their clicks theirs, not the editor's press-and-drag layer under the rows
-            .child(div().absolute().top_1().right_1().occlude().child(remove))
+            // on a chip of the box's surface, so it shows on any picture
+            .child(
+                div()
+                    .absolute()
+                    .top_1()
+                    .right_1()
+                    .rounded_md()
+                    .bg(rgb(palette.surface))
+                    .occlude()
+                    .child(remove),
+            )
             .children(status.map(|status| {
                 div()
                     .absolute()
