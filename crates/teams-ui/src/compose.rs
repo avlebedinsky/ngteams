@@ -51,6 +51,7 @@
 //! `changed` each time what it holds changes), never its text.
 
 pub mod attachments;
+mod translated;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -516,6 +517,8 @@ pub struct Compose {
     reading: Option<Task<()>>,
     /// What the last send couldn't do, shown over the box.
     problem: Option<SharedString>,
+    /// A translated chat's sends ([`translated`]).
+    translated: translated::Translated,
     /// The account's own notes: nothing is written there ([`READ_ONLY_NOTES`]).
     /// What a read-only box says in place of its text area; `None` for a box that writes.
     read_only: Option<&'static str>,
@@ -621,6 +624,7 @@ impl Compose {
             candidates: None,
             reading: None,
             problem: None,
+            translated: translated::Translated::default(),
             writes: Writes::Chat,
             emoji: None,
             emoji_at: Rc::default(),
@@ -873,7 +877,7 @@ impl Compose {
     /// draft back (its text, its mentions, the reply or the edit) when the engine refuses it before it makes a row,
     /// unless something was typed in it since.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only.is_some() {
+        if self.read_only.is_some() || self.translating() {
             return;
         }
         if !self.files_ready() {
@@ -903,7 +907,38 @@ impl Compose {
                 })
                 .collect(),
         );
+        // a translated chat's message is translated before it goes to the outbox
+        let Some(built) = self.translate_first(built, doc, window, cx) else {
+            return;
+        };
+        self.write_built(
+            translated::Sending {
+                text: built,
+                original: None,
+            },
+            false,
+            window,
+            cx,
+        );
+    }
+
+    /// Writes `sending` through the outbox as the box's mode says (a post, a reply, an edit), and empties the box
+    /// unless `keep_box` (what was typed while it was translated stays).
+    fn write_built(
+        &mut self,
+        sending: translated::Sending,
+        keep_box: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let translated::Sending { text: built, original } = sending;
+        let doc = self.editor.read(cx).doc().clone();
+        let sent = original.as_ref().map(|_| built.rich_text().clone());
         let conversation = self.conversation.clone();
+        let edit_of = match &self.mode {
+            Mode::Edit { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        };
         let (action, kind) = match &self.mode {
             Mode::Edit { message_id, .. } => (
                 Action::Edit {
@@ -934,20 +969,32 @@ impl Compose {
             mode: self.mode.clone(),
             attachments: self.attachments.clone(),
         };
+        if let (Some(original), Some(sent)) = (&original, &sent) {
+            self.keep_original(original, sent, edit_of.as_deref(), cx);
+        }
         let reply = self.core.write(action);
         self.trace.record(
             &TraceLine::new("compose", "sent")
                 .conversation(&self.conversation)
                 .kind(kind),
         );
-        self.clear(window, cx);
-        self.await_send(reply, draft, window, cx);
+        if keep_box {
+            self.mode = Mode::New;
+            self.attachments.clear();
+            cx.notify();
+        } else {
+            self.clear(window, cx);
+        }
+        // a post's original is kept by the row it went out as
+        let post = sent.filter(|_| edit_of.is_none());
+        self.await_send(reply, draft, post, window, cx);
     }
 
     fn await_send(
         &mut self,
         reply: teams_core::Reply<teams_store::OutboxEntry>,
         draft: Draft,
+        post: Option<RichText>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -957,9 +1004,12 @@ impl Compose {
             let answer = reply.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.sending_files = this.sending_files.saturating_sub(usize::from(files));
-                if let Err(error) = answer {
-                    this.give_back(draft, window, cx);
-                    this.show_problem(format!("Not sent: {error}"), cx);
+                match answer {
+                    Err(error) => {
+                        this.give_back(draft, window, cx);
+                        this.show_problem(format!("Not sent: {error}"), cx);
+                    }
+                    Ok(row) => this.sent_post(row.client_message_id, post.as_ref(), cx),
                 }
                 cx.notify();
             });
@@ -991,6 +1041,7 @@ impl Compose {
     /// Empties the box, ends a reply or an edit, and collapses an expanded box, as Teams' does once it sent.
     fn clear(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
+        self.forget_untranslated();
         self.mode = Mode::New;
         self.attachments.clear();
         self.picker = None;
@@ -1669,6 +1720,7 @@ impl Render for Compose {
             .gap_1()
             .children(self.picker_view(palette, cx))
             .children(self.mode_bar(palette, cx))
+            .children(self.translation_view(palette, cx))
             .children(self.problem_view(palette))
             .child(self.input_box(palette, focused, cx));
         div()

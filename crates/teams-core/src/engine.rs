@@ -122,7 +122,7 @@ use teams_proto::{
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    ReadHorizon, SearchHit, Store, StoreError, Team,
+    ReadHorizon, SearchHit, SentOriginal, Store, StoreError, StoredTranslation, Team,
 };
 use teams_trouter::{
     Change, ChatEvent, Delivery, Down, MessageLoss, PushEvent, RegistrationReport, Stop, Trouter, TrouterCredentials,
@@ -673,6 +673,10 @@ enum Request {
     /// A call action, with when it was asked (a start taken too late is refused: [`crate::calling::START_WITHIN`]).
     Call(CallAction, std::time::Instant, Responder<CallId>),
     SyncConversation(String, Responder<Synced>),
+    /// A chat's translations made on this computer, kept in the store: no service write.
+    KeepTranslations(Vec<StoredTranslation>, Responder<()>),
+    /// The account's own message as written, kept when it was sent translated: no service write.
+    KeepSentOriginal(SentOriginal, Responder<()>),
     Person(String, Responder<Person>),
     Presence(String, Responder<Availability>),
     ReactionAnimation(String, Responder<Option<Strip>>),
@@ -815,6 +819,19 @@ enum Query {
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
     LeftByEarlierRuns(Responder<Vec<OutboxEntry>>),
     ReplyRoots(String, Responder<Vec<(String, String)>>),
+    /// The kept translations into a language of some of a conversation's messages.
+    Translations {
+        conversation: String,
+        language: String,
+        ids: Vec<String>,
+        reply: Responder<Vec<StoredTranslation>>,
+    },
+    /// The account's own messages of a conversation as written, by their keys.
+    SentOriginals {
+        conversation: String,
+        keys: Vec<String>,
+        reply: Responder<Vec<SentOriginal>>,
+    },
     /// The stored calendar events between two instants (ms): [`crate::calendar::stored`].
     CalendarEvents {
         start_ms: i64,
@@ -1081,6 +1098,44 @@ impl EngineRequests {
             end_ms,
             reply,
         })
+    }
+
+    /// The kept translations into `language` (the app's code) of the messages `ids` of `conversation`, every version
+    /// kept ([`Store::translations`]): a chat translated on this computer shows them without translating again.
+    /// Answered meanwhile too, while a catch-up runs.
+    pub fn translations(
+        &self,
+        conversation: String,
+        language: String,
+        ids: Vec<String>,
+    ) -> Reply<Vec<StoredTranslation>> {
+        self.query(|reply| Query::Translations {
+            conversation,
+            language,
+            ids,
+            reply,
+        })
+    }
+
+    /// Keeps a chat's translations made on this computer ([`Store::put_translations`]): only the store changes.
+    pub fn keep_translations(&self, translations: Vec<StoredTranslation>) -> Reply<()> {
+        self.ask(|reply| Request::KeepTranslations(translations, reply))
+    }
+
+    /// The account's own messages of `conversation` as written when they were sent translated, by their keys
+    /// ([`Store::sent_originals`]). Answered meanwhile too.
+    pub fn sent_originals(&self, conversation: String, keys: Vec<String>) -> Reply<Vec<SentOriginal>> {
+        self.query(|reply| Query::SentOriginals {
+            conversation,
+            keys,
+            reply,
+        })
+    }
+
+    /// Keeps the account's own message as written, sent translated ([`Store::put_sent_original`]): only the store
+    /// changes.
+    pub fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
+        self.ask(|reply| Request::KeepSentOriginal(original, reply))
     }
 
     /// The event `id` of the account's calendar, read whole from the middle tier now: what the scheduling form opens
@@ -2056,6 +2111,12 @@ where
                 let _ = reply.send(logged(synced, || format!("sync of {conversation}")));
             }
             Request::Query(query) => self.answer(query),
+            Request::KeepTranslations(translations, reply) => {
+                let _ = reply.send(self.store.put_translations(&translations).map_err(EngineError::from));
+            }
+            Request::KeepSentOriginal(original, reply) => {
+                let _ = reply.send(self.store.put_sent_original(&original).map_err(EngineError::from));
+            }
             Request::Shutdown => {}
             lookup => self.on_lookup(lookup),
         }

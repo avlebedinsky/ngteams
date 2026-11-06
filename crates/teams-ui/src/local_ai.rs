@@ -1,8 +1,8 @@
 //! The AI command-line tools the app runs on this computer, shared by everything that asks one: live captions
-//! translated ([`crate::translate`]) and a meeting's recap summarized ([`crate::recap_summary`]). Claude Code and the
-//! Codex CLI, each with the model the user picked for that work ([`AiChoice`]: the one recommended for the work, the
-//! tool's own default, or any model the tool takes, named), started as a child process with nothing of the user's setup
-//! that could act on what it is given:
+//! translated ([`crate::translate`]), a meeting's recap summarized ([`crate::recap_summary`]) and a chat translated
+//! ([`crate::chat_translate`]). Claude Code and the Codex CLI, each with the model the user picked for that work
+//! ([`AiChoice`]: the one recommended for the work, the tool's own default, or any model the tool takes, named),
+//! started as a child process with nothing of the user's setup that could act on what it is given:
 //!
 //! - **Claude Code** runs as `claude -p --input-format stream-json --output-format stream-json`: one user message per
 //!   question in one conversation, its `result` line the answer. No tools, MCP servers, slash commands, settings files
@@ -68,6 +68,9 @@ pub enum Work {
     Captions,
     /// A meeting's transcript summarized: one long job, a stronger model.
     Summary,
+    /// A chat's messages translated, a batch at a time with the chat as context, and the account's own before they
+    /// are sent: the fast model, as someone waits on a send.
+    Chat,
 }
 
 impl Backend {
@@ -93,9 +96,9 @@ impl Backend {
     #[must_use]
     pub fn model(self, work: Work) -> &'static str {
         match (self, work) {
-            (Self::Claude, Work::Captions) => "haiku",
+            (Self::Claude, Work::Captions | Work::Chat) => "haiku",
             (Self::Claude, Work::Summary) => "sonnet",
-            (Self::Codex, Work::Captions) => "gpt-6-luna",
+            (Self::Codex, Work::Captions | Work::Chat) => "gpt-6-luna",
             (Self::Codex, Work::Summary) => "gpt-6.1-terra",
         }
     }
@@ -104,7 +107,7 @@ impl Backend {
     #[must_use]
     pub fn effort(self, work: Work) -> &'static str {
         match work {
-            Work::Captions => "low",
+            Work::Captions | Work::Chat => "low",
             Work::Summary => "medium",
         }
     }
@@ -143,9 +146,9 @@ impl Backend {
     #[must_use]
     pub fn label(self, work: Work) -> &'static str {
         match (self, work) {
-            (Self::Claude, Work::Captions) => "Claude Haiku",
+            (Self::Claude, Work::Captions | Work::Chat) => "Claude Haiku",
             (Self::Claude, Work::Summary) => "Claude Sonnet",
-            (Self::Codex, Work::Captions) => "Codex GPT-6-Luna",
+            (Self::Codex, Work::Captions | Work::Chat) => "Codex GPT-6-Luna",
             (Self::Codex, Work::Summary) => "Codex GPT-6.1-Terra",
         }
     }

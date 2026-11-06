@@ -368,6 +368,21 @@ pub struct Settings {
     pub first_account: Option<String>,
     /// Other people's calendars each account added to its calendar (its Add calendar), in the order added.
     pub people_calendars: Vec<PersonCalendar>,
+    /// The language each account reads a chat in ([`crate::chat_translate`]), for the chats it chose one for.
+    pub chat_languages: Vec<ChatLanguage>,
+    /// Which tool, and model, translates chats.
+    pub chat_translator: AiChoice,
+}
+
+/// The language an account reads a chat in, translated on this computer ([`crate::chat_translate`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatLanguage {
+    /// The account, by its MRI.
+    pub account: String,
+    /// The chat (or channel, or a channel post's thread), by its id.
+    pub chat: String,
+    /// The language, by its code in [`crate::translate::TARGET_LANGUAGES`].
+    pub language: &'static str,
 }
 
 /// Another person's calendar an account added to its calendar (Add calendar, "People's calendars").
@@ -461,6 +476,28 @@ impl Settings {
         }
     }
 
+    /// The language `account` reads `chat` in; `None`: as it is written.
+    #[must_use]
+    pub fn chat_language_of(&self, account: &str, chat: &str) -> Option<&'static str> {
+        self.chat_languages
+            .iter()
+            .find(|kept| kept.account == account && kept.chat == chat)
+            .map(|kept| kept.language)
+    }
+
+    /// Sets the language `account` reads `chat` in; `None` reads it as it is written.
+    pub fn set_chat_language(&mut self, account: &str, chat: &str, language: Option<&'static str>) {
+        self.chat_languages
+            .retain(|kept| !(kept.account == account && kept.chat == chat));
+        if let Some(language) = language {
+            self.chat_languages.push(ChatLanguage {
+                account: account.to_owned(),
+                chat: chat.to_owned(),
+                language,
+            });
+        }
+    }
+
     /// Forgets `account`'s own settings (an account removed): when it was the first, `next` (the app's next account)
     /// takes the first's place first, so nothing of it stays at the top level.
     pub fn forget_account(&mut self, account: &str, next: Option<&str>) {
@@ -474,6 +511,7 @@ impl Settings {
             }
         }
         self.accounts.remove(account);
+        self.chat_languages.retain(|kept| kept.account != account);
     }
 
     /// The device chosen for `kind`; `None` follows the system.
@@ -498,12 +536,13 @@ impl Settings {
 }
 
 impl Settings {
-    /// The local AI choice of `work`: the captions' translator or the recaps' summarizer.
+    /// The local AI choice of `work`: the captions' translator, the recaps' summarizer or the chats' translator.
     #[must_use]
     pub fn ai(&self, work: Work) -> &AiChoice {
         match work {
             Work::Captions => &self.caption_translator,
             Work::Summary => &self.recap_summarizer,
+            Work::Chat => &self.chat_translator,
         }
     }
 
@@ -512,6 +551,7 @@ impl Settings {
         match work {
             Work::Captions => self.caption_translator = choice,
             Work::Summary => self.recap_summarizer = choice,
+            Work::Chat => self.chat_translator = choice,
         }
     }
 }
@@ -541,6 +581,8 @@ impl Default for Settings {
             accounts: BTreeMap::new(),
             first_account: None,
             people_calendars: Vec::new(),
+            chat_languages: Vec::new(),
+            chat_translator: AiChoice::default(),
         }
     }
 }
@@ -583,6 +625,9 @@ pub mod keys {
     pub const FIRST_ACCOUNT: &str = "first_account";
     /// Other people's calendars the accounts added: an array of tables (`account`, `address`, `name`).
     pub const PEOPLE_CALENDARS: &str = "people_calendars";
+    /// The languages chats are read in: an array of tables (`account`, `chat`, `language`).
+    pub const CHAT_LANGUAGES: &str = "chat_languages";
+    pub const CHAT_TRANSLATOR: &str = "chat_translator";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -689,6 +734,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         }
         keys::ACCOUNTS => take_accounts(settings, value)?,
         keys::PEOPLE_CALENDARS => take_people_calendars(settings, value)?,
+        keys::CHAT_LANGUAGES | keys::CHAT_TRANSLATOR => take_chat_translation(settings, key, value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
         }
@@ -728,6 +774,37 @@ fn take_people_calendars(settings: &mut Settings, value: &Value) -> Result<(), P
         match taken {
             Some(calendar) => settings.people_calendars.push(calendar),
             None => failed = true,
+        }
+    }
+    if failed { Err(bad) } else { Ok(()) }
+}
+
+/// Takes the chats' translation: the tool translating them, or the language each account reads a chat in (an array
+/// of tables naming the account, the chat and the language; one that is bad is left out, the others are taken).
+fn take_chat_translation(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
+    if key == keys::CHAT_TRANSLATOR {
+        settings.chat_translator = ai_choice(value).ok_or(Problem::BadValue {
+            key: keys::CHAT_TRANSLATOR,
+            why: AI_CHOICE_SHAPE,
+        })?;
+        return Ok(());
+    }
+    let bad = Problem::BadValue {
+        key: keys::CHAT_LANGUAGES,
+        why: "not a list of chats, each with an account, a chat id and a language chats are translated into",
+    };
+    let entries = value.as_array().ok_or(bad.clone())?;
+    let mut failed = false;
+    for entry in entries {
+        let id = |key: &str| entry.get(key).and_then(chat_id);
+        let language = entry
+            .get("language")
+            .and_then(Value::as_str)
+            .and_then(translate::language)
+            .map(|(code, _)| code);
+        match (id("account"), id("chat"), language) {
+            (Some(account), Some(chat), Some(language)) => settings.set_chat_language(&account, &chat, Some(language)),
+            _ => failed = true,
         }
     }
     if failed { Err(bad) } else { Ok(()) }
@@ -993,6 +1070,7 @@ pub fn render(settings: &Settings) -> String {
         table.insert(keys::FIRST_ACCOUNT.to_owned(), Value::String(first.clone()));
     }
     render_people(settings, &mut table);
+    render_chat_translation(settings, &mut table);
     table.to_string()
 }
 
@@ -1011,6 +1089,28 @@ fn render_people(settings: &Settings, table: &mut Table) {
             })
             .collect();
         table.insert(keys::PEOPLE_CALENDARS.to_owned(), Value::Array(people));
+    }
+}
+
+/// The chats' translation, into the file's table (the chats' languages when there are any).
+fn render_chat_translation(settings: &Settings, table: &mut Table) {
+    table.insert(
+        keys::CHAT_TRANSLATOR.to_owned(),
+        ai_choice_value(&settings.chat_translator),
+    );
+    if !settings.chat_languages.is_empty() {
+        let chats = settings
+            .chat_languages
+            .iter()
+            .map(|kept| {
+                let mut entry = Table::new();
+                entry.insert("account".to_owned(), Value::String(kept.account.clone()));
+                entry.insert("chat".to_owned(), Value::String(kept.chat.clone()));
+                entry.insert("language".to_owned(), Value::String(kept.language.to_owned()));
+                Value::Table(entry)
+            })
+            .collect();
+        table.insert(keys::CHAT_LANGUAGES.to_owned(), Value::Array(chats));
     }
 }
 

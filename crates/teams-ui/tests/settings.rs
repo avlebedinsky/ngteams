@@ -81,6 +81,15 @@ fn changed() -> Settings {
             address: "avery@example.com".to_owned(),
             name: "Avery Example".to_owned(),
         }],
+        chat_languages: vec![teams_ui::settings::ChatLanguage {
+            account: "8:orgid:00000000-0000-4000-8000-00000000000a".to_owned(),
+            chat: CHAT.to_owned(),
+            language: "de",
+        }],
+        chat_translator: AiChoice {
+            tool: TranslatorChoice::Only(Backend::Codex),
+            model: teams_ui::local_ai::Model::Named("my-team-model".to_owned()),
+        },
     }
 }
 
@@ -923,6 +932,50 @@ fn the_font_size_steps_within_its_range() {
     assert_eq!(appearance.stepped_font_size(1), *theme::FONT_SIZES.end());
     appearance.font_size = *theme::FONT_SIZES.start();
     assert_eq!(appearance.stepped_font_size(-1), *theme::FONT_SIZES.start());
+}
+
+#[test]
+fn a_chat_s_language_is_kept_per_account_and_chat_and_a_bad_one_left_out() {
+    let (read, problems) = parse(
+        "chat_translator = \"claude\"\n\
+         [[chat_languages]]\naccount = \"8:orgid:a\"\nchat = \"19:one@thread.v2\"\nlanguage = \"de\"\n\
+         [[chat_languages]]\naccount = \"8:orgid:a\"\nchat = \"19:two@thread.v2\"\nlanguage = \"klingon\"\n\
+         [[chat_languages]]\naccount = \"8:orgid:b\"\nchat = \"19:one@thread.v2\"\nlanguage = \"pt-br\"\n",
+    )
+    .unwrap();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(
+        read.chat_translator,
+        AiChoice::of(TranslatorChoice::Only(Backend::Claude))
+    );
+    assert_eq!(read.chat_language_of("8:orgid:a", "19:one@thread.v2"), Some("de"));
+    assert_eq!(read.chat_language_of("8:orgid:a", "19:two@thread.v2"), None);
+    assert_eq!(read.chat_language_of("8:orgid:b", "19:one@thread.v2"), Some("pt-br"));
+    // kept across a restart: written and read again
+    let again = parse(&render(&read)).unwrap().0;
+    assert_eq!(again.chat_languages, read.chat_languages);
+    assert_eq!(again.chat_translator, read.chat_translator);
+}
+
+#[test]
+fn a_chat_s_language_is_changed_turned_off_and_forgotten_with_its_account() {
+    let (mut settings, _) = parse(
+        "[[chat_languages]]\naccount = \"8:orgid:a\"\nchat = \"19:one@thread.v2\"\nlanguage = \"de\"\n\
+         [[chat_languages]]\naccount = \"8:orgid:b\"\nchat = \"19:one@thread.v2\"\nlanguage = \"pt-br\"\n",
+    )
+    .unwrap();
+    settings.set_chat_language("8:orgid:a", "19:one@thread.v2", Some("fr"));
+    assert_eq!(settings.chat_language_of("8:orgid:a", "19:one@thread.v2"), Some("fr"));
+    assert_eq!(settings.chat_languages.len(), 2);
+    settings.set_chat_language("8:orgid:a", "19:one@thread.v2", None);
+    assert_eq!(settings.chat_language_of("8:orgid:a", "19:one@thread.v2"), None);
+    settings.forget_account("8:orgid:b", None);
+    assert!(settings.chat_languages.is_empty());
+    // off by default; a bad tool or list is reported
+    assert!(Settings::default().chat_languages.is_empty());
+    assert_eq!(Settings::default().chat_translator, AiChoice::default());
+    assert_eq!(parse("chat_translator = \"luna\"").unwrap().1.len(), 1);
+    assert_eq!(parse("chat_languages = 3").unwrap().1.len(), 1);
 }
 
 #[test]

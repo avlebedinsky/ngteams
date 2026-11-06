@@ -34,7 +34,8 @@ use teams_proto::{
     TeamAnalytics, TeamPerson, TeamPicture, TeamTemplateCard, TeamTemplateDetails, TeamWrite,
 };
 use teams_store::{
-    Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
+    Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit,
+    SentOriginal, StoredTranslation, Team,
 };
 use tokio::sync::oneshot;
 
@@ -156,6 +157,28 @@ pub trait Core: Send + Sync + 'static {
     }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
+    /// The kept translations into `language` of the messages `ids` of `conversation` (a chat translated on this
+    /// computer: [`crate::chat_translate`]), every version kept. A fake keeps none.
+    fn translations(&self, conversation: String, language: String, ids: Vec<String>) -> Reply<Vec<StoredTranslation>> {
+        let _ = (conversation, language, ids);
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// Keeps a chat's translations in the store: no service write. A fake keeps nothing.
+    fn keep_translations(&self, translations: Vec<StoredTranslation>) -> Reply<()> {
+        let _ = translations;
+        Reply::ready(Ok(()))
+    }
+    /// The account's own messages of `conversation` as written when they were sent translated, by their keys. A fake
+    /// keeps none.
+    fn sent_originals(&self, conversation: String, keys: Vec<String>) -> Reply<Vec<SentOriginal>> {
+        let _ = (conversation, keys);
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// Keeps the account's own message as written, sent translated: no service write. A fake keeps nothing.
+    fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
+        let _ = original;
+        Reply::ready(Ok(()))
+    }
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
     fn history_complete(&self, conversation: String) -> Reply<Option<bool>>;
     /// An outbox row as it now stands.
@@ -424,6 +447,22 @@ impl Core for EngineRequests {
 
     fn stored_calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
         EngineRequests::stored_calendar(self, start_ms, end_ms)
+    }
+
+    fn translations(&self, conversation: String, language: String, ids: Vec<String>) -> Reply<Vec<StoredTranslation>> {
+        EngineRequests::translations(self, conversation, language, ids)
+    }
+
+    fn keep_translations(&self, translations: Vec<StoredTranslation>) -> Reply<()> {
+        EngineRequests::keep_translations(self, translations)
+    }
+
+    fn sent_originals(&self, conversation: String, keys: Vec<String>) -> Reply<Vec<SentOriginal>> {
+        EngineRequests::sent_originals(self, conversation, keys)
+    }
+
+    fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
+        EngineRequests::keep_sent_original(self, original)
     }
 
     fn calendar_event(&self, id: String) -> Reply<FullEvent> {

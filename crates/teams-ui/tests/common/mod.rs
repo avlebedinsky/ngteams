@@ -14,7 +14,7 @@ use teams_core::{
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    ReadHorizon, SearchHit, Team,
+    ReadHorizon, SearchHit, SentOriginal, StoredTranslation, Team,
 };
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
@@ -214,6 +214,10 @@ pub struct FakeCore {
     pub calendar: Mutex<calendar::CalendarFake>,
     /// The meetings their chats' threads name, by chat; any other chat names none.
     pub meetings: Mutex<HashMap<String, teams_core::MeetingDetails>>,
+    /// The chats' translations kept, as the store keeps them (a newer version's replacing an older one's).
+    pub translations: Mutex<Vec<StoredTranslation>>,
+    /// The account's own messages as written, kept when they were sent translated.
+    pub sent_originals: Mutex<Vec<SentOriginal>>,
 }
 
 /// An explicit actor, with account A as the fixture's default. An explicit override keeps its exact value.
@@ -832,6 +836,50 @@ impl Core for FakeCore {
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
         self.answer("read_horizon", || locked(&self.horizons).get(&conversation).cloned())
+    }
+
+    fn translations(&self, conversation: String, language: String, ids: Vec<String>) -> Reply<Vec<StoredTranslation>> {
+        self.answer("translations", || {
+            locked(&self.translations)
+                .iter()
+                .filter(|kept| {
+                    kept.conversation_id == conversation && kept.language == language && ids.contains(&kept.message_id)
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
+    fn keep_translations(&self, translations: Vec<StoredTranslation>) -> Reply<()> {
+        self.answer("keep_translations", || {
+            let mut kept = locked(&self.translations);
+            for row in translations {
+                kept.retain(|old| {
+                    !(old.conversation_id == row.conversation_id
+                        && old.message_id == row.message_id
+                        && old.language == row.language)
+                });
+                kept.push(row);
+            }
+        })
+    }
+
+    fn sent_originals(&self, conversation: String, keys: Vec<String>) -> Reply<Vec<SentOriginal>> {
+        self.answer("sent_originals", || {
+            locked(&self.sent_originals)
+                .iter()
+                .filter(|kept| kept.conversation_id == conversation && keys.contains(&kept.key))
+                .cloned()
+                .collect()
+        })
+    }
+
+    fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
+        self.answer("keep_sent_original", || {
+            let mut kept = locked(&self.sent_originals);
+            kept.retain(|old| !(old.conversation_id == original.conversation_id && old.key == original.key));
+            kept.push(original);
+        })
     }
 
     fn history_complete(&self, conversation: String) -> Reply<Option<bool>> {

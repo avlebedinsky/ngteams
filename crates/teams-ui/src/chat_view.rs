@@ -116,6 +116,7 @@ use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Rea
 
 use crate::bridge::Core;
 use crate::card_view::{CardState, CardsElement, ShownCards};
+use crate::chat_translate::{self, ChatTranslation};
 use crate::clock::{self, HourCycle};
 use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
 use crate::files;
@@ -548,6 +549,8 @@ pub struct MessageItem {
     pub thread: Threaded,
     /// A channel post's replies, summed up under it ([`Place::Channel`]); none without any.
     pub replies: Option<Box<Replies>>,
+    /// How its translation is marked beside its time, while the chat is translated ([`crate::chat_translate`]).
+    pub translation: Option<chat_translate::Mark>,
 }
 
 /// Where a message stands in a channel's threads.
@@ -955,8 +958,13 @@ pub struct ChatView {
     asks: u64,
     /// The models' revision the people were last asked at: someone renamed since is asked again.
     people_seen: u64,
-    /// Rendered rich text per message id, with the version it was rendered from.
-    rendered: HashMap<String, (i64, Arc<Rendered>)>,
+    /// Rendered rich text per message id, with the version it was rendered from and the translation it shows (its
+    /// text's address; `None`: the message's own).
+    rendered: HashMap<String, (i64, Option<usize>, Arc<Rendered>)>,
+    /// The chat's translation into the language picked for it ([`crate::chat_translate`]).
+    translation: Entity<ChatTranslation>,
+    /// What it showed at the last rebuild, and the observation of its changes.
+    translated: (chat_translate::Shown, Subscription),
     /// The system messages as shown, and what they are worked out from.
     systems: Systems,
     /// How many times rich text was laid out.
@@ -1118,6 +1126,7 @@ impl ChatView {
         let subscriptions = Self::subscriptions(&parts.models, &compose, window, cx);
         let writes_to = writes_to(&conversation, &place);
         let (seen, people_seen) = Self::seen_at(&parts.models, [&conversation, &writes_to], cx);
+        let (translation, observing_translation) = Self::translation_of(&parts, &conversation, &compose, cx);
         let mut view = Self {
             core: parts.core,
             models: parts.models,
@@ -1136,6 +1145,8 @@ impl ChatView {
             asks: 0,
             people_seen,
             rendered: HashMap::new(),
+            translation,
+            translated: (chat_translate::Shown::default(), observing_translation),
             systems: Systems::default(),
             layouts: 0,
             parses: 0,
@@ -1191,6 +1202,20 @@ impl ChatView {
         view.typing_changed(cx);
         view.sync_notes(cx);
         view
+    }
+
+    /// The chat's translation, handed to its compose box too, and its observation: a change builds the rows again.
+    fn translation_of(
+        parts: &ShellParts,
+        conversation: &str,
+        compose: &Entity<Compose>,
+        cx: &mut Context<Self>,
+    ) -> (Entity<ChatTranslation>, Subscription) {
+        let (core, settings) = (Arc::clone(&parts.core), parts.settings.clone());
+        let translation = cx.new(|cx| ChatTranslation::new(core, settings, conversation, cx));
+        compose.update(cx, |compose, _| compose.set_translation(translation.clone()));
+        let observing = cx.observe(&translation, |this: &mut Self, _, cx| this.rebuild(cx));
+        (translation, observing)
     }
 
     /// The models' revisions a new view starts at: its conversations' last change (the conversation's, and the chain a
@@ -1323,6 +1348,12 @@ impl ChatView {
     #[must_use]
     pub fn compose(&self) -> &Entity<Compose> {
         &self.compose
+    }
+
+    /// The chat's translation: its header's language picker drives it.
+    #[must_use]
+    pub fn translation(&self) -> &Entity<ChatTranslation> {
+        &self.translation
     }
 
     /// Whether the operating-system file drop target is currently highlighted.
@@ -1775,7 +1806,13 @@ impl ChatView {
     fn edit(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(held) = self.held_message(message) else { return };
         let mentioned = rich_text::mentioned(held.properties.as_deref());
-        let loaded = compose::load(&compose::rich_text_of(held), &mentioned);
+        // in a translated chat the edit starts from the text shown (what the account wrote), and goes out translated
+        let text = self
+            .translated
+            .0
+            .text_of(held)
+            .map_or_else(|| compose::rich_text_of(held), |shown| shown.as_ref().clone());
+        let loaded = compose::load(&text, &mentioned);
         let id = held.id.clone();
         self.compose.update(cx, |compose, cx| match loaded {
             Ok(loaded) => compose.edit(id, loaded, window, cx),
@@ -2176,6 +2213,7 @@ impl ChatView {
         }
         self.want_names(cx);
         self.rebuild(cx);
+        self.follow_translation(cx);
         self.watch_senders();
         if load == Load::Window
             && let Some(target) = self.revealing.take()
@@ -2189,6 +2227,14 @@ impl ChatView {
         }
         self.kick(cx);
         self.want_receipt(cx);
+    }
+
+    /// Hands the chat's translation the text messages the view holds now (it translates those it has nothing for).
+    fn follow_translation(&self, cx: &mut Context<Self>) {
+        let held: Vec<&Message> = self.messages.iter().filter(|message| self.shows(message)).collect();
+        let name_of = |message: &Message| self.sender_of(message).0;
+        self.translation
+            .update(cx, |translation, cx| translation.follow(&held, &name_of, cx));
     }
 
     fn take(&mut self, load: Load, read: Read) {
@@ -2467,12 +2513,18 @@ impl ChatView {
     /// A text message's rich text, parsed and laid out once per id and version: the cache is asked before anything
     /// is parsed.
     fn rendered(&mut self, message: &Message) -> Arc<Rendered> {
-        if let Some((version, rendered)) = self.rendered.get(&message.id)
+        let translated = self.translated.0.text_of(message);
+        let shows = translated.as_ref().map(|text| Arc::as_ptr(text) as usize);
+        if let Some((version, shown, rendered)) = self.rendered.get(&message.id)
             && *version == message.version
+            && *shown == shows
         {
             return Arc::clone(rendered);
         }
-        let text = self.parse(message);
+        let text = match translated {
+            Some(text) => text.as_ref().clone(),
+            None => self.parse(message),
+        };
         self.layouts += 1;
         let mentions = Mentions::of_message(message, self.core.me());
         let web_link = rich_text::message_web_link(&message.conversation_id, &message.id);
@@ -2482,7 +2534,7 @@ impl ChatView {
                 .with_source(rich_text::PictureSource::new(Arc::clone(&self.core))),
         );
         self.rendered
-            .insert(message.id.clone(), (message.version, Arc::clone(&rendered)));
+            .insert(message.id.clone(), (message.version, shows, Arc::clone(&rendered)));
         rendered
     }
 
@@ -2627,6 +2679,9 @@ impl ChatView {
             .then(|| forwarded::forwarded_from(message.properties.as_deref()))
             .flatten()
             .map(|from| Box::new(self.forward_origin(&from)));
+        let translation = matches!(body, Body::Text(_))
+            .then(|| self.translated.0.mark_of(message))
+            .flatten();
         Some(MessageItem {
             id: message.id.clone(),
             version: message.version,
@@ -2658,6 +2713,7 @@ impl ChatView {
                 Place::Thread { .. } => Threaded::InThread,
             },
             replies: None,
+            translation,
         })
     }
 
@@ -2774,7 +2830,10 @@ impl ChatView {
         let Some(Command::Send { text, .. }) = sending::command_of(row) else {
             return None;
         };
-        let rendered = Arc::new(rich_text::layout(text.rich_text(), &Mentions::default()));
+        // a post sent translated shows as the account wrote it
+        let original = self.translated.0.original_of_sent(text.rich_text());
+        let shown = original.as_deref().unwrap_or(text.rich_text());
+        let rendered = Arc::new(rich_text::layout(shown, &Mentions::default()));
         self.pending_rendered.insert(row.id, Arc::clone(&rendered));
         Some(RenderedText(rendered))
     }
@@ -2820,6 +2879,7 @@ impl ChatView {
 
     /// Builds the rows again and tells the list which changed.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.translated.0 = self.translation.read(cx).shown();
         let now_ms = Utc::now().timestamp_millis();
         let known = self.known_rows(cx);
         let notes = self.message_notes(&known, now_ms);
@@ -3184,8 +3244,11 @@ impl ChatView {
             column.items_start()
         };
         let cycle = clock::cycle(cx);
+        // Teams' translation mark stands beside the time, or under the bubble when there is no header to hold it
+        let mut mark = translation_mark(item, palette, cx);
+        let header = item.header.then(|| header_line(item, palette, cycle, mark.take()));
         column
-            .children(item.header.then(|| header_line(item, palette, cycle)))
+            .children(header)
             .child(bubble_line(
                 item,
                 InChat {
@@ -3201,7 +3264,7 @@ impl ChatView {
                 bar,
                 forward,
             ))
-            .children(footer_line(item, palette, cx))
+            .children(footer_line(item, mark, palette, cx))
             .children(item.replies.as_ref().map(|replies| {
                 let post = item.id.clone();
                 let open: forwarded::OnOpen = Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
@@ -4236,7 +4299,7 @@ fn new_messages_row(palette: Palette) -> AnyElement {
 /// A message's header, Teams' way: the sender's name (none on the account's own) and its time (on `cycle`'s clock),
 /// both muted, over the bubble's left edge, then "Edited" once edited. The time's test selector is
 /// `message-time-<id> <time>`.
-fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle) -> AnyElement {
+fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle, mark: Option<AnyElement>) -> AnyElement {
     let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let id = &item.id;
     let time = div().debug_selector(|| format!("message-time-{id} {time}")).child(time);
@@ -4251,7 +4314,45 @@ fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle) -> AnyEle
         .children(name)
         .child(time)
         .children(item.edited.then(edited_mark))
+        .children(mark)
         .into_any_element()
+}
+
+/// Teams' translation mark of a message of a translated chat: a click shows it as sent, and back; while its
+/// translation comes, a dimmed mark; one that couldn't be translated, a mark that says so.
+fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
+    use chat_translate::Mark;
+    let mark = item.translation.as_ref()?;
+    let id = item.id.clone();
+    let (tip, color, toggles): (SharedString, u32, bool) = match mark {
+        Mark::Translated { tip } => (tip.clone(), palette.muted_foreground, true),
+        Mark::Original { tip } => (tip.clone(), palette.brand, true),
+        Mark::Waiting => ("Translating…".into(), palette.border, false),
+        Mark::Failed => ("This message couldn't be translated".into(), theme::DANGER, false),
+    };
+    let selector = format!("translation-mark-{id}");
+    let glyph = Glyph::LANGUAGES.icon().size(px(14.0)).text_color(rgb(color));
+    let face = div()
+        .id(ElementId::Name(selector.clone().into()))
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .p(px(2.0))
+        .child(glyph)
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+    let face = if toggles {
+        face.cursor_pointer()
+            .hover(move |face| face.bg(rgb(palette.hover)))
+            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.translation
+                    .update(cx, |translation, cx| translation.toggle_original(&id, cx));
+            }))
+    } else {
+        face
+    };
+    Some(face.into_any_element())
 }
 
 /// The header of a forwarded message's card ([`forwarded::header`]); a click on the original's time tells
@@ -4518,10 +4619,15 @@ fn muted(text: &'static str, palette: Palette) -> AnyElement {
 /// once more than one reacted, the account's own ringed in the brand colour; a click sets or takes back the account's
 /// own), then "Add reaction", which opens the reactions on the message. "Edited" stands here when there is no header
 /// to hold it.
-fn footer_line(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
+fn footer_line(
+    item: &MessageItem,
+    mark: Option<AnyElement>,
+    palette: Palette,
+    cx: &mut Context<ChatView>,
+) -> Option<AnyElement> {
     let edited =
         (item.edited && !item.header).then(|| edited_mark().text_xs().text_color(rgb(palette.muted_foreground)));
-    if edited.is_none() && item.reactions.is_empty() {
+    if edited.is_none() && mark.is_none() && item.reactions.is_empty() {
         return None;
     }
     let reactions = item
@@ -4555,6 +4661,7 @@ fn footer_line(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>)
     };
     Some(
         line.children(edited)
+            .children(mark)
             .children(reactions)
             .children(add)
             .into_any_element(),
@@ -4788,6 +4895,7 @@ impl Render for ChatView {
             ))
             .child(messages)
             .children(typing)
+            .children(ChatTranslation::notice(&self.translation, palette, cx))
             .children(self.confirmation(palette, cx))
             .child(self.compose.clone())
             .children(more)

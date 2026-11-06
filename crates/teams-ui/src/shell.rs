@@ -2708,6 +2708,10 @@ impl Shell {
                     presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
                 });
                 let call = self.call_header_button(cx);
+                // the chat's language: its messages read in it, and the account's sent in the chat's own
+                let translate = chat
+                    .as_ref()
+                    .map(|chat| crate::chat_translate::header_button(chat.read(cx).translation(), cx));
                 let tabs = self.meeting_tab_bar(id, palette, cx);
                 // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
                 // presence, the call on the right
@@ -2715,6 +2719,7 @@ impl Shell {
                     .children(tabs)
                     .children(presence)
                     .child(div().flex_1())
+                    .children(translate)
                     .children(call)
                     .debug_selector(|| "chat-header".to_owned());
                 let body = self.meeting_tab_body().map_or_else(
@@ -2736,8 +2741,12 @@ impl Shell {
                     |(_, chosen)| (self.team_face(id, palette, cx), chosen.name.clone()),
                 );
                 let join = self.channel_join_button(id, cx);
+                let translate = shown.map(|(view, _)| {
+                    crate::chat_translate::header_button(view.read(cx).posts().read(cx).translation(), cx)
+                });
                 let header = pane_header_led(lead, title, palette)
                     .child(div().flex_1())
+                    .children(translate)
                     .children(join)
                     .debug_selector(|| "channel-header".to_owned());
                 let body = div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone()));

@@ -95,14 +95,15 @@ fn the_migration_creates_the_index_and_fills_nothing() -> Result<(), StoreError>
          ALTER TABLE conversation_sync DROP COLUMN gap_until;
          DROP TABLE message_search; DROP TABLE search_entries; DROP TABLE reply_roots; DROP TABLE team_channels;
          DROP TABLE teams; DROP TABLE teams_read; DROP TABLE favorites; DROP TABLE favorites_read;
-         ALTER TABLE conversations DROP COLUMN empty; DROP TABLE app_read_horizon; DROP TABLE calendar_events; DROP TABLE forgotten_conversations; PRAGMA user_version = 7;",
+         ALTER TABLE conversations DROP COLUMN empty; DROP TABLE app_read_horizon; DROP TABLE calendar_events; DROP TABLE forgotten_conversations; DROP TABLE message_translations;
+         DROP TABLE sent_originals; PRAGMA user_version = 7;",
     )
     .expect("back to schema 7");
     drop(raw);
 
     let store = Store::open(&store_path(&dir))?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 19);
+    assert_eq!(SCHEMA_VERSION, 20);
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     let tables: Vec<String> = raw
         .prepare("SELECT name FROM sqlite_master WHERE name IN ('message_search', 'search_entries') ORDER BY name")

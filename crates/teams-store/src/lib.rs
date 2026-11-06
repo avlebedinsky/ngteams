@@ -17,6 +17,8 @@
 //!   post (M2 Task 16);
 //! - [`calendar`]: the account's calendar events as the calendar view last read them, each window's read replacing
 //!   the events it overlaps (schema 16);
+//! - [`translations`]: chats translated on this computer, each message's translation by its id, version and language,
+//!   and the account's own messages as written when they were sent translated (schema 20);
 //! - [`schema`]: the migrations, applied in order on open.
 //!
 //! Every versioned write is an upsert that never lets an older version overwrite a newer one, so a Trouter delivery
@@ -38,6 +40,7 @@ pub mod search;
 pub mod snapshot;
 pub mod state;
 pub mod teams;
+pub mod translations;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -55,6 +58,7 @@ pub use schema::SCHEMA_VERSION;
 pub use search::{IndexCursor, IndexText, SearchHit};
 pub use state::{AppReadHorizon, ReadHorizon, SyncState};
 pub use teams::{ChannelAbout, ChannelKind, Team, TeamAbout, TeamChannel};
+pub use translations::{SentOriginal, StoredTranslation, TranslationKind};
 
 /// How long a write waits for another connection's lock (a second process on the same account) before it fails.
 /// Every transaction takes the write lock when it begins (`BEGIN IMMEDIATE`), so one that reads before it writes

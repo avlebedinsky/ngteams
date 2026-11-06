@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 188] = [
+const STEPS: [Step; 5 + 195] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -237,6 +237,52 @@ const STEPS: [Step; 5 + 188] = [
             compose.format_bar().update(cx, |bar, cx| bar.close(window, cx));
             compose.send(window, cx);
         });
+    }),
+    // the chat translated into German on this computer (a made-up tool, [`FAKE_CHAT_CLAUDE`]): the header's language
+    // picker lit, each message translated with Teams' translation mark beside its time
+    ("chat-translated", |shell, _, cx| {
+        chat_tools(FAKE_CHAT_CLAUDE, cx);
+        translate_chat(shell, Some("de"), cx);
+    }),
+    // "See original message" on the last of someone else's messages
+    ("chat-translated-original", |shell, _, cx| {
+        let Some(chat) = shell.read(cx).chat().cloned() else {
+            return;
+        };
+        let theirs = chat.read(cx).items().iter().rev().find_map(|item| match item {
+            Item::Message(message) if !message.own && message.translation.is_some() => Some(message.id.clone()),
+            _ => None,
+        });
+        if let Some(id) = theirs {
+            let translation = chat.read(cx).translation().clone();
+            translation.update(cx, |translation, cx| translation.toggle_original(&id, cx));
+        }
+    }),
+    // a message written in German, being translated into the chat's language before it goes
+    ("chat-translated-sending", |shell, window, cx| {
+        type_in_compose(shell, "Hallo! Passt dir Mittagessen um zwölf?", window, cx);
+        with_compose(shell, cx, |compose, cx| compose.send(window, cx));
+    }),
+    // sent: shown as written
+    ("chat-translated-sent", |_, _, _| {}),
+    // the translated chat opened again in Teams Dark: its translations read back from the store at once
+    ("chat-translated-dark", |shell, window, cx| {
+        show_chat_in_theme(shell, teams_ui::theme::DARK_KEY, window, cx);
+    }),
+    // the tool signed out: the chat says why with Try again, and a send keeps its message with Try again and Send
+    // without translating
+    ("chat-translated-failed", |shell, window, cx| {
+        show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
+        chat_tools(SIGNED_OUT_CLAUDE, cx);
+        translate_chat(shell, Some("fr"), cx);
+        type_in_compose(shell, "Bonjour à tous", window, cx);
+        with_compose(shell, cx, |compose, cx| compose.send(window, cx));
+    }),
+    // read as written again
+    ("chat-translated-off", |shell, window, cx| {
+        translate_chat(shell, None, cx);
+        cx.set_global(teams_ui::local_ai::Tools::default());
+        clear_compose(shell, window, cx);
     }),
     // text selected with the mouse from the second-to-last message into the last, on the selection colour, then its
     // right-click menu
@@ -1711,6 +1757,55 @@ fn show_ai_tools(shell: &Entity<Shell>, cx: &mut App) {
     });
     show_page(shell, Page::Calls, cx);
     shell.read(cx).settings_view().read(cx).scroll_to_end();
+}
+
+/// A made-up Claude Code translating a chat: each message of a batch with "Übersetzt:" before its words, kept in its
+/// language (English); an outgoing message, after a moment, with "(in English)" after it.
+const FAKE_CHAT_CLAUDE: &str = r#"#!/bin/bash
+while IFS= read -r line; do
+  echo '{"type":"system","subtype":"init"}'
+  body=""
+  case "$line" in
+    *'<translate>'*)
+      body=$(printf '%s' "$line" | sed 's/.*<translate>\\n//; s/\\n<\/translate>.*//')
+      body=$(printf '%s' "$body" | sed 's/\(<m id=\\"[0-9]*\\"\) from=\\"[^\\]*\\">\(<x[0-9]*>\)\{0,1\}/\1 lang=\\"en\\">\2Übersetzt: /g')
+      ;;
+    *'<outgoing'*)
+      sleep 2
+      text=$(printf '%s' "$line" | sed 's/.*<outgoing to=\\"[a-z]*\\">\(.*\)<\/outgoing>.*/\1/')
+      body="<out lang=\\\"en\\\">$text (in English)</out>"
+      ;;
+  esac
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$body"
+done
+"#;
+
+/// A made-up Claude Code that isn't signed in.
+const SIGNED_OUT_CLAUDE: &str = "#!/bin/bash\necho 'Invalid API key. Please run /login' >&2\nexit 1\n";
+
+/// `script` as the AI tool the app finds (Claude Code), written to the temporary directory: never the real one.
+fn chat_tools(script: &str, cx: &mut App) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let program = std::env::temp_dir().join(format!("tour-chat-claude-{}-{}", std::process::id(), script.len()));
+    let written =
+        fs::write(&program, script).and_then(|()| fs::set_permissions(&program, fs::Permissions::from_mode(0o755)));
+    if let Err(error) = written {
+        eprintln!("tour chat translator: {error}");
+        cx.quit();
+        return;
+    }
+    cx.set_global(teams_ui::local_ai::Tools::with(vec![(
+        teams_ui::local_ai::Backend::Claude,
+        program,
+    )]));
+}
+
+/// The open chat read in `language` (`None`: as written), as its header's picker sets it.
+fn translate_chat(shell: &Entity<Shell>, language: Option<&'static str>, cx: &mut App) {
+    if let Some(chat) = shell.read(cx).chat().cloned() {
+        let translation = chat.read(cx).translation().clone();
+        translation.update(cx, |translation, cx| translation.set_language(language, cx));
+    }
 }
 
 /// The made-up call's captions shown and translated into German by [`FAKE_CLAUDE`]: two lines said, one still spoken.

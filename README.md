@@ -18,7 +18,10 @@ preferences, email and workflow actions. Calls and meetings support Teams
 live captions and spoken-language controls (Alt+Shift+C); caption text stays in memory and clears on hide or call
 end. Captions can be translated on this computer ("Translate to" in the caption settings) by Claude Code or the Codex
 CLI, with any model the tool lists or one typed (by default Claude Haiku or GPT-6-Luna; Settings → Calls → Captions);
-the caption text then goes to that tool and its provider. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
+the caption text then goes to that tool and its provider. A chat or channel can be read and written in another
+language (the header's translation button): its messages are shown translated by the same tools (Settings → General
+→ Chat translation), the account's own are sent in the chat's language and shown as written, and the translations
+are kept in the store, so a chat opened again is not translated twice. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
 [workflows](docs/protocol/workflows.md), and [live captions](docs/protocol/live-captions.md).
 
 ## Layout

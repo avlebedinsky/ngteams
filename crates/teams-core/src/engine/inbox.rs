@@ -231,6 +231,17 @@ impl Inbox {
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
             Query::ReplyRoots(conversation, reply) => give(reply, store.reply_roots(&conversation)),
+            Query::Translations {
+                conversation,
+                language,
+                ids,
+                reply,
+            } => give(reply, store.translations(&conversation, &language, &ids)),
+            Query::SentOriginals {
+                conversation,
+                keys,
+                reply,
+            } => give(reply, store.sent_originals(&conversation, &keys)),
             Query::CalendarEvents {
                 start_ms,
                 end_ms,

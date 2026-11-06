@@ -1,0 +1,236 @@
+//! One chat's translating tool, on a thread of its own so the window never waits on it: [`crate::local_ai`]'s
+//! [`Tool`] with the chat model ([`Work::Chat`]), Claude Code or the Codex CLI without tools, hooks, MCP servers or
+//! saved sessions.
+//!
+//! - **The chat's context**: the process keeps the conversation, so each batch is read against the batches before it;
+//!   each job carries the messages before its own as `<context>` too, so a process started anew (after
+//!   [`Limits::turns`] questions or [`Limits::chars`] characters, or after a failure) loses nothing that matters.
+//! - **One job at a time**, in the order handed in: the model hands one batch at a time and an outgoing message at
+//!   once, so a send waits at most for the batch running.
+//! - **Failures** are told with the job they ended ([`Outcome`]); the process is closed and the next job starts a new
+//!   one. Nothing here logs a message, a translation or the tool's output.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
+
+use super::prompt::{self, Answer, Item, Said};
+pub use crate::local_ai::Failure;
+use crate::local_ai::{Backend, Launch, Model, Tool, Work};
+
+/// How long a wait for the next job polls before it looks at whether the session was dropped.
+const POLL: Duration = Duration::from_millis(100);
+
+/// When a session's process is replaced, and how long the tool may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Questions asked of one process before it is replaced.
+    pub turns: usize,
+    /// Characters sent to one process before it is replaced.
+    pub chars: usize,
+    /// How long the first answer may take (the process starting and signing in).
+    pub first: Duration,
+    /// How long any later answer may take.
+    pub turn: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            turns: 40,
+            chars: 120_000,
+            first: Duration::from_secs(90),
+            turn: Duration::from_secs(60),
+        }
+    }
+}
+
+/// What a session runs: the tool, where it is, its model, the language the chat is read in, and its limits.
+#[derive(Clone, Debug)]
+pub struct Spec {
+    pub backend: Backend,
+    pub program: PathBuf,
+    pub model: Model,
+    /// The chat's language's English name, as the instructions name it.
+    pub language: &'static str,
+    pub limits: Limits,
+}
+
+/// What the tool is asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// A batch of the chat's messages, into the chat's language.
+    Batch {
+        id: u64,
+        context: Vec<Said>,
+        items: Vec<Item>,
+    },
+    /// The account's own message (encoded), into the chat's language `to` (`None`: judged from the context).
+    Outgoing {
+        id: u64,
+        context: Vec<Said>,
+        to: Option<String>,
+        text: String,
+    },
+}
+
+/// What a session tells the model.
+#[derive(Debug)]
+pub enum Outcome {
+    /// A batch's answers, by the messages' numbers; or why it failed.
+    Batch {
+        id: u64,
+        answers: Result<HashMap<usize, Answer>, Failure>,
+    },
+    /// An outgoing message's translation (`None`: already in the chat's language) and the language it named; or why
+    /// it failed.
+    Outgoing {
+        id: u64,
+        answer: Result<(Option<String>, Option<String>), Failure>,
+    },
+}
+
+/// A running session: dropping it stops its thread and its process.
+pub struct Session {
+    jobs: mpsc::Sender<Job>,
+    stop: Arc<AtomicBool>,
+    outcomes: async_channel::Receiver<Outcome>,
+}
+
+impl Session {
+    /// Starts `spec`'s session; its tool starts with the first job.
+    #[must_use]
+    pub fn start(spec: Spec) -> Self {
+        let (jobs, queued) = mpsc::channel();
+        let (out, outcomes) = async_channel::unbounded();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = Worker {
+            spec,
+            jobs: queued,
+            out,
+            stop: Arc::clone(&stop),
+            tool: None,
+        };
+        let _ = thread::Builder::new()
+            .name("chat-translate".into())
+            .spawn(move || worker.run());
+        Self { jobs, stop, outcomes }
+    }
+
+    /// Hands `job` to the tool.
+    pub fn send(&self, job: Job) {
+        let _ = self.jobs.send(job);
+    }
+
+    /// Where its outcomes come.
+    #[must_use]
+    pub fn outcomes(&self) -> async_channel::Receiver<Outcome> {
+        self.outcomes.clone()
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The session's thread.
+struct Worker {
+    spec: Spec,
+    jobs: Receiver<Job>,
+    out: async_channel::Sender<Outcome>,
+    stop: Arc<AtomicBool>,
+    tool: Option<Tool>,
+}
+
+impl Worker {
+    fn run(mut self) {
+        while let Some(job) = self.next_job() {
+            let outcome = match job {
+                Job::Batch { id, context, items } => {
+                    let answers = self
+                        .ask(&prompt::batch(&context, &items))
+                        .map(|text| prompt::read_batch(&text));
+                    Outcome::Batch { id, answers }
+                }
+                Job::Outgoing { id, context, to, text } => {
+                    let backend = self.spec.backend;
+                    let answer = self
+                        .ask(&prompt::outgoing(&context, to.as_deref(), &text))
+                        .and_then(|text| prompt::read_outgoing(&text).ok_or_else(|| not_a_translation(backend)));
+                    Outcome::Outgoing { id, answer }
+                }
+            };
+            if self.stop.load(Ordering::Relaxed) || self.out.try_send(outcome).is_err() {
+                break;
+            }
+        }
+        if let Some(tool) = self.tool.take() {
+            tool.close();
+        }
+    }
+
+    /// The next job, or `None` once the session was dropped.
+    fn next_job(&self) -> Option<Job> {
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            match self.jobs.recv_timeout(POLL) {
+                Ok(job) => return Some(job),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+
+    /// Asks `message` of the tool, started (or started anew once worn) first; a failure closes it.
+    fn ask(&mut self, message: &str) -> Result<String, Failure> {
+        let limits = self.spec.limits;
+        if let Some(tool) = self
+            .tool
+            .take_if(|tool| tool.turns() >= limits.turns || tool.chars() >= limits.chars)
+        {
+            tool.close();
+        }
+        let mut tool = match self.tool.take() {
+            Some(tool) => tool,
+            None => Tool::start(
+                &Launch {
+                    backend: self.spec.backend,
+                    program: self.spec.program.clone(),
+                    work: Work::Chat,
+                    model: self.spec.model.clone(),
+                    instructions: prompt::instructions(self.spec.language),
+                    first: limits.first,
+                },
+                &self.stop,
+            )?,
+        };
+        let wait = if tool.answered() { limits.turn } else { limits.first };
+        match tool.ask(message, wait, &self.stop) {
+            Ok(text) => {
+                self.tool = Some(tool);
+                Ok(text)
+            }
+            Err(failure) => {
+                tool.close();
+                Err(failure)
+            }
+        }
+    }
+}
+
+/// What an answer that isn't a translation fails with.
+fn not_a_translation(backend: Backend) -> Failure {
+    Failure::Stopped(backend, Some("its answer wasn't a translation.".to_owned()))
+}
+
+#[cfg(test)]
+#[path = "../../tests/support/chat_translate_session_units.rs"]
+mod tests;

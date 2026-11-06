@@ -41,6 +41,8 @@ impl Glyph {
     pub const EYE: Self = Self(include_bytes!("../assets/icons/eye.svg"));
     pub const EYE_OFF: Self = Self(include_bytes!("../assets/icons/eye-off.svg"));
     pub const GLOBE: Self = Self(include_bytes!("../assets/icons/globe.svg"));
+    /// A chat's translation (Teams' "aあ" mark beside a translated message's time).
+    pub const LANGUAGES: Self = Self(include_bytes!("../assets/icons/languages.svg"));
     /// The general channel in a team's list of channels.
     pub const HOUSE: Self = Self(include_bytes!("../assets/icons/house.svg"));
     pub const UPLOAD: Self = Self(include_bytes!("../assets/icons/arrow-up-from-line.svg"));

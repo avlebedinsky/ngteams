@@ -1,0 +1,206 @@
+//! Chats translated on this computer in the store (schema 20), on a real file in a temporary directory: a message's
+//! translation kept by its id, version and language across a reopen, an older version's dropped when a newer one is
+//! kept, the account's own messages as written by their key, and both gone with their conversation. Every id and text
+//! here is made up.
+
+use std::path::PathBuf;
+
+use teams_store::{
+    Conversation, ConversationKind, Message, SCHEMA_VERSION, SentOriginal, Store, StoreError, StoredTranslation,
+    TranslationKind,
+};
+
+const CHAT: &str = "19:synthetic-translated@unq.gbl.spaces";
+const OTHER: &str = "19:synthetic-other@unq.gbl.spaces";
+
+fn store_path(dir: &tempfile::TempDir) -> PathBuf {
+    dir.path().join("store").join("a.sqlite")
+}
+
+fn with_chats(dir: &tempfile::TempDir) -> Result<Store, StoreError> {
+    let mut store = Store::open(&store_path(dir))?;
+    for id in [CHAT, OTHER] {
+        store.upsert_conversation(&Conversation {
+            id: id.to_owned(),
+            kind: ConversationKind::OneToOne,
+            topic: None,
+            version: 1,
+            last_activity: None,
+        })?;
+    }
+    for (conversation, id) in [(CHAT, "1"), (CHAT, "2"), (OTHER, "1")] {
+        store.upsert_message(
+            &Message {
+                conversation_id: conversation.to_owned(),
+                id: id.to_owned(),
+                version: 10,
+                client_message_id: None,
+                sender: Some("8:orgid:synthetic-b".to_owned()),
+                sender_name: None,
+                message_type: "RichText/Html".to_owned(),
+                content: "<p>Synthetic text</p>".to_owned(),
+                properties: None,
+                arrival_time: 1000,
+                compose_time: None,
+                edit_time: None,
+                delete_time: None,
+            },
+            None,
+        )?;
+    }
+    Ok(store)
+}
+
+fn translation(conversation: &str, id: &str, version: i64, language: &str, kind: TranslationKind) -> StoredTranslation {
+    StoredTranslation {
+        conversation_id: conversation.to_owned(),
+        message_id: id.to_owned(),
+        version,
+        language: language.to_owned(),
+        kind,
+        content: format!("synthetic {id} v{version} in {language}"),
+        source_language: Some("en".to_owned()),
+    }
+}
+
+fn original(conversation: &str, key: &str, content: &str) -> SentOriginal {
+    SentOriginal {
+        conversation_id: conversation.to_owned(),
+        key: key.to_owned(),
+        language: "de".to_owned(),
+        content: content.to_owned(),
+        sent_text: "Synthetic sent".to_owned(),
+        created_at: 5,
+    }
+}
+
+fn ids(found: &[StoredTranslation]) -> Vec<(String, i64)> {
+    let mut ids: Vec<_> = found
+        .iter()
+        .map(|kept| (kept.message_id.clone(), kept.version))
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn translations_are_kept_by_message_version_and_language() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    {
+        let mut store = with_chats(&dir)?;
+        assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+        store.put_translations(&[
+            translation(CHAT, "1", 10, "de", TranslationKind::Translated),
+            translation(CHAT, "2", 10, "de", TranslationKind::Same),
+            translation(CHAT, "1", 10, "fr", TranslationKind::Translated),
+            translation(OTHER, "1", 10, "de", TranslationKind::Translated),
+            // a message the store doesn't hold is left out
+            translation(CHAT, "missing", 10, "de", TranslationKind::Translated),
+        ])?;
+    }
+    // a later run reads them back
+    let mut store = Store::open(&store_path(&dir))?;
+    let wanted = ["1", "2", "missing"].map(str::to_owned);
+    let german = store.translations(CHAT, "de", &wanted)?;
+    assert_eq!(ids(&german), [("1".to_owned(), 10), ("2".to_owned(), 10)]);
+    let first = german.iter().find(|kept| kept.message_id == "1").expect("kept");
+    assert_eq!(first.kind, TranslationKind::Translated);
+    assert_eq!(first.content, "synthetic 1 v10 in de");
+    assert_eq!(first.source_language.as_deref(), Some("en"));
+    assert_eq!(
+        german.iter().find(|kept| kept.message_id == "2").map(|kept| kept.kind),
+        Some(TranslationKind::Same)
+    );
+    assert_eq!(ids(&store.translations(CHAT, "fr", &wanted)?), [("1".to_owned(), 10)]);
+    assert!(store.translations(CHAT, "es", &wanted)?.is_empty());
+    assert!(
+        format!("{first:?}").contains("message_id") && !format!("{first:?}").contains("synthetic 1"),
+        "Debug leaves the text out"
+    );
+
+    // a newer version's translation replaces the older one in that language only
+    store.put_translations(&[translation(CHAT, "1", 11, "de", TranslationKind::Original)])?;
+    let german = store.translations(CHAT, "de", &wanted)?;
+    assert_eq!(ids(&german), [("1".to_owned(), 11), ("2".to_owned(), 10)]);
+    assert_eq!(ids(&store.translations(CHAT, "fr", &wanted)?), [("1".to_owned(), 10)]);
+    // the same key again replaces it
+    let mut again = translation(CHAT, "2", 10, "de", TranslationKind::Translated);
+    again.content = "synthetic again".to_owned();
+    store.put_translations(&[again])?;
+    let german = store.translations(CHAT, "de", &["2".to_owned()])?;
+    assert_eq!(
+        german.first().map(|kept| kept.content.as_str()),
+        Some("synthetic again")
+    );
+    assert_eq!(TranslationKind::Same.key(), "same");
+    Ok(())
+}
+
+#[test]
+fn sent_originals_are_kept_by_key_and_go_with_their_conversation() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chats(&dir)?;
+    store.put_sent_original(&original(CHAT, "client-1", "as written"))?;
+    store.put_sent_original(&original(CHAT, &SentOriginal::edit_key("1"), "edited as written"))?;
+    store.put_sent_original(&original("19:unknown@unq.gbl.spaces", "client-2", "left out"))?;
+    let keys = ["client-1".to_owned(), "edit:1".to_owned(), "client-2".to_owned()];
+    let mut found = store.sent_originals(CHAT, &keys)?;
+    found.sort_by(|a, b| a.key.cmp(&b.key));
+    assert_eq!(
+        found.iter().map(|kept| kept.key.as_str()).collect::<Vec<_>>(),
+        ["client-1", "edit:1"]
+    );
+    assert_eq!(found[0].content, "as written");
+    assert_eq!(found[0].sent_text, "Synthetic sent");
+    assert_eq!(found[0].language, "de");
+    assert_eq!(found[0].created_at, 5);
+    assert!(
+        !format!("{:?}", found[0]).contains("as written"),
+        "Debug leaves the text out"
+    );
+    assert!(store.sent_originals("19:unknown@unq.gbl.spaces", &keys)?.is_empty());
+
+    // a later edit of the same message replaces its original
+    store.put_sent_original(&original(CHAT, "edit:1", "edited again"))?;
+    let edit = store.sent_originals(CHAT, &["edit:1".to_owned()])?;
+    assert_eq!(edit.first().map(|kept| kept.content.as_str()), Some("edited again"));
+
+    // forgetting the chat forgets them, and its messages' translations
+    store.put_translations(&[translation(CHAT, "1", 10, "de", TranslationKind::Translated)])?;
+    store.forget_conversation(CHAT)?;
+    assert!(store.sent_originals(CHAT, &keys)?.is_empty());
+    assert!(store.translations(CHAT, "de", &["1".to_owned()])?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_long_list_of_ids_is_read_in_parts() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chats(&dir)?;
+    store.put_translations(&[translation(CHAT, "2", 10, "de", TranslationKind::Translated)])?;
+    let mut wanted: Vec<String> = (0..1000).map(|n| format!("unknown-{n}")).collect();
+    wanted.push("2".to_owned());
+    assert_eq!(ids(&store.translations(CHAT, "de", &wanted)?), [("2".to_owned(), 10)]);
+    let mut keys: Vec<String> = (0..1000).map(|n| format!("unknown-{n}")).collect();
+    store.put_sent_original(&original(CHAT, "client-9", "as written"))?;
+    keys.push("client-9".to_owned());
+    assert_eq!(store.sent_originals(CHAT, &keys)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn the_translations_migration_starts_with_none() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    drop(with_chats(&dir)?);
+    // the store as schema 19 left it
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch("DROP TABLE message_translations; DROP TABLE sent_originals; PRAGMA user_version = 19;")
+        .expect("back to schema 19");
+    drop(raw);
+    let store = Store::open(&store_path(&dir))?;
+    assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+    assert_eq!(SCHEMA_VERSION, 20);
+    assert!(store.translations(CHAT, "de", &["1".to_owned()])?.is_empty());
+    assert!(store.sent_originals(CHAT, &["client-1".to_owned()])?.is_empty());
+    Ok(())
+}

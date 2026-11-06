@@ -1,5 +1,5 @@
 //! The settings' one control for a local AI choice ([`AiChoice`]), the same wherever a setting picks the tool that
-//! does some work on this computer (live captions' translation, recaps' summaries): a box titled by the work, of
+//! does some work on this computer (live captions' translation, recaps' summaries, chats' translation): a box titled by the work, of
 //!
 //! - **the tool**: Automatic (Claude Code when it is installed, else Codex), Claude or Codex, side by side; under it
 //!   what goes to the tool, or that the tool isn't installed;
@@ -63,6 +63,17 @@ fn words(work: Work) -> Words {
             selector: "recap-summarizer",
             model_selector: "recap-summarizer-model",
             name_selector: "recap-summarizer-model-name",
+        },
+        Work::Chat => Words {
+            title: "Chat translation",
+            tool: "Translate chats with",
+            sends: crate::chat_translate::SETTINGS_NOTE,
+            install: "translate chats",
+            model: "A fast model keeps your messages from waiting; each request carries the chat, so terms and tone \
+                    stay consistent.",
+            selector: "chat-translator",
+            model_selector: "chat-translator-model",
+            name_selector: "chat-translator-model-name",
         },
     }
 }
