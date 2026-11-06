@@ -476,16 +476,24 @@ fn video_format(param: &Pod) -> Option<(PixelFormat, u32, u32)> {
     Some((format, width, height))
 }
 
-/// The size a fixed video format names.
+/// The size a fixed video format names: a plain rectangle, or one wrapped in a choice of none, as PipeWire 1.6 hands
+/// a negotiated format over (each fixed value a `Choice` of kind `None`). Read only as a plain one, every format
+/// negotiated there went unread and the stream dropped each of its buffers: no camera's or shared screen's frame came.
 fn video_size(param: &Pod) -> Option<Rectangle> {
     let (_, value) = pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()).ok()?;
     let Value::Object(object) = value else {
         return None;
     };
-    object.properties.into_iter().find_map(|property| match property.value {
-        Value::Rectangle(size) if property.key == FormatProperties::VideoSize.as_raw() => Some(size),
-        _ => None,
-    })
+    object
+        .properties
+        .into_iter()
+        .filter(|property| property.key == FormatProperties::VideoSize.as_raw())
+        .find_map(|property| match property.value {
+            Value::Rectangle(size) | Value::Choice(ChoiceValue::Rectangle(Choice(_, ChoiceEnum::None(size)))) => {
+                Some(size)
+            }
+            _ => None,
+        })
 }
 
 /// The memory a camera's buffers may come in: a DMA-BUF or a memfd (shared with this process, mapped by the stream's
@@ -807,27 +815,49 @@ mod tests {
         assert!(smooth.iter().all(|(_, size, min)| *min == 24 && size.is_some_and(|(w, h)| (w * 9).abs_diff(h * 16) * 100 <= h * 16)));
         let slow = &offers[CAMERA_SIZES.len() * 2..CAMERA_SIZES.len() * 4];
         assert!(slow.iter().all(|(_, size, min)| *min == 0 && size.is_some()));
-        assert_eq!(offers[offers.len() - 2..], [(Encoding::Raw, None, 0), (Encoding::Mjpeg, None, 0)]);
+        assert_eq!(
+            offers[offers.len() - 2..],
+            [(Encoding::Raw, None, 0), (Encoding::Mjpeg, None, 0)]
+        );
     }
 
     #[test]
     fn a_negotiated_motion_jpeg_or_raw_format_is_read_with_its_size() {
-        let fixed = |subtype: MediaSubtype, format: Option<VideoFormat>| {
+        // PipeWire 1.6 wraps each fixed value of a negotiated format in a choice of none
+        let id = |id: u32, wrapped: bool| {
+            if wrapped {
+                Value::Choice(ChoiceValue::Id(Choice(ChoiceFlags::empty(), ChoiceEnum::None(Id(id)))))
+            } else {
+                Value::Id(Id(id))
+            }
+        };
+        let fixed_as = |subtype: MediaSubtype, format: Option<VideoFormat>, wrapped: bool| {
+            let size = Rectangle {
+                width: 1280,
+                height: 720,
+            };
             let mut properties = vec![
-                pod::Property::new(FormatProperties::MediaType.as_raw(), Value::Id(Id(MediaType::Video.as_raw()))),
-                pod::Property::new(FormatProperties::MediaSubtype.as_raw(), Value::Id(Id(subtype.as_raw()))),
+                pod::Property::new(
+                    FormatProperties::MediaType.as_raw(),
+                    id(MediaType::Video.as_raw(), wrapped),
+                ),
+                pod::Property::new(FormatProperties::MediaSubtype.as_raw(), id(subtype.as_raw(), wrapped)),
                 pod::Property::new(
                     FormatProperties::VideoSize.as_raw(),
-                    Value::Rectangle(Rectangle {
-                        width: 1280,
-                        height: 720,
-                    }),
+                    if wrapped {
+                        Value::Choice(ChoiceValue::Rectangle(Choice(
+                            ChoiceFlags::empty(),
+                            ChoiceEnum::None(size),
+                        )))
+                    } else {
+                        Value::Rectangle(size)
+                    },
                 ),
             ];
             if let Some(format) = format {
                 properties.push(pod::Property::new(
                     FormatProperties::VideoFormat.as_raw(),
-                    Value::Id(Id(format.as_raw())),
+                    id(format.as_raw(), wrapped),
                 ));
             }
             serialize(pod::Object {
@@ -838,11 +868,23 @@ mod tests {
             .unwrap()
         };
         let read = |bytes: &[u8]| video_format(Pod::from_bytes(bytes).expect("a pod"));
-        assert_eq!(read(&fixed(MediaSubtype::Mjpg, None)), Some((PixelFormat::Mjpeg, 1280, 720)));
-        assert_eq!(
-            read(&fixed(MediaSubtype::Raw, Some(VideoFormat::YUY2))),
-            Some((PixelFormat::Yuy2, 1280, 720))
-        );
-        assert_eq!(read(&fixed(MediaSubtype::H264, None)), None);
+        for wrapped in [false, true] {
+            let fixed = |subtype, format| fixed_as(subtype, format, wrapped);
+            assert_eq!(
+                read(&fixed(MediaSubtype::Mjpg, None)),
+                Some((PixelFormat::Mjpeg, 1280, 720))
+            );
+            assert_eq!(
+                read(&fixed(MediaSubtype::Raw, Some(VideoFormat::YUY2))),
+                Some((PixelFormat::Yuy2, 1280, 720)),
+                "wrapped: {wrapped}"
+            );
+            assert_eq!(
+                read(&fixed(MediaSubtype::Raw, Some(VideoFormat::I420))),
+                Some((PixelFormat::I420, 1280, 720)),
+                "wrapped: {wrapped}"
+            );
+            assert_eq!(read(&fixed(MediaSubtype::H264, None)), None);
+        }
     }
 }

@@ -740,7 +740,10 @@ a alone). What each of Teams' remaining call controls sends:
   offer's line) shared, `screenSharerAttributes` `202`, the descriptions `200`; b and c showed the share named AI with
   the people beside it and decoded its stream; Stop sharing ended it at both. c (the mixer's offered line, turned to
   send) shared the same way and a showed it. The sandbox's synthetic screen delivered no picture in that run (its
-  camera neither: `docs/backlog/sandbox-video-no-frames.md`), so what went out was the line's black keep-alive frames.
+  camera neither: PipeWire 1.6 hands a negotiated video format's size over wrapped in a choice of none, which the
+  reader didn't take), so what went out was the line's black keep-alive frames. Run again once the reader took it (a
+  sharing to b and c in their chat): b and c showed the screen's moving pattern beside a's blurred camera, and a's
+  close log counted 325 of a shared screen sent.
 - **The native client's share, 1:1.** Share asks the desktop's screen-cast portal (`org.freedesktop.portal.ScreenCast`:
   `CreateSession`, `SelectSources` for a monitor or a window with the cursor drawn in, `Start`, `OpenPipeWireRemote`)
   for what to share; the node it names is read over the portal's PipeWire remote for as long as the share, its frames
