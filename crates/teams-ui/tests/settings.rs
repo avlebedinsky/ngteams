@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use gpui::{AppContext as _, TestAppContext};
 use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_media::video::effects::{Backdrop, Background};
+use teams_ui::local_ai::{AiChoice, Model};
 use teams_ui::settings::{
     AccountSettings, DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications,
     Problem, Settings, SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
@@ -58,8 +59,14 @@ fn changed() -> Settings {
         },
         time_format: TimeFormat::Twelve,
         caption_translate_to: Some("de"),
-        caption_translator: TranslatorChoice::Only(Backend::Codex),
-        recap_summarizer: TranslatorChoice::Only(Backend::Claude),
+        caption_translator: AiChoice {
+            tool: TranslatorChoice::Only(Backend::Codex),
+            model: Model::Named("gpt-6.1-sol".to_owned()),
+        },
+        recap_summarizer: AiChoice {
+            tool: TranslatorChoice::Only(Backend::Claude),
+            model: Model::ToolDefault,
+        },
         accounts: [(
             "8:orgid:00000000-0000-4000-8000-00000000000b".to_owned(),
             AccountSettings {
@@ -729,13 +736,28 @@ fn the_time_format_follows_the_system_by_default_and_each_choice_goes_through_th
     }
 }
 
+/// Every local AI choice a setting can hold: each tool, with its recommended model, its own default, or a model named.
+fn ai_choices() -> Vec<AiChoice> {
+    let models = [
+        Model::Recommended,
+        Model::ToolDefault,
+        Model::Named("claude-opus-5-5".to_owned()),
+        Model::Named("sonnet[1m]".to_owned()),
+    ];
+    TranslatorChoice::ALL
+        .into_iter()
+        .flat_map(|tool| models.clone().map(|model| AiChoice { tool, model }))
+        .collect()
+}
+
 #[test]
 fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_the_file() {
     let defaults = Settings::default();
     assert_eq!(defaults.caption_translate_to, None);
-    assert_eq!(defaults.caption_translator, TranslatorChoice::Automatic);
+    assert_eq!(defaults.caption_translator.tool, TranslatorChoice::Automatic);
+    assert_eq!(defaults.caption_translator.model, Model::Recommended);
     assert!(!render(&defaults).contains("caption_translate_to"));
-    for choice in TranslatorChoice::ALL {
+    for choice in ai_choices() {
         let settings = Settings {
             caption_translate_to: Some("pt-br"),
             caption_translator: choice,
@@ -743,6 +765,7 @@ fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_th
         };
         let text = render(&settings);
         assert!(text.contains("caption_translate_to = \"pt-br\""), "{text}");
+        assert!(text.contains("[caption_translator]"), "{text}");
         let (read, problems) = parse(&text).expect("TOML");
         assert_eq!(read, settings);
         assert!(problems.is_empty(), "{problems:?}");
@@ -751,6 +774,25 @@ fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_th
         ("caption_translate_to = \"klingon\"", "caption_translate_to"),
         ("caption_translate_to = 3", "caption_translate_to"),
         ("caption_translator = \"luna\"", "caption_translator"),
+        ("caption_translator = 3", "caption_translator"),
+        ("caption_translator = { tool = \"gemini\" }", "caption_translator"),
+        ("caption_translator = { tool = 1 }", "caption_translator"),
+        (
+            "caption_translator = { tool = \"claude\", model = 3 }",
+            "caption_translator",
+        ),
+        (
+            "caption_translator = { tool = \"claude\", model = \"--dangerously\" }",
+            "caption_translator",
+        ),
+        (
+            "caption_translator = { tool = \"claude\", model = \"two words\" }",
+            "caption_translator",
+        ),
+        (
+            "caption_translator = { tool = \"claude\", model = \"\" }",
+            "caption_translator",
+        ),
     ] {
         let (read, problems) = parse(bad).expect("TOML");
         assert_eq!(read, Settings::default(), "{bad}");
@@ -763,17 +805,16 @@ fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_th
 
 #[test]
 fn the_recap_summarizer_is_automatic_by_default_and_goes_through_the_file() {
-    assert_eq!(Settings::default().recap_summarizer, TranslatorChoice::Automatic);
-    for choice in TranslatorChoice::ALL {
+    assert_eq!(Settings::default().recap_summarizer, AiChoice::default());
+    for choice in ai_choices() {
         let settings = Settings {
-            recap_summarizer: choice,
+            recap_summarizer: choice.clone(),
             ..Settings::default()
         };
         let text = render(&settings);
-        assert!(
-            text.contains(&format!("recap_summarizer = \"{}\"", choice.key())),
-            "{text}"
-        );
+        assert!(text.contains("[recap_summarizer]"), "{text}");
+        assert!(text.contains(&format!("tool = \"{}\"", choice.tool.key())), "{text}");
+        assert!(text.contains(&format!("model = \"{}\"", choice.model.key())), "{text}");
         let (read, problems) = parse(&text).expect("TOML");
         assert_eq!(read, settings);
         assert!(problems.is_empty(), "{problems:?}");
@@ -790,6 +831,65 @@ fn the_recap_summarizer_is_automatic_by_default_and_goes_through_the_file() {
         ),
         "{problems:?}"
     );
+}
+
+#[test]
+fn an_earlier_builds_tool_alone_keeps_its_tool_with_the_recommended_model_and_is_written_anew() {
+    for tool in TranslatorChoice::ALL {
+        let earlier = format!(
+            "caption_translator = \"{key}\"\nrecap_summarizer = \"{key}\"\n",
+            key = tool.key()
+        );
+        let (read, problems) = parse(&earlier).expect("TOML");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(read.caption_translator, AiChoice::of(tool));
+        assert_eq!(read.recap_summarizer, AiChoice::of(tool));
+        let text = render(&read);
+        assert!(
+            text.contains(&format!(
+                "[caption_translator]\nmodel = \"recommended\"\ntool = \"{}\"",
+                tool.key()
+            )),
+            "{text}"
+        );
+        assert_eq!(parse(&text).expect("TOML").0, read);
+    }
+    // a table missing a part keeps that part's default
+    let (read, problems) =
+        parse("[caption_translator]\ntool = \"codex\"\n[recap_summarizer]\nmodel = \"opus\"\n").expect("TOML");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(
+        read.caption_translator,
+        AiChoice::of(TranslatorChoice::Only(Backend::Codex))
+    );
+    assert_eq!(
+        read.recap_summarizer,
+        AiChoice {
+            tool: TranslatorChoice::Automatic,
+            model: Model::Named("opus".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn a_model_s_name_is_any_the_tool_takes_on_its_command_line() {
+    assert_eq!(Model::from_key("recommended"), Some(Model::Recommended));
+    assert_eq!(Model::from_key(" default "), Some(Model::ToolDefault));
+    for name in [
+        "opus",
+        "claude-opus-5-5",
+        "sonnet[1m]",
+        "gpt-6.1-sol",
+        "us.anthropic.claude-x:0",
+    ] {
+        assert_eq!(Model::from_key(name), Some(Model::Named(name.to_owned())), "{name}");
+        assert_eq!(Model::Named(name.to_owned()).key(), name);
+    }
+    let long = "m".repeat(101);
+    for bad in ["", "  ", "-p", "two words", "tab\tbed", long.as_str()] {
+        assert_eq!(Model::from_key(bad), None, "{bad:?}");
+    }
+    assert_eq!(Model::from_key(&"m".repeat(100)), Some(Model::Named("m".repeat(100))));
 }
 
 #[test]

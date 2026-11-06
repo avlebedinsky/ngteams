@@ -2,7 +2,6 @@
 //! the tool, the call's context included, and how each failure ends it.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -53,10 +52,19 @@ while IFS= read -r line; do
 done
 "#;
 
+/// A script `name` in `dir`, put there by a child: written by this process, it couldn't be run (`ETXTBSY`) while
+/// another test's child, forked before the write's descriptor closed, hadn't reached its own `exec`.
 fn fake(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let source = dir.join(format!("{name}.source"));
+    fs::write(&source, format!("#!/bin/bash\n{body}")).unwrap();
     let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/bash\n{body}")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let installed = std::process::Command::new("install")
+        .args(["-m", "755"])
+        .arg(&source)
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(installed.success(), "{name} installed");
     path
 }
 
@@ -64,6 +72,7 @@ fn spec(backend: Backend, program: PathBuf, limits: Limits) -> Spec {
     Spec {
         backend,
         program,
+        model: Model::Recommended,
         language: "German",
         limits,
     }
@@ -190,7 +199,7 @@ fn the_call_reached_both_processes(log: &str) {
 
 #[test]
 fn claude_runs_without_tools_settings_or_saved_sessions() {
-    let args = Backend::Claude.args(Work::Captions, "Synthetic instructions.");
+    let args = Backend::Claude.args(Work::Captions, &Model::Recommended, "Synthetic instructions.");
     for flag in [
         "--tools",
         "--setting-sources",
@@ -201,10 +210,72 @@ fn claude_runs_without_tools_settings_or_saved_sessions() {
         assert!(args.iter().any(|arg| arg == flag), "{flag}");
     }
     assert_eq!(args.last().map(String::as_str), Some("Synthetic instructions."));
-    let codex = Backend::Codex.args(Work::Captions, "unused");
+    let codex = Backend::Codex.args(Work::Captions, &Model::Recommended, "unused");
     assert_eq!(codex[0], "app-server");
     assert!(codex.iter().any(|arg| arg == "features.hooks=false"));
     assert!(!codex.iter().any(|arg| arg == "unused"));
+}
+
+#[test]
+fn claude_is_asked_for_the_model_picked_or_none_for_its_own_default() {
+    let model_of = |model: &Model| {
+        let args = Backend::Claude.args(Work::Captions, model, "Synthetic instructions.");
+        let at = args.iter().position(|arg| arg == "--model");
+        (at.map(|at| args[at + 1].clone()), args.last().cloned())
+    };
+    let instructions = Some("Synthetic instructions.".to_owned());
+    assert_eq!(
+        model_of(&Model::Recommended),
+        (Some("haiku".into()), instructions.clone())
+    );
+    assert_eq!(
+        model_of(&Model::Named("claude-opus-5-5".into())),
+        (Some("claude-opus-5-5".into()), instructions.clone())
+    );
+    assert_eq!(model_of(&Model::ToolDefault), (None, instructions));
+    let summary = Backend::Claude.args(Work::Summary, &Model::Recommended, "unused");
+    assert!(summary.windows(2).any(|pair| pair == ["--model", "sonnet"]));
+    // Codex takes its model in its thread
+    let codex = Backend::Codex.args(Work::Captions, &Model::Named("gpt-6.1-sol".into()), "unused");
+    assert!(!codex.iter().any(|arg| arg.contains("gpt-6.1-sol")));
+}
+
+#[test]
+fn a_fake_claude_runs_with_the_model_picked() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = format!("echo \"args $*\" >> \"$(dirname \"$0\")/received.log\"\n{FAKE_CLAUDE}");
+    let program = fake(dir.path(), "claude", &body);
+    let mut spec = spec(Backend::Claude, program, quick());
+    spec.model = Model::Named("opus".into());
+    let session = Session::start(spec);
+    session.send(caption("Lab Speaker", "Synthetic hello.", 1));
+    assert_eq!(translated(&session), "DE Synthetic hello.");
+    let log = received(dir.path());
+    let args = log.lines().find(|line| line.starts_with("args ")).unwrap();
+    assert!(args.starts_with("args -p --model opus --input-format"), "{args}");
+}
+
+#[test]
+fn codex_starts_its_thread_with_the_model_picked_or_its_own_default() {
+    for (model, asked) in [
+        (Model::Named("gpt-6.1-sol".into()), Some("gpt-6.1-sol")),
+        (Model::ToolDefault, None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake(dir.path(), "codex", FAKE_CODEX);
+        let mut spec = spec(Backend::Codex, program, quick());
+        spec.model = model;
+        let session = Session::start(spec);
+        session.send(caption("Lab Speaker", "Synthetic hello.", 1));
+        assert_eq!(translated(&session), "DE Synthetic hello.");
+        let log = received(dir.path());
+        let start = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|message| message["method"] == "thread/start")
+            .unwrap();
+        assert_eq!(start["params"].get("model").and_then(Value::as_str), asked);
+    }
 }
 
 #[test]

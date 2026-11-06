@@ -2,8 +2,8 @@
 //! cold start), fed one caption at a time on its stdin and read back from its stdout, on a thread of its own so the
 //! window never waits on it.
 //!
-//! The process is [`crate::local_ai`]'s [`Tool`], with its fastest model ([`Work::Captions`]): Claude Code or the
-//! Codex CLI, without tools, hooks, MCP servers or saved sessions.
+//! The process is [`crate::local_ai`]'s [`Tool`], with the model picked for captions ([`Work::Captions`]): Claude Code
+//! or the Codex CLI, without tools, hooks, MCP servers or saved sessions.
 //!
 //! **The call's context**: the process keeps the conversation, so each caption is read against the whole call so far
 //! (the call's title and people, every caption with its speaker, what was said that wasn't sent, the translations it
@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use super::{LineKey, instructions};
 pub use crate::local_ai::Failure;
-use crate::local_ai::{Backend, Launch, Tool, Work, cap};
+use crate::local_ai::{Backend, Launch, Model, Tool, Work, cap};
 
 /// How long a wait for the next caption polls before it looks at whether the session was dropped.
 const POLL: Duration = Duration::from_millis(100);
@@ -66,11 +66,12 @@ impl Default for Limits {
     }
 }
 
-/// What a session runs: the tool, where it is, the language it translates into, and its limits.
+/// What a session runs: the tool, where it is, its model, the language it translates into, and its limits.
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub backend: Backend,
     pub program: PathBuf,
+    pub model: Model,
     /// The target language's English name, as the instructions name it.
     pub language: &'static str,
     pub limits: Limits,
@@ -319,6 +320,7 @@ impl Worker {
             backend: self.spec.backend,
             program: self.spec.program.clone(),
             work: Work::Captions,
+            model: self.spec.model.clone(),
             instructions: instructions(self.spec.language),
             first: self.spec.limits.first,
         };

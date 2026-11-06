@@ -1,7 +1,8 @@
 //! The AI command-line tools the app runs on this computer, shared by everything that asks one: live captions
 //! translated ([`crate::translate`]) and a meeting's recap summarized ([`crate::recap_summary`]). Claude Code and the
-//! Codex CLI, each with the model its work needs ([`Work`]), started as a child process with nothing of the user's
-//! setup that could act on what it is given:
+//! Codex CLI, each with the model the user picked for that work ([`AiChoice`]: the one recommended for the work, the
+//! tool's own default, or any model the tool takes, named), started as a child process with nothing of the user's setup
+//! that could act on what it is given:
 //!
 //! - **Claude Code** runs as `claude -p --input-format stream-json --output-format stream-json`: one user message per
 //!   question in one conversation, its `result` line the answer. No tools, MCP servers, slash commands, settings files
@@ -9,6 +10,8 @@
 //! - **Codex** runs as `codex app-server` (JSON-RPC over stdio): `initialize`, one ephemeral read-only thread whose
 //!   base instructions are ours, then one `turn/start` per question, its last agent message the answer. Hooks, apps,
 //!   plugins, MCP servers, tools and project docs are turned off for it.
+//!
+//! The models each tool offers are listed from what it reports itself ([`catalog`]), never from a list of ours.
 //!
 //! [`Tool`] is one such process: started, asked on its stdin and read back from its stdout, each wait bounded and
 //! stopped as soon as its caller drops the work. **Failures** ([`Failure`]) say what the user can do: the tool missing,
@@ -25,7 +28,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::{App, Global};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+pub mod catalog;
+
+pub use catalog::{Catalog, Listed};
 
 /// How long a wait on the tool polls before it looks at whether its work was dropped.
 const POLL: Duration = Duration::from_millis(100);
@@ -80,8 +88,8 @@ impl Backend {
         self.key()
     }
 
-    /// The model it asks for `work`. Codex has no model named plain `luna`: it refuses it for a `ChatGPT` account, so
-    /// the newest Luna it lists is asked for captions, and its mid-sized Terra for a summary.
+    /// The model recommended for `work` ([`Model::Recommended`]). Codex has no model named plain `luna`: it refuses it
+    /// for a `ChatGPT` account, so the newest Luna it lists is asked for captions, and its mid-sized Terra for a summary.
     #[must_use]
     pub fn model(self, work: Work) -> &'static str {
         match (self, work) {
@@ -101,7 +109,37 @@ impl Backend {
         }
     }
 
-    /// What the settings and the views call it doing `work`.
+    /// The model `model` asks it for doing `work`: `None` leaves it to the tool's own default.
+    #[must_use]
+    pub fn model_of(self, work: Work, model: &Model) -> Option<String> {
+        match model {
+            Model::Recommended => Some(self.model(work).to_owned()),
+            Model::ToolDefault => None,
+            Model::Named(name) => Some(name.clone()),
+        }
+    }
+
+    /// What the views call it doing `work` with `model`: "Claude Haiku" (recommended), "Claude Code" (its default),
+    /// "Claude Code (opus)" (named).
+    #[must_use]
+    pub fn label_of(self, work: Work, model: &Model) -> String {
+        match model {
+            Model::Recommended => self.label(work).to_owned(),
+            Model::ToolDefault => self.name().to_owned(),
+            Model::Named(name) => format!("{} ({name})", self.name()),
+        }
+    }
+
+    /// Its name in a label: "Claude Code", "Codex".
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    /// What the views call it doing `work` with its recommended model.
     #[must_use]
     pub fn label(self, work: Work) -> &'static str {
         match (self, work) {
@@ -139,50 +177,53 @@ impl Backend {
         }
     }
 
-    /// Its command line for `work`, `instructions` being the system prompt (Codex takes it in its thread instead).
+    /// Its command line for `work` with `model`, `instructions` being the system prompt (Codex takes the model and the
+    /// instructions in its thread instead).
     #[must_use]
-    pub fn args(self, work: Work, instructions: &str) -> Vec<String> {
-        let mut args: Vec<String> = match self {
-            Self::Claude => [
-                "-p",
-                "--model",
-                self.model(work),
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--tools",
-                "",
-                "--no-session-persistence",
-                "--setting-sources",
-                "",
-                "--strict-mcp-config",
-                "--disable-slash-commands",
-                "--system-prompt",
-            ]
-            .iter()
-            .map(|word| (*word).to_owned())
-            .collect(),
-            Self::Codex => vec![
-                "app-server".to_owned(),
-                "-c".to_owned(),
-                format!("model_reasoning_effort=\"{}\"", self.effort(work)),
-                "-c".to_owned(),
-                "mcp_servers={}".to_owned(),
-                "-c".to_owned(),
-                "project_doc_max_bytes=0".to_owned(),
-            ],
-        };
+    pub fn args(self, work: Work, model: &Model, instructions: &str) -> Vec<String> {
         match self {
-            Self::Claude => args.push(instructions.to_owned()),
+            Self::Claude => {
+                let mut args = vec!["-p".to_owned()];
+                if let Some(model) = self.model_of(work, model) {
+                    args.extend(["--model".to_owned(), model]);
+                }
+                args.extend(
+                    [
+                        "--input-format",
+                        "stream-json",
+                        "--output-format",
+                        "stream-json",
+                        "--verbose",
+                        "--tools",
+                        "",
+                        "--no-session-persistence",
+                        "--setting-sources",
+                        "",
+                        "--strict-mcp-config",
+                        "--disable-slash-commands",
+                        "--system-prompt",
+                        instructions,
+                    ]
+                    .map(str::to_owned),
+                );
+                args
+            }
             Self::Codex => {
+                let mut args = vec![
+                    "app-server".to_owned(),
+                    "-c".to_owned(),
+                    format!("model_reasoning_effort=\"{}\"", self.effort(work)),
+                    "-c".to_owned(),
+                    "mcp_servers={}".to_owned(),
+                    "-c".to_owned(),
+                    "project_doc_max_bytes=0".to_owned(),
+                ];
                 for feature in CODEX_OFF {
                     args.extend(["-c".to_owned(), format!("features.{feature}=false")]);
                 }
+                args
             }
         }
-        args
     }
 }
 
@@ -204,7 +245,7 @@ const CODEX_OFF: [&str; 13] = [
 ];
 
 /// Which tool does a work, as the settings keep it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ToolChoice {
     /// Claude Code when it is installed, else Codex.
     #[default]
@@ -227,6 +268,81 @@ impl ToolChoice {
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|choice| choice.key() == key)
+    }
+
+    /// Its segment's words in the settings.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::Only(Backend::Claude) => "Claude",
+            Self::Only(Backend::Codex) => "Codex",
+        }
+    }
+}
+
+/// The model a tool is asked for, as the settings keep it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Model {
+    /// The one this app recommends for the work ([`Backend::model`]).
+    #[default]
+    Recommended,
+    /// None asked for: the tool uses its own default.
+    ToolDefault,
+    /// Any model the tool takes, by the name its command line takes (an alias or a full name).
+    Named(String),
+}
+
+/// The longest model name kept, in bytes.
+pub const MAX_MODEL_NAME: usize = 100;
+
+impl Model {
+    /// Its name in the settings file: `recommended`, `default`, or the model's name.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Recommended => "recommended",
+            Self::ToolDefault => "default",
+            Self::Named(name) => name,
+        }
+    }
+
+    /// The model `key` names (as the settings file or the user types it, trimmed): `recommended`, `default` (Claude
+    /// Code's alias for its default, so the same thing), or a model's name: visible characters without spaces, at
+    /// most [`MAX_MODEL_NAME`] bytes, not starting with `-` (it goes on a command line).
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        let key = key.trim();
+        match key {
+            "recommended" => Some(Self::Recommended),
+            "default" => Some(Self::ToolDefault),
+            _ => {
+                let shaped = !key.is_empty()
+                    && key.len() <= MAX_MODEL_NAME
+                    && !key.starts_with('-')
+                    && key.chars().all(|c| !c.is_whitespace() && !c.is_control());
+                shaped.then(|| Self::Named(key.to_owned()))
+            }
+        }
+    }
+}
+
+/// A local AI choice of the settings: which tool, then which model. Every setting that picks a local AI keeps one,
+/// and the settings show each with the same control ([`crate::settings_view`]'s AI picker).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct AiChoice {
+    pub tool: ToolChoice,
+    pub model: Model,
+}
+
+impl AiChoice {
+    /// `tool` with its recommended model.
+    #[must_use]
+    pub fn of(tool: ToolChoice) -> Self {
+        Self {
+            tool,
+            model: Model::Recommended,
+        }
     }
 }
 
@@ -337,12 +453,13 @@ impl Failure {
     }
 }
 
-/// What a [`Tool`] runs: the tool, where it is, its work and instructions, and how long it may take to start.
+/// What a [`Tool`] runs: the tool, where it is, its work, model and instructions, and how long it may take to start.
 #[derive(Clone, Debug)]
 pub struct Launch {
     pub backend: Backend,
     pub program: PathBuf,
     pub work: Work,
+    pub model: Model,
     pub instructions: String,
     /// How long the process may take to start (Codex answers its thread's start).
     pub first: Duration,
@@ -362,6 +479,8 @@ pub fn cap(text: &str, max: usize) -> String {
 pub struct Tool {
     backend: Backend,
     work: Work,
+    /// The model asked for, `None`: the tool's default.
+    model: Option<String>,
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
@@ -385,7 +504,7 @@ impl Tool {
         let backend = launch.backend;
         let mut command = Command::new(&launch.program);
         command
-            .args(backend.args(launch.work, &launch.instructions))
+            .args(backend.args(launch.work, &launch.model, &launch.instructions))
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -413,6 +532,7 @@ impl Tool {
         let mut tool = Self {
             backend,
             work: launch.work,
+            model: backend.model_of(launch.work, &launch.model),
             child,
             stdin,
             lines,
@@ -460,17 +580,18 @@ impl Tool {
         self.answer_of(initialize, deadline, stop)?;
         self.write(&json!({"jsonrpc": "2.0", "method": "initialized"}))?;
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let start = self.request(
-            "thread/start",
-            &json!({
-                "model": Backend::Codex.model(self.work),
-                "cwd": cwd,
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "ephemeral": true,
-                "baseInstructions": instructions,
-            }),
-        )?;
+        let mut params = json!({
+            "cwd": cwd,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+            "ephemeral": true,
+            "baseInstructions": instructions,
+        });
+        // none named: the model the user's Codex is set to
+        if let (Some(model), Some(params)) = (&self.model, params.as_object_mut()) {
+            params.insert("model".to_owned(), Value::String(model.clone()));
+        }
+        let start = self.request("thread/start", &params)?;
         let started = self.answer_of(start, deadline, stop)?;
         let thread = started
             .pointer("/thread/id")

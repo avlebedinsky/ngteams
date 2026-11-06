@@ -344,6 +344,7 @@ fn made_summary() -> teams_ui::recap_summary::Made {
             questions: vec![point("Should the transcript follow the video when it is searched?", 22)],
         },
         tool: "claude".to_owned(),
+        model: teams_ui::local_ai::Model::Recommended,
         made_at: fixtures::START + 3_600_000,
         sections: 1,
     }

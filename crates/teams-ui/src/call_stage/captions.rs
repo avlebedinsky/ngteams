@@ -373,7 +373,7 @@ impl CallStage {
 
 /// The header's note of the translation: the language and the tool doing it.
 fn translated_into(status: &Status) -> Option<gpui::Div> {
-    let Status::Translating { backend, language } = status else {
+    let Status::Translating { language, by, .. } = status else {
         return None;
     };
     Some(
@@ -383,10 +383,7 @@ fn translated_into(status: &Status) -> Option<gpui::Div> {
             .overflow_hidden()
             .text_ellipsis()
             .whitespace_nowrap()
-            .child(SharedString::from(format!(
-                "Translated into {language} by {}",
-                backend.label(crate::local_ai::Work::Captions)
-            ))),
+            .child(SharedString::from(format!("Translated into {language} by {by}"))),
     )
 }
 

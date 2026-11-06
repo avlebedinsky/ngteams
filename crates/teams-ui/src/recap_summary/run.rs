@@ -13,7 +13,7 @@ use std::time::Duration;
 use super::{
     FIX_REQUEST, Input, Line, Made, instructions, notes_instructions, parse, sections, stamp, transcript_text,
 };
-use crate::local_ai::{Backend, Failure, Launch, Tool, Work, cap};
+use crate::local_ai::{Backend, Failure, Launch, Model, Tool, Work, cap};
 
 /// The longest notes kept of one section.
 const MAX_NOTES: usize = 12_000;
@@ -73,11 +73,12 @@ pub enum Update {
     Failed(Failure),
 }
 
-/// What to summarize, with which tool.
+/// What to summarize, with which tool and model.
 #[derive(Clone, Debug)]
 pub struct Request {
     pub backend: Backend,
     pub program: PathBuf,
+    pub model: Model,
     pub input: Input,
     pub limits: Limits,
 }
@@ -186,6 +187,7 @@ impl Worker {
         Ok(Made {
             summary,
             tool: self.request.backend.key().to_owned(),
+            model: self.request.model.clone(),
             made_at: chrono::Utc::now().timestamp_millis(),
             sections: count,
         })
@@ -211,6 +213,7 @@ impl Worker {
             backend: self.request.backend,
             program: self.request.program.clone(),
             work: Work::Summary,
+            model: self.request.model.clone(),
             instructions,
             first: self.request.limits.start,
         };

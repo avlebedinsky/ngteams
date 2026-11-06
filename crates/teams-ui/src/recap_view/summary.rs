@@ -18,7 +18,7 @@ use teams_proto::chat::MessageText;
 use super::{Pane, Post, Read, RecapView, centred, event_row, spinner};
 use crate::clock;
 use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
-use crate::local_ai::{Backend, Failure, ToolChoice, Tools, Work};
+use crate::local_ai::{AiChoice, Backend, Failure, Tools, Work};
 use crate::recap::{local_session_line, shows_parts};
 use crate::recap_summary::{self, Input, Made, Point, RecapSummary, State, Step, Topic, cache_key, stamp};
 use crate::rich_text::{self, Mentions};
@@ -76,9 +76,9 @@ impl RecapView {
     }
 
     /// The tool the settings pick for summaries.
-    fn summary_choice(&self, cx: &Context<Self>) -> ToolChoice {
-        self.settings.as_ref().map_or_else(ToolChoice::default, |settings| {
-            settings.read(cx).settings().recap_summarizer
+    fn summary_choice(&self, cx: &Context<Self>) -> AiChoice {
+        self.settings.as_ref().map_or_else(AiChoice::default, |settings| {
+            settings.read(cx).settings().recap_summarizer.clone()
         })
     }
 
@@ -257,9 +257,10 @@ impl RecapView {
             State::Idle => self.offer(palette, cx),
             State::Running {
                 backend,
+                label,
                 stage,
                 started,
-            } => running(backend, &stage.words(), started, palette, cx),
+            } => running((backend, &label), &stage.words(), started, palette, cx),
             State::Failed(failure) => failed(&failure, palette, cx),
             State::Done(made) => self.summary_shown(&made, palette, cx),
         }
@@ -267,7 +268,8 @@ impl RecapView {
 
     /// What a summary is, what it sends where, and Generate; without a tool, how to get one.
     fn offer(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let picked = Tools::of(cx).pick(self.summary_choice(cx));
+        let choice = self.summary_choice(cx);
+        let picked = Tools::of(cx).pick(choice.tool);
         let action = match &picked {
             Ok(_) => selected_by(
                 "recap-summary-generate",
@@ -292,7 +294,7 @@ impl RecapView {
                 "The transcript goes to {} ({}) on this computer, which sends it to {}. Pick the tool in Settings \
                  > Calls.",
                 backend.tool(),
-                backend.label(Work::Summary),
+                backend.label_of(Work::Summary, &choice.model),
                 backend.provider()
             ),
             Err(failure) => format!(
@@ -570,9 +572,9 @@ fn privacy_note(words: String, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// The summary being made: how far it got, for how long, and Cancel.
+/// The summary being made by `backend` (as the recap says it: `label`): how far it got, for how long, and Cancel.
 fn running(
-    backend: Backend,
+    (backend, label): (Backend, &str),
     stage: &str,
     started: std::time::Instant,
     palette: Palette,
@@ -598,7 +600,7 @@ fn running(
             div()
                 .text_sm()
                 .text_color(rgb(palette.muted_foreground))
-                .child(format!("{} · {elapsed}", backend.label(Work::Summary))),
+                .child(format!("{label} · {elapsed}")),
         )
         .child(selected_by("recap-summary-cancel", cancel))
         .child(privacy_note(

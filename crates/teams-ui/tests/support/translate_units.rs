@@ -153,7 +153,8 @@ fn captions_are_translated_only_once_a_language_is_picked_and_while_they_show() 
             translation.status(),
             &Status::Translating {
                 backend: Backend::Claude,
-                language: "German"
+                language: "German",
+                by: "Claude Haiku".to_owned(),
             }
         );
     });

@@ -16,9 +16,9 @@ opens people search results as chats, and keeps unread badges in sync with read 
 keeps its existing file references and cards. Channel menus provide management, notification and section
 preferences, email and workflow actions. Calls and meetings support Teams
 live captions and spoken-language controls (Alt+Shift+C); caption text stays in memory and clears on hide or call
-end. Captions can be translated on this computer ("Translate to" in the caption settings) by Claude Code (Claude
-Haiku) or the Codex CLI (GPT-6-Luna), whichever is installed (Settings → Calls → Captions); the caption text then
-goes to that tool and its provider. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
+end. Captions can be translated on this computer ("Translate to" in the caption settings) by Claude Code or the Codex
+CLI, with any model the tool lists or one typed (by default Claude Haiku or GPT-6-Luna; Settings → Calls → Captions);
+the caption text then goes to that tool and its provider. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
 [workflows](docs/protocol/workflows.md), and [live captions](docs/protocol/live-captions.md).
 
 ## Layout
@@ -315,8 +315,9 @@ Recap plays the meeting's recordings with their transcripts (search, download), 
 it, and its More options downloads a recording the account may download
 ([docs/protocol/recap.md](docs/protocol/recap.md)). Its AI summary is made on this computer when asked for, laid out
 as Fathom's call summaries (purpose, key takeaways, topics with their moments, next steps with owners, open
-questions), by Claude Code (Claude Sonnet) or the Codex CLI (GPT-6.1-Terra) (Settings → Calls → Meeting recaps): the
-transcript then goes to that tool and its provider. It is kept per recording, copied as Markdown, or sent to the
+questions), by Claude Code or the Codex CLI with any model it takes (by default Claude Sonnet or GPT-6.1-Terra;
+Settings → Calls → Meeting recaps, the same tool-and-model control as the captions'): the transcript then goes to that
+tool and its provider. It is kept per recording, copied as Markdown, or sent to the
 meeting's chat after a preview. Settings control appearance, notifications, privacy,
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.

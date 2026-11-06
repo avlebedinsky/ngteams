@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 181] = [
+const STEPS: [Step; 5 + 183] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -612,7 +612,8 @@ const STEPS: [Step; 5 + 181] = [
     ("settings-privacy", |shell, _, cx| show_page(shell, Page::Privacy, cx)),
     ("settings-calls", |shell, _, cx| {
         // the mock's engine has no calls: made-up devices give the settings their Calls page, and calls shown with the
-        // calling endpoint registered its "Make a test call"
+        // calling endpoint registered its "Make a test call"; made-up AI tools and models for its AI pickers
+        made_up_ai_tools(cx);
         let model = shell.read(cx).settings().clone();
         teams_ui::settings::attach_devices(&model, Arc::new(FixedDirectory::new(made_up_devices())), cx);
         let models = shell.read(cx).models().clone();
@@ -657,6 +658,9 @@ const STEPS: [Step; 5 + 181] = [
         }
         view.read(cx).scroll_to_end();
     }),
+    // the Calls page's local AI tools, scrolled to: captions translated by a model Claude Code lists, recaps
+    // summarized by a model typed that Codex doesn't list (its name's field shown)
+    ("settings-ai-tools", |shell, _, cx| show_ai_tools(shell, cx)),
     ("settings-diagnostics", |shell, _, cx| {
         // the calls shown for the Calls page go again: the mock's engine has none
         let calls = shell.read(cx).models().calls.clone();
@@ -676,6 +680,8 @@ const STEPS: [Step; 5 + 181] = [
         });
         show_page(shell, Page::Appearance, cx);
     }),
+    // the local AI tools in Teams Dark
+    ("settings-ai-tools-dark", |shell, _, cx| show_ai_tools(shell, cx)),
     ("channel-dialog-dark", |shell, window, cx| {
         open_channel_dialog(shell, window, cx);
         with_channel_dialog(shell, cx, |dialog, cx| fill_channel_dialog(dialog, window, cx));
@@ -1269,8 +1275,9 @@ const STEPS: [Step; 5 + 181] = [
             model.change(
                 |settings| {
                     settings.appearance.theme = teams_ui::theme::DARK_KEY;
-                    settings.caption_translator =
-                        teams_ui::translate::TranslatorChoice::Only(teams_ui::translate::Backend::Codex);
+                    settings.caption_translator = teams_ui::translate::AiChoice::of(
+                        teams_ui::translate::TranslatorChoice::Only(teams_ui::translate::Backend::Codex),
+                    );
                 },
                 cx,
             );
@@ -1292,7 +1299,7 @@ const STEPS: [Step; 5 + 181] = [
                 |settings| {
                     settings.appearance.theme = teams_ui::theme::DARK_KEY;
                     settings.caption_translate_to = None;
-                    settings.caption_translator = teams_ui::translate::TranslatorChoice::Automatic;
+                    settings.caption_translator = teams_ui::translate::AiChoice::default();
                 },
                 cx,
             );
@@ -1620,6 +1627,58 @@ while IFS= read -r line; do
 done
 "#;
 
+/// Made-up local AI tools (both installed, at paths nothing runs) and the models they list.
+fn made_up_ai_tools(cx: &mut App) {
+    use teams_ui::local_ai::{Backend, Catalog, Listed, Tools};
+    let listed = |id: &str, name: &str, latest: bool| Listed {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        latest,
+    };
+    cx.set_global(Tools::with(vec![
+        (Backend::Claude, "/made-up/claude".into()),
+        (Backend::Codex, "/made-up/codex".into()),
+    ]));
+    cx.set_global(Catalog::with(
+        vec![
+            listed("opus", "Opus", true),
+            listed("sonnet", "Sonnet", true),
+            listed("haiku", "Haiku", true),
+            listed("claude-opus-5-5", "Opus 5.5", false),
+            listed("claude-sonnet-5-5", "Sonnet 5.5", false),
+        ],
+        vec![
+            listed("gpt-6.1-sol", "GPT-6.1-Sol", false),
+            listed("gpt-6.1-terra", "GPT-6.1 Terra", false),
+            listed("gpt-6-luna", "GPT-6-Luna", false),
+        ],
+    ));
+}
+
+/// The Calls page scrolled to its AI pickers: captions by Claude Code's Opus, recaps by a model typed for Codex.
+fn show_ai_tools(shell: &Entity<Shell>, cx: &mut App) {
+    use teams_ui::local_ai::{AiChoice, Backend, Model, ToolChoice};
+    made_up_ai_tools(cx);
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(
+            |settings| {
+                settings.caption_translator = AiChoice {
+                    tool: ToolChoice::Only(Backend::Claude),
+                    model: Model::Named("opus".to_owned()),
+                };
+                settings.recap_summarizer = AiChoice {
+                    tool: ToolChoice::Only(Backend::Codex),
+                    model: Model::Named("my-team-model".to_owned()),
+                };
+            },
+            cx,
+        );
+    });
+    show_page(shell, Page::Calls, cx);
+    shell.read(cx).settings_view().read(cx).scroll_to_end();
+}
+
 /// The made-up call's captions shown and translated into German by [`FAKE_CLAUDE`]: two lines said, one still spoken.
 fn translated_captions(shell: &Entity<Shell>, cx: &mut App) {
     use std::os::unix::fs::PermissionsExt as _;
@@ -1637,7 +1696,14 @@ fn translated_captions(shell: &Entity<Shell>, cx: &mut App) {
     )]));
     let model = shell.read(cx).settings().clone();
     model.update(cx, |model, cx| {
-        model.change(|settings| settings.caption_translate_to = Some("de"), cx);
+        model.change(
+            |settings| {
+                settings.caption_translate_to = Some("de");
+                // the recommended model, whatever the settings' tour picked
+                settings.caption_translator = teams_ui::translate::AiChoice::default();
+            },
+            cx,
+        );
     });
     let line = |stamp: u64, who: (&str, &str), text: &str, final_result: bool| teams_core::Caption {
         id: format!("made-up/{stamp}"),

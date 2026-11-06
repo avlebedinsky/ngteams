@@ -88,8 +88,9 @@ caption invite/command is reported in the caption pane and cannot fail the voice
 ## Local translation (not Teams')
 
 Separately from Teams' own translation below, the native client can translate the captions it shows on the user's
-own computer: "Translate to" in the caption settings, done by the installed Claude Code (`claude`, Claude Haiku) or
-Codex CLI (`codex app-server`, GPT-6-Luna; Codex rejects a plain `luna` model for a ChatGPT account). Nothing is sent
+own computer: "Translate to" in the caption settings, done by the installed Claude Code (`claude`) or Codex CLI
+(`codex app-server`) with the model picked in Settings → Calls (by default Claude Haiku or GPT-6-Luna; Codex rejects a
+plain `luna` model for a ChatGPT account). Nothing is sent
 to Teams and the meeting is unaffected; the caption text goes to the chosen tool and its provider. How it schedules,
 keeps the call's context and bounds it is in `crates/teams-ui/src/translate.rs` and its `session` module.
 

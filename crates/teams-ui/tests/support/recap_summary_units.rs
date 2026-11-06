@@ -12,6 +12,7 @@ use teams_proto::chat::MessageText;
 use teams_proto::transcript::{read_vtt, turns};
 
 use super::*;
+use crate::local_ai::ToolChoice;
 
 /// A transcript of two made-up speakers.
 const VTT: &str = "WEBVTT\n\n\
@@ -128,6 +129,7 @@ fn made() -> Made {
     Made {
         summary: parse(&answer().to_string(), 140).unwrap(),
         tool: "claude".into(),
+        model: Model::Recommended,
         made_at: 1_767_348_000_000,
         sections: 1,
     }
@@ -250,6 +252,7 @@ fn claude_sonnet_reads_a_short_transcript_whole() {
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
         program: fake_claude(dir.path()),
+        model: Model::Recommended,
         input: input(),
         limits: quick(),
     });
@@ -285,6 +288,7 @@ fn a_long_transcript_is_condensed_by_sections_then_summarized() {
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
         program: fake_claude(dir.path()),
+        model: Model::Recommended,
         input: input(),
         limits,
     });
@@ -326,6 +330,7 @@ fn an_answer_that_isnt_a_summary_is_asked_for_again_once() {
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
         program,
+        model: Model::Recommended,
         input: input(),
         limits: quick(),
     });
@@ -360,6 +365,7 @@ done
     let job = Summarizing::start(Request {
         backend: Backend::Codex,
         program,
+        model: Model::Recommended,
         input: input(),
         limits: quick(),
     });
@@ -398,6 +404,7 @@ fn a_tool_signed_out_slow_or_gone_says_so() {
         let job = Summarizing::start(Request {
             backend: Backend::Claude,
             program,
+            model: Model::Recommended,
             input: input(),
             limits,
         });
@@ -437,6 +444,7 @@ fn dropping_a_summary_being_made_ends_its_tool() {
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
         program,
+        model: Model::Recommended,
         input: input(),
         limits: Limits::default(),
     });
@@ -467,6 +475,7 @@ fn the_installed_tools_summarize() {
         let job = Summarizing::start(Request {
             backend,
             program,
+            model: Model::Recommended,
             input: input(),
             limits: Limits::default(),
         });

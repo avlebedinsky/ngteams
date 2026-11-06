@@ -49,8 +49,9 @@ use teams_proto::ManualAvailability;
 use toml::{Table, Value};
 
 use crate::effects::CameraPreview;
+use crate::local_ai::{AiChoice, Model, ToolChoice, Work};
 use crate::theme::{self, Appearance};
-use crate::translate::{self, TranslatorChoice};
+use crate::translate;
 
 /// The settings file's mode.
 pub const FILE_MODE: u32 = 0o600;
@@ -354,10 +355,10 @@ pub struct Settings {
     /// [`crate::translate::TARGET_LANGUAGES`]; `None`: not translated (the default: nothing goes to a tool until the
     /// user picks one).
     pub caption_translate_to: Option<&'static str>,
-    /// Which tool translates them.
-    pub caption_translator: TranslatorChoice,
-    /// Which tool makes a meeting recap's AI summary ([`crate::recap_summary`]), when the user asks for one.
-    pub recap_summarizer: TranslatorChoice,
+    /// Which tool, and model, translates them.
+    pub caption_translator: AiChoice,
+    /// Which tool, and model, makes a meeting recap's AI summary ([`crate::recap_summary`]), when the user asks for one.
+    pub recap_summarizer: AiChoice,
     /// The other accounts' own settings, by the account's MRI: the first account's are [`Settings::selected_chat`]
     /// and [`Settings::manual_status`] themselves (see [`Settings::first_account`]).
     pub accounts: BTreeMap<String, AccountSettings>,
@@ -496,6 +497,25 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// The local AI choice of `work`: the captions' translator or the recaps' summarizer.
+    #[must_use]
+    pub fn ai(&self, work: Work) -> &AiChoice {
+        match work {
+            Work::Captions => &self.caption_translator,
+            Work::Summary => &self.recap_summarizer,
+        }
+    }
+
+    /// Sets the local AI choice of `work`.
+    pub fn set_ai(&mut self, work: Work, choice: AiChoice) {
+        match work {
+            Work::Captions => self.caption_translator = choice,
+            Work::Summary => self.recap_summarizer = choice,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -516,8 +536,8 @@ impl Default for Settings {
             appearance: Appearance::default(),
             time_format: TimeFormat::default(),
             caption_translate_to: None,
-            caption_translator: TranslatorChoice::default(),
-            recap_summarizer: TranslatorChoice::default(),
+            caption_translator: AiChoice::default(),
+            recap_summarizer: AiChoice::default(),
             accounts: BTreeMap::new(),
             first_account: None,
             people_calendars: Vec::new(),
@@ -550,8 +570,13 @@ pub mod keys {
     pub const ANIMATIONS: &str = "animations";
     pub const TIME_FORMAT: &str = "time_format";
     pub const CAPTION_TRANSLATE_TO: &str = "caption_translate_to";
+    /// A local AI choice: a table of `tool` (`automatic`, `claude`, `codex`) and `model` (`recommended`, `default` or
+    /// a model's name); a file of an earlier build holds the tool alone, as a string, its model the recommended one.
     pub const CAPTION_TRANSLATOR: &str = "caption_translator";
     pub const RECAP_SUMMARIZER: &str = "recap_summarizer";
+    /// A local AI choice's tool and model, in its table.
+    pub const AI_TOOL: &str = "tool";
+    pub const AI_MODEL: &str = "model";
     /// The other accounts' own settings: a table of tables, by the account's MRI.
     pub const ACCOUNTS: &str = "accounts";
     /// The account whose own settings are the top-level ones, by its MRI.
@@ -805,23 +830,46 @@ fn take_captions(settings: &mut Settings, key: &str, value: &Value) -> Result<()
                 })?,
         );
     } else if key == keys::RECAP_SUMMARIZER {
-        settings.recap_summarizer = value
-            .as_str()
-            .and_then(TranslatorChoice::from_key)
-            .ok_or(Problem::BadValue {
-                key: keys::RECAP_SUMMARIZER,
-                why: "not one of automatic, claude, codex",
-            })?;
+        settings.recap_summarizer = ai_choice(value).ok_or(Problem::BadValue {
+            key: keys::RECAP_SUMMARIZER,
+            why: AI_CHOICE_SHAPE,
+        })?;
     } else {
-        settings.caption_translator = value
-            .as_str()
-            .and_then(TranslatorChoice::from_key)
-            .ok_or(Problem::BadValue {
-                key: keys::CAPTION_TRANSLATOR,
-                why: "not one of automatic, claude, codex",
-            })?;
+        settings.caption_translator = ai_choice(value).ok_or(Problem::BadValue {
+            key: keys::CAPTION_TRANSLATOR,
+            why: AI_CHOICE_SHAPE,
+        })?;
     }
     Ok(())
+}
+
+/// What a local AI choice that can't be read isn't.
+const AI_CHOICE_SHAPE: &str = "not a tool (automatic, claude, codex) or a table of a tool and a model";
+
+/// A local AI choice as the file keeps it: a table of its tool and model, or (a file of an earlier build) the tool's
+/// name alone, its model the recommended one.
+fn ai_choice(value: &Value) -> Option<AiChoice> {
+    if let Some(tool) = value.as_str() {
+        return ToolChoice::from_key(tool).map(AiChoice::of);
+    }
+    let table = value.as_table()?;
+    let tool = match table.get(keys::AI_TOOL) {
+        Some(tool) => ToolChoice::from_key(tool.as_str()?)?,
+        None => ToolChoice::default(),
+    };
+    let model = match table.get(keys::AI_MODEL) {
+        Some(model) => Model::from_key(model.as_str()?)?,
+        None => Model::default(),
+    };
+    Some(AiChoice { tool, model })
+}
+
+/// A local AI choice, as the file keeps it.
+fn ai_choice_value(choice: &AiChoice) -> Value {
+    let mut table = Table::new();
+    table.insert(keys::AI_TOOL.to_owned(), Value::String(choice.tool.key().to_owned()));
+    table.insert(keys::AI_MODEL.to_owned(), Value::String(choice.model.key().to_owned()));
+    Value::Table(table)
 }
 
 /// Takes the camera's background in calls.
@@ -921,7 +969,7 @@ pub fn render(settings: &Settings) -> String {
     render_captions(settings, &mut table);
     table.insert(
         keys::RECAP_SUMMARIZER.to_owned(),
-        Value::String(settings.recap_summarizer.key().to_owned()),
+        ai_choice_value(&settings.recap_summarizer),
     );
     let accounts: Table = settings
         .accounts
@@ -976,7 +1024,7 @@ fn render_captions(settings: &Settings, table: &mut Table) {
     }
     table.insert(
         keys::CAPTION_TRANSLATOR.to_owned(),
-        Value::String(settings.caption_translator.key().to_owned()),
+        ai_choice_value(&settings.caption_translator),
     );
 }
 

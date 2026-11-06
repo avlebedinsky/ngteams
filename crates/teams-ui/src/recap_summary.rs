@@ -1,6 +1,6 @@
 //! A meeting recap's AI summary, made on this computer by the AI command-line tool the user has
-//! ([`crate::local_ai`]: Claude Code with Claude Sonnet, or the Codex CLI with GPT-6.1-Terra), laid out as Fathom's
-//! call summaries are:
+//! ([`crate::local_ai`]: Claude Code or the Codex CLI, with the model the user picked, by default Claude Sonnet or
+//! GPT-6.1-Terra), laid out as Fathom's call summaries are:
 //!
 //! - **Meeting purpose**: one line on why the meeting was held;
 //! - **Key takeaways**: the few outcomes, decisions and facts that matter most;
@@ -42,7 +42,7 @@ use teams_proto::transcript::Turn;
 
 pub use run::{Limits, Request, Stage, Summarizing, Update};
 
-use crate::local_ai::{Backend, Failure, ToolChoice, Tools, Work, cap};
+use crate::local_ai::{AiChoice, Backend, Failure, Model, Tools, Work, cap};
 
 /// The folder beside the settings file the summaries are kept in.
 pub const SUMMARY_DIR: &str = "recap-summaries";
@@ -98,13 +98,16 @@ pub struct Summary {
     pub questions: Vec<Point>,
 }
 
-/// A summary made: what it says, the tool that made it, when (ms since the epoch), and how many sections the
+/// A summary made: what it says, the tool and model that made it, when (ms since the epoch), and how many sections the
 /// transcript was condensed in (1: read whole).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Made {
     pub summary: Summary,
     /// The tool's key ([`Backend::key`]).
     pub tool: String,
+    /// The model asked for (a summary kept by an earlier build: the recommended one, all it could ask for).
+    #[serde(default)]
+    pub model: Model,
     pub made_at: i64,
     pub sections: usize,
 }
@@ -116,11 +119,13 @@ impl Made {
         Backend::ALL.into_iter().find(|backend| backend.key() == self.tool)
     }
 
-    /// What made it, as the recap says it: "Claude Sonnet".
+    /// What made it, as the recap says it: "Claude Sonnet", "Codex (gpt-6.1-sol)".
     #[must_use]
-    pub fn made_with(&self) -> &'static str {
-        self.backend()
-            .map_or("an AI tool", |backend| backend.label(Work::Summary))
+    pub fn made_with(&self) -> String {
+        self.backend().map_or_else(
+            || "an AI tool".to_owned(),
+            |backend| backend.label_of(Work::Summary, &self.model),
+        )
     }
 }
 
@@ -632,6 +637,8 @@ pub enum State {
     Idle,
     Running {
         backend: Backend,
+        /// What the recap says makes it: "Claude Sonnet".
+        label: String,
         stage: Stage,
         started: Instant,
     },
@@ -689,9 +696,9 @@ impl RecapSummary {
         &self.state
     }
 
-    /// Makes a summary of `input` with the tool `choice` comes to (anew, when one was made).
-    pub fn start(&mut self, choice: ToolChoice, input: Input, cx: &mut Context<Self>) {
-        let (backend, program) = match Tools::of(cx).pick(choice) {
+    /// Makes a summary of `input` with the tool and model `choice` comes to (anew, when one was made).
+    pub fn start(&mut self, choice: AiChoice, input: Input, cx: &mut Context<Self>) {
+        let (backend, program) = match Tools::of(cx).pick(choice.tool) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.state = State::Failed(failure);
@@ -699,9 +706,11 @@ impl RecapSummary {
                 return;
             }
         };
+        let label = backend.label_of(Work::Summary, &choice.model);
         let job = Summarizing::start(Request {
             backend,
             program,
+            model: choice.model,
             input,
             limits: self.limits,
         });
@@ -725,6 +734,7 @@ impl RecapSummary {
         self.job = Some(job);
         self.state = State::Running {
             backend,
+            label,
             stage: Stage::Summarizing,
             started: Instant::now(),
         };

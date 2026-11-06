@@ -1,10 +1,11 @@
-//! Live captions translated on this computer, by the AI command-line tool the user has: Claude Code with Claude Haiku,
-//! or the Codex CLI with GPT-6-Luna. Teams' own caption translation needs a licence; this one needs only the tool.
+//! Live captions translated on this computer, by the AI command-line tool the user has: Claude Code or the Codex CLI,
+//! with the model the user picked (by default the fastest: Claude Haiku, GPT-6-Luna). Teams' own caption translation
+//! needs a licence; this one needs only the tool.
 //!
 //! - **Opt-in**: nothing is translated, and no tool starts, until the user picks a language in the captions' settings
-//!   ("Translate to", [`crate::settings::Settings::caption_translate_to`]); the Calls settings pick the tool
-//!   ([`TranslatorChoice`]: automatically Claude Code when it is installed, else Codex). The captions' text then goes
-//!   to that tool, which sends it to its provider; the pane names the tool.
+//!   ("Translate to", [`crate::settings::Settings::caption_translate_to`]); the Calls settings pick the tool and its
+//!   model ([`AiChoice`]: automatically Claude Code when it is installed, else Codex). The captions' text then goes
+//!   to that tool, which sends it to its provider; the pane names the tool and model.
 //! - **As Teams shows translated captions**: the translation alone, in the speaker's line; until a line's translation
 //!   comes, its text as spoken, dimmed. When translating fails (the tool missing, signed out, too slow, stopped), the
 //!   captions show as spoken under a notice saying why, with Try again.
@@ -29,13 +30,13 @@ pub use session::{Job, Limits, Outcome, Said, Session, Spec};
 
 use crate::settings::SettingsModel;
 
-/// A tool captions can be translated with ([`crate::local_ai`]); captions use its fastest model ([`Work::Captions`]).
+/// A tool captions can be translated with ([`crate::local_ai`]), with the model picked for [`Work::Captions`].
 pub use crate::local_ai::Backend;
 /// Which tool translates, as the settings keep it.
 pub use crate::local_ai::ToolChoice as TranslatorChoice;
 /// The tools found on this computer.
 pub use crate::local_ai::Tools as Translators;
-pub use crate::local_ai::{Failure, Work};
+pub use crate::local_ai::{AiChoice, Failure, Model, Work};
 
 /// The languages captions can be translated into: a code and its English name.
 pub const TARGET_LANGUAGES: &[(&str, &str)] = &[
@@ -130,12 +131,11 @@ pub enum Status {
     Translating {
         backend: Backend,
         language: &'static str,
+        /// What the pane says translates: "Claude Haiku", "Codex (gpt-6.1-sol)".
+        by: String,
     },
     /// It stopped: the captions show as spoken.
-    Failed {
-        failure: Failure,
-        language: &'static str,
-    },
+    Failed { failure: Failure, language: &'static str },
 }
 
 /// How a caption line is shown.
@@ -154,7 +154,7 @@ pub enum Shown<'a> {
 pub struct CaptionTranslation {
     settings: Entity<SettingsModel>,
     /// The language and tool in effect, while the captions show and a language is picked.
-    config: Option<(&'static str, TranslatorChoice)>,
+    config: Option<(&'static str, AiChoice)>,
     status: Status,
     schedule: Option<Schedule>,
     session: Option<Session>,
@@ -238,9 +238,9 @@ impl CaptionTranslation {
         let want = settings
             .caption_translate_to
             .filter(|_| self.showing)
-            .map(|target| (target, settings.caption_translator));
+            .map(|target| (target, settings.caption_translator.clone()));
         if want != self.config {
-            self.config = want;
+            self.config.clone_from(&want);
             self.session = None;
             self.receiving = None;
             self.waking = None;
@@ -261,21 +261,23 @@ impl CaptionTranslation {
     }
 
     /// Picks the tool and starts its session.
-    fn begin(&mut self, target: &'static str, choice: TranslatorChoice, cx: &mut Context<Self>) {
+    fn begin(&mut self, target: &'static str, choice: AiChoice, cx: &mut Context<Self>) {
         let Some((code, language)) = language(target) else {
             return;
         };
         self.schedule = Some(Schedule::new(code));
-        let (backend, program) = match Translators::of(cx).pick(choice) {
+        let (backend, program) = match Translators::of(cx).pick(choice.tool) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.status = Status::Failed { failure, language };
                 return;
             }
         };
+        let by = backend.label_of(Work::Captions, &choice.model);
         let session = Session::start(Spec {
             backend,
             program,
+            model: choice.model,
             language,
             limits: self.limits,
         });
@@ -288,7 +290,7 @@ impl CaptionTranslation {
             }
         }));
         self.session = Some(session);
-        self.status = Status::Translating { backend, language };
+        self.status = Status::Translating { backend, language, by };
     }
 
     fn received(&mut self, outcome: Outcome, cx: &mut Context<Self>) {

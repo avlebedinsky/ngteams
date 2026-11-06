@@ -16,7 +16,9 @@
 //!   the shell: [`SettingsViewEvent::MakeTestCall`]; offered while no call is up or rings on any account, the calling
 //!   endpoint is registered and the app isn't read-only, else said why), the calls' video switch ("Video in
 //!   calls"), and the camera's video effects (blur, a picture behind the person) with their self-preview
-//!   ([`crate::effects::EffectsPicker`], made while the page shows and dropped as it goes, its preview with it).
+//!   ([`crate::effects::EffectsPicker`], made while the page shows and dropped as it goes, its preview with it), then
+//!   the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
+//!   the same control ([`ai_picker::AiPicker`]).
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
 //!
 //! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
@@ -46,10 +48,12 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::local_ai::Work;
 use crate::presence;
 use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel, TimeFormat};
+use crate::settings_view::ai_picker::AiPicker;
 use crate::shell::shown_as;
 use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
 use crate::trace::ViewTrace;
-use crate::translate::{TranslatorChoice, Translators};
+
+pub mod ai_picker;
 
 /// The font picker's first row: the system's UI font (no family named).
 pub const SYSTEM_FONT_LABEL: &str = "System font";
@@ -323,6 +327,8 @@ pub struct SettingsView {
     test_call: Option<TestCallState>,
     /// The video effects' picker while the Calls page shows.
     effects: Option<Entity<EffectsPicker>>,
+    /// The local AI choices' pickers (captions, then recaps), made the first time the Calls page shows.
+    ai: Option<[Entity<AiPicker>; 2]>,
     /// The page's scrolling.
     scroll: ScrollHandle,
     _observing: Subscription,
@@ -343,6 +349,7 @@ impl SettingsView {
             fonts: None,
             test_call: None,
             effects: None,
+            ai: None,
             scroll: ScrollHandle::new(),
             _observing: observing,
         }
@@ -878,93 +885,18 @@ impl SettingsView {
         if self.shows_effects(cx) {
             groups.push(self.video_effects(palette, cx));
         }
-        groups.push(self.captions(settings, palette, cx));
-        groups.push(self.recaps(settings, palette, cx));
+        groups.extend(self.ai_pickers(cx).into_iter().map(IntoElement::into_any_element));
         groups
     }
 
-    /// Which tool translates live captions ([`crate::translate`]); the picker's test selector is `caption-translator`.
-    fn captions(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let translators = Translators::of(cx);
-        let picks = self.tool_picks(
-            &translators,
-            settings.caption_translator,
-            Work::Captions,
-            |settings, choice| settings.caption_translator = choice,
-        );
-        let description = if translators.installed().next().is_some() {
-            "When you translate live captions, their text goes to this tool on your computer and its provider."
-        } else {
-            "Install Claude Code (claude) or the Codex CLI (codex) to translate live captions."
-        };
-        group(
-            Some("Captions"),
-            vec![row(
-                "Translate captions with",
-                Some(description),
-                picker("caption-translator", picks, palette),
-                palette,
-            )],
-            palette,
-        )
-    }
-
-    /// Which tool makes a recap's AI summary ([`crate::recap_summary`]); the picker's test selector is
-    /// `recap-summarizer`.
-    fn recaps(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let tools = Translators::of(cx);
-        let picks = self.tool_picks(&tools, settings.recap_summarizer, Work::Summary, |settings, choice| {
-            settings.recap_summarizer = choice;
-        });
-        let description = if tools.installed().next().is_some() {
-            "When you ask for a recap's AI summary, its transcript goes to this tool on your computer and its provider."
-        } else {
-            "Install Claude Code (claude) or the Codex CLI (codex) to summarize meeting recaps."
-        };
-        group(
-            Some("Meeting recaps"),
-            vec![row(
-                "Summarize recaps with",
-                Some(description),
-                picker("recap-summarizer", picks, palette),
-                palette,
-            )],
-            palette,
-        )
-    }
-
-    /// A tool picker's rows: Automatic (naming the tool it comes to) and each tool installed, labelled by its model for
-    /// `work`, the one chosen kept even when it is gone.
-    fn tool_picks(
-        &self,
-        tools: &Translators,
-        chosen: TranslatorChoice,
-        work: Work,
-        set: fn(&mut Settings, TranslatorChoice),
-    ) -> Vec<Pick> {
-        TranslatorChoice::ALL
-            .into_iter()
-            .filter_map(|choice| {
-                let label = match choice {
-                    TranslatorChoice::Automatic => tools.pick(choice).map_or_else(
-                        |_| "Automatic".to_owned(),
-                        |(backend, _)| format!("Automatic ({})", backend.label(work)),
-                    ),
-                    TranslatorChoice::Only(backend) if tools.pick(choice).is_ok() => backend.label(work).to_owned(),
-                    TranslatorChoice::Only(backend) if choice == chosen => {
-                        format!("{} (not installed)", backend.label(work))
-                    }
-                    TranslatorChoice::Only(_) => return None,
-                };
-                Some(Pick {
-                    key: choice.key().to_owned(),
-                    label: label.into(),
-                    status: None,
-                    chosen: choice == chosen,
-                    apply: self.changer(move |settings| set(settings, choice)),
-                })
+    /// The local AI choices' pickers: the captions' translator, then the recaps' summarizer.
+    pub fn ai_pickers(&mut self, cx: &mut Context<Self>) -> [Entity<AiPicker>; 2] {
+        let model = self.model.clone();
+        self.ai
+            .get_or_insert_with(|| {
+                [Work::Captions, Work::Summary].map(|work| cx.new(|cx| AiPicker::new(model.clone(), work, cx)))
             })
-            .collect()
+            .clone()
     }
 
     /// The camera's video effects: what they do, the self-preview and the backgrounds.
@@ -1296,6 +1228,16 @@ fn group(title: Option<&'static str>, rows: Vec<AnyElement>, palette: Palette) -
 fn row(
     title: &'static str,
     description: Option<&'static str>,
+    control: impl IntoElement,
+    palette: Palette,
+) -> AnyElement {
+    row_with(title.into(), description.map(SharedString::from), control, palette)
+}
+
+/// [`row`], its words made as it draws.
+fn row_with(
+    title: SharedString,
+    description: Option<SharedString>,
     control: impl IntoElement,
     palette: Palette,
 ) -> AnyElement {

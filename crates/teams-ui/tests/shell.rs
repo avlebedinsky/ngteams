@@ -23,11 +23,12 @@ use teams_store::{Applied, Conversation, ConversationKind, Member, Message};
 use teams_trouter::{Down, Stop};
 use teams_ui::chat_list::{ChatList, DELETED, RowKind, UNKNOWN_USER, listed, one_to_one_partner, preview};
 use teams_ui::clock::{self, HourCycle};
+use teams_ui::local_ai::{AiChoice, Backend, Catalog, Listed, Model, ToolChoice, Tools};
 use teams_ui::settings::{
     Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel, TimeFormat,
     attach_devices,
 };
-use teams_ui::settings_view::Page;
+use teams_ui::settings_view::{Page, SettingsView};
 use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, Shell, ShellParts};
 use teams_ui::switcher::{fuzzy_score, matches};
 use teams_ui::view::{Shown, status_text};
@@ -1000,6 +1001,197 @@ fn the_settings_view_lists_the_devices_and_moves_the_calls_to_the_one_chosen() {
     assert!(
         bounds(cx, "microphone-built-in-mic").is_none(),
         "the one unplugged is gone"
+    );
+}
+
+/// Both AI tools installed at synthetic paths (nothing here runs them), with a few models each lists.
+fn synthetic_ai_tools(cx: &mut VisualTestContext) {
+    let listed = |id: &str, name: &str, latest: bool| Listed {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        latest,
+    };
+    cx.update(|_, cx| {
+        cx.set_global(Tools::with(vec![
+            (Backend::Claude, "/synthetic/claude".into()),
+            (Backend::Codex, "/synthetic/codex".into()),
+        ]));
+        cx.set_global(Catalog::with(
+            vec![
+                listed("opus", "Opus", true),
+                listed("claude-opus-5-5", "Opus 5.5", false),
+            ],
+            vec![listed("gpt-6.1-sol", "GPT-6.1-Sol", false)],
+        ));
+    });
+}
+
+/// The Calls page, scrolled to its AI pickers.
+fn ai_pickers_shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    let model = cx.update(|_, cx| shell.read(cx).settings().clone());
+    let directory = FixedDirectory::new(DeviceList::new(vec![device_info(
+        DeviceKind::Microphone,
+        "built-in-mic",
+        "Built-in microphone",
+    )]));
+    cx.update(|_, cx| {
+        attach_devices(&model, Arc::new(directory), cx);
+        shell.update(cx, Shell::show_settings);
+    });
+    click(cx, "settings-page-calls");
+    cx.update(|_, cx| shell.read(cx).settings_view().read(cx).scroll_to_end());
+}
+
+/// Other's name field: a name it can't take is said so and not used; one it can is set.
+fn a_model_typed_is_used_when_the_tool_can_take_it(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    // another model typed: its name field, used on Enter; one it can't take is said so and not used
+    click(cx, "caption-translator-model");
+    click(cx, "caption-translator-model-other");
+    assert!(
+        bounds(cx, "caption-translator-model-name").is_some(),
+        "the name field shows"
+    );
+    cx.simulate_input("-x");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        settings_of(shell, cx).caption_translator.model,
+        Model::ToolDefault,
+        "a dash can't start a model's name"
+    );
+    cx.simulate_keystrokes("backspace backspace");
+    cx.simulate_input("claude-next");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        settings_of(shell, cx).caption_translator,
+        AiChoice {
+            tool: ToolChoice::Only(Backend::Claude),
+            model: Model::Named("claude-next".to_owned()),
+        }
+    );
+    // a model the tool doesn't list keeps its name field, and is listed as the one set
+    assert!(
+        bounds(cx, "caption-translator-model-name").is_some(),
+        "unlisted: its field stays"
+    );
+    click(cx, "caption-translator-model");
+    assert!(bounds(cx, "caption-translator-model-claude-next").is_some());
+    cx.simulate_keystrokes("escape");
+}
+
+/// The recaps' summarizer: its own choice, and Automatic offers no model by name.
+fn the_recaps_summarizer_is_kept_apart(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    // the recaps' summarizer has the same control, kept apart; Automatic offers no model by name
+    click(cx, "recap-summarizer-codex");
+    click(cx, "recap-summarizer-model");
+    click(cx, "recap-summarizer-model-gpt-6.1-sol");
+    assert_eq!(
+        settings_of(shell, cx).recap_summarizer,
+        AiChoice {
+            tool: ToolChoice::Only(Backend::Codex),
+            model: Model::Named("gpt-6.1-sol".to_owned()),
+        }
+    );
+    click(cx, "recap-summarizer-automatic");
+    click(cx, "recap-summarizer-model");
+    assert!(bounds(cx, "recap-summarizer-model-recommended").is_some());
+    assert!(
+        bounds(cx, "recap-summarizer-model-other").is_none(),
+        "no Other for Automatic"
+    );
+    assert!(bounds(cx, "recap-summarizer-model-gpt-6.1-sol").is_none());
+    cx.simulate_keystrokes("escape");
+    assert_eq!(settings_of(shell, cx).recap_summarizer, AiChoice::default());
+}
+
+#[test]
+fn every_ai_setting_picks_its_tool_then_any_model_the_tool_lists_or_one_typed() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    synthetic_ai_tools(cx);
+    ai_pickers_shown(&shell, cx);
+    let captions = |cx: &mut VisualTestContext| settings_of(&shell, cx).caption_translator;
+    let claude = ToolChoice::Only(Backend::Claude);
+
+    // a tool chosen comes with its recommended model; its models are listed, with its own default and Other
+    click(cx, "caption-translator-claude");
+    assert_eq!(captions(cx), AiChoice::of(claude));
+    click(cx, "caption-translator-model");
+    for row in ["recommended", "default", "opus", "claude-opus-5-5", "other"] {
+        assert!(
+            bounds(cx, &format!("caption-translator-model-{row}")).is_some(),
+            "{row} is listed"
+        );
+    }
+    assert!(
+        bounds(cx, "caption-translator-model-gpt-6.1-sol").is_none(),
+        "not Codex's models"
+    );
+    click(cx, "caption-translator-model-opus");
+    assert_eq!(captions(cx).model, Model::Named("opus".to_owned()));
+    click(cx, "caption-translator-model");
+    click(cx, "caption-translator-model-default");
+    assert_eq!(captions(cx).model, Model::ToolDefault);
+    assert!(bounds(cx, "caption-translator-model-name").is_none(), "no name field");
+
+    a_model_typed_is_used_when_the_tool_can_take_it(&shell, cx);
+
+    // another tool: its recommended model again
+    click(cx, "caption-translator-codex");
+    assert_eq!(captions(cx), AiChoice::of(ToolChoice::Only(Backend::Codex)));
+    assert!(bounds(cx, "caption-translator-model-name").is_none());
+
+    the_recaps_summarizer_is_kept_apart(&shell, cx);
+    assert_eq!(
+        captions(cx),
+        AiChoice::of(ToolChoice::Only(Backend::Codex)),
+        "each setting its own"
+    );
+}
+
+#[test]
+fn an_ai_setting_draws_without_its_tool_and_shows_a_model_set_that_isn_t_listed() {
+    let rig = seeded();
+    let settings = Settings {
+        caption_translator: AiChoice::of(ToolChoice::Only(Backend::Codex)),
+        ..Settings::default()
+    };
+    let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| {
+        cx.set_global(Tools::with(vec![(Backend::Claude, "/synthetic/claude".into())]));
+        cx.set_global(Catalog::default());
+    });
+    ai_pickers_shown(&shell, cx);
+    let pickers = cx.update(|_, cx| {
+        let view = shell.read(cx).settings_view().clone();
+        view.update(cx, SettingsView::ai_pickers)
+    });
+    assert!(bounds(cx, "caption-translator").is_some());
+    // nothing installed: the recaps' Automatic says so; Codex chosen and missing says so
+    cx.update(|_, cx| cx.set_global(Tools::default()));
+    assert!(bounds(cx, "recap-summarizer").is_some());
+    assert!(cx.update(|_, cx| !pickers[0].read(cx).is_typing()));
+    // a model set that isn't listed (or before the list came) shows its name in its field
+    cx.update(|_, cx| {
+        cx.set_global(Tools::with(vec![(Backend::Claude, "/synthetic/claude".into())]));
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(
+                |settings| {
+                    settings.recap_summarizer = AiChoice {
+                        tool: ToolChoice::Only(Backend::Claude),
+                        model: Model::Named("from-the-file".to_owned()),
+                    };
+                },
+                cx,
+            );
+        });
+    });
+    assert!(bounds(cx, "recap-summarizer-model-name").is_some());
+    assert_eq!(
+        cx.update(|_, cx| pickers[1].read(cx).choice(cx).model),
+        Model::Named("from-the-file".to_owned())
     );
 }
 
