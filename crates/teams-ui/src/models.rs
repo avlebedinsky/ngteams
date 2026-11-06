@@ -340,7 +340,9 @@ impl Models {
             | Event::AudioClosed { .. }
             | Event::CallCaptions { .. }
             | Event::CallParticipants { .. }
-            | Event::Lobby { .. } => {
+            | Event::Lobby { .. }
+            | Event::CallOwn { .. }
+            | Event::CallReaction { .. } => {
                 self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
             }
             // how the push channel's registration went and a waiting transient's send (told on the feed, for the own

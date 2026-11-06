@@ -143,6 +143,9 @@ impl Offer {
                     | CallOperation::UpdateMediaDescriptions
                     | CallOperation::ApplyChannelParameters
                     | CallOperation::KeepAlive
+                    | CallOperation::PublishState
+                    | CallOperation::RemoveState
+                    | CallOperation::SendMessage
             ),
             OfferState::Leaving => operation == CallOperation::Leave,
             OfferState::Declined => operation == CallOperation::Reject,
@@ -225,6 +228,9 @@ impl Offer {
                     CallOperation::UpdateEndpointMetadata,
                     CallOperation::UpdateParticipantProperties,
                     CallOperation::Leave,
+                    CallOperation::PublishState,
+                    CallOperation::RemoveState,
+                    CallOperation::SendMessage,
                 ]
                 .into_iter()
                 .filter_map(|operation| {

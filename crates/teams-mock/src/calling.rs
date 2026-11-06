@@ -93,6 +93,8 @@ pub struct Leg {
     renegotiation: Option<String>,
     /// The `rosterUpdate` callback its `attach` handed out.
     roster: Option<String>,
+    /// The `receiveMessage` callback its `attach` handed out.
+    messages: Option<String>,
 }
 
 /// A call as the mock keeps it, for a test to read ([`crate::ChatServiceMock::calls`]).
@@ -280,6 +282,7 @@ pub(crate) fn serve(state: &mut State, request: &Request) -> Option<ResponseTemp
     let answer = match (method, segments.as_slice()) {
         ("POST", ["epconv"]) => start(state, &account, &body),
         ("POST", ["ep", CONV_HOST, "conv", conversation]) => join(state, &account, conversation, &body),
+        ("DELETE", ["ep", CONV_HOST, "conv", conversation]) => end_for_all(state, &account, conversation, &body),
         (_, ["ep", CONV_HOST, "conv", conversation, op]) => conversation_op(state, &account, conversation, op, &body),
         (_, ["ep", CC_HOST, "cc", "v1", kind, call, leg, _, _, rest @ ..]) => {
             controller_op(state, &account, (kind, call, leg), rest.first().copied(), &body)
@@ -330,6 +333,7 @@ fn start(state: &mut State, caller: &str, body: &Value) -> Option<ResponseTempla
         );
     }
     roster::enter(state, index, caller, roster::link_of(body));
+    roster::listen(state, index, caller, roster::named(body, "receiveMessage").as_deref());
     Some(json_answer(200, &conversation_answer(&call.conversation)))
 }
 
@@ -361,6 +365,7 @@ fn new_call(
                 declined: false,
                 renegotiation: None,
                 roster: None,
+                messages: None,
             })
             .collect(),
         requests: Vec::new(),
@@ -382,14 +387,20 @@ fn log(state: &mut State, index: usize, account: &str, op: &str) {
     }
 }
 
-/// The conversation a start or a join opens (`answers.json`'s call start answer, on `conversation`).
+/// The conversation a start or a join opens (`answers.json`'s call start answer, on `conversation`), with the links a
+/// meeting's conversation hands out besides (seen 2026-11-06): its endpoint state, its published states and its
+/// messages.
 fn conversation_answer(conversation: &str) -> Value {
     let answers: Value = serde_json::from_str(ECHO_ANSWERS).unwrap_or_default();
     let text = answers["call_start_answer"].to_string();
-    fixture(
+    let mut answer = fixture(
         &text,
         &[("SyntheticConversation0", conversation), ("?i=0-0-0-0&e=1", CONV_QUERY)],
-    )
+    );
+    for op in ["updateEndpointState", "publishState", "removeState", "sendMessage"] {
+        answer["links"][op] = json!(conversation_url(conversation, Some(op)));
+    }
+    answer
 }
 
 /// Rings every callee of call `index` on each calling endpoint it registered (a group call's with its callee's mixer's
@@ -512,6 +523,7 @@ fn join(state: &mut State, account: &str, conversation: &str, body: &Value) -> O
             .and_then(|offer| state.peer_answer(&id, account, offer));
         accept_by_controller(state, index, acceptance.as_deref(), answer);
         roster::enter(state, index, account, roster::link_of(body));
+        roster::listen(state, index, account, roster::named(body, "receiveMessage").as_deref());
     }
     Some(json_answer(200, &conversation_answer(conversation)))
 }
@@ -573,10 +585,41 @@ fn conversation_op(
             // the echo is in the call: its roster says so (as captured)
             roster::enter(state, index, &echo, None);
         }
-        "updateEndpointMetadata" | "updateEndpointState" | "updateParticipantProperties" => {}
+        "updateEndpointState" => {
+            if let Some(muted) = body.pointer("/endpointState/state/isMuted").and_then(Value::as_bool) {
+                roster::muted(state, index, account, muted);
+            }
+        }
+        "publishState" => {
+            let id = fill_guids("<guid:hand>");
+            roster::hand(state, index, account, Some(&id));
+            return Some(json_answer(
+                200,
+                &json!({"publishStateResponse": {"typeRank": 1, "stateId": id}}),
+            ));
+        }
+        "removeState" => roster::hand(state, index, account, None),
+        "sendMessage" => {
+            roster::react(state, index, body);
+            return Some(status(202));
+        }
+        "updateEndpointMetadata" | "updateParticipantProperties" => {}
         _ => return None,
     }
     Some(status(200))
+}
+
+/// The meeting ended for everyone at its conversation's own URL (its organizer's End meeting): everyone in it gets the
+/// call's end.
+fn end_for_all(state: &mut State, account: &str, conversation: &str, body: &Value) -> Option<ResponseTemplate> {
+    let index = state
+        .calling
+        .calls
+        .iter()
+        .position(|call| call.conversation == conversation && call.phase != CallPhase::Ended)?;
+    log(state, index, account, "end_conversation");
+    leave(state, index, body);
+    Some(status(204))
 }
 
 /// Someone leaves call `index`: a cancel while it rings, the call's end to everyone once it is up.
@@ -852,6 +895,7 @@ fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     let leg_state = leg_mut(state, index, leg)?;
     leg_state.attached.push((endpoint, end));
     leg_state.roster = roster::link_of(body);
+    leg_state.messages = roster::named(body, "receiveMessage");
     if let Some(link) = roster::link_of(body) {
         roster::watch(state, index, &link);
     }
@@ -866,6 +910,15 @@ fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
             ("<guid:b>", object_id(&call.legs[leg].callee)),
         ],
     );
+    let mut answer = answer;
+    // the conversation's links for the account's hand and its reactions besides (seen 2026-11-06)
+    if let Some(responses) = answer["additionalActionResponses"].as_array_mut() {
+        for response in responses {
+            for op in ["publishState", "removeState", "sendMessage"] {
+                response["output"]["links"][op] = json!(conversation_url(&call.conversation, Some(op)));
+            }
+        }
+    }
     Some(json_answer(200, &answer))
 }
 
@@ -896,8 +949,10 @@ fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     leg_state.attached.retain(|(_, end)| !others.contains(end));
     leg_state.renegotiation = renegotiation;
     let roster_link = leg_state.roster.clone();
+    let messages = leg_state.messages.clone();
     state.calling.calls[index].phase = CallPhase::Connected;
     roster::enter(state, index, &callee, roster_link);
+    roster::listen(state, index, &callee, messages.as_deref());
     if let Some(answer) = body.pointer("/callAcceptance/mediaContent") {
         // a caller the mock plays: its peer takes the callee's answer
         state.peer_accept(&call.id, &callee, answer);

@@ -1327,6 +1327,8 @@ fn fake_call(shell: &Entity<Shell>, cx: &mut App) {
                     video_on: true,
                     line: Some(0),
                     speaking: true,
+                    muted: false,
+                    hand_raised: false,
                 }],
                 speaking: false,
                 hearing: false,

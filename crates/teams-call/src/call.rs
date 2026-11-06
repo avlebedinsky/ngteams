@@ -14,12 +14,14 @@ use crate::roster::Roster;
 use crate::{CallId, CallState, CallWrite, End, WriteId};
 
 /// The conversation's callbacks a start, a join or an `attach` hands out (`conversationRequest.links`, as captured).
-pub(crate) const CONVERSATION_LINKS: [&str; 5] = [
+pub(crate) const CONVERSATION_LINKS: [&str; 6] = [
     "conversationEnd",
     "conversationUpdate",
     "localParticipantUpdate",
     "addParticipantSuccess",
     "addParticipantFailure",
+    // the live reactions of everyone in the call (seen 2026-11-06, the web client's own callbacks)
+    "receiveMessage",
 ];
 
 /// The call's callbacks a start or a join hands out (`callInvitation.links`).
@@ -149,6 +151,15 @@ pub(crate) enum Step {
     ChannelParameters,
     /// A meeting lobby's Admit or Deny: its failing ends nothing (the person stays waiting, as the roster tells).
     Lobby,
+    /// The account's microphone muted or not, told to the call's conversation: its failing ends nothing (the others
+    /// see the state they last saw).
+    Muted,
+    /// The account's hand raised or lowered: its failing ends nothing (the roster tells the hand as it stands).
+    Hand,
+    /// A live reaction: its failing ends nothing.
+    React,
+    /// The organizer's end of the meeting for everyone: its failing leaves the call instead.
+    EndMeeting,
 }
 
 impl Step {
@@ -160,7 +171,7 @@ impl Step {
             Self::Join => "join",
             Self::Attach => "attach",
             Self::Ringing => "progress",
-            Self::EndpointState => "update_endpoint_state",
+            Self::EndpointState | Self::Muted => "update_endpoint_state",
             Self::Accept => "accept",
             Self::Decline => "reject",
             Self::Acknowledge => "acknowledge",
@@ -174,6 +185,9 @@ impl Step {
             Self::Describe => "update_media_descriptions",
             Self::ChannelParameters => "apply_channel_parameters",
             Self::Lobby => "lobby_decision",
+            Self::Hand => "hand",
+            Self::React => "send_message",
+            Self::EndMeeting => "end_conversation",
         }
     }
 }
@@ -282,6 +296,11 @@ pub(crate) struct Call {
     /// A channel's Meet now whose subscription waits for its answer: the channel and the offer its entry goes with.
     pub(crate) meet_now: Option<(String, MediaContent)>,
     pub(crate) started: Instant,
+    /// The endpoint state's reports so far (the start's, the join's or the answer's is the first): each mute tells the
+    /// next.
+    pub(crate) endpoint_states: u64,
+    /// The states the account published or took back in the call so far (its raised hand): each counts the next.
+    pub(crate) published: u64,
 }
 
 impl Call {
@@ -332,6 +351,8 @@ impl Call {
             early_acceptance: None,
             meet_now: None,
             started,
+            endpoint_states: 1,
+            published: 0,
         }
     }
 

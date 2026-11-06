@@ -12,6 +12,7 @@ use teams_proto::{
     MediaDescriptions, MeetingInfo, RenegotiateMedia, ReportRinging, StartCall, StartParts, UpdateEndpointMetadata,
     UpdateEndpointState, UpdateMediaDescriptions,
 };
+use teams_proto::{EndConversation, PublishState, RemoveState, SendCallReaction};
 
 use crate::agent::{Kind, guid};
 use crate::call::{
@@ -299,6 +300,46 @@ pub(crate) fn lobby(call: &mut Call, link: &CallLink, waiting: &Mri, admit: bool
         DecideLobby::deny(&call.context, link, (&call.me, waiting), &links)?
     };
     Ok(CallWrite::Lobby(write))
+}
+
+/// The account's microphone muted (`muted`) or not, told at the conversation's `updateEndpointState` link as the
+/// endpoint state's next report.
+pub(crate) fn muted(call: &mut Call, link: &CallLink, muted: bool) -> Result<CallWrite, CallError> {
+    let sequence = call.endpoint_states + 1;
+    let write = UpdateEndpointState::new(&call.context, link, &call.me, muted, sequence)?;
+    call.endpoint_states = sequence;
+    Ok(CallWrite::EndpointState(write))
+}
+
+/// The account's hand raised at the conversation's `publishState` link, or (`lowered`, its state's id) taken back at
+/// its `removeState` link, as the next state the account changed.
+pub(crate) fn hand(call: &mut Call, link: &CallLink, lowered: Option<&str>) -> Result<CallWrite, CallError> {
+    let sequence = call.published + 1;
+    let write = match lowered {
+        Some(state) => CallWrite::RemoveState(RemoveState::new(&call.context, link, &call.me, state, sequence)?),
+        None => CallWrite::PublishState(PublishState::raise_hand(&call.context, link, &call.me, sequence)?),
+    };
+    call.published = sequence;
+    Ok(write)
+}
+
+/// A live reaction `reaction` at the conversation's `sendMessage` link.
+pub(crate) fn reaction(call: &Call, link: &CallLink, reaction: &str) -> Result<CallWrite, CallError> {
+    Ok(CallWrite::Reaction(SendCallReaction::new(
+        &call.context,
+        link,
+        &call.me,
+        reaction,
+    )?))
+}
+
+/// The meeting ended for everyone, at the conversation's own URL.
+pub(crate) fn end_meeting(call: &Call, link: &CallLink) -> Result<CallWrite, CallError> {
+    Ok(CallWrite::EndMeeting(EndConversation::new(
+        &call.context,
+        link,
+        &call.me,
+    )?))
 }
 
 /// The call's keep-alive, at the call leg's own link (the acceptance's or the `accept`'s answer's `callLeg`).

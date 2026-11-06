@@ -173,8 +173,8 @@ pub enum CallAction {
     /// A hang-up: a cancel while it rings at its callees, a `leave` once it is up, a decline of an answer whose
     /// `accept` hasn't gone.
     HangUp { call: CallId },
-    /// The microphone muted (`true`) or not: silence goes in its place, nothing is sent to the call's services (no
-    /// capture shows the web client telling them).
+    /// The microphone muted (`true`) or not: silence goes in its place, and the call's conversation is told, as the
+    /// web client tells it (`updateEndpointState`, seen 2026-11-06), so the others see the account muted.
     Mute { call: CallId, muted: bool },
     /// The call's media offered again (its lines as they are) as a renegotiation.
     Renegotiate { call: CallId },
@@ -185,6 +185,13 @@ pub enum CallAction {
     /// Someone waiting in the lobby of the account's meeting ([`Event::Lobby`]) let in (`admit`) or turned away, as
     /// Teams' Admit and Deny.
     Lobby { call: CallId, waiting: Mri, admit: bool },
+    /// The account's hand raised (`true`) or lowered in the call, as Teams' Raise and Lower hand.
+    RaiseHand { call: CallId, raised: bool },
+    /// A live reaction to everyone in the call, as Teams' React offers them (`like`, `heart`, `applause`, `laugh`,
+    /// `surprised`).
+    React { call: CallId, reaction: String },
+    /// The meeting ended for everyone in it, as its organizer's End meeting ([`Event::CallOwn`] says who organizes).
+    EndMeeting { call: CallId },
 }
 
 impl CallAction {
@@ -300,6 +307,9 @@ pub(crate) enum Act {
     Renegotiate(CallId),
     Camera(CallId, bool),
     Lobby(CallId, Mri, bool),
+    RaiseHand(CallId, bool),
+    React(CallId, String),
+    EndMeeting(CallId),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -792,6 +802,20 @@ where
             CallEvent::Ended { call, end } => self.ended(call, end),
             CallEvent::Voicemail { call } => self.emit(Event::Voicemail { call }),
             CallEvent::Participants { call, participants } => self.participants(call, participants, now),
+            CallEvent::InLobby { call, waiting } => self.in_lobby(call, waiting),
+            event @ (CallEvent::Lobby { .. } | CallEvent::Own { .. } | CallEvent::Reaction { .. }) => {
+                self.roster_told(event);
+            }
+            CallEvent::KeepAliveDue { call, sent } => {
+                log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
+            }
+        }
+    }
+
+    /// What the call's roster and its messages told, told on as the engine's events: who waits in the lobby, the
+    /// account's own state, a live reaction.
+    fn roster_told(&self, event: CallEvent) {
+        match event {
             CallEvent::Lobby { call, waiting } => self.emit(Event::Lobby {
                 call,
                 waiting: waiting
@@ -802,10 +826,27 @@ where
                     })
                     .collect(),
             }),
-            CallEvent::InLobby { call, waiting } => self.in_lobby(call, waiting),
-            CallEvent::KeepAliveDue { call, sent } => {
-                log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
-            }
+            CallEvent::Own {
+                call,
+                hand_raised,
+                organizer,
+            } => self.emit(Event::CallOwn {
+                call,
+                hand_raised,
+                organizer,
+            }),
+            CallEvent::Reaction {
+                call,
+                from,
+                name,
+                reaction,
+            } => self.emit(Event::CallReaction {
+                call,
+                from,
+                name,
+                reaction,
+            }),
+            _ => {}
         }
     }
 
@@ -830,6 +871,15 @@ where
             CallState::Connected => {
                 self.open_devices(call);
                 self.up = Some(call);
+                // muted before the call was up (a meeting joined muted, a mute while it was set up): the others see it
+                if self
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.call == call && live.session.is_muted())
+                    && let Err(error) = self.calls.set_muted(call, true)
+                {
+                    log::info!("call {}: its mute wasn't told: {error}", call.get());
+                }
                 if self.media_connected(call) {
                     CallStatus::Connected
                 } else {
@@ -1346,6 +1396,21 @@ where
                 .decide_lobby(call, &waiting, admit)
                 .map(|()| call)
                 .map_err(CallActionError::from),
+            Act::RaiseHand(call, raised) => self
+                .calls
+                .raise_hand(call, raised)
+                .map(|()| call)
+                .map_err(CallActionError::from),
+            Act::React(call, reaction) => self
+                .calls
+                .react(call, &reaction)
+                .map(|()| call)
+                .map_err(CallActionError::from),
+            Act::EndMeeting(call) => self
+                .calls
+                .end_meeting(call)
+                .map(|()| call)
+                .map_err(CallActionError::from),
             Act::Renegotiate(call) => match self.live.as_ref().filter(|live| live.call == call) {
                 // the machine first: the session's new offer would replace the one it waits on
                 Some(live) => match self.calls.begin_renegotiation(call) {
@@ -1405,7 +1470,7 @@ where
         Ok(call)
     }
 
-    fn mute(&self, call: CallId, muted: bool) -> Result<CallId, CallActionError> {
+    fn mute(&mut self, call: CallId, muted: bool) -> Result<CallId, CallActionError> {
         let live = self
             .live
             .as_ref()
@@ -1413,6 +1478,12 @@ where
             .ok_or(CallActionError::NoMedia)?;
         live.session.set_muted(muted);
         log::info!("call {}: muted {muted}", call.get());
+        // the others see it once the call is up; before then it is told as it connects
+        if self.up == Some(call)
+            && let Err(error) = self.calls.set_muted(call, muted)
+        {
+            log::info!("call {}: its mute wasn't told: {error}", call.get());
+        }
         Ok(call)
     }
 

@@ -64,10 +64,22 @@ pub enum CallOperation {
     /// its `removeParticipant` link: what the organizer's Deny sends for someone waiting in the lobby (seen 2026-11-03,
     /// `meeting-steps`). Names them.
     RemoveParticipant,
+    /// `POST …/conv/<id>/publishState`: the sender's raised hand (`stateType` `raiseHands`) published in the call's
+    /// conversation, at its `publishState` link (seen 2026-11-06, `meeting-steps`: Raise). Names nobody else.
+    PublishState,
+    /// `POST …/conv/<id>/removeState`: a state the sender published taken back by its id (its hand lowered), at the
+    /// conversation's `removeState` link (seen 2026-11-06, `meeting-steps`: Lower hand). Names nobody else.
+    RemoveState,
+    /// `POST …/conv/<id>/sendMessage`: a live reaction (Like, Love, Applause, Laugh, Surprised) to everyone in the call,
+    /// at the conversation's `sendMessage` link (seen 2026-11-06, `meeting-steps`: React). Reaches only who is in it.
+    SendMessage,
+    /// `DELETE …/conv/<id>`: the organizer ends the meeting for everyone in it, at the conversation's own URL (seen
+    /// 2026-11-06, `meeting-steps`: End meeting). Reaches only who is in it.
+    EndConversation,
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 24] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
@@ -88,6 +100,10 @@ impl CallOperation {
         Self::NotificationLinks,
         Self::Admit,
         Self::RemoveParticipant,
+        Self::PublishState,
+        Self::RemoveState,
+        Self::SendMessage,
+        Self::EndConversation,
     ];
 
     /// The protocol operation name.
@@ -114,6 +130,10 @@ impl CallOperation {
             Self::NotificationLinks => "notification_links",
             Self::Admit => "admit",
             Self::RemoveParticipant => "remove_participant",
+            Self::PublishState => "publish_state",
+            Self::RemoveState => "remove_state",
+            Self::SendMessage => "send_message",
+            Self::EndConversation => "end_conversation",
         }
     }
 
@@ -122,7 +142,7 @@ impl CallOperation {
     pub fn method(self) -> &'static str {
         match self {
             Self::UpdateEndpointMetadata => "PUT",
-            Self::Reject => "DELETE",
+            Self::Reject | Self::EndConversation => "DELETE",
             Self::Add
             | Self::Leave
             | Self::Acknowledge
@@ -140,7 +160,10 @@ impl CallOperation {
             | Self::KeepAlive
             | Self::NotificationLinks
             | Self::Admit
-            | Self::RemoveParticipant => "POST",
+            | Self::RemoveParticipant
+            | Self::PublishState
+            | Self::RemoveState
+            | Self::SendMessage => "POST",
         }
     }
 
@@ -165,8 +188,11 @@ impl CallOperation {
             Self::NotificationLinks => "notificationLinks",
             Self::Admit => "admit",
             Self::RemoveParticipant => "removeParticipant",
+            Self::PublishState => "publishState",
+            Self::RemoveState => "removeState",
+            Self::SendMessage => "sendMessage",
             // the conversation's own URL, the call leg's own: no segment after it
-            Self::Join | Self::KeepAlive => "",
+            Self::Join | Self::KeepAlive | Self::EndConversation => "",
         }
     }
 }

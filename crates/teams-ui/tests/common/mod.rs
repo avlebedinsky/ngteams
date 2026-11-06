@@ -937,6 +937,9 @@ impl Core for FakeCore {
             | CallAction::Mute { call, .. }
             | CallAction::Camera { call, .. }
             | CallAction::Lobby { call, .. }
+            | CallAction::RaiseHand { call, .. }
+            | CallAction::React { call, .. }
+            | CallAction::EndMeeting { call }
             | CallAction::Renegotiate { call } => call,
             CallAction::Call { .. }
             | CallAction::TestCall { .. }

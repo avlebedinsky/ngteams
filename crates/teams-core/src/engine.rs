@@ -423,6 +423,21 @@ pub enum Event {
     /// Who waits in the lobby of the account's meeting now (empty once nobody does): each let in or turned away with
     /// [`CallAction::Lobby`]. Told whenever that changed.
     Lobby { call: CallId, waiting: Vec<LobbyPerson> },
+    /// The account's own state in its call changed: its hand raised or lowered, or it organizes the meeting (it may
+    /// end it for everyone: [`CallAction::EndMeeting`]).
+    CallOwn {
+        call: CallId,
+        hand_raised: bool,
+        organizer: bool,
+    },
+    /// Someone in the account's call sent a live reaction (the account's own too, as the service echoes it): who, their
+    /// name as given, and the reaction (`like`, `heart`, `applause`, `laugh`, `surprised`).
+    CallReaction {
+        call: CallId,
+        from: Mri,
+        name: Option<String>,
+        reaction: String,
+    },
 }
 
 /// What the engine's requests can fail with.
@@ -2827,6 +2842,9 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
         CallAction::Renegotiate { call } => Act::Renegotiate(call),
         CallAction::Camera { call, on } => Act::Camera(call, on),
         CallAction::Lobby { call, waiting, admit } => Act::Lobby(call, waiting, admit),
+        CallAction::RaiseHand { call, raised } => Act::RaiseHand(call, raised),
+        CallAction::React { call, reaction } => Act::React(call, reaction),
+        CallAction::EndMeeting { call } => Act::EndMeeting(call),
     })
 }
 

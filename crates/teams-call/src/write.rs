@@ -5,6 +5,7 @@ use teams_proto::{
     AttachCall, DecideLobby, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, RenegotiateMedia, ReportRinging, Request,
     StartCall, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
 };
+use teams_proto::{EndConversation, PublishState, RemoveState, SendCallReaction};
 
 /// The id a write's outcome comes back under ([`crate::Calls::on_outcome`]). Unique for the machine's life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,6 +50,10 @@ pub enum CallWrite {
     MediaDescriptions(UpdateMediaDescriptions),
     KeepAlive(KeepAliveCall),
     Lobby(DecideLobby),
+    PublishState(PublishState),
+    RemoveState(RemoveState),
+    Reaction(SendCallReaction),
+    EndMeeting(EndConversation),
 }
 
 impl CallWrite {
@@ -74,6 +79,10 @@ impl CallWrite {
             Self::MediaDescriptions(write) => sink.submit(id, write),
             Self::KeepAlive(write) => sink.submit(id, write),
             Self::Lobby(write) => sink.submit(id, write),
+            Self::PublishState(write) => sink.submit(id, write),
+            Self::RemoveState(write) => sink.submit(id, write),
+            Self::Reaction(write) => sink.submit(id, write),
+            Self::EndMeeting(write) => sink.submit(id, write),
         }
     }
 
@@ -100,6 +109,10 @@ impl CallWrite {
             Self::MediaDescriptions(_) => "update_media_descriptions",
             Self::KeepAlive(_) => "keep_alive",
             Self::Lobby(_) => "lobby_decision",
+            Self::PublishState(_) => "publish_state",
+            Self::RemoveState(_) => "remove_state",
+            Self::Reaction(_) => "send_message",
+            Self::EndMeeting(_) => "end_conversation",
         }
     }
 }

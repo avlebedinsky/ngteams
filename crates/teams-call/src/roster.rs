@@ -21,6 +21,18 @@ pub struct Participant {
     pub video_source: Option<i64>,
     /// Whether it sends video now (its main video line `sendrecv` or `sendonly`).
     pub video_on: bool,
+    /// Whether its microphone is muted, as its endpoint reports it.
+    pub muted: bool,
+    /// Whether its hand is raised.
+    pub hand_raised: bool,
+}
+
+/// The account's own entry in the call's roster, as last told: its raised hand's id while it is up, and whether it
+/// organizes the meeting.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Own {
+    pub(crate) hand: Option<String>,
+    pub(crate) organizer: bool,
 }
 
 /// A call's roster as delivered so far.
@@ -34,6 +46,8 @@ pub(crate) struct Roster {
     told_waiting: Vec<Participant>,
     /// Whether the account itself was last told waiting in the lobby.
     told_own_wait: bool,
+    /// The account's own entry as last told.
+    told_own: Own,
 }
 
 /// What a roster update changed of a meeting's lobby, as [`Roster::lobby`] tells it.
@@ -49,6 +63,28 @@ impl Roster {
     /// The participants as last told.
     pub(crate) fn participants(&self) -> &[Participant] {
         &self.told
+    }
+
+    /// The account's own entry as the entries kept say now, when it changed since last told; `me` is the account.
+    pub(crate) fn own_changed(&mut self, me: &Mri) -> Option<Own> {
+        let own = self.own(me);
+        if own == self.told_own {
+            return None;
+        }
+        self.told_own = own.clone();
+        Some(own)
+    }
+
+    /// The account's own entry as the entries kept say now; `me` is the account.
+    pub(crate) fn own(&self, me: &Mri) -> Own {
+        self.entries
+            .iter()
+            .find(|entry| &entry.mri == me && entry.active)
+            .map(|entry| Own {
+                hand: entry.hand.clone(),
+                organizer: entry.organizer,
+            })
+            .unwrap_or_default()
     }
 
     /// Who was last told waiting in the lobby, the account aside.
@@ -117,5 +153,7 @@ fn participant(entry: &RosterEntry) -> Participant {
         audio_source: entry.audio_source,
         video_source: entry.video_source,
         video_on: entry.video_on,
+        muted: entry.muted,
+        hand_raised: entry.hand.is_some(),
     }
 }

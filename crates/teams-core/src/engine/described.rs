@@ -60,6 +60,9 @@ pub(super) fn call(action: &CallAction) -> String {
             call.get(),
             if *admit { "admit" } else { "deny" }
         ),
+        CallAction::RaiseHand { call, raised } => format!("call {} hand raised {raised}", call.get()),
+        CallAction::React { call, reaction } => format!("call {}: reaction {reaction}", call.get()),
+        CallAction::EndMeeting { call } => format!("call {}: the meeting ended for everyone", call.get()),
     }
 }
 
@@ -169,16 +172,19 @@ fn plain(event: &Event) -> String {
         ),
         // no names: how many, which lines, who of them speaks
         Event::CallParticipants { call, view } => format!(
-            "call {}: {} participant(s), cameras on {}, lines {:?}, speaking {}{}",
+            "call {}: {} participant(s), cameras on {}, lines {:?}, speaking {}{}, muted {}, hands up {}",
             call.get(),
             view.participants.len(),
             view.participants.iter().filter(|p| p.video_on).count(),
             view.participants.iter().map(|p| p.line).collect::<Vec<_>>(),
             view.participants.iter().filter(|p| p.speaking).count(),
-            if view.speaking { " and the account" } else { "" }
+            if view.speaking { " and the account" } else { "" },
+            view.participants.iter().filter(|p| p.muted).count(),
+            view.participants.iter().filter(|p| p.hand_raised).count(),
         ),
         // no names: how many wait
         Event::Lobby { call, waiting } => format!("call {}: {} waiting in the lobby", call.get(), waiting.len()),
+        Event::CallOwn { .. } | Event::CallReaction { .. } => call_state(event),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }
@@ -186,6 +192,24 @@ fn plain(event: &Event) -> String {
         | Event::Outbox(_)
         | Event::Failed { .. }
         | Event::CatchUpFailed { .. } => String::new(),
+    }
+}
+
+/// The account's own state in its call, and a live reaction, by MRI and kind: never the sender's name.
+fn call_state(event: &Event) -> String {
+    match event {
+        Event::CallOwn {
+            call,
+            hand_raised,
+            organizer,
+        } => format!(
+            "call {}: own hand raised {hand_raised}, organizer {organizer}",
+            call.get()
+        ),
+        Event::CallReaction {
+            call, from, reaction, ..
+        } => format!("call {}: reaction {reaction} from {from}", call.get()),
+        _ => String::new(),
     }
 }
 

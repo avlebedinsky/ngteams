@@ -1516,3 +1516,60 @@ fn a_lobbys_admit_and_deny_are_built_whole_naming_the_person_waiting() {
         assert_eq!(body["participants"]["to"][0]["id"], LAB_B);
     }
 }
+
+#[test]
+fn a_raised_hand_and_a_lowered_one_are_built_in_their_captured_shapes() {
+    use teams_proto::{PublishState, RemoveState};
+    let from = participant(LAB_A);
+    let raised = PublishState::raise_hand(&context(), &link(&conv("Synthetic0", "publishState")), &from, 1).unwrap();
+    let body = teams_proto::Request::body(&raised).unwrap();
+    assert_eq!(
+        body["publishedState"],
+        json!({"content": {"skinTone": 0}, "level": "user", "stateType": "raiseHands", "sequenceNumber": 1})
+    );
+    assert_eq!(body["from"]["id"], LAB_A);
+    let lowered = RemoveState::new(
+        &context(),
+        &link(&conv("Synthetic0", "removeState")),
+        &from,
+        "hand-a",
+        2,
+    )
+    .unwrap();
+    let body = teams_proto::Request::body(&lowered).unwrap();
+    assert_eq!(body["stateIds"], json!(["hand-a"]));
+    assert_eq!(body["scope"], json!("specified"));
+    assert_eq!(body["sequenceNumber"], json!(2));
+    // each goes only to its own link
+    assert!(matches!(
+        PublishState::raise_hand(&context(), &link(&conv("Synthetic0", "removeState")), &from, 1),
+        Err(CallWriteError::Unmapped)
+    ));
+}
+
+#[test]
+fn a_live_reaction_and_a_meeting_s_end_are_built_in_their_captured_shapes() {
+    use teams_proto::{EndConversation, SendCallReaction};
+    let from = participant(LAB_A);
+    for name in teams_proto::CALL_REACTIONS {
+        let reaction =
+            SendCallReaction::new(&context(), &link(&conv("Synthetic0", "sendMessage")), &from, name).unwrap();
+        let body = teams_proto::Request::body(&reaction).unwrap();
+        let content = &body["messageContent"][0];
+        assert_eq!(content["type"], json!("Reaction"));
+        assert_eq!(content["scope"], json!("all"));
+        assert_eq!(content["payload"]["values"][0]["name"], json!(name));
+        assert_eq!(content["payload"]["values"][0]["count"], json!(1));
+    }
+    assert!(matches!(
+        SendCallReaction::new(&context(), &link(&conv("Synthetic0", "sendMessage")), &from, "wave"),
+        Err(CallWriteError::Unmapped)
+    ));
+    let end = EndConversation::new(&context(), &link(&conv("Synthetic0", "")), &from).unwrap();
+    assert_eq!(teams_proto::Request::method(&end).as_str(), "DELETE");
+    let body = teams_proto::Request::body(&end).unwrap();
+    assert_eq!(
+        body["conversationTransactionEnd"]["phrase"],
+        json!("ConversationEndForAllInitiated")
+    );
+}

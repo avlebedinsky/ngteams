@@ -570,12 +570,16 @@ fn proxy_link(link: &Value) -> Option<Url> {
 /// The conversation links of a start's answer (see the module docs); `None` unless the answer is a JSON object with a
 /// `conversationController` on the flight proxy at `/api/v2/ep/<host>/conv/<id>`.
 fn answer_links(answer: &[u8]) -> Option<Vec<Link>> {
-    const NAMES: [(CallOperation, &str); 5] = [
+    const NAMES: [(CallOperation, &str); 9] = [
         (CallOperation::UpdateEndpointMetadata, "updateEndpointMetadata"),
         (CallOperation::Add, "addParticipantAndModality"),
         (CallOperation::Leave, "leave"),
         (CallOperation::Admit, "admit"),
         (CallOperation::RemoveParticipant, "removeParticipant"),
+        (CallOperation::UpdateEndpointState, "updateEndpointState"),
+        (CallOperation::PublishState, "publishState"),
+        (CallOperation::RemoveState, "removeState"),
+        (CallOperation::SendMessage, "sendMessage"),
     ];
     let answer = strict_json(answer)?;
     let controller = proxy_link(answer.get("conversationController")?)?;
@@ -584,6 +588,8 @@ fn answer_links(answer: &[u8]) -> Option<Vec<Link>> {
         return None;
     }
     let links = answer.get("links").and_then(Value::as_object);
+    // the conversation itself: where its organizer ends it for everyone
+    let end = (CallOperation::EndConversation, controller.as_str().to_owned());
     Some(
         NAMES
             .iter()
@@ -593,6 +599,7 @@ fn answer_links(answer: &[u8]) -> Option<Vec<Link>> {
                     && link.query() == controller.query();
                 fits.then(|| (*operation, link.as_str().to_owned()))
             })
+            .chain(std::iter::once(end))
             .collect(),
     )
 }

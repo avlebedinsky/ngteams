@@ -18,5 +18,6 @@ mod diagnostics;
 mod failures;
 mod flows;
 mod group;
+mod in_call;
 mod support;
 mod video;

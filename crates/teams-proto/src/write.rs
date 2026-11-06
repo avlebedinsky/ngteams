@@ -22,12 +22,12 @@ pub use calendar::{
 pub(crate) use call::on_calling_base;
 pub use call::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
-    AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CALL_START_URL, CALLING_BASE, CALLING_HOST,
-    CallContext, CallLink, CallParticipant, CallWriteError, ChannelParameters, ClientInfo, DecideLobby, DeclineCall,
-    Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent,
-    MediaDescription, MediaDescriptions, MeetingInfo, RenegotiateMedia, ReportRinging, StartCall, StartParts,
-    TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
-    UpdateParticipantProperties, VoiceConsent,
+    AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CALL_REACTIONS, CALL_START_URL, CALLING_BASE,
+    CALLING_HOST, CallContext, CallLink, CallParticipant, CallWriteError, ChannelParameters, ClientInfo, DecideLobby,
+    DeclineCall, EndConversation, Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason,
+    Links, MediaContent, MediaDescription, MediaDescriptions, MeetingInfo, PublishState, RAISE_HANDS, RemoveState,
+    RenegotiateMedia, ReportRinging, SendCallReaction, StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO,
+    UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
 };
 pub use channel::{
     AddChannelMembers, ChannelCreated, ChannelLayout, CreateChannel, NewChannel, NewChannelKind, ShowChannelByDefault,

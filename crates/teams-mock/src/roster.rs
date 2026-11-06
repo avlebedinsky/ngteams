@@ -32,19 +32,96 @@ pub(crate) struct Party {
     pub(crate) mri: String,
     /// Its `rosterUpdate` callback.
     pub(crate) link: Option<String>,
+    /// Its `receiveMessage` callback: where the call's live reactions reach it.
+    pub(crate) messages: Option<String>,
     pub(crate) active: bool,
     pub(crate) video_on: bool,
+    /// Its endpoint's state as it last reported it (`updateEndpointState`).
+    pub(crate) muted: bool,
+    /// The id of its raised hand while it is up (`publishState`, taken back by `removeState`).
+    pub(crate) hand: Option<String>,
 }
 
 /// The `rosterUpdate` callback a start's, a join's or an `attach`'s body hands out (wherever in it).
 pub(crate) fn link_of(body: &Value) -> Option<String> {
+    named(body, "rosterUpdate")
+}
+
+/// The callback named `name` a body hands out (wherever in it).
+pub(crate) fn named(body: &Value, name: &str) -> Option<String> {
     match body {
         Value::Object(fields) => fields.iter().find_map(|(key, value)| match value {
-            Value::String(link) if key == "rosterUpdate" => Some(link.clone()),
-            _ => link_of(value),
+            Value::String(link) if key == name => Some(link.clone()),
+            _ => named(value, name),
         }),
-        Value::Array(values) => values.iter().find_map(link_of),
+        Value::Array(values) => values.iter().find_map(|value| named(value, name)),
         _ => None,
+    }
+}
+
+/// `mri`'s live reactions in call `index` reach it at `link` from now on.
+pub(crate) fn listen(state: &mut State, index: usize, mri: &str, link: Option<&str>) {
+    let Some(call) = state.calling.calls.get_mut(index) else {
+        return;
+    };
+    for party in call.roster.iter_mut().filter(|party| party.mri == mri) {
+        party.messages = link.map(str::to_owned);
+    }
+}
+
+/// `mri`'s endpoint in call `index` reports itself muted (`muted`) or not: everyone is told when that changed.
+pub(crate) fn muted(state: &mut State, index: usize, mri: &str, muted: bool) {
+    let Some(call) = state.calling.calls.get_mut(index) else {
+        return;
+    };
+    let mut changed = false;
+    for party in call
+        .roster
+        .iter_mut()
+        .filter(|party| party.mri == mri && party.muted != muted)
+    {
+        party.muted = muted;
+        changed = true;
+    }
+    if changed {
+        send(state, index, Some(mri));
+    }
+}
+
+/// `mri` raises its hand in call `index` (`Some` its state's id) or lowers it: everyone is told.
+pub(crate) fn hand(state: &mut State, index: usize, mri: &str, hand: Option<&str>) {
+    let Some(call) = state.calling.calls.get_mut(index) else {
+        return;
+    };
+    for party in call.roster.iter_mut().filter(|party| party.mri == mri) {
+        party.hand = hand.map(str::to_owned);
+    }
+    send(state, index, Some(mri));
+}
+
+/// The live reaction `body` (a `sendMessage`'s) from `mri` in call `index`, delivered to everyone in it at their
+/// `receiveMessage` callbacks (its sender too, as the service's are) in the captured shape.
+pub(crate) fn react(state: &mut State, index: usize, body: &Value) {
+    let Some(call) = state.calling.calls.get(index) else {
+        return;
+    };
+    let Some(content) = body.pointer("/messageContent/0") else {
+        return;
+    };
+    let message = json!({
+        "from": body.get("from").cloned().unwrap_or(Value::Null),
+        "type": content.get("type").cloned().unwrap_or(Value::Null),
+        "payload": content.get("payload").cloned().unwrap_or(Value::Null),
+        "operationId": content.get("operationId").cloned().unwrap_or(Value::Null),
+    });
+    let links: Vec<String> = call
+        .roster
+        .iter()
+        .filter(|party| party.active)
+        .filter_map(|party| party.messages.clone())
+        .collect();
+    for link in links {
+        state.call_back(Some(&link), message.clone());
     }
 }
 
@@ -58,8 +135,11 @@ pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<Str
     call.roster.push(Party {
         mri: mri.to_owned(),
         link,
+        messages: None,
         active: true,
         video_on: false,
+        muted: false,
+        hand: None,
     });
     if call.group_chat.is_some() || call.test_call {
         send(state, index, Some(mri));
@@ -201,10 +281,22 @@ fn entry(
         }
         false => json!({endpoint: {"call": {"serverMuteVersion": 0}, "modalityJoined": "Call"}}),
     };
-    json!({
+    // each endpoint in the call reports its microphone (the mock's endpoints report once)
+    let mut endpoints = endpoints;
+    if let Some(fields) = endpoints.as_object_mut() {
+        for endpoint in fields.values_mut() {
+            endpoint["endpointState"] = json!({"endpointStateSequenceNumber": 1, "state": {"isMuted": party.muted}});
+        }
+    }
+    let mut entry = json!({
         "version": version,
         "state": if party.active { "active" } else { "inactive" },
         "details": {"id": party.mri, "displayName": state.display_name(&party.mri)},
         "endpoints": endpoints,
-    })
+    });
+    if let Some(hand) = &party.hand {
+        entry["publishedStates"] =
+            json!([{"typeRank": 1, "stateType": "raiseHands", "content": {"skinTone": 0}, "stateId": hand}]);
+    }
+    entry
 }

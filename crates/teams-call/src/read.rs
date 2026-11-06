@@ -23,6 +23,10 @@ pub(crate) struct Invitation {
     pub(crate) attach: CallLink,
     /// The caller's offer (a 1:1 call's) or the call's mixer's (a group call's).
     pub(crate) offer: Option<MediaContent>,
+    /// The participant id the caller gave the callee (`callNotification.to.participantId`): the callee's in the call,
+    /// which the web client names itself by (its progress, its answer, its endpoint state); the service keys the
+    /// callee's endpoint state by it (seen 2026-11-06: a mute under another id never showed).
+    pub(crate) callee_participant: Option<String>,
 }
 
 /// The invitation `body` is; `None` for any other body or one that doesn't read.
@@ -45,6 +49,7 @@ pub(crate) fn invitation(body: &[u8]) -> Option<Invitation> {
         conversation: link(&gp, "/conversationInvitation/conversationController")?,
         attach: link(notification, "/links/attach")?,
         offer: notification.get("mediaContent").and_then(media),
+        callee_participant: text(notification, "/to/participantId").filter(|id| !id.is_empty()),
     })
 }
 
@@ -76,6 +81,13 @@ pub(crate) struct Conversation {
     /// A meeting's `admit` and `removeParticipant`: where its lobby's Admit and Deny go.
     pub(crate) admit: Option<CallLink>,
     pub(crate) remove: Option<CallLink>,
+    /// `publishState` and `removeState`: where the account's raised hand goes up and comes down.
+    pub(crate) publish_state: Option<CallLink>,
+    pub(crate) remove_state: Option<CallLink>,
+    /// `sendMessage`: where the account's live reactions go.
+    pub(crate) send_message: Option<CallLink>,
+    /// The conversation itself (its `conversationController`): where a meeting's organizer ends it for everyone.
+    pub(crate) controller: Option<CallLink>,
 }
 
 impl Conversation {
@@ -89,6 +101,10 @@ impl Conversation {
             add: at("addParticipantAndModality"),
             admit: at("admit"),
             remove: at("removeParticipant"),
+            publish_state: at("publishState"),
+            remove_state: at("removeState"),
+            send_message: at("sendMessage"),
+            controller: None,
         }
     }
 }
@@ -103,8 +119,10 @@ pub(crate) fn conversation_controller(body: &[u8]) -> Option<CallLink> {
 /// names a conversation controller.
 pub(crate) fn conversation(body: &[u8]) -> Option<Conversation> {
     let body: Value = serde_json::from_slice(body).ok()?;
-    link(&body, "/conversationController")?;
-    Some(Conversation::of(body.get("links")?))
+    let controller = link(&body, "/conversationController")?;
+    let mut conversation = Conversation::of(body.get("links")?);
+    conversation.controller = Some(controller);
+    Some(conversation)
 }
 
 /// What an `attach`'s answer hands out: the call leg's `progress`, `acceptance` and `callLeg` (the decline's) links,
@@ -127,7 +145,10 @@ pub(crate) fn attached(body: &[u8], conversation: &CallLink) -> Option<Attached>
         .iter()
         .find(|response| response.get("url").and_then(Value::as_str) == Some(conversation.as_str()))
         .and_then(|response| response.pointer("/output/links"))
-        .map(Conversation::of)
+        .map(|links| Conversation {
+            controller: Some(conversation.clone()),
+            ..Conversation::of(links)
+        })
         .unwrap_or_default();
     Some(Attached {
         progress: link(links, "/progress")?,
@@ -259,6 +280,10 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
 /// {"mediaStreams": [{"type", "label", "sourceId", "direction"}]}}}}}, "type": "Delta", "sequenceNumber"}`). A 1:1
 /// call's endpoints list no media streams (its media goes between the two ends, through no mixer): their `call`
 /// holds only `serverMuteVersion`.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is the roster's own word for its entry, read from a field of its own"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RosterEntry {
     pub(crate) mri: Mri,
@@ -276,6 +301,14 @@ pub(crate) struct RosterEntry {
     pub(crate) audio_source: Option<i64>,
     pub(crate) video_source: Option<i64>,
     pub(crate) video_on: bool,
+    /// The endpoint in the call says its microphone is muted (`endpointState.state.isMuted`, seen 2026-11-06: each
+    /// participant's client reports it with `updateEndpointState` as it mutes and unmutes).
+    pub(crate) muted: bool,
+    /// The id of the participant's raised hand (its `publishedStates` entry of `stateType` `raiseHands`, seen
+    /// 2026-11-06), while it is up.
+    pub(crate) hand: Option<String>,
+    /// The participant organizes the meeting (`meetingRole` `organizer`).
+    pub(crate) organizer: bool,
 }
 
 /// The roster update `body`'s participants, each where it reads (an MRI and a version); `None` unless it is one.
@@ -348,7 +381,48 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
         video_on: video
             .and_then(|video| video.get("direction")?.as_str())
             .is_some_and(|direction| matches!(direction, "sendrecv" | "sendonly")),
+        muted: endpoints.is_some_and(|endpoints| {
+            endpoints
+                .values()
+                .filter(|endpoint| endpoint.get("call").is_some_and(Value::is_object))
+                .any(|endpoint| {
+                    endpoint
+                        .pointer("/endpointState/state/isMuted")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                })
+        }),
+        hand: entry
+            .get("publishedStates")
+            .and_then(Value::as_array)
+            .and_then(|states| {
+                states
+                    .iter()
+                    .find(|state| state.get("stateType").and_then(Value::as_str) == Some(teams_proto::RAISE_HANDS))
+            })
+            .and_then(|state| state.get("stateId")?.as_str())
+            .map(str::to_owned),
+        organizer: entry.get("meetingRole").and_then(Value::as_str) == Some("organizer"),
     })
+}
+
+/// A live reaction delivered at the conversation's `receiveMessage` callback (`{"from": {"id", "displayName"},
+/// "type": "Reaction", "payload": {"values": [{"name", "count"}]}}`, seen 2026-11-06): who sent it, their name as
+/// given, and the reaction's name; `None` for any other message.
+pub(crate) fn reaction(body: &[u8]) -> Option<(Mri, Option<String>, String)> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    if body.get("type").and_then(Value::as_str) != Some("Reaction") {
+        return None;
+    }
+    let from = body.get("from")?;
+    let mri = Mri::new(from.get("id")?.as_str()?);
+    let name = from
+        .get("displayName")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let reaction = body.pointer("/payload/values/0/name")?.as_str()?.to_owned();
+    Some((mri, name, reaction))
 }
 
 /// A renegotiation delivered at the account's `mediaRenegotiation` callback (`{"mediaNegotiation": {"mediaContent",

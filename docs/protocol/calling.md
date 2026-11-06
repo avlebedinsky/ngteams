@@ -612,6 +612,49 @@ after its rebuild are its own renegotiations, not another session). Seen live 20
 a's web client stayed in the meeting 40 and 60 s and hung up itself, every write permitted, its audio frames sent and
 received.
 
+## While a call runs: mute, raised hands, reactions, a meeting's end
+
+Captured 2026-11-06 with `ab-call --call steps` (a 1:1 call a → b, a's page driven step by step once it was up) and
+`meeting-steps` (a's Meet now from its calendar, a alone in it). What each participant's client tells the call's
+conversation while it runs, and how the others learn it:
+
+- **Mute.** Each mute and unmute of the web client posts `…/conv/<id>/updateEndpointState` (the conversation's link of
+  that name) with `{"from": {id, displayName, endpointId, participantId, languageId}, "endpointState":
+  {"endpointStateSequenceNumber": <n>, "endpointProperties": {…}, "state": {"isMuted": true|false}}}`, the sequence
+  counting up from the start's, join's or answer's own report. Everyone's roster then lists the participant's endpoint
+  with that `endpointState` (seen in a 1:1 call's roster too: `"endpointState": {"endpointStateSequenceNumber": 1,
+  "state": {"isMuted": false}}` beside `"call": {"serverMuteVersion": 0}`). Teams shows it as a muted microphone on
+  the participant's tile and in its People pane. The native client sends the same on each mute once the call is up,
+  and on connecting when it was muted before (a meeting joined muted); it reads `isMuted` of each endpoint in the call.
+  A callee's state is kept by the participant id its invitation gave it (`callNotification.to.participantId`, the one
+  the web callee names itself by in its progress, its answer and its states): a native callee that named itself by
+  an id of its own had its mute answered `200` and never shown (native a ↔ b, 2026-11-06); naming itself by the
+  invitation's, b's mute and unmute showed on a at once.
+- **Raise and Lower hand** (meetings and group calls; a 1:1 call's toolbar has no Raise): Raise posts
+  `…/conv/<id>/publishState` with `{"from", "publishedState": {"content": {"skinTone": 0}, "level": "user",
+  "stateType": "raiseHands", "sequenceNumber": 1}}`, answered `{"publishStateResponse": {"typeRank", "stateId"}}`;
+  the roster's entry of the participant then lists `"publishedStates": [{"typeRank", "stateType": "raiseHands",
+  "content": {"skinTone": 0}, "stateId"}]` (and `participantCounts.requestingAttention…` counts it). Lower posts
+  `…/conv/<id>/removeState` with `{"from", "sequenceNumber": 2, "scope": "specified", "stateIds": [<stateId>]}`,
+  answered `{"removeStateResponse": {"results": [{"stateId", "result": {…"Success"…}}]}}`. The native client lowers
+  by the id its own roster entry lists.
+- **React** (meetings and group calls): Like, Love, Applause, Laugh, Surprised post `…/conv/<id>/sendMessage` with
+  `{"from", "messageContent": [{"operationId": <guid>, "payload": {"values": [{"id": <guid>, "name": "like" | "heart" |
+  "applause" | "laugh" | "surprised", "count": 1, "attributes": {"skinTone": 0}}]}, "scope": "all", "to": [], "type":
+  "Reaction"}]}`, answered `202`. Everyone in the call, its sender too, gets it at the conversation callback
+  `receiveMessage` that its start, join or `attach` handed out: `{"from": {"id", "displayName", …}, "type":
+  "Reaction", "payload": {"values": [{"name", "count", "attributes"}]}, "operationId"}`. The web client hands that
+  callback out with every conversation request; the native client now does too.
+- **End meeting** (the Leave menu of the meeting's organizer, its roster entry's `meetingRole` `organizer`; a
+  confirmation first): `DELETE` at the conversation's own URL (`conversationController`) with `{"participants":
+  {"from"}, "conversationTransactionEnd": {"reason": "noError", "code": 0, "phrase": "ConversationEndForAllInitiated"},
+  "callTransactionEnd": {"code": 0, "subCode": 0, "phrase": "CallEndReasonLocalUserInitiated", "resultCategories":
+  ["Success"]}}`, answered `204`; no `leave` follows, and everyone's call ends.
+
+The conversation's answer lists these links among its others (`publishState`, `removeState`, `sendMessage`, `mute`,
+`unmute`, `admitAll`, `searchParticipants`, `setMeetingLayout`, `updateMeetingStates`, …). Muting someone else
+(`mute`), a spotlight and the meeting's layout weren't captured: the native client offers none of them.
+
 ## A call held past a dropped socket
 
 `dropped`: with the callee's page off the network (DevTools' emulation fails new requests; open sockets stay, so the run

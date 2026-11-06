@@ -613,6 +613,10 @@ call_write!(
     UpdateMediaDescriptions,
     KeepAliveCall,
     DecideLobby,
+    PublishState,
+    RemoveState,
+    SendCallReaction,
+    EndConversation,
 );
 
 /// The meeting a call is, as a join or a start names it (`meetingInfo`): its organizer's object id and tenant.
@@ -1253,4 +1257,144 @@ impl DecideLobby {
 /// An admit's or a removal's body: the sender, the one person it names, the callbacks for how it went.
 fn lobby_body(from: &CallParticipant, waiting: &Mri, links: &Links) -> Value {
     json!({"participants": {"from": from.json(), "to": [{"id": waiting.as_str()}]}, "links": links.json()})
+}
+
+/// The sender's raised hand, published in the call's conversation: `POST` to its `publishState` link
+/// (`{"from", "publishedState": {"content": {"skinTone": 0}, "level": "user", "stateType": "raiseHands",
+/// "sequenceNumber"}}`, seen 2026-11-06). Its answer names the state's id (`publishStateResponse.stateId`), which the
+/// roster's entry of the sender lists too (`publishedStates`), and which [`RemoveState`] takes back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishState(Built);
+
+impl PublishState {
+    /// `from` raises its hand at `link`, the `sequence`th state the sender changed in the call.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a `publishState` in its captured shape.
+    pub fn raise_hand(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        sequence: u64,
+    ) -> Result<Self, CallWriteError> {
+        let body = json!({
+            "from": from.json(),
+            "publishedState": {
+                "content": {"skinTone": 0},
+                "level": "user",
+                "stateType": RAISE_HANDS,
+                "sequenceNumber": sequence,
+            },
+        });
+        Ok(Self(operation(context, CallOperation::PublishState, link, Some(body))?))
+    }
+}
+
+/// The type of a raised hand's published state.
+pub const RAISE_HANDS: &str = "raiseHands";
+
+/// A state the sender published taken back (its hand lowered): `POST` to the conversation's `removeState` link
+/// (`{"from", "sequenceNumber", "scope": "specified", "stateIds": [<id>]}`, seen 2026-11-06).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoveState(Built);
+
+impl RemoveState {
+    /// `from` takes back its state `state` at `link`, the `sequence`th state the sender changed in the call.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a `removeState` in its captured shape.
+    pub fn new(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        state: &str,
+        sequence: u64,
+    ) -> Result<Self, CallWriteError> {
+        let body = json!({
+            "from": from.json(),
+            "sequenceNumber": sequence,
+            "scope": "specified",
+            "stateIds": [state],
+        });
+        Ok(Self(operation(context, CallOperation::RemoveState, link, Some(body))?))
+    }
+}
+
+/// The live reactions a call takes, as Teams' React offers them, by the name the wire gives each.
+pub const CALL_REACTIONS: [&str; 5] = ["like", "heart", "applause", "laugh", "surprised"];
+
+/// A live reaction to everyone in the call: `POST` to the conversation's `sendMessage` link (`{"from",
+/// "messageContent": [{"operationId", "payload": {"values": [{"id", "name", "count": 1, "attributes": {"skinTone":
+/// 0}}]}, "scope": "all", "to": [], "type": "Reaction"}]}`, seen 2026-11-06). Everyone in the call gets it at their
+/// conversation's `receiveMessage` callback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendCallReaction(Built);
+
+impl SendCallReaction {
+    /// `from` sends `reaction` (one of [`CALL_REACTIONS`]) at `link`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] for a reaction the call doesn't take, or when the request isn't a `sendMessage` in its
+    /// captured shape.
+    pub fn new(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        reaction: &str,
+    ) -> Result<Self, CallWriteError> {
+        if !CALL_REACTIONS.contains(&reaction) {
+            return Err(CallWriteError::Unmapped);
+        }
+        let (operation_id, value_id) = (
+            parts::guid().map_err(CallWriteError::Random)?,
+            parts::guid().map_err(CallWriteError::Random)?,
+        );
+        let body = json!({
+            "from": from.json(),
+            "messageContent": [{
+                "operationId": operation_id,
+                "payload": {"values": [{
+                    "id": value_id,
+                    "name": reaction,
+                    "count": 1,
+                    "attributes": {"skinTone": 0},
+                }]},
+                "scope": "all",
+                "to": [],
+                "type": "Reaction",
+            }],
+        });
+        Ok(Self(operation(context, CallOperation::SendMessage, link, Some(body))?))
+    }
+}
+
+/// The organizer ends the meeting for everyone in it: `DELETE` at the conversation's own URL (its
+/// `conversationController`), with an end for all (`ConversationEndForAllInitiated`, seen 2026-11-06). Everyone in it
+/// gets the conversation's end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndConversation(Built);
+
+impl EndConversation {
+    /// `from` ends the conversation at `link` for everyone.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't the conversation's end in its captured shape.
+    pub fn new(context: &CallContext, link: &CallLink, from: &CallParticipant) -> Result<Self, CallWriteError> {
+        let body = json!({
+            "participants": {"from": from.json()},
+            "conversationTransactionEnd": {"reason": "noError", "code": 0, "phrase": "ConversationEndForAllInitiated"},
+            "callTransactionEnd": {
+                "code": 0,
+                "subCode": 0,
+                "phrase": "CallEndReasonLocalUserInitiated",
+                "resultCategories": ["Success"],
+            },
+        });
+        Ok(Self(operation(
+            context,
+            CallOperation::EndConversation,
+            link,
+            Some(body),
+        )?))
+    }
 }

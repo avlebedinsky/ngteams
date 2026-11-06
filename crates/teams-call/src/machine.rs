@@ -175,6 +175,21 @@ pub enum CallEvent {
     /// The account itself waits in the meeting's lobby (`waiting`), or no longer does (let in: the call goes on, or
     /// turned away: its end follows).
     InLobby { call: CallId, waiting: bool },
+    /// The account's own entry in the roster changed: its hand raised or lowered ([`Calls::raise_hand`]), or it
+    /// organizes the meeting (it may end it for everyone: [`Calls::end_meeting`]).
+    Own {
+        call: CallId,
+        hand_raised: bool,
+        organizer: bool,
+    },
+    /// Someone in the call sent a live reaction (`like`, `heart`, `applause`, `laugh`, `surprised`), the account's own
+    /// as the service echoes it too: who, their name as given, and the reaction.
+    Reaction {
+        call: CallId,
+        from: Mri,
+        name: Option<String>,
+        reaction: String,
+    },
 }
 
 /// The Trouter delivery a response answers: its connection and its id.
@@ -914,6 +929,73 @@ impl Calls {
         Ok(())
     }
 
+    /// The account's microphone muted (`muted`) or not, told to the call's conversation at its `updateEndpointState`
+    /// link, as the web client tells it each time it mutes and unmutes (seen 2026-11-06): the others' rosters show it.
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while the call isn't up or its conversation
+    /// named no such link; nothing was sent.
+    pub fn set_muted(&mut self, call: CallId, muted: bool) -> Result<(), CallError> {
+        let current = up(&mut self.call, call)?;
+        let link = current.conversation.endpoint_state.clone().ok_or(CallError::NotNow)?;
+        let write = build::muted(current, &link, muted)?;
+        self.out.send(current, Step::Muted, write);
+        Ok(())
+    }
+
+    /// The account raises its hand (`raised`) at the conversation's `publishState` link, or lowers it at its
+    /// `removeState` link by the id its roster entry gives it, as the web client's Raise and Lower hand send them.
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while the call isn't up, its conversation named
+    /// no such link, or (lowering) no hand of the account's is up; nothing was sent.
+    pub fn raise_hand(&mut self, call: CallId, raised: bool) -> Result<(), CallError> {
+        let me = self.identity.mri.clone();
+        let current = up(&mut self.call, call)?;
+        let up = current.roster.own(&me).hand;
+        let (link, lowered) = match (raised, up) {
+            (true, _) => (current.conversation.publish_state.clone(), None),
+            (false, Some(state)) => (current.conversation.remove_state.clone(), Some(state)),
+            (false, None) => return Err(CallError::NotNow),
+        };
+        let link = link.ok_or(CallError::NotNow)?;
+        let write = build::hand(current, &link, lowered.as_deref())?;
+        self.out.send(current, Step::Hand, write);
+        Ok(())
+    }
+
+    /// The account sends the live reaction `reaction` to everyone in the call at the conversation's `sendMessage`
+    /// link.
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while the call isn't up or its conversation
+    /// named no such link, [`CallError::Write`] for a reaction the call doesn't take; nothing was sent.
+    pub fn react(&mut self, call: CallId, reaction: &str) -> Result<(), CallError> {
+        let current = up(&mut self.call, call)?;
+        let link = current.conversation.send_message.clone().ok_or(CallError::NotNow)?;
+        let write = build::reaction(current, &link, reaction)?;
+        self.out.send(current, Step::React, write);
+        Ok(())
+    }
+
+    /// The account ends the meeting for everyone in it, as its organizer's End meeting: a `DELETE` at the
+    /// conversation's own URL. Only the organizer's (its roster entry says so).
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while the call isn't up, the account doesn't
+    /// organize it or the conversation isn't known; nothing was sent.
+    pub fn end_meeting(&mut self, call: CallId) -> Result<(), CallError> {
+        let me = self.identity.mri.clone();
+        let current = up(&mut self.call, call)?;
+        if !current.roster.own(&me).organizer {
+            return Err(CallError::NotNow);
+        }
+        let link = current.conversation.controller.clone().ok_or(CallError::NotNow)?;
+        let write = build::end_meeting(current, &link)?;
+        self.out.send(current, Step::EndMeeting, write);
+        Ok(())
+    }
+
     /// The account hangs up `call`: cancels it while it rings at its callees, leaves it once it is up. An invitation
     /// that rings here is declined instead ([`Self::decline`]), and so is one being answered whose `accept` hasn't
     /// gone out yet (the account isn't in the call before it, and only a decline ends the ring).
@@ -1197,7 +1279,21 @@ impl Calls {
             (Step::Leave, Some(_)) => self.left(),
             // a keep-alive not taken ends nothing: the next one goes when it falls due, as the web client's does; a
             // group call's media described again and not taken leaves the call as it was (the camera goes unseen)
-            (_, Some(_)) | (Step::KeepAlive | Step::Describe | Step::ChannelParameters | Step::Lobby, None) => {}
+            // the meeting ended for everyone: the call is over here (the conversation's end follows)
+            (Step::EndMeeting, Some(_)) => self.finish(End::HungUp),
+            // not ended for everyone: the account leaves it alone, as a hang-up does
+            (Step::EndMeeting, None) => self.leave(Ending::HungUp, now),
+            (_, Some(_))
+            | (
+                Step::KeepAlive
+                | Step::Describe
+                | Step::ChannelParameters
+                | Step::Lobby
+                | Step::Muted
+                | Step::Hand
+                | Step::React,
+                None,
+            ) => {}
             (step, None) => self.fail(step, now),
         }
     }
@@ -1280,6 +1376,7 @@ impl Calls {
                 self.roster_updated(delivery);
                 self.echo_present(now);
             }
+            (Kind::Conversation, "receiveMessage") => self.message_received(delivery),
             (Kind::Conversation, "addParticipantFailure") => {
                 if let Some(call) = self.call.as_mut().filter(|call| call.caption_inviting) {
                     call.caption_inviting = false;
@@ -1485,7 +1582,10 @@ impl Calls {
     fn ring(&mut self, delivery: &Delivery, invitation: Invitation, now: Instant) -> Result<(), CallError> {
         let agent = self.agent.clone().ok_or(CallError::NoEndpoint)?;
         let context = CallContext::fresh()?.with_region(self.identity.region.clone(), self.identity.partition.clone());
-        let me = self.participant()?;
+        let mut me = self.participant()?;
+        if let Some(id) = invitation.callee_participant.clone() {
+            me.participant_id = Some(id);
+        }
         let caption_thread = invitation
             .group_chat
             .clone()
@@ -1553,6 +1653,20 @@ impl Calls {
             self.out.event(CallEvent::Participants { call: id, participants });
         }
         lobby_told(call, &mut self.out, &self.identity.mri);
+    }
+
+    /// A message at the conversation's `receiveMessage` callback: a live reaction told; anything else changes nothing.
+    fn message_received(&mut self, delivery: &Delivery) {
+        let Some(call) = self.call.as_ref() else { return };
+        if let Some((from, name, reaction)) = read::reaction(&delivery.body) {
+            let id = call.id;
+            self.out.event(CallEvent::Reaction {
+                call: id,
+                from,
+                name,
+                reaction,
+            });
+        }
     }
 
     /// The test call's echo in its roster, or no longer: it leaves once it played the recording back (its entry turns
@@ -1803,6 +1917,19 @@ fn correlation() -> String {
 mod tests;
 
 /// The lobby's change since last told (who waits, whether the account itself does), as events.
+/// The call `call` in `slot` while it is up.
+fn up(slot: &mut Option<Call>, call: CallId) -> Result<&mut Call, CallError> {
+    let current = slot
+        .as_mut()
+        .filter(|current| current.id == call)
+        .ok_or(CallError::NoSuchCall)?;
+    if current.phase == Phase::Connected {
+        Ok(current)
+    } else {
+        Err(CallError::NotNow)
+    }
+}
+
 fn lobby_told(call: &mut Call, out: &mut Out, me: &Mri) {
     let change = call.roster.lobby(me);
     if let Some(waiting) = change.waiting {
@@ -1810,6 +1937,13 @@ fn lobby_told(call: &mut Call, out: &mut Out, me: &Mri) {
     }
     if let Some(waiting) = change.own {
         out.event(CallEvent::InLobby { call: call.id, waiting });
+    }
+    if let Some(own) = call.roster.own_changed(me) {
+        out.event(CallEvent::Own {
+            call: call.id,
+            hand_raised: own.hand.is_some(),
+            organizer: own.organizer,
+        });
     }
 }
 

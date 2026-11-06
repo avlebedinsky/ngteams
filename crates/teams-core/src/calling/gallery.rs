@@ -31,6 +31,10 @@ pub const HEARING_LEVEL: f32 = 1e-4;
 pub const SPEAKING_HOLD: Duration = Duration::from_millis(400);
 
 /// One participant as the account is shown it ([`crate::Event::CallParticipants`]).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a sign of its own the call gives of the participant, shown by its own mark"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallParticipant {
     pub mri: String,
@@ -42,6 +46,10 @@ pub struct CallParticipant {
     pub line: Option<usize>,
     /// Whether it is speaking now.
     pub speaking: bool,
+    /// Whether its microphone is muted, as its endpoint reports it.
+    pub muted: bool,
+    /// Whether its hand is raised.
+    pub hand_raised: bool,
 }
 
 /// What a call's view is now: its participants, whether the account itself is speaking, and whether its microphone
@@ -215,6 +223,8 @@ impl Gallery {
                     video_on: participant.video_on,
                     line,
                     speaking,
+                    muted: participant.muted,
+                    hand_raised: participant.hand_raised,
                 }
             })
             .collect();
@@ -240,6 +250,8 @@ mod tests {
             audio_source: Some(audio),
             video_source: Some(audio + 1),
             video_on: true,
+            muted: false,
+            hand_raised: false,
         }
     }
 
