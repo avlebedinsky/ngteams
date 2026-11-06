@@ -1,5 +1,5 @@
 //! Caption operations use their own outcome path: a service failure never fails the voice call.
-use teams_proto::captions::{CAPTION_SERVICE_MRI, CaptionService, CaptionWrite, RecordStart};
+use teams_proto::captions::{CAPTION_SERVICE_MRI, CaptionService, CaptionWrite, Processing, RecordCommand};
 
 use super::{CallError, CallEvent, CallId, Calls};
 use crate::agent::Kind;
@@ -45,13 +45,14 @@ impl Calls {
         .map_err(|_| CallError::NotNow)
     }
 
-    /// Starts recording and transcription as `start` names it (`Some`), or stops them (`None`), on the recording bot's
-    /// command link: the bot must be in the call already ([`Calls::caption_invite`] invites it).
+    /// Sends `command` to the recording bot's command link: the bot must be in the call already
+    /// ([`Calls::caption_invite`] invites it). A recording starts alone while a transcription runs, and with its
+    /// transcript otherwise; Stop recording stops the transcription too while it runs, as the web client does.
     ///
     /// # Errors
-    /// The call must be connected and its recording bot's command link known; `start` must be one the web client
+    /// The call must be connected and its recording bot's command link known; a start must be one the web client
     /// would send.
-    pub fn record_command(&self, id: CallId, start: Option<&RecordStart>) -> Result<CaptionWrite, CallError> {
+    pub fn record_command(&self, id: CallId, command: &RecordCommand) -> Result<CaptionWrite, CallError> {
         let call = self
             .call
             .as_ref()
@@ -59,9 +60,27 @@ impl Calls {
             .ok_or(CallError::NotNow)?;
         let service = call.caption_service.as_ref().ok_or(CallError::NotNow)?;
         let thread = call.caption_thread.as_deref().ok_or(CallError::NotNow)?;
-        match start {
-            Some(start) => CaptionWrite::record(&call.context, &service.command, &call.me, thread, start),
-            None => CaptionWrite::stop_recording(&call.context, &service.command, &call.me, thread),
+        let (link, me, context) = (&service.command, &call.me, &call.context);
+        let recording = if call.meeting.state.transcribing.is_some() {
+            Processing::Recording
+        } else {
+            Processing::Both
+        };
+        match command {
+            RecordCommand::Record(start) => CaptionWrite::record(context, link, me, thread, (start, recording)),
+            RecordCommand::Transcribe(start) => {
+                CaptionWrite::record(context, link, me, thread, (start, Processing::Transcript))
+            }
+            RecordCommand::StopRecording => {
+                let what = match recording {
+                    Processing::Recording => Processing::Both,
+                    _ => Processing::Recording,
+                };
+                CaptionWrite::stop_recording(context, link, me, thread, what)
+            }
+            RecordCommand::StopTranscription => {
+                CaptionWrite::stop_recording(context, link, me, thread, Processing::Transcript)
+            }
         }
         .map_err(|_| CallError::NotNow)
     }

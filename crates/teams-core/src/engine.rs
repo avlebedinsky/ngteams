@@ -3087,22 +3087,10 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
     Ok(match action {
         CallAction::Captions { call, enabled } => Act::Captions(call, enabled),
         CallAction::CaptionLanguage { call, language } => Act::CaptionLanguage(call, language),
-        CallAction::Record {
-            call,
-            title,
-            organizer,
-            language,
-        } => Act::Record(
-            call,
-            Some(teams_proto::captions::RecordStart {
-                title,
-                organizer,
-                language,
-                // the recording's file name has its start in local time, as the web client names it
-                stamp: chrono::Local::now().format("%Y%m%d_%H%M%S").to_string(),
-            }),
-        ),
-        CallAction::StopRecording { call } => Act::Record(call, None),
+        action @ (CallAction::Record { .. }
+        | CallAction::StopRecording { .. }
+        | CallAction::Transcribe { .. }
+        | CallAction::StopTranscription { .. }) => crate::calling::record_act(action)?,
         CallAction::Call { chat } => Act::Place(placement(store, me, &chat)?),
         CallAction::TestCall { echo } => Act::Place(Placement::TestCall { echo }),
         CallAction::Join { chat } => Act::Join(chat),

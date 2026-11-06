@@ -67,6 +67,7 @@ mod captions;
 pub use captions::{CallCaptions, Caption, CaptionPhase};
 mod recording;
 pub use recording::{CallRecording, RecordingPhase, RecordingProblem};
+pub(crate) use recording::record_act;
 mod gallery;
 mod health;
 pub use health::{CallHealth, MediaHealth, NetworkHealth, StreamHealth};
@@ -157,17 +158,29 @@ pub enum CallAction {
     Captions { call: CallId, enabled: bool },
     /// Change shared spoken language after the user confirms everyone is speaking it.
     CaptionLanguage { call: CallId, language: String },
-    /// Start recording and transcription (More → Record and transcribe → Start recording, confirmed): the call's
-    /// `title` as Teams names its recording ("Call with …", a meeting's title), a meeting's `organizer`'s name, and the
-    /// spoken `language` picked (a `teams_proto::captions::SPOKEN_LANGUAGES` code).
+    /// Start recording (More → Record and transcribe → Start recording, confirmed), with its transcript unless a
+    /// transcription runs already: the call's `title` as Teams names its recording ("Call with …", a meeting's title),
+    /// a meeting's `organizer`'s name, the spoken `language` picked (a `teams_proto::captions::SPOKEN_LANGUAGES` code),
+    /// and whether it records the audio alone ("Choose what to record" → Audio only).
     Record {
         call: CallId,
         title: String,
         organizer: Option<String>,
         language: String,
+        audio_only: bool,
     },
-    /// Stop recording and transcription (Stop recording, confirmed), whoever started them.
+    /// Stop recording (Stop recording, confirmed), with the transcription while it runs, whoever started them.
     StopRecording { call: CallId },
+    /// Start the transcription alone (More → Record and transcribe → Start transcription, its language confirmed),
+    /// named as [`CallAction::Record`] names a recording.
+    Transcribe {
+        call: CallId,
+        title: String,
+        organizer: Option<String>,
+        language: String,
+    },
+    /// Stop the transcription alone (Stop transcription, confirmed), whoever started it.
+    StopTranscription { call: CallId },
     /// A call from the chat `chat`: a 1:1 chat's other member, or a group chat's other members as the store holds
     /// them.
     Call { chat: String },
@@ -334,8 +347,8 @@ pub(crate) type Waiting = oneshot::Sender<Result<CallId, EngineError>>;
 pub(crate) enum Act {
     Captions(CallId, bool),
     CaptionLanguage(CallId, String),
-    /// A recording started (`Some`) or stopped.
-    Record(CallId, Option<teams_proto::captions::RecordStart>),
+    /// A recording or a transcription started or stopped.
+    Record(CallId, teams_proto::captions::RecordCommand),
     Place(Placement),
     Join(String),
     /// The meeting that runs in a channel joined: the channel, and the meeting as CSA names it, read as the media is
@@ -653,7 +666,7 @@ where
         match act {
             Act::Captions(call, enabled) => self.caption_toggle(call, enabled),
             Act::CaptionLanguage(call, language) => self.caption_language(call, &language),
-            Act::Record(call, start) => self.record(call, start),
+            Act::Record(call, command) => self.record(call, command),
             _ => Err(CallActionError::Call(CallError::NotNow)),
         }
     }

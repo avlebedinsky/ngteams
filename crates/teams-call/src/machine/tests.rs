@@ -2320,6 +2320,69 @@ fn caption_invite_failure_does_not_end_voice_and_only_own_roster_binds_service()
 }
 
 #[test]
+fn a_recording_starts_alone_beside_a_running_transcription_and_its_stop_stops_both() {
+    use teams_proto::captions::{RecordCommand, RecordStart};
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let start = RecordStart {
+        title: "Call with Lab B".into(),
+        organizer: None,
+        language: "en-us".into(),
+        stamp: "20261106_120144".into(),
+        audio_only: true,
+    };
+    assert!(
+        calls.record_command(call, &RecordCommand::StopRecording).is_err(),
+        "no bot in the call yet"
+    );
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let bot = |version: u64, transcript: &str| {
+        json!({"participants":{teams_proto::captions::CAPTION_SERVICE_MRI:{"state":"active","version":version,
+            "endpoints":{"synthetic":{"endpointMetadata":{"commandUrl":command,"spokenLanguage":"en-us",
+            "processingModes":{"closedCaptions":{"state":"Inactive"},
+            "realTimeTranscript":{"state":transcript,"userId":"8:orgid:synthetic"}}}}}}}})
+    };
+    let sent = |calls: &Calls, command: &RecordCommand| {
+        let write = calls.record_command(call, command).unwrap();
+        let body = write.bare_body();
+        (
+            body.get("mode").and_then(Value::as_str).map(str::to_owned),
+            body["processingModes"].clone(),
+        )
+    };
+    let both = json!(["recording", "realTimeTranscript"]);
+    calls.on_delivery(&delivery(&roster, &bot(1, "Inactive")), Observed::Nothing, now);
+    assert_eq!(
+        sent(&calls, &RecordCommand::Record(start.clone())),
+        (None, both.clone())
+    );
+    assert_eq!(
+        sent(&calls, &RecordCommand::StopRecording),
+        (Some("recording".into()), json!(["recording"]))
+    );
+    // the transcription runs: a recording starts alone, and its stop stops both
+    calls.on_delivery(&delivery(&roster, &bot(2, "Active")), Observed::Nothing, now);
+    assert_eq!(
+        sent(&calls, &RecordCommand::Record(start.clone())),
+        (Some("recording".into()), json!(["recording"]))
+    );
+    assert_eq!(sent(&calls, &RecordCommand::StopRecording), (None, both));
+    for command in [RecordCommand::Transcribe(start), RecordCommand::StopTranscription] {
+        assert_eq!(
+            sent(&calls, &command),
+            (Some("transcription".into()), json!(["realTimeTranscript"]))
+        );
+    }
+}
+
+#[test]
 fn mixer_explicitly_marks_only_the_initial_caption_media_fork_as_a_new_session() {
     let mut content =
         json!({"blob":"v=0\r\n","contentType":"application/sdp-ngc-0.5","newOffer":true,"fromMixer":true});

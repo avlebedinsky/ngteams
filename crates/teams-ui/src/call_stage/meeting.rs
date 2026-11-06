@@ -8,8 +8,7 @@
 //!   More → Timer before anyone set one shows the bar at five minutes, paused, until Play or Start sends it.
 //! - **The lock** (People's "…" and Controls, the meeting's organizer's): "Lock the meeting?" asks first; the notice
 //!   "This meeting is locked." (or unlocked) shows once the meeting tells it changed.
-//! - **A recording someone runs**: "Recording and transcription", who started it and that attending means being
-//!   included, once the roster shows Microsoft's recording bot recording (the header's red dot meanwhile).
+//! - **A recording or a transcription someone runs**: its notice, and the header's mark meanwhile ([`super::transcript`]).
 //! - **Meeting info** (More → Meeting info in a meeting): a pane with the meeting's title, Copy join info, and how to
 //!   join as its invitation says (the join link, the meeting id, the passcode, Need help? and System reference).
 //! - **The attendance list** (People's "…" → Download attendance list): made here from who is in the call and when
@@ -378,19 +377,7 @@ impl CallStage {
             self.lock_notice = Some(state.locked);
         }
         self.lock_seen = Some(state.locked);
-        let recording = state.recording.is_some();
-        if recording && !self.recording_seen {
-            self.recording_notice = true;
-            self.record.stopped = None;
-        }
-        if !recording {
-            self.recording_notice = false;
-            if self.recording_seen {
-                // it stopped: whoever stopped it, the notice says so
-                self.record.stopped = Some(std::mem::take(&mut self.record.stopping));
-            }
-        }
-        self.recording_seen = recording;
+        self.recorder_seen(active);
         if state.timer.is_some() {
             // the meeting runs a timer now: no draft of the account's own
             self.timer_draft = false;
@@ -415,35 +402,8 @@ impl CallStage {
                 }),
             )
         });
-        let recording = active
-            .meeting
-            .recording
-            .as_ref()
-            .filter(|_| self.recording_notice)
-            .map(|recording| {
-                let line = if recording.by.as_ref().is_some_and(|by| by.as_str() == self.core.me()) {
-                    Self::started_by_you(palette)
-                } else {
-                    let who = recording
-                        .by
-                        .as_ref()
-                        .map_or_else(|| SharedString::from(SOMEONE), |mri| self.name_of(active, mri));
-                    SharedString::from(format!(
-                        "Started by {who}. By attending this meeting, you agree to being included."
-                    ))
-                    .into_any_element()
-                };
-                notice(
-                    ("call-recording-notice", Glyph::RECORD, "Recording and transcription"),
-                    line,
-                    palette,
-                    cx.listener(|this, _, _, cx| {
-                        this.recording_notice = false;
-                        cx.notify();
-                    }),
-                )
-            });
-        let others = self.recording_notices(palette, cx);
+        let recording = self.recording_notice_view(active, palette, cx);
+        let others = self.recording_notices(active, palette, cx);
         if lock.is_none() && recording.is_none() && others.is_empty() {
             return None;
         }
@@ -465,7 +425,7 @@ impl CallStage {
     }
 
     /// The name of `mri` in the call: the account's own, or a participant's as the call names them.
-    fn name_of(&self, active: &ActiveCall, mri: &Mri) -> SharedString {
+    pub(super) fn name_of(&self, active: &ActiveCall, mri: &Mri) -> SharedString {
         if mri.as_str() == self.core.me() {
             return self.own_name.clone().unwrap_or_else(|| SharedString::from("You"));
         }

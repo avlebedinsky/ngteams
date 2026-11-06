@@ -1,7 +1,8 @@
 //! What a meeting's call shares with everyone in it while it runs (`docs/protocol/calling.md`, "More of a running
 //! call"), as its conversation and its roster tell it: the timer (the conversation's `meetingStates.timer`), the lock
-//! (`meetingDetails.meetingCapability.lockMeeting`), how to join it (`meetingDetails.invitation`), and a recording
-//! someone runs (Microsoft's recording bot in the roster, its endpoint's `processingModes.recording`). The account
+//! (`meetingDetails.meetingCapability.lockMeeting`), how to join it (`meetingDetails.invitation`), and a recording or a
+//! transcription someone runs (Microsoft's recording bot in the roster, its endpoint's `processingModes.recording` and
+//! `.realTimeTranscript`). The account
 //! changes the timer and the lock ([`Calls::set_timer`], [`Calls::lock_meeting`]) and starts or stops a recording
 //! through the recording bot's command link ([`Calls::record_command`]). Each change is told as
 //! [`CallEvent::Meeting`].
@@ -29,11 +30,22 @@ pub struct MeetingState {
     pub join: Option<MeetingJoinInfo>,
     /// A recording runs.
     pub recording: Option<Recording>,
+    /// A transcription runs (with a recording or alone).
+    pub transcribing: Option<Transcription>,
 }
 
 /// A recording someone runs in the call, as the recording bot's roster entry tells it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Recording {
+    /// Who started it, when the entry names them (`userId`).
+    pub by: Option<Mri>,
+    /// It records the audio alone (its `properties.recordVideo` is `"False"`).
+    pub audio_only: bool,
+}
+
+/// A transcription someone runs in the call, as the recording bot's roster entry tells it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Transcription {
     /// Who started it, when the entry names them (`userId`).
     pub by: Option<Mri>,
 }
@@ -56,29 +68,37 @@ fn conversation_update(body: &[u8]) -> Option<(Option<TimerUpdate>, Option<bool>
     Some((timer, teams_proto::meeting_locked(&body), MeetingJoinInfo::read(&body)))
 }
 
-/// The recording bot's entry in a roster update (`body`): its version, and whether it records now, with who started
-/// it (`userId`, empty once it stopped); `None` when the update doesn't list it.
-fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>)> {
+/// The recording bot's entry in a roster update (`body`): its version, whether it records and whether it transcribes
+/// now, each with who started it (`userId`, which stays once it stopped: its `state` tells whether it runs); `None`
+/// when the update doesn't list it.
+fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>, Option<Transcription>)> {
     let body: Value = serde_json::from_slice(body).ok()?;
     let entry = body.get("participants")?.get(RECORDER_MRI)?;
     let version = entry.get("version")?.as_u64()?;
     let active = entry.get("state").and_then(Value::as_str) == Some("active");
-    let recording = entry
-        .get("endpoints")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|endpoints| endpoints.values())
-        .filter_map(|endpoint| endpoint.pointer("/endpointMetadata/processingModes/recording"))
-        .find(|mode| mode.get("state").and_then(Value::as_str) == Some("Active"))
-        .filter(|_| active)
-        .map(|mode| Recording {
-            by: mode
-                .get("userId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(Mri::new),
-        });
-    Some((version, recording))
+    let running = |name: &str| {
+        let pointer = format!("/endpointMetadata/processingModes/{name}");
+        entry
+            .get("endpoints")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|endpoints| endpoints.values())
+            .filter_map(|endpoint| endpoint.pointer(&pointer))
+            .find(|mode| mode.get("state").and_then(Value::as_str) == Some("Active"))
+            .filter(|_| active)
+    };
+    let by = |mode: &Value| {
+        mode.get("userId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(Mri::new)
+    };
+    let recording = running("recording").map(|mode| Recording {
+        by: by(mode),
+        audio_only: mode.pointer("/properties/recordVideo").and_then(Value::as_str) == Some("False"),
+    });
+    let transcribing = running("realTimeTranscript").map(|mode| Transcription { by: by(mode) });
+    Some((version, recording, transcribing))
 }
 
 impl Meeting {
@@ -107,15 +127,16 @@ impl Meeting {
 
     /// Takes what a roster update `body` tells of the recording bot; whether the state changed.
     pub(crate) fn roster(&mut self, body: &[u8]) -> bool {
-        let Some((version, recording)) = recorder(body) else {
+        let Some((version, recording, transcribing)) = recorder(body) else {
             return false;
         };
         if self.recorder_version.is_some_and(|told| told >= version) {
             return false;
         }
         self.recorder_version = Some(version);
-        let changed = self.state.recording != recording;
+        let changed = self.state.recording != recording || self.state.transcribing != transcribing;
         self.state.recording = recording;
+        self.state.transcribing = transcribing;
         changed
     }
 }

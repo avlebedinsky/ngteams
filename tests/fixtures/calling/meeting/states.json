@@ -97,5 +97,140 @@
     },
     "type": "Delta",
     "sequenceNumber": 24
+  },
+  "transcribing_roster": {
+    "participants": {
+      "<mri:recorder>": {
+        "version": 31,
+        "state": "active",
+        "details": {
+          "id": "<mri:recorder>",
+          "displayName": null
+        },
+        "endpoints": {
+          "<guid:1>": {
+            "call": {
+              "serverMuteVersion": 1
+            },
+            "endpointMetadata": {
+              "processingModes": {
+                "closedCaptions": {
+                  "state": "Inactive",
+                  "timestamp": "0001-01-01T00:00:00"
+                },
+                "realTimeTranscript": {
+                  "state": "Active",
+                  "userId": "<mri:a>",
+                  "timestamp": "2026-01-02T03:10:00.0000000Z",
+                  "properties": {
+                    "storage": "rtaf",
+                    "lastStartReason": "UserCommand"
+                  }
+                },
+                "recording": {
+                  "state": "Inactive",
+                  "userId": "",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "type": "Delta",
+    "sequenceNumber": 31
+  },
+  "audio_recording_roster": {
+    "participants": {
+      "<mri:recorder>": {
+        "version": 32,
+        "state": "active",
+        "details": {
+          "id": "<mri:recorder>",
+          "displayName": null
+        },
+        "endpoints": {
+          "<guid:1>": {
+            "call": {
+              "serverMuteVersion": 1
+            },
+            "endpointMetadata": {
+              "processingModes": {
+                "closedCaptions": {
+                  "state": "Inactive",
+                  "timestamp": "0001-01-01T00:00:00"
+                },
+                "realTimeTranscript": {
+                  "state": "Active",
+                  "userId": "<mri:a>",
+                  "timestamp": "2026-01-02T03:10:00.0000000Z",
+                  "properties": {
+                    "storage": "rtaf",
+                    "lastStartReason": "UserCommand"
+                  }
+                },
+                "recording": {
+                  "state": "Active",
+                  "userId": "<mri:a>",
+                  "timestamp": "2026-01-02T03:11:00.0000000Z",
+                  "properties": {
+                    "recordVideo": "False",
+                    "exportFormatType": "Mp4"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "type": "Delta",
+    "sequenceNumber": 32
+  },
+  "transcription_stopped_roster": {
+    "participants": {
+      "<mri:recorder>": {
+        "version": 33,
+        "state": "active",
+        "details": {
+          "id": "<mri:recorder>",
+          "displayName": null
+        },
+        "endpoints": {
+          "<guid:1>": {
+            "call": {
+              "serverMuteVersion": 1
+            },
+            "endpointMetadata": {
+              "processingModes": {
+                "closedCaptions": {
+                  "state": "Inactive",
+                  "timestamp": "0001-01-01T00:00:00"
+                },
+                "realTimeTranscript": {
+                  "state": "Inactive",
+                  "userId": "<mri:a>",
+                  "timestamp": "2026-01-02T03:12:00.0000000Z",
+                  "properties": {
+                    "storage": "rtaf",
+                    "lastStartReason": "UserCommand",
+                    "lastStopReason": "UserCommand"
+                  }
+                },
+                "recording": {
+                  "state": "Inactive",
+                  "userId": "<mri:a>",
+                  "timestamp": "2026-01-02T03:12:00.0000000Z",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "type": "Delta",
+    "sequenceNumber": 33
   }
 }

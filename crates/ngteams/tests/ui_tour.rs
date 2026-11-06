@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 214] = [
+const STEPS: [Step; 5 + 219] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1688,7 +1688,69 @@ const STEPS: [Step; 5 + 214] = [
             cx,
         );
     }),
+    // More → Record and transcribe → Start transcription: "What language is everyone speaking?"
+    ("call-group-transcribe", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models.apply(
+            teams_core::Event::CallRecording {
+                call: teams_core::CallId::for_tests(GROUP_CALL),
+                recording: teams_core::CallRecording::default(),
+            },
+            cx,
+        );
+        with_stage(cx, CallStage::open_transcribe_dialog);
+    }),
+    // the account's transcription: its notice, the transcript's mark by the duration, and the Transcript pane open
+    ("call-group-transcribing", |shell, _, cx| {
+        with_stage(cx, CallStage::close_record_dialog);
+        transcription_state(shell, false, cx);
+    }),
+    // and in Teams Dark
+    ("call-group-transcribing-dark", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+    }),
+    // in Teams Light, Start recording while it transcribes asks what to record: Audio only picked
+    ("call-group-record-audio-only", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+        with_stage(cx, |stage, cx| {
+            stage.open_record_dialog(cx);
+            stage.choose_audio_only(true, cx);
+        });
+    }),
+    // the audio alone records beside the transcription: "Audio recording and transcription" and the microphone's mark
+    ("call-group-recording-audio", |shell, _, cx| {
+        with_stage(cx, CallStage::close_record_dialog);
+        transcription_state(shell, true, cx);
+    }),
 ];
+
+/// The made-up group call transcribing for the account, recording the audio alone (`audio`) or not, as the roster
+/// tells it.
+fn transcription_state(shell: &Entity<Shell>, audio: bool, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::CallMeeting {
+            call: teams_core::CallId::for_tests(GROUP_CALL),
+            state: teams_core::MeetingState {
+                recording: audio.then(|| teams_core::Recording {
+                    by: Some(Mri::new(LAB_A)),
+                    audio_only: true,
+                }),
+                transcribing: Some(teams_core::Transcription {
+                    by: Some(Mri::new(LAB_A)),
+                }),
+                ..teams_core::MeetingState::default()
+            },
+        },
+        cx,
+    );
+}
 
 /// The made-up group call recording, started by `by`, or not recording (`None`), as the roster tells it.
 fn recording_state(shell: &Entity<Shell>, by: Option<&str>, cx: &mut App) {
@@ -1697,7 +1759,10 @@ fn recording_state(shell: &Entity<Shell>, by: Option<&str>, cx: &mut App) {
         teams_core::Event::CallMeeting {
             call: teams_core::CallId::for_tests(GROUP_CALL),
             state: teams_core::MeetingState {
-                recording: by.map(|by| teams_core::Recording { by: Some(Mri::new(by)) }),
+                recording: by.map(|by| teams_core::Recording {
+                    by: Some(Mri::new(by)),
+                    audio_only: false,
+                }),
                 ..teams_core::MeetingState::default()
             },
         },
@@ -1733,7 +1798,9 @@ fn meeting_state(shell: &Entity<Shell>, locked: bool, cx: &mut App) {
                 }),
                 recording: Some(teams_core::Recording {
                     by: Some(Mri::new(LAB_B)),
+                    audio_only: false,
                 }),
+                transcribing: None,
             },
         },
         cx,

@@ -535,15 +535,25 @@ pub enum Ask {
     Transfer {
         target: Mri,
     },
-    /// Start recording and transcription (More → Record and transcribe → Start recording, confirmed): the call's
-    /// `title` as its recording is named, a meeting's `organizer`, the spoken `language` picked.
+    /// Start recording, with its transcript unless one runs (More → Record and transcribe → Start recording,
+    /// confirmed): the call's `title` as its recording is named, a meeting's `organizer`, the spoken `language`
+    /// picked, and whether it records the audio alone.
     Record {
         title: String,
         organizer: Option<String>,
         language: String,
+        audio_only: bool,
     },
-    /// Stop recording and transcription (Stop recording, confirmed).
+    /// Stop recording, with the transcription while it runs (Stop recording, confirmed).
     StopRecording,
+    /// Start the transcription alone (Start transcription, its language confirmed), named as a recording is.
+    Transcribe {
+        title: String,
+        organizer: Option<String>,
+        language: String,
+    },
+    /// Stop the transcription alone (Stop transcription, confirmed).
+    StopTranscription,
 }
 
 impl Ask {
@@ -577,6 +587,8 @@ impl Ask {
             Self::Transfer { .. } => "transfer",
             Self::Record { .. } => "record",
             Self::StopRecording => "stop-recording",
+            Self::Transcribe { .. } => "transcribe",
+            Self::StopTranscription => "stop-transcription",
         }
     }
 
@@ -1412,7 +1424,9 @@ impl Calls {
                 self.meeting_action(ask)
             }
             Ask::ToggleHold | Ask::Add { .. } | Ask::Transfer { .. } => self.one_to_one_action(ask),
-            Ask::Record { .. } | Ask::StopRecording => self.record_action(ask),
+            Ask::Record { .. } | Ask::StopRecording | Ask::Transcribe { .. } | Ask::StopTranscription => {
+                self.record_action(ask)
+            }
             Ask::ToggleShare | Ask::ToggleCamera => self.video_action(ask),
         }
     }
@@ -1481,26 +1495,41 @@ impl Calls {
         }
     }
 
-    /// The engine's action for a recording's start or stop, on the call up once it is connected (not the test call's).
+    /// The engine's action for a recording's or a transcription's start or stop, on the call up once it is connected
+    /// (not the test call's).
     fn record_action(&self, ask: &Ask) -> Result<CallAction, &'static str> {
         let call = self
             .call
             .as_ref()
             .filter(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall)
-            .ok_or("no-call")?;
-        match ask {
+            .ok_or("no-call")?
+            .id;
+        Ok(match ask.clone() {
             Ask::Record {
                 title,
                 organizer,
                 language,
-            } => Ok(CallAction::Record {
-                call: call.id,
-                title: title.clone(),
-                organizer: organizer.clone(),
-                language: language.clone(),
-            }),
-            _ => Ok(CallAction::StopRecording { call: call.id }),
-        }
+                audio_only,
+            } => CallAction::Record {
+                call,
+                title,
+                organizer,
+                language,
+                audio_only,
+            },
+            Ask::Transcribe {
+                title,
+                organizer,
+                language,
+            } => CallAction::Transcribe {
+                call,
+                title,
+                organizer,
+                language,
+            },
+            Ask::StopTranscription => CallAction::StopTranscription { call },
+            _ => CallAction::StopRecording { call },
+        })
     }
 
     /// The start or join `start` (its number) still isn't told: the engine never answered it. It is given up, and said.

@@ -1,5 +1,6 @@
-//! What a meeting shares with everyone in it (its timer, its lock, how to join it, a recording someone runs) told from
-//! its conversation's updates and its roster, and the account's timer and lock sent, on synthetic deliveries.
+//! What a meeting shares with everyone in it (its timer, its lock, how to join it, a recording or a transcription someone
+//! runs) told from its conversation's updates and its roster, and the account's timer and lock sent, on synthetic
+//! deliveries.
 
 use super::*;
 use teams_proto::Request as _;
@@ -135,7 +136,14 @@ fn the_recording_bot_is_told_as_a_recording_never_as_a_person() {
     );
     let told = meeting_told(&effects_now);
     assert_eq!(told.len(), 1);
-    assert_eq!(told[0].recording, Some(crate::Recording { by: Some(Mri::new(A)) }));
+    assert_eq!(
+        told[0].recording,
+        Some(crate::Recording {
+            by: Some(Mri::new(A)),
+            audio_only: false,
+        })
+    );
+    assert_eq!(told[0].transcribing, Some(crate::Transcription { by: None }));
     calls.on_delivery(
         &delivery(&roster, &fixture()["recording_stopped_roster"]),
         Observed::Nothing,
@@ -144,7 +152,41 @@ fn the_recording_bot_is_told_as_a_recording_never_as_a_person() {
     let told = meeting_told(&effects(&mut calls));
     assert_eq!(told.len(), 1);
     assert_eq!(told[0].recording, None);
+    assert_eq!(told[0].transcribing, None);
     let _ = call;
+}
+
+#[test]
+fn a_transcription_alone_an_audio_recording_and_their_stop_are_told_by_their_state() {
+    let now = Instant::now();
+    let (mut calls, _) = up(now);
+    let roster = callback(&calls, "rosterUpdate");
+    let mut told_after = |name: &str| {
+        calls.on_delivery(&delivery(&roster, &fixture()[name]), Observed::Nothing, now);
+        let told = meeting_told(&effects(&mut calls));
+        let [state] = &told[..] else {
+            panic!("{name}: {told:#?}")
+        };
+        state.clone()
+    };
+    let transcribing = Some(crate::Transcription { by: Some(Mri::new(A)) });
+    let state = told_after("transcribing_roster");
+    assert_eq!(
+        (state.recording, state.transcribing.clone()),
+        (None, transcribing.clone())
+    );
+    let state = told_after("audio_recording_roster");
+    assert_eq!(
+        state.recording,
+        Some(crate::Recording {
+            by: Some(Mri::new(A)),
+            audio_only: true,
+        })
+    );
+    assert_eq!(state.transcribing, transcribing);
+    // the starter stays named once both stopped: their state says they don't run
+    let state = told_after("transcription_stopped_roster");
+    assert_eq!((state.recording, state.transcribing), (None, None));
 }
 
 #[test]

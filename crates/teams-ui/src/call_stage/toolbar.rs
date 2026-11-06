@@ -55,7 +55,7 @@ impl CallStage {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .children(live.and_then(recording_dot))
+                            .children(live.and_then(|active| transcript::indicator(active, palette)))
                             .child(
                                 div()
                                     .debug_selector(|| "call-window-status".to_owned())
@@ -798,17 +798,4 @@ pub(super) fn tool_face(glyph: Glyph, caption: &'static str) -> gpui::Div {
         .gap_0p5()
         .child(glyph.icon().size(px(20.0)))
         .when(!caption.is_empty(), |face| face.child(div().text_xs().child(caption)))
-}
-
-/// The red dot Teams shows by the call's duration while a recording runs.
-fn recording_dot(active: &ActiveCall) -> Option<gpui::Div> {
-    active.meeting.recording.as_ref()?;
-    Some(
-        div()
-            .debug_selector(|| "call-recording-dot".to_owned())
-            .flex_none()
-            .size(px(10.0))
-            .rounded_full()
-            .bg(rgb(theme::DANGER)),
-    )
 }

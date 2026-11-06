@@ -1101,6 +1101,8 @@ impl Core for FakeCore {
             | CallAction::CaptionLanguage { call, .. }
             | CallAction::Record { call, .. }
             | CallAction::StopRecording { call }
+            | CallAction::Transcribe { call, .. }
+            | CallAction::StopTranscription { call }
             | CallAction::Answer { call }
             | CallAction::Decline { call }
             | CallAction::HangUp { call }

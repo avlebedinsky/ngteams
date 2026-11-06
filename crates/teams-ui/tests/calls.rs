@@ -3621,6 +3621,7 @@ fn a_recording_someone_runs_and_the_lock_s_change_show_their_notices() {
         teams_core::MeetingState {
             recording: Some(teams_core::Recording {
                 by: Some(Mri::new(LAB_B)),
+                audio_only: false,
             }),
             ..teams_core::MeetingState::default()
         },
@@ -3658,9 +3659,157 @@ fn open_record_menu(stage: &mut VisualTestContext, item: &'static str) {
 
 fn recording_by(by: &str) -> teams_core::MeetingState {
     teams_core::MeetingState {
-        recording: Some(teams_core::Recording { by: Some(Mri::new(by)) }),
+        recording: Some(teams_core::Recording {
+            by: Some(Mri::new(by)),
+            audio_only: false,
+        }),
         ..teams_core::MeetingState::default()
     }
+}
+
+/// The roster tells `by`'s transcription, with their recording of the audio alone (`audio`) or none.
+fn transcribing_by(by: &str, audio: bool) -> teams_core::MeetingState {
+    teams_core::MeetingState {
+        recording: audio.then(|| teams_core::Recording {
+            by: Some(Mri::new(by)),
+            audio_only: true,
+        }),
+        transcribing: Some(teams_core::Transcription {
+            by: Some(Mri::new(by)),
+        }),
+        ..teams_core::MeetingState::default()
+    }
+}
+
+#[test]
+fn the_account_transcribes_after_asking_the_language_and_its_transcript_opens() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    open_record_menu(stage, "call-transcribe-start");
+    assert!(!drawn(stage, "call-transcript-toggle"), "no transcript before one ran");
+    click(stage, "call-transcribe-start");
+    assert!(drawn(stage, "call-transcribe-dialog"), "Start transcription asks the language first");
+    let before = actions(&rig).len();
+    click(stage, "call-transcribe-cancel");
+    assert_eq!(actions(&rig).len(), before, "Cancel sends nothing");
+    open_record_menu(stage, "call-transcribe-start");
+    click(stage, "call-transcribe-start");
+    click(stage, "call-transcribe-confirm");
+    let Some(CallAction::Transcribe { title, language, .. }) = actions(&rig).last().cloned() else {
+        panic!("{:?}", actions(&rig));
+    };
+    assert_eq!(language, "en-us");
+    assert!(title.starts_with("Call with "), "{title}");
+    // the roster tells it: its notice, the header's mark, and the transcript open by itself for its starter
+    meeting(&rig, transcribing_by(LAB_A, false));
+    assert!(drawn(stage, "call-transcription-notice"));
+    assert!(drawn(stage, "call-recording-privacy"));
+    assert!(drawn(stage, "call-transcribing"));
+    assert!(drawn(stage, "call-transcript-pane"));
+    assert!(drawn(stage, "call-transcript-event"));
+    // Switch to live captions shows them instead
+    click(stage, "call-transcript-captions");
+    assert!(!drawn(stage, "call-transcript-pane"));
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Captions {
+            call: call(1),
+            enabled: true
+        })
+    );
+    open_record_menu(stage, "call-transcript-toggle");
+    click(stage, "call-transcript-toggle");
+    assert!(drawn(stage, "call-transcript-pane"), "Show transcript shows it again");
+    click(stage, "call-transcript-tip-close");
+    assert!(!drawn(stage, "call-transcript-tip"));
+    record_audio_beside_the_transcription(&rig, stage);
+}
+
+/// While the account's transcription runs: Start recording asks what to record, the audio alone records beside it, and
+/// Stop recording stops both after asking.
+fn record_audio_beside_the_transcription(rig: &Rig, stage: &mut VisualTestContext) {
+    open_record_menu(stage, "call-record-start");
+    click(stage, "call-record-start");
+    assert!(drawn(stage, "call-record-what"), "it asks what to record");
+    assert!(!drawn(stage, "call-record-language"), "the transcription has its language");
+    click(stage, "call-record-what");
+    click(stage, "call-record-what-audio");
+    click(stage, "call-record-confirm");
+    let Some(CallAction::Record { audio_only, .. }) = actions(rig).last().cloned() else {
+        panic!("{:?}", actions(rig));
+    };
+    assert!(audio_only);
+    meeting(rig, transcribing_by(LAB_A, true));
+    assert!(drawn(stage, "call-recording-notice"));
+    assert!(drawn(stage, "call-recording-audio"), "the microphone's mark");
+    assert!(!drawn(stage, "call-recording-dot"));
+    assert!(!drawn(stage, "call-transcription-notice"), "the recording's notice says it");
+    open_record_menu(stage, "call-record-stop");
+    click(stage, "call-record-stop");
+    assert!(drawn(stage, "call-record-stop-dialog"));
+    click(stage, "call-record-stop-confirm");
+    assert_eq!(actions(rig).last(), Some(&CallAction::StopRecording { call: call(1) }));
+    meeting(rig, teams_core::MeetingState::default());
+    assert!(drawn(stage, "call-recording-stopped"));
+    assert!(!drawn(stage, "call-transcription-stopped"), "the recording's stop says it");
+    assert!(!drawn(stage, "call-transcribing"));
+    open_record_menu(stage, "call-transcript-toggle");
+}
+
+#[test]
+fn someone_else_s_transcription_is_stopped_after_asking_and_its_stop_is_told() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    meeting(&rig, transcribing_by(LAB_B, false));
+    assert!(drawn(stage, "call-transcription-notice"));
+    assert!(drawn(stage, "call-recording-policy"), "everyone else is pointed at the policy");
+    assert!(!drawn(stage, "call-recording-privacy"));
+    assert!(!drawn(stage, "call-transcript-pane"), "only its starter's opens by itself");
+    open_record_menu(stage, "call-transcribe-stop");
+    click(stage, "call-transcribe-stop");
+    assert!(drawn(stage, "call-transcribe-stop-dialog"));
+    let before = actions(&rig).len();
+    click(stage, "call-transcribe-stop-cancel");
+    assert_eq!(actions(&rig).len(), before, "Cancel sends nothing");
+    open_record_menu(stage, "call-transcribe-stop");
+    click(stage, "call-transcribe-stop");
+    click(stage, "call-transcribe-stop-confirm");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::StopTranscription { call: call(1) })
+    );
+    meeting(&rig, teams_core::MeetingState::default());
+    assert!(drawn(stage, "call-transcription-stopped"));
+    click(stage, "call-transcription-stopped-close");
+    assert!(!drawn(stage, "call-transcription-stopped"));
+    // the transcript lists its start and stop
+    open_record_menu(stage, "call-transcript-toggle");
+    click(stage, "call-transcript-toggle");
+    assert!(drawn(stage, "call-transcript-pane"));
+    click(stage, "call-transcript-close");
+    assert!(!drawn(stage, "call-transcript-pane"));
+}
+
+#[test]
+fn a_recording_and_transcription_records_the_audio_alone_from_more_options() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    open_record_menu(stage, "call-record-start");
+    click(stage, "call-record-start");
+    assert!(drawn(stage, "call-record-language"));
+    assert!(!drawn(stage, "call-record-what"), "what to record is under More options");
+    click(stage, "call-record-more");
+    click(stage, "call-record-what");
+    click(stage, "call-record-what-audio");
+    click(stage, "call-record-confirm");
+    let Some(CallAction::Record {
+        audio_only, language, ..
+    }) = actions(&rig).last().cloned()
+    else {
+        panic!("{:?}", actions(&rig));
+    };
+    assert!(audio_only);
+    assert_eq!(language, "en-us");
 }
 
 #[test]

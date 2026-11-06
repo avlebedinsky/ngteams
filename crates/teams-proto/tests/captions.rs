@@ -6,7 +6,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use serde_json::{Value, json};
 use teams_auth::{secrets::Secret, token::TokenError};
-use teams_proto::captions::{CaptionCommandLink, CaptionWrite, RECORDER_AUDIENCE};
+use teams_proto::captions::{CaptionCommandLink, CaptionWrite, Processing, RECORDER_AUDIENCE};
 use teams_proto::{CallContext, CallLink, CallParticipant, Credentials, HttpTransport, Transport};
 use teams_proto::{CallState, Endpoint, Method, Mri, Request, Response, Service};
 use wiremock::matchers::{method, path};
@@ -243,19 +243,29 @@ async fn recording_start_and_stop_carry_the_recorder_token_alone() {
         organizer: None,
         language: "en-us".into(),
         stamp: "20261106_120144".into(),
+        audio_only: false,
     };
     for write in [
-        CaptionWrite::record(&context(), &link, &actor(), &chat(), &start).unwrap(),
-        CaptionWrite::stop_recording(&context(), &link, &actor(), &chat()).unwrap(),
+        CaptionWrite::record(&context(), &link, &actor(), &chat(), (&start, Processing::Both)).unwrap(),
+        CaptionWrite::stop_recording(&context(), &link, &actor(), &chat(), Processing::Both).unwrap(),
+        CaptionWrite::record(&context(), &link, &actor(), &chat(), (&start, Processing::Transcript)).unwrap(),
+        CaptionWrite::stop_recording(&context(), &link, &actor(), &chat(), Processing::Transcript).unwrap(),
     ] {
         assert!(transport.deliver_caption(write).await.unwrap().unwrap().is_success());
     }
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
-    for (request, action) in requests.iter().zip(["start", "stop"]) {
+    assert_eq!(requests.len(), 4);
+    let both = json!(["recording", "realTimeTranscript"]);
+    let transcript = json!(["realTimeTranscript"]);
+    for (request, (action, modes)) in requests.iter().zip([
+        ("start", &both),
+        ("stop", &both),
+        ("start", &transcript),
+        ("stop", &transcript),
+    ]) {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(body["action"], action);
-        assert_eq!(body["processingModes"], json!(["recording", "realTimeTranscript"]));
+        assert_eq!(&body["processingModes"], modes);
         assert_eq!(body["participantSkypeToken"], "");
         assert!(!request.headers.contains_key("x-skypetoken"));
         assert!(request.headers.contains_key("requestid"));

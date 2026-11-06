@@ -821,22 +821,59 @@ a alone). What each of Teams' remaining call controls sends:
   "OnedriveForBusiness", "StorageLocation": "Recordings", "FileName": "<title>-<local YYYYMMDD_HHMMSS>-Meeting
   Recording"}], "correlationId", "meetingTitle", "exchangeId": null, "recordingMode": "Normal", "spokenLanguage",
   "type": "start"}, "participantSkypeToken": ""}` (a call's title "Call with <name>", a meeting's its own, with
-  `meetingOrganizer`); `200` `{"CorrelationId"}`. Start transcription alone posts `"mode": "transcription",
-  "processingModes": ["realTimeTranscript"]` and a `…-Meeting Transcript` file, and opens the transcript pane. The bot's
-  `processingModes.recording` turns `Active` (`userId` the starter, `properties.recordVideo`), then
-  `realTimeTranscript`. The starter sees "Recording and transcription — Started by you. Let everyone know they're being
-  included. Privacy policy"; everyone the red dot by the duration. Stop asks "Stop recording and transcription?"
-  (Cancel, Stop) and posts `{"timestamp", "participantMri", "participantLegId", "action": "stop", "processingModes":
-  ["recording", "realTimeTranscript"], "participantSkypeToken": ""}` to the same link (the newest the roster named);
-  the bot stays, both modes `Inactive`, and "Recording and transcription have stopped. You stopped recording. If you
-  change your mind, you can start them again anytime." shows. A start after that goes straight to the command link. The
-  native client does the same (`CallAction::Record`, `CallAction::StopRecording`, the typed `CaptionWrite::record` and
-  `stop_recording`, each one attempt): the bot is invited as live captions invite it unless it is in the call already,
-  the start waits for its command link, and a refused start or stop says why in Teams' words ("Recording not started.
-  Your IT admin has disabled Recording." for `401`/`403`, "Recording cannot be started for this call." when the bot
-  couldn't join, "Something went wrong. Try to start recording again." otherwise; no refusal was captured, the lab
-  tenant records). Not offered: Audio only and Start transcription (their stop and the transcript pane weren't
-  captured), Show transcript. Run natively 2026-11-06 (lab a and b in their 1:1 call): a's start invited the bot,
+  `meetingOrganizer`); `200` `{"CorrelationId"}`. The bot's `processingModes.recording` turns `Active` (`userId` the
+  starter, `properties.recordVideo`), then `realTimeTranscript`. The starter sees "Recording and transcription —
+  Started by You. Let everyone know they're being included. Privacy policy"; everyone else "Started by <name>. By
+  attending this meeting, you agree to being included. Privacy policy"; everyone the red dot by the duration. Stop asks
+  "Stop recording and transcription?" (Cancel, Stop) and posts `{"timestamp", "participantMri", "participantLegId",
+  "action": "stop", "processingModes": ["recording", "realTimeTranscript"], "participantSkypeToken": ""}` to the same
+  link (the newest the roster named); the bot stays, both modes `Inactive` (the transcript's first, in its own roster
+  update), and "Recording and transcription have stopped. You stopped recording. If you change your mind, you can start
+  them again anytime." shows. A start after that goes straight to the command link.
+
+  **Start transcription** on its own (seen 2026-11-06, lab a ↔ b 1:1 call, a driving; the menu reads Start recording,
+  Start transcription, with Stop transcription and Show transcript (Hide transcript, checked, while it shows) under a
+  line once one ran) asks "What language is everyone speaking?" ("Select the correct language to ensure the accuracy of
+  features that process audio.", Spoken language, Cancel, Confirm, Close) every time it starts. Confirm invites the bot
+  as above when it isn't in the call, then posts the start with `"mode": "transcription", "processingModes":
+  ["realTimeTranscript"]` and the same `actionParameters` but no `recordingMode`, the language as `spokenLanguage` and
+  the file `<title>-<stamp>-Meeting Transcript`; `200` `{"CorrelationId"}`. The bot's `realTimeTranscript` turns
+  `Active` (`userId` the starter, `timestamp`, `properties.lastStartReason: "UserCommand"`); `userId` stays after a stop
+  (so does `recording`'s), only `state` tells whether it runs. Everyone sees "Transcription has started" ("Started by
+  You. Let everyone know…" to the starter, "Started by <name>. By attending this meeting…" to the rest, each with the
+  privacy policy) and a transcript mark left of the duration (no red dot); the starter's Transcript pane opens by
+  itself: its title with a translate button and Close, a bar "Follow the conversation better in real time by using live
+  captions." with "Switch to live captions" (live captions instead of the pane) and a Close, then "AI-generated content
+  may be incorrect" and a row per event, "<name> started transcription" and "<name> stopped transcription". Nobody spoke
+  in the run, so how the pane shows speech wasn't seen. Stop transcription asks "Stop transcription?" (Cancel, Stop)
+  and posts `{"timestamp", "participantMri", "participantLegId", "action": "stop", "mode": "transcription",
+  "processingModes": ["realTimeTranscript"], "participantSkypeToken": ""}`; "Transcription has stopped — If you change
+  your mind, you can start it again anytime." shows to everyone.
+
+  **Choose what to record.** Start recording while the transcription runs asks "Start recording" with one row, "Choose
+  what to record" (Video and audio, checked, or Audio only), Cancel and Confirm. Audio only posts `"mode": "recording",
+  "processingModes": ["recording"]`, the file `…-Meeting Recording`, `"recordingMode": "AudioOnly"` and no
+  `spokenLanguage`; the bot's `recording` turns `Active` with `properties.recordVideo: "False"` (`"True"` for video).
+  The notice reads "Audio recording and transcription" and the duration's mark is a microphone with a dot. Video and
+  audio there wasn't sent in the run: the native client sends the same shape with `"recordingMode": "Normal"`
+  (inferred). Stop recording while both run asks "Stop recording and transcription?" and posts the stop of both above;
+  both modes turn `Inactive`. Not seen: Stop transcription while a recording runs (the menu offers it; the native client
+  sends the transcription's stop), Stop recording while only a recording runs (it sends `"mode": "recording",
+  "processingModes": ["recording"]`, asking "Stop recording?"), and Audio only from "Start recording and
+  transcription"'s More options (it sends the start of both with `"recordingMode": "AudioOnly"`).
+
+  The native client does all of this (`CallAction::Record` with `audio_only`, `StopRecording`, `Transcribe`,
+  `StopTranscription`; the typed `CaptionWrite::record` and `stop_recording` with what they cover,
+  `teams_proto::captions::Processing`, each one attempt): a recording starts alone while the roster says a
+  transcription runs and with its transcript otherwise, and Stop recording stops both while it transcribes. The bot is
+  invited as live captions invite it unless it is in the call already, the start waits for its command link, and a
+  refused start or stop says why in Teams' words ("Recording not started. Your IT admin has disabled Recording." for
+  `401`/`403`, "Recording cannot be started for this call." when the bot couldn't join, "Something went wrong. Try to
+  start recording again." otherwise, a transcription's in the same words for transcription; no refusal was captured,
+  the lab tenant records). The roster's `realTimeTranscript` and `recordVideo` are read into
+  `MeetingState::transcribing` and `Recording::audio_only`. The transcription's start and stop and the audio-only
+  recording haven't run natively yet. The recording's ran natively 2026-11-06 (lab a and b in their 1:1 call): a's
+  start invited the bot,
   posted the start (`200`), both windows showed the notice and the red dot; a's stop (`200`) ended it on both. The
   transcript card came at once and `Call with AI2-<stamp>-Meeting Recording` about a minute after the stop, in the 1:1
   chat and its Shared tab; the chat's Recap tab lists only meeting recordings and this computer's caption transcripts,

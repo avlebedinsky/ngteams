@@ -55,6 +55,10 @@ impl Glyph {
     pub const LOCK: Self = Self(include_bytes!("../assets/icons/lock.svg"));
     pub const LOCK_OPEN: Self = Self(include_bytes!("../assets/icons/lock-open.svg"));
     pub const NOTES: Self = Self(include_bytes!("../assets/icons/notebook-text.svg"));
+    /// A call's transcript (Show transcript, a transcription's notices).
+    pub const CALL_TRANSCRIPT: Self = Self(include_bytes!("../assets/icons/square-text.svg"));
+    /// Start transcription, and the call's header while it transcribes.
+    pub const TRANSCRIBE: Self = Self(include_bytes!("../assets/icons/file-pen-line.svg"));
     pub const PAPERCLIP: Self = Self(include_bytes!("../assets/icons/paperclip.svg"));
     pub const PRINTER: Self = Self(include_bytes!("../assets/icons/printer.svg"));
     pub const SAVE: Self = Self(include_bytes!("../assets/icons/save.svg"));

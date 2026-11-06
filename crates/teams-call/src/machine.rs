@@ -2279,4 +2279,4 @@ mod captions;
 #[path = "meeting.rs"]
 mod meeting;
 pub(crate) use meeting::Meeting;
-pub use meeting::{MeetingState, RECORDER_MRI, Recording};
+pub use meeting::{MeetingState, RECORDER_MRI, Recording, Transcription};

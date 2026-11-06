@@ -55,6 +55,7 @@ mod invite;
 mod meeting;
 mod people_pane;
 mod recording;
+mod transcript;
 mod share;
 mod transfer;
 pub use transfer::Asking;
@@ -191,6 +192,8 @@ enum Pane {
     MeetingInfo,
     /// More → Settings → Call health ([`health`]).
     Health,
+    /// More → Record and transcribe → Show transcript.
+    Transcript,
 }
 
 /// What the call window shows (see the module docs). A GPUI entity, the window's root view.
@@ -515,6 +518,7 @@ impl CallStage {
             self.confirm_lock = false;
             self.record.dialog = None;
             self.record.confirm_stop = false;
+            self.record.confirm_stop_transcription = false;
             // the call's Mute notifications held them back only while it ran
             crate::notify::mute_in_call(false, cx);
             if let Some(tiles) = &mut self.tiles {
@@ -882,6 +886,7 @@ impl CallStage {
             let effects = self.effects_pane(active, palette, cx);
             let info = self.meeting_info_pane(active, title, palette, cx);
             let health = self.health_pane(palette, cx);
+            let transcript = self.transcript_pane(active, palette, cx);
             return div()
                 .size_full()
                 .flex()
@@ -891,6 +896,7 @@ impl CallStage {
                 .children(effects)
                 .children(info)
                 .children(health)
+                .children(transcript)
                 .into_any_element();
         }
         match (ended, ended.and_then(|ended| ended.check)) {

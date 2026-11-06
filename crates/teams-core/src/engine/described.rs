@@ -45,6 +45,8 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::CaptionLanguage { call, .. } => format!("call {} caption spoken language", call.get()),
         CallAction::Record { call, .. } => format!("call {} start recording", call.get()),
         CallAction::StopRecording { call } => format!("call {} stop recording", call.get()),
+        CallAction::Transcribe { call, .. } => format!("call {} start transcription", call.get()),
+        CallAction::StopTranscription { call } => format!("call {} stop transcription", call.get()),
         CallAction::Call { chat } => format!("a call from {chat}"),
         CallAction::TestCall { echo } => format!("the test call of {echo}"),
         CallAction::Join { chat } => format!("a join of the call in {chat}"),
@@ -208,12 +210,13 @@ fn plain(event: &Event) -> String {
 /// What a meeting shares, by kind: never its join link or passcode, nor who records.
 fn call_meeting(call: crate::CallId, state: &teams_call::MeetingState) -> String {
     format!(
-        "call {}: timer {:?}, locked {}, join info {}, recording {}",
+        "call {}: timer {:?}, locked {}, join info {}, recording {}, transcribing {}",
         call.get(),
         state.timer.as_ref().map(|timer| timer.state),
         state.locked,
         state.join.is_some(),
-        state.recording.is_some()
+        state.recording.is_some(),
+        state.transcribing.is_some()
     )
 }
 

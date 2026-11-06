@@ -1,7 +1,9 @@
-//! Recording and transcription (More → Record and transcribe → Start recording, and Stop recording), as the web client
-//! posts them to the recording bot's command link once the bot is in the call (`docs/protocol/calling.md`, "More of a
-//! running call"). The bot is invited as for captions ([`CaptionWrite::invite`]); its command link carries the
-//! account's recorder token only, as the web client sends it (no skypetoken).
+//! Recording and transcription (More → Record and transcribe → Start recording, Start transcription, and their stops),
+//! as the web client posts them to the recording bot's command link once the bot is in the call
+//! (`docs/protocol/calling.md`, "More of a running call"). The bot is invited as for captions
+//! ([`CaptionWrite::invite`]); its command link carries the account's recorder token only, as the web client sends it
+//! (no skypetoken). A command names what it starts or stops ([`Processing`]): the recording and its transcript
+//! together, or either alone.
 
 use serde_json::{Value, json};
 
@@ -10,14 +12,82 @@ use super::{
 };
 use crate::{CallContext, CallParticipant};
 
-/// What both captured recordings record: the recording and its transcript.
-const PROCESSING_MODES: [&str; 2] = ["recording", "realTimeTranscript"];
-
 /// The longest call title a recording's start names.
 const MAX_TITLE: usize = 256;
 
-/// What a recording's start names besides the call: its title, its organizer (a meeting's), the spoken language picked
-/// and when it starts.
+/// What a start or a stop of the recording bot covers, as the web client names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Processing {
+    /// The recording and its transcript together: Start recording while nothing runs, Stop recording while both run.
+    Both,
+    /// The recording alone: Start recording while the transcription runs already.
+    Recording,
+    /// The transcription alone: Start transcription, Stop transcription.
+    Transcript,
+}
+
+impl Processing {
+    /// Its `processingModes`.
+    fn modes(self) -> &'static [&'static str] {
+        match self {
+            Self::Both => &["recording", "realTimeTranscript"],
+            Self::Recording => &["recording"],
+            Self::Transcript => &["realTimeTranscript"],
+        }
+    }
+
+    /// Its `mode`, which a command for one of them names (one for both names none).
+    fn mode(self) -> Option<&'static str> {
+        match self {
+            Self::Both => None,
+            Self::Recording => Some("recording"),
+            Self::Transcript => Some("transcription"),
+        }
+    }
+
+    /// The command's body as a start and a stop share it: who asks, `action`, and what it covers.
+    fn body(self, from: &CallParticipant, action: &str) -> Value {
+        let mut body = json!({"timestamp":timestamp(),"participantMri":from.mri.as_str(),
+            "participantLegId":from.participant_id,"action":action});
+        if let Some(mode) = self.mode() {
+            body["mode"] = json!(mode);
+        }
+        body["processingModes"] = json!(self.modes());
+        body
+    }
+}
+
+/// What the account asks of the recording bot (More → Record and transcribe). Whether a start or a stop of the
+/// recording covers the transcription too follows from what the call's roster says runs
+/// (`teams_call::Calls::record_command`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordCommand {
+    /// Start recording: with its transcript while no transcription runs, alone while one does.
+    Record(RecordStart),
+    /// Start the transcription alone.
+    Transcribe(RecordStart),
+    /// Stop recording: with the transcription while it runs.
+    StopRecording,
+    /// Stop the transcription alone.
+    StopTranscription,
+}
+
+impl RecordCommand {
+    /// It starts something (else it stops something).
+    #[must_use]
+    pub fn starts(&self) -> bool {
+        matches!(self, Self::Record(_) | Self::Transcribe(_))
+    }
+
+    /// It is about the transcription alone.
+    #[must_use]
+    pub fn transcription(&self) -> bool {
+        matches!(self, Self::Transcribe(_) | Self::StopTranscription)
+    }
+}
+
+/// What a recording's or a transcription's start names besides the call: its title, its organizer (a meeting's), the
+/// spoken language picked, when it starts, and whether a recording records the audio alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordStart {
     /// The call's title as Teams names its recording: "Call with <name>" for a call, the meeting's title for a meeting.
@@ -28,6 +98,8 @@ pub struct RecordStart {
     pub language: String,
     /// When it starts, in local time as `YYYYMMDD_HHMMSS`, as the recording's file name has it.
     pub stamp: String,
+    /// The recording records the audio alone ("Choose what to record" → Audio only); a transcription ignores it.
+    pub audio_only: bool,
 }
 
 impl RecordStart {
@@ -53,7 +125,7 @@ fn stamp(value: &str) -> bool {
         })
 }
 
-/// The recorder's features, as both captured starts (and the bot's invitation) named them.
+/// The recorder's features, as every captured start (and the bot's invitation) named them.
 fn features() -> Value {
     json!({"enablePPTSharing":true,"intermediateLiveCaptions":false,"actionItemsEnabled":false,
         "enableEmailAndMeetingLanguageModel":true,"ceoSummit":false,"useUnmixedAudio":true,
@@ -61,9 +133,10 @@ fn features() -> Value {
 }
 
 impl CaptionWrite {
-    /// Starts recording and transcription on the recording bot's command link, as More → Record and transcribe →
-    /// Start recording's Confirm sends it: the recording saved to the account's OneDrive (`Recordings`, named
-    /// `<title>-<stamp>-Meeting Recording`), its transcript in `start.language`.
+    /// Starts recording, transcription or both (`what`) on the recording bot's command link, as More → Record and
+    /// transcribe → Start recording's or Start transcription's Confirm sends it: saved to the account's OneDrive
+    /// (`Recordings`, named `<title>-<stamp>-Meeting Recording`, or `…-Meeting Transcript` for a transcription alone).
+    /// A recording names what it records (`recordingMode`); a transcript names its spoken language.
     ///
     /// # Errors
     /// Rejects an actor without its participant leg, an invalid conversation, an unsupported language, a title with
@@ -73,31 +146,41 @@ impl CaptionWrite {
         link: &CaptionCommandLink,
         from: &CallParticipant,
         thread: &str,
-        start: &RecordStart,
+        (start, what): (&RecordStart, Processing),
     ) -> Result<Self, CaptionWriteError> {
         if !start.valid() {
             return Err(CaptionWriteError);
         }
         let mut write = Self::start(context, link, from, thread)?;
+        let file = if what == Processing::Transcript {
+            "Meeting Transcript"
+        } else {
+            "Meeting Recording"
+        };
         let mut parameters = json!({
             "recordingFeatures":features(),
             "recordingStorageSettings":[{"StorageType":"OnedriveForBusiness","StorageLocation":"Recordings",
-                "FileName":format!("{}-{}-Meeting Recording", start.title, start.stamp)}],
-            "correlationId":fresh_guid()?,"meetingTitle":start.title,"exchangeId":null,
-            "recordingMode":"Normal","spokenLanguage":start.language,"type":"start"
+                "FileName":format!("{}-{}-{file}", start.title, start.stamp)}],
+            "correlationId":fresh_guid()?,"meetingTitle":start.title,"exchangeId":null,"type":"start"
         });
+        if what != Processing::Transcript {
+            parameters["recordingMode"] = json!(if start.audio_only { "AudioOnly" } else { "Normal" });
+        }
+        if what != Processing::Recording {
+            parameters["spokenLanguage"] = json!(start.language);
+        }
         if let Some(organizer) = &start.organizer {
             parameters["meetingOrganizer"] = json!(organizer);
         }
         write.kind = CaptionWriteKind::Record;
-        write.body = json!({"timestamp":timestamp(),"participantMri":from.mri.as_str(),
-            "participantLegId":from.participant_id,"action":"start","processingModes":PROCESSING_MODES,
-            "actionParameters":parameters});
+        write.body = what.body(from, "start");
+        write.body["actionParameters"] = parameters;
         Ok(write)
     }
 
-    /// Stops the recording and its transcription, as Stop recording's "Stop recording and transcription?" → Stop
-    /// sends it. Anyone in the call may stop it, not only who started it.
+    /// Stops recording, transcription or both (`what`), as Stop recording's "Stop recording and transcription?" or
+    /// Stop transcription's "Stop transcription?" → Stop sends it. Anyone in the call may stop them, not only who
+    /// started them.
     ///
     /// # Errors
     /// Rejects an actor without its participant leg or an invalid conversation.
@@ -106,11 +189,11 @@ impl CaptionWrite {
         link: &CaptionCommandLink,
         from: &CallParticipant,
         thread: &str,
+        what: Processing,
     ) -> Result<Self, CaptionWriteError> {
         let mut write = Self::start(context, link, from, thread)?;
         write.kind = CaptionWriteKind::StopRecord;
-        write.body = json!({"timestamp":timestamp(),"participantMri":from.mri.as_str(),
-            "participantLegId":from.participant_id,"action":"stop","processingModes":PROCESSING_MODES});
+        write.body = what.body(from, "stop");
         Ok(write)
     }
 }
@@ -139,6 +222,7 @@ mod tests {
             organizer: None,
             language: "en-us".into(),
             stamp: "20261106_120144".into(),
+            audio_only: false,
         }
     }
 
@@ -146,13 +230,17 @@ mod tests {
         CaptionCommandLink::parse(COMMAND).unwrap()
     }
 
+    fn context() -> CallContext {
+        CallContext::new("00000000-0000-4000-8000-0000000000c1")
+    }
+
     #[test]
     fn start_names_the_recording_its_transcript_and_the_language() {
-        let context = CallContext::new("00000000-0000-4000-8000-0000000000c1");
-        let write = CaptionWrite::record(&context, &link(), &actor(), CHAT, &start()).unwrap();
+        let write = CaptionWrite::record(&context(), &link(), &actor(), CHAT, (&start(), Processing::Both)).unwrap();
         assert_eq!(write.kind(), CaptionWriteKind::Record);
         let body = write.bare_body();
         assert_eq!(body["action"], "start");
+        assert!(body.get("mode").is_none(), "a start of both names no mode");
         assert_eq!(body["processingModes"], json!(["recording", "realTimeTranscript"]));
         assert_eq!(body["participantLegId"], "00000000-0000-4000-8000-0000000000e2");
         let parameters = &body["actionParameters"];
@@ -167,29 +255,90 @@ mod tests {
         );
         assert_eq!(write.url().as_str(), COMMAND);
         assert!(!format!("{write:?}").contains("Lab B"));
-
-        let organized = RecordStart {
-            organizer: Some("Lab A".into()),
-            ..start()
-        };
-        let write = CaptionWrite::record(&context, &link(), &actor(), CHAT, &organized).unwrap();
-        assert_eq!(write.bare_body()["actionParameters"]["meetingOrganizer"], "Lab A");
     }
 
     #[test]
-    fn stop_stops_both_and_names_nothing_else() {
-        let context = CallContext::new("00000000-0000-4000-8000-0000000000c1");
-        let write = CaptionWrite::stop_recording(&context, &link(), &actor(), CHAT).unwrap();
-        assert_eq!(write.kind(), CaptionWriteKind::StopRecord);
+    fn a_meeting_s_start_names_its_organizer_and_the_audio_alone() {
+        let organized = RecordStart {
+            organizer: Some("Lab A".into()),
+            audio_only: true,
+            ..start()
+        };
+        let write = CaptionWrite::record(&context(), &link(), &actor(), CHAT, (&organized, Processing::Both)).unwrap();
+        let parameters = &write.bare_body()["actionParameters"];
+        assert_eq!(parameters["meetingOrganizer"], "Lab A");
+        assert_eq!(parameters["recordingMode"], "AudioOnly");
+    }
+
+    #[test]
+    fn a_transcription_alone_names_its_language_and_its_transcript_file() {
+        let write =
+            CaptionWrite::record(&context(), &link(), &actor(), CHAT, (&start(), Processing::Transcript)).unwrap();
         let body = write.bare_body();
-        assert_eq!(body["action"], "stop");
-        assert_eq!(body["processingModes"], json!(["recording", "realTimeTranscript"]));
-        assert!(body.get("actionParameters").is_none());
+        assert_eq!(body["mode"], "transcription");
+        assert_eq!(body["processingModes"], json!(["realTimeTranscript"]));
+        let parameters = &body["actionParameters"];
+        assert!(
+            parameters.get("recordingMode").is_none(),
+            "a transcript records nothing"
+        );
+        assert_eq!(parameters["spokenLanguage"], "en-us");
+        assert_eq!(
+            parameters["recordingStorageSettings"][0]["FileName"],
+            "Call with Lab B-20261106_120144-Meeting Transcript"
+        );
+    }
+
+    #[test]
+    fn a_recording_beside_a_running_transcription_names_what_it_records_and_no_language() {
+        let audio = RecordStart {
+            audio_only: true,
+            ..start()
+        };
+        let write = CaptionWrite::record(&context(), &link(), &actor(), CHAT, (&audio, Processing::Recording)).unwrap();
+        let body = write.bare_body();
+        assert_eq!(body["mode"], "recording");
+        assert_eq!(body["processingModes"], json!(["recording"]));
+        let parameters = &body["actionParameters"];
+        assert_eq!(parameters["recordingMode"], "AudioOnly");
+        assert!(parameters.get("spokenLanguage").is_none());
+        assert_eq!(
+            parameters["recordingStorageSettings"][0]["FileName"],
+            "Call with Lab B-20261106_120144-Meeting Recording"
+        );
+    }
+
+    #[test]
+    fn stop_stops_what_it_names_and_names_nothing_else() {
+        for (what, mode, modes) in [
+            (Processing::Both, None, json!(["recording", "realTimeTranscript"])),
+            (Processing::Recording, Some("recording"), json!(["recording"])),
+            (
+                Processing::Transcript,
+                Some("transcription"),
+                json!(["realTimeTranscript"]),
+            ),
+        ] {
+            let write = CaptionWrite::stop_recording(&context(), &link(), &actor(), CHAT, what).unwrap();
+            assert_eq!(write.kind(), CaptionWriteKind::StopRecord);
+            let body = write.bare_body();
+            assert_eq!(body["action"], "stop");
+            assert_eq!(body.get("mode").and_then(Value::as_str), mode);
+            assert_eq!(body["processingModes"], modes);
+            assert!(body.get("actionParameters").is_none());
+        }
+    }
+
+    #[test]
+    fn a_command_says_what_it_starts_or_stops() {
+        assert!(RecordCommand::Record(start()).starts());
+        assert!(RecordCommand::Transcribe(start()).starts() && RecordCommand::Transcribe(start()).transcription());
+        assert!(!RecordCommand::StopRecording.starts() && !RecordCommand::StopRecording.transcription());
+        assert!(RecordCommand::StopTranscription.transcription());
     }
 
     #[test]
     fn start_refuses_what_the_web_client_never_sends() {
-        let context = CallContext::new("00000000-0000-4000-8000-0000000000c1");
         for bad in [
             RecordStart {
                 language: "xx-xx".into(),
@@ -212,11 +361,11 @@ mod tests {
                 ..start()
             },
         ] {
-            assert!(CaptionWrite::record(&context, &link(), &actor(), CHAT, &bad).is_err());
+            assert!(CaptionWrite::record(&context(), &link(), &actor(), CHAT, (&bad, Processing::Both)).is_err());
         }
         let mut legless = actor();
         legless.participant_id = None;
-        assert!(CaptionWrite::record(&context, &link(), &legless, CHAT, &start()).is_err());
-        assert!(CaptionWrite::stop_recording(&context, &link(), &legless, CHAT).is_err());
+        assert!(CaptionWrite::record(&context(), &link(), &legless, CHAT, (&start(), Processing::Both)).is_err());
+        assert!(CaptionWrite::stop_recording(&context(), &link(), &legless, CHAT, Processing::Both).is_err());
     }
 }

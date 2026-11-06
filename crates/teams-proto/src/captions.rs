@@ -4,7 +4,7 @@
 use std::fmt;
 
 mod record;
-pub use record::RecordStart;
+pub use record::{Processing, RecordCommand, RecordStart};
 
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
@@ -122,9 +122,9 @@ pub enum CaptionWriteKind {
     Invite,
     Start,
     Language,
-    /// Start recording and transcription ([`CaptionWrite::record`]).
+    /// Start recording, transcription or both ([`CaptionWrite::record`]).
     Record,
-    /// Stop recording and transcription ([`CaptionWrite::stop_recording`]).
+    /// Stop recording, transcription or both ([`CaptionWrite::stop_recording`]).
     StopRecord,
 }
 
