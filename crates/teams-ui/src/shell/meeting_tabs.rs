@@ -4,6 +4,9 @@
 //! Transcript chip, its recording's thumbnail). Each tab's view is made when first shown and kept while its chat is;
 //! another chat opens on Chat.
 //!
+//! Any other chat has the same tabs while it holds calls' captions saved on this computer ([`crate::call_transcript`],
+//! shown in its Recap), as Teams shows a call's recap in its chat.
+//!
 //! Teams' other tabs are left out: Q&A, the Meeting Whiteboard, Attendance and Breakout Rooms are apps of their own
 //! (Viva Engage, Whiteboard's canvas, the organizer's reports) the app has no reach to, and "+" adds an app to the
 //! meeting.
@@ -110,10 +113,21 @@ impl Shell {
         }
     }
 
+    /// Whether chat `id` has the tabs: a meeting's chat, or a chat holding calls' captions saved on this computer
+    /// (or on another tab than Chat, so the way back stays).
+    fn has_tabs(&self, id: &str, cx: &App) -> bool {
+        system_message::is_meeting_chat(id)
+            || self.meeting_tabs.shown != ChatTab::Chat
+            || self
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.read(cx).conversation() == id && !chat.read(cx).saved_transcripts().is_empty())
+    }
+
     /// Shows `tab` of the meeting chat shown, its view made when first shown.
     pub fn show_chat_tab(&mut self, tab: ChatTab, window: &mut Window, cx: &mut Context<Self>) {
         let Main::Chat(id) = &self.main else { return };
-        if !system_message::is_meeting_chat(id) {
+        if !self.has_tabs(id, cx) {
             return;
         }
         let id = id.clone();
@@ -167,6 +181,14 @@ impl Shell {
         });
     }
 
+    /// A call's end row's Transcript chip: the Recap tab, at the chat's call captions saved on this computer by `id`.
+    pub fn open_saved_transcript(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_chat_tab(ChatTab::Recap, window, cx);
+        if let Some(recap) = &self.meeting_tabs.recap {
+            recap.update(cx, |recap, cx| recap.show_saved(id, cx));
+        }
+    }
+
     /// The chat's name as the list has it.
     fn meeting_title(&self, id: &str, cx: &App) -> SharedString {
         self.list
@@ -177,7 +199,7 @@ impl Shell {
 
     /// The header's tabs of a meeting chat; none for any other chat.
     pub(super) fn meeting_tab_bar(&self, id: &str, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !system_message::is_meeting_chat(id) {
+        if !self.has_tabs(id, cx) {
             return None;
         }
         let shown = self.meeting_tabs.shown;

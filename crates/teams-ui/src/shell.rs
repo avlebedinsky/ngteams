@@ -370,7 +370,7 @@ impl Shell {
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
-        let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
+        let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, &settings, cx);
         let focus = Self::focused(window, cx);
         let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
@@ -566,8 +566,11 @@ impl Shell {
         models: &Models,
         list: &Entity<ChatList>,
         trace: &Arc<ViewTrace>,
+        settings: &Entity<SettingsModel>,
         cx: &mut Context<Self>,
     ) -> (Entity<CallBar>, Subscription) {
+        // the account's calls' captions saved on this computer, as the settings ask
+        crate::call_transcript::follow(core, &models.calls, settings, trace, cx);
         let (core, list, trace, calls) = (Arc::clone(core), list.clone(), Arc::clone(trace), models.calls.clone());
         let call_bar = cx.new(|cx| CallBar::new(core, calls, list, trace, cx));
         // a call up, rung or ended: the header's call button follows
@@ -2109,6 +2112,7 @@ impl Shell {
             }
             ChatViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
             ChatViewEvent::OpenRecap { recording, open } => this.open_recap(recording.clone(), *open, window, cx),
+            ChatViewEvent::OpenSavedTranscript(id) => this.open_saved_transcript(*id, window, cx),
             // a chat has no channel's thread or meeting card
             ChatViewEvent::Action { .. } | ChatViewEvent::OpenThread { .. } | ChatViewEvent::EditMeeting { .. } => {}
         })

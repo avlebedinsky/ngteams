@@ -156,10 +156,21 @@ impl ChatView {
                 .event_line(item, line, None, palette)
                 .debug_selector(selector)
                 .into_any_element(),
-            Body::TimedEvent(line) => self
-                .event_line(item, line, Some(time_of_day(item.arrival_time, cycle)), palette)
-                .debug_selector(selector)
-                .into_any_element(),
+            Body::TimedEvent(line) => {
+                let line = self
+                    .event_line(item, line, Some(time_of_day(item.arrival_time, cycle)), palette)
+                    .debug_selector(selector);
+                match self.saved_chip(item, palette, cx) {
+                    Some(chip) => div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(line)
+                        .child(chip)
+                        .into_any_element(),
+                    None => line.into_any_element(),
+                }
+            }
             Body::MeetingEnded(end) => {
                 let line = self
                     .event_line(item, &end.line, Some(time_of_day(item.arrival_time, cycle)), palette)
@@ -168,12 +179,14 @@ impl ChatView {
                     .recap
                     .as_ref()
                     .map(|recap| self.recap_card(item, recap, palette, cx));
+                let saved = self.saved_chip(item, palette, cx);
                 div()
                     .w_full()
                     .flex()
                     .flex_col()
                     .child(line)
                     .children(recap)
+                    .children(saved)
                     .into_any_element()
             }
             Body::Card(card) => event_card(item, card, &self.conversation, palette, cycle),

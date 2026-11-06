@@ -16,7 +16,12 @@ opens people search results as chats, and keeps unread badges in sync with read 
 keeps its existing file references and cards. Channel menus provide management, notification and section
 preferences, email and workflow actions. Calls and meetings support Teams
 live captions and spoken-language controls (Alt+Shift+C); caption text stays in memory and clears on hide or call
-end. Captions can be translated on this computer ("Translate to" in the caption settings) by Claude Code or the Codex
+end, unless Settings → Calls → "Save live captions of every call" is on: then every call's captions are turned on
+(their pane stays as the user has it) and saved in the store as the call's transcript, with nothing sent to Teams
+or shown to the others. A saved transcript is linked from its call's end row in the chat (a row of the app's own for a 1:1
+call, which Teams posts none for; "Saved on this computer")
+and opens in the chat's Recap tab with search, .vtt download, the AI summary and Delete transcript; Teams' own
+transcript of the same call wins. Captions can be translated on this computer ("Translate to" in the caption settings) by Claude Code or the Codex
 CLI, with any model the tool lists or one typed (by default Claude Haiku or GPT-6-Luna; Settings → Calls → Captions);
 the caption text then goes to that tool and its provider. A chat or channel can be read and written in another
 language (the header's translation button): its messages are shown translated by the same tools (Settings → General

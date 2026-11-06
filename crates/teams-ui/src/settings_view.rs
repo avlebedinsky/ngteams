@@ -16,8 +16,8 @@
 //!   the shell: [`SettingsViewEvent::MakeTestCall`]; offered while no call is up or rings on any account, the calling
 //!   endpoint is registered and the app isn't read-only, else said why), the calls' video switch ("Video in
 //!   calls"), and the camera's video effects (blur, a picture behind the person) with their self-preview
-//!   ([`crate::effects::EffectsPicker`], made while the page shows and dropped as it goes, its preview with it), then
-//!   the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
+//!   ([`crate::effects::EffectsPicker`], made while the page shows and dropped as it goes, its preview with it),
+//!   "Save live captions of every call" ([`crate::call_transcript`]), then the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
 //!   the same control ([`ai_picker::AiPicker`]).
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
 //!
@@ -888,6 +888,18 @@ impl SettingsView {
         if self.shows_effects(cx) {
             groups.push(self.video_effects(palette, cx));
         }
+        groups.push(group(
+            Some("Live captions"),
+            vec![row(
+                "Save live captions of every call",
+                Some(SAVE_CAPTIONS_NOTE),
+                self.switch("save-call-captions", settings.save_call_captions, |settings, on| {
+                    settings.save_call_captions = on;
+                }),
+                palette,
+            )],
+            palette,
+        ));
         groups.extend(self.ai_pickers(cx).into_iter().map(IntoElement::into_any_element));
         groups
     }
@@ -1169,6 +1181,10 @@ fn level_label(level: LogLevel) -> &'static str {
 }
 
 /// A line under a row, in `color`, its test selector `selector`.
+/// What "Save live captions of every call" does, under it.
+pub const SAVE_CAPTIONS_NOTE: &str = "Turns captions on in every call and saves them on this computer as the call's \
+                                      transcript, with its AI summary. Teams and the others in the call see nothing.";
+
 fn caption(selector: &'static str, color: u32) -> gpui::Div {
     div()
         .debug_selector(move || selector.to_owned())

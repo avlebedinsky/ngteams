@@ -21,6 +21,10 @@
 //!   paragraphs that hold its words ("1/3", Enter or the arrows go on, the match highlighted); Download saves the
 //!   `WebVTT` as Teams' "Download as .vtt" does. Its cues are also the recording's captions (the player's CC menu,
 //!   named by the transcript's language as its item's transcripts give it), synced to where it plays.
+//! - **Calls' captions saved on this computer** ([`crate::call_transcript`]): each saved transcript of the chat's calls
+//!   is a part of its own, marked "Saved on this computer", its transcript and AI summary as a Teams transcript's
+//!   (`local`), with Delete transcript in More options. Teams' own transcript of the same time wins; a chat that isn't
+//!   a meeting's shows its saved transcripts alone (Teams has no recap of it to read).
 //! - **Its states**: a spinner while the recap or a transcript is read; one that can't be read says so and offers to try
 //!   again, or Teams on the web; a meeting that left nothing says so.
 //!
@@ -49,8 +53,10 @@ use teams_proto::chat::SharedFile;
 use teams_proto::recap::{RecapPart, recap_link, recap_parts};
 use teams_proto::transcript::{Cue, Turn, read_vtt};
 
+mod local;
 mod summary;
 
+pub use local::{DELETE_ASK, DELETED, SAVED_NOTICE};
 pub use summary::{COPIED, EMPTY_TRANSCRIPT, NO_TRANSCRIPT, SENT, SUMMARY_FAILED};
 
 use crate::bridge::Core;
@@ -167,6 +173,8 @@ pub struct RecapView {
     summaries: HashMap<String, (Entity<RecapSummary>, Subscription)>,
     summary_scroll: ScrollHandle,
     sending: Option<Post>,
+    /// The chat's calls' captions saved on this computer, as last read, and Teams' own parts they were merged with.
+    local: local::Local,
 }
 
 impl RecapView {
@@ -212,6 +220,7 @@ impl RecapView {
             summaries: HashMap::new(),
             summary_scroll: ScrollHandle::new(),
             sending: None,
+            local: local::Local::follow(cx),
         };
         view.read(cx);
         view.read_files(cx);
@@ -281,23 +290,29 @@ impl RecapView {
 
     /// Reads the meeting's contents (again).
     pub fn read(&mut self, cx: &mut Context<Self>) {
-        // the recording shown: still the one shown once the recap is read again, wherever its part went
-        let shown = self.part().and_then(|part| part.recording.clone());
+        // the recording (or saved transcript) shown: still the one shown once the recap is read again, wherever its part
+        // went
+        let shown = self.part().and_then(shown_key);
         self.contents = Contents::Reading;
         // a recording's file that couldn't be read is read again with the recap
         self.recording_files.retain(|_, read| !matches!(read, FileRead::Failed));
-        let reply = self.core.meeting_contents(self.conversation.clone());
+        // a chat that isn't a meeting's has no recap at Teams: its saved transcripts alone
+        let reply = crate::system_message::is_meeting_chat(&self.conversation)
+            .then(|| self.core.meeting_contents(self.conversation.clone()));
+        let saved = self.core.call_transcripts(self.conversation.clone());
         self.reading = Some(cx.spawn(async move |this, cx| {
-            let answer = reply.await;
+            let answer = match reply {
+                Some(reply) => reply.await.map(|contents| recap_parts(&contents)),
+                None => Ok(Vec::new()),
+            };
+            let saved = saved.await.unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
-                this.contents = match answer {
-                    Ok(contents) => Contents::Read(recap_parts(&contents)),
-                    Err(_) => Contents::Failed,
-                };
+                this.contents = this.local.merge(answer.ok(), saved, this.core.me());
                 this.settle_parts(shown.as_deref(), cx);
                 if let Some(recording) = this.wanted.take() {
                     this.show_recording(recording, cx);
                 }
+                this.show_wanted_saved(cx);
                 if std::mem::take(&mut this.play_wanted) {
                     this.play_when_shown(cx);
                 }
@@ -316,7 +331,7 @@ impl RecapView {
     fn settle_parts(&mut self, shown: Option<&str>, cx: &mut Context<Self>) {
         let parts = self.parts().unwrap_or_default();
         let recordings: Vec<String> = parts.iter().filter_map(|part| part.recording.clone()).collect();
-        let at = shown.and_then(|link| parts.iter().position(|part| part.recording.as_deref() == Some(link)));
+        let at = shown.and_then(|key| parts.iter().position(|part| shown_key(part).as_deref() == Some(key)));
         let count = parts.len();
         self.players.retain(|link, _| recordings.contains(link));
         if let Some(at) = at {
@@ -440,6 +455,10 @@ impl RecapView {
             return;
         }
         self.transcripts.insert(location.clone(), Read::Reading);
+        if let Some(id) = crate::call_transcript::local_id(&location) {
+            self.read_saved(location, id, cx);
+            return;
+        }
         self.read_language(&location, cx);
         let reply = self.core.meeting_transcript(location.clone());
         cx.spawn(async move |this, cx| {
@@ -453,17 +472,22 @@ impl RecapView {
                         transcript,
                         cues: cues.into(),
                     });
-                this.transcripts.insert(location, read);
-                this.caption_players(cx);
-                // a search asked before the transcript came
-                if !this.query.is_empty() && this.search.is_none() {
-                    let query = this.query.clone();
-                    this.find(&query);
-                }
-                cx.notify();
+                this.transcript_read(location, read, cx);
             });
         })
         .detach();
+    }
+
+    /// The transcript at `location` read (or not).
+    fn transcript_read(&mut self, location: String, read: Read, cx: &mut Context<Self>) {
+        self.transcripts.insert(location, read);
+        self.caption_players(cx);
+        // a search asked before the transcript came
+        if !self.query.is_empty() && self.search.is_none() {
+            let query = self.query.clone();
+            self.find(&query);
+        }
+        cx.notify();
     }
 
     /// Reads the language of the transcript at `location` (once): what its captions are called.
@@ -822,6 +846,7 @@ impl RecapView {
             .px_3()
             .pb_3()
             .child(top)
+            .children(self.delete_confirmation(palette, cx))
             .children(self.download_rows(palette, cx))
             .children(self.saving.then(|| {
                 div()
@@ -881,6 +906,7 @@ impl RecapView {
             .gap_3()
             .child(session)
             .children(tabs)
+            .children(self.shows_saved().then(|| local::saved_mark(palette)))
             .child(div().flex_1())
             .children(self.actions(cx))
             .into_any_element()
@@ -929,6 +955,9 @@ impl RecapView {
 
     /// Share, Watch in browser (a recorded part) and More options.
     fn actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.shows_saved() {
+            return Self::saved_actions(cx);
+        }
         let mut actions = Vec::new();
         let link = self.link();
         if let Some(link) = link.clone() {
@@ -1294,16 +1323,21 @@ impl RecapView {
     /// The transcript's rows: the note, who started it, each turn, and for a transcript alone who stopped it.
     fn transcript_rows(&self, turns: &[Turn], palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let who = self.organizer.clone().unwrap_or_else(|| "The organizer".to_owned());
-        let only_transcript = self.part().is_some_and(|part| part.recording.is_none());
-        let mut rows: Vec<AnyElement> = vec![
-            event_row("recap-ai-notice", Glyph::INFO, AI_NOTICE.to_owned(), palette),
-            event_row(
-                "recap-started",
-                Glyph::TRANSCRIPT,
-                format!("{who} started transcription"),
-                palette,
-            ),
-        ];
+        let saved = self.shows_saved();
+        let only_transcript = !saved && self.part().is_some_and(|part| part.recording.is_none());
+        let mut rows: Vec<AnyElement> = if saved {
+            local::notice_rows(palette)
+        } else {
+            vec![
+                event_row("recap-ai-notice", Glyph::INFO, AI_NOTICE.to_owned(), palette),
+                event_row(
+                    "recap-started",
+                    Glyph::TRANSCRIPT,
+                    format!("{who} started transcription"),
+                    palette,
+                ),
+            ]
+        };
         for (index, turn) in turns.iter().enumerate() {
             rows.extend(self.turn_rows(index, turn, palette, cx));
         }
@@ -1379,6 +1413,11 @@ impl RecapView {
         });
         std::iter::once(header.into_any_element()).chain(paragraphs).collect()
     }
+}
+
+/// What a part is known by across a read again: its recording, else its transcript.
+fn shown_key(part: &RecapPart) -> Option<String> {
+    part.recording.clone().or_else(|| part.transcript.clone())
 }
 
 /// A paragraph's words, the query's matches highlighted (the one shown now, `current`, strongly).

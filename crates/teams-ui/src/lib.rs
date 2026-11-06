@@ -80,6 +80,7 @@ pub mod calendar_view;
 pub mod call_alert;
 mod call_lobby;
 pub mod call_stage;
+pub mod call_transcript;
 pub mod call_view;
 pub mod call_window;
 pub mod calls;

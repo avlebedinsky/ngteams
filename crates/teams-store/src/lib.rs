@@ -19,6 +19,7 @@
 //!   the events it overlaps (schema 16);
 //! - [`translations`]: chats translated on this computer, each message's translation by its id, version and language,
 //!   and the account's own messages as written when they were sent translated (schema 20);
+//! - [`call_transcripts`]: calls' live captions saved on this computer, a transcript per call by its chat (schema 21);
 //! - [`schema`]: the migrations, applied in order on open.
 //!
 //! Every versioned write is an upsert that never lets an older version overwrite a newer one, so a Trouter delivery
@@ -28,6 +29,7 @@
 //! M1 Task 11 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
 
 pub mod calendar;
+pub mod call_transcripts;
 pub mod conversations;
 mod file;
 pub mod messages;
@@ -49,6 +51,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 pub use calendar::StoredEvent;
+pub use call_transcripts::{CallTranscript, TranscriptLine};
 pub use conversations::{Conversation, ConversationKind, Forgotten, ForgottenThread, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange, counts_unread};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};

@@ -637,8 +637,11 @@ impl CallStage {
 
     /// Hands the captions shown, and the call's title and people, to the translation.
     fn translate(&self, live: Option<&ActiveCall>, cx: &mut Context<Self>) {
-        let captions = self.calls.read(cx).captions();
+        let calls = self.calls.read(cx);
+        let captions = calls.captions();
+        // captions that run only for the saved transcript (their pane hidden) aren't translated
         let showing = live.is_some()
+            && calls.captions_shown()
             && matches!(
                 captions.phase,
                 teams_core::CaptionPhase::On | teams_core::CaptionPhase::Starting

@@ -139,7 +139,7 @@ impl ChannelView {
                 message: message.clone(),
             }),
             ChatViewEvent::CreateWorkflows(message) => cx.emit(ChannelViewEvent::CreateWorkflows(message.clone())),
-            ChatViewEvent::Action { .. } | ChatViewEvent::OpenRecap { .. } => {}
+            ChatViewEvent::Action { .. } | ChatViewEvent::OpenRecap { .. } | ChatViewEvent::OpenSavedTranscript(_) => {}
         })
     }
 

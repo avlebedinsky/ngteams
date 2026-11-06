@@ -339,6 +339,9 @@ pub struct Settings {
     pub log_level: LogLevel,
     /// Calls carry video ("Video in calls"); off, a call's media starts no video and the codec isn't used.
     pub video_calls: bool,
+    /// Every call's live captions are turned on and saved on this computer as its transcript ("Save live captions of
+    /// every call", [`crate::call_transcript`]); off by default. Teams and the call's other people see nothing of it.
+    pub save_call_captions: bool,
     /// The calls' microphone by its device name; `None` follows the system's default.
     pub microphone: Option<String>,
     /// The calls' speaker (and the ringtone's); `None` follows the system's default.
@@ -569,6 +572,7 @@ impl Default for Settings {
             manual_status: ManualStatus::default(),
             log_level: LogLevel::default(),
             video_calls: true,
+            save_call_captions: false,
             microphone: None,
             speaker: None,
             camera: None,
@@ -599,6 +603,7 @@ pub mod keys {
     pub const MANUAL_STATUS: &str = "manual_status";
     pub const LOG_LEVEL: &str = "log_level";
     pub const VIDEO_CALLS: &str = "video_calls";
+    pub const SAVE_CALL_CAPTIONS: &str = "save_call_captions";
     pub const MICROPHONE: &str = "microphone";
     pub const SPEAKER: &str = "speaker";
     pub const CAMERA: &str = "camera";
@@ -711,9 +716,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .and_then(LogLevel::parse)
                 .ok_or(bad(keys::LOG_LEVEL, "not one of error, warn, info, debug"))?;
         }
-        keys::VIDEO_CALLS => {
-            settings.video_calls = value.as_bool().ok_or(bad(keys::VIDEO_CALLS, "not true or false"))?;
-        }
+        keys::VIDEO_CALLS | keys::SAVE_CALL_CAPTIONS => take_call_switch(settings, key, value)?,
         keys::MICROPHONE | keys::SPEAKER | keys::CAMERA => take_device(settings, key, value)?,
         keys::VIDEO_EFFECT => take_video_effect(settings, value)?,
         keys::FOLLOW_SYSTEM_THEME
@@ -892,6 +895,20 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
     Ok(())
 }
 
+/// Takes a calls' switch: video in calls, or saving every call's captions.
+fn take_call_switch(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
+    let (key, switch) = if key == keys::VIDEO_CALLS {
+        (keys::VIDEO_CALLS, &mut settings.video_calls)
+    } else {
+        (keys::SAVE_CALL_CAPTIONS, &mut settings.save_call_captions)
+    };
+    *switch = value.as_bool().ok_or(Problem::BadValue {
+        key,
+        why: "not true or false",
+    })?;
+    Ok(())
+}
+
 /// Takes the local AI tools' settings: the language captions are translated into, the tool translating them, or the
 /// tool summarizing recaps.
 fn take_captions(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
@@ -998,13 +1015,15 @@ pub fn render(settings: &Settings) -> String {
     if let Some(chat) = &settings.selected_chat {
         table.insert(keys::SELECTED_CHAT.to_owned(), Value::String(chat.clone()));
     }
-    table.insert(keys::SEND_TYPING.to_owned(), Value::Boolean(settings.send_typing));
-    table.insert(
-        keys::SEND_READ_RECEIPTS.to_owned(),
-        Value::Boolean(settings.send_read_receipts),
-    );
-    table.insert(keys::SEND_PRESENCE.to_owned(), Value::Boolean(settings.send_presence));
-    table.insert(keys::VIDEO_CALLS.to_owned(), Value::Boolean(settings.video_calls));
+    for (key, on) in [
+        (keys::SEND_TYPING, settings.send_typing),
+        (keys::SEND_READ_RECEIPTS, settings.send_read_receipts),
+        (keys::SEND_PRESENCE, settings.send_presence),
+        (keys::VIDEO_CALLS, settings.video_calls),
+        (keys::SAVE_CALL_CAPTIONS, settings.save_call_captions),
+    ] {
+        table.insert(key.to_owned(), Value::Boolean(on));
+    }
     table.insert(
         keys::FIRST_RUN.to_owned(),
         Value::String(settings.first_run.key().to_owned()),

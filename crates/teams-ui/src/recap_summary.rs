@@ -612,6 +612,22 @@ pub fn keep(key: &str, made: &Made, dir: Option<&Path>, cx: &mut App) {
         .detach();
 }
 
+/// Forgets the summary kept by `key`: for the run, and its file in `dir` (its transcript was deleted).
+pub fn forget(key: &str, dir: Option<&Path>, cx: &mut App) {
+    if let Some(cache) = cx.try_global::<SummaryCache>()
+        && cache.memory.contains_key(key)
+    {
+        cx.default_global::<SummaryCache>().memory.remove(key);
+    }
+    let Some(dir) = dir else { return };
+    let file = file_of(dir, key);
+    cx.background_executor()
+        .spawn(async move {
+            let _ = std::fs::remove_file(file);
+        })
+        .detach();
+}
+
 fn write_private(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;

@@ -242,6 +242,8 @@ impl Inbox {
                 keys,
                 reply,
             } => give(reply, store.sent_originals(&conversation, &keys)),
+            Query::CallTranscripts(conversation, reply) => give(reply, store.call_transcripts(&conversation)),
+            Query::TranscriptLines(id, reply) => give(reply, store.transcript_lines(id)),
             Query::CalendarEvents {
                 start_ms,
                 end_ms,

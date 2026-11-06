@@ -13,8 +13,8 @@ use teams_core::{
     PictureBytes, Reply, SearchAnswer, SearchScope, Strip, Transient, TransientSent,
 };
 use teams_store::{
-    Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    ReadHorizon, SearchHit, SentOriginal, StoredTranslation, Team,
+    CallTranscript, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor,
+    Reaction, ReadHorizon, SearchHit, SentOriginal, StoredTranslation, Team, TranscriptLine,
 };
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
@@ -218,6 +218,79 @@ pub struct FakeCore {
     pub translations: Mutex<Vec<StoredTranslation>>,
     /// The account's own messages as written, kept when they were sent translated.
     pub sent_originals: Mutex<Vec<SentOriginal>>,
+    /// The calls' captions saved on this computer, as the store keeps them.
+    pub saved_calls: Mutex<SavedCalls>,
+}
+
+/// The calls' captions saved on this computer, as the store keeps them ([`teams_store::Store::open_call_transcript`]
+/// and the others): each transcript with its lines by utterance.
+#[derive(Default)]
+pub struct SavedCalls {
+    pub transcripts: Vec<CallTranscript>,
+    pub lines: HashMap<i64, Vec<TranscriptLine>>,
+}
+
+impl SavedCalls {
+    /// Carries `write` out as the store does; the transcript's id.
+    pub fn write(&mut self, write: teams_core::TranscriptWrite) -> i64 {
+        use teams_core::TranscriptWrite;
+        match write {
+            TranscriptWrite::Open {
+                conversation,
+                title,
+                at,
+                rejoin_ms,
+            } => {
+                let latest = self
+                    .transcripts
+                    .iter_mut()
+                    .filter(|kept| kept.conversation_id == conversation && kept.ended_at >= at - rejoin_ms)
+                    .max_by_key(|kept| (kept.ended_at, kept.id));
+                if let Some(kept) = latest {
+                    kept.ended_at = kept.ended_at.max(at);
+                    if kept.title.is_none() {
+                        kept.title = title;
+                    }
+                    return kept.id;
+                }
+                let id = self.transcripts.iter().map(|kept| kept.id).max().unwrap_or(0) + 1;
+                self.transcripts.push(CallTranscript {
+                    id,
+                    conversation_id: conversation,
+                    title,
+                    started_at: at,
+                    ended_at: at,
+                    lines: 0,
+                });
+                id
+            }
+            TranscriptWrite::Lines { id, lines } => {
+                let Some(kept) = self.transcripts.iter_mut().find(|kept| kept.id == id) else {
+                    return id;
+                };
+                let held = self.lines.entry(id).or_default();
+                for line in lines {
+                    kept.ended_at = kept.ended_at.max(line.ended_at);
+                    held.retain(|old| old.utterance != line.utterance);
+                    held.push(line);
+                }
+                held.sort_by_key(|line| (line.started_at, line.ended_at));
+                kept.lines = i64::try_from(held.len()).unwrap_or(i64::MAX);
+                id
+            }
+            TranscriptWrite::End { id, at } => {
+                if let Some(kept) = self.transcripts.iter_mut().find(|kept| kept.id == id) {
+                    kept.ended_at = kept.ended_at.max(at);
+                }
+                id
+            }
+            TranscriptWrite::Delete { id } => {
+                self.transcripts.retain(|kept| kept.id != id);
+                self.lines.remove(&id);
+                id
+            }
+        }
+    }
 }
 
 /// An explicit actor, with account A as the fixture's default. An explicit override keeps its exact value.
@@ -879,6 +952,29 @@ impl Core for FakeCore {
             let mut kept = locked(&self.sent_originals);
             kept.retain(|old| !(old.conversation_id == original.conversation_id && old.key == original.key));
             kept.push(original);
+        })
+    }
+
+    fn transcript(&self, write: teams_core::TranscriptWrite) -> Reply<i64> {
+        self.answer("transcript", || locked(&self.saved_calls).write(write))
+    }
+
+    fn call_transcripts(&self, conversation: String) -> Reply<Vec<CallTranscript>> {
+        self.answer("call_transcripts", || {
+            let mut listed: Vec<CallTranscript> = locked(&self.saved_calls)
+                .transcripts
+                .iter()
+                .filter(|kept| kept.conversation_id == conversation && kept.lines > 0)
+                .cloned()
+                .collect();
+            listed.sort_by_key(|kept| (kept.started_at, kept.id));
+            listed
+        })
+    }
+
+    fn transcript_lines(&self, id: i64) -> Reply<Vec<TranscriptLine>> {
+        self.answer("transcript_lines", || {
+            locked(&self.saved_calls).lines.get(&id).cloned().unwrap_or_default()
         })
     }
 

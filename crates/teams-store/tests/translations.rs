@@ -194,12 +194,12 @@ fn the_translations_migration_starts_with_none() -> Result<(), StoreError> {
     drop(with_chats(&dir)?);
     // the store as schema 19 left it
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
-    raw.execute_batch("DROP TABLE message_translations; DROP TABLE sent_originals; PRAGMA user_version = 19;")
+    raw.execute_batch("DROP TABLE message_translations; DROP TABLE sent_originals; DROP TABLE call_transcript_lines; DROP TABLE call_transcripts; PRAGMA user_version = 19;")
         .expect("back to schema 19");
     drop(raw);
     let store = Store::open(&store_path(&dir))?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 20);
+    assert_eq!(SCHEMA_VERSION, 21);
     assert!(store.translations(CHAT, "de", &["1".to_owned()])?.is_empty());
     assert!(store.sent_originals(CHAT, &["client-1".to_owned()])?.is_empty());
     Ok(())

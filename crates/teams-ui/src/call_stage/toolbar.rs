@@ -499,7 +499,7 @@ impl CallStage {
     fn more(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let stage = cx.weak_entity();
         let video = self.calls.read(cx).video().is_some();
-        let caption_visible = self.calls.read(cx).captions().phase != teams_core::CaptionPhase::Off;
+        let caption_visible = self.calls.read(cx).captions_shown();
         let caption_available = !self.core.read_only()
             && self
                 .live(cx)

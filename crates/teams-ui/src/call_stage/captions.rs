@@ -45,10 +45,10 @@ pub(super) fn more(
 
 impl CallStage {
     pub(super) fn caption_pane(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let state = self.calls.read(cx).captions().clone();
-        if state.phase == CaptionPhase::Off {
+        if !self.calls.read(cx).captions_shown() {
             return None;
         }
+        let state = self.calls.read(cx).captions().clone();
         let language_label = language_label(&state.spoken_language);
         let header = self.caption_header(palette, &state.spoken_language, cx);
         let status = Self::caption_status(&state, language_label, cx);

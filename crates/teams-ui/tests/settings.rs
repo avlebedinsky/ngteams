@@ -44,6 +44,7 @@ fn changed() -> Settings {
         manual_status: ManualStatus::DoNotDisturb,
         log_level: LogLevel::Debug,
         video_calls: false,
+        save_call_captions: true,
         microphone: Some("alsa_input.usb-headset".to_owned()),
         speaker: None,
         camera: Some("v4l2_camera".to_owned()),

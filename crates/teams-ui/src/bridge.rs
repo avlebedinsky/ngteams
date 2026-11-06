@@ -27,15 +27,15 @@ use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallId, ChannelDraft, ChannelMade, ChatListing, EngineHandle,
     EngineRequests, Event, EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable,
     MeetingAvailability, MeetingDetails, OwnStatus, Person, PictureBytes, Reply, SearchAnswer, SearchScope, Strip,
-    TeamChange, TeamMember, TeamWritten, Transient, TransientSent,
+    TeamChange, TeamMember, TeamWritten, TranscriptWrite, Transient, TransientSent,
 };
 use teams_proto::{
     AnalyticsPeriod, InstalledApp, JoinableTeam, ManagedChannel, OwnTeamView, PendingInvite, StoreApp, TagsRead,
     TeamAnalytics, TeamPerson, TeamPicture, TeamTemplateCard, TeamTemplateDetails, TeamWrite,
 };
 use teams_store::{
-    Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit,
-    SentOriginal, StoredTranslation, Team,
+    CallTranscript, Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon,
+    SearchHit, SentOriginal, StoredTranslation, Team, TranscriptLine,
 };
 use tokio::sync::oneshot;
 
@@ -178,6 +178,22 @@ pub trait Core: Send + Sync + 'static {
     fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
         let _ = original;
         Reply::ready(Ok(()))
+    }
+    /// Changes the calls' captions saved on this computer ([`crate::call_transcript`]): only the store changes, nothing
+    /// goes to Teams. Answers the transcript's id; a fake keeps nothing and answers 0.
+    fn transcript(&self, write: TranscriptWrite) -> Reply<i64> {
+        let _ = write;
+        Reply::ready(Ok(0))
+    }
+    /// The saved transcripts of the calls in `conversation`, the earliest first. A fake keeps none.
+    fn call_transcripts(&self, conversation: String) -> Reply<Vec<CallTranscript>> {
+        let _ = conversation;
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// A saved transcript's lines in the order they were said. A fake keeps none.
+    fn transcript_lines(&self, id: i64) -> Reply<Vec<TranscriptLine>> {
+        let _ = id;
+        Reply::ready(Ok(Vec::new()))
     }
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
     fn history_complete(&self, conversation: String) -> Reply<Option<bool>>;
@@ -463,6 +479,18 @@ impl Core for EngineRequests {
 
     fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
         EngineRequests::keep_sent_original(self, original)
+    }
+
+    fn transcript(&self, write: TranscriptWrite) -> Reply<i64> {
+        EngineRequests::transcript(self, write)
+    }
+
+    fn call_transcripts(&self, conversation: String) -> Reply<Vec<CallTranscript>> {
+        EngineRequests::call_transcripts(self, conversation)
+    }
+
+    fn transcript_lines(&self, id: i64) -> Reply<Vec<TranscriptLine>> {
+        EngineRequests::transcript_lines(self, id)
     }
 
     fn calendar_event(&self, id: String) -> Reply<FullEvent> {

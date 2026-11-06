@@ -5,7 +5,8 @@
 //! captions on, its speed menu at 1.5x, its settings and its caption settings open; Part 1's recording downloading,
 //! downloaded and failed), the Recap of a meeting transcribed and not recorded, and the Shared tab; Part 1's AI summary
 //! offered, being made, failed, made, and previewed before it is sent to the chat (made by a fake `claude`, or a
-//! made-up summary kept for the run).
+//! made-up summary kept for the run). A 1:1 chat's call captions saved on this computer: the Transcript chip under its
+//! call's end, its Recap (the transcript, its AI summary made, its Delete transcript confirmation).
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -44,7 +45,11 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 const CHILD_ENV: &str = "TEAMS_UI_RECAP_WINDOW_TEST";
 
 /// Each page and the themes it is shot in.
-const PAGES: [(&str, &[&str]); 20] = [
+const PAGES: [(&str, &[&str]); 24] = [
+    ("saved-chat", &[LIGHT_KEY, DARK_KEY]),
+    ("saved", &[LIGHT_KEY, DARK_KEY]),
+    ("saved-summary", &[LIGHT_KEY]),
+    ("saved-delete", &[LIGHT_KEY]),
     ("summary", &[LIGHT_KEY, DARK_KEY]),
     ("summary-offer", &[LIGHT_KEY, DARK_KEY]),
     ("summary-running", &[LIGHT_KEY]),
@@ -176,6 +181,136 @@ fn seed(core: &FakeCore) {
         favorites: None,
         empty: Vec::new(),
     };
+}
+
+/// The a–b chat (a 1:1 with Bo Lab): a few messages, then its call's end, whose captions are saved on this computer.
+const SAVED_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+const BO: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
+
+fn seed_saved(core: &FakeCore) {
+    let me = core.me().to_owned();
+    let minute = 60_000;
+    let ended = fixtures::START + 12 * minute;
+    locked(&core.conversations).push(teams_store::Conversation {
+        id: SAVED_CHAT.to_owned(),
+        kind: teams_store::ConversationKind::OneToOne,
+        topic: None,
+        version: 1,
+        last_activity: Some(ended + minute),
+    });
+    locked(&core.members).insert(
+        SAVED_CHAT.to_owned(),
+        vec![teams_store::Member::new(&me, None), teams_store::Member::new(BO, None)],
+    );
+    locked(&core.names).insert(BO.to_owned(), "Bo Lab".to_owned());
+    let message = |id: &str, sender: &str, kind: &str, content: &str, at: i64| teams_store::Message {
+        conversation_id: SAVED_CHAT.to_owned(),
+        id: id.to_owned(),
+        version: 1,
+        client_message_id: None,
+        sender: Some(sender.to_owned()),
+        sender_name: None,
+        message_type: kind.to_owned(),
+        content: content.to_owned(),
+        properties: None,
+        arrival_time: at,
+        compose_time: Some(at),
+        edit_time: None,
+        delete_time: None,
+    };
+    let call_end = format!(
+        "<ended/><partlist alt=\"\" count=\"2\"><part identity=\"{BO}\"><name>{BO}</name>\
+         <duration>600</duration></part><part identity=\"{me}\"><name>{me}</name><duration>600</duration></part>\
+         </partlist>"
+    );
+    locked(&core.messages).insert(
+        SAVED_CHAT.to_owned(),
+        vec![
+            message(
+                "s1",
+                BO,
+                "RichText/Html",
+                "<p>Got a minute for the release plan?</p>",
+                fixtures::START - minute,
+            ),
+            message(
+                "s2",
+                &me,
+                "RichText/Html",
+                "<p>Sure, calling you now.</p>",
+                fixtures::START - minute / 2,
+            ),
+            message("s3", BO, "Event/Call", &call_end, ended),
+            message(
+                "s4",
+                BO,
+                "RichText/Html",
+                "<p>Thanks, that settles it.</p>",
+                ended + minute,
+            ),
+        ],
+    );
+    seed_saved_transcript(core, &me);
+}
+
+/// The a–b call's captions saved on this computer: a's and Bo's lines over a minute.
+fn seed_saved_transcript(core: &FakeCore, me: &str) {
+    let minute = 60_000;
+    let ended = fixtures::START + 12 * minute;
+    let mut saved = locked(&core.saved_calls);
+    let id = saved.write(teams_core::TranscriptWrite::Open {
+        conversation: SAVED_CHAT.to_owned(),
+        title: None,
+        at: fixtures::START + 2 * minute,
+        rejoin_ms: 300_000,
+    });
+    let said = [
+        (
+            me,
+            "Ada Lab",
+            5,
+            "Hi Bo. Let's go through the release plan for Thursday.",
+        ),
+        (
+            me,
+            "Ada Lab",
+            12,
+            "The build passed overnight, so the only open item is the search fix.",
+        ),
+        (BO, "Bo Lab", 25, "I can finish the search fix by Wednesday afternoon."),
+        (
+            BO,
+            "Bo Lab",
+            34,
+            "Then we test playback on the second recording on Thursday morning.",
+        ),
+        (
+            me,
+            "Ada Lab",
+            48,
+            "Good. I'll write the release notes and send them to the team.",
+        ),
+        (
+            BO,
+            "Bo Lab",
+            61,
+            "Should we keep the old player behind a switch for a week?",
+        ),
+    ];
+    let lines = said
+        .iter()
+        .enumerate()
+        .map(|(index, (speaker, name, second, text))| teams_store::TranscriptLine {
+            utterance: format!("u{index}"),
+            speaker: Some((*speaker).to_owned()),
+            speaker_name: Some((*name).to_owned()),
+            started_at: fixtures::START + 2 * minute + second * 1_000,
+            ended_at: fixtures::START + 2 * minute + (second + 5) * 1_000,
+            text: (*text).to_owned(),
+        })
+        .collect();
+    saved.write(teams_core::TranscriptWrite::Lines { id, lines });
+    saved.write(teams_core::TranscriptWrite::End { id, at: ended });
 }
 
 /// A recording's poster: a made-up frame, as Graph's thumbnail of the recording would be.
@@ -366,6 +501,13 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
     }
     seed_download(&core, &page);
     seed_summary(&page, cx);
+    if page.starts_with("saved") {
+        seed_saved(&core);
+        if page == "saved-summary" {
+            let key = teams_ui::call_transcript::location(core.me(), 1);
+            teams_ui::recap_summary::keep(&key, &made_summary(), None, cx);
+        }
+    }
     let (events, received) = mpsc::unbounded_channel();
     let source = FakeEvents {
         events: received,
@@ -376,6 +518,8 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
     let bridge = cx.new(|cx| Bridge::start(source, shared, models.clone(), cx));
     let chat = if page == "transcript-only" {
         fixtures::TRANSCRIPT_ONLY
+    } else if page.starts_with("saved") {
+        SAVED_CHAT
     } else {
         fixtures::MEETING
     };
@@ -463,7 +607,7 @@ fn last(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
 /// Opens the page's tab.
 fn step(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
     let tab = match page {
-        "chat" => ChatTab::Chat,
+        "chat" | "saved-chat" => ChatTab::Chat,
         "shared" => ChatTab::Shared,
         _ => ChatTab::Recap,
     };
@@ -481,6 +625,15 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
             recap.step_match(false, cx);
         }
         "part-2" => recap.select_part(1, cx),
+        "saved" => recap.show_saved(1, cx),
+        "saved-summary" => {
+            recap.show_saved(1, cx);
+            recap.show_pane(teams_ui::recap_view::Pane::AiSummary, cx);
+        }
+        "saved-delete" => {
+            recap.show_saved(1, cx);
+            recap.ask_delete(cx);
+        }
         "summary-offer" => recap.show_pane(teams_ui::recap_view::Pane::AiSummary, cx),
         "summary-running" | "summary-failed" => recap.summarize(cx),
         "summary-preview" => recap.preview_summary(cx),

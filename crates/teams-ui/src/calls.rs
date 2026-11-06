@@ -470,6 +470,9 @@ pub enum Ask {
     /// Show or hide ephemeral live captions for this viewer.
     ToggleCaptions,
     Captions(bool),
+    /// Start (or stop) the call's live captions for its saved transcript alone, their pane left as the user has it
+    /// ([`crate::call_transcript`]): asked by the app, not the user.
+    RecordCaptions(bool),
     /// Shared meeting spoken language, confirmed in the caption settings.
     CaptionLanguage(String),
     /// Call the chat: its other member, or a group chat's members.
@@ -539,6 +542,7 @@ impl Ask {
     pub fn name(&self) -> &'static str {
         match self {
             Self::ToggleCaptions | Self::Captions(_) => "captions",
+            Self::RecordCaptions(_) => "record-captions",
             Self::CaptionLanguage(_) => "caption-language",
             Self::Call { .. } => "call",
             Self::TestCall => "test-call",
@@ -650,11 +654,23 @@ pub struct Refused {
     pub text: String,
 }
 
+/// The caption pane as the user shows it, and whether the captions are saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CaptionPane {
+    /// The user shows the pane (Show live captions), until the call ends or they hide it.
+    shown: bool,
+    /// The calls' captions are saved ("Save live captions of every call", [`crate::call_transcript`]): they keep
+    /// running while their pane is hidden.
+    saving: bool,
+}
+
 /// The calls' model (see the module docs). A GPUI entity in [`crate::Models`].
 #[derive(Debug, Default)]
 pub struct Calls {
     shown: bool,
     captions: teams_core::CallCaptions,
+    /// The caption pane as the user shows it, and whether the captions are saved.
+    pane: CaptionPane,
     echo: Option<Mri>,
     registered: bool,
     ringing: Option<IncomingCall>,
@@ -710,6 +726,57 @@ impl Calls {
     #[must_use]
     pub fn captions(&self) -> &teams_core::CallCaptions {
         &self.captions
+    }
+
+    /// Whether the caption pane shows: the captions aren't off and, while the calls' captions are saved, the user showed
+    /// it (captions that run for the saved transcript alone show nothing).
+    #[must_use]
+    pub fn captions_shown(&self) -> bool {
+        self.captions.phase != teams_core::CaptionPhase::Off && (self.pane.shown || !self.pane.saving)
+    }
+
+    /// Whether the user showed the caption pane (Show live captions) in the call up.
+    #[must_use]
+    pub fn caption_pane_asked(&self) -> bool {
+        self.pane.shown
+    }
+
+    /// Whether the calls' captions are saved ([`Self::set_saving_captions`]).
+    #[must_use]
+    pub fn saving_captions(&self) -> bool {
+        self.pane.saving
+    }
+
+    /// The calls' captions are saved (`on`), as the settings say: hiding their pane leaves them running.
+    pub fn set_saving_captions(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.pane.saving != on {
+            self.pane.saving = on;
+            cx.notify();
+        }
+    }
+
+    /// What a caption ask leaves the engine to do once the pane is shown or hidden as it asks: the captions turned on
+    /// or off, or nothing (`None`) when they already run for the saved transcript (shown) or keep running for it
+    /// (hidden). Any other ask is left as it is.
+    fn caption_pane_ask(&mut self, ask: Ask, cx: &mut Context<Self>) -> Option<Ask> {
+        let show = match ask {
+            Ask::ToggleCaptions => !self.captions_shown(),
+            Ask::Captions(show) => show,
+            _ => return Some(ask),
+        };
+        if self.call.is_none() {
+            return Some(Ask::Captions(show));
+        }
+        if self.pane.shown != show {
+            self.pane.shown = show;
+            cx.notify();
+        }
+        let running = matches!(
+            self.captions.phase,
+            teams_core::CaptionPhase::On | teams_core::CaptionPhase::Starting
+        );
+        let local = running && (show || self.pane.saving);
+        (!local).then_some(Ask::Captions(show))
     }
 
     /// Whether this build shows calls at all.
@@ -1144,6 +1211,7 @@ impl Calls {
     fn status(&mut self, call: CallId, status: &CallStatus) {
         if self.call.as_ref().is_none_or(|active| active.id != call) {
             self.captions = teams_core::CallCaptions::default();
+            self.pane.shown = false;
             self.call = Some(self.adopt(call));
             self.ended = None;
             self.refused = None;
@@ -1166,6 +1234,7 @@ impl Calls {
         }
         if let CallStatus::Ended(end) = status {
             self.captions = teams_core::CallCaptions::default();
+            self.pane.shown = false;
             active.check.failed = matches!(end, End::Failed(_));
             // a refusal during the call was shown in its bar: how it ended is what is told now; but the start's own
             // refusal (its media couldn't be set up, told as it ended) says why it never connected
@@ -1229,7 +1298,7 @@ impl Calls {
 
     /// The call action `ask` stands for now, or why there is none.
     fn caption_action(&self, ask: &Ask) -> Result<CallAction, &'static str> {
-        let hiding = matches!(ask, Ask::Captions(false))
+        let hiding = matches!(ask, Ask::Captions(false) | Ask::RecordCaptions(false))
             || (matches!(ask, Ask::ToggleCaptions) && self.captions.phase != teams_core::CaptionPhase::Off);
         let call = self
             .call
@@ -1241,7 +1310,7 @@ impl Calls {
                 call: call.id,
                 enabled: self.captions.phase == teams_core::CaptionPhase::Off,
             },
-            Ask::Captions(enabled) => CallAction::Captions {
+            Ask::Captions(enabled) | Ask::RecordCaptions(enabled) => CallAction::Captions {
                 call: call.id,
                 enabled: *enabled,
             },
@@ -1259,7 +1328,9 @@ impl Calls {
         }
         let busy = self.busy();
         match ask {
-            Ask::ToggleCaptions | Ask::Captions(_) | Ask::CaptionLanguage(_) => self.caption_action(ask),
+            Ask::ToggleCaptions | Ask::Captions(_) | Ask::RecordCaptions(_) | Ask::CaptionLanguage(_) => {
+                self.caption_action(ask)
+            }
             Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } | Ask::JoinMeeting { .. } | Ask::MeetNow { .. }
                 if busy =>
             {
@@ -1542,6 +1613,10 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
     }
     trace.record(&asked);
     log::info!("call: {} asked{}", ask.name(), logged_chat(&ask));
+    // the caption pane shown or hidden here; the captions themselves only when they don't run for the saved transcript
+    let Some(ask) = calls.update(cx, |calls, cx| calls.caption_pane_ask(ask, cx)) else {
+        return;
+    };
     let action = match calls.read(cx).action_for(&ask) {
         Ok(action) => action,
         Err(why) => {

@@ -141,6 +141,7 @@ use crate::{presence, presence_badge};
 
 pub mod channel;
 mod events;
+mod saved;
 
 use channel::{ChannelLooks, THREAD_EVENT};
 pub use channel::{MeetingCard, Place, Replies};
@@ -375,6 +376,9 @@ pub enum ChatViewEvent {
     /// A meeting chat's recap card's View recap, Transcript or thumbnail: the chat's Recap tab, at the card's recording
     /// (its sharing link) when the meeting was recorded, showing `open`.
     OpenRecap { recording: Option<String>, open: RecapOpen },
+    /// A call's end row's Transcript chip: the chat's call captions saved on this computer by that id
+    /// ([`crate::call_transcript`]), shown in the chat's Recap tab.
+    OpenSavedTranscript(i64),
     /// A channel post's "Reply in thread" or its replies' summary: its thread, opened beside the channel.
     OpenThread { post: String },
     /// A channel meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`),
@@ -967,6 +971,8 @@ pub struct ChatView {
     translated: (chat_translate::Shown, Subscription),
     /// The system messages as shown, and what they are worked out from.
     systems: Systems,
+    /// The chat's calls' captions saved on this computer, and the call end rows linking them.
+    saved: saved::Saved,
     /// How many times rich text was laid out.
     layouts: u64,
     /// How many times a message's content was parsed: a text message's HTML, or a system message's record (worked out
@@ -1148,6 +1154,7 @@ impl ChatView {
             translation,
             translated: (chat_translate::Shown::default(), observing_translation),
             systems: Systems::default(),
+            saved: saved::Saved::follow(cx),
             layouts: 0,
             parses: 0,
             items: Vec::new(),
@@ -1198,10 +1205,16 @@ impl ChatView {
             seeking: None,
             _subscriptions: subscriptions,
         };
-        view.kick(cx);
-        view.typing_changed(cx);
-        view.sync_notes(cx);
+        view.start(cx);
         view
+    }
+
+    /// A new view's first reads: its messages, who types, its notes' outbox and its saved call transcripts.
+    fn start(&mut self, cx: &mut Context<Self>) {
+        self.kick(cx);
+        self.typing_changed(cx);
+        self.sync_notes(cx);
+        self.read_saved(cx);
     }
 
     /// The chat's translation, handed to its compose box too, and its observation: a change builds the rows again.
@@ -2891,7 +2904,8 @@ impl ChatView {
         if system_message::is_meeting_chat(&self.conversation) {
             self.systems.recaps = meeting_recap::recap_cards(&messages);
         }
-        let shown: Vec<&Message> = messages.iter().filter(|message| self.shows(message)).collect();
+        let saved = self.saved_rows(&messages, cx);
+        let shown = saved::with_saved(messages.iter().filter(|message| self.shows(message)).collect(), &saved);
         let mut rows: Vec<MessageItem> = shown
             .into_iter()
             .filter_map(|message| self.item(message, &notes))

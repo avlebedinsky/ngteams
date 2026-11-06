@@ -76,6 +76,12 @@ and track language identify the continuing utterance; a final result can shorten
 caption text stays in bounded memory, is cleared on hide/end, and is excluded from debug logs, traces and storage.
 Future translated-caption support should preserve audio timestamp, track language and speaker when identifying utterances.
 
+The app's own "Save live captions of every call" (off by default) is the one exception to keeping the text out of
+storage: with it on, every call's captions are started as above for the account alone (the same invite and start, no
+other request), their pane left hidden unless the user shows it, and each utterance's final result is kept in the
+account's store as the call's transcript (`teams-store` schema 21, by chat; a rejoin within five minutes goes on in the
+same one). Nothing of it goes back to Teams, and the logs and traces still carry no caption text.
+
 ## Native call binding and lab validation
 
 The canonical `teams-call` tracker binds the exact local endpoint/participant leg, conversation's add link,

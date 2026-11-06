@@ -121,8 +121,9 @@ use teams_proto::{
     TeamPicture, TeamTemplateCard, TeamTemplateDetails, TeamWrite, Transport,
 };
 use teams_store::{
-    Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    ReadHorizon, SearchHit, SentOriginal, Store, StoreError, StoredTranslation, Team,
+    Applied, CallTranscript, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState,
+    PageCursor, Reaction, ReadHorizon, SearchHit, SentOriginal, Store, StoreError, StoredTranslation, Team,
+    TranscriptLine,
 };
 use teams_trouter::{
     Change, ChatEvent, Delivery, Down, MessageLoss, PushEvent, RegistrationReport, Stop, Trouter, TrouterCredentials,
@@ -694,6 +695,8 @@ enum Request {
     KeepTranslations(Vec<StoredTranslation>, Responder<()>),
     /// The account's own message as written, kept when it was sent translated: no service write.
     KeepSentOriginal(SentOriginal, Responder<()>),
+    /// A call's saved captions ([`TranscriptWrite`]), kept in the store: no service write.
+    Transcript(TranscriptWrite, Responder<i64>),
     Person(String, Responder<Person>),
     Presence(String, Responder<Availability>),
     ReactionAnimation(String, Responder<Option<Strip>>),
@@ -849,6 +852,10 @@ enum Query {
         keys: Vec<String>,
         reply: Responder<Vec<SentOriginal>>,
     },
+    /// The saved transcripts of a conversation's calls.
+    CallTranscripts(String, Responder<Vec<CallTranscript>>),
+    /// A saved transcript's lines.
+    TranscriptLines(i64, Responder<Vec<TranscriptLine>>),
     /// The stored calendar events between two instants (ms): [`crate::calendar::stored`].
     CalendarEvents {
         start_ms: i64,
@@ -862,6 +869,27 @@ enum Query {
         limit: usize,
         reply: Responder<Vec<SearchHit>>,
     },
+}
+
+/// A change to the calls' captions saved on this computer ([`EngineRequests::transcript`]): only the store changes,
+/// nothing goes to Teams. Each answers a transcript's id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TranscriptWrite {
+    /// The transcript a call in `conversation` that connected at `at` (ms) saves its lines to: the chat's latest one
+    /// when it ended no earlier than `rejoin_ms` before (the call rejoined), else a new one
+    /// ([`Store::open_call_transcript`]).
+    Open {
+        conversation: String,
+        title: Option<String>,
+        at: i64,
+        rejoin_ms: i64,
+    },
+    /// Lines kept in transcript `id`, each replacing its utterance's.
+    Lines { id: i64, lines: Vec<TranscriptLine> },
+    /// Transcript `id`'s call ended at `at` (ms).
+    End { id: i64, at: i64 },
+    /// Transcript `id` deleted with its lines.
+    Delete { id: i64 },
 }
 
 /// What the account's own availability is set to ([`EngineRequests::own_availability`]), in the values a capture showed
@@ -1153,6 +1181,24 @@ impl EngineRequests {
     /// changes.
     pub fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
         self.ask(|reply| Request::KeepSentOriginal(original, reply))
+    }
+
+    /// Changes the calls' captions saved on this computer ([`TranscriptWrite`]): only the store changes. Answers the
+    /// transcript's id.
+    pub fn transcript(&self, write: TranscriptWrite) -> Reply<i64> {
+        self.ask(|reply| Request::Transcript(write, reply))
+    }
+
+    /// The saved transcripts of the calls in `conversation` that hold a line, the earliest first
+    /// ([`Store::call_transcripts`]). Answered meanwhile too.
+    pub fn call_transcripts(&self, conversation: impl Into<String>) -> Reply<Vec<CallTranscript>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::CallTranscripts(conversation, reply))
+    }
+
+    /// A saved transcript's lines in the order they were said ([`Store::transcript_lines`]). Answered meanwhile too.
+    pub fn transcript_lines(&self, id: i64) -> Reply<Vec<TranscriptLine>> {
+        self.query(|reply| Query::TranscriptLines(id, reply))
     }
 
     /// The event `id` of the account's calendar, read whole from the middle tier now: what the scheduling form opens
@@ -2134,6 +2180,9 @@ where
             Request::KeepSentOriginal(original, reply) => {
                 let _ = reply.send(self.store.put_sent_original(&original).map_err(EngineError::from));
             }
+            Request::Transcript(write, reply) => {
+                let _ = reply.send(transcript(&mut self.store, write).map_err(EngineError::from));
+            }
             Request::Shutdown => {}
             lookup => self.on_lookup(lookup),
         }
@@ -2918,6 +2967,21 @@ fn logged<T>(result: Result<T, EngineError>, what: impl FnOnce() -> String) -> R
         log::warn!("action {} failed: {error}", what());
     }
     result
+}
+
+/// Carries out `write` on the store; the transcript's id.
+fn transcript(store: &mut Store, write: TranscriptWrite) -> Result<i64, StoreError> {
+    match write {
+        TranscriptWrite::Open {
+            conversation,
+            title,
+            at,
+            rejoin_ms,
+        } => store.open_call_transcript(&conversation, title.as_deref(), at, rejoin_ms),
+        TranscriptWrite::Lines { id, lines } => store.put_transcript_lines(id, &lines).map(|()| id),
+        TranscriptWrite::End { id, at } => store.end_call_transcript(id, at).map(|()| id),
+        TranscriptWrite::Delete { id } => store.delete_call_transcript(id).map(|_| id),
+    }
 }
 
 /// The other member of the 1:1 chat `chat` (`19:<object id>_<object id>@unq.gbl.spaces`) of `me`, as an MRI of the
