@@ -66,8 +66,8 @@
 mod captions;
 pub use captions::{CallCaptions, Caption, CaptionPhase};
 mod recording;
-pub use recording::{CallRecording, RecordingPhase, RecordingProblem};
 pub(crate) use recording::record_act;
+pub use recording::{CallRecording, RecordingPhase, RecordingProblem};
 mod gallery;
 mod health;
 pub use health::{CallHealth, MediaHealth, NetworkHealth, StreamHealth};

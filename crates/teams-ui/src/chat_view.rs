@@ -4784,7 +4784,12 @@ fn bubble(
     let bubble = if bare {
         bubble
     } else {
-        bubble_surface(bubble.px(px(BUBBLE_INSET)).py_2().rounded_lg(), item.own, highlighted, palette)
+        bubble_surface(
+            bubble.px(px(BUBBLE_INSET)).py_2().rounded_lg(),
+            item.own,
+            highlighted,
+            palette,
+        )
     };
     // the account's own keep Teams' margin on their left; someone else's reach the mark's column
     let bubble = if item.own { bubble.max_w(relative(0.8)) } else { bubble };
@@ -5021,26 +5026,30 @@ impl ChatView {
 fn typing_dots(palette: Palette, cx: &App) -> gpui::Div {
     use gpui::AnimationExt as _;
     let moving = crate::motion::on(cx);
-    let dots = [palette.brand, theme::mix(palette.brand, palette.accent, 0.5), palette.accent]
-        .into_iter()
-        .enumerate()
-        .map(move |(at, color)| {
-            let dot = div().size(px(5.0)).rounded_full().bg(rgb(color));
-            if !moving {
-                return dot.into_any_element();
-            }
-            #[expect(clippy::cast_precision_loss, reason = "a dot's place, 0 to 2")]
-            let delay = at as f32 * 0.16;
-            dot.with_animation(
-                SharedString::from(format!("typing-dot-{at}")),
-                gpui::Animation::new(std::time::Duration::from_millis(1100)).repeat(),
-                move |dot, t| {
-                    let lift = ((t - delay).rem_euclid(1.0) * std::f32::consts::TAU).sin().max(0.0);
-                    dot.opacity(0.4 + 0.6 * lift).mb(px(4.0 * lift))
-                },
-            )
-            .into_any_element()
-        });
+    let dots = [
+        palette.brand,
+        theme::mix(palette.brand, palette.accent, 0.5),
+        palette.accent,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(move |(at, color)| {
+        let dot = div().size(px(5.0)).rounded_full().bg(rgb(color));
+        if !moving {
+            return dot.into_any_element();
+        }
+        #[expect(clippy::cast_precision_loss, reason = "a dot's place, 0 to 2")]
+        let delay = at as f32 * 0.16;
+        dot.with_animation(
+            SharedString::from(format!("typing-dot-{at}")),
+            gpui::Animation::new(std::time::Duration::from_millis(1100)).repeat(),
+            move |dot, t| {
+                let lift = ((t - delay).rem_euclid(1.0) * std::f32::consts::TAU).sin().max(0.0);
+                dot.opacity(0.4 + 0.6 * lift).mb(px(4.0 * lift))
+            },
+        )
+        .into_any_element()
+    });
     div().h(px(12.0)).flex().items_end().gap(px(3.0)).children(dots)
 }
 

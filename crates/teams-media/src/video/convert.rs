@@ -303,8 +303,15 @@ mod tests {
             };
             let i420 = to_i420(&frame, MaxSize::HD).expect("decoded");
             assert_eq!((i420.width, i420.height, i420.format), (1280, 720, PixelFormat::I420));
-            let (y, u, v) = (i420.data[640], i420.data[1280 * 720 + 10], i420.data[1280 * 720 * 5 / 4 + 10]);
-            assert!(y.abs_diff(want.y) <= 3 && u.abs_diff(want.u) <= 3 && v.abs_diff(want.v) <= 3, "{y} {u} {v}");
+            let (y, u, v) = (
+                i420.data[640],
+                i420.data[1280 * 720 + 10],
+                i420.data[1280 * 720 * 5 / 4 + 10],
+            );
+            assert!(
+                y.abs_diff(want.y) <= 3 && u.abs_diff(want.u) <= 3 && v.abs_diff(want.v) <= 3,
+                "{y} {u} {v}"
+            );
         }
         let mut cut = picture_jpeg();
         cut.truncate(cut.len() / 2);
@@ -315,7 +322,10 @@ mod tests {
             stride: 0,
             data: cut,
         };
-        assert!(to_i420(&cut, MaxSize::HD).is_none(), "a picture cut short is dropped, not filled with grey");
+        assert!(
+            to_i420(&cut, MaxSize::HD).is_none(),
+            "a picture cut short is dropped, not filled with grey"
+        );
         let broken = VideoFrame {
             width: 1280,
             height: 720,

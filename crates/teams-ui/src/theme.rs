@@ -403,7 +403,11 @@ pub fn mix(from: u32, to: u32, t: f32) -> u32 {
         let a = f32::from(u8::try_from((from >> shift) & 0xff).unwrap_or(0));
         let b = f32::from(u8::try_from((to >> shift) & 0xff).unwrap_or(0));
         // within 0..=255 by construction
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a channel within 0..=255")]
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a channel within 0..=255"
+        )]
         let channel = (a + (b - a) * t).round() as u32;
         mixed | (channel << shift)
     })

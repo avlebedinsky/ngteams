@@ -189,18 +189,18 @@ fn connect(stream: &StreamRc, direction: Direction, formats: &[Vec<u8>]) -> Resu
 }
 
 /// [`connect`], to the node `node` when one is named (a shared screen's).
-fn connect_to(
-    stream: &StreamRc,
-    direction: Direction,
-    node: Option<u32>,
-    formats: &[Vec<u8>],
-) -> Result<(), String> {
+fn connect_to(stream: &StreamRc, direction: Direction, node: Option<u32>, formats: &[Vec<u8>]) -> Result<(), String> {
     let mut pods = formats
         .iter()
         .map(|format| Pod::from_bytes(format).ok_or("a format PipeWire can't read"))
         .collect::<Result<Vec<_>, _>>()?;
     stream
-        .connect(direction, node, StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS, &mut pods)
+        .connect(
+            direction,
+            node,
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            &mut pods,
+        )
         .map_err(text)
 }
 
@@ -526,7 +526,14 @@ fn camera_buffers() -> Result<Vec<u8>, String> {
 /// 4:3 often first (a UVC camera's default is 640x480), and PipeWire takes the first of the camera's modes a param
 /// matches, so one param of many sizes would get the camera's order, not this one: each size is offered as a param
 /// of its own, tried in turn ([`camera_formats`]).
-const CAMERA_SIZES: [(u32, u32); 6] = [(1280, 720), (1024, 576), (960, 540), (1920, 1080), (848, 480), (640, 360)];
+const CAMERA_SIZES: [(u32, u32); 6] = [
+    (1280, 720),
+    (1024, 576),
+    (960, 540),
+    (1920, 1080),
+    (848, 480),
+    (640, 360),
+];
 
 /// The frame rate the call sends (`teams_core`'s video settings): asked for, and not exceeded where a camera allows.
 const CAMERA_RATE: Fraction = Fraction { num: 30, denom: 1 };
@@ -553,7 +560,11 @@ fn camera_formats() -> Result<Vec<Vec<u8>>, String> {
     for rates in [(SMOOTH_RATE, CAMERA_RATE), any_rate] {
         for (width, height) in CAMERA_SIZES {
             for encoding in [Encoding::Raw, Encoding::Mjpeg] {
-                offers.push(camera_format(encoding, Value::Rectangle(Rectangle { width, height }), rates)?);
+                offers.push(camera_format(
+                    encoding,
+                    Value::Rectangle(Rectangle { width, height }),
+                    rates,
+                )?);
             }
         }
     }
@@ -584,7 +595,10 @@ fn camera_format(encoding: Encoding, size: Value, (min, max): (Fraction, Fractio
         Encoding::Mjpeg => MediaSubtype::Mjpg,
     };
     let mut properties = vec![
-        pod::Property::new(FormatProperties::MediaType.as_raw(), Value::Id(Id(MediaType::Video.as_raw()))),
+        pod::Property::new(
+            FormatProperties::MediaType.as_raw(),
+            Value::Id(Id(MediaType::Video.as_raw())),
+        ),
         pod::Property::new(FormatProperties::MediaSubtype.as_raw(), Value::Id(Id(subtype.as_raw()))),
     ];
     if encoding == Encoding::Raw {
@@ -786,7 +800,9 @@ mod tests {
             other => panic!("another subtype: {other:?}"),
         };
         assert_eq!(
-            properties.iter().any(|property| property.key == FormatProperties::VideoFormat.as_raw()),
+            properties
+                .iter()
+                .any(|property| property.key == FormatProperties::VideoFormat.as_raw()),
             encoding == Encoding::Raw,
             "only a raw offer names its pixel formats"
         );

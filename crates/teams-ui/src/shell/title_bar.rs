@@ -274,25 +274,27 @@ impl Shell {
     /// The app launcher: the app's own places, as Teams lists its apps.
     fn launcher(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let shell = cx.weak_entity();
-        let button = on_frame(icon_button("title-launcher", Glyph::GRIP, "Apps"), palette, true).dropdown_menu(move |menu, _, _| {
-            let place = |label: &'static str, glyph: Glyph, page: Option<Main>| {
-                let shell = shell.clone();
-                PopupMenuItem::new(label)
-                    .icon(glyph.icon())
-                    .on_click(move |_, window, cx: &mut App| {
-                        let _ = shell.update(cx, |shell, cx| match &page {
-                            Some(Main::Calendar) => shell.show_calendar(window, cx),
-                            Some(_) => shell.open_settings_page(Page::General, window, cx),
-                            None => shell.show_chats(window, cx),
-                        });
-                    })
-            };
-            menu.min_w(px(200.0))
-                .label("Apps")
-                .item(place("Chat", Glyph::MESSAGE, None))
-                .item(place("Calendar", Glyph::CALENDAR, Some(Main::Calendar)))
-                .item(place("Settings", Glyph::SETTINGS, Some(Main::Settings)))
-        });
+        let button = on_frame(icon_button("title-launcher", Glyph::GRIP, "Apps"), palette, true).dropdown_menu(
+            move |menu, _, _| {
+                let place = |label: &'static str, glyph: Glyph, page: Option<Main>| {
+                    let shell = shell.clone();
+                    PopupMenuItem::new(label)
+                        .icon(glyph.icon())
+                        .on_click(move |_, window, cx: &mut App| {
+                            let _ = shell.update(cx, |shell, cx| match &page {
+                                Some(Main::Calendar) => shell.show_calendar(window, cx),
+                                Some(_) => shell.open_settings_page(Page::General, window, cx),
+                                None => shell.show_chats(window, cx),
+                            });
+                        })
+                };
+                menu.min_w(px(200.0))
+                    .label("Apps")
+                    .item(place("Chat", Glyph::MESSAGE, None))
+                    .item(place("Calendar", Glyph::CALENDAR, Some(Main::Calendar)))
+                    .item(place("Settings", Glyph::SETTINGS, Some(Main::Settings)))
+            },
+        );
         selected_by("title-launcher", button).into_any_element()
     }
 
@@ -305,9 +307,13 @@ impl Shell {
         };
         let button = icon_button_with_key("title-list-toggle", Glyph::PANEL_LEFT, tip, &ToggleListPane);
         // hidden, it is chosen: the kit's chosen chip, its icon in the chip's own colour
-        let button = (if self.list_shown { on_frame(button, palette, true) } else { button })
-            .selected(!self.list_shown)
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_list_pane(cx)));
+        let button = (if self.list_shown {
+            on_frame(button, palette, true)
+        } else {
+            button
+        })
+        .selected(!self.list_shown)
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_list_pane(cx)));
         selected_by("title-list-toggle", button).into_any_element()
     }
 
@@ -336,7 +342,12 @@ impl Shell {
         let shell = cx.weak_entity();
         let size = self.settings.read(cx).settings().appearance.font_size;
         let zoom = u32::from(size) * 100 / u32::from(theme::FONT_SIZE);
-        let button = on_frame(icon_button("title-more", Glyph::MORE, "Settings and more"), palette, true).dropdown_menu(move |menu, _, _| {
+        let button = on_frame(
+            icon_button("title-more", Glyph::MORE, "Settings and more"),
+            palette,
+            true,
+        )
+        .dropdown_menu(move |menu, _, _| {
             let act = |label: SharedString, glyph: Glyph, run: fn(&mut Shell, &mut Window, &mut Context<Shell>)| {
                 let shell = shell.clone();
                 PopupMenuItem::new(label)
@@ -452,5 +463,9 @@ fn drag_area() -> gpui::Stateful<gpui::Div> {
 /// faces stay the kit's, a light chip.)
 fn on_frame(button: Button, palette: Palette, usable: bool) -> Button {
     let color = rgb(palette.on_frame);
-    button.text_color(if usable { color.opacity(0.92) } else { color.opacity(0.35) })
+    button.text_color(if usable {
+        color.opacity(0.92)
+    } else {
+        color.opacity(0.35)
+    })
 }

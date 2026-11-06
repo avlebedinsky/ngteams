@@ -26,7 +26,11 @@ pub fn float(
     }
     let viewport = window.viewport_size();
     let size = (f32::from(viewport.width), f32::from(viewport.height));
-    let left = if gap_left { origin.0 + theme::SHEET_GAP } else { origin.0 };
+    let left = if gap_left {
+        origin.0 + theme::SHEET_GAP
+    } else {
+        origin.0
+    };
     let (top, right, bottom) = (origin.1, size.0 - theme::SHEET_GAP, size.1 - theme::SHEET_GAP);
     let caps = [
         (Corner::TopLeft, (left, top)),
@@ -35,7 +39,11 @@ pub fn float(
         (Corner::BottomLeft, (left, bottom)),
     ]
     .map(|(corner, at)| corner.cap(theme::frame_at(palette, size, at)));
-    let holder = if gap_left { holder.pl(px(theme::SHEET_GAP)) } else { holder };
+    let holder = if gap_left {
+        holder.pl(px(theme::SHEET_GAP))
+    } else {
+        holder
+    };
     holder.pr(px(theme::SHEET_GAP)).pb(px(theme::SHEET_GAP)).child(
         panes
             .relative()
@@ -86,4 +94,3 @@ impl Corner {
             .into_any_element()
     }
 }
-

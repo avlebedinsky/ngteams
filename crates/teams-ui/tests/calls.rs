@@ -3735,9 +3735,7 @@ fn transcribing_by(by: &str, audio: bool) -> teams_core::MeetingState {
             by: Some(Mri::new(by)),
             audio_only: true,
         }),
-        transcribing: Some(teams_core::Transcription {
-            by: Some(Mri::new(by)),
-        }),
+        transcribing: Some(teams_core::Transcription { by: Some(Mri::new(by)) }),
         ..teams_core::MeetingState::default()
     }
 }
@@ -3749,7 +3747,10 @@ fn the_account_transcribes_after_asking_the_language_and_its_transcript_opens() 
     open_record_menu(stage, "call-transcribe-start");
     assert!(!drawn(stage, "call-transcript-toggle"), "no transcript before one ran");
     click(stage, "call-transcribe-start");
-    assert!(drawn(stage, "call-transcribe-dialog"), "Start transcription asks the language first");
+    assert!(
+        drawn(stage, "call-transcribe-dialog"),
+        "Start transcription asks the language first"
+    );
     let before = actions(&rig).len();
     click(stage, "call-transcribe-cancel");
     assert_eq!(actions(&rig).len(), before, "Cancel sends nothing");
@@ -3792,7 +3793,10 @@ fn record_audio_beside_the_transcription(rig: &Rig, stage: &mut VisualTestContex
     open_record_menu(stage, "call-record-start");
     click(stage, "call-record-start");
     assert!(drawn(stage, "call-record-what"), "it asks what to record");
-    assert!(!drawn(stage, "call-record-language"), "the transcription has its language");
+    assert!(
+        !drawn(stage, "call-record-language"),
+        "the transcription has its language"
+    );
     click(stage, "call-record-what");
     click(stage, "call-record-what-audio");
     click(stage, "call-record-confirm");
@@ -3804,7 +3808,10 @@ fn record_audio_beside_the_transcription(rig: &Rig, stage: &mut VisualTestContex
     assert!(drawn(stage, "call-recording-notice"));
     assert!(drawn(stage, "call-recording-audio"), "the microphone's mark");
     assert!(!drawn(stage, "call-recording-dot"));
-    assert!(!drawn(stage, "call-transcription-notice"), "the recording's notice says it");
+    assert!(
+        !drawn(stage, "call-transcription-notice"),
+        "the recording's notice says it"
+    );
     open_record_menu(stage, "call-record-stop");
     click(stage, "call-record-stop");
     assert!(drawn(stage, "call-record-stop-dialog"));
@@ -3812,7 +3819,10 @@ fn record_audio_beside_the_transcription(rig: &Rig, stage: &mut VisualTestContex
     assert_eq!(actions(rig).last(), Some(&CallAction::StopRecording { call: call(1) }));
     meeting(rig, teams_core::MeetingState::default());
     assert!(drawn(stage, "call-recording-stopped"));
-    assert!(!drawn(stage, "call-transcription-stopped"), "the recording's stop says it");
+    assert!(
+        !drawn(stage, "call-transcription-stopped"),
+        "the recording's stop says it"
+    );
     assert!(!drawn(stage, "call-transcribing"));
     open_record_menu(stage, "call-transcript-toggle");
 }
@@ -3823,9 +3833,15 @@ fn someone_else_s_transcription_is_stopped_after_asking_and_its_stop_is_told() {
     let stage = group_call_up(&rig);
     meeting(&rig, transcribing_by(LAB_B, false));
     assert!(drawn(stage, "call-transcription-notice"));
-    assert!(drawn(stage, "call-recording-policy"), "everyone else is pointed at the policy");
+    assert!(
+        drawn(stage, "call-recording-policy"),
+        "everyone else is pointed at the policy"
+    );
     assert!(!drawn(stage, "call-recording-privacy"));
-    assert!(!drawn(stage, "call-transcript-pane"), "only its starter's opens by itself");
+    assert!(
+        !drawn(stage, "call-transcript-pane"),
+        "only its starter's opens by itself"
+    );
     open_record_menu(stage, "call-transcribe-stop");
     click(stage, "call-transcribe-stop");
     assert!(drawn(stage, "call-transcribe-stop-dialog"));
@@ -3858,7 +3874,10 @@ fn a_recording_and_transcription_records_the_audio_alone_from_more_options() {
     open_record_menu(stage, "call-record-start");
     click(stage, "call-record-start");
     assert!(drawn(stage, "call-record-language"));
-    assert!(!drawn(stage, "call-record-what"), "what to record is under More options");
+    assert!(
+        !drawn(stage, "call-record-what"),
+        "what to record is under More options"
+    );
     click(stage, "call-record-more");
     click(stage, "call-record-what");
     click(stage, "call-record-what-audio");

@@ -208,7 +208,10 @@ fn colour_share(png: &Path, color: u32) -> SandboxResult<f64> {
 /// at its place.
 fn frame_share(png: &Path, palette: teams_ui::theme::Palette) -> SandboxResult<f64> {
     let shot = image::open(png)?.to_rgb8();
-    #[expect(clippy::cast_precision_loss, reason = "a screenshot's size and places, well within f32")]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a screenshot's size and places, well within f32"
+    )]
     let size = (shot.width() as f32, shot.height() as f32);
     let near = shot
         .enumerate_pixels()

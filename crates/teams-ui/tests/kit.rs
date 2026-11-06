@@ -425,8 +425,16 @@ fn colours_mix_channel_by_channel_and_stay_in_range() {
     assert_eq!(theme::mix(0x0000_0000, 0x00ff_ffff, 0.0), 0x0000_0000);
     assert_eq!(theme::mix(0x0000_0000, 0x00ff_ffff, 1.0), 0x00ff_ffff);
     assert_eq!(theme::mix(0x0000_0000, 0x00ff_8000, 0.5), 0x0080_4000);
-    assert_eq!(theme::mix(0x0010_2030, 0x0090_a0b0, 2.0), 0x0090_a0b0, "clamped to the far stop");
-    assert_eq!(theme::mix(0x0010_2030, 0x0090_a0b0, -1.0), 0x0010_2030, "and to the near one");
+    assert_eq!(
+        theme::mix(0x0010_2030, 0x0090_a0b0, 2.0),
+        0x0090_a0b0,
+        "clamped to the far stop"
+    );
+    assert_eq!(
+        theme::mix(0x0010_2030, 0x0090_a0b0, -1.0),
+        0x0010_2030,
+        "and to the near one"
+    );
 }
 
 #[test]
@@ -492,7 +500,10 @@ fn a_group_s_initials_read_in_light_and_dark_themes_in_the_same_hue() {
         let (dark_back, dark_initial) = teams_ui::chat_list::initials_colour(name, true);
         assert!(contrast(light_back, light_initial) >= 4.5, "{name} light");
         assert!(contrast(dark_back, dark_initial) >= 4.5, "{name} dark");
-        assert!(theme::luminance(light_back) > 0.5, "{name}: a soft tint in a light theme");
+        assert!(
+            theme::luminance(light_back) > 0.5,
+            "{name}: a soft tint in a light theme"
+        );
         assert!(theme::luminance(dark_back) < 0.05, "{name}: a deep tint in a dark one");
         // on Teams Dark's list, the half doesn't glare: no brighter than the list's own text
         assert!(

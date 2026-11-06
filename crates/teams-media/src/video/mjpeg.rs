@@ -154,7 +154,11 @@ mod tests {
 
     #[test]
     fn a_picture_whose_segments_can_t_be_walked_is_left_as_it_is() {
-        for broken in [&b"not a picture"[..], &[0xff, 0xd8], &[0xff, 0xd8, 0x00, 0x00, 0x00, 0x00]] {
+        for broken in [
+            &b"not a picture"[..],
+            &[0xff, 0xd8],
+            &[0xff, 0xd8, 0x00, 0x00, 0x00, 0x00],
+        ] {
             assert!(matches!(with_tables(broken), Cow::Borrowed(_)));
         }
     }

@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnimationExt as _, AnimationPhase, AnyElement, App, ElementId, IntoElement, SpringAnimation, SpringConfig,
-    Styled, ease_out_quint, px,
+    AnimationExt as _, AnimationPhase, AnyElement, App, ElementId, IntoElement, SpringAnimation, SpringConfig, Styled,
+    ease_out_quint, px,
 };
 
 /// How long an element takes to come in.
@@ -112,7 +112,13 @@ const BREATH: Duration = Duration::from_millis(1400);
 /// `element` lit by a glow of the palette's brand colour that swells and settles, for as long as it is drawn under
 /// `id` while `lit`: a call's tile while its person speaks. Still (the glow at rest) while animations are off; no glow
 /// while not `lit`, nor in a theme without depth (High Contrast stays flat: the tile's own border marks it).
-pub fn breathe<E>(element: E, id: impl Into<ElementId>, lit: bool, palette: crate::theme::Palette, cx: &App) -> AnyElement
+pub fn breathe<E>(
+    element: E,
+    id: impl Into<ElementId>,
+    lit: bool,
+    palette: crate::theme::Palette,
+    cx: &App,
+) -> AnyElement
 where
     E: IntoElement + Styled + 'static,
 {

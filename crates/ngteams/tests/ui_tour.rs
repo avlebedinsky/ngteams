@@ -246,7 +246,9 @@ const STEPS: [Step; 5 + 240] = [
     ("compose-picture", |shell, window, cx| {
         paste_picture(shell, window, cx);
     }),
-    ("compose-picture-dark", |shell, _, cx| fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx)),
+    ("compose-picture-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx)
+    }),
     // sent: the message with the picture in the chat
     ("chat-picture-sent-dark", |shell, window, cx| {
         with_compose(shell, cx, |compose, cx| compose.send(window, cx));

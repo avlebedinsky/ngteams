@@ -238,7 +238,11 @@ fn a_reply_s_quote_names_its_sender_and_a_plain_quote_none() {
     };
     assert_eq!(reply.sender_name.as_deref(), Some("Lab Bee"));
     assert_eq!(reply.message_id.as_deref(), Some("1760000010000"));
-    assert_eq!(reply.time, Some(1_760_000_010_000), "its time, as the quote's itemid carries it");
+    assert_eq!(
+        reply.time,
+        Some(1_760_000_010_000),
+        "its time, as the quote's itemid carries it"
+    );
     assert_eq!(
         reply.blocks,
         [Block::Text(TextBlock {
