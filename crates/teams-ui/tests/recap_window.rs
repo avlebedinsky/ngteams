@@ -2,8 +2,8 @@
 //! main thread), for their screenshots: the app's window over the fake engine (`common`), its store holding a made-up
 //! meeting chat whose recording's card offers "View recap"; its Recap (two recordings: Part 1 with its transcript,
 //! that transcript searched, Part 2, Part 1's recording playing as the engine streams it and paused; paused with its
-//! captions on, its speed menu at 1.5x, its settings and its caption settings open), the Recap of a meeting transcribed
-//! and not recorded, and the Shared tab.
+//! captions on, its speed menu at 1.5x, its settings and its caption settings open; Part 1's recording downloading,
+//! downloaded and failed), the Recap of a meeting transcribed and not recorded, and the Shared tab.
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -42,7 +42,10 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 const CHILD_ENV: &str = "TEAMS_UI_RECAP_WINDOW_TEST";
 
 /// Each page and the themes it is shot in.
-const PAGES: [(&str, &[&str]); 12] = [
+const PAGES: [(&str, &[&str]); 15] = [
+    ("downloading", &[LIGHT_KEY, DARK_KEY]),
+    ("downloaded", &[LIGHT_KEY]),
+    ("download-failed", &[LIGHT_KEY]),
     ("chat", &[LIGHT_KEY]),
     ("recap", &[LIGHT_KEY, DARK_KEY]),
     ("playing", &[LIGHT_KEY, DARK_KEY]),
@@ -223,6 +226,39 @@ const CAPTIONED: &str = "WEBVTT\n\n\
     u1/1-0\n00:00:00.300 --> 00:00:03.500\n<v Ada Lab>Hello everyone, this is the weekly sync.\n\
     We look at the video player first.</v>\n\n";
 
+/// The made-up recording's file, as Part 1's item names it.
+const RECORDING_NAME: &str = "Weekly sync-20260102_100000-Meeting Recording.mp4";
+
+/// The download pages' recording: Part 1's may be downloaded; downloading, its first 5 MiB of 12 MiB come and then
+/// nothing more; downloaded, all of its 4.4 MB; failed, it is refused.
+fn seed_download(core: &FakeCore, page: &str) {
+    locked(&core.recording_files).insert(
+        "ITEM1".to_owned(),
+        teams_proto::RecordingAccess {
+            can_download: true,
+            name: Some(RECORDING_NAME.to_owned()),
+            size: None,
+        },
+    );
+    let size = match page {
+        "downloading" => 12 * 1024 * 1024,
+        "downloaded" => 4_659_019,
+        _ => return,
+    };
+    locked(&core.file_bytes).insert(fixtures::sharing_link("ITEM1"), vec![0x5a; size]);
+    if page == "downloading" {
+        *locked(&core.stream_limit) = Some(5 * 1024 * 1024);
+        *locked(&core.hold_streams_from) = Some(5 * 1024 * 1024);
+    }
+}
+
+/// The download pages' file, in a folder of the run's own.
+fn download_target() -> PathBuf {
+    std::env::temp_dir()
+        .join(format!("ngteams-recap-download-{}", std::process::id()))
+        .join(RECORDING_NAME)
+}
+
 /// The pages that play Part 1's recording, then pause it.
 const PLAYED: [&str; 6] = ["playing", "paused", "captions", "speed", "settings", "caption-settings"];
 
@@ -237,6 +273,7 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
             ..CaptionStyle::default()
         });
     }
+    seed_download(&core, &page);
     let (events, received) = mpsc::unbounded_channel();
     let source = FakeEvents {
         events: received,
@@ -298,6 +335,12 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
 /// The page's last step: ready to be shot, a recording paused first on the pages that show it paused, with the menu
 /// they show open.
 fn last(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
+    if page.starts_with("download") {
+        // the row stays as it is drawn; the made-up file goes
+        if let Some(folder) = download_target().parent() {
+            let _ = fs::remove_dir_all(folder);
+        }
+    }
     if !PLAYED.contains(&page) || page == "playing" {
         say("ready");
         return;
@@ -343,6 +386,9 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
             recap.step_match(false, cx);
         }
         "part-2" => recap.select_part(1, cx),
+        "downloading" | "downloaded" | "download-failed" => {
+            recap.save_recording(fixtures::sharing_link("ITEM1"), download_target(), cx);
+        }
         // the recording streamed and played from half a second in, shot as it plays
         page if PLAYED.contains(&page) => recap.play_from(Duration::from_millis(500), cx),
         _ => {}

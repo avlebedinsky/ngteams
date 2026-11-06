@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_proto::recording::{
-    MEDIA_HOST_SUFFIX, RecordingManifest, SegmentTime, TrackKind, is_media_host, is_media_link, read_manifest,
+    MEDIA_HOST_SUFFIX, RecordingFile, RecordingManifest, SegmentTime, TrackKind, is_media_host, is_media_link,
+    read_manifest, read_recording_file,
 };
-use teams_proto::{Credentials, HttpTransport};
+use teams_proto::{Credentials, HttpTransport, RecordingAccess};
 use url::Url;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -287,4 +288,78 @@ async fn a_refused_manifest_is_the_service_s_answer() {
         transport.recording_manifest(&manifest).await,
         Err(teams_proto::HttpError::Status(answer)) if answer.status() == 403
     ));
+}
+
+#[test]
+fn the_recording_s_file_is_read_on_its_personal_site_with_what_the_recap_needs() {
+    let file = RecordingFile::of(SHARING_LINK, "b!drive1", "ITEM1").expect("a file");
+    assert_eq!(
+        file.url(),
+        "https://madeup-my.sharepoint.com/personal/lab_a/_api/v2.1/drives/b!drive1/items/ITEM1\
+         ?$select=name,size,accessViewpoint"
+    );
+    assert_eq!(file.site().audience(), "https://madeup-my.sharepoint.com");
+    assert!(RecordingFile::of("https://madeup.sharepoint.com/:v:/g/sites/team/x", "b!drive1", "ITEM1").is_none());
+    assert!(RecordingFile::of(SHARING_LINK, "b!drive1", "ITEM1/../x").is_none());
+}
+
+#[test]
+fn the_file_says_whether_the_account_may_download_it_its_name_and_size() {
+    // shaped like the item's answer to the Recap player's read (made up)
+    let organizer = br#"{"@odata.etag":"\"{X},1\"","name":"Weekly sync-20260101_100000-Meeting Recording.mp4",
+        "size":4659019,"title":"Weekly sync","accessViewpoint":{"canRead":true,"canEdit":true,"canDelete":true,
+        "canComment":true,"canDownload":true,"canManagePermissions":true}}"#;
+    assert_eq!(
+        read_recording_file(organizer),
+        Some(RecordingAccess {
+            can_download: true,
+            name: Some("Weekly sync-20260101_100000-Meeting Recording.mp4".to_owned()),
+            size: Some(4_659_019),
+        })
+    );
+    // an attendee whose download is blocked
+    let blocked = br#"{"name":"x.mp4","accessViewpoint":{"canRead":true,"canDownload":false}}"#;
+    assert!(!read_recording_file(blocked).unwrap().can_download);
+    // an answer that doesn't say may not download; a name that isn't a plain file name is left out
+    let silent = br#"{"name":"../x.mp4","size":-1}"#;
+    assert_eq!(
+        read_recording_file(silent),
+        Some(RecordingAccess {
+            can_download: false,
+            name: None,
+            size: None,
+        })
+    );
+    for name in ["", "  ", "..", "a\\b.mp4", "a\u{7}.mp4"] {
+        let body = serde_json::json!({ "name": name }).to_string();
+        assert_eq!(read_recording_file(body.as_bytes()).unwrap().name, None, "{name:?}");
+    }
+    let long = serde_json::json!({ "name": format!("{}.mp4", "a".repeat(400)) }).to_string();
+    assert_eq!(read_recording_file(long.as_bytes()).unwrap().name, None);
+    assert_eq!(read_recording_file(b"[]"), None);
+    assert_eq!(read_recording_file(b"not json"), None);
+}
+
+#[tokio::test]
+async fn the_file_is_read_with_the_site_s_token() {
+    let server = MockServer::start().await;
+    let tokens = Arc::new(FakeTokens::default());
+    let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/personal/lab_a/_api/v2.1/drives/b!drive1/items/ITEM1"))
+        .and(query_param("$select", "name,size,accessViewpoint"))
+        .and(header("authorization", "Bearer placeholder-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(r#"{"name":"x.mp4","accessViewpoint":{"canDownload":true}}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let file = RecordingFile::of(SHARING_LINK, "b!drive1", "ITEM1").unwrap();
+    let answer = transport.recording_file(&file).await.expect("the item");
+    assert!(read_recording_file(answer.body()).unwrap().can_download);
+    assert_eq!(
+        tokens.audiences.lock().unwrap().as_slice(),
+        ["https://madeup-my.sharepoint.com"]
+    );
 }

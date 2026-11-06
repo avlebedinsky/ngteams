@@ -14,6 +14,11 @@
 //!   presentation that says its parts are encrypted (`ContentProtection`), or whose parts are anywhere else, isn't read.
 //! - **A part** (an initialization segment, a media segment: fragmented MP4) is a `GET` of its address with no token of
 //!   the account's ([`MediaSegmentLink`], [`crate::HttpTransport::media_segment`]).
+//! - **The file** ([`RecordingFile`]): the item read on the same site with that site's token,
+//!   `GET <site>/_api/v2.1/drives/<drive>/items/<item>?$select=name,size,accessViewpoint`, as the Recap player reads it
+//!   (it selects `accessViewpoint` among the item's other fields): whether the account may download the recording
+//!   (`accessViewpoint.canDownload`), its file name and size ([`read_recording_file`]). Its bytes are read at the
+//!   download link Graph hands out for its sharing link, as any shared file's ([`crate::FileDownload`]).
 
 use std::fmt;
 
@@ -50,21 +55,8 @@ impl RecordingManifest {
     /// `None` for a link off a personal site, or an id that isn't one.
     #[must_use]
     pub fn of(link: &str, drive: &str, item: &str) -> Option<Self> {
-        let plain = |part: &str| {
-            !part.is_empty()
-                && part.len() <= 256
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'!' | b'-' | b'_'))
-        };
-        if !(plain(drive) && plain(item)) {
-            return None;
-        }
-        let site = personal_site(link)?;
-        let url = format!(
-            "{}_api/v2.1/drives/{drive}/items/{item}/content?format=dash",
-            site.base()
-        );
+        let (site, item) = item_address(link, drive, item)?;
+        let url = format!("{item}/content?format=dash");
         Some(Self { site, url })
     }
 
@@ -79,6 +71,107 @@ impl RecordingManifest {
     pub fn url(&self) -> &str {
         &self.url
     }
+}
+
+/// The address of item `item` of drive `drive` on the personal site `link` is on
+/// (`<site>_api/v2.1/drives/<drive>/items/<item>`), with that site; `None` for a link off a personal site, or an id that
+/// isn't one.
+fn item_address(link: &str, drive: &str, item: &str) -> Option<(DriveSite, String)> {
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 256
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'!' | b'-' | b'_'))
+    };
+    if !(plain(drive) && plain(item)) {
+        return None;
+    }
+    let site = personal_site(link)?;
+    let address = format!("{}_api/v2.1/drives/{drive}/items/{item}", site.base());
+    Some((site, address))
+}
+
+/// Where a recording's file is read: its item on the personal site that holds it, with that site's token (see the
+/// module docs); its answer is read by [`read_recording_file`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordingFile {
+    site: DriveSite,
+    url: String,
+}
+
+/// The fields [`RecordingFile`]'s read selects.
+pub const RECORDING_FILE_SELECT: &str = "name,size,accessViewpoint";
+
+impl RecordingFile {
+    /// The file of item `item` of drive `drive`, on the personal site `link` is on (as [`RecordingManifest::of`]);
+    /// `None` for a link off a personal site, or an id that isn't one.
+    #[must_use]
+    pub fn of(link: &str, drive: &str, item: &str) -> Option<Self> {
+        let (site, item) = item_address(link, drive, item)?;
+        let url = format!("{item}?$select={RECORDING_FILE_SELECT}");
+        Some(Self { site, url })
+    }
+
+    /// The personal site the recording is on: its token's audience.
+    #[must_use]
+    pub fn site(&self) -> &DriveSite {
+        &self.site
+    }
+
+    /// The address its item is read at.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// The longest file name taken from a recording's item (SharePoint's own limit).
+pub const MAX_RECORDING_NAME: usize = 400;
+
+/// A recording's file as its item's read answered ([`read_recording_file`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordingAccess {
+    /// Whether the account may download it: its item's `accessViewpoint.canDownload`; false when the answer doesn't
+    /// say (an attendee whose download the meeting's policy blocks is told false).
+    pub can_download: bool,
+    /// Its file name (`<meeting>-<yyyymmdd_hhmmss>-Meeting Recording.mp4`), when the item gives a plain file name.
+    pub name: Option<String>,
+    /// Its size in bytes, when the item gives it.
+    pub size: Option<u64>,
+}
+
+/// The answer to a [`RecordingFile`] read, `{name, size, accessViewpoint: {canRead, canDownload, …}}`; `None` for an
+/// answer that isn't a JSON object. A name that isn't a plain file name (empty, too long, a path, a control character)
+/// is left out.
+#[must_use]
+pub fn read_recording_file(body: &[u8]) -> Option<RecordingAccess> {
+    let item: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let item = item.as_object()?;
+    let can_download = item
+        .get("accessViewpoint")
+        .and_then(|access| access.get("canDownload"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let plain_name = |name: &&str| {
+        !name.trim().is_empty()
+            && name.len() <= MAX_RECORDING_NAME
+            && !matches!(name.trim(), "." | "..")
+            && !name
+                .chars()
+                .any(|character| matches!(character, '/' | '\\') || character.is_control())
+    };
+    let name = item
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(plain_name)
+        .map(str::to_owned);
+    let size = item.get("size").and_then(serde_json::Value::as_u64);
+    Some(RecordingAccess {
+        can_download,
+        name,
+        size,
+    })
 }
 
 /// The personal site of `link`: an address on it, or a sharing link to one of its files (`/:<kind>:/<g|r>/personal/…`).

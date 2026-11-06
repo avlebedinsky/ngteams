@@ -205,3 +205,49 @@ async fn a_transcript_s_language_is_read_from_its_item_s_transcripts() {
     assert_eq!(rig.server.received_requests().await.unwrap().len(), 2);
     rig.handle.shutdown();
 }
+
+#[tokio::test]
+async fn a_recording_s_file_says_whether_it_may_be_downloaded() {
+    let rig = running_engine().await;
+    let item = Mock::given(method("GET"))
+        .and(path(
+            "/personal/made_up_user_contoso_test/_api/v2.1/drives/b!madeup/items/ITEM1",
+        ))
+        .and(query_param("$select", "name,size,accessViewpoint"))
+        .and(header("authorization", "Bearer synthetic-site-token"));
+    item.respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "name": "Made up-20260101_100000-Meeting Recording.mp4",
+        "size": 1234,
+        "accessViewpoint": {"canRead": true, "canDownload": true}
+    })))
+    .up_to_n_times(1)
+    .mount(&rig.server)
+    .await;
+    let file = rig.handle.recording_file(SHARE, "b!madeup", "ITEM1").await.unwrap();
+    assert!(file.can_download);
+    assert_eq!(file.size, Some(1234));
+    // not an item, refused, failed on the way (the transport's retry too)
+    for (answer, times) in [
+        (ResponseTemplate::new(200).set_body_string("<html/>"), 1),
+        (ResponseTemplate::new(403), 1),
+        (ResponseTemplate::new(503), 2),
+    ] {
+        Mock::given(method("GET"))
+            .respond_with(answer)
+            .up_to_n_times(times)
+            .mount(&rig.server)
+            .await;
+    }
+    for unavailable in [true, true, false] {
+        let error = rig.handle.recording_file(SHARE, "b!madeup", "ITEM1").await.unwrap_err();
+        assert_eq!(matches!(error, EngineError::FileUnavailable), unavailable, "{error:?}");
+    }
+    // a link off a personal site is never asked for
+    assert!(matches!(
+        rig.handle
+            .recording_file("https://example.com/no-file", "b!madeup", "ITEM1")
+            .await,
+        Err(EngineError::FileUnavailable)
+    ));
+    rig.handle.shutdown();
+}

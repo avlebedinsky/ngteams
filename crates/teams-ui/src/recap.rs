@@ -404,6 +404,18 @@ pub fn filtered<'a>(items: &'a [SharedItem], filter: SharedFilter, keyword: &str
 /// hold.
 #[must_use]
 pub fn transcript_file_name(title: &str) -> String {
+    file_name(title, "Transcript", "vtt")
+}
+
+/// A recording's file name for a download when its item gives none: the meeting's name, `.mp4`, without the
+/// characters a file name can't hold.
+#[must_use]
+pub fn recording_file_name(title: &str) -> String {
+    file_name(title, "Recording", "mp4")
+}
+
+/// `title` made a file name with `extension` (`fallback` for a blank one).
+fn file_name(title: &str, fallback: &str, extension: &str) -> String {
     let cleaned: String = title
         .chars()
         .map(|character| {
@@ -415,5 +427,5 @@ pub fn transcript_file_name(title: &str) -> String {
         })
         .collect();
     let cleaned = cleaned.trim();
-    format!("{}.vtt", if cleaned.is_empty() { "Transcript" } else { cleaned })
+    format!("{}.{extension}", if cleaned.is_empty() { fallback } else { cleaned })
 }

@@ -163,6 +163,17 @@ impl<C: Credentials> HttpTransport<C> {
         self.drive_read_with(manifest.site(), manifest.url(), &headers).await
     }
 
+    /// A meeting recording's item, read on the personal site that holds it with that site's token
+    /// ([`crate::RecordingFile`]): whether the account may download it, its name and size; the answer is read by
+    /// [`crate::recording::read_recording_file`].
+    ///
+    /// # Errors
+    /// Returns transport, credentials, or unsuccessful service responses (an item the account may not read is a 403
+    /// or 404).
+    pub async fn recording_file(&self, file: &crate::RecordingFile) -> Result<Response, HttpError> {
+        self.drive_read(file.site(), file.url()).await
+    }
+
     async fn drive_read(&self, site: &DriveSite, url: &str) -> Result<Response, HttpError> {
         self.drive_read_with(site, url, &[]).await
     }

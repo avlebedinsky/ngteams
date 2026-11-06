@@ -12,15 +12,19 @@
 //! asks for it. That works whether or not the account may download the recording (an attendee's view of another's
 //! meeting is refused at the download link). A presentation refused or unreadable is [`EngineError::FileUnavailable`],
 //! as is a part refused; one whose read failed on the way is [`EngineError::FileUnread`].
+//!
+//! A recording's file ([`teams_proto::RecordingFile`]) is its item read on the same site: whether the account may
+//! download it (the recap offers Download only then), its name and size. Its bytes are downloaded as any shared file's
+//! are ([`crate::file_content`]: Graph's download link for its sharing link, read again when it expired).
 
 use std::sync::Arc;
 
 use teams_proto::recap::transcript_language;
-use teams_proto::recording::read_manifest;
+use teams_proto::recording::{read_manifest, read_recording_file};
 use teams_proto::transcript::{MAX_TRANSCRIPT, read_vtt};
 use teams_proto::{
     Client, Credentials, HttpError, HttpTransport, MediaSegmentLink, MeetingContent, MeetingContents, Presentation,
-    RecordingManifest, TranscriptLocation,
+    RecordingAccess, RecordingFile, RecordingManifest, TranscriptLocation,
 };
 
 use crate::engine::{EngineError, Responder};
@@ -76,6 +80,24 @@ impl<C: Credentials + 'static> Recaps<C> {
                 Ok(answer) => Ok(answer.body().to_vec()),
                 Err(error) => {
                     log::info!("a part of a meeting recording couldn't be read: {error}");
+                    Err(file_error(&error))
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// What the recording's file `file` is to the account: whether it may download it, its name and size.
+    pub(crate) fn file(&self, file: RecordingFile, reply: Responder<RecordingAccess>) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client.transport().recording_file(&file).await {
+                Ok(answer) => read_recording_file(answer.body()).ok_or_else(|| {
+                    log::info!("a meeting recording's item isn't one the recap reads");
+                    EngineError::FileUnavailable
+                }),
+                Err(error) => {
+                    log::info!("a meeting recording's item couldn't be read: {error}");
                     Err(file_error(&error))
                 }
             };

@@ -2,7 +2,13 @@
 //!
 //! - **The top row**: the meeting's line (its day and span) in a box with its menu, "Part 1", "Part 2" when the
 //!   meeting was recorded more than once, then Share (its menu: Copy link, the recap's Teams link), Watch in browser
-//!   (the recording in Stream, for a part with a recording) and "More options" (Open in Teams on the web, Copy link).
+//!   (the recording in Stream, for a part with a recording) and "More options" (Download, for a recording the account
+//!   may download, then Open in Teams on the web, Copy link, Refresh).
+//! - **Download** saves the shown part's recording where the user chooses (the downloads folder without a chooser),
+//!   named as its item names it: offered only when its item says the account may download it (Teams' Stream page,
+//!   which Watch in browser opens, offers its Download only then; an attendee whose download the meeting's policy
+//!   blocks is offered none). It runs apart from the view ([`crate::recording_download`]): a row under the top row
+//!   shows how far it got with Cancel, then Show in folder, or what failed with Try again.
 //! - **A recorded part**: the recording played here ([`VideoPlayer`], filling its column at 16:9); beside it the files
 //!   shared in the chat and the transcript. A part with only a transcript shows the files and the transcript across
 //!   the whole width. Teams' Copilot parts (the AI summary, speaker insights and their upsells) are left out.
@@ -16,22 +22,25 @@
 //!   again, or Teams on the web; a meeting that left nothing says so.
 //!
 //! The engine reads everything ([`Core::meeting_contents`], [`Core::meeting_transcript`],
-//! [`Core::transcript_language`], the chat's stored messages for its shared files); no view builds a request.
+//! [`Core::transcript_language`], [`Core::recording_file`], [`Core::file_stream`], the chat's stored messages for its
+//! shared files); no view builds a request.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, FontWeight, HighlightStyle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EntityId, FocusHandle, FontWeight,
+    HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use teams_proto::RecordingAccess;
 use teams_proto::chat::SharedFile;
 use teams_proto::recap::{RecapPart, recap_link, recap_parts};
 use teams_proto::transcript::{Cue, Turn, read_vtt};
@@ -42,9 +51,10 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::PictureSource;
 use crate::people;
 use crate::recap::{
-    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, local_session_line, part_label, row_of, shows_parts,
-    transcript_file_name,
+    AI_NOTICE, NO_FILES, Search, SharedItem, Transcript, local_session_line, part_label, recording_file_name, row_of,
+    shows_parts, transcript_file_name,
 };
+use crate::recording_download::{self, Progress, RecordingDownload, byte_size, download_of};
 use crate::theme::{self, Palette};
 use crate::video_player::{Captions, Recording, VideoPlayer, clock as offset};
 
@@ -65,6 +75,13 @@ enum Contents {
     Reading,
     Failed,
     Read(Vec<RecapPart>),
+}
+
+/// A recording's file as read: whether the account may download it.
+enum FileRead {
+    Reading,
+    Failed,
+    Read(RecordingAccess),
 }
 
 /// A transcript as read.
@@ -91,6 +108,10 @@ pub struct RecapView {
     languages: HashMap<String, Option<String>>,
     /// Each recording's player, by its sharing link (a part's place can change when the recap is read again).
     players: HashMap<String, (Entity<VideoPlayer>, Subscription)>,
+    /// Each recording's file, by its sharing link, once asked for: whether the account may download it.
+    recording_files: HashMap<String, FileRead>,
+    /// The downloads of the recap's recordings watched, so the view follows them.
+    watched: HashMap<EntityId, Subscription>,
     /// The paragraph being spoken, as last kept in view.
     spoken: Option<(usize, usize)>,
     /// The recording asked for ("View recap" on its card) before the parts were read.
@@ -133,6 +154,8 @@ impl RecapView {
             transcripts: HashMap::new(),
             languages: HashMap::new(),
             players: HashMap::new(),
+            recording_files: HashMap::new(),
+            watched: HashMap::new(),
             spoken: None,
             wanted: None,
             search_box,
@@ -211,6 +234,8 @@ impl RecapView {
         // the recording shown: still the one shown once the recap is read again, wherever its part went
         let shown = self.part().and_then(|part| part.recording.clone());
         self.contents = Contents::Reading;
+        // a recording's file that couldn't be read is read again with the recap
+        self.recording_files.retain(|_, read| !matches!(read, FileRead::Failed));
         let reply = self.core.meeting_contents(self.conversation.clone());
         self.reading = Some(cx.spawn(async move |this, cx| {
             let answer = reply.await;
@@ -225,6 +250,7 @@ impl RecapView {
                 }
                 this.organizer_name(cx);
                 this.read_transcript(cx);
+                this.read_recording_file(cx);
                 cx.notify();
             });
         }));
@@ -306,6 +332,7 @@ impl RecapView {
         self.search = None;
         self.query.clear();
         self.read_transcript(cx);
+        self.read_recording_file(cx);
         cx.notify();
     }
 
@@ -517,6 +544,79 @@ impl RecapView {
         }
     }
 
+    /// Reads the shown part's recording's file, when it has a recording not asked of yet: whether the account may
+    /// download it.
+    fn read_recording_file(&mut self, cx: &mut Context<Self>) {
+        let Some(part) = self.part() else { return };
+        let (Some(link), Some(drive), Some(item)) =
+            (part.recording.clone(), part.drive_id.clone(), part.item_id.clone())
+        else {
+            return;
+        };
+        if self.recording_files.contains_key(&link) {
+            return;
+        }
+        self.recording_files.insert(link.clone(), FileRead::Reading);
+        let reply = self.core.recording_file(link.clone(), drive, item);
+        cx.spawn(async move |this, cx| {
+            let read = reply.await.map_or(FileRead::Failed, FileRead::Read);
+            let _ = this.update(cx, |this, cx| {
+                this.recording_files.insert(link, read);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The shown part's recording, when the account may download it and no download of it runs: its sharing link and
+    /// the name it is saved under (its item's, else the meeting's).
+    #[must_use]
+    pub fn downloadable(&self, cx: &App) -> Option<(String, String)> {
+        let link = self.part()?.recording.clone()?;
+        let Some(FileRead::Read(access)) = self.recording_files.get(&link) else {
+            return None;
+        };
+        let running = download_of(&link, cx).is_some_and(|download| download.read(cx).progress().running());
+        if !access.can_download || running {
+            return None;
+        }
+        let name = access.name.clone().unwrap_or_else(|| recording_file_name(&self.title));
+        Some((link, name))
+    }
+
+    /// Download (More options): the shown part's recording saved where the user chooses (the downloads folder without
+    /// a chooser), under its own name.
+    pub fn download_recording(&mut self, cx: &mut Context<Self>) {
+        let Some((link, name)) = self.downloadable(cx) else {
+            return;
+        };
+        let folder = crate::picture_viewer::downloads();
+        let chosen = cx.prompt_for_new_path(&folder, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let target = match chosen.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                Ok(Err(_)) | Err(_) => crate::picture_viewer::free_name(&folder, &name),
+            };
+            let _ = this.update(cx, |this, cx| this.save_recording(link, target, cx));
+        })
+        .detach();
+    }
+
+    /// Downloads the recording whose sharing link is `link` to `target`, its progress shown under the top row.
+    pub fn save_recording(&mut self, link: String, target: PathBuf, cx: &mut Context<Self>) {
+        let download = recording_download::start(Arc::clone(&self.core), link, target, cx);
+        self.watch(&download, cx);
+        cx.notify();
+    }
+
+    /// Follows `download`: the view is drawn again as it moves on.
+    fn watch(&mut self, download: &Entity<RecordingDownload>, cx: &mut Context<Self>) {
+        self.watched
+            .entry(download.entity_id())
+            .or_insert_with(|| cx.observe(download, |_, _, cx| cx.notify()));
+    }
+
     /// Download as .vtt: the transcript saved where the user chooses (the downloads folder without a chooser).
     pub fn download(&mut self, cx: &mut Context<Self>) {
         let Some(location) = self.part().and_then(|part| part.transcript.clone()) else {
@@ -641,6 +741,7 @@ impl RecapView {
             .px_3()
             .pb_3()
             .child(top)
+            .children(self.download_rows(palette, cx))
             .children(self.saving.then(|| {
                 div()
                     .debug_selector(|| "recap-saving".to_owned())
@@ -774,8 +875,18 @@ impl RecapView {
         }
         let web = link.unwrap_or_else(|| teams_proto::chat::web_chat_link(&self.conversation));
         let me = cx.entity().downgrade();
+        let downloadable = self.downloadable(cx).is_some();
         let more = icon_button("recap-more", Glyph::MORE, "More options").dropdown_menu(move |menu, _, _| {
-            let (open, copied, again) = (web.clone(), web.clone(), me.clone());
+            let (open, copied, again, saved) = (web.clone(), web.clone(), me.clone(), me.clone());
+            let menu = if downloadable {
+                menu.item(
+                    menu_row("recap-more-download", Glyph::DOWNLOAD, "Download").on_click(move |_, _, cx| {
+                        let _ = saved.update(cx, Self::download_recording);
+                    }),
+                )
+            } else {
+                menu
+            };
             menu.item(
                 menu_row(
                     "recap-more-web",
@@ -795,6 +906,137 @@ impl RecapView {
             )
         });
         actions.push(selected_by("recap-more", more).into_any_element());
+        actions
+    }
+
+    /// A row for each download of the recap's recordings started this run: how far it got, or how it ended.
+    fn download_rows(&mut self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut links: Vec<String> = self
+            .parts()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|part| part.recording.clone())
+            .collect();
+        links.dedup();
+        let mut rows = Vec::new();
+        for (index, link) in links.into_iter().enumerate() {
+            let Some(download) = download_of(&link, cx) else {
+                continue;
+            };
+            self.watch(&download, cx);
+            rows.push(Self::download_row(index, &download, palette, cx));
+        }
+        rows
+    }
+
+    /// One download's row: its icon, what it does or did (with a bar while it runs), its size, and Cancel; Show in
+    /// folder once saved; Try again once failed; Dismiss once ended.
+    fn download_row(
+        index: usize,
+        download: &Entity<RecordingDownload>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let shown = download.read(cx);
+        let (name, link, target, progress) = (
+            shown.name(),
+            shown.link().to_owned(),
+            shown.target().to_owned(),
+            shown.progress().clone(),
+        );
+        let (glyph, colour, state) = match &progress {
+            Progress::Running { .. } => (Glyph::DOWNLOAD, palette.brand, "running"),
+            Progress::Saved => (Glyph::CIRCLE_CHECK, theme::SUCCESS, "saved"),
+            Progress::Failed(_) => (Glyph::CIRCLE_ALERT, theme::DANGER, "failed"),
+        };
+        let size = match progress {
+            Progress::Running {
+                written,
+                total: Some(total),
+            } => Some(format!("{} of {}", byte_size(written), byte_size(total))),
+            Progress::Running { total: None, .. } => Some("Starting\u{2026}".to_owned()),
+            Progress::Saved | Progress::Failed(_) => None,
+        };
+        let text = download_text(&progress, &name, palette);
+        let actions = Self::download_actions(index, &link, target, &progress, cx);
+        div()
+            .debug_selector(move || format!("recap-download-{index} {state}"))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .child(div().text_color(rgb(colour)).child(glyph.icon().size(px(16.0))))
+            .child(text)
+            .children(size.map(|size| {
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(size)
+            }))
+            .children(actions)
+            .into_any_element()
+    }
+
+    /// A download's buttons: Cancel while it runs; Show in folder once saved; Try again once failed; Dismiss once ended.
+    fn download_actions(
+        index: usize,
+        link: &str,
+        target: PathBuf,
+        progress: &Progress,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let dismissed = link.to_owned();
+        let dismiss = move |_: &mut Self, cx: &mut Context<Self>| {
+            recording_download::dismiss(&dismissed, cx);
+            cx.notify();
+        };
+        let mut actions = Vec::new();
+        match progress {
+            Progress::Running { .. } => {
+                let id = format!("recap-download-cancel-{index}");
+                let cancel = icon_button(SharedString::from(id.clone()), Glyph::X, "Cancel download")
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| dismiss(this, cx)));
+                actions.push(selected_by(id, cancel).into_any_element());
+                return actions;
+            }
+            Progress::Saved => {
+                let id = format!("recap-download-show-{index}");
+                let show = Button::new(SharedString::from(id.clone()))
+                    .icon(Glyph::FOLDER.icon())
+                    .label("Show in folder")
+                    .ghost()
+                    .small()
+                    .on_click(move |_, _, cx| cx.reveal_path(&target));
+                actions.push(selected_by(id, show).into_any_element());
+            }
+            Progress::Failed(_) => {
+                let id = format!("recap-download-retry-{index}");
+                let link = link.to_owned();
+                let again = Button::new(SharedString::from(id.clone()))
+                    .label("Try again")
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if let Some(download) = download_of(&link, cx) {
+                            download.update(cx, RecordingDownload::start);
+                        }
+                    }));
+                actions.push(selected_by(id, again).into_any_element());
+            }
+        }
+        let id = format!("recap-download-dismiss-{index}");
+        let close = icon_button(SharedString::from(id.clone()), Glyph::X, "Dismiss")
+            .small()
+            .on_click(cx.listener(move |this, _, _, cx| dismiss(this, cx)));
+        actions.push(selected_by(id, close).into_any_element());
         actions
     }
 
@@ -1061,6 +1303,43 @@ fn highlighted(
         .text_sm()
         .child(StyledText::new(text.to_owned()).with_highlights(highlights))
         .into_any_element()
+}
+
+/// What a download does or did, by its file's name: under it why it failed, or a bar of how far it got.
+fn download_text(progress: &Progress, name: &str, palette: Palette) -> gpui::Div {
+    let words = match progress {
+        Progress::Running { .. } => format!("Downloading {name}"),
+        Progress::Saved => format!("Downloaded {name}"),
+        Progress::Failed(_) => format!("Couldn't download {name}"),
+    };
+    let why = match progress {
+        Progress::Failed(failure) => Some(
+            div()
+                .text_xs()
+                .text_color(rgb(palette.muted_foreground))
+                .truncate()
+                .child(failure.words()),
+        ),
+        Progress::Running { .. } | Progress::Saved => None,
+    };
+    let bar = progress.fraction().map(|fraction| {
+        div().h(px(4.0)).w_full().rounded_full().bg(rgb(palette.border)).child(
+            div()
+                .h_full()
+                .w(gpui::relative(fraction))
+                .rounded_full()
+                .bg(rgb(palette.brand)),
+        )
+    });
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_sm().truncate().child(words))
+        .children(why)
+        .children(bar)
 }
 
 /// The left card: the recording, as tall as it plays.

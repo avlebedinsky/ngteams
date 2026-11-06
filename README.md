@@ -310,7 +310,8 @@ keys include `r` reply, `a` react, `e` edit own message, Delete own message, Ctr
 The compose editor supports formatting, emoji, mentions and quotes; Enter sends, Shift+Enter inserts a line break,
 and expanded formatting mode uses Ctrl+Enter to send. A meeting chat's header has Teams' Chat, Shared and Recap tabs:
 Recap plays the meeting's recordings with their transcripts (search, download), as a recording's "View recap" opens
-it ([docs/protocol/recap.md](docs/protocol/recap.md)). Settings control appearance, notifications, privacy,
+it, and its More options downloads a recording the account may download
+([docs/protocol/recap.md](docs/protocol/recap.md)). Settings control appearance, notifications, privacy,
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.
 

@@ -91,6 +91,15 @@ pub struct FakeCore {
     /// The meeting recordings `recording_presentation` streams (the made-up one, `support/recording_parts.rs`), by
     /// their item; any other can't be had.
     pub recordings: Mutex<HashSet<String>>,
+    /// What `recording_file` answers, by the recording's item; any other can't be had.
+    pub recording_files: Mutex<HashMap<String, teams_proto::RecordingAccess>>,
+    /// The bytes `file_stream` streams, by the file's sharing link; any other file can't be had.
+    pub file_bytes: Mutex<HashMap<String, Vec<u8>>>,
+    /// The most bytes one `file_stream` hands before it ends (a stream that broke off); `None`: all it was asked.
+    pub stream_limit: Mutex<Option<usize>>,
+    /// With a file's bytes, where its streams stop being answered: one asked from there is held in `held_streams`.
+    pub hold_streams_from: Mutex<Option<u64>>,
+    pub held_streams: Mutex<Vec<Answer<teams_core::FileStream>>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
@@ -707,9 +716,37 @@ impl Core for FakeCore {
         self.answer("file_thumbnail", || locked(&self.thumbnails).get(&share_url).cloned())
     }
 
-    fn file_stream(&self, _: String, _: u64, _: u64) -> Reply<teams_core::FileStream> {
-        // the fake has no file's bytes: a video's card shows that it can't be opened
-        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    fn file_stream(&self, share_url: String, offset: u64, len: u64) -> Reply<teams_core::FileStream> {
+        locked(&self.asked).push("file_stream");
+        // a file without bytes here: a video's card shows that it can't be opened
+        let Some(bytes) = locked(&self.file_bytes).get(&share_url).cloned() else {
+            return Reply::ready(Err(teams_core::EngineError::FileUnavailable));
+        };
+        if locked(&self.hold_streams_from).is_some_and(|from| offset >= from) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_streams).push(answer);
+            return reply;
+        }
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+        let wanted = usize::try_from(len).unwrap_or(usize::MAX);
+        let limit = locked(&self.stream_limit).unwrap_or(usize::MAX);
+        let end = start.saturating_add(wanted.min(limit)).min(bytes.len());
+        Reply::ready(Ok(teams_core::FileStream::of(
+            offset,
+            &bytes[start..end],
+            bytes.len() as u64,
+            4096,
+        )))
+    }
+
+    fn recording_file(&self, _: String, _: String, item: String) -> Reply<teams_proto::RecordingAccess> {
+        locked(&self.asked).push("recording_file");
+        Reply::ready(
+            locked(&self.recording_files)
+                .get(&item)
+                .cloned()
+                .ok_or(teams_core::EngineError::FileUnavailable),
+        )
     }
 
     fn file_size(&self, _: String) -> Reply<u64> {

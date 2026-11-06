@@ -625,6 +625,8 @@ enum Request {
     ),
     /// A part of a meeting recording's presentation ([`crate::recap`]).
     RecordingSegment(teams_proto::MediaSegmentLink, Responder<Vec<u8>>),
+    /// What a meeting recording's file is to the account, by its item ([`crate::recap`]).
+    RecordingFile(teams_proto::RecordingFile, Responder<teams_proto::RecordingAccess>),
     Write(Action, Responder<OutboxEntry>),
     /// A read receipt already queued while the engine waited on the service.
     SendQueued(i64, Responder<OutboxEntry>),
@@ -1406,6 +1408,17 @@ impl EngineRequests {
         self.ask(|reply| Request::RecordingSegment(part, reply))
     }
 
+    /// What the meeting recording that is item `item` of drive `drive` on the personal site `link` is on (its sharing
+    /// link) is to the account, read now ([`crate::recap`]): whether it may download it (Teams' Recap offers Download
+    /// only then), its file name and size. [`EngineError::FileUnavailable`] when its item can't be read or the answer
+    /// isn't one, [`EngineError::FileUnread`] when the read failed on the way.
+    pub fn recording_file(&self, link: &str, drive: &str, item: &str) -> Reply<teams_proto::RecordingAccess> {
+        let Some(file) = teams_proto::RecordingFile::of(link, drive, item) else {
+            return Reply::ready(Err(EngineError::FileUnavailable));
+        };
+        self.ask(|reply| Request::RecordingFile(file, reply))
+    }
+
     /// The size of the file a message carries, by its sharing link, as its item gives it ([`crate::file_content`]);
     /// its download link is kept for the reads that follow, so asking early spares the first read that wait.
     pub fn file_size(&self, share_url: impl Into<String>) -> Reply<u64> {
@@ -1920,6 +1933,7 @@ where
             Request::TranscriptLanguage(location, reply) => self.recaps.language(&location, reply),
             Request::RecordingPresentation(manifest, reply) => self.recaps.presentation(manifest, reply),
             Request::RecordingSegment(part, reply) => self.recaps.segment(part, reply),
+            Request::RecordingFile(file, reply) => self.recaps.file(file, reply),
             Request::Write(action, reply) => {
                 let _ = reply.send(self.logged_write(action).await);
             }

@@ -368,3 +368,142 @@ fn each_part_s_recording_has_its_transcript_as_captions_named_by_its_language() 
     assert_eq!(said(cx, &first).as_deref(), Some("Today."));
     assert!(cx.update(|_, cx| teams_ui::video_player::CaptionStyle::current(cx).on));
 }
+
+/// The made-up recording's file as Part 1's item names it.
+const RECORDING_NAME: &str = "Weekly sync-20260102_100000-Meeting Recording.mp4";
+
+/// The rig with Part 1's recording downloadable (`may` false: blocked), its bytes `bytes`.
+fn downloadable(may: bool, bytes: &[u8]) -> Rig {
+    let rig = rig(false);
+    locked(&rig.core.recording_files).insert(
+        "ITEM1".to_owned(),
+        teams_proto::RecordingAccess {
+            can_download: may,
+            name: Some(RECORDING_NAME.to_owned()),
+            size: Some(bytes.len() as u64),
+        },
+    );
+    locked(&rig.core.file_bytes).insert(fixtures::sharing_link("ITEM1"), bytes.to_vec());
+    rig
+}
+
+/// Made-up bytes standing for a recording.
+fn recording_bytes(len: usize) -> Vec<u8> {
+    (0..len).map(|at| u8::try_from(at % 251).unwrap_or(0)).collect()
+}
+
+#[test]
+fn more_options_downloads_the_recording_where_chosen_with_its_progress_and_end() {
+    let bytes = recording_bytes(300_000);
+    let rig = downloadable(true, &bytes);
+    // streams that break off every 70 000 bytes: each opened again where the file stands
+    *locked(&rig.core.stream_limit) = Some(70_000);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    assert_eq!(asked(&rig, "recording_file"), 1, "the shown part's file is read");
+    let view = recap(&shell, cx);
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).downloadable(cx)),
+        Some((fixtures::sharing_link("ITEM1"), RECORDING_NAME.to_owned()))
+    );
+    click(cx, "recap-more");
+    assert!(cx.debug_bounds("recap-more-download").is_some(), "Download offered");
+    click(cx, "recap-more-download");
+    assert!(rig.cx.did_prompt_for_new_path());
+    let folder = tempfile::tempdir().unwrap();
+    let target = folder.path().join("nested").join("recording.mp4");
+    rig.cx.simulate_new_path_selection(|_| Some(target.clone()));
+    draw(cx);
+    assert_eq!(std::fs::read(&target).unwrap(), bytes, "the whole recording, in order");
+    assert_eq!(asked(&rig, "file_stream"), 5);
+    assert!(cx.debug_bounds("recap-download-0 saved").is_some());
+    assert!(cx.debug_bounds("recap-download-show-0").is_some());
+    assert!(!teams_ui::recording_download::part_path(&target).exists());
+    // the download outlives the tab and the chat: shown again when the recap is
+    click(cx, "chat-tab-chat");
+    click(cx, "chat-tab-recap");
+    assert!(cx.debug_bounds("recap-download-0 saved").is_some());
+    click(cx, "recap-download-dismiss-0");
+    assert!(cx.debug_bounds("recap-download-0 saved").is_none());
+    assert!(target.exists(), "dismissing keeps the file");
+}
+
+#[test]
+fn a_download_shows_how_far_it_got_and_cancelling_leaves_nothing() {
+    let bytes = recording_bytes(200_000);
+    let rig = downloadable(true, &bytes);
+    // the first 50 000 bytes come, then nothing more
+    *locked(&rig.core.stream_limit) = Some(50_000);
+    *locked(&rig.core.hold_streams_from) = Some(50_000);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    let view = recap(&shell, cx);
+    let folder = tempfile::tempdir().unwrap();
+    let target = folder.path().join("recording.mp4");
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.save_recording(fixtures::sharing_link("ITEM1"), target.clone(), cx);
+        });
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("recap-download-0 running").is_some());
+    let download = cx
+        .update(|_, cx| teams_ui::recording_download::download_of(&fixtures::sharing_link("ITEM1"), cx))
+        .expect("the download");
+    assert!(matches!(
+        cx.update(|_, cx| download.read(cx).progress().clone()),
+        teams_ui::recording_download::Progress::Running { .. }
+    ));
+    assert!(teams_ui::recording_download::part_path(&target).exists());
+    // a running download isn't offered again
+    assert_eq!(cx.update(|_, cx| view.read(cx).downloadable(cx)), None);
+    click(cx, "recap-download-cancel-0");
+    assert!(cx.debug_bounds("recap-download-0 running").is_none());
+    assert!(!teams_ui::recording_download::part_path(&target).exists());
+    assert!(!target.exists());
+    // offered again once cancelled
+    assert!(cx.update(|_, cx| view.read(cx).downloadable(cx)).is_some());
+}
+
+#[test]
+fn a_recording_the_account_may_not_download_offers_no_download() {
+    let rig = downloadable(false, b"made-up bytes");
+    let (_shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    assert_eq!(asked(&rig, "recording_file"), 1);
+    click(cx, "recap-more");
+    assert!(cx.debug_bounds("recap-more-refresh").is_some(), "the menu is open");
+    assert!(cx.debug_bounds("recap-more-download").is_none());
+    // Part 2's file can't be read: no Download either, and it is read again with the recap
+    cx.simulate_keystrokes("escape");
+    click(cx, "recap-part-1");
+    assert_eq!(asked(&rig, "recording_file"), 2);
+    click(cx, "recap-more");
+    assert!(cx.debug_bounds("recap-more-download").is_none());
+}
+
+#[test]
+fn a_download_that_fails_says_why_and_tries_again() {
+    let bytes = recording_bytes(10_000);
+    let rig = downloadable(true, &bytes);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    let view = recap(&shell, cx);
+    let folder = tempfile::tempdir().unwrap();
+    let target = folder.path().join("recording.mp4");
+    // the recording refused at its download link
+    let bytes_kept = locked(&rig.core.file_bytes).remove(&fixtures::sharing_link("ITEM1"));
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.save_recording(fixtures::sharing_link("ITEM1"), target.clone(), cx);
+        });
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("recap-download-0 failed").is_some());
+    assert!(!teams_ui::recording_download::part_path(&target).exists());
+    // there again: Try again saves it
+    locked(&rig.core.file_bytes).insert(fixtures::sharing_link("ITEM1"), bytes_kept.unwrap());
+    click(cx, "recap-download-retry-0");
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+    assert!(cx.debug_bounds("recap-download-0 saved").is_some());
+}

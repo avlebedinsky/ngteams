@@ -140,6 +140,13 @@ pub trait Core: Send + Sync + 'static {
         let _ = part;
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
+    /// What the meeting recording that is item `item` of drive `drive` on the personal site of its sharing link `link`
+    /// is to the account: whether it may download it (the recap offers Download only then), its file name and size. A
+    /// fake without recordings answers that it can't be had.
+    fn recording_file(&self, link: String, drive: String, item: String) -> Reply<teams_proto::RecordingAccess> {
+        let _ = (link, drive, item);
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -663,6 +670,10 @@ impl Core for EngineRequests {
 
     fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {
         EngineRequests::recording_segment(self, part)
+    }
+
+    fn recording_file(&self, link: String, drive: String, item: String) -> Reply<teams_proto::RecordingAccess> {
+        EngineRequests::recording_file(self, &link, &drive, &item)
     }
 
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {

@@ -121,6 +121,7 @@ pub mod reaction_picker;
 pub mod reactions;
 pub mod recap;
 pub mod recap_view;
+pub mod recording_download;
 pub mod rich_text;
 pub mod ringtone;
 pub mod search;
