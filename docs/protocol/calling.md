@@ -901,9 +901,17 @@ a alone). What each of Teams' remaining call controls sends:
   `401`/`403`, "Recording cannot be started for this call." when the bot couldn't join, "Something went wrong. Try to
   start recording again." otherwise, a transcription's in the same words for transcription; no refusal was captured,
   the lab tenant records). The roster's `realTimeTranscript` and `recordVideo` are read into
-  `MeetingState::transcribing` and `Recording::audio_only`. The transcription's start and stop and the audio-only
-  recording haven't run natively yet. The recording's ran natively 2026-11-06 (lab a and b in their 1:1 call): a's
-  start invited the bot,
+  `MeetingState::transcribing` and `Recording::audio_only`. The audio-only recording hasn't run natively yet. The
+  transcription's ran natively 2026-11-06 (lab a and b in their 1:1 call): a's Start transcription invited the bot
+  (`202`), its start went out once the roster named the bot's command link, about 27 s later (`200`), and both windows
+  showed "Transcription has started" and the transcript mark, a's Transcript pane open by itself, b's from Show
+  transcript; a's stop (`200`) showed "Transcription has stopped" and "AI stopped transcription" on both. The chat got
+  the bot's `Media_CallRecording` states for the transcript alone (`Initial`, `ChunkFinished`, then `Success` seconds
+  after the call ended, its file `…-Meeting Transcript.mp4`), drawn as nothing, and a `Media_CallTranscript` at
+  the start, whose card (the call's span, View recap, the Transcript chip, no thumbnail) both sides show. The Recap
+  tab's sessions list the recordings alone, as Teams' do (recap.md), so the call transcribed alone isn't among them and
+  its card's View recap opens the latest recording (what Teams' opens there wasn't captured). The recording's ran
+  natively 2026-11-06 (lab a and b in their 1:1 call): a's start invited the bot,
   posted the start (`200`), both windows showed the notice and the red dot; a's stop (`200`) ended it on both. The
   transcript card came at once and `Call with AI2-<stamp>-Meeting Recording` about a minute after the stop, in the 1:1
   chat and its Shared tab; the chat's Recap tab lists only meeting recordings and this computer's caption transcripts,
