@@ -1,0 +1,33 @@
+RtpTransceiver::set_direction: the binding webrtc-sys 0.3.52 has (src/rtp_transceiver.rs) exposed on the safe API,
+as RTCRtpTransceiver.direction's setter. ngteams turns a group call's sharing line, which the mixer's offer created
+receive-only, to send before answering it (crates/teams-media/src/rtc.rs).
+
+--- a/src/native/rtp_transceiver.rs
++++ b/src/native/rtp_transceiver.rs
+@@ -78,6 +78,12 @@
+         self.sys_handle.direction().into()
+     }
+
++    pub fn set_direction(&self, direction: RtpTransceiverDirection) -> Result<(), RtcError> {
++        self.sys_handle
++            .set_direction(direction.into())
++            .map_err(|e| unsafe { sys_err::ffi::RtcError::from(e.what()).into() })
++    }
++
+     pub fn sender(&self) -> rtp_sender::RtpSender {
+         rtp_sender::RtpSender { handle: RtpSender { sys_handle: self.sys_handle.sender() } }
+     }
+--- a/src/rtp_transceiver.rs
++++ b/src/rtp_transceiver.rs
+@@ -56,6 +56,11 @@
+         self.handle.direction()
+     }
+
++    /// The direction the transceiver is to go from the next negotiation on (`RTCRtpTransceiver.direction`'s setter).
++    pub fn set_direction(&self, direction: RtpTransceiverDirection) -> Result<(), RtcError> {
++        self.handle.set_direction(direction)
++    }
++
+     pub fn sender(&self) -> RtpSender {
+         self.handle.sender()
+     }

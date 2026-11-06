@@ -48,7 +48,7 @@ default-members = [
     "crates/wpe-webkit-sys",
     "spikes/gpui-video",
 ]
-# Patched crates.io sources (scripts/vendor-gpui.sh), used through [patch.crates-io], never workspace members.
+# Patched crates.io sources (scripts/vendor-crates.sh), used through [patch.crates-io], never workspace members.
 exclude = ["vendor"]
 
 [workspace.package]
@@ -284,9 +284,15 @@ opt-level = 3
 # GPUI with agterm-rs's external-surfaces patches (M0 Task 16, approach (b) of the video spike):
 # `Window::paint_external_surface` draws CPU pixels uploaded into a texture kept per surface, or a dmabuf imported on
 # the GPU, instead of a new sprite atlas texture per video frame. vendor/gpui-pre and vendor/gpui-pre-wgpu are the verified crates.io sources of the
-# pinned 0.3.9 plus build/patches/gpui-pre{,-wgpu} (scripts/vendor-gpui.sh; `--check` verifies them); so is
+# pinned 0.3.9 plus build/patches/gpui-pre{,-wgpu} (scripts/vendor-crates.sh; `--check` verifies them); so is
 # vendor/gpui-pre-linux, whose Wayland clipboard keeps another program's HTML for the rich-text editor's paste.
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+# LiveKit's libwebrtc bindings, the pinned 0.3.55 plus build/patches/libwebrtc (scripts/vendor-crates.sh):
+# `RtpTransceiver::set_direction`, which webrtc-sys binds and the safe API leaves out (0.4.0 too). A group call's screen
+# goes out on the mixer's sharing line, turned to send before the answer (crates/teams-media/src/rtc.rs). Only the Rust
+# crate is patched: webrtc-sys and its prebuilt libwebrtc stay crates.io's. Drop this, vendor/libwebrtc and its patch
+# once a LiveKit release exposes it.
+libwebrtc = { path = "vendor/libwebrtc" }
