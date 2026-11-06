@@ -658,7 +658,7 @@ The conversation's answer lists these links among its others (`publishState`, `r
 ### Hold and resume
 
 Captured 2026-11-06 with `ab-call --call steps` (a 1:1 call a → b, a's page driven: Hold, then Resume). Teams offers
-Hold in a 1:1 call's toolbar (beside Transfer, Consult and Dial pad), not in a group call or a meeting.
+Hold in a 1:1 call's toolbar (beside its Transfer, Consult and Dial pad), not in a group call or a meeting.
 
 - **Hold** posts to the call leg's `hold` link (handed out with the call's other leg links: the caller's acceptance,
   the callee's `accept` answer, a retarget) `{"hold": {"holdType": "musicOnHold", "links": {"holdCompletion": <a call
@@ -712,7 +712,8 @@ a alone). What each of Teams' remaining call controls sends:
   renegotiation followed and the viewer showed nothing before the call ended; the group path wasn't captured.
 - **Dial pad** (1:1 calls): a pad of 1–9, `*`, 0, `#` with letters, under a Number field that collects what was pressed.
   Each key goes as a DTMF tone on the call's audio sender (the browser's `insertDTMF`, 200 ms tone, 100 ms gap, RFC
-  4733 `telephone-event` on the audio line); nothing goes to the signaling.
+  4733 `telephone-event` on the audio line); nothing goes to the signaling. The native client has no dial pad and sends
+  no DTMF (the user's choice): this records only what Teams does.
 - **Transfer** (1:1 calls) holds the call first, then asks "Transfer the call" (Type a name or number, the person's
   suggestions; once picked: Transfer to an audio call or to their work voicemail, Include a call topic, Cancel, Transfer).
   Cancel leaves the call held. Transfer posts `{"callTransfer": {"target": {"id"}, "transferor": {"details": {id,
@@ -732,7 +733,7 @@ a alone). What each of Teams' remaining call controls sends:
   of the three (`POST v1/threads`, no topic) and posts the conversation's `add` (`addParticipantAndModality`) with
   `{"participants": {"from", "to": [{id, participantId}]}, "participantInvitationData": {}, "groupChat": {"threadId":
   <the new chat>, "messageId": null}, "links": {"addParticipantSuccess", "addParticipantFailure"}}` (`202`). The call
-  becomes a group call at once: the toolbar trades Transfer, Consult, Dial pad and Hold for Raise, React and Controls,
+  becomes a group call at once: Teams' toolbar trades Transfer, Consult, Dial pad and Hold for Raise, React and Controls,
   Leave gains its options, People shows "Currently in this call (3)", Mute all, the account as Organizer, and the
   invitee ringing (then "No response" with a call-again button, and "People added to the chat").
 - **Record** (More's Record and transcribe: Start recording, Start transcription) asks the spoken language and what to
