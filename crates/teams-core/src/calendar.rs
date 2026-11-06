@@ -31,7 +31,7 @@ use teams_proto::{
     EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetNow, MeetNowMeeting,
     MeetingChannel, MeetingDetails, MeetingThread, MeetingTimes, Organizer, PersonSchedule, Request, RespondEvent,
     RsvpAnswer, ScheduledMeeting, Schedules, SetMeetingTitle, ShortProfileLookup, TimeZoneSettings, Transport,
-    UpdateChannelEvent, UpdateEvent,
+    UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
 use teams_store::{Store, StoreError, StoredEvent};
 use tokio::task::JoinSet;
@@ -601,11 +601,31 @@ async fn complete<C: Credentials + 'static>(
     let known = known(client, whom, me).await;
     draft.organizer = organizer(me, &known);
     draft.time_zone = match &draft.zone {
-        // a zone the form chose: as Exchange names it, read now (the desktop's when that read fails)
-        Some(zone) => zone_name(client, zone).await.or(known.time_zone),
+        // a zone the form chose: as Exchange names it, read now
+        Some(zone) => {
+            let name = zone_name(client, zone).await;
+            if name.is_none() {
+                // the desktop's when that read fails: the service reads both times as the zone sent's clock, so they
+                // are written in the desktop's offsets rather than the chosen zone's
+                draft.start = in_desktop_zone(draft.start);
+                draft.end = in_desktop_zone(draft.end);
+            }
+            name.or(known.time_zone)
+        }
         None => known.time_zone,
     };
     draft
+}
+
+/// `time`, the same moment, with the desktop's offset then.
+fn in_desktop_zone(time: ZonedTime) -> ZonedTime {
+    Local
+        .timestamp_millis_opt(time.ms)
+        .single()
+        .map_or(time, |at| ZonedTime {
+            ms: time.ms,
+            offset_minutes: at.offset().local_minus_utc() / 60,
+        })
 }
 
 /// `write` with its draft, when it carries one, completed ([`complete`]).

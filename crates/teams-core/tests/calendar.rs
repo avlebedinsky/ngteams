@@ -297,6 +297,67 @@ async fn calendar_writes_keep_the_organizer_and_fields_read_before_an_edit() {
     rig.handle.shutdown();
 }
 
+/// A draft with its times in Honolulu's offset, the zone the form chose.
+fn honolulu_draft() -> EventDraft {
+    let mut draft = draft();
+    draft.attendees.clear();
+    draft.zone = Some("Pacific/Honolulu".to_owned());
+    draft.start.offset_minutes = -600;
+    draft.end.offset_minutes = -600;
+    draft
+}
+
+#[tokio::test]
+async fn a_chosen_zone_is_sent_by_its_exchange_name_or_the_times_move_to_the_desktop_s_zone() {
+    let rig = running_engine(true).await;
+    identity(&rig.server).await;
+    editable_calendar(&rig.server).await;
+    Mock::given(method("GET"))
+        .and(path(ZONE))
+        .and(wiremock::matchers::query_param("timezone", "Pacific/Honolulu"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"timeZone": "HawaiianSt"})))
+        .with_priority(1)
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    rig.handle
+        .write_event(EventWrite::Create(honolulu_draft()))
+        .await
+        .unwrap();
+    // the zone's read fails the second time: the desktop's zone, the times in its offsets
+    Mock::given(method("GET"))
+        .and(path(ZONE))
+        .and(wiremock::matchers::query_param("timezone", "Pacific/Honolulu"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&rig.server)
+        .await;
+    rig.handle
+        .write_event(EventWrite::Create(honolulu_draft()))
+        .await
+        .unwrap();
+
+    let posted: Vec<Value> = requests(&rig.server, "POST", EVENTS)
+        .await
+        .iter()
+        .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap()["calendarEvent"].clone())
+        .collect();
+    assert_eq!(posted[0]["eventTimeZone"], "HawaiianSt");
+    assert_eq!(posted[0]["utcOffset"], -600);
+    assert_eq!(posted[0]["startTime"], "2026-10-31T14:00:00-10:00");
+    assert_eq!(posted[0]["endTime"], "2026-10-31T14:30:00-10:00");
+    assert_eq!(posted[1]["eventTimeZone"], "Utc");
+    let desktop = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .to_rfc3339()
+    };
+    assert_eq!(posted[1]["startTime"], desktop(START));
+    assert_eq!(posted[1]["endTime"], desktop(START + 1_800_000));
+    rig.handle.shutdown();
+}
+
 #[tokio::test]
 async fn the_scheduler_keeps_each_successful_half_and_fails_only_when_both_reads_fail() {
     let rig = running_engine(true).await;
