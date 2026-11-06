@@ -321,8 +321,12 @@ meeting's chat after a preview. Settings control appearance, notifications, priv
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.
 
-Calls open a separate window; closing it leaves the call. The main window keeps an in-call strip. Ctrl+Shift+M
-mutes, Ctrl+Shift+O toggles camera and Ctrl+Shift+H leaves. Camera starts off; only the user's action turns it on.
+Calls open a separate window; closing it leaves the call. Its toolbar follows Teams': Chat (the call's chat beside
+the stage), People, Raise and React (group calls and meetings), View (Gallery or Speaker, Show videos first; More
+options: Turn off other videos, Hide me, Full screen), More, camera, microphone and Leave (End meeting, after a
+confirmation, for a meeting's organizer). The main window keeps an in-call strip.
+Ctrl+Shift+M mutes, Ctrl+Shift+O toggles camera, Ctrl+Shift+K raises or lowers the hand and Ctrl+Shift+H leaves.
+Camera starts off; only the user's action turns it on.
 Notifications, tray and device access use the session selected at startup: desktop for the user's normal app,
 private sandbox for lab/tests. One call or ring is admitted at a time across the app's accounts.
 

@@ -75,6 +75,10 @@ impl CallKind {
 }
 
 /// The call up, or being set up, as the views show it.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is the call's own state, told by an event of its own and shown by a control of its own"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveCall {
     pub id: CallId,
@@ -104,7 +108,30 @@ pub struct ActiveCall {
     /// Who waits in the meeting's lobby, as its roster tells it ([`teams_core::Event::Lobby`]): Teams' "Waiting in
     /// the lobby" with Admit and Deny for each.
     pub lobby: Vec<LobbyPerson>,
+    /// The account's hand is raised, as its roster entry tells it ([`teams_core::Event::CallOwn`]).
+    pub hand_raised: bool,
+    /// The account organizes the meeting: it may end it for everyone.
+    pub organizer: bool,
+    /// The live reactions sent in the call lately, the newest last, each shown for [`REACTION_SHOWN`].
+    pub reactions: Vec<LiveReaction>,
 }
+
+/// A live reaction someone in the call sent ([`teams_core::Event::CallReaction`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveReaction {
+    pub from: Mri,
+    /// Their name as the reaction gave it.
+    pub name: Option<String>,
+    /// `like`, `heart`, `applause`, `laugh` or `surprised`.
+    pub reaction: String,
+    pub at: Instant,
+}
+
+/// How long a live reaction shows on the stage, as Teams floats one up and away.
+pub const REACTION_SHOWN: Duration = Duration::from_secs(4);
+
+/// The most live reactions the stage shows at once.
+const REACTIONS_SHOWN: usize = 12;
 
 impl ActiveCall {
     /// Its results, when it is the test call.
@@ -428,6 +455,12 @@ pub enum Ask {
         waiting: Mri,
         admit: bool,
     },
+    /// Raise the account's hand, or lower it.
+    ToggleHand,
+    /// Send a live reaction to everyone in the call (`like`, `heart`, `applause`, `laugh`, `surprised`).
+    React(String),
+    /// End the meeting for everyone in it (its organizer's End meeting).
+    EndMeeting,
 }
 
 impl Ask {
@@ -449,6 +482,9 @@ impl Ask {
             Self::ToggleCamera => "camera",
             Self::Lobby { admit: true, .. } => "admit",
             Self::Lobby { admit: false, .. } => "deny",
+            Self::ToggleHand => "hand",
+            Self::React(_) => "react",
+            Self::EndMeeting => "end-meeting",
         }
     }
 
@@ -842,6 +878,8 @@ impl Calls {
                     | Event::CallCaptions { .. }
                     | Event::CallParticipants { .. }
                     | Event::Lobby { .. }
+                    | Event::CallOwn { .. }
+                    | Event::CallReaction { .. }
             );
         }
         match event {
@@ -890,10 +928,49 @@ impl Calls {
                     active.lobby.clone_from(waiting);
                 }
             }
+            Event::CallOwn { .. } | Event::CallReaction { .. } => self.in_call(event),
             _ => return false,
         }
         cx.notify();
         true
+    }
+
+    /// The account's own state in its call, or a live reaction sent in it.
+    fn in_call(&mut self, event: &Event) {
+        match event {
+            Event::CallOwn {
+                call,
+                hand_raised,
+                organizer,
+            } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.hand_raised = *hand_raised;
+                    active.organizer = *organizer;
+                }
+            }
+            Event::CallReaction {
+                call,
+                from,
+                name,
+                reaction,
+            } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    let now = Instant::now();
+                    active
+                        .reactions
+                        .retain(|shown| now.duration_since(shown.at) < REACTION_SHOWN);
+                    active.reactions.push(LiveReaction {
+                        from: from.clone(),
+                        name: name.clone(),
+                        reaction: reaction.clone(),
+                        at: now,
+                    });
+                    let over = active.reactions.len().saturating_sub(REACTIONS_SHOWN);
+                    active.reactions.drain(..over);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The microphone (`microphone`) or the speaker of `call` went away for good: its check fails.
@@ -982,6 +1059,9 @@ impl Calls {
             view: CallView::default(),
             check: DeviceCheck::default(),
             lobby: Vec::new(),
+            hand_raised: false,
+            organizer: false,
+            reactions: Vec::new(),
         }
     }
 
@@ -1068,6 +1148,7 @@ impl Calls {
                     admit: *admit,
                 })
             }
+            Ask::ToggleHand | Ask::React(_) | Ask::EndMeeting => self.meeting_action(ask),
             Ask::ToggleCamera if self.video.is_none() => Err("no-video"),
             Ask::ToggleCamera => {
                 let call = self.call.as_ref().ok_or("no-call")?;
@@ -1076,6 +1157,23 @@ impl Calls {
                     on: !call.camera,
                 })
             }
+        }
+    }
+
+    /// The engine's call action for Raise or Lower hand, a live reaction or End meeting, on the call up.
+    fn meeting_action(&self, ask: &Ask) -> Result<CallAction, &'static str> {
+        let call = self.call.as_ref().ok_or("no-call")?;
+        match ask {
+            Ask::ToggleHand => Ok(CallAction::RaiseHand {
+                call: call.id,
+                raised: !call.hand_raised,
+            }),
+            Ask::React(reaction) => Ok(CallAction::React {
+                call: call.id,
+                reaction: reaction.clone(),
+            }),
+            Ask::EndMeeting if call.organizer => Ok(CallAction::EndMeeting { call: call.id }),
+            _ => Err("not-organizer"),
         }
     }
 
@@ -1130,6 +1228,8 @@ impl Calls {
                 };
                 match action {
                     CallAction::Mute { muted, .. } => active.muted = *muted,
+                    // shown raised at once, as Teams does; the roster tells it as it stands
+                    CallAction::RaiseHand { raised, .. } => active.hand_raised = *raised,
                     CallAction::Camera { on, .. } => {
                         active.camera = *on;
                         active.check.camera |= *on;
@@ -1209,6 +1309,7 @@ fn local_refusal_text(why: &str) -> String {
         }
         "no-video" => "calls here carry no video".to_owned(),
         "not-waiting" => "they aren't waiting in the lobby any more".to_owned(),
+        "not-organizer" => "only the meeting's organizer can end it for everyone".to_owned(),
         "not-told" => "the call didn't start: the app got no answer from the calling service, try again".to_owned(),
         _ => "calls aren't available".to_owned(),
     }

@@ -50,6 +50,8 @@ pub struct CallParticipant {
     pub muted: bool,
     /// Whether its hand is raised.
     pub hand_raised: bool,
+    /// Whether it organizes the meeting: Teams' People pane says "Organizer" under its name.
+    pub organizer: bool,
 }
 
 /// What a call's view is now: its participants, whether the account itself is speaking, and whether its microphone
@@ -225,6 +227,7 @@ impl Gallery {
                     speaking,
                     muted: participant.muted,
                     hand_raised: participant.hand_raised,
+                    organizer: participant.organizer,
                 }
             })
             .collect();
@@ -252,6 +255,7 @@ mod tests {
             video_on: true,
             muted: false,
             hand_raised: false,
+            organizer: false,
         }
     }
 

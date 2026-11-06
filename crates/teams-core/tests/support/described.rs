@@ -234,6 +234,7 @@ fn device_and_gallery_diagnostics_report_counts_and_lines_without_participant_na
                     speaking: true,
                     muted: false,
                     hand_raised: false,
+                    organizer: false,
                 }],
                 speaking,
                 hearing: true,

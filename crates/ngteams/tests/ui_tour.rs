@@ -11,7 +11,8 @@
 //! Dark and Light; a picture opened in the picture viewer, fitted and zoomed; the 12-hour time format and a chat's
 //! times on it; a group chat's presence; the "Chats" section's See more, what it brings and a chat opened from below
 //! the rows shown; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, beside the main window
-//! with its in-call strip, and in Teams Dark) and says
+//! with its in-call strip, and in Teams Dark; a group call with Raise and React, its People pane, its speaker view and
+//! its chat, in Teams Light and Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
 //! the app, never by screen coordinates.
 //!
@@ -118,7 +119,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 157] = [
+const STEPS: [Step; 5 + 163] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1194,7 +1195,162 @@ const STEPS: [Step; 5 + 157] = [
             cx,
         );
     }),
+    // a group call in the a-b-c chat, answered: Chat, People with how many are in it, Raise and React; Lab Bee
+    // speaking on its video, Lab Sea muted with its hand up, reactions floating up (its window opens as the call is
+    // told: its panes open in the steps after)
+    ("call-group", |shell, _, cx| fake_group_call(shell, cx)),
+    // its View's Speaker: Lab Bee large over a strip of the others
+    ("call-group-speaker", |_, _, cx| {
+        with_stage(cx, |stage, cx| {
+            stage.show_roster(false, cx);
+            stage.set_layout(teams_ui::call_stage::Layout::Speaker, cx);
+        });
+    }),
+    // the call's chat beside the stage, back in the gallery
+    ("call-group-chat", |_, _, cx| {
+        with_stage_window(cx, |stage, window, cx| {
+            stage.set_layout(teams_ui::call_stage::Layout::Gallery, cx);
+            stage.show_chat(true, window, cx);
+        });
+    }),
+    // in Teams Dark, the account's own hand up, the People pane open
+    ("call-group-dark", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models.apply(
+            teams_core::Event::CallOwn {
+                call: teams_core::CallId::for_tests(GROUP_CALL),
+                hand_raised: true,
+                organizer: false,
+            },
+            cx,
+        );
+        react(shell, LAB_C, "applause", cx);
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+        with_stage(cx, |stage, cx| stage.show_roster(true, cx));
+    }),
+    // and its chat in Teams Dark
+    ("call-group-chat-dark", |_, _, cx| {
+        with_stage_window(cx, |stage, window, cx| stage.show_chat(true, window, cx));
+    }),
+    // back in Teams Light, the People pane with the hands up in their line, and End meeting's confirmation over it
+    ("call-end-meeting-confirm", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+        with_stage(cx, |stage, cx| {
+            stage.show_roster(true, cx);
+            stage.confirm_end_meeting(true, cx);
+        });
+    }),
 ];
+
+/// The made-up group call's number.
+const GROUP_CALL: u64 = 2;
+
+/// The made-up call ended, and a group call in the a-b-c chat from b answered in its place, told to a's models as the
+/// engine would tell it: b speaking on its camera (line 1), c muted with its hand up, and live reactions from c and
+/// the account itself; b's picture a test pattern, fed while the tour runs.
+fn fake_group_call(shell: &Entity<Shell>, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+    });
+    let call = teams_core::CallId::for_tests(GROUP_CALL);
+    let participant = |mri: &str, name: &str, video: bool, speaking: bool, quiet: bool| teams_core::CallParticipant {
+        mri: mri.to_owned(),
+        name: Some(name.to_owned()),
+        video_on: video,
+        line: Some(if video { 1 } else { 2 }),
+        speaking,
+        muted: quiet,
+        hand_raised: quiet,
+        organizer: false,
+    };
+    let events = [
+        teams_core::Event::Call {
+            call: teams_core::CallId::for_tests(FAKE_CALL),
+            status: teams_core::CallStatus::Ended(teams_core::End::HungUp),
+        },
+        teams_core::Event::IncomingCall(teams_core::IncomingCall {
+            call,
+            caller: Mri::new(LAB_B),
+            caller_name: Some("Lab Bee".to_owned()),
+            group_chat: Some(ABC_CHAT.to_owned()),
+        }),
+        teams_core::Event::Call {
+            call,
+            status: teams_core::CallStatus::Answering,
+        },
+        teams_core::Event::Call {
+            call,
+            status: teams_core::CallStatus::Connected,
+        },
+        teams_core::Event::CallParticipants {
+            call,
+            view: teams_core::CallView {
+                participants: vec![
+                    participant(LAB_B, "Lab Bee", true, true, false),
+                    participant(LAB_C, "Lab Sea", false, false, true),
+                ],
+                speaking: false,
+                hearing: false,
+            },
+        },
+    ];
+    for event in events {
+        models.apply(event, cx);
+    }
+    react(shell, LAB_C, "heart", cx);
+    react(shell, LAB_A, "like", cx);
+    let Some(feed) = models.calls.read(cx).video().cloned() else {
+        return;
+    };
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let pattern = TestPattern::new(640, 360);
+        let output: &dyn VideoOutput = &feed;
+        let mut sink = output.remote(1);
+        for frame in 0.. {
+            if sink.show(&pattern.frame(frame)).is_err() {
+                break;
+            }
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+        }
+    })
+    .detach();
+}
+
+/// A live reaction `reaction` from `from` in the made-up group call, told as the engine would tell it.
+fn react(shell: &Entity<Shell>, from: &str, reaction: &str, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::CallReaction {
+            call: teams_core::CallId::for_tests(GROUP_CALL),
+            from: Mri::new(from),
+            name: None,
+            reaction: reaction.to_owned(),
+        },
+        cx,
+    );
+}
+
+/// Runs `change` on the call window's stage with its window, when it is open.
+fn with_stage_window(cx: &mut App, change: impl FnOnce(&mut CallStage, &mut Window, &mut Context<CallStage>)) {
+    let found = cx.windows().into_iter().find_map(|window| {
+        let kit = window.downcast::<KitRoot>()?;
+        let stage = kit.read(cx).ok()?.view().clone().downcast::<CallStage>().ok()?;
+        Some((kit, stage))
+    });
+    if let Some((kit, stage)) = found {
+        let _ = kit.update(cx, |_, window, cx| {
+            stage.update(cx, |stage, cx| change(stage, window, cx));
+        });
+    }
+}
 
 /// A fake Claude Code for the tour: it answers the made-up captions with their German, anything else unchanged.
 const FAKE_CLAUDE: &str = r#"#!/bin/bash
@@ -1329,6 +1485,7 @@ fn fake_call(shell: &Entity<Shell>, cx: &mut App) {
                     speaking: true,
                     muted: false,
                     hand_raised: false,
+                    organizer: false,
                 }],
                 speaking: false,
                 hearing: false,

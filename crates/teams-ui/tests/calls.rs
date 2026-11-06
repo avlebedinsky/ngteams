@@ -1164,6 +1164,7 @@ fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
                 speaking: true,
                 muted: false,
                 hand_raised: false,
+                organizer: false,
             }],
             speaking: false,
             hearing: false,
@@ -1253,6 +1254,7 @@ fn view(who: &[(&str, &str, bool, Option<usize>, bool)], speaking: bool) -> Call
                 speaking: *speaking,
                 muted: false,
                 hand_raised: false,
+                organizer: false,
             })
             .collect(),
         speaking,
@@ -1475,6 +1477,7 @@ fn echo_heard(rig: &Rig, number: u64) {
                 speaking: true,
                 muted: false,
                 hand_raised: false,
+                organizer: false,
             }],
             speaking: false,
             hearing: true,
@@ -2941,27 +2944,357 @@ fn caption_font_and_position_choices_are_local_and_preserve_the_ephemeral_lines(
 #[test]
 fn language_and_speech_menu_exposes_caption_toggle_through_the_actual_more_popup() {
     let (rig, _windows, window) = caption_stage();
-    click(window, "call-more");
-    window.simulate_keystrokes("down right");
-    draw(window);
-    if !drawn(window, "call-toggle-captions") {
-        window.simulate_keystrokes("left");
-    }
+    open_language_and_speech(window);
     click(window, "call-toggle-captions");
     assert!(matches!(
         actions(&rig).last(),
         Some(CallAction::Captions { enabled: true, .. })
     ));
     caption_state(&rig, teams_core::CaptionPhase::On, None);
-    click(window, "call-more");
-    window.simulate_keystrokes("down right");
-    draw(window);
-    if !drawn(window, "call-toggle-captions") {
-        window.simulate_keystrokes("left");
-    }
+    open_language_and_speech(window);
     click(window, "call-toggle-captions");
     assert!(matches!(
         actions(&rig).last(),
         Some(CallAction::Captions { enabled: false, .. })
     ));
+}
+
+/// More's Language and speech opened by the keyboard, as Teams lists it after the video effects and audio settings.
+fn open_language_and_speech(window: &mut VisualTestContext) {
+    for downs in 1..=4 {
+        click(window, "call-more");
+        let keys = format!("{} right", vec!["down"; downs].join(" "));
+        window.simulate_keystrokes(&keys);
+        if drawn(window, "call-toggle-captions") {
+            return;
+        }
+        window.simulate_keystrokes("escape");
+        draw(window);
+    }
+    panic!("Language and speech isn't in More");
+}
+
+/// Where the element `selector` starts from the window's left.
+fn left_of(window: &mut VisualTestContext, selector: &'static str) -> gpui::Pixels {
+    draw(window);
+    window.debug_bounds(selector).expect(selector).origin.x
+}
+
+/// Opens View's More options (a submenu, reached by the keyboard as a user's arrows reach it).
+fn open_view_more_options(window: &mut VisualTestContext) {
+    for downs in 1..=5 {
+        click(window, "call-view");
+        let keys = format!("{} right", vec!["down"; downs].join(" "));
+        window.simulate_keystrokes(&keys);
+        if drawn(window, "call-view-hide-me") {
+            return;
+        }
+        window.simulate_keystrokes("escape");
+        draw(window);
+    }
+    panic!("More options isn't in View");
+}
+
+/// a's group call in the trio chat, up, b muted with its hand raised and c speaking: its window.
+fn in_group_call(rig: &Rig, trace: &Arc<ViewTrace>) -> (Entity<CallWindows>, &'static mut VisualTestContext) {
+    let (shell, cx) = shell_window(rig, Some(TRIO), Arc::clone(trace));
+    let (windows, _) = call_windows(rig, &shell, trace);
+    registered(rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(rig, 1, CallStatus::Connected);
+    let mut told = view(
+        &[
+            (LAB_B, "Lab Bee", false, None, false),
+            (LAB_C, "Lab Sea", false, None, true),
+        ],
+        false,
+    );
+    told.participants[0].muted = true;
+    told.participants[0].hand_raised = true;
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: told,
+    });
+    let stage = stage(rig, &windows);
+    (windows, stage)
+}
+
+/// The call actions asked so far that `wanted` takes.
+fn asked(rig: &Rig, wanted: impl Fn(&CallAction) -> bool) -> Vec<CallAction> {
+    actions(rig).into_iter().filter(|action| wanted(action)).collect()
+}
+
+#[test]
+fn a_group_call_offers_teams_controls_raise_and_react_and_shows_who_is_muted_or_has_a_hand_up() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (_windows, stage) = in_group_call(&rig, &trace);
+    for control in [
+        "call-chat",
+        "call-roster",
+        // b's hand up asks for attention: People's red badge
+        "call-roster-attention",
+        "call-raise-hand",
+        "call-react",
+        "call-view",
+        "call-more",
+        "call-mute",
+        "call-hang-up",
+    ] {
+        assert!(drawn(stage, control), "{control}");
+    }
+    assert!(
+        !drawn(stage, "call-leave-options"),
+        "only a meeting's organizer ends it for everyone"
+    );
+    click(stage, "call-raise-hand");
+    stage.simulate_keystrokes("ctrl-shift-k");
+    click(stage, "call-react");
+    click(stage, "call-react-heart");
+    let hands = asked(&rig, |action| {
+        matches!(action, CallAction::RaiseHand { .. } | CallAction::React { .. })
+    });
+    assert_eq!(
+        hands,
+        [
+            CallAction::RaiseHand {
+                call: call(1),
+                raised: true
+            },
+            // shown raised at once: its key lowers it again
+            CallAction::RaiseHand {
+                call: call(1),
+                raised: false
+            },
+            CallAction::React {
+                call: call(1),
+                reaction: "heart".to_owned()
+            }
+        ]
+    );
+    // the account's hand up, as the roster tells it: Raise lowers it
+    rig.send(Event::CallOwn {
+        call: call(1),
+        hand_raised: true,
+        organizer: false,
+    });
+    rig.cx.run_until_parked();
+    click(stage, "call-raise-hand");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::RaiseHand {
+            call: call(1),
+            raised: false
+        })
+    );
+    // the People pane: everyone with their signs, the account first
+    click(stage, "call-roster");
+    for row in ["call-roster-pane", "call-roster-self", "call-roster-0", "call-roster-1"] {
+        assert!(drawn(stage, row), "{row}");
+    }
+    // b's hand, the first up, is numbered as Teams numbers them
+    assert!(drawn(stage, "call-roster-hand-1"));
+    assert!(!drawn(stage, "call-roster-hand-2"), "the account's hand is down again");
+    // a live reaction floats up from the stage
+    rig.send(Event::CallReaction {
+        call: call(1),
+        from: Mri::new(LAB_C),
+        name: Some("Lab Sea".to_owned()),
+        reaction: "applause".to_owned(),
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-reactions"));
+    no_name_in(&written);
+}
+
+#[test]
+fn view_lays_the_stage_out_as_gallery_or_speaker_pins_a_tile_and_hides_the_self_view() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (_windows, stage) = in_group_call(&rig, &trace);
+    assert!(drawn(stage, "call-grid"));
+    assert!(!drawn(stage, "call-speaker-main"), "the gallery first");
+    click(stage, "call-view");
+    click(stage, "call-view-speaker");
+    assert!(drawn(stage, "call-speaker-main"));
+    assert!(drawn(stage, "call-speaker-strip"));
+    click(stage, "call-view");
+    click(stage, "call-view-gallery");
+    assert!(!drawn(stage, "call-speaker-main"));
+    // a tile's More options, shown while the pointer is over it, pins it for the account alone
+    let tile = stage.debug_bounds("call-participant-1").expect("c's tile").center();
+    stage.simulate_mouse_move(tile, None, Modifiers::none());
+    click(stage, "call-participant-1-more");
+    click(stage, "call-participant-1-pin");
+    assert!(drawn(stage, "call-speaker-main"), "the pinned tile large");
+    let tile = stage.debug_bounds("call-participant-1").expect("c's tile").center();
+    stage.simulate_mouse_move(tile, None, Modifiers::none());
+    click(stage, "call-participant-1-more");
+    click(stage, "call-participant-1-pin");
+    assert!(!drawn(stage, "call-speaker-main"), "unpinned");
+    open_view_more_options(stage);
+    click(stage, "call-view-hide-me");
+    assert!(!drawn(stage, "call-participant-self"));
+    open_view_more_options(stage);
+    click(stage, "call-view-hide-me");
+    assert!(drawn(stage, "call-participant-self"));
+    let traced: Vec<Vec<String>> = lines(&written, "call-window", "layout").iter().map(kinds).collect();
+    assert_eq!(traced, [["speaker"], ["gallery"]]);
+    assert_eq!(lines(&written, "call-window", "pinned").len(), 2);
+}
+
+#[test]
+fn view_turns_the_others_videos_off_and_shows_videos_first() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (_windows, stage) = in_group_call(&rig, &trace);
+    // Turn off other videos, and on again
+    open_view_more_options(stage);
+    click(stage, "call-view-other-videos");
+    open_view_more_options(stage);
+    assert!(drawn(stage, "call-view-other-videos"));
+    click(stage, "call-view-other-videos");
+    let others: Vec<Vec<String>> = lines(&written, "call-window", "other-videos")
+        .iter()
+        .map(kinds)
+        .collect();
+    assert_eq!(others, [["off"], ["on"]]);
+    // Show videos first leads with the cameras on: c's tile (the second in the roster) first
+    let told = view(
+        &[
+            (LAB_B, "Lab Bee", false, None, false),
+            (LAB_C, "Lab Sea", true, Some(1), false),
+        ],
+        false,
+    );
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: told,
+    });
+    rig.cx.run_until_parked();
+    assert!(left_of(stage, "call-participant-0") < left_of(stage, "call-participant-1"));
+    click(stage, "call-view");
+    click(stage, "call-view-videos-first");
+    assert!(left_of(stage, "call-participant-1") < left_of(stage, "call-participant-0"));
+}
+
+#[test]
+fn a_one_to_one_call_offers_no_raise_or_react_and_its_chat_opens_beside_the_stage() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    assert!(drawn(stage, "call-chat"));
+    assert!(!drawn(stage, "call-raise-hand"), "a 1:1 call has no Raise");
+    assert!(!drawn(stage, "call-react"), "nor React");
+    stage.simulate_keystrokes("ctrl-shift-k");
+    assert!(
+        asked(&rig, |action| matches!(action, CallAction::RaiseHand { .. })).is_empty(),
+        "its key asks nothing either"
+    );
+    click(stage, "call-chat");
+    assert!(drawn(stage, "call-chat-pane"));
+    // one pane at a time: People takes its place, and Chat brings it back
+    click(stage, "call-roster");
+    assert!(drawn(stage, "call-roster-pane"));
+    assert!(!drawn(stage, "call-chat-pane"));
+    click(stage, "call-chat");
+    assert!(drawn(stage, "call-chat-pane"));
+    click(stage, "call-chat-close");
+    assert!(!drawn(stage, "call-chat-pane"));
+}
+
+#[test]
+fn a_meeting_s_organizer_ends_it_for_everyone_and_shares_its_link_from_the_people_pane() {
+    let rig = calling();
+    let (trace, _) = trace();
+    meeting_chat_with(&rig, Some(MEETING_LINK));
+    let (_windows, stage) = in_meeting(&rig, &trace);
+    assert!(!drawn(stage, "call-leave-options"), "not told it organizes");
+    rig.send(Event::CallOwn {
+        call: call(1),
+        hand_raised: false,
+        organizer: true,
+    });
+    rig.cx.run_until_parked();
+    // End meeting asks first: Cancel leaves the meeting running, End ends it for everyone
+    click(stage, "call-leave-options");
+    click(stage, "call-end-meeting");
+    assert!(drawn(stage, "call-end-meeting-confirm"));
+    click(stage, "call-end-meeting-cancel");
+    assert!(!drawn(stage, "call-end-meeting-confirm"));
+    assert!(asked(&rig, |action| matches!(action, CallAction::EndMeeting { .. })).is_empty());
+    click(stage, "call-leave-options");
+    click(stage, "call-end-meeting");
+    click(stage, "call-end-meeting-end");
+    assert_eq!(actions(&rig).last(), Some(&CallAction::EndMeeting { call: call(1) }));
+    click(stage, "call-leave-options");
+    click(stage, "call-leave");
+    assert_eq!(actions(&rig).last(), Some(&CallAction::HangUp { call: call(1) }));
+    // People: Share invite copies the meeting's link
+    status(&rig, 1, CallStatus::Connected);
+    click(stage, "call-roster");
+    click(stage, "call-share-invite");
+    click(stage, "call-copy-link");
+    assert!(drawn(stage, "call-link-copied"));
+    // the account organizes it: "Organizer" under its own row
+    assert!(drawn(stage, "call-roster-organizer"));
+    let copied = stage.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some(MEETING_LINK));
+    // and whoever waits in the lobby is let in at once by Admit all
+    rig.send(Event::Lobby {
+        call: call(1),
+        waiting: vec![
+            teams_core::LobbyPerson {
+                mri: Mri::new(LAB_B),
+                name: Some("Lab Bee".to_owned()),
+            },
+            teams_core::LobbyPerson {
+                mri: Mri::new(LAB_C),
+                name: None,
+            },
+        ],
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-roster-lobby"));
+    click(stage, "call-lobby-admit-all");
+    click(stage, "call-roster-deny-1");
+    let decided: Vec<(String, bool)> = asked(&rig, |action| matches!(action, CallAction::Lobby { .. }))
+        .into_iter()
+        .filter_map(|action| match action {
+            CallAction::Lobby { waiting, admit, .. } => Some((waiting.as_str().to_owned(), admit)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        decided,
+        [
+            (LAB_B.to_owned(), true),
+            (LAB_C.to_owned(), true),
+            (LAB_C.to_owned(), false)
+        ]
+    );
+}
+
+#[test]
+fn a_reconnecting_call_says_so_over_its_stage() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (_windows, stage) = in_group_call(&rig, &trace);
+    assert!(
+        !drawn(stage, "call-reconnecting"),
+        "a connection that is fine says nothing"
+    );
+    status(&rig, 1, CallStatus::Reconnecting);
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-reconnecting"));
+    status(&rig, 1, CallStatus::Connected);
+    rig.cx.run_until_parked();
+    assert!(!drawn(stage, "call-reconnecting"));
 }

@@ -127,6 +127,14 @@ impl Glyph {
     pub const MORE: Self = Self(include_bytes!("../assets/icons/ellipsis.svg"));
     /// The app launcher's grid of dots (the title bar's left corner).
     pub const GRIP: Self = Self(include_bytes!("../assets/icons/grip.svg"));
+    /// A call's Raise hand, and a raised hand on a tile or a row.
+    pub const HAND: Self = Self(include_bytes!("../assets/icons/hand.svg"));
+    /// A call's gallery view.
+    pub const GALLERY: Self = Self(include_bytes!("../assets/icons/layout-grid.svg"));
+    /// A call's speaker view.
+    pub const SPEAKER_VIEW: Self = Self(include_bytes!("../assets/icons/layout-panel-top.svg"));
+    pub const PIN: Self = Self(include_bytes!("../assets/icons/pin.svg"));
+    pub const PIN_OFF: Self = Self(include_bytes!("../assets/icons/pin-off.svg"));
     pub const SEARCH: Self = Self(include_bytes!("../assets/icons/search.svg"));
     pub const PALETTE: Self = Self(include_bytes!("../assets/icons/palette.svg"));
     pub const PANEL_LEFT: Self = Self(include_bytes!("../assets/icons/panel-left.svg"));

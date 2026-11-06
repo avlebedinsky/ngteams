@@ -1,18 +1,26 @@
 //! What a call's own window shows ([`CallStage`]), as Teams' call window does: the main window's chats stay usable
 //! beside it ([`crate::call_window`] opens and closes it).
 //!
-//! - **The header**: who the call is with (a chat's name, an invitation's caller, "Echo" for the test call) and its
-//!   state (calling, ringing, connecting, connected with its duration, reconnecting, taken by voicemail); on its right
-//!   Teams' call controls: People (the participants' pane), More (Video effects, in a build that shows video; Device
-//!   settings: the main window's settings on their Calls page), the camera (a build that shows video) and the microphone, each with a menu of the devices the
-//!   settings list (the camera's; the microphone's and the speaker's) when they are listed, and Leave in Teams' red.
-//!   Each control's tooltip names it and its key (Ctrl+Shift+O, Ctrl+Shift+M, Ctrl+Shift+H, the main window's keys).
-//! - **The stage**: before anyone is in the call, the callee's avatar with the call's state, as Teams shows it while it
-//!   rings; once the call's roster told who is in it, a tile per participant in a grid (its video when a line shows
-//!   it, else its initials; its name; a border in the brand colour while it speaks); before the roster, a tile per
-//!   person the call is with (a 1:1 call's far end's video on its tile). The account's own tile (its self view, a
-//!   border while it speaks) floats at the stage's bottom right, as Teams' self view does.
-//! - **The participants' pane** (People): who is in the call, the account first, and who speaks.
+//! - **The header** ([`toolbar`]): who the call is with (a chat's name, an invitation's caller, "Echo" for the test
+//!   call) and its state (calling, ringing, connecting, connected with its duration, reconnecting, taken by
+//!   voicemail); on its right Teams' call controls in Teams' order: Chat (the call's chat), People (the participants'
+//!   pane, with how many are in the call), Raise and React (a group call's and a meeting's, as Teams offers them), View
+//!   (Gallery or Speaker, Show videos first; More options: Turn off other videos, Hide me, Full screen), More (Language and speech, Video effects and settings, Audio
+//!   settings: the main window's settings on their Calls page), the camera (a build that shows video) and the
+//!   microphone, each with a menu of the devices the settings list, and Leave in Teams' red (a meeting's organizer's
+//!   with End meeting beside it, which asks first). Each control's tooltip names it and its key.
+//! - **The stage** ([`gallery`]): before anyone is in the call, the callee's avatar with the call's state, as Teams
+//!   shows it while it rings; once the call's roster told who is in it, a tile per participant (its video when a line
+//!   shows it, else its initials; its name with its microphone muted and its hand raised; a border in the brand colour
+//!   while it speaks, Teams' gold while its hand is up) in the gallery, or the one who speaks (or the one pinned) large
+//!   over a strip of the others; each tile's More options pins it for the account alone. The account's own tile floats
+//!   at the stage's bottom right, as Teams' self view does, unless View hid it; live reactions float up from the
+//!   stage's bottom.
+//! - **The People pane** ([`people_pane`]): a meeting's Share invite (its link copied), who waits in its lobby (Admit
+//!   all, Admit and Deny each), and who is in the call, the account first, with whether they speak, are muted or have
+//!   their hand up (numbered in the order the hands went up, the avatar ringed in gold), and "Organizer" under the
+//!   meeting's organizer. People's red badge counts the hands up and the people waiting in the lobby.
+//! - **The Chat pane** ([`chat_pane`]): the call's chat beside the stage, as the main window shows it.
 //! - **The video effects' pane** (More's or the camera menu's Video effects; one pane at a time, as Teams has it):
 //!   the self-preview over the background effects ([`crate::effects::EffectsPicker`]): what the call sends while the
 //!   camera is on, else a preview only the user's Preview turns on. A background chosen applies to the call's camera
@@ -34,6 +42,11 @@
 //! number, why it ended and what it offers: `call-back`, `rejoin` or `none`), never a name.
 
 mod captions;
+mod chat_pane;
+mod gallery;
+mod people_pane;
+mod toolbar;
+pub use gallery::Layout;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +63,7 @@ use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use teams_core::{CallId, CallParticipant, CallStatus, CallView};
 use teams_media::devices::catalog::DeviceKind;
+use teams_proto::Mri;
 
 use crate::bridge::Core;
 use crate::call_view::{self, CallPeople, Control, Look, control};
@@ -60,7 +74,9 @@ use crate::notify::SOMEONE;
 use crate::people;
 use crate::settings::SettingsModel;
 use crate::settings_view::{self, DeviceChoice, device_label};
-use crate::shell::{CallChat, HangUpCall, JoinCall, ToggleCameraCall, ToggleCaptionsCall, ToggleMuteCall};
+use crate::shell::{
+    CallChat, HangUpCall, JoinCall, ShellParts, ToggleCameraCall, ToggleCaptionsCall, ToggleHandCall, ToggleMuteCall,
+};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::translate::CaptionTranslation;
@@ -73,8 +89,12 @@ pub const CONTEXT: &str = "CallStage";
 const HEADER_HEIGHT: f32 = 56.0;
 /// The self view's size, px.
 const SELF_VIEW: (f32, f32) = (224.0, 126.0);
-/// The participants' pane's width, px.
-const ROSTER_WIDTH: f32 = 280.0;
+/// A side pane's width (People, Video effects), px.
+const PANE_WIDTH: f32 = 320.0;
+/// The Chat pane's width, px.
+const CHAT_WIDTH: f32 = 360.0;
+/// The window's width under which the toolbar's controls show their icons alone, px.
+const COMPACT_BELOW: f32 = 860.0;
 /// The avatar of the one the call rings (or ended with) and of a tile without video: the kit's large one (80 px),
 /// whose initials it sizes and centres (a custom size leaves them small, at its top left).
 const BIG_AVATAR: Size = Size::Large;
@@ -113,17 +133,51 @@ pub struct StageParts {
     /// The app's other accounts' calls: Call back and Rejoin wait while one of them is busy (one call at a time across
     /// the accounts, as the shell's call buttons do).
     pub others: Vec<Entity<Calls>>,
+    /// What the call's chat is drawn with in the Chat pane (the account's shell parts); none, no Chat.
+    pub shell: Option<ShellParts>,
 }
 
-/// One tile of the stage: its test selector, its name, whether it speaks, and the video line showing it.
+/// One tile of the stage: its test selector, who (by MRI, when known), its name, whether it speaks, its microphone
+/// muted and its hand raised, and the video line showing it.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a sign of its own the tile shows of its person"
+)]
 struct StageTile {
     selector: String,
+    mri: Option<String>,
     name: SharedString,
     speaking: bool,
+    muted: bool,
+    hand: bool,
+    /// Its camera is on (View's Show videos first leads with these).
+    video_on: bool,
     video: Option<Tile>,
 }
 
+/// The meeting a call is, as its chat's thread names it: for Share invite.
+struct MeetingLink {
+    call: CallId,
+    /// Its details once read (its join link among them).
+    details: Option<teams_proto::MeetingDetails>,
+    /// Copy meeting link put the link on the clipboard.
+    copied: bool,
+}
+
+/// The side pane open beside the stage: one at a time, as Teams has it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pane {
+    None,
+    People,
+    Chat,
+    Effects,
+}
+
 /// What the call window shows (see the module docs). A GPUI entity, the window's root view.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a choice of its own in the window (View's options, a pane, a confirmation), set by its own control"
+)]
 pub struct CallStage {
     core: Arc<dyn Core>,
     calls: Entity<Calls>,
@@ -137,10 +191,36 @@ pub struct CallStage {
     people: CallPeople,
     /// The video tiles, in a build that shows video.
     tiles: Option<Tiles>,
-    /// The participants' pane is open.
-    roster: bool,
-    /// The video effects' pane, while it is open.
+    /// The side pane open.
+    pane: Pane,
+    /// The video effects' pane's picker, while it is open.
     effects: Option<Entity<EffectsPicker>>,
+    /// The call's chat, once the Chat pane showed it.
+    chat: Option<Entity<crate::chat_view::ChatView>>,
+    /// What the call's chat is drawn with ([`StageParts::shell`]).
+    shell: Option<ShellParts>,
+    /// How the stage lays its tiles out (View).
+    layout: Layout,
+    /// The participant pinned for the account alone, by MRI.
+    pinned: Option<String>,
+    /// Who spoke last (the speaker view shows them while nobody speaks), by MRI.
+    last_speaker: Option<String>,
+    /// View's Hide me: the self view hidden.
+    self_hidden: bool,
+    /// View's Show videos first: the tiles whose camera is on lead.
+    videos_first: bool,
+    /// View's Turn off other videos: the others' tiles show their initials, not their video.
+    others_off: bool,
+    /// Who has a hand up, in the order they raised it (the account by its own MRI): the People pane numbers them.
+    hands: Vec<String>,
+    /// End meeting asks first: its confirmation shows.
+    confirm_end: bool,
+    /// The meeting the call is, as its chat's thread names it (its join link), read once per call.
+    meeting: Option<MeetingLink>,
+    /// The live reactions' floating while some show.
+    reacting: Option<Task<()>>,
+    /// The window's width as last drawn, px: a narrow one's toolbar shows its controls' icons alone.
+    width: f32,
     /// The devices a test call used, named as it ended.
     results: Option<[String; 3]>,
     /// The grid as last traced.
@@ -177,6 +257,7 @@ impl CallStage {
             trace,
             namer,
             others,
+            shell,
         } = parts;
         let translation = cx.new(|cx| CaptionTranslation::new(settings.clone(), cx));
         let observing = [
@@ -205,8 +286,21 @@ impl CallStage {
             call,
             people: CallPeople::default(),
             tiles,
-            roster: false,
+            pane: Pane::None,
             effects: None,
+            chat: None,
+            shell,
+            layout: Layout::default(),
+            pinned: None,
+            last_speaker: None,
+            self_hidden: false,
+            videos_first: false,
+            others_off: false,
+            hands: Vec::new(),
+            confirm_end: false,
+            meeting: None,
+            reacting: None,
+            width: f32::MAX,
             results: None,
             grid_traced: None,
             titled: None,
@@ -229,11 +323,49 @@ impl CallStage {
 
     /// Opens or closes the participants' pane, as People does.
     pub fn show_roster(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.roster = open;
         if open {
+            self.pane = Pane::People;
             self.effects = None;
+            self.read_meeting(cx);
+        } else if self.pane == Pane::People {
+            self.pane = Pane::None;
         }
         cx.notify();
+    }
+
+    /// Whether the People pane is open.
+    #[must_use]
+    pub fn roster_shown(&self) -> bool {
+        self.pane == Pane::People
+    }
+
+    /// Reads the meeting the call is (its join link, for Share invite), once per call; nothing for any other call.
+    fn read_meeting(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.live(cx).filter(|active| active.kind == CallKind::Meeting) else {
+            return;
+        };
+        let Some(chat) = active.chat.clone() else { return };
+        if self.meeting.as_ref().is_some_and(|meeting| meeting.call == active.id) {
+            return;
+        }
+        self.meeting = Some(MeetingLink {
+            call: active.id,
+            details: None,
+            copied: false,
+        });
+        let reply = self.core.meeting(chat);
+        let call = active.id;
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let details = reply.await.ok().flatten();
+            // a stage that is gone has no pane to fill
+            let _ = this.update(cx, |this, cx| {
+                if let Some(meeting) = this.meeting.as_mut().filter(|meeting| meeting.call == call) {
+                    meeting.details = details;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Opens or closes the video effects' pane, as More's Video effects does (a build that shows video).
@@ -246,7 +378,10 @@ impl CallStage {
             let (settings, trace, call) = (self.settings.clone(), Arc::clone(&self.trace), self.call.get());
             self.effects =
                 Some(cx.new(|cx| EffectsPicker::new(settings, trace, PickerPlace::CallPane, cx).in_call(feed, call)));
-            self.roster = false;
+            self.pane = Pane::Effects;
+        }
+        if !open && self.pane == Pane::Effects {
+            self.pane = Pane::None;
         }
         cx.notify();
     }
@@ -295,7 +430,10 @@ impl CallStage {
                 cx,
                 (|stage| &mut stage.people, |_, cx| cx.notify()),
             );
+            self.float_reactions(active, cx);
+            self.order_hands(active);
         } else {
+            self.confirm_end = false;
             if let Some(tiles) = &mut self.tiles {
                 tiles.clear(self.call.get());
             }
@@ -484,321 +622,9 @@ impl CallStage {
             self.titled = Some(title.clone());
         }
     }
-
-    /// The header: who the call is with and its state, and the controls while it is up.
-    fn header(
-        &self,
-        live: Option<&ActiveCall>,
-        title: SharedString,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let state: SharedString = match (live, self.ended(cx)) {
-            (Some(active), _) => call_view::status_with_duration(active).into(),
-            (None, Some(ended)) if ended.check.is_none() => {
-                let heading = ended.reason(self.core.me()).heading();
-                match ended.duration {
-                    Some(lasted) => format!("{heading} · {}", calls::duration_text(lasted.as_secs())).into(),
-                    None => heading.into(),
-                }
-            }
-            (None, Some(ended)) => calls::end_text(&ended.end, ended.voicemail).into(),
-            (None, None) => "Call ended".into(),
-        };
-        div()
-            .h(px(HEADER_HEIGHT))
-            .flex_none()
-            .px_4()
-            .flex()
-            .items_center()
-            .gap_3()
-            // on the frame, as the main window's title bar is
-            .text_color(rgb(palette.on_frame))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(div().truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
-                    .child(
-                        div()
-                            .debug_selector(|| "call-window-status".to_owned())
-                            .truncate()
-                            .text_xs()
-                            .text_color(rgb(palette.on_frame).opacity(0.75))
-                            .child(state),
-                    ),
-            )
-            .children(live.map(|active| self.toolbar(active, palette, cx)))
-    }
-
-    /// Teams' call controls: People, More, the camera and the microphone with their devices, and Leave.
-    fn toolbar(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
-        let people_tip = if self.roster {
-            "Hide participants"
-        } else {
-            "Show participants"
-        };
-        let roster = tool(
-            ("call-roster", Glyph::USERS, "People"),
-            (people_tip, None),
-            self.roster,
-            palette,
-            cx,
-            |this, cx| {
-                let open = !this.roster;
-                this.show_roster(open, cx);
-            },
-        );
-        let camera = self
-            .calls
-            .read(cx)
-            .video()
-            .is_some()
-            .then(|| self.camera(active, palette, cx));
-        let (mic, mute) = if active.muted {
-            (Glyph::MIC_OFF, "Unmute")
-        } else {
-            (Glyph::MIC, "Mute")
-        };
-        let microphone = tool(
-            ("call-mute", mic, "Mic"),
-            (mute, Some(&ToggleMuteCall)),
-            active.muted,
-            palette,
-            cx,
-            |this, cx| this.ask(Ask::ToggleMute, cx),
-        );
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .child(roster)
-            .child(self.more(palette, cx))
-            .child(
-                div()
-                    .w(px(1.0))
-                    .h(px(32.0))
-                    .mx_1()
-                    .bg(rgb(palette.on_frame).opacity(0.25)),
-            )
-            .children(camera)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(microphone)
-                    .children(self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx)),
-            )
-            .child(div().w_2())
-            .child(control(
-                "call-hang-up",
-                Control::Labelled(Glyph::PHONE_OFF, "Leave"),
-                ("Leave call", &HangUpCall),
-                Look::Danger,
-                cx,
-                |this, cx| this.ask(Ask::HangUp, cx),
-            ))
-    }
-
-    /// The camera's control, with its devices.
-    fn camera(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
-        let (glyph, tip) = if active.camera {
-            (Glyph::VIDEO, "Turn camera off")
-        } else {
-            (Glyph::VIDEO_OFF, "Turn camera on")
-        };
-        div()
-            .flex()
-            .items_center()
-            .child(tool(
-                ("call-camera", glyph, "Camera"),
-                (tip, Some(&ToggleCameraCall)),
-                !active.camera,
-                palette,
-                cx,
-                |this, cx| this.ask(Ask::ToggleCamera, cx),
-            ))
-            .children(self.devices_menu("call-camera-devices", CAMERAS, "Choose camera and video effects", cx))
-    }
-
-    /// More: Video effects (a build that shows video) and Device settings.
-    fn more(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let stage = cx.weak_entity();
-        let video = self.calls.read(cx).video().is_some();
-        let caption_visible = self.calls.read(cx).captions().phase != teams_core::CaptionPhase::Off;
-        let caption_available = !self.core.read_only()
-            && self
-                .live(cx)
-                .is_some_and(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall);
-        let face = tool_face(Glyph::MORE, "More");
-        selected_by(
-            "call-more",
-            Button::new("call-more")
-                .ghost()
-                .h(px(48.0))
-                .text_color(rgb(palette.on_frame))
-                .child(face)
-                .tooltip("More actions")
-                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, window, cx| {
-                    let menu = captions::more(menu, stage.clone(), caption_visible, caption_available, window, cx);
-                    let menu = if video {
-                        menu.item(effects_item("call-more-video-effects", stage.clone()))
-                    } else {
-                        menu
-                    };
-                    let stage = stage.clone();
-                    menu.min_w(px(200.0)).item(
-                        PopupMenuItem::element(|_, _| {
-                            div()
-                                .debug_selector(|| "call-more-device-settings".to_owned())
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(Glyph::SETTINGS.icon().size(px(14.0)))
-                                .child("Device settings")
-                        })
-                        .on_click(move |_, _, cx| emit(&stage, CallStageEvent::DeviceSettings, cx)),
-                    )
-                }),
-        )
-        .into_any_element()
-    }
-
-    /// The menu of the devices of `kinds` (each under its name), chosen as the settings choose them; none while the
-    /// devices aren't listed.
-    fn devices_menu(
-        &self,
-        id: &'static str,
-        kinds: &'static [DeviceKind],
-        tip: &'static str,
-        cx: &Context<Self>,
-    ) -> Option<AnyElement> {
-        self.settings.read(cx).devices()?;
-        let on_frame = theme::current(cx).on_frame;
-        let model = self.settings.clone();
-        let stage = cx.weak_entity();
-        let effects = kinds == CAMERAS;
-        Some(
-            selected_by(
-                id,
-                Button::new(id)
-                    .ghost()
-                    .xsmall()
-                    .icon(Glyph::CHEVRON_DOWN.icon())
-                    .text_color(rgb(on_frame))
-                    .tooltip(tip)
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, cx| {
-                        let menu = device_items(menu, kinds, &model, cx);
-                        if effects {
-                            menu.separator()
-                                .item(effects_item("call-camera-video-effects", stage.clone()))
-                        } else {
-                            menu
-                        }
-                    }),
-            )
-            .into_any_element(),
-        )
-    }
 }
 
 impl CallStage {
-    /// The stage of the call up: who rings while nobody is in it, else the grid, with the self view over it.
-    fn stage(
-        &mut self,
-        active: &ActiveCall,
-        title: &SharedString,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // waiting in the lobby, the account sees nobody: only that someone should let it in
-        let tiles = if active.status == CallStatus::Lobby {
-            Vec::new()
-        } else {
-            self.tiles_of(active)
-        };
-        let call = active.id.get();
-        let lobby = crate::call_lobby::card(active, palette, cx);
-        let body = if tiles.is_empty() {
-            let waiting = active.kind == CallKind::Meeting && active.status == CallStatus::Connected;
-            let state = if waiting {
-                "Waiting for others to join".to_owned()
-            } else {
-                calls::status_text(active)
-            };
-            let rings = crate::motion::ripple("call-calling", palette.accent, BIG_AVATAR_PX, cx);
-            calling(title, &state, palette, rings)
-        } else {
-            let selector = if active.view.participants.is_empty() {
-                "call-people"
-            } else {
-                "call-grid"
-            };
-            let drawn: Vec<AnyElement> = tiles
-                .into_iter()
-                .map(|tile| {
-                    let video = tile.video.and_then(|line| self.tiles.as_mut()?.fill(line, call));
-                    tile_view(tile, video, palette, cx)
-                })
-                .collect();
-            grid(selector, drawn)
-        };
-        let own = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Own, call));
-        div()
-            .debug_selector(|| "call-stage".to_owned())
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .p_3()
-            .bg(rgb(palette.background))
-            .child(body)
-            .child(self_view(active.view.speaking, own, palette, cx))
-            .children(lobby)
-            .into_any_element()
-    }
-
-    /// The stage's tiles: the roster's participants once it told who is in the call (the grid, traced when it
-    /// changed); before that, once the media connected, the people the call is with (a 1:1 call's far end on line
-    /// 0); none while it rings.
-    fn tiles_of(&mut self, active: &ActiveCall) -> Vec<StageTile> {
-        let view = &active.view;
-        if !view.participants.is_empty() {
-            let people = self.people.of(active.id);
-            let tiles = view
-                .participants
-                .iter()
-                .enumerate()
-                .map(|(index, participant)| StageTile {
-                    selector: format!("call-participant-{index}"),
-                    name: participant_name(participant, people),
-                    speaking: participant.speaking,
-                    video: participant.line.map(Tile::Line),
-                })
-                .collect();
-            self.trace_grid(active.id, view);
-            return tiles;
-        }
-        if !matches!(active.status, CallStatus::Connected | CallStatus::Reconnecting) {
-            return Vec::new();
-        }
-        let people = self.people.of(active.id);
-        let one = people.len() == 1;
-        people
-            .iter()
-            .enumerate()
-            .map(|(index, (_, name))| StageTile {
-                selector: format!("call-person-{index}"),
-                name: name.clone(),
-                speaking: false,
-                video: one.then_some(Tile::REMOTE),
-            })
-            .collect()
-    }
-
     /// Traces the grid's cells when the grid of `call` changed: each participant's MRI, camera, line and speaking, and
     /// the account's own speaking and whether its microphone hears anything (a closing `self` line).
     fn trace_grid(&mut self, call: CallId, view: &CallView) {
@@ -827,75 +653,10 @@ impl CallStage {
         self.grid_traced = Some(view.clone());
     }
 
-    /// The participants' pane: who is in the call, the account first, and who speaks.
-    fn roster_pane(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let people = self.people.of(active.id);
-        let mut rows = vec![self_row(active.view.speaking, palette)];
-        if active.view.participants.is_empty() {
-            rows.extend(
-                people
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (_, name))| roster_row(format!("call-roster-{index}"), name.clone(), false, palette)),
-            );
-        } else {
-            rows.extend(active.view.participants.iter().enumerate().map(|(index, participant)| {
-                let name = participant_name(participant, people);
-                roster_row(format!("call-roster-{index}"), name, participant.speaking, palette)
-            }));
-        }
-        let count = rows.len();
-        let close = selected_by(
-            "call-roster-close",
-            icon_button("call-roster-close", Glyph::X, "Close participants")
-                .small()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.roster = false;
-                    cx.notify();
-                })),
-        );
-        div()
-            .debug_selector(|| "call-roster-pane".to_owned())
-            .w(px(ROSTER_WIDTH))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(palette.surface))
-            .border_l_1()
-            .border_color(rgb(palette.border))
-            .child(
-                div()
-                    .h(px(48.0))
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Participants"),
-                    )
-                    .child(close),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .py_1()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(SharedString::from(format!("In this call ({count})"))),
-            )
-            .children(rows)
-            .into_any_element()
-    }
-
     /// The video effects' pane while it is open: its title and Close over the picker, which learns whether the call's
     /// camera is on.
     fn effects_pane(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let picker = self.effects.clone()?;
+        let picker = self.effects.clone().filter(|_| self.pane == Pane::Effects)?;
         picker.update(cx, |picker, cx| picker.set_camera_on(active.camera, cx));
         let close = selected_by(
             "call-effects-close",
@@ -904,32 +665,7 @@ impl CallStage {
                 .on_click(cx.listener(|this, _, _, cx| this.show_effects(false, cx))),
         );
         Some(
-            div()
-                .debug_selector(|| "call-effects-pane".to_owned())
-                .w(px(ROSTER_WIDTH))
-                .flex_none()
-                .h_full()
-                .flex()
-                .flex_col()
-                .bg(rgb(palette.surface))
-                .border_l_1()
-                .border_color(rgb(palette.border))
-                .child(
-                    div()
-                        .h(px(48.0))
-                        .px_4()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child("Video effects"),
-                        )
-                        .child(close),
-                )
+            people_pane::side_pane("call-effects-pane", "Video effects", close, palette)
                 .child(
                     div()
                         .id("call-effects-scroll")
@@ -1054,13 +790,15 @@ impl CallStage {
     ) -> AnyElement {
         if let Some(active) = live {
             let stage = self.stage(active, title, palette, cx);
-            let roster = self.roster.then(|| self.roster_pane(active, palette, cx));
+            let roster = (self.pane == Pane::People).then(|| self.roster_pane(active, palette, cx));
+            let chat = self.chat_pane(active, palette, cx);
             let effects = self.effects_pane(active, palette, cx);
             return div()
                 .size_full()
                 .flex()
                 .child(stage)
                 .children(roster)
+                .children(chat)
                 .children(effects)
                 .into_any_element();
         }
@@ -1186,6 +924,7 @@ impl Render for CallStage {
             (None, None) => SharedString::from("Call"),
         };
         self.retitle(&title, window);
+        self.width = f32::from(window.viewport_size().width);
         let body = self.body((live.as_ref(), ended.as_ref()), &title, palette, cx);
         let header = self.header(live.as_ref(), title, palette, cx);
         let mut captions = live.as_ref().and_then(|_| self.caption_pane(palette, cx));
@@ -1200,9 +939,14 @@ impl Render for CallStage {
             .flex_col()
             .bg(rgb(palette.background))
             .children(refused)
+            .children(
+                live.as_ref()
+                    .and_then(|active| gallery::connection_banner(active, palette)),
+            )
             .children(if self.caption_top { captions.take() } else { None })
             .child(div().flex_1().min_h_0().child(body))
             .children(captions);
+        let confirmation = self.end_confirmation(palette, cx);
         let sheet = crate::sheet::float(
             div().flex_1().min_h_0().w_full(),
             panes,
@@ -1219,8 +963,10 @@ impl Render for CallStage {
             .on_action(cx.listener(|this, _: &ToggleCaptionsCall, _, cx| this.ask(Ask::ToggleCaptions, cx)))
             .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| this.ask(Ask::ToggleCamera, cx)))
             .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask(Ask::HangUp, cx)))
+            .on_action(cx.listener(|this, _: &ToggleHandCall, _, cx| this.toggle_hand(cx)))
             .on_action(cx.listener(|this, _: &CallChat, _, cx| this.act_on_end(false, cx)))
             .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.act_on_end(true, cx)))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -1228,6 +974,7 @@ impl Render for CallStage {
             .text_color(rgb(palette.foreground))
             .child(header)
             .child(sheet)
+            .children(confirmation)
     }
 }
 
@@ -1240,8 +987,8 @@ const RESULT_DEVICES: [DeviceKind; 3] = [DeviceKind::Microphone, DeviceKind::Spe
 /// The results' card's width, px.
 const RESULTS_WIDTH: f32 = 480.0;
 
-/// The microphone's menu: the microphones, then the speakers.
-const AUDIO: &[DeviceKind] = &[DeviceKind::Microphone, DeviceKind::Speaker];
+/// The microphone's menu, in Teams' order: the speakers, then the microphones.
+const AUDIO: &[DeviceKind] = &[DeviceKind::Speaker, DeviceKind::Microphone];
 
 /// The camera's menu.
 const CAMERAS: &[DeviceKind] = &[DeviceKind::Camera];
@@ -1267,7 +1014,7 @@ fn effects_item(selector: &'static str, stage: WeakEntity<CallStage>) -> PopupMe
             .items_center()
             .gap_2()
             .child(Glyph::SPARKLES.icon().size(px(14.0)))
-            .child("Video effects")
+            .child("Video effects and settings")
     })
     .on_click(move |_, _, cx| {
         if let Some(stage) = stage.upgrade() {
@@ -1326,55 +1073,6 @@ fn device_item(kind: DeviceKind, choice: DeviceChoice, model: &Entity<SettingsMo
             model.change(|settings| settings.set_device(kind, name.clone()), cx);
         });
     })
-}
-
-/// A control of the toolbar, Teams' way: its icon over its caption, its tooltip naming it (with the key bound to its
-/// action, when it has one), marked while `marked` (muted, the camera off, the pane open).
-fn tool(
-    (id, glyph, caption): (&'static str, Glyph, &'static str),
-    (tip, action): (&'static str, Option<&dyn gpui::Action>),
-    marked: bool,
-    palette: Palette,
-    cx: &mut Context<CallStage>,
-    on: fn(&mut CallStage, &mut Context<CallStage>),
-) -> AnyElement {
-    let action = action.map(gpui::Action::boxed_clone);
-    div()
-        .debug_selector(move || id.to_owned())
-        .id(id)
-        .h(px(48.0))
-        .min_w(px(56.0))
-        .px_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        // on the frame: its ink, a lit chip while marked (muted, camera off, the people shown)
-        .text_color(rgb(palette.on_frame))
-        .when(marked, |tool| tool.bg(rgb(palette.on_frame).opacity(0.2)))
-        .hover(move |tool| tool.bg(rgb(palette.on_frame).opacity(0.12)))
-        .tooltip(move |window, cx| {
-            let tooltip = Tooltip::new(tip);
-            match &action {
-                Some(action) => tooltip.action(action.as_ref(), None).build(window, cx),
-                None => tooltip.build(window, cx),
-            }
-        })
-        .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
-        .child(tool_face(glyph, caption))
-        .into_any_element()
-}
-
-/// A toolbar control's face: its icon over its caption, in the control's own text colour.
-fn tool_face(glyph: Glyph, caption: &'static str) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap_0p5()
-        .child(glyph.icon().size(px(20.0)))
-        .child(div().text_xs().child(caption))
 }
 
 /// The screen while the call rings (or once it ended): its avatar, who it is with and its state, centred.
@@ -1452,171 +1150,6 @@ fn follow_up_button(rejoin: bool, cx: &mut Context<CallStage>) -> AnyElement {
             |this, cx| this.act_on_end(false, cx),
         )
     }
-}
-
-/// The tiles in a grid of near-square rows, each tile as wide as a column, a short last row centred: Teams' gallery.
-fn grid(selector: &'static str, tiles: Vec<AnyElement>) -> AnyElement {
-    let count = tiles.len();
-    let columns = (1..=count).find(|columns| columns * columns >= count).unwrap_or(1);
-    let width = 1.0 / f32::from(u16::try_from(columns).unwrap_or(1));
-    let mut rows: Vec<Vec<AnyElement>> = Vec::new();
-    for tile in tiles {
-        match rows.last_mut() {
-            Some(row) if row.len() < columns => row.push(tile),
-            _ => rows.push(vec![tile]),
-        }
-    }
-    div()
-        .debug_selector(move || selector.to_owned())
-        .size_full()
-        .flex()
-        .flex_col()
-        .children(rows.into_iter().map(|row| {
-            div().flex_1().min_h_0().w_full().flex().justify_center().children(
-                row.into_iter()
-                    .map(|tile| div().w(relative(width)).h_full().p_1().child(tile)),
-            )
-        }))
-        .into_any_element()
-}
-
-/// One tile: its video when a line shows it, else its initials; its name; a border in the brand colour while it
-/// speaks.
-fn tile_view(tile: StageTile, video: Option<AnyElement>, palette: Palette, cx: &App) -> AnyElement {
-    let StageTile {
-        selector,
-        name,
-        speaking,
-        ..
-    } = tile;
-    let face = video.unwrap_or_else(|| {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(people::avatar(Some(&name), None, BIG_AVATAR))
-            .into_any_element()
-    });
-    let glow_id = SharedString::from(format!("{selector}-speaking"));
-    let tile = div()
-        .debug_selector(move || selector.clone())
-        .relative()
-        .size_full()
-        .rounded_lg()
-        .overflow_hidden()
-        // a dark tile with a hint of the brand colour from its top
-        .bg(theme::gradient(
-            theme::mix(palette.rail, palette.brand, 0.2),
-            palette.rail,
-            160.0,
-        ))
-        .border_2()
-        .border_color(rgb(if speaking { palette.brand } else { palette.rail }))
-        .child(face)
-        .child(name_tag(name, speaking, palette));
-    // while its person speaks, a glow in the brand colour swells and settles round it
-    crate::motion::breathe(tile, glow_id, speaking, palette, cx)
-}
-
-/// A tile's name at its bottom left, with a speaker while it speaks.
-fn name_tag(name: SharedString, speaking: bool, palette: Palette) -> gpui::Div {
-    div()
-        .absolute()
-        .bottom_2()
-        .left_2()
-        .max_w(relative(0.9))
-        .px_2()
-        .py_0p5()
-        .flex()
-        .items_center()
-        .gap_1()
-        .rounded_md()
-        .bg(rgb(palette.surface))
-        .text_xs()
-        .when(speaking, |tag| {
-            tag.child(Glyph::VOLUME.icon().size(px(12.0)).text_color(rgb(palette.brand)))
-        })
-        .child(div().truncate().child(name))
-}
-
-/// The account's own tile, floating at the stage's bottom right: its self view while the camera sends, else its mark;
-/// a border while it speaks.
-fn self_view(speaking: bool, video: Option<AnyElement>, palette: Palette, cx: &App) -> AnyElement {
-    let face = video.unwrap_or_else(|| {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(rgb(palette.muted_foreground))
-            .child(Glyph::USER.icon().size(px(32.0)))
-            .into_any_element()
-    });
-    let own = div()
-        .debug_selector(|| "call-participant-self".to_owned())
-        .absolute()
-        .bottom_5()
-        .right_5()
-        .w(px(SELF_VIEW.0))
-        .h(px(SELF_VIEW.1))
-        .rounded_lg()
-        .overflow_hidden()
-        .bg(rgb(palette.surface))
-        .border_2()
-        .border_color(rgb(if speaking { palette.brand } else { palette.border }))
-        .when(!speaking, |own| {
-            own.shadow(theme::glow(palette, 0x0000_0000, 0.3, 18.0, 6.0))
-        })
-        .child(face)
-        .child(name_tag(SharedString::from("You"), speaking, palette));
-    crate::motion::breathe(own, "call-self-speaking", speaking, palette, cx)
-}
-
-/// One row of the participants' pane: the person's initials, name, and a speaker while they speak.
-fn roster_row(selector: impl Into<String>, name: SharedString, speaking: bool, palette: Palette) -> AnyElement {
-    let selector = selector.into();
-    div()
-        .debug_selector(move || selector.clone())
-        .h(px(44.0))
-        .px_4()
-        .flex()
-        .items_center()
-        .gap_3()
-        .child(people::avatar(Some(&name), None, Size::Small))
-        .child(div().flex_1().min_w_0().truncate().child(name))
-        .when(speaking, |row| {
-            row.child(Glyph::VOLUME.icon().size(px(16.0)).text_color(rgb(palette.brand)))
-        })
-        .into_any_element()
-}
-
-/// The account's own row of the participants' pane: its mark (not the initials of "You") and "You".
-fn self_row(speaking: bool, palette: Palette) -> AnyElement {
-    div()
-        .debug_selector(|| "call-roster-self".to_owned())
-        .h(px(44.0))
-        .px_4()
-        .flex()
-        .items_center()
-        .gap_3()
-        .child(
-            div()
-                .size(px(24.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(rgb(palette.selected))
-                .text_color(rgb(palette.brand))
-                .child(Glyph::USER.icon().size(px(14.0))),
-        )
-        .child(div().flex_1().child("You"))
-        .when(speaking, |row| {
-            row.child(Glyph::VOLUME.icon().size(px(16.0)).text_color(rgb(palette.brand)))
-        })
-        .into_any_element()
 }
 
 /// A participant's name: the roster's, else the one the call's people give its MRI, else "Someone".

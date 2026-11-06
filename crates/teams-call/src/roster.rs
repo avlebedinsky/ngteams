@@ -10,6 +10,10 @@ use teams_proto::Mri;
 use crate::read::RosterEntry;
 
 /// One participant of a call, the account aside.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is its own roster field (video, mute, hand, meeting role), told and shown apart"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Participant {
     pub mri: Mri,
@@ -25,6 +29,8 @@ pub struct Participant {
     pub muted: bool,
     /// Whether its hand is raised.
     pub hand_raised: bool,
+    /// Whether it organizes the meeting (its roster entry's `meetingRole` `organizer`).
+    pub organizer: bool,
 }
 
 /// The account's own entry in the call's roster, as last told: its raised hand's id while it is up, and whether it
@@ -155,5 +161,6 @@ fn participant(entry: &RosterEntry) -> Participant {
         video_on: entry.video_on,
         muted: entry.muted,
         hand_raised: entry.hand.is_some(),
+        organizer: entry.organizer,
     }
 }

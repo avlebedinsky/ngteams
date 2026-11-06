@@ -116,7 +116,8 @@ actions!(
         HangUpCall,
         ToggleMuteCall,
         ToggleCaptionsCall,
-        ToggleCameraCall
+        ToggleCameraCall,
+        ToggleHandCall
     ]
 );
 
@@ -205,6 +206,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-shift-c", ToggleCaptionsCall, None),
         // Teams' own key for the camera
         KeyBinding::new("ctrl-shift-o", ToggleCameraCall, None),
+        // Teams' own key for Raise and Lower hand
+        KeyBinding::new("ctrl-shift-k", ToggleHandCall, None),
     ]);
 }
 

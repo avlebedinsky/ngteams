@@ -297,6 +297,7 @@ impl CallWindows {
                 .filter(|other| other.key != key)
                 .map(|other| other.parts.models.calls.clone())
                 .collect(),
+            shell: Some(parts.clone()),
         };
         let windows = cx.weak_entity();
         let mut made: Option<Entity<CallStage>> = None;
