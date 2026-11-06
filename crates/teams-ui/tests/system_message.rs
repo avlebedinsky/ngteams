@@ -214,10 +214,24 @@ fn a_meeting_chat_names_everyone_by_name_and_tells_a_recording_saved() {
         )),
         "{ready:?}"
     );
-    // elsewhere the account is "You"; a ready recording is the same line (its recap card goes under it)
+    // elsewhere too a recording names the account by its name, as Teams' 1:1 chat does ("AI started recording."); a
+    // ready recording is the same line (its recap card goes under it)
     assert_eq!(
         shown(kind, &saved_recording("Initial", "0", None), GROUP, Some(ME), &Names),
-        Some(timed("You started recording and transcription"))
+        Some(timed("Ann Able started recording and transcription"))
+    );
+    let started = recording("Initial", "0", "Recording").replace(BEN, ME);
+    assert_eq!(
+        shown(kind, &started, ONE_TO_ONE, Some(ME), &Names),
+        Some(timed("Ann Able started recording."))
+    );
+    let stopped = recording("ChunkFinished", "202", "Recording").replace(
+        "<RecordingContent",
+        &format!("<RecordingTerminatorId value=\"{ME}\" /><RecordingContent"),
+    );
+    assert_eq!(
+        shown(kind, &stopped, ONE_TO_ONE, Some(ME), &Names),
+        Some(timed("Ann Able stopped recording."))
     );
     assert_eq!(
         shown(kind, &saved_recording("Success", "200", None), GROUP, Some(ME), &Names),

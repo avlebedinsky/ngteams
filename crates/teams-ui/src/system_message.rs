@@ -4,7 +4,8 @@
 //! English ones; which one a message takes follows the web client's own choice (the meeting chat's, a group chat's
 //! meeting, a call's).
 //!
-//! A meeting chat names everyone by name, the account too ("Nick started recording."), as Teams' meeting chat does. A
+//! A meeting chat names everyone by name, the account too ("Nick started recording."), as Teams' meeting chat does; a
+//! recording's start and stop name the account by its name in every chat, as Teams' 1:1 chat does too. A
 //! ready recording is the line "Recording has been saved to <owner>'s OneDrive and will expire in n days." in every
 //! chat; a meeting chat's transcript is told by the meeting's recap card under its end, any other chat's recording and
 //! transcript by a recap card of their own ([`crate::meeting_recap`]).
@@ -278,7 +279,9 @@ pub fn shown(
     Some(match chat_event(message_type, content)? {
         ChatEvent::CallStarted(start) => call_started(&start, meeting, names),
         ChatEvent::CallEnded(end) => call_ended(&end, meeting, own),
-        ChatEvent::Recording(recording) => recording_shown(&recording, names),
+        // a recording's lines name the account by its name in every chat: Teams' 1:1 chat says "AI started recording."
+        // as its meeting chat does
+        ChatEvent::Recording(recording) => recording_shown(&recording, &by_name),
         // a meeting chat's transcript is told by the meeting's recap card
         ChatEvent::Transcript(_) if meeting => Shown::Nothing,
         ChatEvent::Transcript(_) => Shown::Transcript,
