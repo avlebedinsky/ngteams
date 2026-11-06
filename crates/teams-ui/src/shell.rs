@@ -2002,6 +2002,21 @@ impl Shell {
         self.chat.as_ref()
     }
 
+    /// Opens someone's 1:1 chat `id` (a call's Consult → Open chat): as the chat list shows it when it lists it, else
+    /// as a people search result opens it (the chat found or made through the engine, named after the person), so a
+    /// 1:1 chat the list doesn't show never opens nameless.
+    pub fn open_one_to_one(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let listed = self.list.read(cx).row(&id).is_some();
+        let partner = one_to_one_partner(&id, self.core.me());
+        match partner {
+            Some(partner) if !listed => {
+                self.search_box
+                    .update(cx, |search, cx| search.open_person(Some(&partner), cx));
+            }
+            _ => self.open_chat(id, window, cx),
+        }
+    }
+
     /// Opens a chat in the conversation pane and keeps it as the selected chat; the switcher closes. A team's channel
     /// the Teams list shows opens as a channel instead ([`Shell::open_channel`]), never in a chat view.
     pub fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -3156,5 +3171,41 @@ pub fn shown_as(reporting: Reporting) -> Availability {
         Reporting::Inactive | Reporting::Halted | Reporting::Quit => Availability::Offline,
         // a manual status (or reset) that failed: what the account shows isn't known
         Reporting::Connecting | Reporting::NotSet(_) => Availability::Unknown,
+    }
+}
+
+/// The other member of the 1:1 chat `id` (`19:<oid>_<oid>@unq.gbl.spaces`) for the account `me`, as an MRI.
+fn one_to_one_partner(id: &str, me: &str) -> Option<String> {
+    let pair = id.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?;
+    let (one, other) = pair.split_once('_')?;
+    let mine = me.strip_prefix("8:orgid:")?;
+    let theirs = if one == mine {
+        other
+    } else if other == mine {
+        one
+    } else {
+        return None;
+    };
+    (!theirs.is_empty()).then(|| format!("8:orgid:{theirs}"))
+}
+
+#[cfg(test)]
+mod partner_tests {
+    use super::one_to_one_partner;
+
+    #[test]
+    fn a_one_to_one_chat_names_its_other_member_whichever_side_the_account_is() {
+        let me = "8:orgid:aaaa";
+        assert_eq!(
+            one_to_one_partner("19:aaaa_bbbb@unq.gbl.spaces", me).as_deref(),
+            Some("8:orgid:bbbb")
+        );
+        assert_eq!(
+            one_to_one_partner("19:bbbb_aaaa@unq.gbl.spaces", me).as_deref(),
+            Some("8:orgid:bbbb")
+        );
+        assert_eq!(one_to_one_partner("19:cccc_bbbb@unq.gbl.spaces", me), None);
+        assert_eq!(one_to_one_partner("19:abc@thread.v2", me), None);
+        assert_eq!(one_to_one_partner("19:aaaa_@unq.gbl.spaces", me), None);
     }
 }
