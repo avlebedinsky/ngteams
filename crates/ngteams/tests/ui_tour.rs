@@ -1322,7 +1322,7 @@ const STEPS: [Step; 5 + 183] = [
     }),
     // and in Teams Light
     ("call-window-held-by-far-end", |shell, _, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx)
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
     }),
     // someone waiting in a meeting's lobby, as whoever may admit sees them: "Waiting in the lobby", Deny and Admit
     ("call-lobby-dark", |shell, _, cx| {
