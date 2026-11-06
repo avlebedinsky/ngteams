@@ -101,7 +101,7 @@ impl CallStage {
             return;
         };
         if let Some(chat) = teams_proto::one_to_one_id(self.core.me(), &picked.mri) {
-            cx.emit(CallStageEvent::OpenChat(chat));
+            cx.emit(CallStageEvent::OpenChat(chat, picked.name.clone()));
         }
         cx.notify();
     }

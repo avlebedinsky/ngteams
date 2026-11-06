@@ -888,7 +888,7 @@ const STEPS: [Step; 5 + 231] = [
     ("chat-quote-jump-dark", |shell, _, cx| go_to_quote(shell, cx)),
     // the account menu over it, in Teams Dark
     ("account-menu-dark", |shell, _, cx| {
-        shell.update(cx, Shell::toggle_status_menu)
+        shell.update(cx, Shell::toggle_status_menu);
     }),
     // the settings' General and Notifications pages in Teams Dark
     ("settings-general-dark", |shell, _, cx| {
@@ -896,20 +896,20 @@ const STEPS: [Step; 5 + 231] = [
         show_page(shell, Page::General, cx);
     }),
     ("settings-notifications-dark", |shell, _, cx| {
-        show_page(shell, Page::Notifications, cx)
+        show_page(shell, Page::Notifications, cx);
     }),
     // the a–b chat in each other dark theme: each its own frame and accent
     ("chat-nord", |shell, window, cx| {
-        show_chat_in_theme(shell, "nord", window, cx)
+        show_chat_in_theme(shell, "nord", window, cx);
     }),
     ("chat-dracula", |shell, window, cx| {
-        show_chat_in_theme(shell, "dracula", window, cx)
+        show_chat_in_theme(shell, "dracula", window, cx);
     }),
     ("chat-solarized-dark", |shell, window, cx| {
-        show_chat_in_theme(shell, "solarized-dark", window, cx)
+        show_chat_in_theme(shell, "solarized-dark", window, cx);
     }),
     ("chat-high-contrast", |shell, window, cx| {
-        show_chat_in_theme(shell, "high-contrast", window, cx)
+        show_chat_in_theme(shell, "high-contrast", window, cx);
     }),
     // the 12-hour clock chosen, back in Teams Light: the setting, then the a–b chat's times
     ("settings-time-12-hour", |shell, _, cx| {
@@ -2980,7 +2980,7 @@ fn clear_compose(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
             compose.toggle_expanded(window, cx);
         }
         compose.editor().update(cx, |editor, cx| {
-            editor.set_doc(teams_ui::editor::doc::Doc::default(), cx)
+            editor.set_doc(teams_ui::editor::doc::Doc::default(), cx);
         });
     });
 }

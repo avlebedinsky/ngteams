@@ -161,12 +161,22 @@ pub(super) enum VideoKind {
     Group,
 }
 
+/// Whether a call's setup reads the account's tenant from its token first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TenantRead {
+    /// Known already, or not wanted.
+    No,
+    /// Wanted, the setup going on without it: the organizer's Controls name it (the meeting options' URL).
+    Wanted,
+    /// Needed: a test call's `add` and a Meet now's entry name it; the setup is refused without one.
+    Needed,
+}
+
 /// What a call's media is set up for: the far end's offer to answer (none for a start or a join), whether to read
-/// the account's tenant first (a test call's `add` names it; the setup is refused without one), and which video the
-/// call takes.
+/// the account's tenant first ([`TenantRead`]), and which video the call takes.
 pub(super) struct Setup {
     pub(super) offer: Option<MediaContent>,
-    pub(super) tenant: bool,
+    pub(super) tenant: TenantRead,
     pub(super) video: VideoKind,
 }
 
@@ -177,16 +187,16 @@ pub(super) async fn prepare<C: Credentials + 'static>(
     setup: Setup,
 ) -> Result<Prepared, String> {
     let Setup { offer, tenant, video } = setup;
-    let tenant = if tenant {
-        Some(
+    let tenant = match tenant {
+        TenantRead::Needed => Some(
             client
                 .transport()
                 .account_tenant()
                 .await
                 .ok_or("the account's tenant can't be read from its token")?,
-        )
-    } else {
-        None
+        ),
+        TenantRead::Wanted => client.transport().account_tenant().await,
+        TenantRead::No => None,
     };
     let mut prepared = set_up_with(&client, media, offer, video).await?;
     prepared.tenant = tenant;

@@ -262,6 +262,8 @@ pub struct Shell {
     settings: Entity<SettingsModel>,
     trace: Arc<ViewTrace>,
     list: Entity<ChatList>,
+    /// The names of 1:1 chats opened from a call that the list doesn't show yet (Consult → Open chat), by chat.
+    unlisted_names: std::collections::HashMap<String, SharedString>,
     teams: Entity<TeamsList>,
     /// The list pane: the chats and the teams.
     sidebar: Entity<Sidebar>,
@@ -360,9 +362,7 @@ impl Shell {
         } = parts;
         let selected = Self::selected_chat(&settings, core.me(), cx);
         let (list, previews) = Self::chat_list(&chat_parts, selected.clone(), cx);
-        let opened = cx.subscribe_in(&list, window, |this: &mut Self, _, event, window, cx| match event {
-            ChatListEvent::Opened(id) => this.open_chat(id.clone(), window, cx),
-        });
+        let opened = Self::opened(&list, window, cx);
         let (teams, [channel_opened, kept_channel]) = Self::teams_list(&core, &models, &trace, window, cx);
         let sidebar = cx.new(|cx| Sidebar::new(list.clone(), teams.clone(), models.clone(), Arc::clone(&trace), cx));
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
@@ -380,6 +380,7 @@ impl Shell {
             settings,
             trace,
             list,
+            unlisted_names: std::collections::HashMap::new(),
             teams,
             sidebar,
             chat,
@@ -431,6 +432,13 @@ impl Shell {
                 searched,
             ],
         }
+    }
+
+    /// A chat the chat list opens shows in the conversation pane.
+    fn opened(list: &Entity<ChatList>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(list, window, |this: &mut Self, _, event, window, cx| match event {
+            ChatListEvent::Opened(id) => this.open_chat(id.clone(), window, cx),
+        })
     }
 
     /// The chat list, `selected` highlighted, and the account's translations outside the open chats
@@ -2002,12 +2010,15 @@ impl Shell {
         self.chat.as_ref()
     }
 
-    /// Opens someone's 1:1 chat `id` (a call's Consult → Open chat): as the chat list shows it when it lists it, else
-    /// as a people search result opens it (the chat found or made through the engine, named after the person), so a
-    /// 1:1 chat the list doesn't show never opens nameless.
-    pub fn open_one_to_one(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens someone's 1:1 chat `id` (a call's Consult → Open chat), headed by their `name` while the chat list doesn't
+    /// show it (a 1:1 chat with no message yet): as the chat list shows it when it lists it, else as a people search
+    /// result opens it (the chat found or made through the engine).
+    pub fn open_one_to_one(&mut self, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let listed = self.list.read(cx).row(&id).is_some();
         let partner = one_to_one_partner(&id, self.core.me());
+        if !name.is_empty() {
+            self.unlisted_names.insert(id.clone(), SharedString::from(name));
+        }
         match partner {
             Some(partner) if !listed => {
                 self.search_box
@@ -2726,6 +2737,20 @@ impl Shell {
             .into_any_element()
     }
 
+    /// A chat header's name: the chat list's, else the name a 1:1 chat opened from a call was opened under, else
+    /// "Chat".
+    fn header_name(&self, id: &str, row: Option<&crate::chat_list::ChatRow>) -> SharedString {
+        row.map_or_else(
+            || {
+                self.unlisted_names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| SharedString::from("Chat"))
+            },
+            |row| row.name.clone(),
+        )
+    }
+
     fn main_pane(&self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let pane = div()
             .debug_selector(|| "conversation-pane".to_owned())
@@ -2736,7 +2761,7 @@ impl Shell {
         match &self.main {
             Main::Chat(id) => {
                 let row = self.list.read(cx).row(id);
-                let name = row.map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
+                let name = self.header_name(id, row);
                 let face =
                     row.map(|row| people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small));
                 let chat = self

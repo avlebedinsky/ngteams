@@ -76,6 +76,11 @@ where
     /// One of `call`'s meeting options changed (Controls): answered once the middle tier took it, or why not.
     pub(super) fn set_meeting_option(&self, call: CallId, option: MeetingOption, reply: Waiting) {
         let Some(of) = self.calls.options_of(call) else {
+            log::info!(
+                "call {}: no meeting option changes: {}",
+                call.get(),
+                self.calls.options_missing(call)
+            );
             let _ = reply.send(Err(EngineError::from(CallActionError::Call(CallError::NotNow))));
             return;
         };

@@ -282,6 +282,28 @@ impl Calls {
         self.meeting_told(|meeting| meeting.roster(body) | meeting.own(&entries, &me));
     }
 
+    /// Why [`Calls::options_of`] names no options for `call`, in a few words (never an id): what the log says of a
+    /// Controls change that didn't go.
+    #[must_use]
+    pub fn options_missing(&self, call: CallId) -> &'static str {
+        let Some(current) = self
+            .call
+            .as_ref()
+            .filter(|current| current.id == call && current.phase == super::Phase::Connected)
+        else {
+            return "the call isn't up";
+        };
+        if !current.roster.own(&self.identity.mri).organizer {
+            "the roster doesn't name the account its organizer"
+        } else if self.identity.tenant_id.is_empty() {
+            "the account's tenant isn't known yet"
+        } else if current.caption_thread.is_none() {
+            "the call names no chat"
+        } else {
+            "its tenant, organizer or chat isn't of the options' form"
+        }
+    }
+
     /// Whose meeting options the organizer's Controls change for `call` (the middle tier's
     /// [`teams_proto::MeetingOptionsRead`]): the account's tenant, its object id and the call's chat, while the call is
     /// up in a group chat or a meeting's chat and the account organizes it; `None` otherwise.

@@ -130,7 +130,7 @@ pub enum CallStageEvent {
     /// Close on a call's end or a test call's results, or the end left alone for [`AUTO_CLOSE`].
     Close,
     /// Consult's Open chat: the 1:1 chat of this id opens in the main window.
-    OpenChat(String),
+    OpenChat(String, String),
 }
 
 /// What a call's end offers: a new start to its chat, or a join of its group call that runs on.

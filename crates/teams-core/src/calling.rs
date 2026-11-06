@@ -1122,7 +1122,7 @@ where
             self.media.clone(),
             Setup {
                 offer: Some(offer),
-                tenant: false,
+                tenant: media::TenantRead::No,
                 video: VideoKind::Group,
             },
         );
@@ -1791,8 +1791,14 @@ where
         }
         // a test call's `add` and a Meet now's entry (its organizer's tenant) name the account's tenant: read from its
         // token when the engine couldn't name it
-        let tenant = matches!(act, Act::Place(Placement::TestCall { .. } | Placement::Channel { .. }))
-            && !self.calls.knows_tenant();
+        // any other call reads it too while it's unknown, without waiting on it: the organizer's Controls name it
+        let tenant = if self.calls.knows_tenant() {
+            media::TenantRead::No
+        } else if matches!(act, Act::Place(Placement::TestCall { .. } | Placement::Channel { .. })) {
+            media::TenantRead::Needed
+        } else {
+            media::TenantRead::Wanted
+        };
         let told = answering.is_none().then(|| self.calls.reserve());
         match (told, answering) {
             (Some(call), _) => {

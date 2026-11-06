@@ -238,10 +238,12 @@ impl Desktop {
                     shell.open_settings_page(Page::Calls, window, cx);
                 });
             }
-            CallWindowsEvent::OpenChat(key, chat) => {
+            CallWindowsEvent::OpenChat(key, chat, name) => {
                 this.switch(key, cx);
-                let chat = chat.clone();
-                this.in_shell(cx, move |shell, window, cx| shell.open_one_to_one(chat, window, cx));
+                let (chat, name) = (chat.clone(), name.clone());
+                this.in_shell(cx, move |shell, window, cx| {
+                    shell.open_one_to_one(chat, name, window, cx);
+                });
             }
             CallWindowsEvent::Closed => {
                 // a call window closed for another to open in its place keeps the app

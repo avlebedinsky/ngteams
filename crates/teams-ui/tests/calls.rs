@@ -4178,7 +4178,7 @@ fn consult_holds_the_call_and_opens_the_person_s_one_to_one_chat() {
     let chat = teams_proto::one_to_one_id(&me, LAB_SEA).expect("a 1:1 chat");
     assert_eq!(
         asked.lock().unwrap().last(),
-        Some(&CallWindowsEvent::OpenChat(me, chat))
+        Some(&CallWindowsEvent::OpenChat(me, chat, "Lab Sea".to_owned()))
     );
     // the call stays held: nothing resumes it
     assert!(
