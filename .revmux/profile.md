@@ -27,7 +27,9 @@
 - **A message sent twice or lost.** The outbox resends without its arrival check; a row of another run is sent
   without an explicit `Store::resend`; an older version overwrites a newer one; a field in a form no capture showed
   is read as absent, 0 or newer instead of kept as `Unknown`.
-- **A token trusted past its expiry**, or a credential handed to a third party (a bot, an app backend).
+- **A token trusted past its expiry**, or a credential handed to a third party (a bot, an app backend). Exception:
+  when the user starts a recording or live captions, Microsoft's recording bot receives the user's recorder-scoped
+  token, as Teams sends it.
 - **A lab browser target resumed unarmed.** Arming order and close-or-kill containment are in `AGENTS.md`. A breach
   is never a flake.
 - **The feature doesn't work.** A call that doesn't connect, audio that doesn't flow, a view that shows the wrong

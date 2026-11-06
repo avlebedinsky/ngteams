@@ -15,7 +15,9 @@ The user's own client follows its [personal-build rules](personal-build.md).
   is, for messages, chats, membership changes, invitations, meetings and calls either way.
 
 Apps and bots aren't people. Their presence in a target does not expand the set of people the lab may reach. No
-account token or credential is sent to a bot, an app's backend or any other third party.
+account token or credential is sent to a bot, an app's backend or any other third party. Exception: when the user
+starts a recording or live captions, Microsoft's recording bot receives the user's recorder-scoped token, as Teams
+sends it.
 
 ## Before each live run
 
