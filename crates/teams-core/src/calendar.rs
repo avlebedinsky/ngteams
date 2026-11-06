@@ -28,9 +28,10 @@ use teams_proto::chat::ChatReads;
 use teams_proto::{
     Author, CalendarEvent, CalendarView, CancelChannelEvent, CancelEvent, ChannelEventRead, ChannelMeetup, Client,
     CreateChannelEvent, CreateEvent, CreateOnlineMeeting, Credentials, CsaTeams, DeleteEvent, EventAttendee,
-    EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingChannel, MeetingDetails,
-    MeetingThread, MeetingTimes, Organizer, PersonSchedule, Request, RespondEvent, RsvpAnswer, ScheduledMeeting,
-    Schedules, SetMeetingTitle, ShortProfileLookup, TimeZoneSettings, Transport, UpdateChannelEvent, UpdateEvent,
+    EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetNow, MeetNowMeeting,
+    MeetingChannel, MeetingDetails, MeetingThread, MeetingTimes, Organizer, PersonSchedule, Request, RespondEvent,
+    RsvpAnswer, ScheduledMeeting, Schedules, SetMeetingTitle, ShortProfileLookup, TimeZoneSettings, Transport,
+    UpdateChannelEvent, UpdateEvent,
 };
 use teams_store::{Store, StoreError, StoredEvent};
 use tokio::task::JoinSet;
@@ -412,6 +413,75 @@ where
         });
     }
 
+    /// Answers `reply` with the busy times of `people` (other people's calendars added to the account's: their
+    /// addresses and names) over `days` days from `start_ms`: the free/busy read the Scheduler sends ([`Schedules`]),
+    /// one per [`teams_proto::AVAILABILITY_DAYS`] days as the web client asks, sent together and their answers joined
+    /// by person. Plain reads that reach nobody; all of them failing is [`EngineError::CalendarUnread`].
+    pub(crate) fn people_calendars(
+        &self,
+        people: Vec<EventAttendee>,
+        start_ms: i64,
+        days: u32,
+        reply: Responder<Vec<PersonSchedule>>,
+    ) {
+        let outbox = Arc::clone(&self.outbox);
+        let client = Arc::clone(&self.client);
+        let whom = Arc::clone(&self.whom);
+        tokio::task::spawn_local(async move {
+            if people.is_empty() {
+                let _ = reply.send(Ok(Vec::new()));
+                return;
+            }
+            let me = outbox.me().clone();
+            let known = known(&client, &whom, &me).await;
+            let organizer = organizer(&me, &known);
+            let chunk = teams_proto::AVAILABILITY_DAYS;
+            let mut reads = JoinSet::new();
+            for index in 0..days.clamp(1, 42).div_ceil(chunk) {
+                let read = Schedules(FreeBusyAsk {
+                    attendees: people.clone(),
+                    organizer: organizer.clone(),
+                    start_ms: start_ms + i64::from(index * chunk) * 86_400_000,
+                    meeting_minutes: 30,
+                });
+                reads.spawn_local(schedules(Arc::clone(&client), read));
+            }
+            let mut joined: Vec<PersonSchedule> = Vec::new();
+            let mut any = false;
+            while let Some(done) = reads.join_next().await {
+                let Ok(Some(read)) = done else { continue };
+                any = true;
+                join_schedules(&mut joined, read);
+            }
+            for schedule in &mut joined {
+                schedule.busy.sort_by_key(|busy| busy.start_ms);
+                schedule.busy.dedup();
+            }
+            let _ = reply.send(if any {
+                Ok(joined)
+            } else {
+                Err(EngineError::CalendarUnread)
+            });
+        });
+    }
+
+    /// Makes a meeting of the account's own to start now, named `subject` (the calendar's Meet now, [`MeetNow`]) and
+    /// answers `reply` with its chat and links: one attempt through the outbox (refused in the read-only mode), its
+    /// failure [`EngineError::EventNotSaved`].
+    pub(crate) fn meet_now(&self, subject: String, reply: Responder<MeetNowMeeting>) {
+        let outbox = Arc::clone(&self.outbox);
+        tokio::task::spawn_local(async move {
+            let request = MeetNow { subject };
+            let answer = match send(&outbox, &request, "meet now").await {
+                Ok(body) => {
+                    MeetNow::read_answer(&body).ok_or_else(|| not_saved("meet now", "the meeting doesn't read"))
+                }
+                Err(error) => Err(error),
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
     /// Sends `write` (see the module docs) and answers `reply` with what it gave.
     pub(crate) fn write(&self, write: EventWrite, reply: Responder<EventWritten>) {
         let outbox = Arc::clone(&self.outbox);
@@ -530,7 +600,11 @@ async fn complete<C: Credentials + 'static>(
 ) -> EventDraft {
     let known = known(client, whom, me).await;
     draft.organizer = organizer(me, &known);
-    draft.time_zone = known.time_zone;
+    draft.time_zone = match &draft.zone {
+        // a zone the form chose: as Exchange names it, read now (the desktop's when that read fails)
+        Some(zone) => zone_name(client, zone).await.or(known.time_zone),
+        None => known.time_zone,
+    };
     draft
 }
 
@@ -642,7 +716,39 @@ async fn own_address<C: Credentials + 'static>(client: &Client<HttpTransport<C>>
 /// The account's time zone as Exchange names it (`TurkeySt`), from the middle tier's reading of the desktop's
 /// ([`TimeZoneSettings`]).
 async fn time_zone<C: Credentials + 'static>(client: &Client<HttpTransport<C>>) -> Option<String> {
-    let read = TimeZoneSettings::new(&local_zone()?);
+    zone_name(client, &local_zone()?).await
+}
+
+/// The busy times one free/busy read gives ([`Schedules`]); `None` when it failed.
+async fn schedules<C: Credentials + 'static>(
+    client: Arc<Client<HttpTransport<C>>>,
+    read: Schedules,
+) -> Option<Vec<PersonSchedule>> {
+    match client.send(&read).await {
+        Ok(answer) => Schedules::read_answer(answer.body()),
+        Err(error) => {
+            log::info!("other people's calendars couldn't be read: {error}");
+            None
+        }
+    }
+}
+
+/// `read`'s busy times added to `joined`'s, each person's to theirs.
+fn join_schedules(joined: &mut Vec<PersonSchedule>, read: Vec<PersonSchedule>) {
+    for schedule in read {
+        match joined
+            .iter_mut()
+            .find(|known| known.address.eq_ignore_ascii_case(&schedule.address))
+        {
+            Some(known) => known.busy.extend(schedule.busy),
+            None => joined.push(schedule),
+        }
+    }
+}
+
+/// The IANA zone `zone` as Exchange names it, read from the middle tier ([`TimeZoneSettings`]).
+async fn zone_name<C: Credentials + 'static>(client: &Client<HttpTransport<C>>, zone: &str) -> Option<String> {
+    let read = TimeZoneSettings::new(zone);
     let answer = client.read(&read).await.ok()?;
     TimeZoneSettings::read_answer(answer.body())
 }

@@ -365,6 +365,19 @@ pub struct Settings {
     /// the app last set it ([`SettingsModel::set_first_account`]) and the file keeps it. `None` (a file of a build of
     /// one account): every account is taken for the first, and the first one the app sets takes the top-level ones.
     pub first_account: Option<String>,
+    /// Other people's calendars each account added to its calendar (its Add calendar), in the order added.
+    pub people_calendars: Vec<PersonCalendar>,
+}
+
+/// Another person's calendar an account added to its calendar (Add calendar, "People's calendars").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonCalendar {
+    /// The account that added it, by its MRI.
+    pub account: String,
+    /// The person's address.
+    pub address: String,
+    /// Their name, as the directory gave it.
+    pub name: String,
 }
 
 /// What each account of an app of several keeps of its own: the chat shown last and its manual status.
@@ -507,6 +520,7 @@ impl Default for Settings {
             recap_summarizer: TranslatorChoice::default(),
             accounts: BTreeMap::new(),
             first_account: None,
+            people_calendars: Vec::new(),
         }
     }
 }
@@ -542,6 +556,8 @@ pub mod keys {
     pub const ACCOUNTS: &str = "accounts";
     /// The account whose own settings are the top-level ones, by its MRI.
     pub const FIRST_ACCOUNT: &str = "first_account";
+    /// Other people's calendars the accounts added: an array of tables (`account`, `address`, `name`).
+    pub const PEOPLE_CALENDARS: &str = "people_calendars";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -647,6 +663,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
             take_captions(settings, key, value)?;
         }
         keys::ACCOUNTS => take_accounts(settings, value)?,
+        keys::PEOPLE_CALENDARS => take_people_calendars(settings, value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
         }
@@ -655,6 +672,40 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         }
     }
     Ok(())
+}
+
+/// Takes the people's calendars the accounts added: an array of tables each naming the account (an MRI), the person's
+/// address and their name. One that is bad is left out, the others are taken.
+fn take_people_calendars(settings: &mut Settings, value: &Value) -> Result<(), Problem> {
+    let bad = Problem::BadValue {
+        key: keys::PEOPLE_CALENDARS,
+        why: "not a list of calendars, each with an account, an address and a name",
+    };
+    let entries = value.as_array().ok_or(bad.clone())?;
+    let mut failed = false;
+    for entry in entries {
+        let text = |key: &str| {
+            entry
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let taken = text("account")
+            .and_then(|account| chat_id(&Value::String(account)))
+            .zip(text("address").filter(|address| address.contains('@')))
+            .map(|(account, address)| PersonCalendar {
+                account,
+                name: text("name").unwrap_or_else(|| address.clone()),
+                address,
+            });
+        match taken {
+            Some(calendar) => settings.people_calendars.push(calendar),
+            None => failed = true,
+        }
+    }
+    if failed { Err(bad) } else { Ok(()) }
 }
 
 /// Takes the other accounts' own settings: each a table under the account's MRI (an id as a chat id is kept) holding
@@ -893,7 +944,26 @@ pub fn render(settings: &Settings) -> String {
     if let Some(first) = &settings.first_account {
         table.insert(keys::FIRST_ACCOUNT.to_owned(), Value::String(first.clone()));
     }
+    render_people(settings, &mut table);
     table.to_string()
+}
+
+/// The people's calendars the accounts added, into the file's table (when there are any).
+fn render_people(settings: &Settings, table: &mut Table) {
+    if !settings.people_calendars.is_empty() {
+        let people = settings
+            .people_calendars
+            .iter()
+            .map(|calendar| {
+                let mut entry = Table::new();
+                entry.insert("account".to_owned(), Value::String(calendar.account.clone()));
+                entry.insert("address".to_owned(), Value::String(calendar.address.clone()));
+                entry.insert("name".to_owned(), Value::String(calendar.name.clone()));
+                Value::Table(entry)
+            })
+            .collect();
+        table.insert(keys::PEOPLE_CALENDARS.to_owned(), Value::Array(people));
+    }
 }
 
 /// The captions' translation, into the file's table (the language only when one is picked).

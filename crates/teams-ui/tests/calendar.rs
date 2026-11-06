@@ -8,7 +8,7 @@ mod fixtures;
 
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone as _};
 use common::{Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use teams_core::{EngineError, EventResponse, EventWrite, EventWritten};
@@ -497,7 +497,7 @@ fn the_read_only_card_offers_no_join_but_still_copies_its_link() {
 }
 
 #[test]
-fn calendar_controls_toggle_visibility_choose_dates_and_explain_unavailable_actions() {
+fn calendar_controls_toggle_visibility_choose_dates_and_open_their_panels() {
     let rig = Rig::start();
     rig.core.calendar.lock().unwrap().events = vec![event("visible", 9)];
     let (view, cx, _) = window(&rig);
@@ -522,17 +522,24 @@ fn calendar_controls_toggle_visibility_choose_dates_and_explain_unavailable_acti
     draw(cx);
     assert!(cx.debug_bounds("calendar-picker").is_none());
     click(cx, "calendar-add");
-    assert!(cx.debug_bounds("calendar-notice").is_some());
-    click(cx, "calendar-notice-close");
-    // Join with an ID: its panel, an ID that isn't one refused there, closed again
+    assert!(cx.debug_bounds("calendar-add-dialog").is_some());
+    click(cx, "calendar-add-close");
+    assert!(cx.debug_bounds("calendar-add-dialog").is_none());
+    // Join with an ID, in Meet now's menu: its panel, an ID that isn't one refused there, closed again
+    click(cx, "calendar-meet-now-more");
     click(cx, "calendar-join-id");
     assert!(cx.debug_bounds("calendar-join-id-panel").is_some());
     click(cx, "calendar-join-id-join");
     assert!(cx.debug_bounds("calendar-join-id-problem").is_some());
     click(cx, "calendar-join-id-close");
     assert!(cx.debug_bounds("calendar-join-id-panel").is_none());
+    // Day, in the view menu's Day submenu: one day
     click(cx, "calendar-mode");
-    click(cx, "calendar-mode-day");
+    cx.simulate_keystrokes("down right");
+    if cx.debug_bounds("calendar-days-1").is_none() {
+        cx.simulate_keystrokes("left");
+    }
+    click(cx, "calendar-days-1");
     assert_eq!(cx.update(|_, cx| view.read(cx).mode()), Mode::Day);
     click(cx, "calendar-next");
     assert_eq!(cx.update(|_, cx| view.read(cx).anchor()), date(28));
@@ -782,7 +789,6 @@ fn answered(rig: &Rig) {
         .push_back(Ok(EventWritten { created: None }));
 }
 
-
 #[test]
 fn an_invitation_s_card_accepts_it_with_a_message_and_shows_the_answer() {
     let rig = Rig::start();
@@ -884,4 +890,199 @@ fn an_organizer_cancels_a_whole_series_with_a_message_and_an_appointment_offers_
         rig.core.calendar.lock().unwrap().writes.as_slice(),
         [EventWrite::Cancel { id, message: Some(message), .. }] if id == "own-master" && message == "Moving to next month"
     ));
+}
+
+#[test]
+fn day_view_shows_one_to_seven_days_and_steps_by_them() {
+    let rig = Rig::start();
+    let (view, cx, _) = window(&rig);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_days(3, cx)));
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).mode()), Mode::Day);
+    let span = cx.update(|_, cx| view.read(cx).span());
+    assert_eq!((span.first, span.days), (date(27), 3));
+    assert_eq!(cx.update(|_, cx| view.read(cx).title()), "October 27–29, 2026");
+    assert!(cx.debug_bounds("calendar-day-2026-10-29").is_some());
+    assert!(cx.debug_bounds("calendar-day-2026-10-30").is_none());
+    click(cx, "calendar-next");
+    assert_eq!(cx.update(|_, cx| view.read(cx).anchor()), date(30));
+    click(cx, "calendar-previous");
+    assert_eq!(cx.update(|_, cx| view.read(cx).anchor()), date(27));
+    // out of range asks are held to a week, and one day is the day's own title
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_days(9, cx)));
+    assert_eq!(cx.update(|_, cx| view.read(cx).days()), 7);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_days(1, cx)));
+    assert_eq!(cx.update(|_, cx| view.read(cx).title()), "Tuesday, October 27, 2026");
+    // from the work week, a day count shows Day view
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_mode(Mode::WorkWeek, cx)));
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_days(2, cx)));
+    assert_eq!(cx.update(|_, cx| view.read(cx).mode()), Mode::Day);
+    assert_eq!(cx.update(|_, cx| view.read(cx).span().days), 2);
+}
+
+fn person(address: &str, name: &str) -> teams_core::Invitable {
+    teams_core::Invitable {
+        mri: String::new(),
+        name: name.to_owned(),
+        address: address.to_owned(),
+    }
+}
+
+fn busy_at(address: &str, day: u32, hour: u32) -> teams_proto::PersonSchedule {
+    let start = chrono::Local
+        .from_local_datetime(&date(day).and_hms_opt(hour, 0, 0).unwrap())
+        .unwrap()
+        .timestamp_millis();
+    teams_proto::PersonSchedule {
+        address: address.to_owned(),
+        busy: vec![teams_proto::BusyTime {
+            status: teams_proto::FreeBusy::Busy,
+            start_ms: start,
+            end_ms: start + 3_600_000,
+            subject: None,
+        }],
+    }
+}
+
+#[test]
+fn add_calendar_finds_a_person_adds_their_calendar_and_shows_their_busy_times() {
+    let rig = Rig::start();
+    {
+        let mut calendar = rig.core.calendar.lock().unwrap();
+        calendar.people = vec![person("avery@example.com", "Avery Example")];
+        calendar.schedules = vec![busy_at("avery@example.com", 28, 10)];
+    }
+    let (view, cx, written) = window(&rig);
+    click(cx, "calendar-add");
+    cx.simulate_input("Ave");
+    cx.executor().advance_clock(std::time::Duration::from_millis(400));
+    draw(cx);
+    click(cx, "calendar-add-found-0");
+    assert!(cx.debug_bounds("calendar-add-picked").is_some());
+    click(cx, "calendar-add-add");
+    assert!(cx.debug_bounds("calendar-add-dialog").is_none());
+    let people = cx.update(|_, cx| view.read(cx).people().to_vec());
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].address, "avery@example.com");
+    assert!(people[0].ticked);
+    // their busy time is read for the days shown and drawn, opening no card
+    let reads = rig.core.calendar.lock().unwrap().schedule_reads.clone();
+    assert_eq!(reads.last().unwrap().0, ["avery@example.com"]);
+    assert_eq!(reads.last().unwrap().2, 5);
+    draw(cx);
+    assert!(cx.debug_bounds("calendar-people").is_some());
+    let busy = format!(
+        "calendar-event-person-avery@example.com-{}",
+        rig.core.calendar.lock().unwrap().schedules[0].busy[0].start_ms
+    );
+    let busy: &'static str = Box::leak(busy.into_boxed_str());
+    click(cx, busy);
+    assert!(cx.update(|_, cx| view.read(cx).card().is_none()));
+    split_close_and_add_again(&view, cx);
+    let trace = written.text();
+    assert!(trace.contains("person-added") && trace.contains("person-removed"));
+    assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
+}
+
+#[test]
+fn meet_now_starts_a_meeting_of_its_own_or_gives_its_link() {
+    let rig = Rig::start();
+    rig.core.calendar.lock().unwrap().meet_now = Some(teams_proto::MeetNowMeeting {
+        thread: "19:meeting_made-up@thread.v2".to_owned(),
+        join: "https://teams.microsoft.com/l/meetup-join/made-up".to_owned(),
+        share: "https://teams.microsoft.com/meet/1?p=made-up".to_owned(),
+    });
+    let (view, cx, _) = window(&rig);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::clone(&events);
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &CalendarViewEvent, _| {
+            seen.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    // Get a link to share: the meeting made, its link shown with Share via email
+    click(cx, "calendar-meet-now");
+    assert!(cx.debug_bounds("calendar-meet-now-dialog").is_some());
+    click(cx, "calendar-meet-now-share");
+    assert!(cx.debug_bounds("calendar-meet-now-link").is_some());
+    assert!(cx.debug_bounds("calendar-meet-now-email").is_some());
+    click(cx, "calendar-meet-now-copy");
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .as_deref(),
+        Some("https://teams.microsoft.com/meet/1?p=made-up")
+    );
+    // Start meeting then joins the meeting made, without making another
+    click(cx, "calendar-meet-now-start");
+    assert!(cx.debug_bounds("calendar-meet-now-dialog").is_none());
+    assert_eq!(rig.core.calendar.lock().unwrap().meet_now_asked.len(), 1);
+    assert!(
+        matches!(&events.borrow()[..], [CalendarViewEvent::JoinChat { chat, link: Some(_), .. }]
+        if chat == "19:meeting_made-up@thread.v2")
+    );
+    // Start meeting from the dialog: made and joined at once
+    click(cx, "calendar-meet-now");
+    click(cx, "calendar-meet-now-start");
+    assert_eq!(rig.core.calendar.lock().unwrap().meet_now_asked.len(), 2);
+    assert_eq!(events.borrow().len(), 2);
+    assert_eq!(
+        teams_ui::calendar_view::mail_link("Team sync", "https://x/y?p=1"),
+        "mailto:?subject=Team%20sync&body=Join%20the%20meeting%3A%20https%3A%2F%2Fx%2Fy%3Fp%3D1"
+    );
+}
+
+#[test]
+fn a_clicked_event_s_card_opens_beside_it() {
+    let rig = Rig::start();
+    rig.core.calendar.lock().unwrap().events = vec![event("busy", 14)];
+    let (view, cx, _) = window(&rig);
+    let block = cx.debug_bounds("calendar-event-busy").unwrap();
+    click(cx, "calendar-event-busy");
+    let card = cx.debug_bounds("calendar-card").unwrap();
+    // beside the point clicked, not centred over the grid
+    assert!(card.left() > block.center().x || card.right() < block.center().x);
+    assert!(cx.update(|_, cx| view.read(cx).card().is_some()));
+}
+
+/// Split view shows the account's calendar and the person's apart; closing theirs unticks it; adding them again says
+/// so; Remove takes them off the list.
+fn split_close_and_add_again(view: &Entity<CalendarView>, cx: &mut VisualTestContext) {
+    // Split view: the account's calendar and theirs in columns of their own
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_split(true, cx)));
+    draw(cx);
+    assert!(cx.debug_bounds("calendar-split-0").is_some());
+    assert!(cx.debug_bounds("calendar-split-1").is_some());
+    // closing their columns unticks their calendar
+    click(cx, "calendar-split-close-1");
+    assert!(!cx.update(|_, cx| view.read(cx).people()[0].ticked));
+    assert!(cx.debug_bounds("calendar-split-1").is_none());
+    // adding them again says so
+    cx.update(|window, cx| view.update(cx, |view, cx| view.open_add_calendar(window, cx)));
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.pick_person(person("AVERY@example.com", "Avery"), window, cx);
+        });
+    });
+    click(cx, "calendar-add-add");
+    assert!(cx.debug_bounds("calendar-add-problem").is_some());
+    cx.update(|_, cx| view.update(cx, CalendarView::close_add_calendar));
+    // Remove takes it off the list
+    cx.update(|_, cx| view.update(cx, |view, cx| view.remove_person("avery@example.com", cx)));
+    assert!(cx.update(|_, cx| view.read(cx).people().is_empty()));
+}
+
+#[test]
+fn a_meeting_meet_now_couldn_t_make_says_so_and_the_dialog_stays() {
+    let rig = Rig::start();
+    let (_, cx, _) = window(&rig);
+    // a meeting that couldn't be made says so, and the dialog stays
+    rig.core.calendar.lock().unwrap().meet_now = None;
+    click(cx, "calendar-meet-now");
+    click(cx, "calendar-meet-now-start");
+    assert!(cx.debug_bounds("calendar-meet-now-problem").is_some());
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(cx.debug_bounds("calendar-meet-now-dialog").is_none());
+    assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
 }

@@ -69,6 +69,11 @@ fn changed() -> Settings {
         )]
         .into(),
         first_account: None,
+        people_calendars: vec![teams_ui::settings::PersonCalendar {
+            account: "8:orgid:00000000-0000-4000-8000-00000000000a".to_owned(),
+            address: "avery@example.com".to_owned(),
+            name: "Avery Example".to_owned(),
+        }],
     }
 }
 
@@ -818,4 +823,21 @@ fn the_font_size_steps_within_its_range() {
     assert_eq!(appearance.stepped_font_size(1), *theme::FONT_SIZES.end());
     appearance.font_size = *theme::FONT_SIZES.start();
     assert_eq!(appearance.stepped_font_size(-1), *theme::FONT_SIZES.start());
+}
+
+#[test]
+fn people_s_calendars_are_kept_by_account_and_a_bad_one_left_out() {
+    let (read, problems) = parse(
+        "[[people_calendars]]\naccount = \"8:orgid:a\"\naddress = \"avery@example.com\"\nname = \"Avery\"\n\
+         [[people_calendars]]\naccount = \"8:orgid:a\"\naddress = \"no-address\"\n\
+         [[people_calendars]]\naccount = \"8:orgid:b\"\naddress = \"riley@example.com\"\n",
+    )
+    .unwrap();
+    assert_eq!(problems.len(), 1);
+    assert_eq!(read.people_calendars.len(), 2);
+    assert_eq!(read.people_calendars[0].name, "Avery");
+    // a calendar without a name is named by its address
+    assert_eq!(read.people_calendars[1].name, "riley@example.com");
+    assert_eq!(parse(&render(&read)).unwrap().0.people_calendars, read.people_calendars);
+    assert_eq!(parse("people_calendars = 3").unwrap().1.len(), 1);
 }

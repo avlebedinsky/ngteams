@@ -482,6 +482,7 @@ fn draft() -> EventDraft {
             offset_minutes: 0,
         },
         time_zone: None,
+        zone: None,
         all_day: false,
         organizer: Organizer {
             mri: String::new(),

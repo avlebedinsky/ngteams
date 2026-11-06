@@ -36,6 +36,13 @@ pub(super) struct JoinIdForm {
     finding: bool,
 }
 
+impl JoinIdForm {
+    /// Its boxes.
+    pub(super) fn inputs(&self) -> [&Entity<InputState>; 2] {
+        [&self.id, &self.passcode]
+    }
+}
+
 impl CalendarView {
     /// Join with an ID: the panel opens, the ID's box focused.
     pub fn open_join_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {

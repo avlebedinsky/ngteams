@@ -16,8 +16,8 @@ mod team;
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
 pub use calendar::{
     CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
-    EventDraft, EventShowAs, MeetingChannel, Organizer, RespondEvent, RsvpAnswer, UpdateChannelEvent, UpdateEvent,
-    ZonedTime,
+    EventDraft, EventShowAs, MeetNow, MeetNowMeeting, MeetingChannel, Organizer, RespondEvent, RsvpAnswer,
+    UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
 pub(crate) use call::on_calling_base;
 pub use call::{

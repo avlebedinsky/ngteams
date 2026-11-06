@@ -158,6 +158,7 @@ fn draft() -> EventDraft {
             offset_minutes: 0,
         },
         time_zone: None,
+        zone: None,
         all_day: false,
         organizer: Organizer {
             mri: String::new(),
@@ -334,6 +335,78 @@ async fn the_scheduler_keeps_each_successful_half_and_fails_only_when_both_reads
     assert!(matches!(
         rig.handle.availability(Vec::new(), START, 30).await,
         Err(EngineError::CalendarUnread)
+    ));
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
+async fn people_s_calendars_are_read_five_days_a_read_and_joined_by_person() {
+    let rig = running_engine(true).await;
+    identity(&rig.server).await;
+    answer(&rig.server, "PUT", SCHEDULES, 200, json!([{
+        "userPrincipalName": MAIL_B,
+        "freeBusyEvents": [{"freeBusyStatus": "Busy", "startTime": "2026-11-01T16:00:00Z", "endTime": "2026-11-01T16:30:00Z"}],
+    }])).await;
+    let read = rig
+        .handle
+        .people_calendars(vec![attendee(MAIL_B)], START, 7)
+        .await
+        .unwrap();
+    // a week is two reads, five days from the start and then from five days on; the same busy time once
+    let asked = requests(&rig.server, "PUT", SCHEDULES).await;
+    assert_eq!(asked.len(), 2);
+    let mut starts: Vec<String> = asked
+        .iter()
+        .map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["numberOfDays"], 5);
+            assert_eq!(body["attendees"][0]["address"], MAIL_B);
+            body["startTime"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    starts.sort();
+    assert_ne!(starts[0], starts[1]);
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].address, MAIL_B);
+    assert_eq!(read[0].busy.len(), 1);
+    // nobody asked about reads nothing
+    assert!(
+        rig.handle
+            .people_calendars(Vec::new(), START, 7)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(requests(&rig.server, "PUT", SCHEDULES).await.len(), 2);
+    rig.server.reset().await;
+    identity(&rig.server).await;
+    answer(&rig.server, "PUT", SCHEDULES, 403, Value::Null).await;
+    assert!(matches!(
+        rig.handle.people_calendars(vec![attendee(MAIL_B)], START, 3).await,
+        Err(EngineError::CalendarUnread)
+    ));
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
+async fn meet_now_makes_a_meeting_of_the_account_s_own_once() {
+    let rig = running_engine(true).await;
+    answer(&rig.server, "POST", ONLINE, 201, json!({"value": {
+        "groupContext": {"threadId": "19:meeting_made-up@thread.v2"},
+        "links": {"join": "https://teams.microsoft.com/l/meetup-join/made-up", "shortJoinUrl": "https://teams.microsoft.com/meet/1?p=x"},
+    }})).await;
+    let made = rig.handle.meet_now("Meeting with Lab").await.unwrap();
+    assert_eq!(made.thread, "19:meeting_made-up@thread.v2");
+    assert_eq!(made.share, "https://teams.microsoft.com/meet/1?p=x");
+    let asked = requests(&rig.server, "POST", ONLINE).await;
+    assert_eq!(asked.len(), 1);
+    let body: Value = serde_json::from_slice(&asked[0].body).unwrap();
+    assert_eq!(body["meetingType"], "MeetNow");
+    assert_eq!(body["subject"], "Meeting with Lab");
+    next_answer(&rig.server, "POST", ONLINE, 500, Value::Null).await;
+    assert!(matches!(
+        rig.handle.meet_now("Again").await,
+        Err(EngineError::EventNotSaved { .. })
     ));
     rig.handle.shutdown();
 }

@@ -751,6 +751,16 @@ enum Request {
         meeting_minutes: u32,
         reply: Responder<MeetingAvailability>,
     },
+    PeopleCalendars {
+        people: Vec<EventAttendee>,
+        start_ms: i64,
+        days: u32,
+        reply: Responder<Vec<teams_proto::PersonSchedule>>,
+    },
+    MeetNow {
+        subject: String,
+        reply: Responder<teams_proto::MeetNowMeeting>,
+    },
     SearchService {
         query: String,
         scope: SearchScope,
@@ -1339,6 +1349,30 @@ impl EngineRequests {
             meeting_minutes,
             reply,
         })
+    }
+
+    /// The busy times of `people` (other people's calendars the account added) over `days` days from `start_ms`, read
+    /// now ([`crate::calendar`]): what the calendar draws in their calendars; [`EngineError::CalendarUnread`] when no
+    /// read went through.
+    pub fn people_calendars(
+        &self,
+        people: Vec<EventAttendee>,
+        start_ms: i64,
+        days: u32,
+    ) -> Reply<Vec<teams_proto::PersonSchedule>> {
+        self.ask(|reply| Request::PeopleCalendars {
+            people,
+            start_ms,
+            days,
+            reply,
+        })
+    }
+
+    /// Makes a meeting of the account's own to start now, named `subject` (the calendar's Meet now,
+    /// [`crate::calendar`]): its chat and links.
+    pub fn meet_now(&self, subject: impl Into<String>) -> Reply<teams_proto::MeetNowMeeting> {
+        let subject = subject.into();
+        self.ask(|reply| Request::MeetNow { subject, reply })
     }
 
     /// What the service's search finds for `query` in `scope` (read now: [`crate::service_search`]): the title bar's
@@ -2025,6 +2059,20 @@ where
         }
     }
 
+    /// Other people's calendars read, or a meeting of the account's own made now (Meet now): the calendar's.
+    fn on_meeting(&mut self, request: Request) {
+        match request {
+            Request::PeopleCalendars {
+                people,
+                start_ms,
+                days,
+                reply,
+            } => self.calendar.people_calendars(people, start_ms, days, reply),
+            Request::MeetNow { subject, reply } => self.calendar.meet_now(subject, reply),
+            _ => {}
+        }
+    }
+
     /// A request a part of the engine answers on its own (a picture, a file's bytes, the calendar, the search, a
     /// person): handed to that part (`on_request` takes the rest).
     fn on_lookup(&mut self, request: Request) {
@@ -2072,6 +2120,7 @@ where
                 meeting_minutes,
                 reply,
             } => self.calendar.availability(attendees, start_ms, meeting_minutes, reply),
+            request @ (Request::PeopleCalendars { .. } | Request::MeetNow { .. }) => self.on_meeting(request),
             Request::Invitable { query, reply } => match self.store.profiles_named(&query, INVITABLE) {
                 Ok(named) => self.calendar.invitable(named, reply),
                 Err(error) => {

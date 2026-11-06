@@ -27,6 +27,12 @@ pub struct CalendarFake {
     pub availability: MeetingAvailability,
     /// The Meet now titles asked, each with its channel.
     pub titles: Vec<(String, String)>,
+    /// What the people's calendars read answers, and each read asked (the addresses, the start, the days).
+    pub schedules: Vec<teams_proto::PersonSchedule>,
+    pub schedule_reads: Vec<(Vec<String>, i64, u32)>,
+    /// The calendar's Meet now: the meeting it makes (none: it fails), and each name asked.
+    pub meet_now: Option<teams_proto::MeetNowMeeting>,
+    pub meet_now_asked: Vec<String>,
 }
 
 impl CalendarFake {

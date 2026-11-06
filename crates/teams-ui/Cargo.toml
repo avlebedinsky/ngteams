@@ -11,6 +11,8 @@ publish.workspace = true
 async-channel.workspace = true
 # the chat list's times, in the local time zone
 chrono.workspace = true
+# the scheduling form's start and end time zones
+chrono-tz.workspace = true
 # the bridge's drain: the engine's next event or the stop, whichever comes first
 futures-util.workspace = true
 gpui-pre.workspace = true

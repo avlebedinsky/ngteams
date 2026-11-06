@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, InteractiveElement as _, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px, relative, rgb,
+    StatefulInteractiveElement as _, Styled as _, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -21,9 +21,20 @@ use crate::clock::{self, HourCycle};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::{self, Palette};
 
+/// The card's width, px.
+const CARD_WIDTH: f32 = 440.0;
+/// How far from the point its event was clicked at the card opens, px.
+const CARD_GAP: f32 = 24.0;
+
 impl CalendarView {
-    /// The open event's card, over the grid.
-    pub(super) fn card_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+    /// The open event's card: next to where its event was clicked, as Teams' peek opens beside the event (on its
+    /// right, or on its left where the window has no room), else centred over the grid.
+    pub(super) fn card_view(
+        &self,
+        palette: Palette,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
         let shown = self.card.clone()?;
         let event = Rc::clone(&shown.event);
         let cycle = clock::cycle(cx);
@@ -38,8 +49,8 @@ impl CalendarView {
             .debug_selector(|| "calendar-card".to_owned())
             .id("calendar-card")
             .occlude()
-            .w(px(480.0))
-            .max_h(relative(0.85))
+            .w(px(CARD_WIDTH))
+            .max_h(window.viewport_size().height * 0.85)
             .p_5()
             .flex()
             .flex_col()
@@ -80,6 +91,9 @@ impl CalendarView {
             }))
             .children(actions)
             .children(manage);
+        if let Some(at) = self.card_at {
+            return Some(Self::peek(card, at, palette, window, cx));
+        }
         Some(
             div()
                 .id("calendar-card-backdrop")
@@ -94,6 +108,37 @@ impl CalendarView {
                 .on_click(cx.listener(|this, _, _, cx| this.close_card(cx)))
                 .child(card),
         )
+    }
+
+    /// The card as Teams' peek: beside the point `at` its event was clicked at (on its right, or its left where the
+    /// window has no room), the brand line along its top, the calendar left undimmed; a click beside it closes it.
+    fn peek(
+        card: gpui::Stateful<gpui::Div>,
+        at: gpui::Point<gpui::Pixels>,
+        palette: Palette,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let card = card.border_t_4().border_color(rgb(palette.brand));
+        let room = window.viewport_size().width - at.x;
+        let (corner, x) = if room > px(CARD_WIDTH + CARD_GAP + 16.0) {
+            (gpui::Anchor::TopLeft, at.x + px(CARD_GAP))
+        } else {
+            (gpui::Anchor::TopRight, at.x - px(CARD_GAP))
+        };
+        let placed = gpui::anchored()
+            .anchor(corner)
+            .position(gpui::point(x, at.y - px(48.0)))
+            .snap_to_window_with_margin(px(8.0))
+            .child(card);
+        div()
+            .id("calendar-card-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_click(cx.listener(|this, _, _, cx| this.close_card(cx)))
+            .child(gpui::deferred(placed).with_priority(1))
     }
 
     /// The card's Edit and its removal (Cancel meeting for the account's own meeting, Delete for its appointment,

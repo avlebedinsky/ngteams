@@ -387,6 +387,23 @@ pub trait Core: Send + Sync + 'static {
         let _ = (attendees, start_ms, meeting_minutes);
         Reply::ready(Ok(MeetingAvailability::default()))
     }
+    /// The busy times of `people` (other people's calendars the account added: Add calendar) over `days` days from
+    /// `start_ms`, read now (`teams_core::calendar`). A fake core knows of no busy time.
+    fn people_calendars(
+        &self,
+        people: Vec<EventAttendee>,
+        start_ms: i64,
+        days: u32,
+    ) -> Reply<Vec<teams_proto::PersonSchedule>> {
+        let _ = (people, start_ms, days);
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// Makes a meeting of the account's own to start now, named `subject` (the calendar's Meet now): its chat and
+    /// links. Only the user's Start meeting or Get a link to share asks for one. A fake core makes none.
+    fn meet_now(&self, subject: String) -> Reply<teams_proto::MeetNowMeeting> {
+        let _ = subject;
+        Reply::ready(Err(teams_core::EngineError::MeetingUnread))
+    }
 }
 
 impl Core for EngineRequests {
@@ -572,6 +589,19 @@ impl Core for EngineRequests {
         meeting_minutes: u32,
     ) -> Reply<MeetingAvailability> {
         EngineRequests::availability(self, attendees, start_ms, meeting_minutes)
+    }
+
+    fn people_calendars(
+        &self,
+        people: Vec<EventAttendee>,
+        start_ms: i64,
+        days: u32,
+    ) -> Reply<Vec<teams_proto::PersonSchedule>> {
+        EngineRequests::people_calendars(self, people, start_ms, days)
+    }
+
+    fn meet_now(&self, subject: String) -> Reply<teams_proto::MeetNowMeeting> {
+        EngineRequests::meet_now(self, subject)
     }
 
     fn read_only(&self) -> bool {

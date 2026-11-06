@@ -127,6 +127,10 @@ pub struct EventDraft {
     pub end: ZonedTime,
     /// The account's time zone as Exchange names it (`TurkeySt`), when known; else UTC's.
     pub time_zone: Option<String>,
+    /// The zone its start is given in, by its IANA name (`Europe/London`), when the form chose one other than the
+    /// desktop's (its start and end time zones): the engine reads its Exchange name for `time_zone` instead of the
+    /// desktop's.
+    pub zone: Option<String>,
     pub all_day: bool,
     pub organizer: Organizer,
     pub attendees: Vec<EventAttendee>,
@@ -291,6 +295,72 @@ impl Request for CreateOnlineMeeting {
 
     fn body(&self) -> Option<Value> {
         Some(json!({"isStreamEnabled": false, "meetingType": "Scheduled"}))
+    }
+}
+
+/// `POST beta/me/calendarEvents/privateMeeting/schedulingService/create` with `{"meetingType": "MeetNow",
+/// "isStreamEnabled": false, "subject", "unhideChatThread": true}`: a meeting of the account's own to start now (the
+/// calendar's Meet now: Start meeting, or Get a link to share), its chat shown to the organizer alone and no event on
+/// the calendar. It reaches nobody: a plain request. The service answers `201` with `{"value": {"subject",
+/// "groupContext": {"threadId"}, "links": {"join", "shortJoinUrl", "update"}, …}}` ([`MeetNow::read_answer`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetNow {
+    /// The meeting's name (the dialog's "Meeting name").
+    pub subject: String,
+}
+
+/// A meeting Meet now made: its chat, its join link and the short link the dialog shares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetNowMeeting {
+    /// Its chat (`groupContext.threadId`), what its pre-join joins by.
+    pub thread: String,
+    /// Its join link (`links.join`).
+    pub join: String,
+    /// Its short link (`links.shortJoinUrl`, `https://teams.microsoft.com/meet/<id>?p=<passcode>`), else the join link.
+    pub share: String,
+}
+
+impl MeetNow {
+    /// The meeting the answer `body` gives: `None` without a chat or a join link.
+    #[must_use]
+    pub fn read_answer(body: &[u8]) -> Option<MeetNowMeeting> {
+        let answer: Value = serde_json::from_slice(body).ok()?;
+        let meeting = answer.get("value")?;
+        let text = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let thread = text(meeting.get("groupContext").and_then(|context| context.get("threadId")))?;
+        let links = meeting.get("links");
+        let join = text(links.and_then(|links| links.get("join")))?;
+        let share = text(links.and_then(|links| links.get("shortJoinUrl"))).unwrap_or_else(|| join.clone());
+        Some(MeetNowMeeting { thread, join, share })
+    }
+}
+
+impl Request for MeetNow {
+    fn service(&self) -> Service {
+        Service::MiddleTier
+    }
+
+    fn method(&self) -> Method {
+        Method::Post
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        CreateOnlineMeeting.endpoint()
+    }
+
+    fn body(&self) -> Option<Value> {
+        Some(json!({
+            "meetingType": "MeetNow",
+            "isStreamEnabled": false,
+            "subject": self.subject,
+            "unhideChatThread": true,
+        }))
     }
 }
 
@@ -906,6 +976,7 @@ mod tests {
                 offset_minutes: 180,
             },
             time_zone: Some("TurkeySt".to_owned()),
+            zone: None,
             all_day: false,
             organizer: Organizer {
                 mri: "8:orgid:00000000-0000-4000-8000-00000000000a".to_owned(),
@@ -1376,5 +1447,35 @@ mod tests {
             Some(json!("e"))
         );
         assert!(CreateOnlineMeeting::read_answer(br#"{"value": {}}"#).is_none());
+    }
+
+    #[test]
+    fn meet_now_makes_a_meeting_of_its_own_and_reads_its_chat_and_links() {
+        let meet = MeetNow {
+            subject: "Meeting with A".to_owned(),
+        };
+        assert_eq!(meet.method(), Method::Post);
+        assert_eq!(meet.endpoint(), CreateOnlineMeeting.endpoint());
+        assert_eq!(
+            meet.body(),
+            Some(
+                json!({"meetingType": "MeetNow", "isStreamEnabled": false, "subject": "Meeting with A",
+                "unhideChatThread": true})
+            )
+        );
+        let body =
+            json!({"value": {"subject": "Meeting with A", "groupContext": {"threadId": "19:meeting_x@thread.v2"},
+            "links": {"join": "https://teams.microsoft.com/l/meetup-join/x", "shortJoinUrl":
+            "https://teams.microsoft.com/meet/1?p=x", "update": "https://example.com/u"}}})
+            .to_string();
+        let made = MeetNow::read_answer(body.as_bytes()).unwrap();
+        assert_eq!(made.thread, "19:meeting_x@thread.v2");
+        assert_eq!(made.join, "https://teams.microsoft.com/l/meetup-join/x");
+        assert_eq!(made.share, "https://teams.microsoft.com/meet/1?p=x");
+        let no_short =
+            json!({"value": {"groupContext": {"threadId": "19:t"}, "links": {"join": "https://j"}}}).to_string();
+        assert_eq!(MeetNow::read_answer(no_short.as_bytes()).unwrap().share, "https://j");
+        assert!(MeetNow::read_answer(br#"{"value": {"links": {"join": "https://j"}}}"#).is_none());
+        assert!(MeetNow::read_answer(b"no").is_none());
     }
 }

@@ -32,6 +32,7 @@ mod giphy;
 mod http;
 mod meeting;
 mod own;
+mod places;
 mod post_read;
 mod read;
 pub mod recap;
@@ -91,6 +92,7 @@ pub use own::{
     MESSAGING_APP_ID, MESSAGING_TEMPLATE, OwnState, REGISTRATION_TTL, RegisteredEndpoint, TROUTER_DOMAIN, register,
     register_calling,
 };
+pub use places::{PLACES_PAGE, Place, RoomLists, Rooms};
 #[cfg(feature = "test-support")]
 pub use post_read::ProbePostRead;
 pub use post_read::{
@@ -148,8 +150,8 @@ pub use write::{
 };
 pub use write::{
     CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
-    EventDraft, EventShowAs, MeetingChannel, Organizer, RespondEvent, RsvpAnswer, UpdateChannelEvent, UpdateEvent,
-    ZonedTime,
+    EventDraft, EventShowAs, MeetNow, MeetNowMeeting, MeetingChannel, Organizer, RespondEvent, RsvpAnswer,
+    UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
 
 pub use workflow::{MessageRun, MessageSender, Principal, WorkflowFailure, WorkflowRequest, WorkflowResponse};

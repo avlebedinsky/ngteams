@@ -217,6 +217,45 @@ length in minutes.
   "Busy"|"Tentative"|…, "startTime", "endTime", "details": {"subject"?, "location"?, "isPrivate"?}}]}]`, one entry
   per person asked about; the details (and the time zone) only for the account's own calendar.
 
+### Time zones
+
+Behind the globe beside its times, the web client's form shows the start's date, time and time zone on one line and
+the end's under them ("(UTC+03:00) Istanbul"), seen 2026-11-06 (`team-manage`, the hosted Outlook form). The middle
+tier's event carries one zone, `eventTimeZone` (with `utcOffset`): the start's, by its Exchange name, which
+`timeZoneSettingsWithOffset?timezone=<IANA zone>` gives (`Pacific/Honolulu`: `local.timeZone` `HawaiianSt`). The
+service reads `startTime` and `endTime` as that zone's clock whatever offset they carry: a native save of 2026-11-06
+with the start in Honolulu (`-10:00`) and the end written with Istanbul's offset (`13:00+03:00`) came back ending at
+13:00 Honolulu time. So both are written in the start's zone; an end picked in another zone is converted to it.
+
+### Meet now
+
+The calendar's toolbar has a split **Meet now** (its menu: Join with an ID). Its face opens "Start a meeting now" with
+the meeting's name ("Meeting with <first name>") and two buttons; both make the meeting with `POST
+beta/me/calendarEvents/privateMeeting/schedulingService/create` and `{"meetingType": "MeetNow", "isStreamEnabled":
+false, "subject": <name>, "unhideChatThread": true}` (captured 2026-11-06, `meeting-steps`, answered `201` with the
+meeting: `subject`, `groupContext.threadId`, `links.join`, `links.shortJoinUrl`). **Start meeting** then opens the
+meeting's pre-join; **Get a link to share** shows the meeting's name over its short link
+(`https://teams.microsoft.com/meet/<id>?p=<passcode>`) with Copy, "Configure meeting options", Start meeting and
+"Share via email". No event is written to the calendar, and nobody is invited.
+
+### Other people's calendars
+
+The left pane's **Add calendar** opens a dialog of sections (Recommended, Edit my calendars, Create blank calendar, Add
+from directory, Subscribe from web, Upload from file, Holidays, Birthdays). **Add from directory** finds a person by
+name or address and adds their calendar under "People's calendars" (Outlook's `service.svc?action=CreateCalendar`,
+seen 2026-11-06), each with a tick and a "…" (Show this only, Remove, Color, Move). Split view (in the view menu)
+shows each calendar ticked in columns of its own under its name and its close. What a person's calendar shows by
+default is their free and busy times: the native client reads them with the Scheduler's `schedules` read (five days a
+read, as the web client asks) and keeps the list of added calendars in its own settings, not in the mailbox.
+
+### Rooms
+
+The web client's code names the room finder's reads, `GET v2.0/places/roomLists`, `v2.0/places/rooms` and
+`v2.0/places/<list address>/roomList/rooms` (each `?$count=true&$top=<n>&$skip=0`), answered `{"roomLists": [<place>]}`
+and `{"rooms": [<place>]}`, a place `{"displayName", "emailAddress", "address"?, …}`. The lab tenant has no rooms (the
+form's "Browse all rooms" said "We didn't find any conference rooms", 2026-11-06), so no answer with one was seen and the
+native form shows no room finder; `teams-proto`'s `RoomLists` and `Rooms` read them.
+
 ### Write path and lab reach
 
 Calendar changes use the typed event requests and the outbox; there is no membership classifier or permit. Updates
@@ -248,3 +287,10 @@ their typed protocol requests with the service's own credential.
   occurrence or (by its master) the whole series; an occurrence's Cancel and Delete offer this event or the whole
   series, a cancellation with a message for the attendees.
 - It never sends the online meeting's delete.
+- **Meet now** (`crates/teams-ui/src/calendar_view/meet_now.rs`): the meeting made through the outbox (`MeetNow`, one
+  attempt), then its pre-join (Start meeting) or its short link (Get a link to share).
+- **Time zones** (`crates/teams-ui/src/event_form/zones.rs`): the form's slot stays in the desktop's time; a start zone
+  other than the desktop's is sent as the draft's `zone`, whose Exchange name the engine reads for `eventTimeZone`, and
+  both times are written in it.
+- **People's calendars** (`crates/teams-ui/src/calendar_view/people.rs`): their busy times read for the days shown
+  (`Schedules`, a read per five days), drawn in each calendar's colour, opening no card.

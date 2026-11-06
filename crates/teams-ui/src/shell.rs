@@ -368,7 +368,7 @@ impl Shell {
         let sidebar = cx.new(|cx| Sidebar::new(list.clone(), teams.clone(), models.clone(), Arc::clone(&trace), cx));
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
-        let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, window, cx);
+        let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
         let focus = Self::focused(window, cx);
@@ -583,11 +583,14 @@ impl Shell {
         core: &Arc<dyn Core>,
         models: &Models,
         trace: &Arc<ViewTrace>,
+        settings: &Entity<SettingsModel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Entity<CalendarView>, Subscription) {
         let (core, calls, trace) = (Arc::clone(core), models.calls.clone(), Arc::clone(trace));
         let calendar = cx.new(|cx| CalendarView::new(core, calls, trace, cx));
+        // the people's calendars the account added are kept in the settings
+        calendar.update(cx, |calendar, cx| calendar.set_settings(settings.clone(), cx));
         let events = cx.subscribe_in(&calendar, window, |this: &mut Self, _, event, window, cx| match event {
             CalendarViewEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
             CalendarViewEvent::Join(to_join) => this.open_prejoin(to_join.clone(), cx),

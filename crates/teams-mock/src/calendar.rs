@@ -235,7 +235,8 @@ fn writes(request: &Request, rest: &[String]) -> Option<ResponseTemplate> {
             201,
             &json!({"value": {
                 "groupContext": {"threadId": "19:meeting_MadeUpNewMeeting@thread.v2"},
-                "links": {"join": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpNewMeeting%40thread.v2/0"},
+                "links": {"join": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpNewMeeting%40thread.v2/0",
+                    "shortJoinUrl": "https://teams.microsoft.com/meet/1234567890123?p=MadeUpPass"},
             }}),
         ),
         ("GET", ["beta", "me", "calendarEvents", "timeZoneSettingsWithOffset"]) => answer(

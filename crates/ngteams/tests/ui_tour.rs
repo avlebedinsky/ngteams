@@ -119,7 +119,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 164] = [
+const STEPS: [Step; 5 + 171] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1018,11 +1018,76 @@ const STEPS: [Step; 5 + 164] = [
             calendar.open_join_id(window, cx);
         });
     }),
+    // the toolbar's Meet now: "Start a meeting now" with the meeting's name
+    ("calendar-meet-now-dark", |shell, window, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.close_join_id(cx);
+            calendar.open_meet_now(window, cx);
+        });
+    }),
+    // its Get a link to share: the meeting made (the mock's), its short link with Copy, Start meeting and Share via
+    // email
+    ("calendar-meet-now-link-dark", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| calendar.meet(false, cx));
+    }),
+    // Add calendar: its dialog on Add from directory, a person picked
+    ("calendar-add-calendar", |shell, window, cx| {
+        let settings = shell.read(cx).settings().clone();
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.close_meet_now(cx);
+            calendar.open_add_calendar(window, cx);
+            calendar.pick_person(tour_person(), window, cx);
+        });
+    }),
+    // the person added: "People's calendars" in the pane, their busy times (the mock's) beside the account's events
+    ("calendar-people", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, teams_ui::calendar_view::CalendarView::add_picked);
+    }),
+    // Split view over three days: the account's calendar and theirs in columns of their own
+    ("calendar-split", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.set_days(3, cx);
+            calendar.set_split(true, cx);
+        });
+    }),
+    // a meeting's card opened by a click on it: beside the event, as Teams' peek opens, in Teams Dark
+    ("calendar-peek-dark", |shell, _, cx| {
+        let settings = shell.read(cx).settings().clone();
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.set_split(false, cx);
+            calendar.set_mode(teams_ui::calendar::Mode::WorkWeek, cx);
+            let meeting = calendar.events().and_then(|events| {
+                events
+                    .iter()
+                    .find(|shown| shown.event.online && !shown.event.cancelled && !shown.all_day())
+                    .cloned()
+            });
+            match meeting {
+                Some(meeting) => {
+                    calendar.open_card_at(meeting, gpui::point(gpui::px(520.0), gpui::px(380.0)), cx);
+                }
+                None => say("no meeting in the calendar"),
+            }
+        });
+    }),
     // the calendar's New: the scheduling form in a window of its own ("New event - Calendar"), at the selection,
     // the day beside it with the new event's block, in Teams Dark as the user's screenshot has it
     ("event-form-dark", |shell, _, cx| {
         let calendar = shell.read(cx).calendar_view().clone();
         calendar.update(cx, |calendar, cx| {
+            calendar.close_card(cx);
             calendar.close_join_id(cx);
             let slot = calendar.next_slot();
             calendar.new_event(slot, false, cx);
@@ -1064,6 +1129,16 @@ const STEPS: [Step; 5 + 164] = [
             form.close_custom(cx);
             form.show_side(event_form::Side::Scheduler, cx);
             form.toggle_formatting(window, cx);
+        });
+    }),
+    // the globe's time zones: the start's date, time and zone, the end's in London on its own date
+    ("event-form-zones-dark", |_, _, cx| {
+        with_event_form(cx, |form, _, cx| {
+            form.show_side(event_form::Side::Day, cx);
+            form.show_zones(true, cx);
+            if let Ok(london) = "Europe/London".parse::<event_form::zones::Tz>() {
+                form.set_zone(true, london, cx);
+            }
         });
     }),
     // two messages b sent in the a–b–c chat, forwarded to a by the outsider (`seed_forwards`): each in Teams' card
@@ -1538,6 +1613,15 @@ fn with_stage(cx: &mut App, change: impl FnOnce(&mut CallStage, &mut Context<Cal
 }
 
 /// Runs `change` on the scheduling form, in its window, when it is open.
+/// The person the tour adds a calendar of (made up).
+fn tour_person() -> teams_core::Invitable {
+    teams_core::Invitable {
+        mri: String::new(),
+        name: "Avery Example".to_owned(),
+        address: "avery@example.com".to_owned(),
+    }
+}
+
 fn with_event_form(
     cx: &mut App,
     change: impl FnOnce(&mut event_form::EventForm, &mut Window, &mut Context<event_form::EventForm>),
@@ -2132,7 +2216,8 @@ impl MockLab {
 
         let origin = mock.origin();
         let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
-        let transport = Arc::new(http()?);
+        // the outbox sends the calendar's writes (Meet now's meeting) to the middle tier
+        let transport = Arc::new(http()?.with_middle_tier(MIDDLE_TIER_BASE)?);
 
         let trouter_client = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())?
             .with_options(Options {

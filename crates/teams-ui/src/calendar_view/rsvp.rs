@@ -98,6 +98,14 @@ impl CalendarView {
         answer
             .into_iter()
             .chain(self.removal_note.as_ref())
+            .chain(
+                self.join_id
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(super::join_id::JoinIdForm::inputs),
+            )
+            .chain(self.meet_now.as_ref().map(super::meet_now::MeetNowForm::input))
+            .chain(self.others.adding.as_ref().map(super::people::AddCalendar::input))
             .any(|note| note.read(cx).focus_handle(cx).is_focused(window))
     }
 

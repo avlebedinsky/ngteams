@@ -141,6 +141,7 @@ fn a_draft_preserves_the_meeting_details_and_leaves_identity_for_the_engine() {
     let fields = Fields {
         subject: "  Synthetic meeting  ".to_owned(),
         slot: Slot::new(at(27, 15, 0), at(27, 16, 0)).with_all_day(true),
+        zones: None,
         attendees: vec![attendee.clone()],
         location: "  Room 42  ".to_owned(),
         body_html: "<p>Keep <strong>formatting</strong> &amp; text</p>".to_owned(),

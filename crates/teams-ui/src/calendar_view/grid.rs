@@ -11,14 +11,16 @@ use gpui::{
 use super::{CalendarView, GUTTER, HOUR_HEIGHT, MIN_MINUTES, MONTH_LISTED, Toggle, hour_label, mix, time_text};
 use crate::calendar::{self, Look, Mode, Shown, Slot};
 use crate::clock::{self, HourCycle};
-use crate::icons::Glyph;
+use gpui_component::Sizable as _;
+
+use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::Palette;
 
 impl CalendarView {
-    /// The time grid of the days shown: their headers, the all-day strip, and the hours with the events.
+    /// The time grid of the days shown: their headers, the all-day strip, and the hours with the events; in Split view
+    /// each calendar ticked has its own columns side by side, under its name and its close.
     pub(super) fn time_grid(&mut self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let span = self.span();
-        let events = self.visible();
         let now = calendar::now().naive_local();
         let cycle = clock::cycle(cx);
         if self.toggles.on(Toggle::ScrollDue) {
@@ -31,29 +33,8 @@ impl CalendarView {
             self.scroll
                 .set_offset(point(px(0.0), px(-hour.clamp(0.0, 16.0) * HOUR_HEIGHT)));
         }
-        let headers = div()
-            .flex()
-            .flex_none()
-            .border_b_1()
-            .border_color(rgb(palette.border))
-            .child(div().w(px(GUTTER)).flex_none())
-            .children(span.dates().map(|date| day_header(date, now.date(), palette, cx)));
-        let all_day: Vec<Vec<Shown>> = span
-            .dates()
-            .map(|date| {
-                events
-                    .iter()
-                    .filter(|shown| shown.all_day() && shown.on(date))
-                    .cloned()
-                    .collect()
-            })
-            .collect();
-        let strip = all_day_strip(all_day, cycle, palette, cx);
-        let gutter = hours_gutter(cycle, palette);
-        let columns: Vec<AnyElement> = span
-            .dates()
-            .map(|date| self.day_column(date, &events, now, palette, cx))
-            .collect();
+        let groups = self.grid_groups();
+        let (headers, strip, body) = self.grid_parts(&groups, now, cycle, palette, cx);
         let body = div()
             .id("calendar-hours")
             .debug_selector(|| "calendar-hours".to_owned())
@@ -61,7 +42,7 @@ impl CalendarView {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            .child(div().flex().child(gutter).children(columns));
+            .child(body);
         div()
             .debug_selector(|| "calendar-grid".to_owned())
             .flex_1()
@@ -71,6 +52,161 @@ impl CalendarView {
             .child(headers)
             .children(strip)
             .child(body)
+    }
+
+    /// The calendars the grid shows: in Split view each ticked one on its own (the account's, then each person's),
+    /// else one group of them all.
+    fn grid_groups(&self) -> Vec<Group> {
+        if !self.split() {
+            let mut events = (*self.visible()).clone();
+            events.extend(self.people_shown(None));
+            events.sort_by_key(|shown| shown.start);
+            return vec![Group {
+                owner: None,
+                name: String::new(),
+                events,
+            }];
+        }
+        let mut groups = Vec::new();
+        if !self.toggles.on(Toggle::Hidden) {
+            groups.push(Group {
+                owner: None,
+                name: "Calendar".to_owned(),
+                events: (*self.visible()).clone(),
+            });
+        }
+        for person in self.others.list.iter().filter(|person| person.ticked) {
+            groups.push(Group {
+                owner: Some(person.address.clone()),
+                name: person.name.clone(),
+                events: self.people_shown(Some(&person.address)),
+            });
+        }
+        if groups.is_empty() {
+            groups.push(Group {
+                owner: None,
+                name: "Calendar".to_owned(),
+                events: Vec::new(),
+            });
+        }
+        groups
+    }
+
+    /// The grid's three parts over `groups`: the headers (each group's name in Split view over its days), the all-day
+    /// strip (when any day has an all-day event) and the hours' columns beside the gutter.
+    fn grid_parts(
+        &self,
+        groups: &[Group],
+        now: NaiveDateTime,
+        cycle: HourCycle,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> (gpui::Div, Option<gpui::Div>, gpui::Div) {
+        let span = self.span();
+        let split = self.split();
+        let mut headers = div()
+            .flex()
+            .flex_none()
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .child(div().w(px(GUTTER)).flex_none());
+        let mut strips = div().flex().flex_1();
+        let mut any_all_day = false;
+        let mut body = div().flex().child(hours_gutter(cycle, palette));
+        for (index, group) in groups.iter().enumerate() {
+            let apart = split && index > 0;
+            let days = div()
+                .flex()
+                .children(span.dates().map(|date| day_header(date, now.date(), palette, cx)));
+            headers = headers.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .when(apart, gpui::Styled::ml_3)
+                    .children(split.then(|| self.group_header(index, group, palette, cx)))
+                    .child(days),
+            );
+            let all_day: Vec<Vec<Shown>> = span
+                .dates()
+                .map(|date| {
+                    let on = |shown: &&Shown| shown.all_day() && shown.on(date);
+                    group.events.iter().filter(on).cloned().collect()
+                })
+                .collect();
+            any_all_day |= all_day.iter().any(|day| !day.is_empty());
+            let strip = all_day_strip(all_day, cycle, palette, self, cx);
+            strips = strips.child(strip.flex_1().min_w_0().when(apart, gpui::Styled::ml_3));
+            let columns: Vec<AnyElement> = span
+                .dates()
+                .map(|date| self.day_column(date, &group.events, now, palette, cx))
+                .collect();
+            body = body.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .when(apart, gpui::Styled::ml_3)
+                    .children(columns),
+            );
+        }
+        let strip = any_all_day.then(|| {
+            div()
+                .debug_selector(|| "calendar-all-day".to_owned())
+                .flex()
+                .flex_none()
+                .border_b_1()
+                .border_color(rgb(palette.border))
+                .child(div().w(px(GUTTER)).flex_none())
+                .child(strips)
+        });
+        (headers, strip, body)
+    }
+
+    /// A calendar's name over its columns in Split view, in its colour, with its close (which unticks it).
+    fn group_header(&self, index: usize, group: &Group, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let color = group
+            .owner
+            .as_deref()
+            .map_or(palette.brand, |owner| self.person_color(owner));
+        let owner = group.owner.clone();
+        div()
+            .debug_selector(move || format!("calendar-split-{index}"))
+            .h(px(40.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .border_b_2()
+            .border_color(rgb(color))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(rgb(color))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(group.name.clone()),
+            )
+            .child(selected_by(
+                format!("calendar-split-close-{index}"),
+                icon_button(
+                    SharedString::from(format!("calendar-split-close-{index}")),
+                    Glyph::X,
+                    "Hide this calendar",
+                )
+                .small()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(owner) = &owner {
+                        this.tick_person(Some(owner), false, cx);
+                    } else {
+                        this.toggles.set(Toggle::Hidden, true);
+                        cx.notify();
+                    }
+                })),
+            ))
     }
 
     /// A day's column of hours: its hour and half-hour lines, its events and, today, the current time's line.
@@ -121,7 +257,13 @@ impl CalendarView {
                     .border_color(rgb(palette.brand))
             });
         let slots = calendar::day_slots(events, date, MIN_MINUTES);
-        let blocks: Vec<AnyElement> = slots.into_iter().map(|slot| block(slot, cycle, palette, cx)).collect();
+        let blocks: Vec<AnyElement> = slots
+            .into_iter()
+            .map(|slot| {
+                let color = slot.shown.owner.as_deref().map(|owner| self.person_color(owner));
+                block(slot, color, cycle, palette, cx)
+            })
+            .collect();
         let now_line = self.now_line(date, now, palette);
         div()
             .flex_1()
@@ -175,7 +317,12 @@ impl CalendarView {
     /// The month view: the weekday names over six weeks of days, each listing its events.
     pub(super) fn month_view(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let span = self.span();
-        let events = self.visible();
+        let events = {
+            let mut events = (*self.visible()).clone();
+            events.extend(self.people_shown(None));
+            events.sort_by_key(|shown| shown.start);
+            events
+        };
         let today = calendar::now().date_naive();
         let names = div()
             .flex()
@@ -289,12 +436,10 @@ impl CalendarView {
                 cell.bg(rgb(mix(palette.background, palette.surface, 500)))
             })
             .child(number)
-            .children(
-                listed
-                    .into_iter()
-                    .take(MONTH_LISTED)
-                    .map(|shown| chip(shown, false, cycle, palette, cx)),
-            )
+            .children(listed.into_iter().take(MONTH_LISTED).map(|shown| {
+                let color = shown.owner.as_deref().map(|owner| self.person_color(owner));
+                chip(shown, color, false, cycle, palette, cx)
+            }))
             .children(more)
             .into_any_element()
     }
@@ -370,16 +515,14 @@ fn day_header(date: NaiveDate, today: NaiveDate, palette: Palette, cx: &mut Cont
         .into_any_element()
 }
 
-/// The all-day strip under the days' headers, when any day shown has an all-day event: each day's as chips.
+/// A calendar's part of the all-day strip under the days' headers: each day's all-day events as chips.
 fn all_day_strip(
     all_day: Vec<Vec<Shown>>,
     cycle: HourCycle,
     palette: Palette,
+    view: &CalendarView,
     cx: &mut Context<CalendarView>,
-) -> Option<gpui::Div> {
-    if all_day.iter().all(Vec::is_empty) {
-        return None;
-    }
+) -> gpui::Div {
     let days: Vec<gpui::Div> = all_day
         .into_iter()
         .map(|day| {
@@ -393,19 +536,13 @@ fn all_day_strip(
                 .gap_1()
                 .border_l_1()
                 .border_color(rgb(palette.border))
-                .children(day.into_iter().map(|shown| chip(shown, true, cycle, palette, cx)))
+                .children(day.into_iter().map(|shown| {
+                    let color = shown.owner.as_deref().map(|owner| view.person_color(owner));
+                    chip(shown, color, true, cycle, palette, cx)
+                }))
         })
         .collect();
-    Some(
-        div()
-            .debug_selector(|| "calendar-all-day".to_owned())
-            .flex()
-            .flex_none()
-            .border_b_1()
-            .border_color(rgb(palette.border))
-            .child(div().w(px(GUTTER)).flex_none())
-            .children(days),
-    )
+    div().flex().children(days)
 }
 
 /// One half hour of a day's column, behind the events: a click selects it, a drag stretches the selection over more,
@@ -456,8 +593,15 @@ fn hours_gutter(cycle: HourCycle, palette: Palette) -> gpui::Div {
         }))
 }
 
-/// An event's block in the time grid.
-fn block(slot: Slot, cycle: HourCycle, palette: Palette, cx: &mut Context<CalendarView>) -> AnyElement {
+/// An event's block in the time grid: the account's own in the brand colour, opening its card beside it; a person's
+/// busy time in their calendar's `color`, opening nothing.
+fn block(
+    slot: Slot,
+    color: Option<u32>,
+    cycle: HourCycle,
+    palette: Palette,
+    cx: &mut Context<CalendarView>,
+) -> AnyElement {
     let top = units(slot.top) / 60.0 * HOUR_HEIGHT;
     let height = units(slot.length) / 60.0 * HOUR_HEIGHT;
     let width = 1.0 / units(slot.columns);
@@ -468,14 +612,30 @@ fn block(slot: Slot, cycle: HourCycle, palette: Palette, cx: &mut Context<Calend
     let text = block_text(&shown, height, cycle, palette);
     let selector = format!("calendar-event-{}", shown.event.id);
     let id = SharedString::from(format!("calendar-event-{}-{}", shown.event.id, slot.top));
-    div()
+    let placed = div()
         .absolute()
         .top(px(top + 1.0))
         .left(relative(left))
         .w(relative(width))
         .h(px((height - 2.0).max(14.0)))
         .pr(px(4.0))
-        .pl(px(2.0))
+        .pl(px(2.0));
+    if let Some(color) = color {
+        return placed
+            .child(
+                person_face(color, look, palette)
+                    .debug_selector(move || selector.clone())
+                    .id(id)
+                    .size_full()
+                    .flex()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().w(px(4.0)).h_full().flex_none().rounded_l_md().bg(rgb(color)))
+                    .child(text),
+            )
+            .into_any_element();
+    }
+    placed
         .child(
             event_face(look, palette)
                 .debug_selector(move || selector.clone())
@@ -496,7 +656,7 @@ fn block(slot: Slot, cycle: HourCycle, palette: Palette, cx: &mut Context<Calend
                     if event.click_count() >= 2 && own && !shown.event.cancelled {
                         this.edit_event(shown.event.id.clone(), cx);
                     } else {
-                        this.open_card(shown.clone(), cx);
+                        this.open_card_at(shown.clone(), event.position(), cx);
                     }
                 })),
         )
@@ -560,7 +720,14 @@ fn block_text(shown: &Shown, height: f32, cycle: HourCycle, palette: Palette) ->
 }
 
 /// An event as one line (the all-day strip's, a month day's): its time unless all day, its title, its mark.
-fn chip(shown: Shown, all_day: bool, cycle: HourCycle, palette: Palette, cx: &mut Context<CalendarView>) -> AnyElement {
+fn chip(
+    shown: Shown,
+    color: Option<u32>,
+    all_day: bool,
+    cycle: HourCycle,
+    palette: Palette,
+    cx: &mut Context<CalendarView>,
+) -> AnyElement {
     let look = shown.look();
     let selector = format!("calendar-event-{}", shown.event.id);
     let id = SharedString::from(format!(
@@ -570,7 +737,15 @@ fn chip(shown: Shown, all_day: bool, cycle: HourCycle, palette: Palette, cx: &mu
     ));
     let time = (!all_day && !shown.all_day()).then(|| time_text(shown.start, cycle));
     let mark = mark(&shown, palette);
-    event_face(look, palette)
+    let face = match color {
+        Some(color) => person_face(color, look, palette),
+        None => event_face(look, palette).cursor_pointer(),
+    };
+    let edge = match color {
+        Some(color) => div().w(px(4.0)).h_full().flex_none().rounded_l_md().bg(rgb(color)),
+        None => edge(look, palette),
+    };
+    let chip = face
         .debug_selector(move || selector.clone())
         .id(id)
         .h(px(24.0))
@@ -578,9 +753,8 @@ fn chip(shown: Shown, all_day: bool, cycle: HourCycle, palette: Palette, cx: &mu
         .items_center()
         .gap_1()
         .overflow_hidden()
-        .cursor_pointer()
         .text_sm()
-        .child(edge(look, palette))
+        .child(edge)
         .children(time.map(|time| {
             div()
                 .pl_1()
@@ -598,9 +772,29 @@ fn chip(shown: Shown, all_day: bool, cycle: HourCycle, palette: Palette, cx: &mu
                 .whitespace_nowrap()
                 .child(shown.title()),
         )
-        .children(mark.map(|mark| div().pr_1().child(mark)))
-        .on_click(cx.listener(move |this, _, _, cx| this.open_card(shown.clone(), cx)))
-        .into_any_element()
+        .children(mark.map(|mark| div().pr_1().child(mark)));
+    if color.is_some() {
+        return chip.into_any_element();
+    }
+    chip.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+        this.open_card_at(shown.clone(), event.position(), cx);
+    }))
+    .into_any_element()
+}
+
+/// A person's busy time's block or chip: tinted with their calendar's colour, a tentative one lighter.
+fn person_face(color: u32, look: Look, palette: Palette) -> gpui::Div {
+    let tint = if look == Look::Tentative { 140 } else { 260 };
+    div().rounded_md().bg(rgb(mix(palette.background, color, tint)))
+}
+
+/// One calendar's columns of the time grid.
+struct Group {
+    /// Whose: `None` for the account's own.
+    owner: Option<String>,
+    /// Its name over its columns in Split view.
+    name: String,
+    events: Vec<Shown>,
 }
 
 /// An event's block or chip by its look: filled with the brand colour's tint, a cancelled one only outlined.

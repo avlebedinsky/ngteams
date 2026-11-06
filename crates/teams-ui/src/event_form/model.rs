@@ -279,6 +279,8 @@ pub fn typed_attendee(text: &str, required: bool) -> Option<EventAttendee> {
 pub struct Fields {
     pub subject: String,
     pub slot: Slot,
+    /// The start's and end's time zones, when the form shows them.
+    pub zones: Option<super::zones::Zones>,
     pub attendees: Vec<EventAttendee>,
     pub location: String,
     /// The text as HTML: the editor's, or the event's own while it is unchanged (empty for none).
@@ -296,12 +298,13 @@ impl Fields {
     /// The draft of these fields.
     #[must_use]
     pub fn draft(&self) -> EventDraft {
-        let (start, end) = self.slot.zoned();
+        let (start, end) = super::zones::zoned_slot(self.slot, self.zones);
         EventDraft {
             subject: self.subject.trim().to_owned(),
             start,
             end,
             time_zone: None,
+            zone: super::zones::draft_zone(self.zones),
             all_day: self.slot.all_day,
             organizer: Organizer {
                 mri: String::new(),

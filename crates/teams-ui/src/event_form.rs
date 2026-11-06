@@ -26,10 +26,11 @@ mod body;
 mod channel;
 mod day;
 pub(crate) mod model;
-mod people;
+pub(crate) mod people;
 pub mod print;
 pub mod repeat;
 mod scheduler;
+pub mod zones;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -287,6 +288,8 @@ pub struct EventForm {
     attendees: Vec<EventAttendee>,
     optional_shown: bool,
     slot: Slot,
+    /// The start's and the end's time zones, while the globe shows them.
+    zones: Option<zones::Zones>,
     online: bool,
     show_as: EventShowAs,
     reminder: Option<u32>,
@@ -374,6 +377,7 @@ impl EventForm {
             attendees: Vec::new(),
             optional_shown: false,
             slot: Slot::next_half_hour(now),
+            zones: None,
             online: false,
             show_as: EventShowAs::Busy,
             reminder: Some(15),
@@ -605,6 +609,7 @@ impl EventForm {
         Fields {
             subject: self.title.read(cx).value().to_string(),
             slot: self.slot,
+            zones: self.zones,
             attendees: self.attendees.clone(),
             location: self.location.read(cx).value().to_string(),
             body_html,
@@ -1751,9 +1756,25 @@ impl EventForm {
 
     fn when_row(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let slot = self.slot;
-        let date_menu = self.date_menu(cx);
-        let start_menu = (!slot.all_day).then(|| self.start_menu(cx));
-        let end_menu = (!slot.all_day).then(|| self.end_menu(cx));
+        let zoned = self.zones.is_some() && !slot.all_day;
+        let zoned_lines = zoned.then(|| self.zoned_lines(cx));
+        let date_menu = (!zoned).then(|| self.date_menu(cx));
+        let start_menu = (!slot.all_day && !zoned).then(|| self.start_menu(cx));
+        let end_menu = (!slot.all_day && !zoned).then(|| self.end_menu(cx));
+        let globe = (!slot.all_day).then(|| {
+            let shown = self.zones.is_some();
+            selected_by(
+                "event-zones",
+                icon_button(
+                    "event-zones",
+                    Glyph::GLOBE,
+                    if shown { "Hide time zones" } else { "Show time zones" },
+                )
+                .small()
+                .selected(shown)
+                .on_click(cx.listener(move |form, _, _, cx| form.show_zones(!shown, cx))),
+            )
+        });
         let all_day = Switch::new("event-all-day")
             .checked(slot.all_day)
             .label("All day")
@@ -1767,10 +1788,12 @@ impl EventForm {
             .flex()
             .items_center()
             .gap_1()
-            .child(selected_by("event-date", date_menu))
+            .children(zoned_lines)
+            .children(date_menu.map(|menu| selected_by("event-date", menu)))
             .children(start_menu.map(|menu| selected_by("event-start", menu)))
-            .when(!slot.all_day, |line| line.child("-"))
+            .when(!slot.all_day && !zoned, |line| line.child("-"))
             .children(end_menu.map(|menu| selected_by("event-end", menu)))
+            .children(globe)
             .child(div().flex_1())
             .child(selected_by("event-all-day", all_day))
             .child(self.suggested_times(cx))

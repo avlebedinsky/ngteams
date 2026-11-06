@@ -1,5 +1,5 @@
-//! The calendar's left pane (its month, Add calendar, My calendars, Show all), its toolbar, the month picker under the
-//! toolbar's dates and the notice of a control that can't act yet.
+//! The calendar's left pane (its month, Add calendar, My calendars, People's calendars, Show all), its toolbar, the
+//! month picker under the toolbar's dates and the notice of a control that can't act yet.
 
 use chrono::{Datelike as _, Duration, NaiveDate};
 use gpui::{
@@ -10,7 +10,7 @@ use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 
-use super::{ADD_CALENDAR_UNAVAILABLE, CalendarView, PANE_WIDTH, Toggle, separator};
+use super::{CalendarView, PANE_WIDTH, Toggle, separator};
 use crate::calendar::{self, Mode};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::Palette;
@@ -166,7 +166,7 @@ impl CalendarView {
     ) -> AnyElement {
         let in_month = date.month() == month.month();
         let is_today = date == today;
-        let chosen = self.mode == Mode::Day && date == self.anchor;
+        let chosen = self.mode == Mode::Day && self.span().contains(date);
         let selector = format!("{id}-{}", date.format("%Y-%m-%d"));
         let face = div()
             .size(px(26.0))
@@ -262,7 +262,7 @@ impl CalendarView {
             .text_color(rgb(palette.brand))
             .child(Glyph::CALENDAR_ADD.icon().size(px(18.0)))
             .child("Add calendar")
-            .on_click(cx.listener(|this, _, _, cx| this.say(ADD_CALENDAR_UNAVAILABLE, cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.open_add_calendar(window, cx)));
         let open = !self.toggles.on(Toggle::MineFolded);
         let group = div()
             .flex()
@@ -309,6 +309,7 @@ impl CalendarView {
                 .text_color(rgb(palette.muted_foreground))
                 .child("No other calendars")
         });
+        let people = self.people_group(palette, cx);
         div()
             .px_3()
             .pt_1()
@@ -319,6 +320,7 @@ impl CalendarView {
             .child(group)
             .children(own)
             .children(others)
+            .children(people)
             .child(div().flex().child(self.show_all(palette, cx)))
     }
 
@@ -360,18 +362,19 @@ impl CalendarView {
             .label("Today")
             .ghost()
             .on_click(cx.listener(|this, _, _, cx| this.today(cx)));
+        let unit = if mode == Mode::Day && self.days > 1 {
+            format!("{} days", self.days)
+        } else {
+            mode.unit().to_owned()
+        };
         let previous = icon_button(
             "calendar-previous",
             Glyph::CHEVRON_LEFT,
-            format!("Go to previous {}", mode.unit()),
+            format!("Go to previous {unit}"),
         )
         .on_click(cx.listener(|this, _, _, cx| this.step(false, cx)));
-        let next = icon_button(
-            "calendar-next",
-            Glyph::CHEVRON_RIGHT,
-            format!("Go to next {}", mode.unit()),
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.step(true, cx)));
+        let next = icon_button("calendar-next", Glyph::CHEVRON_RIGHT, format!("Go to next {unit}"))
+            .on_click(cx.listener(|this, _, _, cx| this.step(true, cx)));
         let dates = Button::new("calendar-dates")
             .ghost()
             .child(
@@ -380,7 +383,7 @@ impl CalendarView {
                     .items_center()
                     .gap_2()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(calendar::title(self.anchor, mode))
+                    .child(self.title())
                     .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
             )
             .on_click(cx.listener(|this, _, _, cx| {
@@ -415,25 +418,21 @@ impl CalendarView {
             .child(selected_by("calendar-next", next))
             .child(selected_by("calendar-dates", dates))
             .child(div().flex_1())
-            .child(self.filter_menu(palette, cx))
             .child(self.mode_switcher(cx))
+            .child(self.filter_menu(palette, cx))
             .child(Self::more_menu(cx))
             .child(separator(palette))
-            .child(selected_by(
-                "calendar-join-id",
-                Button::new("calendar-join-id")
-                    .icon(Glyph::HASH.icon())
-                    .label("Join with an ID")
-                    .ghost()
-                    .on_click(cx.listener(|this, _, window, cx| this.open_join_id(window, cx))),
-            ))
+            .child(self.meet_now_button(palette, cx))
             .child(Self::new_button(palette, cx))
     }
 
-    /// The view switcher: its icon, the view's name and a menu of the views.
+    /// The view switcher: its icon, the view's name and a menu of the views, as Teams' has it: Day (its 1–7 days in a
+    /// submenu), Work week, Week, Month, and Split view.
     pub(super) fn mode_switcher(&self, cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity().downgrade();
         let mode = self.mode;
+        let days = self.days;
+        let split = self.split();
         selected_by(
             "calendar-mode",
             Button::new("calendar-mode")
@@ -447,21 +446,20 @@ impl CalendarView {
                         .child(mode.label())
                         .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
                 )
-                .dropdown_menu(move |menu, _, _| {
-                    Mode::ALL.iter().fold(menu.min_w(px(180.0)), |menu, choice| {
-                        let (view, choice) = (view.clone(), *choice);
-                        let selector = format!("calendar-mode-{}", choice.key());
-                        menu.item(
-                            PopupMenuItem::element(move |_, _| {
-                                let selector = selector.clone();
-                                div().debug_selector(move || selector.clone()).child(choice.label())
-                            })
-                            .checked(choice == mode)
-                            .on_click(move |_, _, cx: &mut App| {
-                                let _ = view.update(cx, |view, cx| view.set_mode(choice, cx));
-                            }),
-                        )
-                    })
+                .dropdown_menu(move |menu, window, cx| {
+                    let days_view = view.clone();
+                    let menu = menu.min_w(px(200.0)).submenu_with_icon(
+                        Some(Glyph::CALENDAR.icon()),
+                        "Day",
+                        window,
+                        cx,
+                        move |menu, _, _| days_menu(menu, &days_view, mode, days),
+                    );
+                    let menu = Mode::ALL
+                        .iter()
+                        .filter(|choice| **choice != Mode::Day)
+                        .fold(menu, |menu, choice| menu.item(mode_item(view.clone(), *choice, mode)));
+                    menu.separator().item(split_item(view.clone(), split))
                 }),
         )
         .into_any_element()
@@ -681,7 +679,7 @@ pub(super) fn calendar_tick(selector: &'static str, ticked: bool, palette: Palet
 }
 
 /// A row of the calendars' list.
-fn calendar_row(id: &'static str, palette: Palette) -> gpui::Stateful<gpui::Div> {
+pub(super) fn calendar_row(id: &'static str, palette: Palette) -> gpui::Stateful<gpui::Div> {
     div()
         .debug_selector(move || id.to_owned())
         .id(id)
@@ -717,5 +715,63 @@ fn new_item(
             let slot = view.next_slot();
             view.new_event(slot, online, cx);
         });
+    })
+}
+
+/// Day's submenu: 1 to 7 days, the number Day view shows checked.
+fn days_menu(
+    menu: gpui_component::menu::PopupMenu,
+    view: &gpui::WeakEntity<CalendarView>,
+    mode: Mode,
+    days: u8,
+) -> gpui_component::menu::PopupMenu {
+    (1..=7u8).fold(menu.min_w(px(140.0)), |menu, count| {
+        let view = view.clone();
+        let selector = format!("calendar-days-{count}");
+        let label = if count == 1 {
+            "1 day".to_owned()
+        } else {
+            format!("{count} days")
+        };
+        menu.item(
+            PopupMenuItem::element(move |_, _| {
+                let selector = selector.clone();
+                div().debug_selector(move || selector.clone()).child(label.clone())
+            })
+            .checked(mode == Mode::Day && count == days)
+            .on_click(move |_, _, cx: &mut App| {
+                let _ = view.update(cx, |view, cx| view.set_days(count, cx));
+            }),
+        )
+    })
+}
+
+/// A view of the view menu (Work week, Week, Month), checked while shown.
+fn mode_item(view: gpui::WeakEntity<CalendarView>, choice: Mode, mode: Mode) -> PopupMenuItem {
+    let selector = format!("calendar-mode-{}", choice.key());
+    PopupMenuItem::element(move |_, _| {
+        let selector = selector.clone();
+        div().debug_selector(move || selector.clone()).child(choice.label())
+    })
+    .checked(choice == mode)
+    .on_click(move |_, _, cx: &mut App| {
+        let _ = view.update(cx, |view, cx| view.set_mode(choice, cx));
+    })
+}
+
+/// The view menu's Split view, checked while on.
+fn split_item(view: gpui::WeakEntity<CalendarView>, split: bool) -> PopupMenuItem {
+    PopupMenuItem::element(|_, _| {
+        div()
+            .debug_selector(|| "calendar-split".to_owned())
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Glyph::COLUMNS.icon().size(px(14.0)))
+            .child("Split view")
+    })
+    .checked(split)
+    .on_click(move |_, _, cx: &mut App| {
+        let _ = view.update(cx, |view, cx| view.set_split(!split, cx));
     })
 }

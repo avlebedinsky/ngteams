@@ -1,9 +1,10 @@
 //! The Calendar (the rail's Calendar, Ctrl+4), as Teams' calendar app shows it: across the list and conversation
 //! panes, a left pane with the month (Monday first, the days shown marked, today circled, its own month arrows, folded
-//! to the week by its chevron), "Add calendar", "My calendars" with the account's calendar ticked and "Show all"; a
-//! toolbar with the pane's toggle, Today, the previous and next arrows, the dates shown (a month picker under them), the
-//! Filter (`filter`), the view switcher (Day, Work week, Week, Month), "…" (Refresh), "Join with an ID" and the split
-//! "New"; and the grid:
+//! to the week by its chevron), "Add calendar", "My calendars" with the account's calendar ticked, "People's calendars"
+//! (`people`) and "Show all"; a toolbar with the pane's toggle, Today, the previous and next arrows, the dates shown (a
+//! month picker under them), the view switcher (Day with its 1–7 days, Work week, Week, Month, and Split view: each
+//! calendar ticked in columns of its own), the Filter (`filter`), "…" (Refresh), the split Meet now (`meet_now`; its menu
+//! has "Join with an ID") and the split "New"; and the grid:
 //! the days' headers (today's in the brand colour under a brand line), the hours with their half-hour lines, the
 //! all-day strip, each event a block with a coloured edge (striped while not accepted), its title and organizer, the
 //! recurring mark (crossed out on a cancelled occurrence, which is outlined), overlapping events side by side, and the
@@ -15,7 +16,7 @@
 //!   store kept from earlier reads, this run's or an earlier one's ([`Core::stored_calendar`]), and the read's answer
 //!   then replaces them: events added, changed, moved, cancelled or gone, occurrences of a series too. A declined
 //!   meeting isn't shown, as in Teams.
-//! - **An event clicked** opens its card: its title, when, the series it belongs to, where, the organizer and the
+//! - **An event clicked** opens its card beside it, as Teams' peek opens (centred when opened otherwise): its title, when, the series it belongs to, where, the organizer and the
 //!   account's answer, who is invited, its text; for a Teams meeting the split Join (any time, started or not: its
 //!   pre-join, [`crate::prejoin`], which starts the meeting's call when nobody has), "Chat with
 //!   participants" (the meeting's chat); Join's menu has Join and "Copy join link". A build that shows no call, and the
@@ -30,8 +31,9 @@
 //!   confirmed first, for an occurrence this event or the whole series. An invitation's card offers Accept, Decline
 //!   and Tentative with an optional message for the organizer (`rsvp`).
 //! - **Join with an ID** (`join_id`): the meeting's ID and passcode, the meeting found in the calendar by them and
-//!   joined as its card's Join joins it. "Add calendar" (other people's and shared calendars) says it isn't
-//!   available yet.
+//!   joined as its card's Join joins it.
+//! - **Add calendar** (`people`): another person's calendar found in the directory and added under "People's
+//!   calendars", their busy times drawn in its colour.
 //! - **Keys** while the calendar has the focus: Left and Right the previous and next days, T today, Ctrl+Alt+1–4 the
 //!   views, Escape closes a card or the month picker.
 //! - **Traced**: `calendar shown` with the view's key, `calendar read` with the view's key when its events came,
@@ -65,11 +67,15 @@ mod card;
 mod filter;
 mod grid;
 mod join_id;
+mod meet_now;
 mod pane;
+pub mod people;
 mod rsvp;
 
 pub use filter::{Hidden, Shows};
 pub use join_id::ID_INVALID;
+pub use meet_now::{MEET_NOW_FAILED, mail_link};
+pub use people::{ALREADY_ADDED, CALENDAR_COLORS, Person};
 pub use rsvp::RSVP_NOT_SENT;
 
 /// One hour's height in the time grid, px.
@@ -124,28 +130,32 @@ enum Toggle {
     ScrollDue,
     /// The pointer is pressed on the grid's half hours: moving it stretches the selection.
     Dragging,
+    /// Split view: each calendar ticked in columns of its own, side by side.
+    Split,
+    /// "People's calendars" is folded.
+    PeopleFolded,
 }
 
 /// The switches on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Toggles(u8);
+struct Toggles(u16);
 
 impl Default for Toggles {
     fn default() -> Self {
-        Self(1 << Toggle::ScrollDue as u8)
+        Self(1 << Toggle::ScrollDue as u16)
     }
 }
 
 impl Toggles {
     fn on(self, toggle: Toggle) -> bool {
-        self.0 & (1 << toggle as u8) != 0
+        self.0 & (1 << toggle as u16) != 0
     }
 
     fn set(&mut self, toggle: Toggle, on: bool) {
         if on {
-            self.0 |= 1 << toggle as u8;
+            self.0 |= 1 << toggle as u16;
         } else {
-            self.0 &= !(1 << toggle as u8);
+            self.0 &= !(1 << toggle as u16);
         }
     }
 
@@ -203,6 +213,14 @@ pub struct CalendarView {
     notice: Option<&'static str>,
     /// Join with an ID's panel, while it is open.
     join_id: Option<join_id::JoinIdForm>,
+    /// "Start a meeting now", while it is open.
+    meet_now: Option<meet_now::MeetNowForm>,
+    /// How many days Day view shows (its 1–7 days choice).
+    days: u8,
+    /// Other people's calendars the account added, what was read of them, and the Add calendar dialog.
+    others: people::Others,
+    /// Where the card opens: next to the point its event was clicked at (window coordinates), else centred.
+    card_at: Option<gpui::Point<gpui::Pixels>>,
     scroll: ScrollHandle,
     _ticker: Task<()>,
 }
@@ -250,6 +268,10 @@ impl CalendarView {
             rsvp: None,
             notice: None,
             join_id: None,
+            meet_now: None,
+            days: 1,
+            others: people::Others::default(),
+            card_at: None,
             scroll: ScrollHandle::new(),
             _ticker: ticker,
         }
@@ -289,7 +311,57 @@ impl CalendarView {
     /// The days shown.
     #[must_use]
     pub fn span(&self) -> Span {
-        Span::of(self.anchor, self.mode)
+        match self.mode {
+            Mode::Day => Span::days_from(self.anchor, self.days),
+            mode => Span::of(self.anchor, mode),
+        }
+    }
+
+    /// How many days Day view shows.
+    #[must_use]
+    pub fn days(&self) -> u8 {
+        self.days
+    }
+
+    /// Day view over `days` days (its 1–7 days choice).
+    pub fn set_days(&mut self, days: u8, cx: &mut Context<Self>) {
+        let days = days.clamp(1, 7);
+        let changed = self.days != days || self.mode != Mode::Day;
+        self.days = days;
+        if self.mode == Mode::Day {
+            if changed {
+                self.toggles.set(Toggle::ScrollDue, true);
+                self.read(false, cx);
+                cx.notify();
+            }
+        } else {
+            self.set_mode(Mode::Day, cx);
+        }
+    }
+
+    /// Whether Split view is on: each calendar ticked in columns of its own.
+    #[must_use]
+    pub fn split(&self) -> bool {
+        self.toggles.on(Toggle::Split)
+    }
+
+    /// Split view on or off.
+    pub fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
+        if self.split() != split {
+            self.toggles.set(Toggle::Split, split);
+            self.trace
+                .record(&TraceLine::new("calendar", "split").kind(if split { "on" } else { "off" }));
+            cx.notify();
+        }
+    }
+
+    /// What the toolbar says the view shows.
+    #[must_use]
+    pub fn title(&self) -> String {
+        match self.mode {
+            Mode::Day => calendar::days_title(self.anchor, self.days),
+            mode => calendar::title(self.anchor, mode),
+        }
     }
 
     /// The events shown, once read (or, until then, as the store kept them).
@@ -341,11 +413,26 @@ impl CalendarView {
 
     /// The previous (`forward` false) or next days.
     pub fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
-        self.go_to(calendar::step(self.anchor, self.mode, forward), cx);
+        let to = match self.mode {
+            Mode::Day => {
+                let days = i64::from(self.days);
+                self.anchor + chrono::Duration::days(if forward { days } else { -days })
+            }
+            mode => calendar::step(self.anchor, mode, forward),
+        };
+        self.go_to(to, cx);
     }
 
-    /// Opens the card of `shown`.
+    /// Opens the card of `shown` next to the point `at` (window coordinates) its event was clicked at, as Teams' peek
+    /// opens beside the event.
+    pub fn open_card_at(&mut self, shown: Shown, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.open_card(shown, cx);
+        self.card_at = Some(at);
+    }
+
+    /// Opens the card of `shown`, centred.
     pub fn open_card(&mut self, shown: Shown, cx: &mut Context<Self>) {
+        self.card_at = None;
         let kind = if shown.event.online { "meeting" } else { "event" };
         self.trace
             .record(&TraceLine::new("calendar-event", "opened").kind(kind));
@@ -382,6 +469,7 @@ impl CalendarView {
     /// Closes the event's card.
     pub fn close_card(&mut self, cx: &mut Context<Self>) {
         self.card = None;
+        self.card_at = None;
         self.removal = Removal::None;
         self.removal_series = false;
         self.removal_note = None;
@@ -691,8 +779,13 @@ impl CalendarView {
         cx.notify();
     }
 
-    /// Reads the span shown, unless it was read (`again` reads it anyway) or is being read.
+    /// Reads the span shown, unless it was read (`again` reads it anyway) or is being read; the people's calendars too.
     fn read(&mut self, again: bool, cx: &mut Context<Self>) {
+        if again {
+            self.read_people_again(cx);
+        } else {
+            self.read_people(cx);
+        }
         let span = self.span();
         if self.reading.as_ref().is_some_and(|(reading, _)| *reading == span) {
             self.read_again |= again;
@@ -794,6 +887,8 @@ impl CalendarView {
                 let slot = self.next_slot();
                 self.new_event(slot, false, cx);
             }
+            "escape" if self.meet_now.is_some() => self.close_meet_now(cx),
+            "escape" if self.others.adding.is_some() => self.close_add_calendar(cx),
             "escape" if self.card.is_none() && self.picker.is_none() && self.selection.is_some() => {
                 self.selection = None;
                 cx.notify();
@@ -952,8 +1047,6 @@ pub enum Removal {
     /// Confirmed: being sent.
     Sending,
 }
-/// What Add calendar says.
-pub const ADD_CALENDAR_UNAVAILABLE: &str = "Adding other calendars isn't available yet.";
 
 /// A colour `permille` thousandths of the way from `base` to `over`.
 pub(crate) fn mix(base: u32, over: u32, permille: u32) -> u32 {
@@ -1033,8 +1126,10 @@ impl Render for CalendarView {
             cx,
         );
         let picker = self.picker_view(palette, cx);
-        let card = self.card_view(palette, cx);
+        let card = self.card_view(palette, window, cx);
         let join_id = self.join_id_view(palette, cx);
+        let meet_now = self.meet_now_view(palette, cx);
+        let add_calendar = self.add_calendar_view(palette, cx);
         let main = div()
             .relative()
             .flex_1()
@@ -1061,5 +1156,7 @@ impl Render for CalendarView {
                 calendar.child(self.left_pane(palette, cx))
             })
             .child(main)
+            .children(meet_now)
+            .children(add_calendar)
     }
 }

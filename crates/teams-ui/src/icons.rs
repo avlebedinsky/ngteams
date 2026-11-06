@@ -97,6 +97,7 @@ impl Glyph {
     pub const CLOUD_UPLOAD: Self = Self(include_bytes!("../assets/icons/cloud-upload.svg"));
     pub const CODE: Self = Self(include_bytes!("../assets/icons/square-code.svg"));
     pub const COPY: Self = Self(include_bytes!("../assets/icons/copy.svg"));
+    pub const COLUMNS: Self = Self(include_bytes!("../assets/icons/columns-2.svg"));
     pub const DOWNLOAD: Self = Self(include_bytes!("../assets/icons/download.svg"));
     pub const EMOJI: Self = Self(include_bytes!("../assets/icons/face-slightly-smiling.svg"));
     /// A picture at its own size (the picture viewer's "Actual size").

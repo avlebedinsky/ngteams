@@ -97,6 +97,9 @@ base64 = "0.23.1"
 # the chat list's times in the local time zone (read from TZ and the zoneinfo files, no libc localtime): the version
 # the UI kit already links, with only its clock
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# the scheduling form's start and end time zones: the IANA zones and their offsets at a time (no logging of its own,
+# so nothing of it reaches the compile-time log cap)
+chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 clap ={ version = "4.6.7", features = ["derive"] }
 # STUN FINGERPRINT (CRC-32) for the echo call's TURN client
 crc32fast = "1.5.2"

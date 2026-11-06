@@ -568,6 +568,24 @@ impl Core for FakeCore {
         Reply::ready(Ok(locked(&self.calendar).availability.clone()))
     }
 
+    fn people_calendars(
+        &self,
+        people: Vec<teams_core::EventAttendee>,
+        start_ms: i64,
+        days: u32,
+    ) -> Reply<Vec<teams_proto::PersonSchedule>> {
+        let mut calendar = locked(&self.calendar);
+        let addresses = people.into_iter().map(|person| person.address).collect();
+        calendar.schedule_reads.push((addresses, start_ms, days));
+        Reply::ready(Ok(calendar.schedules.clone()))
+    }
+
+    fn meet_now(&self, subject: String) -> Reply<teams_proto::MeetNowMeeting> {
+        let mut calendar = locked(&self.calendar);
+        calendar.meet_now_asked.push(subject);
+        Reply::ready(calendar.meet_now.clone().ok_or(teams_core::EngineError::MeetingUnread))
+    }
+
     fn me(&self) -> &str {
         &self.me
     }

@@ -87,6 +87,15 @@ impl Span {
         }
     }
 
+    /// `days` days from `first` (Day view's 1–7 days choice), at least one and at most a week.
+    #[must_use]
+    pub fn days_from(first: NaiveDate, days: u8) -> Self {
+        Self {
+            first,
+            days: u32::from(days.clamp(1, 7)),
+        }
+    }
+
     /// Each day, in order.
     pub fn dates(self) -> impl Iterator<Item = NaiveDate> {
         (0..self.days).filter_map(move |day| self.first.checked_add_signed(Duration::days(i64::from(day))))
@@ -142,20 +151,32 @@ pub fn add_months(first: NaiveDate, months: i64) -> NaiveDate {
 /// 2026", "December 28, 2026 – January 3, 2027", "October 2026".
 #[must_use]
 pub fn title(anchor: NaiveDate, mode: Mode) -> String {
-    let span = Span::of(anchor, mode);
     match mode {
         Mode::Day => anchor.format("%A, %B %-d, %Y").to_string(),
         Mode::Month => anchor.format("%B %Y").to_string(),
-        Mode::WorkWeek | Mode::Week => {
-            let (first, last) = (span.first, span.end() - Duration::days(1));
-            if first.year() != last.year() {
-                format!("{} – {}", first.format("%B %-d, %Y"), last.format("%B %-d, %Y"))
-            } else if first.month() != last.month() {
-                format!("{} – {}", first.format("%B %-d"), last.format("%B %-d, %Y"))
-            } else {
-                format!("{}–{}", first.format("%B %-d"), last.format("%-d, %Y"))
-            }
-        }
+        Mode::WorkWeek | Mode::Week => range_title(Span::of(anchor, mode)),
+    }
+}
+
+/// What the toolbar says Day view shows over `days` days from `anchor`: the day alone ("Friday, October 30, 2026"), or
+/// the days as a week's are said ("October 30 – November 1, 2026").
+#[must_use]
+pub fn days_title(anchor: NaiveDate, days: u8) -> String {
+    if days <= 1 {
+        return title(anchor, Mode::Day);
+    }
+    range_title(Span::days_from(anchor, days))
+}
+
+/// A span's days as the toolbar says them: "October 26–30, 2026", across months or years in full.
+fn range_title(span: Span) -> String {
+    let (first, last) = (span.first, span.end() - Duration::days(1));
+    if first.year() != last.year() {
+        format!("{} – {}", first.format("%B %-d, %Y"), last.format("%B %-d, %Y"))
+    } else if first.month() != last.month() {
+        format!("{} – {}", first.format("%B %-d"), last.format("%B %-d, %Y"))
+    } else {
+        format!("{}–{}", first.format("%B %-d"), last.format("%-d, %Y"))
     }
 }
 
@@ -206,6 +227,9 @@ pub struct Shown {
     pub event: Rc<CalendarEvent>,
     pub start: NaiveDateTime,
     pub end: NaiveDateTime,
+    /// Whose calendar it is in: `None` for the account's own, else the address of the person whose calendar the
+    /// account added (a busy time of theirs, which opens no card).
+    pub owner: Option<Rc<str>>,
 }
 
 impl Shown {
@@ -220,7 +244,12 @@ impl Shown {
             start = nearest_midnight(start);
             end = nearest_midnight(end).max(start + Duration::days(1));
         }
-        Some(Self { event, start, end })
+        Some(Self {
+            event,
+            start,
+            end,
+            owner: None,
+        })
     }
 
     /// How its block is drawn.

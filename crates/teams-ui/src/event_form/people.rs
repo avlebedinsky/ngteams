@@ -12,7 +12,7 @@ use teams_core::{Invitable, SearchAnswer, SearchScope};
 use super::{EventForm, Need};
 
 /// How long the box waits after a key before it asks.
-const PAUSE: Duration = Duration::from_millis(250);
+pub(crate) const PAUSE: Duration = Duration::from_millis(250);
 
 /// The most suggestions shown.
 const MOST: usize = 10;
@@ -45,7 +45,7 @@ impl EventForm {
 }
 
 /// The people the account knows, then those the directory found with an address, each address once.
-fn merged(known: Vec<Invitable>, found: &SearchAnswer) -> Vec<Invitable> {
+pub(crate) fn merged(known: Vec<Invitable>, found: &SearchAnswer) -> Vec<Invitable> {
     let mut people = known;
     for person in &found.people {
         let Some(address) = person.email.clone().filter(|address| address.contains('@')) else {
