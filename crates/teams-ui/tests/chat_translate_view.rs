@@ -247,6 +247,60 @@ fn a_tool_that_fails_says_so_and_a_send_goes_only_as_written_when_asked() {
     assert_eq!(mark_of(&view, cx, "1001"), None);
 }
 
+/// The writes `rig` was asked for that send or edit a message.
+fn message_writes(rig: &Rig) -> Vec<Action> {
+    rig.core
+        .actions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|action| matches!(action, Action::Send { .. } | Action::Edit { .. }))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_send_being_translated_goes_as_it_was_sent_and_a_cancelled_edit_s_goes_not_at_all() {
+    use teams_ui::compose::{Loaded, Mode};
+    use teams_ui::editor::doc::{Block, Doc};
+
+    let rig = Rig::start();
+    let dir = tempfile::tempdir().unwrap();
+    // the fake, a second slower to translate a message sent
+    let slow = FAKE_CLAUDE.replace("*'<outgoing'*)\n", "*'<outgoing'*)\n      sleep 1\n");
+    let fake = tool(dir.path(), "claude", &slow);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, fake)])));
+    let (view, cx) = translated_chat(&rig);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    let lunch = || Loaded {
+        doc: Doc::new(vec![Block::paragraph("Lunch?")]),
+        quotes: Vec::new(),
+    };
+
+    // an edit started while a new message is translated: the message goes as the new one it was sent as, and the edit
+    // stays in the box
+    send(&view, cx, "Hallo");
+    cx.update(|_, cx| assert!(compose.read(cx).translating()));
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.edit("1002".to_owned(), lunch(), window, cx)));
+    until(cx, |_| !message_writes(&rig).is_empty());
+    assert_eq!(sent_texts(&rig), ["EN Hallo"]);
+    assert_eq!(message_writes(&rig).len(), 1, "no edit went");
+    cx.update(|_, cx| {
+        assert!(matches!(compose.read(cx).mode(), Mode::Edit { message_id, .. } if message_id == "1002"));
+        assert_eq!(compose.read(cx).value(cx).trim(), "Lunch?");
+    });
+
+    // the edit sent, then cancelled while it is translated: nothing of it goes
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.send(window, cx)));
+    cx.update(|_, cx| assert!(compose.read(cx).translating()));
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.cancel(window, cx)));
+    cx.update(|_, cx| assert!(!compose.read(cx).translating()));
+    std::thread::sleep(Duration::from_millis(1_500));
+    draw(cx);
+    assert_eq!(message_writes(&rig).len(), 1, "{:?}", message_writes(&rig));
+}
+
 /// The header's language picker on its own.
 struct Header(Entity<ChatTranslation>);
 

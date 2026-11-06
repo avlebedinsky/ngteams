@@ -12,9 +12,8 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Sizable as _, Size};
 use teams_proto::chat::{MessageText, RichText};
 
-use super::Compose;
+use super::{Compose, Draft, Mode};
 use crate::chat_translate::{ChatTranslation, Outgoing};
-use crate::editor::doc::Doc;
 use crate::icons::{Glyph, selected_by};
 use crate::theme::{self, Palette};
 
@@ -22,8 +21,9 @@ use crate::theme::{self, Palette};
 #[derive(Default)]
 pub struct Translated {
     pub(super) model: Option<Entity<ChatTranslation>>,
-    /// The translation of the message sent, while it runs: the box's text as it was sent.
-    running: Option<(Task<()>, Doc)>,
+    /// The translation of the message sent, while it runs, and what the send took from the box (its text, and the
+    /// post, reply or edit it is): it is written as that, whatever the box turned to meanwhile.
+    running: Option<(Task<()>, Draft)>,
     /// Why the last send wasn't translated: nothing was sent.
     failed: Option<SharedString>,
     /// The next send goes as written (Send without translating).
@@ -54,23 +54,23 @@ impl Compose {
         self.translated.failed.as_ref()
     }
 
-    /// Hands `built` (the box's message, `doc` its text) to the chat's translation, when the chat is translated:
-    /// `built` back to send at once otherwise.
+    /// Hands `built` (the box's message, `from` what the send took from the box) to the chat's translation, when the
+    /// chat is translated: both back to send at once otherwise.
     pub(super) fn translate_first(
         &mut self,
         built: MessageText,
-        doc: Doc,
+        from: Draft,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<MessageText> {
+    ) -> Option<(MessageText, Draft)> {
         if std::mem::take(&mut self.translated.as_written) {
-            return Some(built);
+            return Some((built, from));
         }
         let Some(model) = self.translated.model.clone() else {
-            return Some(built);
+            return Some((built, from));
         };
         let Some(task) = model.update(cx, |translation, cx| translation.outgoing(built.rich_text(), cx)) else {
-            return Some(built);
+            return Some((built, from));
         };
         self.translated.failed = None;
         self.problem = None;
@@ -78,7 +78,7 @@ impl Compose {
             let answer = task.await;
             let _ = this.update_in(cx, |this, window, cx| this.translation_came(answer, built, window, cx));
         });
-        self.translated.running = Some((running, doc));
+        self.translated.running = Some((running, from));
         cx.notify();
         None
     }
@@ -86,7 +86,7 @@ impl Compose {
     /// The translation of a send came: the message goes out translated (or as written, already in the chat's
     /// language); a failure sends nothing and keeps it in the box.
     fn translation_came(&mut self, answer: Outgoing, built: MessageText, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((_, doc)) = self.translated.running.take() else {
+        let Some((_, from)) = self.translated.running.take() else {
             return;
         };
         let sending = match answer {
@@ -112,9 +112,20 @@ impl Compose {
                 return cx.notify();
             }
         };
-        // what was typed while it was translated stays in the box
-        let keep_box = *self.editor.read(cx).doc() != doc;
-        self.write_built(sending, keep_box, window, cx);
+        self.write_built(sending, from, true, window, cx);
+    }
+
+    /// Calls off the translation of a send made as `mode` (its reply or edit cancelled): nothing of it is sent.
+    pub(super) fn drop_translation_of(&mut self, mode: &Mode, cx: &mut Context<Self>) {
+        if self
+            .translated
+            .running
+            .as_ref()
+            .is_some_and(|(_, from)| from.mode == *mode)
+        {
+            self.translated.running = None;
+            cx.notify();
+        }
     }
 
     /// The box emptied: what its last send said goes with it.

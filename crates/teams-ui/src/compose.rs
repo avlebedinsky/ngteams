@@ -81,7 +81,7 @@ use teams_store::Message;
 
 pub use crate::editor::Editor;
 use crate::editor::convert::{self, CantLoad};
-use crate::editor::doc::Doc;
+use crate::editor::doc::{Doc, Kind};
 use crate::editor::toolbar::{FormatBar, FormatBarEvent, unavailable};
 use crate::editor::{self, EditorEvent, EnterMode};
 
@@ -550,7 +550,8 @@ fn empty_file_text() -> Result<MessageText, ComposeError> {
     )
 }
 
-/// What a send took from the box: given back when the engine refuses the write.
+/// What a send took from the box: given back when the engine refuses the write. A send held for its translation
+/// writes with its own (the box may start an edit or a reply meanwhile).
 struct Draft {
     doc: Doc,
     mode: Mode,
@@ -762,13 +763,24 @@ impl Compose {
     }
 
     /// The doc the box holds, and what it is a draft of, moved to `other` (New message's box and an existing chat's
-    /// as the To: line finds that chat or leaves it): what was typed stays typed.
+    /// as the To: line finds that chat or leaves it): what was typed stays typed. Its pasted pictures stay behind: each
+    /// was uploaded for this box's chat alone (only its members may read it), and `other`'s editor holds no picture of
+    /// that id, so a block of one moved there would show nothing and hold every send back as not yet uploaded.
     pub fn hand_text_to(&mut self, other: &Entity<Self>, cx: &mut Context<Self>) {
-        let doc = self.editor.read(cx).doc().clone();
         if self.editor.read(cx).is_empty() {
             return;
         }
+        let mut doc = self.editor.read(cx).doc().clone();
+        doc.blocks.retain(|block| !matches!(block.kind, Kind::Picture(_)));
         self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
+        if doc
+            .blocks
+            .iter()
+            .all(|block| block.kind == Kind::Paragraph && block.is_empty())
+        {
+            cx.notify();
+            return;
+        }
         other.update(cx, |other, cx| {
             other.editor.update(cx, |editor, cx| editor.set_doc(doc, cx));
             cx.notify();
@@ -977,6 +989,8 @@ impl Compose {
         if matches!(self.mode, Mode::Edit { .. }) {
             self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         }
+        // the reply or the edit being translated is called off with it: nothing of it is sent
+        self.drop_translation_of(&self.mode.clone(), cx);
         let _ = window;
         self.mode = Mode::New;
         self.picker = None;
@@ -1041,8 +1055,13 @@ impl Compose {
                 })
                 .collect(),
         );
+        let from = Draft {
+            doc,
+            mode: self.mode.clone(),
+            attachments: self.attachments.clone(),
+        };
         // a translated chat's message is translated before it goes to the outbox
-        let Some(built) = self.translate_first(built, doc, window, cx) else {
+        let Some((built, from)) = self.translate_first(built, from, window, cx) else {
             return;
         };
         self.write_built(
@@ -1050,30 +1069,35 @@ impl Compose {
                 text: built,
                 original: None,
             },
+            from,
             false,
             window,
             cx,
         );
     }
 
-    /// Writes `sending` through the outbox as the box's mode says (a post, a reply, an edit), and empties the box
-    /// unless `keep_box` (what was typed while it was translated stays).
+    /// Writes `sending` through the outbox as `from`, what the send took from the box, says (a post, a reply, an
+    /// edit), and empties the box; a send held for its translation (`held`) leaves the box as it is when anything in it
+    /// changed meanwhile (what was typed, an edit or a reply started, files added), taking out only what it sent.
     fn write_built(
         &mut self,
         sending: translated::Sending,
-        keep_box: bool,
+        from: Draft,
+        held: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let translated::Sending { text: built, original } = sending;
-        let doc = self.editor.read(cx).doc().clone();
+        let paths = |attachments: &[attachments::Attachment]| -> Vec<std::path::PathBuf> {
+            attachments.iter().map(|file| file.path.clone()).collect()
+        };
+        let keep_box = held
+            && (*self.editor.read(cx).doc() != from.doc
+                || self.mode != from.mode
+                || paths(&self.attachments) != paths(&from.attachments));
         if self.writes == Writes::NewChat {
             // the chat is made first, by the view that holds the box; the message waits here until it is
-            self.starting = Some(Draft {
-                doc,
-                mode: self.mode.clone(),
-                attachments: self.attachments.clone(),
-            });
+            self.starting = Some(from);
             self.trace.record(&TraceLine::new("compose", "sent").kind("new chat"));
             self.clear(window, cx);
             cx.emit(ComposeEvent::Start(Box::new(built)));
@@ -1081,11 +1105,11 @@ impl Compose {
         }
         let sent = original.as_ref().map(|_| built.rich_text().clone());
         let conversation = self.conversation.clone();
-        let edit_of = match &self.mode {
+        let edit_of = match &from.mode {
             Mode::Edit { message_id, .. } => Some(message_id.clone()),
             _ => None,
         };
-        let (action, kind) = match &self.mode {
+        let (action, kind) = match &from.mode {
             Mode::Edit { message_id, .. } => (
                 Action::Edit {
                     // a thread's reply is edited where it is stored, its channel, never the post's chain
@@ -1110,14 +1134,9 @@ impl Compose {
                 "message",
             ),
         };
-        let draft = Draft {
-            doc,
-            mode: self.mode.clone(),
-            attachments: self.attachments.clone(),
-        };
         if let (Some(original), Some(sent)) = (&original, &sent) {
             // the account's reply keeps its quote as the chat showed it
-            let original = match &self.mode {
+            let original = match &from.mode {
                 Mode::Reply(quoted) => quoted.as_shown_in(original),
                 _ => original.clone(),
             };
@@ -1131,15 +1150,18 @@ impl Compose {
         );
         cx.emit(ComposeEvent::Sent);
         if keep_box {
-            self.mode = Mode::New;
-            self.attachments.clear();
+            if self.mode == from.mode {
+                self.mode = Mode::New;
+            }
+            let sent_files = paths(&from.attachments);
+            self.attachments.retain(|file| !sent_files.contains(&file.path));
             cx.notify();
         } else {
             self.clear(window, cx);
         }
         // a post's original is kept by the row it went out as
         let post = sent.filter(|_| edit_of.is_none());
-        self.await_send(reply, draft, post, window, cx);
+        self.await_send(reply, from, post, window, cx);
     }
 
     fn await_send(

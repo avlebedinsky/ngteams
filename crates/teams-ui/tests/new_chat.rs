@@ -374,6 +374,130 @@ fn a_call_only_group_chat_is_found_by_to_opened_and_then_listed_after_the_others
     assert!(listed(cx).contains(&CALL.to_owned()));
 }
 
+/// New message with b and c named "Lab trio", its first message sent while the outbox still holds the new chat's row
+/// (`settled` is what the outbox says of it next); then another chat opened before that row settles.
+fn first_message_then_away(
+    rig: &Rig,
+    settled: OutboxState,
+) -> (Entity<Shell>, Entity<NewChat>, &'static mut VisualTestContext) {
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(created(OutboxState::Pending));
+    rig.core.outbox_answers.lock().unwrap().push_back(created(settled));
+    let (shell, cx) = shell_window(rig);
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let view = new_chat(&shell, cx);
+    add(cx, "Bee");
+    add(cx, "Sea");
+    click(cx, "new-chat-group-name-toggle");
+    cx.simulate_input("Lab trio");
+    draw(cx);
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input("hello all");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(cx.update(|_, cx| view.read(cx).is_starting()));
+    click(cx, "chat-row-0");
+    assert!(matches!(main(&shell, cx), Main::Chat(_)));
+    // the outbox settles the row
+    rig.cx.executor().advance_clock(std::time::Duration::from_secs(1));
+    draw(cx);
+    (shell, view, cx)
+}
+
+#[test]
+fn a_first_message_still_goes_when_new_message_is_left_and_its_chat_opens_over_nothing() {
+    let rig = seeded();
+    let (shell, view, cx) = first_message_then_away(&rig, OutboxState::Sent);
+    let went = main(&shell, cx);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    let [Action::CreateChat { .. }, Action::Send { conversation, .. }] = actions.as_slice() else {
+        panic!("the chat made, then the message sent: {actions:?}");
+    };
+    assert_eq!(conversation, MADE);
+    assert_eq!(
+        main(&shell, cx),
+        went,
+        "the chat made isn't opened over the place shown"
+    );
+    assert!(!cx.update(|_, cx| view.read(cx).is_starting()));
+    // New message opened again is a new one
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    assert_ne!(new_chat(&shell, cx).entity_id(), view.entity_id());
+}
+
+#[test]
+fn a_first_message_given_back_while_new_message_was_left_is_there_when_it_opens_again() {
+    let rig = seeded();
+    let (shell, view, cx) = first_message_then_away(&rig, OutboxState::Failed);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    assert!(matches!(actions.as_slice(), [Action::CreateChat { .. }]), "{actions:?}");
+    assert!(matches!(main(&shell, cx), Main::Chat(_)));
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    assert_eq!(new_chat(&shell, cx).entity_id(), view.entity_id());
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    assert_eq!(cx.update(|_, cx| compose.read(cx).value(cx)).trim(), "hello all");
+    assert_eq!(
+        cx.update(|_, cx| compose.read(cx).problem().cloned()),
+        Some(NOT_STARTED.into())
+    );
+}
+
+/// A made-up picture, `width` by `height`, as PNG bytes.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let picture = image::RgbaImage::from_pixel(width, height, image::Rgba([40, 120, 200, 255]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    picture.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
+#[test]
+fn a_picture_pasted_for_one_chat_stays_behind_when_the_people_find_another() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let view = new_chat(&shell, cx);
+    add(cx, "Bee");
+    let first = cx.update(|_, cx| view.read(cx).compose(cx));
+    first.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input("Look");
+    let pasted = gpui::ClipboardEntry::Image(gpui::Image::from_bytes(gpui::ImageFormat::Png, png(30, 30)));
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem { entries: vec![pasted] }));
+    cx.simulate_keystrokes("ctrl-v");
+    draw(cx);
+    assert!(
+        cx.debug_bounds("editor-picture-1").is_some(),
+        "pasted in the a–b chat's box"
+    );
+    let to = cx.debug_bounds("new-chat-to-input").expect("the To: box");
+    cx.simulate_click(to.center(), Modifiers::none());
+    add(cx, "Sea");
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).found().map(str::to_owned)),
+        Some(CALL.to_owned())
+    );
+    // the text goes on to the a–b–c chat's box; the picture, uploaded for the a–b chat alone, doesn't
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    assert_eq!(cx.update(|_, cx| compose.read(cx).value(cx)).trim(), "Look");
+    assert!(cx.debug_bounds("editor-picture-1").is_none());
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    let [Action::Send { conversation, text }] = actions.as_slice() else {
+        panic!("the message sent, nothing held back: {actions:?}");
+    };
+    assert_eq!(conversation, CALL);
+    assert!(text.pictures().is_empty());
+}
+
 #[test]
 fn the_read_only_mode_offers_no_new_message() {
     let rig = seeded();

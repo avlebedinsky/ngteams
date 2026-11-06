@@ -19,7 +19,10 @@
 //! - **The first message** of a new chat makes it through the outbox ([`Action::CreateChat`]: the people, and the
 //!   group name as its topic, the request Teams sent), waits for the outbox to settle that row, then sends the message
 //!   to the chat made ([`Action::Send`]) and opens it. A chat that couldn't be made gives the message back to the box
-//!   with what went wrong. A named chat needs at least two other people, as Teams sends none with one.
+//!   with what went wrong. A named chat needs at least two other people, as Teams sends none with one. Leaving New
+//!   message meanwhile doesn't call it off: the shell keeps it, out of sight, until the message is sent (the chat made
+//!   is then not opened over the place shown) or given back, which New message opened again shows
+//!   ([`NewChat::keeps_going`]).
 //!
 //! Nothing is written in the read-only mode: the shell offers no New message there. Traced: `new-chat opened`,
 //! `new-chat found` (the chat it is, or none), `new-chat started` (the chat made), never a name or a text.
@@ -147,6 +150,8 @@ pub struct NewChat {
     /// New message's own box, for a chat not made yet.
     draft: Entity<Compose>,
     starting: Option<Task<()>>,
+    /// A first message given back since New message was last shown.
+    given_back: bool,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -209,6 +214,7 @@ impl NewChat {
             found: None,
             draft,
             starting: None,
+            given_back: false,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -216,6 +222,7 @@ impl NewChat {
 
     /// Gives the To: box the keyboard, its suggestions open.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.given_back = false;
         self.to.update(cx, |to, cx| to.focus(window, cx));
         self.suggesting = true;
         self.refresh_suggestions(cx);
@@ -494,6 +501,8 @@ impl NewChat {
                 .map(|row| row.id.clone());
             return self.show_found(chat, window, cx);
         }
+        // the chat shown is for the people as they were: nothing is written to it while theirs is looked up
+        self.show_found(None, window, cx);
         let mut members: Vec<String> = self.people.iter().map(|person| person.mri.clone()).collect();
         members.push(me);
         let asked = self.people();
@@ -540,6 +549,7 @@ impl NewChat {
     /// New message's box handed on its first message: the chat is made, then the message sent to it (see the module
     /// docs).
     fn start(&mut self, text: MessageText, window: &mut Window, cx: &mut Context<Self>) {
+        self.given_back = false;
         let topic = self.group_name(cx);
         let refused = if self.people.is_empty() {
             Some(NOBODY)
@@ -574,14 +584,14 @@ impl NewChat {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.starting = None;
                 let draft = this.draft.clone();
-                match made.filter(|_| sent) {
-                    Some(chat) => {
-                        this.trace
-                            .record(&TraceLine::new("new-chat", "started").conversation(&chat));
-                        draft.update(cx, |draft, cx| draft.started(Ok(()), window, cx));
-                        cx.emit(NewChatEvent::Open(chat));
-                    }
-                    None => draft.update(cx, |draft, cx| draft.started(Err(NOT_STARTED.into()), window, cx)),
+                if let Some(chat) = made.filter(|_| sent) {
+                    this.trace
+                        .record(&TraceLine::new("new-chat", "started").conversation(&chat));
+                    draft.update(cx, |draft, cx| draft.started(Ok(()), window, cx));
+                    cx.emit(NewChatEvent::Open(chat));
+                } else {
+                    this.given_back = true;
+                    draft.update(cx, |draft, cx| draft.started(Err(NOT_STARTED.into()), window, cx));
                 }
             });
         }));
@@ -592,6 +602,13 @@ impl NewChat {
     #[must_use]
     pub fn is_starting(&self) -> bool {
         self.starting.is_some()
+    }
+
+    /// Whether New message is kept when the place shown leaves it (see the module docs): its first message is still
+    /// on its way, or was given back since it was last shown.
+    #[must_use]
+    pub fn keeps_going(&self) -> bool {
+        self.starting.is_some() || self.given_back
     }
 
     // --- drawing ---
