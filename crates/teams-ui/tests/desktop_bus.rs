@@ -4,8 +4,9 @@
 //! - [`BusNotifications`]: a notice reaches the server with the app's name, its summary and body, the `default`
 //!   action and its hints; one replaces another by id; a close is the server's `CloseNotification`; the server's
 //!   `ActionInvoked` for a body comes back as the notification's id, any other action doesn't.
-//! - [`BusTray`]: the item registers its own name with the watcher; its title, tooltip, icon and status say the unread
-//!   total, and change with it (`NewTitle` told); a click and the menu's "Open" ask for the window, the menu's "Quit"
+//! - [`BusTray`]: the item registers its own name with the watcher; its title, tooltip, icon (the count drawn on it,
+//!   its attention icon too) and status say the unread total, and change with it (`NewTitle` told), as does the Unity
+//!   launcher entry's `Update` for the app's desktop entry; a click and the menu's "Open" ask for the window, the menu's "Quit"
 //!   for the quit; its menu lays out "Open Teams" and "Quit". It follows its watcher: the watcher stopped is told
 //!   `Gone`, started again `Registered` (the item registered with it again), and the bus killed ends the stream.
 //! - The bus the app is given is the only one: a child process whose `DBUS_SESSION_BUS_ADDRESS` is unset (or names
@@ -26,7 +27,9 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use teams_ui::notify::{BusNotifications, Notice, NoticeKind, NotificationServer as _};
-use teams_ui::tray::{BusTray, Hosted, ITEM_PATH, MENU_OPEN, MENU_PATH, MENU_QUIT, TrayEvent, TrayIcon as _};
+use teams_ui::tray::{
+    BusTray, Hosted, ITEM_PATH, LAUNCHER_ENTRY, MENU_OPEN, MENU_PATH, MENU_QUIT, TrayEvent, TrayIcon as _,
+};
 use teams_ui::{app_icon, bus};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -159,8 +162,9 @@ type ToolTip = (String, Vec<(i32, i32, Vec<u8>)>, String, String);
 /// A menu item: its id, its properties and its children.
 type MenuItem = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
 
-/// The item shows the app's icon by its pixels, badged while something is `unread`, with no theme name over them.
-async fn assert_icon(host: &zbus::Connection, name: &str, unread: bool) {
+/// The item shows the app's icon by its pixels, badged with the `unread` count while it isn't 0 (its attention icon
+/// too), with no theme name over them.
+async fn assert_icon(host: &zbus::Connection, name: &str, unread: u64) {
     let icon: String = property(host, name, ITEM_PATH, ITEM, "IconName").await;
     assert_eq!(icon, "");
     let pixmaps: Vec<(i32, i32, Vec<u8>)> = property(host, name, ITEM_PATH, ITEM, "IconPixmap").await;
@@ -168,7 +172,65 @@ async fn assert_icon(host: &zbus::Connection, name: &str, unread: bool) {
     let (_, tip_icon, _, _): ToolTip = property(host, name, ITEM_PATH, ITEM, "ToolTip").await;
     assert_eq!(tip_icon, app_icon::pixmaps(unread));
     let attention: Vec<(i32, i32, Vec<u8>)> = property(host, name, ITEM_PATH, ITEM, "AttentionIconPixmap").await;
-    assert_eq!(attention, app_icon::pixmaps(true));
+    assert_eq!(attention, app_icon::pixmaps(unread));
+}
+
+/// The launcher entry's next `Update`: the desktop entry it names, its count and whether the count is shown.
+async fn next_launcher_update(updates: &mut zbus::MessageStream) -> (String, i64, bool) {
+    let message = tokio::time::timeout(WAIT, updates.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let (uri, mut properties): (String, HashMap<String, OwnedValue>) = message.body().deserialize().unwrap();
+    let count = i64::try_from(properties.remove("count").unwrap()).unwrap();
+    let visible = bool::try_from(properties.remove("count-visible").unwrap()).unwrap();
+    (uri, count, visible)
+}
+
+/// The item's title, tooltip, status and icons follow the count `tray` is given, as the launcher entry's `Update` does;
+/// the same count again tells nothing.
+async fn the_count_shows(host: &zbus::Connection, item: &zbus::Proxy<'_>, tray: &BusTray) {
+    let name = tray.name();
+    let mut titled = item.receive_signal("NewTitle").await.unwrap();
+    let mut attention = item.receive_signal("NewAttentionIcon").await.unwrap();
+    let launcher = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface(LAUNCHER_ENTRY)
+        .unwrap()
+        .member("Update")
+        .unwrap()
+        .build();
+    let mut updates = zbus::MessageStream::for_match_rule(launcher, host, None).await.unwrap();
+    // the counts given, then the title and status shown
+    let steps: [(&[u64], &str, &str); 3] = [
+        (&[3], "ngteams (lab a): 3 unread chats", "NeedsAttention"),
+        (&[3, 120], "ngteams (lab a): 120 unread chats", "NeedsAttention"),
+        (&[0], "ngteams (lab a)", "Active"),
+    ];
+    for (counts, title, status) in steps {
+        for &count in counts {
+            tray.set_unread(count).await;
+        }
+        let shown = counts[counts.len() - 1];
+        tokio::time::timeout(WAIT, titled.next()).await.unwrap().unwrap();
+        tokio::time::timeout(WAIT, attention.next()).await.unwrap().unwrap();
+        assert_titled(host, name, title, status).await;
+        assert_icon(host, name, shown).await;
+        let update = next_launcher_update(&mut updates).await;
+        let uri = "application://ngteams-lab.desktop".to_owned();
+        assert_eq!(update, (uri, i64::try_from(shown).unwrap(), shown > 0));
+    }
+}
+
+/// The item's title, tooltip and status.
+async fn assert_titled(host: &zbus::Connection, name: &str, title: &str, status: &str) {
+    let shown: String = property(host, name, ITEM_PATH, ITEM, "Title").await;
+    assert_eq!(shown, title);
+    let (_, _, tip, _): ToolTip = property(host, name, ITEM_PATH, ITEM, "ToolTip").await;
+    assert_eq!(tip, title);
+    let shown: String = property(host, name, ITEM_PATH, ITEM, "Status").await;
+    assert_eq!(shown, status);
 }
 
 #[test]
@@ -200,19 +262,7 @@ fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit(
         assert_eq!(menu.as_str(), MENU_PATH);
 
         let item = zbus::Proxy::new(&host, name.clone(), ITEM_PATH, ITEM).await.unwrap();
-        let mut titled = item.receive_signal("NewTitle").await.unwrap();
-        tray.set_unread(3).await;
-        tokio::time::timeout(WAIT, titled.next()).await.unwrap().unwrap();
-        let title: String = property(&host, &name, ITEM_PATH, ITEM, "Title").await;
-        assert_eq!(title, "ngteams (lab a): 3 unread");
-        let status: String = property(&host, &name, ITEM_PATH, ITEM, "Status").await;
-        assert_eq!(status, "NeedsAttention");
-        let (_, _, tip, _): ToolTip = property(&host, &name, ITEM_PATH, ITEM, "ToolTip").await;
-        assert_eq!(tip, "ngteams (lab a): 3 unread");
-        assert_icon(&host, &name, true).await;
-        tray.set_unread(0).await;
-        tokio::time::timeout(WAIT, titled.next()).await.unwrap().unwrap();
-        assert_icon(&host, &name, false).await;
+        the_count_shows(&host, &item, &tray).await;
 
         item.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).await.unwrap();
         assert_eq!(asked.recv().await, Some(TrayEvent::Open));

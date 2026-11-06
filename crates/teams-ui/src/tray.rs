@@ -1,10 +1,17 @@
 //! The tray item (M2 Task 14): a `StatusNotifierItem` showing the account's unread total, with "Open" and "Quit".
 //!
-//! - **The total** ([`Tray`]): the store's unread count summed over the chats the chat list shows (not a team's
-//!   channels, not the account's own streams), counted again a moment after the models say a chat changed, each chat
-//!   asked again only when it changed since it was counted. The item's title and tooltip say it ("ngteams: 3 unread"),
-//!   its status is `NeedsAttention` while it isn't 0, `Active` otherwise. Its icon is the app's, carried as pixels
-//!   ([`crate::app_icon::pixmaps`]) with Teams' red unread badge while the total isn't 0, never a name from the theme.
+//! - **The total** ([`Tray`]): the unread chats, as Teams' own badge counts them: a chat the chat list shows (not a
+//!   team's channel, not the account's own streams) counts once while the store holds any message of it unread, however
+//!   many (Teams keeps one yes or no per chat: `docs/protocol/chat.md`, "Which chats are unread"). Counted again a moment
+//!   after the models say a chat changed, each chat asked again only when it changed since it was counted, and summed
+//!   over the window's accounts. The item's title and tooltip say it ("ngteams: 3 unread chats"), its status is
+//!   `NeedsAttention` while it isn't 0, `Active` otherwise. Its icon is the app's, carried as pixels
+//!   ([`crate::app_icon::pixmaps`]) with Teams' red unread badge and the count on it ("99+" past 99) while the total
+//!   isn't 0, never a name from the theme: the `StatusNotifierItem` spec has no counter of its own, so the number is
+//!   drawn into the icon, and into its attention icon too (a host shows that one while the item needs attention).
+//! - **The launcher's count**: the same total goes to the desktop's task manager as the Unity launcher entry's `count`
+//!   (`com.canonical.Unity.LauncherEntry.Update` for `application://<app id>.desktop`), which KDE Plasma's task manager
+//!   and docks draw on the app's task button; hidden at 0. Nothing hears it on a desktop without one.
 //! - **The item** ([`BusTray`]): `org.kde.StatusNotifierItem` at [`ITEM_PATH`] and its menu, `com.canonical.dbusmenu`
 //!   at [`MENU_PATH`], on the connection to the bus the app is given ([`crate::bus`]), under the name
 //!   `org.kde.StatusNotifierItem-<pid>-1`, registered with the watcher (`org.kde.StatusNotifierWatcher`). Activating
@@ -48,6 +55,9 @@ pub const MENU_OPEN: i32 = 1;
 pub const MENU_QUIT: i32 = 2;
 /// How long after a change the total is counted again.
 pub const COUNT_DELAY: Duration = Duration::from_millis(300);
+/// The Unity launcher entry's interface, and the path its signal comes from.
+pub const LAUNCHER_ENTRY: &str = "com.canonical.Unity.LauncherEntry";
+pub const LAUNCHER_PATH: &str = "/com/canonical/unity/launcherentry/ngteams";
 
 /// What the tray asks the app for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,11 +86,26 @@ pub trait TrayIcon: Send + Sync + 'static {
 /// The item's title (and tooltip) for an unread total: the app's name, and the total when it isn't 0.
 #[must_use]
 pub fn title(app: &str, unread: u64) -> String {
-    if unread == 0 {
-        app.to_owned()
-    } else {
-        format!("{app}: {unread} unread")
+    match unread {
+        0 => app.to_owned(),
+        1 => format!("{app}: 1 unread chat"),
+        _ => format!("{app}: {unread} unread chats"),
     }
+}
+
+/// The launcher entry's properties for an unread total: its `count`, shown while it isn't 0.
+#[must_use]
+pub fn launcher_properties(unread: u64) -> HashMap<&'static str, Value<'static>> {
+    HashMap::from([
+        ("count", Value::from(i64::try_from(unread).unwrap_or(i64::MAX))),
+        ("count-visible", Value::from(unread > 0)),
+    ])
+}
+
+/// The desktop entry the launcher entry names: the app's id, which the install's `.desktop` file is named after.
+#[must_use]
+pub fn launcher_uri(app_id: &str) -> String {
+    format!("application://{app_id}.desktop")
 }
 
 /// The item's status for an unread total.
@@ -192,7 +217,7 @@ impl Tray {
         self.icon.is_some()
     }
 
-    /// The unread total as last counted.
+    /// The unread total (the unread chats) as last counted.
     #[must_use]
     pub fn total(&self) -> Option<u64> {
         self.total
@@ -208,10 +233,11 @@ impl Tray {
             .detach();
     }
 
-    /// A count's result: the chats it counted, as of `revisions`.
+    /// A count's result: the chats it counted, as of `revisions`; the total is how many of them hold anything unread.
     fn counted(&mut self, chats: Vec<(String, Counted)>, cx: &mut Context<Self>) -> bool {
         self.counted = chats.into_iter().collect();
-        let total = self.counted.values().map(|counted| counted.unread).sum();
+        let unread = self.counted.values().filter(|counted| counted.unread > 0).count();
+        let total = u64::try_from(unread).unwrap_or(u64::MAX);
         if self.total != Some(total) {
             self.total = Some(total);
             self.show(cx);
@@ -267,6 +293,8 @@ struct Item {
     id: String,
     app: String,
     unread: u64,
+    /// The icon for `unread`, drawn when it changed.
+    icon: Pixmaps,
     events: UnboundedSender<TrayEvent>,
 }
 
@@ -332,7 +360,7 @@ impl Item {
 
     #[zbus(property)]
     fn icon_pixmap(&self) -> Pixmaps {
-        app_icon::pixmaps(self.unread > 0)
+        self.icon.clone()
     }
 
     #[zbus(property)]
@@ -341,17 +369,17 @@ impl Item {
         ""
     }
 
+    // the count, as the icon: a host shows this one while the item needs attention
     #[zbus(property)]
-    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
     fn attention_icon_pixmap(&self) -> Pixmaps {
-        app_icon::pixmaps(true)
+        self.icon.clone()
     }
 
     #[zbus(property)]
     fn tool_tip(&self) -> (String, Pixmaps, String, String) {
         (
             String::new(),
-            app_icon::pixmaps(self.unread > 0),
+            self.icon.clone(),
             title(&self.app, self.unread),
             String::new(),
         )
@@ -374,6 +402,9 @@ impl Item {
 
     #[zbus(signal)]
     async fn new_icon(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn new_attention_icon(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn new_tool_tip(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
@@ -561,6 +592,8 @@ async fn register(connection: &Connection, name: &str) -> zbus::Result<()> {
 pub struct BusTray {
     connection: Connection,
     name: String,
+    /// The launcher entry's desktop entry ([`launcher_uri`]).
+    launcher: String,
 }
 
 impl BusTray {
@@ -582,6 +615,7 @@ impl BusTray {
         let tray = Self {
             connection: connection.clone(),
             name,
+            launcher: launcher_uri(app_id),
         };
         // followed before the first registration, so no new watcher between the two is missed
         let owners = zbus::fdo::DBusProxy::new(connection)
@@ -620,6 +654,7 @@ impl BusTray {
             id: app_id.to_owned(),
             app: app.to_owned(),
             unread: 0,
+            icon: app_icon::pixmaps(0),
             events: events.clone(),
         };
         server.at(ITEM_PATH, item).await?;
@@ -643,7 +678,7 @@ impl BusTray {
         &self.name
     }
 
-    async fn show_unread(connection: Connection, unread: u64) -> zbus::Result<()> {
+    async fn show_unread(connection: Connection, launcher: String, unread: u64) -> zbus::Result<()> {
         let item = connection.object_server().interface::<_, Item>(ITEM_PATH).await?;
         {
             let mut shown = item.get_mut().await;
@@ -651,21 +686,32 @@ impl BusTray {
                 return Ok(());
             }
             shown.unread = unread;
+            shown.icon = app_icon::pixmaps(unread);
         }
         let emitter = item.signal_emitter();
         Item::new_title(emitter).await?;
         Item::new_icon(emitter).await?;
+        Item::new_attention_icon(emitter).await?;
         Item::new_tool_tip(emitter).await?;
-        Item::new_status(emitter, status(unread)).await
+        Item::new_status(emitter, status(unread)).await?;
+        connection
+            .emit_signal(
+                None::<()>,
+                LAUNCHER_PATH,
+                LAUNCHER_ENTRY,
+                "Update",
+                &(launcher.as_str(), launcher_properties(unread)),
+            )
+            .await
     }
 }
 
 impl TrayIcon for BusTray {
     fn set_unread(&self, unread: u64) -> BoxFuture<'static, ()> {
-        let connection = self.connection.clone();
+        let (connection, launcher) = (self.connection.clone(), self.launcher.clone());
         Box::pin(async move {
             // a bus that went away takes the item with it: nothing left to show
-            let _ = Self::show_unread(connection, unread).await;
+            let _ = Self::show_unread(connection, launcher, unread).await;
         })
     }
 }
@@ -677,9 +723,23 @@ mod tests {
     #[test]
     fn the_title_says_the_total() {
         assert_eq!(title("App", 0), "App");
-        assert_eq!(title("App", 3), "App: 3 unread");
+        assert_eq!(title("App", 1), "App: 1 unread chat");
+        assert_eq!(title("App", 3), "App: 3 unread chats");
+        assert_eq!(title("App", 250), "App: 250 unread chats");
         assert_eq!(status(0), "Active");
         assert_eq!(status(1), "NeedsAttention");
+    }
+
+    #[test]
+    fn the_launcher_entry_counts_while_anything_is_unread() {
+        assert_eq!(launcher_uri("com.example.app"), "application://com.example.app.desktop");
+        let none = launcher_properties(0);
+        assert_eq!(none["count"], Value::from(0_i64));
+        assert_eq!(none["count-visible"], Value::from(false));
+        let some = launcher_properties(120);
+        assert_eq!(some["count"], Value::from(120_i64));
+        assert_eq!(some["count-visible"], Value::from(true));
+        assert_eq!(launcher_properties(u64::MAX)["count"], Value::from(i64::MAX));
     }
 
     #[test]

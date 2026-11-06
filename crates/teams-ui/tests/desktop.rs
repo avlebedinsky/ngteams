@@ -1,5 +1,5 @@
 //! The desktop on GPUI's test context, over the fake engine (`common`), a fake notification server and a fake tray
-//! item: the unread total the tray shows (the listed chats only, counted again as chats change); closing the window
+//! item: the unread total the tray shows (the listed chats unread, counted again as chats change); closing the window
 //! quits without a tray item and keeps the app with one, which shows the window again; a tray item gone (its
 //! watcher left, the bus lost) while the window is closed opens it again, and closing it then quits; activating a
 //! notification
@@ -104,13 +104,14 @@ fn the_tray_shows_the_unread_total_of_the_listed_chats_as_they_change() {
     let models = rig.models.clone();
     let tray = rig.cx.update(|cx| cx.new(|cx| Tray::new(core, models, trace, cx)));
     count(&rig);
-    // a's chats, not the channel nor the notes
-    assert_eq!(rig.cx.read(|cx| tray.read(cx).total()), Some(3));
+    // a's unread chats, each once however many of its messages are unread (two in the a–b chat), not the channel nor
+    // the notes
+    assert_eq!(rig.cx.read(|cx| tray.read(cx).total()), Some(2));
     let icon = Arc::new(FakeIcon::default());
     let given = Arc::clone(&icon);
     rig.cx.update(|cx| tray.update(cx, |tray, cx| tray.set_icon(given, cx)));
     rig.cx.run_until_parked();
-    assert_eq!(icon.shown(), [3]);
+    assert_eq!(icon.shown(), [2]);
     assert!(rig.cx.read(|cx| tray.read(cx).has_icon()));
 
     // a's horizon in the a–b chat moved: only that chat is asked again
@@ -132,20 +133,22 @@ fn the_tray_shows_the_unread_total_of_the_listed_chats_as_they_change() {
         .filter(|asked| **asked == "unread_count")
         .count();
     assert_eq!(asked_after - asked_before, 1);
-    assert_eq!(icon.shown(), [3, 1]);
-    // a change that leaves the total as it was shows nothing new
+    assert_eq!(icon.shown(), [2, 1]);
+    // more unread in a chat already unread leaves the total as it was: nothing new shown
+    rig.core.unread.lock().unwrap().insert(TRIO.to_owned(), 4);
     rig.send(Event::ConversationChanged {
         conversation: TRIO.to_owned(),
     });
     count(&rig);
-    assert_eq!(icon.shown(), [3, 1]);
+    assert_eq!(icon.shown(), [2, 1]);
+    assert_eq!(rig.cx.read(|cx| tray.read(cx).total()), Some(1));
     let totals: Vec<serde_json::Value> = written
         .lines()
         .into_iter()
         .filter(|line| line["view"] == "tray" && line["change"] == "unread")
         .map(|line| line["unread"].clone())
         .collect();
-    assert_eq!(totals, [serde_json::json!([3]), serde_json::json!([1])]);
+    assert_eq!(totals, [serde_json::json!([2]), serde_json::json!([1])]);
     assert_eq!(rig.shutdowns(), 0);
 }
 

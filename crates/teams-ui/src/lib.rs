@@ -47,9 +47,10 @@
 //!   caller hands in, read by the live test.
 //! - [`desktop`]: the app on the desktop: the main window (opened again from the tray or a notification), the
 //!   [`notify`] notifications of messages that come (as the "notifications" setting says; a chat shown in a focused
-//!   window never notifies; activating one opens its chat) and the [`tray`] item (the unread total, open, quit;
-//!   closing the window keeps the app in the tray), both on the bus the app is given ([`bus`]) and nowhere else.
-//!   Both carry the app's icon ([`app_icon`]: the tray item its pixels, with Teams' unread badge).
+//!   window never notifies; activating one opens its chat) and the [`tray`] item (the unread chats, open, quit;
+//!   closing the window keeps the app in the tray; the launcher entry's count), both on the bus the app is given
+//!   ([`bus`]) and nowhere else. Both carry the app's icon ([`app_icon`]: the tray item its pixels, with Teams' unread
+//!   badge and its count).
 //! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app and the
 //!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call strip of the
 //!   main window, [`call_window`] the call's own window (as Teams opens one) showing [`call_stage`]'s stage and

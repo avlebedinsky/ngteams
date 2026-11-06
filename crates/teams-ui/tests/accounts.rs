@@ -285,12 +285,13 @@ fn the_tray_sums_the_accounts_and_an_account_removed_leaves_the_sum_and_the_wind
     d.rig.cx.executor().advance_clock(COUNT_DELAY);
     d.rig.cx.run_until_parked();
     let total = |d: &TwoAccounts| d.rig.cx.read(|cx| d.desktop.read(cx).tray().read(cx).combined(cx));
-    assert_eq!(total(&d), Some(5));
+    // a's one unread chat (two messages) and b's (three): two chats
+    assert_eq!(total(&d), Some(2));
     let unread_b = d.rig.cx.read(|cx| {
         let accounts = d.desktop.read(cx).accounts().read(cx);
         accounts.tile(LAB_B).unwrap().unread(cx)
     });
-    assert_eq!(unread_b, 3);
+    assert_eq!(unread_b, 1);
 
     // the user asks to remove b from its account menu: the app is asked, and does it
     d.switch(LAB_B);
@@ -306,7 +307,7 @@ fn the_tray_sums_the_accounts_and_an_account_removed_leaves_the_sum_and_the_wind
         .cx
         .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.remove_account(LAB_B, cx)));
     d.rig.cx.run_until_parked();
-    assert_eq!(total(&d), Some(2));
+    assert_eq!(total(&d), Some(1));
     assert_eq!(d.shown(window).0, LAB_A);
     let shells = d
         .rig

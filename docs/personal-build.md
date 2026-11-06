@@ -42,8 +42,8 @@ locks prevent a concurrent forget while that account is running.
 ## Several accounts
 
 The user may add several work accounts and run them together in one window. Rail avatars switch accounts, "+" adds
-one, and the account menu offers "Sign out and remove". Notifications name their account and the tray counts all
-accounts' unread messages. Each account has its own engine, store, tokens and region; one engine opens each store.
+one, and the account menu offers "Sign out and remove". Notifications name their account and the tray badge counts all
+accounts' unread chats. Each account has its own engine, store, tokens and region; one engine opens each store.
 
 A newly typed account is pending until sign-in succeeds. If sign-in stores nothing, a bare entry containing only its
 UPN is removed; entries with manual identity-provider hosts or a refused provider remain pending for correction.
