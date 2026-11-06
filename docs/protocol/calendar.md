@@ -227,6 +227,20 @@ service reads `startTime` and `endTime` as that zone's clock whatever offset the
 with the start in Honolulu (`-10:00`) and the end written with Istanbul's offset (`13:00+03:00`) came back ending at
 13:00 Honolulu time. So both are written in the start's zone; an end picked in another zone is converted to it.
 
+A zone field is a combobox: focused, it empties to "Search for a city" and typing lists matching cities with their
+zone ("hono": Honolulu, Hawaii (HST), Honokaa, Hawaii, …), seen 2026-11-06. Picking a zone there keeps the start's
+date and clock and reads them in the new zone.
+
+A series repeats in the start's zone. Outlook's form (2026-11-06, start zone Hawaii, the save held unsent) said
+"Occurs every Friday from 10:00 AM to 10:30 AM effective Fri 11/6/2026 until Fri 4/30/2027 (UTC-10)" and its
+`CreateCalendarEvent` carried `StartTimeZoneId` `Hawaiian Standard Time`, the weekly pattern's `DaysOfWeek` `Friday`
+and the range's `StartDate` `2026-11-06`: the weekday and the days are the start zone's, whatever day the desktop is on.
+The native client writes `eventRecurrenceRange`'s days as that zone's midnights with its offset, and takes a preset's
+weekday, week and date from the start's day there. Checked live 2026-11-06 with a series of lab account a's own: a
+weekly series starting Monday 21:00 in Honolulu (Tuesday 10:00 on an Istanbul desktop), sent with `eventTimeZone`
+`HawaiianSt`, `daysOfTheWeek` `[1]` and `startDate` `2026-11-09T00:00:00-10:00`, was answered `201`, and the calendar
+view gave its occurrences at `07:00:00+00:00` on the Tuesdays, Monday 21:00 there.
+
 ### Meet now
 
 The calendar's toolbar has a split **Meet now** (its menu: Join with an ID). Its face opens "Start a meeting now" with
@@ -291,6 +305,7 @@ their typed protocol requests with the service's own credential.
   attempt), then its pre-join (Start meeting) or its short link (Get a link to share).
 - **Time zones** (`crates/teams-ui/src/event_form/zones.rs`): the form's slot stays in the desktop's time; a start zone
   other than the desktop's is sent as the draft's `zone`, whose Exchange name the engine reads for `eventTimeZone`, and
-  both times are written in it.
+  both times are written in it. A series' days are the start zone's (its weekday, its first and last days, the
+  summary), written as that zone's midnights. Each zone picker searches its zones by city, region or offset.
 - **People's calendars** (`crates/teams-ui/src/calendar_view/people.rs`): their busy times read for the days shown
   (`Schedules`, a read per five days), drawn in each calendar's colour, opening no card.

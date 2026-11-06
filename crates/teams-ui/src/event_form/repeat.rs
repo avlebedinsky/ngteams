@@ -4,12 +4,14 @@
 //! line Teams writes under it ("Occurs every Tuesday starting 10/27/2026"), and the custom recurrence dialog (repeat
 //! every n days, weeks on chosen days, months on a day or a weekday of the month, years; the end).
 //!
-//! What a series sends is `teams-proto`'s [`Recurrence`]: the pattern, the start's day and the end's, as local
-//! midnights (`docs/protocol/calendar.md`, "A series").
+//! What a series sends is `teams-proto`'s [`Recurrence`]: the pattern, the start's day and the end's, as midnights
+//! of the zone it repeats in (`docs/protocol/calendar.md`, "A series"). Its days are the start zone's: a start zone
+//! other than the desktop's gives the weekday, the first day and the label of the day it is there
+//! ([`super::zones::series_day`]).
 
 use std::fmt::Write as _;
 
-use chrono::{Datelike as _, NaiveDate, NaiveTime};
+use chrono::{Datelike as _, NaiveDate};
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px, rgb,
@@ -22,7 +24,7 @@ use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use teams_proto::{Recurrence, RecurrencePattern as Pattern, WeekIndex, Weekday};
 
 use super::EventForm;
-use super::model::zoned;
+use super::zones::{Tz, midnight};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::{self, Palette};
 
@@ -134,13 +136,13 @@ impl Repeat {
         self.which(start).map_or("Custom", Preset::label)
     }
 
-    /// What it sends for a series starting on `start`.
+    /// What it sends for a series starting on `start`, its days as `zone`'s midnights (the desktop's without one).
     #[must_use]
-    pub fn recurrence(&self, start: NaiveDate) -> Recurrence {
+    pub fn recurrence(&self, start: NaiveDate, zone: Option<Tz>) -> Recurrence {
         Recurrence {
             pattern: self.pattern.clone(),
-            start: zoned(start.and_time(NaiveTime::MIN)),
-            end: self.until.map(|until| zoned(until.and_time(NaiveTime::MIN))),
+            start: midnight(start, zone),
+            end: self.until.map(|until| midnight(until, zone)),
         }
     }
 
@@ -408,7 +410,7 @@ impl EventForm {
     /// The repeat row a series shows under its time: the drop-down, the end, and the summary.
     pub(super) fn repeat_row(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let repeat = self.repeat.clone()?;
-        let start = self.slot.start.date();
+        let start = self.series_day();
         let summary = repeat.summary(start);
         let menu = self.repeat_menu(repeat, start, cx);
         let content = div()
@@ -494,7 +496,7 @@ impl EventForm {
 
     /// Repeats the event by `preset` from its day, keeping the end it has.
     fn choose_preset(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
-        let start = self.slot.start.date();
+        let start = self.series_day();
         let until = self.repeat.as_ref().and_then(|repeat| repeat.until);
         let mut repeat = Repeat::preset(preset, start);
         repeat.until = until;
@@ -504,7 +506,7 @@ impl EventForm {
     /// The custom recurrence dialog, over the form while it is open.
     pub(super) fn custom_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         let custom = self.custom.clone()?;
-        let start = self.slot.start.date();
+        let start = self.series_day();
         let preview = custom.repeat(start);
         let dialog = div()
             .debug_selector(|| "event-custom-repeat".to_owned())
@@ -865,7 +867,16 @@ mod tests {
             pattern: Pattern::Daily { interval: 1 },
             until: Some(date(12, 1)),
         }
-        .recurrence(date(10, 27));
+        .recurrence(date(10, 27), None);
         assert_eq!(Repeat::of(&recurrence).until, Some(date(12, 1)));
+        // in a zone of its own, its days are that zone's midnights, read back as the same days
+        let honolulu = Repeat {
+            pattern: Pattern::Daily { interval: 1 },
+            until: Some(date(12, 1)),
+        }
+        .recurrence(date(10, 27), Some(chrono_tz::Pacific::Honolulu));
+        assert_eq!(honolulu.start.offset_minutes, -600);
+        assert_eq!(Repeat::of(&honolulu).until, Some(date(12, 1)));
+        assert_eq!(civil_date(honolulu.start), Some(date(10, 27)));
     }
 }

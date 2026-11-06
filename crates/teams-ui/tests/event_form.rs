@@ -15,7 +15,7 @@ use fixtures::full;
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use teams_core::{EventKind, EventWrite, EventWritten};
 use teams_ui::ViewTrace;
-use teams_ui::event_form::{EventForm, Saved, Seed, Side, Slot};
+use teams_ui::event_form::{self, EventForm, Saved, Seed, Side, Slot};
 
 fn slot() -> Slot {
     let day = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
@@ -701,15 +701,79 @@ fn a_channel_s_meeting_cancelled_from_its_details_is_cancelled_on_the_team_s_cal
 }
 
 #[test]
-fn the_globe_s_zone_pickers_open_and_pick_a_zone() {
+fn the_globe_s_zone_pickers_search_and_pick_a_zone() {
     let rig = Rig::start();
     let (form, cx, _, _) = window(&rig, new_seed());
     click(cx, "event-zones");
     click(cx, "event-start-zone");
+    cx.simulate_input("honolulu");
+    draw(cx);
+    assert!(cx.debug_bounds("event-start-zone-pacific-niue").is_none());
     click(cx, "event-start-zone-pacific-honolulu");
     click(cx, "event-end-zone");
+    cx.simulate_input("niue");
     click(cx, "event-end-zone-pacific-niue");
     let zones = cx.update(|_, cx| form.read(cx).zones()).unwrap();
     assert_eq!(zones.start.name(), "Pacific/Honolulu");
     assert_eq!(zones.end.name(), "Pacific/Niue");
+    // a zone set from outside (the tour) shows in its picker too
+    cx.update(|_, cx| form.update(cx, |form, cx| form.set_zone(false, chrono_tz::Asia::Kolkata, cx)));
+    click(cx, "event-start-zone");
+    assert!(cx.debug_bounds("event-start-zone-asia-kolkata").is_some());
+}
+
+/// A zone far from the desktop's, and a start on 2026-11-10 (a Tuesday) whose day there is another.
+fn far_start() -> (event_form::zones::Tz, Slot, NaiveDate) {
+    let desktop = event_form::zones::Zones::desktop().start;
+    let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+    [chrono_tz::Pacific::Honolulu, chrono_tz::Pacific::Kiritimati]
+        .into_iter()
+        .filter(|zone| *zone != desktop)
+        .find_map(|zone| {
+            (0..24).find_map(|hour| {
+                let start = day.and_hms_opt(hour, 0, 0).unwrap();
+                let there = event_form::zones::wall_in(start, zone).date();
+                (there != day).then(|| (zone, Slot::new(start, start + chrono::Duration::hours(1)), there))
+            })
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_series_in_another_zone_repeats_on_the_start_s_day_there() {
+    use chrono::Datelike as _;
+    let (far, slot, there) = far_start();
+    let rig = Rig::start();
+    let (form, cx, _, _) = window(&rig, Seed::New { slot, online: false });
+    cx.update(|window, cx| {
+        form.update(cx, |form, cx| {
+            form.choose_series(true, window, cx);
+            form.show_zones(true, cx);
+            form.set_zone(false, far, cx);
+        });
+    });
+    draw(cx);
+    let weekday = there.format("%A").to_string();
+    let repeats = cx.update(|_, cx| form.read(cx).printable(cx).repeats).unwrap();
+    assert_eq!(
+        repeats,
+        format!("Occurs every {weekday} starting {}", there.format("%-m/%-d/%Y"))
+    );
+    cx.update(|window, cx| form.update(cx, |form, cx| form.save(window, cx)));
+    draw(cx);
+    let calendar = rig.core.calendar.lock().unwrap();
+    let [EventWrite::Create(draft)] = calendar.writes.as_slice() else {
+        panic!("one series creation");
+    };
+    assert_eq!(draft.zone.as_deref(), Some(far.name()));
+    let recurrence = draft.recurrence.as_ref().unwrap();
+    let day = teams_proto::Weekday::ALL[there.weekday().num_days_from_sunday() as usize];
+    assert_eq!(
+        recurrence.pattern,
+        teams_proto::RecurrencePattern::Weekly {
+            interval: 1,
+            days: vec![day]
+        }
+    );
+    assert_eq!(recurrence.start, event_form::zones::midnight(there, Some(far)));
 }

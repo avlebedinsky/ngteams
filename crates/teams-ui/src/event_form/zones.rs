@@ -7,15 +7,25 @@
 //! the start's zone: an end picked in another zone is still the same moment.
 //!
 //! The zones listed are the IANA zones of the world's regions, each as "(UTC+03:00) Istanbul" at the event's start,
-//! by offset then name.
+//! by offset then name. A picker is Teams' combobox: typing searches the zones by city (Teams' placeholder, "Search
+//! for a city"); its rows are built once for the start's day and drawn only as far as they are scrolled to, so it opens
+//! at once even with its four hundred rows.
+//!
+//! A series repeats in the start's zone, as Outlook's form writes it (its weekday, its first and last days are the
+//! start zone's, seen 2026-11-06: a start at 10:00 Honolulu on a Friday is "Occurs every Friday … (UTC-10)", whatever
+//! day the desktop's clock is on): [`series_day`], [`midnight`].
 
-use chrono::{DateTime, Duration, Local, NaiveDateTime, Offset as _, TimeZone as _, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Offset as _, TimeZone as _, Utc};
 use chrono_tz::OffsetComponents as _;
 pub use chrono_tz::Tz;
-use gpui::{App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, div, px};
+use gpui::{
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    Styled as _, Subscription, Window, div, px,
+};
 use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::menu::DropdownMenu as _;
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use teams_core::ZonedTime;
 
 use super::{EventForm, Slot, model, slot_item};
@@ -138,6 +148,96 @@ pub fn choices(at: DateTime<Utc>) -> Vec<(Tz, String)> {
     zones.into_iter().map(|(_, zone, label)| (zone, label)).collect()
 }
 
+/// The choices with `chosen` among them: it takes the place of the zone listed by its name (an alias, such as
+/// Asia/Istanbul for Istanbul), or joins the list by its offset when none is.
+#[must_use]
+pub fn choices_with(mut listed: Vec<(Tz, String)>, chosen: Tz, at: DateTime<Utc>) -> Vec<(Tz, String)> {
+    if listed.iter().any(|(zone, _)| *zone == chosen) {
+        return listed;
+    }
+    let name = label(chosen, at);
+    if let Some(same) = listed.iter_mut().find(|(_, listed)| *listed == name) {
+        same.0 = chosen;
+        return listed;
+    }
+    let offset = |zone: &Tz| at.with_timezone(zone).offset().fix().local_minus_utc();
+    let place = listed
+        .iter()
+        .position(|(zone, listed)| (offset(zone), listed.as_str()) > (offset(&chosen), name.as_str()))
+        .unwrap_or(listed.len());
+    listed.insert(place, (chosen, name));
+    listed
+}
+
+/// A row of a zone picker: the zone, its name, and the row's test selector (`event-start-zone-pacific-honolulu`).
+#[derive(Clone, Debug)]
+pub struct ZoneChoice {
+    zone: Tz,
+    label: SharedString,
+    selector: SharedString,
+}
+
+impl ZoneChoice {
+    fn new(id: &str, zone: Tz, label: String) -> Self {
+        let selector = format!("{id}-{}", zone.name().replace('/', "-").to_ascii_lowercase());
+        Self {
+            zone,
+            label: label.into(),
+            selector: selector.into(),
+        }
+    }
+}
+
+impl SelectItem for ZoneChoice {
+    type Value = Tz;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let selector = self.selector.clone();
+        div()
+            .debug_selector(move || selector.to_string())
+            .child(self.label.clone())
+    }
+
+    fn value(&self) -> &Tz {
+        &self.zone
+    }
+
+    /// A city, a region or an offset: "hono", "pacific", "+05:30".
+    fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        self.label.to_lowercase().contains(&query) || self.zone.name().replace('_', " ").to_lowercase().contains(&query)
+    }
+}
+
+/// A zone picker's state.
+pub type ZoneSelect = SelectState<SearchableVec<ZoneChoice>>;
+
+/// The start's and the end's zone pickers, their rows named for the offsets on `day` (the start's, in UTC).
+pub struct ZonePickers {
+    start: Entity<ZoneSelect>,
+    end: Entity<ZoneSelect>,
+    day: NaiveDate,
+    _confirmed: [Subscription; 2],
+}
+
+/// A picker's rows: the zones at `at`, `chosen` among them.
+fn zone_rows(id: &str, listed: &[(Tz, String)], chosen: Tz, at: DateTime<Utc>) -> SearchableVec<ZoneChoice> {
+    let rows: Vec<ZoneChoice> = choices_with(listed.to_vec(), chosen, at)
+        .into_iter()
+        .map(|(zone, label)| ZoneChoice::new(id, zone, label))
+        .collect();
+    SearchableVec::new(rows)
+}
+
+/// The id of the start's picker (`end` false) or the end's.
+fn picker_id(end: bool) -> &'static str {
+    if end { "event-end-zone" } else { "event-start-zone" }
+}
+
 impl EventForm {
     /// The time zones shown, while they are.
     #[must_use]
@@ -148,12 +248,15 @@ impl EventForm {
     /// Shows the start's and end's time zones (both the desktop's), or hides them: the event's times are the desktop's
     /// again.
     pub fn show_zones(&mut self, shown: bool, cx: &mut Context<Self>) {
+        let from = self.series_day();
         self.zones = shown.then(Zones::desktop);
+        self.follow_series_day(from);
         cx.notify();
     }
 
-    /// The start's (`end` false) or the end's time zone changed to `zone`.
+    /// The start's (`end` false) or the end's time zone changed to `zone`; a series follows the start's day there.
     pub fn set_zone(&mut self, end: bool, zone: Tz, cx: &mut Context<Self>) {
+        let from = self.series_day();
         let mut zones = self.zones.unwrap_or_else(Zones::desktop);
         if end {
             zones.end = zone;
@@ -161,46 +264,113 @@ impl EventForm {
             zones.start = zone;
         }
         self.zones = Some(zones);
+        self.follow_series_day(from);
         cx.notify();
     }
 
-    /// The start line's zone picker, or the end line's.
-    pub(super) fn zone_menu(&self, end: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The day a series starts on: the start's date in the zone it repeats in ([`series_day`]).
+    #[must_use]
+    pub fn series_day(&self) -> NaiveDate {
+        series_day(self.slot, self.zones)
+    }
+
+    /// The zone a series repeats in, when it isn't the desktop's ([`series_zone`]).
+    #[must_use]
+    pub fn series_zone(&self) -> Option<Tz> {
+        series_zone(self.zones, self.slot.all_day)
+    }
+
+    /// A series' preset follows its first day, moved from `from` (its end dropped when it is now before it).
+    pub(super) fn follow_series_day(&mut self, from: NaiveDate) {
+        let to = self.series_day();
+        if let Some(repeat) = &self.repeat
+            && from != to
+        {
+            self.repeat = Some(repeat.moved(from, to));
+        }
+    }
+
+    /// The two zone pickers, made the first time the globe shows them, their rows named again when the start moves
+    /// to another day, each showing its zone.
+    fn zone_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> [Entity<ZoneSelect>; 2] {
         let zones = self.zones.unwrap_or_else(Zones::desktop);
-        let chosen = if end { zones.end } else { zones.start };
         let at = instant(self.slot.start);
-        let id = if end { "event-end-zone" } else { "event-start-zone" };
-        // a zone and its alias are listed once: the chosen one is checked by its name
-        let chosen_name = label(chosen, at);
-        let form = cx.entity().downgrade();
-        let button = Button::new(id)
-            .ghost()
-            .small()
-            .tooltip(if end { "End time zone" } else { "Start time zone" })
-            .label(label(chosen, at))
-            .dropdown_menu(move |menu, _, _| {
-                let menu = menu.min_w(px(320.0)).scrollable(true).max_h(px(420.0));
-                // the zone chosen first, then every zone by offset
-                let menu = menu
-                    .item(PopupMenuItem::new(chosen_name.clone()).checked(true))
-                    .separator();
-                choices(at).into_iter().fold(menu, |menu, (zone, name)| {
-                    let form = form.clone();
-                    let checked = name == chosen_name;
-                    let selector = format!("{id}-{}", zone.name().replace('/', "-").to_ascii_lowercase());
-                    menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            let selector = selector.clone();
-                            div().debug_selector(move || selector.clone()).child(name.clone())
-                        })
-                        .checked(checked)
-                        .on_click(move |_, _, cx: &mut App| {
-                            let _ = form.update(cx, |form, cx| form.set_zone(end, zone, cx));
-                        }),
-                    )
-                })
+        let day = at.date_naive();
+        let pickers = match self.zone_pickers.take() {
+            Some(pickers) if pickers.day == day => pickers,
+            Some(pickers) => {
+                let listed = choices(at);
+                for (end, state, chosen) in [(false, &pickers.start, zones.start), (true, &pickers.end, zones.end)] {
+                    let rows = zone_rows(picker_id(end), &listed, chosen, at);
+                    state.update(cx, |state, cx| state.set_items(rows, window, cx));
+                }
+                ZonePickers { day, ..pickers }
+            }
+            None => Self::new_zone_pickers(zones, at, window, cx),
+        };
+        for (end, state, chosen) in [(false, &pickers.start, zones.start), (true, &pickers.end, zones.end)] {
+            if state.read(cx).selected_value() == Some(&chosen) {
+                continue;
+            }
+            // a zone the rows don't list (set by the tour, or the desktop's alias) joins them first
+            state.update(cx, |state, cx| {
+                state.set_selected_value(&chosen, window, cx);
+                if state.selected_value() != Some(&chosen) {
+                    state.set_items(zone_rows(picker_id(end), &choices(at), chosen, at), window, cx);
+                    state.set_selected_value(&chosen, window, cx);
+                }
             });
-        selected_by(id, button)
+        }
+        let states = [pickers.start.clone(), pickers.end.clone()];
+        self.zone_pickers = Some(pickers);
+        states
+    }
+
+    fn new_zone_pickers(zones: Zones, at: DateTime<Utc>, window: &mut Window, cx: &mut Context<Self>) -> ZonePickers {
+        let listed = choices(at);
+        let mut picker = |end: bool, chosen: Tz| {
+            let rows = zone_rows(picker_id(end), &listed, chosen, at);
+            let state = cx.new(|cx| {
+                let mut state = SelectState::new(rows, None, window, cx).searchable(true);
+                state.set_selected_value(&chosen, window, cx);
+                state
+            });
+            let confirmed = cx.subscribe_in(
+                &state,
+                window,
+                move |form: &mut Self, _, event: &SelectEvent<SearchableVec<ZoneChoice>>, _, cx| {
+                    if let SelectEvent::Confirm(Some(zone)) = event {
+                        form.set_zone(end, *zone, cx);
+                    }
+                },
+            );
+            (state, confirmed)
+        };
+        let (start, start_confirmed) = picker(false, zones.start);
+        let (end, end_confirmed) = picker(true, zones.end);
+        ZonePickers {
+            start,
+            end,
+            day: at.date_naive(),
+            _confirmed: [start_confirmed, end_confirmed],
+        }
+    }
+
+    /// The start line's zone picker, or the end line's.
+    fn zone_menu(state: &Entity<ZoneSelect>, end: bool) -> gpui::Div {
+        let id = picker_id(end);
+        selected_by(
+            id,
+            div().w(px(250.0)).child(
+                Select::new(state)
+                    .id(id)
+                    .small()
+                    .menu_width(px(320.0))
+                    .menu_max_h(px(420.0))
+                    .search_placeholder("Search for a city")
+                    .accessibility_label(if end { "End time zone" } else { "Start time zone" }),
+            ),
+        )
     }
 
     /// The start line's date: six weeks of days from a week ago, as the start's zone shows them; the start moves to it
@@ -296,7 +466,8 @@ impl EventForm {
     }
 
     /// The lines the globe opens: the start's date, time and zone, then the end's.
-    pub(super) fn zoned_lines(&self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn zoned_lines(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let [start_zone, end_zone] = self.zone_pickers(window, cx);
         let muted = crate::theme::current(cx).muted_foreground;
         let caption = move |text: &'static str| {
             div()
@@ -314,7 +485,7 @@ impl EventForm {
             .child(caption("Start"))
             .child(selected_by("event-date", self.start_date_menu(cx)))
             .child(selected_by("event-start", self.zoned_start_menu(cx)))
-            .child(self.zone_menu(false, cx));
+            .child(Self::zone_menu(&start_zone, false));
         let end = div()
             .debug_selector(|| "event-zoned-end".to_owned())
             .flex()
@@ -323,16 +494,57 @@ impl EventForm {
             .child(caption("End"))
             .child(self.end_date_menu(cx))
             .child(selected_by("event-end", self.zoned_end_menu(cx)))
-            .child(self.zone_menu(true, cx));
+            .child(Self::zone_menu(&end_zone, true));
         div().flex().flex_col().gap_1().child(start).child(end)
     }
+}
+
+/// The start's zone the draft is written in, when the zones shown name one other than the desktop's.
+#[must_use]
+pub fn start_zone(zones: Option<Zones>) -> Option<Tz> {
+    let zones = zones?;
+    (zones.start != desktop_zone().unwrap_or(Tz::UTC)).then_some(zones.start)
 }
 
 /// The start zone's IANA name the draft is written in, when the zones shown name one other than the desktop's.
 #[must_use]
 pub fn draft_zone(zones: Option<Zones>) -> Option<String> {
-    let zones = zones?;
-    (zones.start != desktop_zone().unwrap_or(Tz::UTC)).then(|| zones.start.name().to_owned())
+    start_zone(zones).map(|zone| zone.name().to_owned())
+}
+
+/// The zone a series repeats in: the start's ([`start_zone`]), unless the event takes whole days (whose days are the
+/// desktop's: the globe is hidden then).
+#[must_use]
+pub fn series_zone(zones: Option<Zones>, all_day: bool) -> Option<Tz> {
+    start_zone(zones.filter(|_| !all_day))
+}
+
+/// The day a series starting at `slot` starts on: its start's date in the zone it repeats in, which gives its
+/// weekday, its week and its date of the month.
+#[must_use]
+pub fn series_day(slot: Slot, zones: Option<Zones>) -> NaiveDate {
+    series_zone(zones, slot.all_day).map_or(slot.start.date(), |zone| wall_in(slot.start, zone).date())
+}
+
+/// `date`'s midnight as `zone` writes it, with its offset then (the desktop's without a zone): a series' first and
+/// last days.
+#[must_use]
+pub fn midnight(date: NaiveDate, zone: Option<Tz>) -> ZonedTime {
+    let wall = date.and_time(NaiveTime::MIN);
+    let Some(zone) = zone else {
+        return model::zoned(wall);
+    };
+    // a midnight the zone's clock skips is the first moment of that day
+    zone.from_local_datetime(&wall)
+        .earliest()
+        .or_else(|| zone.from_local_datetime(&(wall + Duration::hours(1))).earliest())
+        .map_or_else(
+            || model::zoned(wall),
+            |at| ZonedTime {
+                ms: at.timestamp_millis(),
+                offset_minutes: at.offset().fix().local_minus_utc() / 60,
+            },
+        )
 }
 
 /// A slot's times as the draft writes them: the start with its zone's offset, the end with its own.
@@ -435,5 +647,101 @@ mod tests {
             end: chrono_tz::Asia::Kolkata,
         };
         assert_eq!(zoned_slot(slot, Some(apart)).1, zoned_in(slot.end, Some(other)));
+    }
+
+    /// A zone far from the desktop's, and a start on 2026-11-10 (a Tuesday) whose day there is another.
+    fn far_start() -> (Tz, Slot, NaiveDate) {
+        let desktop = Zones::desktop().start;
+        let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        [chrono_tz::Pacific::Honolulu, chrono_tz::Pacific::Kiritimati]
+            .into_iter()
+            .filter(|zone| *zone != desktop)
+            .find_map(|zone| {
+                (0..24).find_map(|hour| {
+                    let start = day.and_hms_opt(hour, 0, 0).unwrap();
+                    let there = wall_in(start, zone).date();
+                    (there != day).then(|| (zone, Slot::new(start, start + Duration::hours(1)), there))
+                })
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_series_starts_on_the_start_zone_s_day() {
+        let (far, slot, there) = far_start();
+        let desktop = Zones::desktop();
+        assert_eq!(series_day(slot, None), slot.start.date());
+        assert_eq!(series_day(slot, Some(desktop)), slot.start.date());
+        let zones = Zones {
+            start: far,
+            end: desktop.end,
+        };
+        assert_eq!(series_zone(Some(zones), false), Some(far));
+        assert_eq!(series_day(slot, Some(zones)), there);
+        // an all-day event's days stay the desktop's
+        assert_eq!(series_zone(Some(zones), true), None);
+        assert_eq!(series_day(slot.with_all_day(true), Some(zones)), slot.start.date());
+    }
+
+    #[test]
+    fn a_series_day_is_written_as_its_zone_s_midnight() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let honolulu = midnight(day, Some(chrono_tz::Pacific::Honolulu));
+        assert_eq!(honolulu.offset_minutes, -600);
+        assert_eq!(
+            honolulu.ms,
+            Utc.from_utc_datetime(&day.and_hms_opt(10, 0, 0).unwrap())
+                .timestamp_millis()
+        );
+        assert_eq!(midnight(day, None), model::zoned(day.and_time(NaiveTime::MIN)));
+        // Santiago's clock skips its midnight on 2026-09-06: the day starts at 01:00 there
+        let skipped = NaiveDate::from_ymd_opt(2026, 9, 6).unwrap();
+        let santiago = midnight(skipped, Some(chrono_tz::America::Santiago));
+        let shifted = santiago.ms + i64::from(santiago.offset_minutes) * 60_000;
+        assert_eq!(DateTime::from_timestamp_millis(shifted).unwrap().date_naive(), skipped);
+    }
+
+    #[test]
+    fn a_chosen_zone_the_list_lacks_takes_its_namesake_s_place_or_joins_by_offset() {
+        let november = at(2026, 11, 3, 10);
+        let listed = choices(november);
+        let istanbul = listed
+            .iter()
+            .find(|(_, name)| name == "(UTC+03:00) Istanbul")
+            .map(|(zone, _)| *zone)
+            .unwrap();
+        let alias = if istanbul == chrono_tz::Asia::Istanbul {
+            chrono_tz::Europe::Istanbul
+        } else {
+            chrono_tz::Asia::Istanbul
+        };
+        let with_alias = choices_with(listed.clone(), alias, november);
+        assert_eq!(with_alias.len(), listed.len());
+        assert!(with_alias.contains(&(alias, "(UTC+03:00) Istanbul".to_owned())));
+        let eastern = chrono_tz::US::Eastern;
+        let with_eastern = choices_with(listed.clone(), eastern, november);
+        assert_eq!(with_eastern.len(), listed.len() + 1);
+        let offsets: Vec<i32> = with_eastern
+            .iter()
+            .map(|(zone, _)| november.with_timezone(zone).offset().fix().local_minus_utc())
+            .collect();
+        assert!(offsets.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(choices_with(listed.clone(), istanbul, november), listed);
+    }
+
+    #[test]
+    fn a_zone_row_is_found_by_its_city_its_region_or_its_offset() {
+        let row = ZoneChoice::new(
+            "event-start-zone",
+            chrono_tz::America::New_York,
+            "(UTC-05:00) New York".to_owned(),
+        );
+        assert_eq!(row.selector.as_ref(), "event-start-zone-america-new_york");
+        assert_eq!(row.value(), &chrono_tz::America::New_York);
+        assert_eq!(row.title().as_ref(), "(UTC-05:00) New York");
+        for query in ["new y", "NEW YORK", "america", "-05:00", " york "] {
+            assert!(row.matches(query), "{query}");
+        }
+        assert!(!row.matches("honolulu"));
     }
 }

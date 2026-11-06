@@ -290,6 +290,8 @@ pub struct EventForm {
     slot: Slot,
     /// The start's and the end's time zones, while the globe shows them.
     zones: Option<zones::Zones>,
+    /// The two zone pickers, once the globe has shown them.
+    zone_pickers: Option<zones::ZonePickers>,
     online: bool,
     show_as: EventShowAs,
     reminder: Option<u32>,
@@ -340,8 +342,7 @@ impl EventForm {
         let cancel_note = input("Add a message for the attendees (optional)", window, cx);
         let body = Self::body_editor(core.read_only(), window, cx);
         let format_bar = cx.new(|cx| FormatBar::new(body.clone(), cx).without_discard());
-        let until_picker = Self::date_picker(window, cx);
-        let custom_until_picker = Self::date_picker(window, cx);
+        let (until_picker, custom_until_picker) = (Self::date_picker(window, cx), Self::date_picker(window, cx));
         let subscriptions = Self::subscriptions(
             [&required, &optional],
             &body,
@@ -378,6 +379,7 @@ impl EventForm {
             optional_shown: false,
             slot: Slot::next_half_hour(now),
             zones: None,
+            zone_pickers: None,
             online: false,
             show_as: EventShowAs::Busy,
             reminder: Some(15),
@@ -461,7 +463,7 @@ impl EventForm {
             }),
             cx.subscribe_in(until, window, |this: &mut Self, _, event: &DatePickerEvent, _, cx| {
                 let DatePickerEvent::Change(picked) = event;
-                let start = this.slot.start.date();
+                let start = this.series_day();
                 if let Some(repeat) = &mut this.repeat {
                     repeat.until = repeat::picked_until(picked.start().map(|time| time.date()), start);
                 }
@@ -472,7 +474,7 @@ impl EventForm {
                 window,
                 |this: &mut Self, _, event: &DatePickerEvent, _, cx| {
                     let DatePickerEvent::Change(picked) = event;
-                    let start = this.slot.start.date();
+                    let start = this.series_day();
                     if let Some(custom) = &mut this.custom {
                         custom.until = repeat::picked_until(picked.start().map(|time| time.date()), start);
                     }
@@ -605,11 +607,12 @@ impl EventForm {
         } else {
             self.body_seed.clone().unwrap_or_else(|| self.body_html(cx))
         };
-        let start = self.slot.start.date();
+        let start = self.series_day();
         Fields {
             subject: self.title.read(cx).value().to_string(),
             slot: self.slot,
-            zones: self.zones,
+            // an all-day event's days are the desktop's (the globe is hidden then)
+            zones: self.zones.filter(|_| !self.slot.all_day),
             attendees: self.attendees.clone(),
             location: self.location.read(cx).value().to_string(),
             body_html,
@@ -622,17 +625,16 @@ impl EventForm {
                 .repeat
                 .as_ref()
                 .filter(|_| self.edits_series())
-                .map(|repeat| repeat.recurrence(start)),
+                .map(|repeat| repeat.recurrence(start, self.series_zone())),
         }
     }
 
-    /// Moves the event to `slot`, and the day beside it to its date; a series' preset follows the new day.
+    /// Moves the event to `slot`, and the day beside it to its date; a series' preset follows the new day (the start
+    /// zone's).
     pub fn set_slot(&mut self, slot: Slot, cx: &mut Context<Self>) {
-        let from = self.slot.start.date();
+        let from = self.series_day();
         self.slot = slot;
-        if let Some(repeat) = &self.repeat {
-            self.repeat = Some(repeat.moved(from, slot.start.date()));
-        }
+        self.follow_series_day(from);
         if slot.start.date() != self.day {
             self.day = slot.start.date();
             self.read_day(cx);
@@ -1005,7 +1007,7 @@ impl EventForm {
         }
         match &self.series {
             Series::New => {
-                let start = self.slot.start.date();
+                let start = self.series_day();
                 let repeat = series.then(|| Repeat::preset(repeat::Preset::Weekly, start));
                 self.set_repeat(repeat, window, cx);
             }
@@ -1073,7 +1075,7 @@ impl EventForm {
 
     /// Opens the custom recurrence dialog on the series' recurrence.
     pub fn open_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let start = self.slot.start.date();
+        let start = self.series_day();
         let custom = Custom::of(self.repeat.as_ref(), start);
         let until = custom.until;
         self.custom = Some(custom);
@@ -1100,7 +1102,7 @@ impl EventForm {
     /// The custom dialog's Save: its recurrence becomes the series'.
     fn save_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(custom) = self.custom.take() else { return };
-        let repeat = custom.repeat(self.slot.start.date());
+        let repeat = custom.repeat(self.series_day());
         self.set_repeat(Some(repeat), window, cx);
     }
 }
@@ -1501,7 +1503,7 @@ impl EventForm {
     #[must_use]
     pub fn printable(&self, cx: &App) -> print::Printable {
         let cycle = clock::cycle(cx);
-        let start = self.slot.start.date();
+        let start = self.series_day();
         let names = |required: bool| {
             self.attendees
                 .iter()
@@ -1754,10 +1756,10 @@ impl EventForm {
         )
     }
 
-    fn when_row(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+    fn when_row(&mut self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let slot = self.slot;
         let zoned = self.zones.is_some() && !slot.all_day;
-        let zoned_lines = zoned.then(|| self.zoned_lines(cx));
+        let zoned_lines = zoned.then(|| self.zoned_lines(window, cx));
         let date_menu = (!zoned).then(|| self.date_menu(cx));
         let start_menu = (!slot.all_day && !zoned).then(|| self.start_menu(cx));
         let end_menu = (!slot.all_day && !zoned).then(|| self.end_menu(cx));
@@ -2070,7 +2072,7 @@ impl Render for EventForm {
                     .then(|| self.suggestions_view(Need::Optional, palette, cx))
                     .flatten(),
             )
-            .child(self.when_row(palette, cx))
+            .child(self.when_row(palette, window, cx))
             .children(self.repeat_row(palette, cx))
             .children(self.channel_row(palette, cx))
             .child(self.location_row(palette, window, cx))
