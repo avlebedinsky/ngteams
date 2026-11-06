@@ -109,18 +109,7 @@ impl CallStage {
                 "call-recording-policy",
             )
         };
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_x_1()
-            .child(text)
-            .child(meeting::link_text(
-                selector,
-                SharedString::from("Privacy policy"),
-                PRIVACY_POLICY.to_owned(),
-                palette,
-            ))
-            .into_any_element()
+        meeting::text_with_link(selector, &text, "Privacy policy", PRIVACY_POLICY, palette)
     }
 
     /// A recording's notice while it shows: "Recording and transcription" (the audio alone: "Audio recording and

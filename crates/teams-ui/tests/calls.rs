@@ -16,6 +16,9 @@ pub mod common;
 mod health;
 #[path = "common/notices.rs"]
 mod notices;
+/// A recording's notice that fits its card, and Controls' checks a lagging read doesn't flip back.
+#[path = "calls/stage_fit.rs"]
+mod stage_fit;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

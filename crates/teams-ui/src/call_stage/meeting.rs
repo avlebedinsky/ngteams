@@ -414,6 +414,7 @@ impl CallStage {
                 .top(px(8.0))
                 .left_0()
                 .right_0()
+                .px_2()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -1024,7 +1025,8 @@ pub(super) fn notice(
                 .items_center()
                 .gap_2()
                 .child(glyph.icon().size(px(16.0)))
-                .child(div().flex_1().text_sm().child(heading))
+                // a text's narrowest is its whole line in GPUI: without `min_w_0` a long heading pushes Close out
+                .child(div().flex_1().min_w_0().text_sm().child(heading))
                 .child(selected_by(
                     close_id.clone(),
                     icon_button(SharedString::from(close_id), Glyph::X, "Close")
@@ -1033,6 +1035,40 @@ pub(super) fn notice(
                 )),
         )
         .child(div().text_sm().text_color(rgb(palette.muted_foreground)).child(line))
+        .into_any_element()
+}
+
+/// `text` and then the link `label` in one run of text, as Teams' notices end with their privacy policy: the link in the
+/// brand's colour, underlined, opens `url` in the browser. One run wraps as a paragraph inside its card. A row of the
+/// text and the link apart overflowed it: GPUI measures a text's narrowest as its whole line, so a flex row never
+/// wraps it, however long a name in it makes it.
+pub(super) fn text_with_link(
+    selector: &'static str,
+    text: &str,
+    label: &str,
+    url: &'static str,
+    palette: Palette,
+) -> AnyElement {
+    let whole = format!("{text} {label}");
+    let link = whole.len() - label.len()..whole.len();
+    let style = gpui::HighlightStyle {
+        color: Some(rgb(palette.brand).into()),
+        underline: Some(gpui::UnderlineStyle {
+            thickness: px(1.0),
+            ..gpui::UnderlineStyle::default()
+        }),
+        ..gpui::HighlightStyle::default()
+    };
+    div()
+        .debug_selector(move || selector.to_owned())
+        .w_full()
+        .child(
+            gpui::InteractiveText::new(
+                selector,
+                gpui::StyledText::new(whole).with_highlights([(link.clone(), style)]),
+            )
+            .on_click(vec![link], move |_, _, cx| cx.open_url(url)),
+        )
         .into_any_element()
 }
 

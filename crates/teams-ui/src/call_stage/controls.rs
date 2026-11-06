@@ -4,8 +4,11 @@
 //! - **Controls** (the toolbar's shield, the organizer's): Lock meeting; Enable lobby; "Allow all participants to:"
 //!   Present, Chat, Unmute themselves and Turn on their cameras (the last two greyed while everyone may present: the
 //!   restrictions bind attendees only); View more options where the meeting's options page is known. Each check is the
-//!   meeting's option as the service read it when the call became the organizer's, then as the conversation told it;
-//!   a change shows at once ([`Ask::MeetingOption`]) and is read again shortly after, so one not taken goes back.
+//!   meeting's option as the service read it when the call became the organizer's, then as the conversation told it.
+//!   A change shows at once ([`Ask::MeetingOption`]) and the options are read again shortly after. The value the user
+//!   set stays shown until a read shows the same, the conversation tells that option anew, or the change wasn't
+//!   taken: the middle tier's read can lag its write by seconds (live 2026-11-06, Present turned back on read back
+//!   off 3 s later), so a read that disagrees doesn't flip the check back.
 //! - **Mute all** (People, beside "Currently in this call", the organizer's while anyone else isn't muted): "Mute
 //!   everyone?" asks first ([`Ask::MuteAll`]).
 //! - **"You've been muted"**: the organizer muted the account ([`teams_core::MeetingState::muted_by_organizer`]): its
@@ -30,8 +33,12 @@ pub(super) struct ControlsUi {
     /// The organizer's mute "You've been muted" shows for, and the newest one seen.
     toast: Option<u64>,
     toast_seen: Option<u64>,
-    /// The meeting's options as Controls show them, for the call they were read for.
+    /// The meeting's options as the service last had them (read, then as the conversation told them), for the call
+    /// they were read for.
     options: Option<(CallId, MeetingOptions)>,
+    /// What the user set in Controls that the service hasn't shown yet, for its call: shown over `options` (see the
+    /// module docs).
+    set: Option<(CallId, MeetingOptions)>,
     /// The options as the conversation last told them.
     told: MeetingOptions,
     reading: Option<Task<()>>,
@@ -69,9 +76,13 @@ impl CallStage {
             controls.toast = None;
         }
         if active.meeting.options != controls.told {
-            controls.told = active.meeting.options;
+            let before = std::mem::replace(&mut controls.told, active.meeting.options);
             if let Some((_, options)) = controls.options.as_mut() {
                 *options = options.updated(controls.told);
+            }
+            // told after the change, so newer than it: what it tells stands
+            if let Some((_, set)) = controls.set.as_mut() {
+                told_anew(set, before, controls.told);
             }
         }
         let read = controls.options.as_ref().is_some_and(|(call, _)| *call == active.id);
@@ -98,6 +109,12 @@ impl CallStage {
                     (None, None) => MeetingOptions::default().updated(told),
                 };
                 stage.controls.options = Some((call, options));
+                // a read that shows what the user set confirms it; one that doesn't may lag the change, and is kept under it
+                if read.is_some()
+                    && let Some((_, set)) = stage.controls.set.as_mut().filter(|(of, _)| *of == call)
+                {
+                    drop_same(set, options);
+                }
                 cx.notify();
             });
         }));
@@ -128,30 +145,53 @@ impl CallStage {
         self.controls.hovered
     }
 
-    /// The meeting's options as Controls show them: Teams' defaults where nothing was read or told.
+    /// The meeting's options as Controls show them: what the user set over what the service has, Teams' defaults where
+    /// nothing was read or told.
     fn shown_options(&self, call: CallId) -> MeetingOptions {
-        self.controls
+        let had = self
+            .controls
             .options
             .filter(|(of, _)| *of == call)
-            .map_or(self.controls.told, |(_, options)| options)
+            .map_or(self.controls.told, |(_, options)| options);
+        self.controls
+            .set
+            .filter(|(of, _)| *of == call)
+            .map_or(had, |(_, set)| had.updated(set))
     }
 
     /// One of Controls' options changed: shown at once, sent, and read again shortly after.
     fn change_option(&mut self, option: MeetingOption, cx: &mut Context<Self>) {
-        let Some(active) = self.live(cx) else { return };
-        let mut options = self.shown_options(active.id);
-        match option {
-            MeetingOption::Lobby(on) => options.lobby = Some(on),
-            MeetingOption::Present(on) => options.present = Some(on),
-            MeetingOption::Chat(on) => options.chat = Some(on),
-            MeetingOption::Attendees { unmute, camera } => {
-                options.unmute = Some(unmute);
-                options.camera = Some(camera);
-            }
+        let Some(call) = self.live(cx).map(|active| active.id) else {
+            return;
+        };
+        let set = match self.controls.set.take() {
+            Some((of, set)) if of == call => set,
+            _ => MeetingOptions::default(),
+        };
+        self.controls.set = Some((call, set.updated(changed(option))));
+        let stage = cx.weak_entity();
+        calls::ask_then(
+            &self.calls,
+            &self.core,
+            &self.trace,
+            Ask::MeetingOption(option),
+            cx,
+            move |taken, cx| {
+                if !taken {
+                    let _ = stage.update(cx, |stage, cx| stage.option_not_taken(call, option, cx));
+                }
+            },
+        );
+        self.read_options(call, READ_AGAIN_AFTER, cx);
+    }
+
+    /// The change `option` of `call`'s options wasn't taken: the check shows what the service has again, unless the
+    /// user has since set it otherwise.
+    fn option_not_taken(&mut self, call: CallId, option: MeetingOption, cx: &mut Context<Self>) {
+        if let Some((_, set)) = self.controls.set.as_mut().filter(|(of, _)| *of == call) {
+            drop_same(set, changed(option));
+            cx.notify();
         }
-        self.controls.options = Some((active.id, options));
-        self.ask(Ask::MeetingOption(option), cx);
-        self.read_options(active.id, READ_AGAIN_AFTER, cx);
     }
 
     /// The toolbar's Controls (the organizer's, in a group call or a meeting that is up), its menu under it while open.
@@ -487,6 +527,50 @@ fn menu_row(selector: &'static str, label: &'static str, palette: Palette) -> gp
         .cursor_pointer()
         .hover(move |row| row.bg(rgb(palette.hover)))
         .child(div().flex_1().min_w_0().truncate().child(label))
+}
+
+/// The options' five checks alike, in Controls' order: lobby, present, chat, unmute, camera.
+fn checks(options: &mut MeetingOptions) -> [&mut Option<bool>; 5] {
+    [
+        &mut options.lobby,
+        &mut options.present,
+        &mut options.chat,
+        &mut options.unmute,
+        &mut options.camera,
+    ]
+}
+
+/// What `option` sets, and nothing else.
+fn changed(option: MeetingOption) -> MeetingOptions {
+    let mut options = MeetingOptions::default();
+    match option {
+        MeetingOption::Lobby(on) => options.lobby = Some(on),
+        MeetingOption::Present(on) => options.present = Some(on),
+        MeetingOption::Chat(on) => options.chat = Some(on),
+        MeetingOption::Attendees { unmute, camera } => {
+            options.unmute = Some(unmute);
+            options.camera = Some(camera);
+        }
+    }
+    options
+}
+
+/// Drops each value the user set (`set`) that `same` holds too: a read that shows it, or a change of it that failed.
+fn drop_same(set: &mut MeetingOptions, mut same: MeetingOptions) {
+    for (set, same) in checks(set).into_iter().zip(checks(&mut same)) {
+        if set.is_some() && *set == *same {
+            *set = None;
+        }
+    }
+}
+
+/// Drops each value the user set (`set`) of an option the conversation told anew, from `before` to `now`.
+fn told_anew(set: &mut MeetingOptions, mut before: MeetingOptions, mut now: MeetingOptions) {
+    for ((set, before), now) in checks(set).into_iter().zip(checks(&mut before)).zip(checks(&mut now)) {
+        if now.is_some() && *before != *now {
+            *set = None;
+        }
+    }
 }
 
 /// The thin line between Controls' groups.

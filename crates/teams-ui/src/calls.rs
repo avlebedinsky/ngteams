@@ -1716,7 +1716,21 @@ fn local_refusal_text(why: &str) -> String {
 /// why when it goes nowhere: decided here, or refused by the engine). The answer updates `calls`.
 /// Nothing at all in a build that shows no calls: no trace, no refusal, nothing asked of the engine.
 pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, ask: Ask, cx: &mut App) {
+    ask_then(calls, core, trace, ask, cx, |_, _| {});
+}
+
+/// [`ask`], and then `then` told whether the engine took it (`false`: refused here or by the engine, or no calls shown).
+/// `then` is told later, never while this runs, so a view may ask from within its own update.
+pub fn ask_then(
+    calls: &Entity<Calls>,
+    core: &Arc<dyn Core>,
+    trace: &Arc<ViewTrace>,
+    ask: Ask,
+    cx: &mut App,
+    then: impl FnOnce(bool, &mut App) + 'static,
+) {
     if !calls.read(cx).shows() {
+        cx.defer(move |cx| then(false, cx));
         return;
     }
     let mut asked = TraceLine::new("call", "asked").kind(ask.name());
@@ -1727,6 +1741,7 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
     log::info!("call: {} asked{}", ask.name(), logged_chat(&ask));
     // the caption pane shown or hidden here; the captions themselves only when they don't run for the saved transcript
     let Some(ask) = calls.update(cx, |calls, cx| calls.caption_pane_ask(ask, cx)) else {
+        cx.defer(move |cx| then(true, cx));
         return;
     };
     let action = match calls.read(cx).action_for(&ask) {
@@ -1734,6 +1749,7 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
         Err(why) => {
             refused(trace, &ask, why);
             calls.update(cx, |calls, cx| calls.refuse(&ask, why, local_refusal_text(why), cx));
+            cx.defer(move |cx| then(false, cx));
             return;
         }
     };
@@ -1756,8 +1772,10 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
         if let Err(error) = &answer {
             refused(&trace, &ask, refusal_kind(error));
         }
+        let taken = answer.is_ok();
         // calls that are gone have nobody left to tell
         let _ = weak.update(cx, |calls, cx| calls.answered(&ask, start, &action, answer, cx));
+        cx.update(|cx| then(taken, cx));
     })
     .detach();
 }
