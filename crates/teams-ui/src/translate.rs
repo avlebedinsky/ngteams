@@ -32,10 +32,6 @@ use crate::settings::SettingsModel;
 
 /// A tool captions can be translated with ([`crate::local_ai`]), with the model picked for [`Work::Captions`].
 pub use crate::local_ai::Backend;
-/// Which tool translates, as the settings keep it.
-pub use crate::local_ai::ToolChoice as TranslatorChoice;
-/// The tools found on this computer.
-pub use crate::local_ai::Tools as Translators;
 pub use crate::local_ai::{AiChoice, Failure, Model, Work};
 
 /// The languages captions can be translated into: a code and its English name.
@@ -266,7 +262,7 @@ impl CaptionTranslation {
             return;
         };
         self.schedule = Some(Schedule::new(code));
-        let (backend, program) = match Translators::of(cx).pick(choice.tool) {
+        let (backend, program) = match crate::local_ai::Tools::of(cx).pick(choice.tool) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.status = Status::Failed { failure, language };

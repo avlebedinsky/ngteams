@@ -464,11 +464,9 @@ fn answers_lose_a_repeated_caption_tag_and_are_capped() {
 #[test]
 #[ignore = "runs the installed claude and codex, which reach their providers"]
 fn the_installed_tools_translate() {
-    let translators = crate::translate::Translators::detect();
+    let translators = crate::local_ai::Tools::detect();
     for backend in translators.installed() {
-        let (_, program) = translators
-            .pick(crate::translate::TranslatorChoice::Only(backend))
-            .unwrap();
+        let (_, program) = translators.pick(crate::local_ai::ToolChoice::Only(backend)).unwrap();
         let session = Session::start(spec(backend, program, Limits::default()));
         let mut first = caption(
             "Lab Speaker",

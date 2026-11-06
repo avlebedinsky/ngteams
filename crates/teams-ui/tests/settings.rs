@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use gpui::{AppContext as _, TestAppContext};
 use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_media::video::effects::{Backdrop, Background};
+use teams_ui::local_ai::ToolChoice as TranslatorChoice;
 use teams_ui::local_ai::{AiChoice, Model};
 use teams_ui::settings::{
     AccountSettings, DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications,
     Problem, Settings, SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
 };
 use teams_ui::theme::{self, Appearance, THEMES};
-use teams_ui::translate::{Backend, TranslatorChoice};
+use teams_ui::translate::Backend;
 
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 

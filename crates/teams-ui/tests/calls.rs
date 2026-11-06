@@ -40,13 +40,14 @@ use teams_ui::call_stage::AUTO_CLOSE;
 use teams_ui::call_view;
 use teams_ui::call_window::{CallWindows, CallWindowsEvent};
 use teams_ui::calls::{Ask, CallKind, EndReason, Ended, Verdict};
+use teams_ui::local_ai::Tools as Translators;
 use teams_ui::notify::NoticeKind;
 use teams_ui::ringtone::{Ringer, Ringtone};
 use teams_ui::settings::{Settings, SettingsModel, attach_devices};
 use teams_ui::settings_view::{Page, TestCallOffer};
 use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::switcher::CallCommand;
-use teams_ui::translate::{Backend, Translators};
+use teams_ui::translate::Backend;
 use teams_ui::video::{Tile, VideoFeed};
 use teams_ui::{Calls, ViewTrace};
 

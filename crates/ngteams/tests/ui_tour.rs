@@ -247,7 +247,7 @@ const STEPS: [Step; 5 + 240] = [
         paste_picture(shell, window, cx);
     }),
     ("compose-picture-dark", |shell, _, cx| {
-        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx)
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
     // sent: the message with the picture in the chat
     ("chat-picture-sent-dark", |shell, window, cx| {
@@ -1449,14 +1449,14 @@ const STEPS: [Step; 5 + 240] = [
     ("call-window-captions", |shell, _, cx| translated_captions(shell, cx)),
     // in Teams Dark, the tool picked gone: the captions as spoken under a notice saying why, with Try again
     ("call-window-captions-failed-dark", |shell, _, cx| {
-        cx.set_global(teams_ui::translate::Translators::default());
+        cx.set_global(teams_ui::local_ai::Tools::default());
         let model = shell.read(cx).settings().clone();
         model.update(cx, |model, cx| {
             model.change(
                 |settings| {
                     settings.appearance.theme = teams_ui::theme::DARK_KEY;
                     settings.caption_translator = teams_ui::translate::AiChoice::of(
-                        teams_ui::translate::TranslatorChoice::Only(teams_ui::translate::Backend::Codex),
+                        teams_ui::local_ai::ToolChoice::Only(teams_ui::translate::Backend::Codex),
                     );
                 },
                 cx,
@@ -2361,7 +2361,7 @@ fn translated_captions(shell: &Entity<Shell>, cx: &mut App) {
         cx.quit();
         return;
     }
-    cx.set_global(teams_ui::translate::Translators::with(vec![(
+    cx.set_global(teams_ui::local_ai::Tools::with(vec![(
         teams_ui::translate::Backend::Claude,
         program,
     )]));

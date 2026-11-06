@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::AppContext as _;
 
 use super::*;
-use crate::local_ai::executable;
+use crate::local_ai::{ToolChoice as TranslatorChoice, Tools as Translators, executable};
 use crate::settings::Settings;
 
 #[test]
