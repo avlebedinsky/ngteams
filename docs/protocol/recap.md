@@ -166,6 +166,18 @@ Transcript pane and "…").
   to Meeting Recaps) are a meeting's, and the Transcript pane says "No transcript available" ("The transcript for this
   meeting was never created, has expired, or has been deleted."). The recording is played as a meeting's (the item's
   `content?format=dash`, `streamembed.aspx`).
+- **Share → Copy link** (a later capture the same day, the same chat: the card's Share and the tab's, Copy link alone)
+  opens the meeting's "Share Recap" dialog, its preview "Recap: Call with <name> <weekday>, <month> <day> | Meeting |
+  Microsoft Teams", and copies, with no request, the `meetingrecap` link (as plain text, and as HTML, an anchor titled
+  so) in a 1:1 chat's shape: `threadType=OneOnOneChat&meetingType=Unknown`. From the Recap tab it is
+  `driveId&driveItemId&sitePath=<sharing link>&fileUrl=<the file's address>?web=1&threadId&organizerId&tenantId&callId&threadType&meetingType&subType=RecapSharingLink_RecapCore&recapType`,
+  `recapType=Recording` (its transcript is invalid); from the card it is
+  `driveId&driveItemId&sitePath=<sharing link>&fileUrl=<the same sharing link>&threadId&callId&threadType&meetingType&subType=RecapSharingLink_RecapChiclet&recapType`,
+  no organizer or tenant, `recapType=RecordingAndTranscript` (as the message's `contentTypes` say). The link's origin
+  is the web client's own (`teams.cloud.microsoft` there).
+- **Names**: the 1:1 chat's lines name the account by its own name ("AI started recording.", "AI stopped
+  recording.", "saved to AI's OneDrive"), as the meeting chat's do; no other line of the 1:1 chat names anyone. No
+  group chat of lab accounts holds a recording, so a group chat's lines weren't seen.
 
 ## What `ngteams` does
 
@@ -214,5 +226,6 @@ the tabs while it holds one. Its Recap tab makes the meeting's read with the cha
 (its parts beside it when it was recorded more than once), the latest shown first; a recording with no transcript
 to read keeps the Transcript pane, saying there is none as Teams does, and the chat's captions saved on this computer
 stay sessions of their own (Teams' transcript of the same time would win, as a meeting's). A recording's start and
-stop name the account by its name, as Teams' 1:1 chat does. The recap link Share copies
-keeps the meeting's shape (`threadType=meeting`): the call's own wasn't captured.
+stop name the account by its name, as Teams' 1:1 chat does. Share → Copy link copies a 1:1 call's link in Teams'
+shapes above (the tab's without `fileUrl`, which only the item's own read gives); a group chat's keeps the meeting's
+shape (`threadType=meeting`), its own not captured.

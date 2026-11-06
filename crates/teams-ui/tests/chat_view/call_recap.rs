@@ -169,6 +169,18 @@ fn the_cards(view: &Entity<ChatView>, shown: &[MessageItem], cx: &mut VisualTest
     assert_eq!(card.badge().as_deref(), Some("51s"));
     let start = NOON + MINUTE;
     assert_eq!(card.span, Some((start, start + 51_000)));
+    // Share → Copy link copies the card's own link, as browser Teams' 1:1 chat copies it
+    let link = card.share_link(CHAT).expect("a recap link");
+    for part in [
+        "threadType=OneOnOneChat",
+        "meetingType=Unknown",
+        "subType=RecapSharingLink_RecapChiclet",
+        "recapType=RecordingAndTranscript",
+        "fileUrl=",
+    ] {
+        assert!(link.contains(part), "{part} in {link}");
+    }
+    assert!(!link.contains("organizerId"), "{link}");
     let Some(Body::Card(alone)) = shown.iter().find(|item| item.id == "7").map(|item| &item.body) else {
         panic!("no transcript card");
     };

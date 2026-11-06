@@ -5,8 +5,8 @@
 #![cfg(test)]
 
 use teams_proto::recap::{
-    ContentKind, MCPS_AUDIENCE, MeetingContent, MeetingContents, TranscriptLocation, recap_link, recap_parts,
-    recap_span, transcript_language,
+    ContentKind, LinkFrom, MCPS_AUDIENCE, MeetingContent, MeetingContents, TranscriptLocation, recap_link,
+    recap_link_from, recap_parts, recap_span, transcript_language,
 };
 use teams_proto::{Read as _, Service};
 
@@ -222,6 +222,80 @@ fn the_recap_link_names_the_part_and_its_meeting() {
     let mut bare = parts[0].clone();
     bare.item_id = None;
     assert_eq!(recap_link(&bare, THREAD), None);
+}
+
+#[test]
+fn a_1_1_calls_recap_link_is_a_1_1_chats_from_the_tab_and_the_cards_shape_from_its_card() {
+    const CALL_CHAT: &str =
+        "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+    let contents = MeetingContents::read_answer(&answer()).expect("an answer");
+    let mut part = recap_parts(&contents).remove(0);
+    part.transcript = None;
+    let keys = |link: &str| -> Vec<(String, String)> {
+        url::Url::parse(link)
+            .expect("a URL")
+            .query_pairs()
+            .into_owned()
+            .collect()
+    };
+    let names = |pairs: &[(String, String)]| pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+    // the Recap tab's Share, as browser Teams copies it for a 1:1 call (its fileUrl only the item's own read gives)
+    let tab = keys(&recap_link(&part, CALL_CHAT).expect("a link"));
+    assert_eq!(
+        names(&tab),
+        [
+            "driveId",
+            "driveItemId",
+            "sitePath",
+            "threadId",
+            "organizerId",
+            "tenantId",
+            "callId",
+            "threadType",
+            "meetingType",
+            "subType",
+            "recapType"
+        ]
+    );
+    let value = |pairs: &[(String, String)], name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(value(&tab, "threadType").as_deref(), Some("OneOnOneChat"));
+    assert_eq!(value(&tab, "meetingType").as_deref(), Some("Unknown"));
+    assert_eq!(value(&tab, "subType").as_deref(), Some("RecapSharingLink_RecapCore"));
+    assert_eq!(value(&tab, "recapType").as_deref(), Some("Recording"));
+    // its card's: the sharing link as fileUrl too, no organizer or tenant, the card's subType
+    part.transcript = Some("transcript".to_owned());
+    let card = keys(&recap_link_from(&part, CALL_CHAT, LinkFrom::Card).expect("a link"));
+    assert_eq!(
+        names(&card),
+        [
+            "driveId",
+            "driveItemId",
+            "sitePath",
+            "fileUrl",
+            "threadId",
+            "callId",
+            "threadType",
+            "meetingType",
+            "subType",
+            "recapType"
+        ]
+    );
+    assert_eq!(value(&card, "fileUrl"), value(&card, "sitePath"));
+    assert_eq!(
+        value(&card, "subType").as_deref(),
+        Some("RecapSharingLink_RecapChiclet")
+    );
+    assert_eq!(value(&card, "recapType").as_deref(), Some("RecordingAndTranscript"));
+    // a meeting's card keeps the Recap tab's shape
+    assert_eq!(
+        recap_link_from(&part, THREAD, LinkFrom::Card),
+        recap_link(&part, THREAD)
+    );
 }
 
 #[test]

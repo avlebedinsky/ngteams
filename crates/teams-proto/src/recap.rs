@@ -364,24 +364,51 @@ pub fn recap_span(parts: &[RecapPart]) -> Option<(i64, i64)> {
     Some((start, end.max(start)))
 }
 
-/// The link Teams' Share → Copy link copies for a part of the recap of the meeting whose chat is `thread`:
-/// `https://teams.microsoft.com/l/meetingrecap?…` with the part's item, its sharing link, the meeting's chat, organizer,
-/// tenant and call, and what the recap holds; `None` without the item or the sharing link.
+/// Where Share → Copy link was asked for: the Recap tab's Share, or the chat's recap card's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkFrom {
+    Recap,
+    Card,
+}
+
+/// The link Teams' Recap tab's Share → Copy link copies for a part of the recap of the chat `thread`
+/// ([`recap_link_from`] from [`LinkFrom::Recap`]).
 #[must_use]
 pub fn recap_link(part: &RecapPart, thread: &str) -> Option<String> {
+    recap_link_from(part, thread, LinkFrom::Recap)
+}
+
+/// The link Teams' Share → Copy link copies for a part of the recap of the chat `thread`, asked for `from` the Recap
+/// tab or the chat's card: `https://teams.microsoft.com/l/meetingrecap?…` with the part's item, its sharing link, the
+/// chat, organizer, tenant and call, and what the recap holds; `None` without the item or the sharing link.
+///
+/// A meeting's (and, as no capture showed a group chat's, a group chat's) is `threadType=meeting` from the Recap tab's
+/// shape. A 1:1 chat's call is `threadType=OneOnOneChat&meetingType=Unknown`; from its card it is the card's own
+/// shape, `subType=RecapSharingLink_RecapChiclet` with the sharing link as `fileUrl` too and no organizer or tenant, as
+/// browser Teams copies it.
+#[must_use]
+pub fn recap_link_from(part: &RecapPart, thread: &str, from: LinkFrom) -> Option<String> {
+    let one_to_one = thread.ends_with("@unq.gbl.spaces");
+    let card = one_to_one && from == LinkFrom::Card;
     let mut url = Url::parse("https://teams.microsoft.com/l/meetingrecap").ok()?;
     {
         let mut query = url.query_pairs_mut();
+        let sharing_link = part.sharing_link.as_deref()?;
         query
             .append_pair("driveId", part.drive_id.as_deref()?)
             .append_pair("driveItemId", part.item_id.as_deref()?)
-            .append_pair("sitePath", part.sharing_link.as_deref()?)
-            .append_pair("threadId", thread);
-        if let Some(organizer) = &part.organizer_id {
-            query.append_pair("organizerId", organizer);
+            .append_pair("sitePath", sharing_link);
+        if card {
+            query.append_pair("fileUrl", sharing_link);
         }
-        if let Some(tenant) = &part.tenant_id {
-            query.append_pair("tenantId", tenant);
+        query.append_pair("threadId", thread);
+        if !card {
+            if let Some(organizer) = &part.organizer_id {
+                query.append_pair("organizerId", organizer);
+            }
+            if let Some(tenant) = &part.tenant_id {
+                query.append_pair("tenantId", tenant);
+            }
         }
         if let Some(call) = &part.call_id {
             query.append_pair("callId", call);
@@ -391,10 +418,19 @@ pub fn recap_link(part: &RecapPart, thread: &str) -> Option<String> {
             (true, false) => "Recording",
             (false, _) => "Transcript",
         };
-        query
-            .append_pair("threadType", "meeting")
-            .append_pair("subType", "RecapSharingLink_RecapCore")
-            .append_pair("recapType", holds);
+        if one_to_one {
+            query
+                .append_pair("threadType", "OneOnOneChat")
+                .append_pair("meetingType", "Unknown");
+        } else {
+            query.append_pair("threadType", "meeting");
+        }
+        let sub_type = if card {
+            "RecapSharingLink_RecapChiclet"
+        } else {
+            "RecapSharingLink_RecapCore"
+        };
+        query.append_pair("subType", sub_type).append_pair("recapType", holds);
     }
     Some(url.into())
 }

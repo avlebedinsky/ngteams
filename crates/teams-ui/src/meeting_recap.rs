@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, TimeZone};
 use teams_proto::chat::{ChatEvent, RecordingContents, RecordingItem, RecordingStatus, chat_event, meeting_times};
-use teams_proto::recap::{RecapPart, recap_link};
+use teams_proto::recap::{LinkFrom, RecapPart, recap_link_from};
 use teams_store::Message;
 
 use crate::clock::HourCycle;
@@ -134,7 +134,12 @@ impl RecapCard {
         let file = shown.file.as_ref()?;
         Some(RecapPart {
             recording: recorded.then(|| shown.link.clone()),
-            transcript: shown.transcript.clone(),
+            // a transcribed call's recording names no transcript to read (Teams' 1:1 card's link still says it holds
+            // one, as its message's contentTypes do): only the link reads this part, so its own link stands for it
+            transcript: shown
+                .transcript
+                .clone()
+                .or_else(|| self.transcript.then(|| shown.link.clone())),
             sharing_link: Some(shown.link.clone()),
             call_id: self.call_id.clone(),
             drive_id: Some(file.drive.clone()),
@@ -149,11 +154,12 @@ impl RecapCard {
         })
     }
 
-    /// The link Share → Copy link copies: the recap's Teams link for the meeting whose chat is `thread`, as the Recap
-    /// tab's Share copies it; `None` without a recording's or a transcript's file.
+    /// The link Share → Copy link copies: the recap's Teams link for the chat `thread`, as Teams' card copies it (a
+    /// meeting's as the Recap tab's Share does, a 1:1 call's in the card's own shape); `None` without a recording's or a
+    /// transcript's file.
     #[must_use]
     pub fn share_link(&self, thread: &str) -> Option<String> {
-        recap_link(&self.part()?, thread)
+        recap_link_from(&self.part()?, thread, LinkFrom::Card)
     }
 
     /// Its line: the span's day and times on `cycle`'s clock in `zone`.
