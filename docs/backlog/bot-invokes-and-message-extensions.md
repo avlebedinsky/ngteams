@@ -12,7 +12,7 @@ is a JSON object with the keys `appId`, `conversation` (an object with the chat'
 `userAadToken` and `value` (an object with `commandContext`).
 
 **They stay denied under the lab rule.** The lab rule lets through everything that reaches nobody, but a bot invoke
-hands a credential to a third party, which the hard rules never allow: `userAadToken` is an Entra token for the lab
+hands a credential to an app's backend, which the hard rules never allow: `userAadToken` is an Entra token for the lab
 account, which the chat service passes on to the app's own backend, whatever the invoke itself does. On the chat
 service it is no mapped write and no carve-out, so `teams_fence::contacting` calls it unreadable; the writing
 scenarios' expected-deny list (`expected.rs`, "bot invokes") only stops it from failing a run. The native client

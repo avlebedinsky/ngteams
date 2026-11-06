@@ -14,10 +14,10 @@ The user's own client follows its [personal-build rules](personal-build.md).
 - The user's own account in `contacts`, identified by MRI and by UPN when given. It may be reached as a lab account
   is, for messages, chats, membership changes, invitations, meetings and calls either way.
 
-Apps and bots aren't people. Their presence in a target does not expand the set of people the lab may reach. No
-account token or credential is sent to a bot, an app's backend or any other third party. Exception: when the user
-starts a recording or live captions, Microsoft's recording bot receives the user's recorder-scoped token, as Teams
-sends it.
+Apps and bots aren't people. Their presence in a target does not expand the set of people the lab may reach. ngteams
+sends a token only where Teams itself sends it, for the same user action, to the service it was issued for, and never
+to a non-Microsoft service (a third-party bot, an app's backend). So when the user starts a recording, transcription
+or live captions, Microsoft's recording bot receives the user's recorder-scoped token, as Teams sends it.
 
 ## Before each live run
 
