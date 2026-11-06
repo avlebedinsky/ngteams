@@ -7,10 +7,15 @@
 //!   thread reads it at each frame, so a change shows on the next frame. Choosing an effect never turns a camera on:
 //!   it only changes the frames of a camera something else turned on.
 //! - **The model** is Google's `MediaPipe` selfie segmenter (landscape, 256 by 144; Apache-2.0), converted to ONNX
-//!   (`tools/selfie-segmenter/convert.py`) and run by tract on the CPU, on a thread of its own beside the camera's
-//!   ([`segment`]: the camera's thread never waits for it, and takes its newest mask), loaded once per process on the
-//!   first frame that needs it. Until its first mask, and when it can't load, there is no person in the frame
-//!   (everything is the background): an effect the user chose never falls back to showing what it hides.
+//!   once, at development time (`tools/selfie-segmenter/convert.py`), and built into the app. It runs on a thread of
+//!   its own beside the camera's ([`segment`]: the camera's thread never waits for it, and takes its newest mask): on
+//!   the GPU where there is one ([`gpu`]: Burn on wgpu, from code generated from the ONNX at build time), else on the
+//!   CPU (tract), loaded once per process on the first frame that needs it. Until its first mask, and when it can't
+//!   load, there is no person in the frame (everything is the background): an effect the user chose never falls back
+//!   to showing what it hides.
+//! - **The edge** is soft, as Teams draws it ([`edge`]): the model's coarse mask refined against the frame's own
+//!   picture so it hugs the person, then feathered over a few pixels, and smoothed over frames where it only
+//!   flickers.
 //! - **The pictures** are decoded once (a stock one from the bytes built in, the user's from its file), cropped to the
 //!   frame's shape and kept as I420 at the frame's size until the choice or the size changes. One that can't be read
 //!   is blurred instead, for the same reason.
@@ -22,6 +27,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::devices::{PixelFormat, VideoFrame};
 
 mod compose;
+mod edge;
+mod gpu;
 mod segment;
 
 pub use segment::{MODEL_HEIGHT, MODEL_WIDTH};

@@ -1,7 +1,6 @@
-//! A frame put together from the person and a new background: the model's mask scaled up to the frame (bilinear),
-//! its edge sharpened there (so it follows the person smoothly rather than the model's coarse pixels), and each plane
-//! blended between the frame and the background, which is either the frame
-//! itself blurred or a picture. The blur is made small (a cell per [`blur_factor`] pixels, the person left out of it
+//! A frame put together from the person and a new background: the model's mask made into a soft edge that hugs the
+//! person ([`super::edge`]), scaled up to the frame (bilinear), and each plane blended between the frame and the
+//! background, which is either the frame itself blurred or a picture. The blur is made small (a cell per [`blur_factor`] pixels, the person left out of it
 //! so they don't bleed into it as a halo), blurred there and scaled back up.
 
 use std::ops::Range;
@@ -13,7 +12,7 @@ use image::{ImageReader, RgbImage};
 use crate::devices::{PixelFormat, VideoFrame};
 use crate::video::convert::{MaxSize, to_i420};
 
-use super::segment::{MODEL_HEIGHT, MODEL_WIDTH};
+use super::edge::EdgeRefiner;
 use super::{Backdrop, to_usize};
 
 /// The blur's radius in cells, and its passes (three box blurs: near a Gaussian).
@@ -21,25 +20,8 @@ const BLUR_RADIUS: usize = 2;
 const BLUR_PASSES: usize = 3;
 /// The largest picture file read, bytes.
 const MAX_PICTURE_FILE: u64 = 64 * 1024 * 1024;
-/// The mask's values (0..=255) below which a pixel is the background, and above which it is the person; between
-/// them the edge, smoothstepped.
-const EDGE: (u32, u32) = (77, 179);
-
-/// The mask's value as a pixel's weight: the edge between [`EDGE`]'s bounds smoothstepped to 0..=255.
-fn edge_table() -> Vec<u8> {
-    let (low, high) = EDGE;
-    (0..=255_u32)
-        .map(|value| {
-            // t in 0..=256 across the edge, then 3t² − 2t³ in 0..=256
-            let t = (value.clamp(low, high) - low) * 256 / (high - low);
-            let smooth = t * t * (3 * 256 - 2 * t) / (256 * 256);
-            u8::try_from(smooth.min(255)).unwrap_or(u8::MAX)
-        })
-        .collect()
-}
-
 /// Bilinear scaling of one 8-bit plane from one size to another (pixel centres matched), in 8-bit fixed point.
-struct Resampler {
+pub(super) struct Resampler {
     from: (usize, usize),
     to: (usize, usize),
     /// The output columns in runs that share their two source columns: the source columns either side and the run's
@@ -73,10 +55,20 @@ impl Resampler {
     }
 
     /// The same scaling, made again only when the sizes changed.
-    fn kept(kept: Option<Self>, from: (usize, usize), to: (usize, usize)) -> Self {
+    pub(super) fn kept(kept: Option<Self>, from: (usize, usize), to: (usize, usize)) -> Self {
         match kept {
             Some(resampler) if resampler.from == from && resampler.to == to => resampler,
             _ => Self::new(from, to),
+        }
+    }
+
+    /// `plane` (the source size) scaled into `out` (made the output size).
+    pub(super) fn scale(&self, plane: &[u8], out: &mut Vec<u8>) {
+        let (width, height) = self.to;
+        out.resize(width * height, 0);
+        let mut vertical = Vec::new();
+        for (row, line) in out.chunks_exact_mut(width).enumerate() {
+            self.row(plane, row, line, &mut vertical);
         }
     }
 
@@ -157,11 +149,11 @@ pub(super) struct Compositor {
     /// The blur's cells to the frame's luma size, and to its chroma size.
     blur_luma: Option<Resampler>,
     blur_chroma: Option<Resampler>,
+    /// The mask made a soft edge, at the working size ([`super::edge`]).
+    edge: EdgeRefiner,
     /// The mask at the frame's luma size, and at its chroma size.
     alpha: Vec<u8>,
     alpha_chroma: Vec<u8>,
-    /// [`edge_table`], made on the first frame.
-    edge: Vec<u8>,
 }
 
 /// One plane of a frame: its bytes, width and height.
@@ -175,7 +167,7 @@ impl Compositor {
     /// Blurs `frame`'s background, `mask` saying where the person is.
     pub(super) fn blur(&mut self, frame: &mut VideoFrame, mask: &[u8]) {
         let (width, height) = (to_usize(frame.width), to_usize(frame.height));
-        self.scale_mask(mask, width, height);
+        self.scale_mask(mask, frame);
         let factor = blur_factor(width);
         let cells = (width.div_ceil(factor), height.div_ceil(factor));
         let chroma_cells = ((width / 2).div_ceil(factor / 2), (height / 2).div_ceil(factor / 2));
@@ -205,7 +197,7 @@ impl Compositor {
         if picture.data.len() < frame.data.len() || (picture.width, picture.height) != (frame.width, frame.height) {
             return;
         }
-        self.scale_mask(mask, width, height);
+        self.scale_mask(mask, frame);
         let luma_size = width * height;
         let chroma_size = luma_size / 4;
         let [luma, u_plane, v_plane] = planes(frame);
@@ -224,32 +216,18 @@ impl Compositor {
         }
     }
 
-    /// The mask scaled to the frame's luma and chroma sizes, into [`Compositor::alpha`] and its chroma twin.
-    fn scale_mask(&mut self, mask: &[u8], width: usize, height: usize) {
-        let model = (MODEL_WIDTH, MODEL_HEIGHT);
-        let luma = Resampler::kept(self.mask_luma.take(), model, (width, height));
-        let chroma = Resampler::kept(self.mask_chroma.take(), model, (width / 2, height / 2));
-        if self.edge.is_empty() {
-            self.edge = edge_table();
-        }
-        for (resampler, alpha) in [(&luma, &mut self.alpha), (&chroma, &mut self.alpha_chroma)] {
-            scale_into(resampler, mask, alpha);
-            for value in alpha.iter_mut() {
-                *value = self.edge[usize::from(*value)];
-            }
-        }
-        self.mask_luma = Some(luma);
-        self.mask_chroma = Some(chroma);
-    }
-}
-
-/// `plane` scaled by `resampler` into `out`.
-fn scale_into(resampler: &Resampler, plane: &[u8], out: &mut Vec<u8>) {
-    let (width, height) = resampler.to;
-    out.resize(width * height, 0);
-    let mut vertical = Vec::new();
-    for (row, line) in out.chunks_exact_mut(width).enumerate() {
-        resampler.row(plane, row, line, &mut vertical);
+    /// The mask made a soft edge against `frame`'s luma ([`super::edge`]) and scaled to its luma and chroma sizes,
+    /// into [`Compositor::alpha`] and its chroma twin.
+    fn scale_mask(&mut self, mask: &[u8], frame: &VideoFrame) {
+        let (width, height) = (to_usize(frame.width), to_usize(frame.height));
+        let luma = frame.data.get(..width * height).unwrap_or_default();
+        let (edge, work) = self.edge.refine(mask, luma, width, height);
+        let to_luma = Resampler::kept(self.mask_luma.take(), work, (width, height));
+        let to_chroma = Resampler::kept(self.mask_chroma.take(), work, (width / 2, height / 2));
+        to_luma.scale(edge, &mut self.alpha);
+        to_chroma.scale(edge, &mut self.alpha_chroma);
+        self.mask_luma = Some(to_luma);
+        self.mask_chroma = Some(to_chroma);
     }
 }
 

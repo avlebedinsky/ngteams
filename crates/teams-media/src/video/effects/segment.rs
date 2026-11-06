@@ -1,12 +1,15 @@
-//! Where the person is in a frame: `MediaPipe`'s selfie segmenter (landscape) on tract, its confidence smoothed over
-//! frames, as an 8-bit mask at the model's size (255 surely the person, 0 surely the background; the compositor
-//! sharpens the edge once it scaled the mask up).
+//! Where the person is in a frame: `MediaPipe`'s selfie segmenter (landscape), its confidence smoothed over frames
+//! ([`follow`]), as an 8-bit mask at the model's size (255 surely the person, 0 surely the background; the compositor
+//! makes its edge soft against the frame, [`super::edge`]).
 //!
 //! The model runs on a thread of its own (`teams-media-seg`), so the camera's thread never waits for it: each frame
 //! hands it the frame scaled to the model's size (the newest one replaces one it hasn't started), and takes the newest
 //! mask it made. The mask so trails the picture by about one run of the model, which the smoothing hides. Until the
 //! first mask comes (the model loading, a fraction of a second) the whole picture is the background, never the
 //! camera's picture as it is.
+//!
+//! **Where it runs**: on the GPU once one is ready ([`super::gpu`]: Burn on wgpu), on the CPU until then and wherever
+//! there is none (tract, here). Both run the same model, so a switch between them doesn't show.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -26,13 +29,23 @@ pub const MODEL_WIDTH: usize = 256;
 /// The model's input height, px.
 pub const MODEL_HEIGHT: usize = 144;
 /// The pixels of the model's input and of its mask.
-const MODEL_PIXELS: usize = MODEL_WIDTH * MODEL_HEIGHT;
+pub(super) const MODEL_PIXELS: usize = MODEL_WIDTH * MODEL_HEIGHT;
 
 /// The model, converted to ONNX (`tools/selfie-segmenter/convert.py`).
 const MODEL: &[u8] = include_bytes!("../../../assets/segmentation/selfie_segmenter_landscape.onnx");
 
-/// How much of a new mask is its own; the rest is the masks before it (less flicker at the edges).
-const NEW_WEIGHT: f32 = 0.7;
+/// How much of a new mask is its own where it barely changed (the rest is the masks before it: the edge's flicker
+/// from one run to the next smoothed away), and the change from which it is all its own (the person moved: the mask
+/// follows at once rather than trailing them).
+const STEADY_WEIGHT: f32 = 0.35;
+const MOVED: (f32, f32) = (0.1, 0.5);
+
+/// A pixel's confidence kept so far moved toward a new mask's `new`: a little where they agree (flicker), all the
+/// way where they differ a lot (motion).
+pub(super) fn follow(kept: f32, new: f32) -> f32 {
+    let weight = STEADY_WEIGHT + (1.0 - STEADY_WEIGHT) * super::edge::smoothstep(MOVED.0, MOVED.1, (new - kept).abs());
+    kept + (new - kept) * weight
+}
 
 pub(super) type Plan = Arc<TypedRunnableModel>;
 
@@ -54,16 +67,48 @@ fn load() -> TractResult<Plan> {
         .into_runnable()
 }
 
-/// Runs the model on `input` ([`model_input`]): the person's confidence per pixel of the model's size.
-pub(super) fn run(plan: &Plan, input: &[f32]) -> Result<Vec<f32>, String> {
-    let input = Tensor::from_shape(&[1, 3, MODEL_HEIGHT, MODEL_WIDTH], input).map_err(|error| error.to_string())?;
-    let outputs = plan.run(tvec!(input.into())).map_err(|error| format!("{error:#}"))?;
-    let output = outputs.first().ok_or("the model gave no output")?;
-    let view = output.to_plain_array_view::<f32>().map_err(|error| error.to_string())?;
-    if view.len() != MODEL_PIXELS {
-        return Err(format!("the model gave {} values", view.len()));
+/// A runtime of the model.
+pub(super) trait Segment {
+    /// Runs the model on `input` ([`model_input`]): the person's confidence per pixel of the model's size.
+    fn segment(&self, input: &[f32]) -> Result<Vec<f32>, String>;
+}
+
+impl Segment for Plan {
+    fn segment(&self, input: &[f32]) -> Result<Vec<f32>, String> {
+        let input = Tensor::from_shape(&[1, 3, MODEL_HEIGHT, MODEL_WIDTH], input).map_err(|error| error.to_string())?;
+        let outputs = self.run(tvec!(input.into())).map_err(|error| format!("{error:#}"))?;
+        let output = outputs.first().ok_or("the model gave no output")?;
+        let view = output.to_plain_array_view::<f32>().map_err(|error| error.to_string())?;
+        if view.len() != MODEL_PIXELS {
+            return Err(format!("the model gave {} values", view.len()));
+        }
+        Ok(view.iter().copied().collect())
     }
-    Ok(view.iter().copied().collect())
+}
+
+/// A runtime of the model another thread may hold.
+pub(super) type Shared = Arc<dyn Segment + Send + Sync>;
+
+/// One run of the model on `input`: on `gpu` while there is one, else on `cpu`. A GPU that fails is let go (`gpu`
+/// becomes `None`) and the CPU runs instead; the GPU's error comes back beside the confidence, for the caller to turn
+/// it off with.
+pub(super) fn run_once(
+    gpu: &mut Option<Shared>,
+    cpu: &Result<Plan, String>,
+    input: &[f32],
+) -> (Result<Vec<f32>, String>, Option<String>) {
+    let mut failed = None;
+    if let Some(on_gpu) = gpu.as_ref() {
+        match on_gpu.segment(input) {
+            Ok(confidence) => return (Ok(confidence), None),
+            Err(error) => {
+                failed = Some(error);
+                *gpu = None;
+            }
+        }
+    }
+    let confidence = cpu.as_ref().map_err(Clone::clone).and_then(|plan| plan.segment(input));
+    (confidence, failed)
 }
 
 /// What the camera's thread and the model's share.
@@ -120,26 +165,36 @@ impl Drop for Worker {
     }
 }
 
-/// The model's thread: runs the model on each newest input until told to stop. A model that can't load or run gives
-/// masks of no person (said once).
+/// The newest input, waited for; `None` once the model's thread is to stop.
+fn next_input(exchange: &Exchange) -> Option<Vec<f32>> {
+    let mut state = exchange.lock();
+    loop {
+        if state.stop {
+            return None;
+        }
+        if let Some(input) = state.input.take() {
+            return Some(input);
+        }
+        state = exchange.wake.wait(state).unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+/// The model's thread: runs the model on each newest input until told to stop, on the GPU once it is ready, else on
+/// the CPU. A model that can't load or run gives masks of no person (said once).
 fn segment_loop(exchange: &Exchange) {
     let plan = plan();
+    let mut gpu: Option<Shared> = None;
     let mut count = 0_u64;
     let mut said = false;
-    loop {
-        let input = {
-            let mut state = exchange.lock();
-            loop {
-                if state.stop {
-                    return;
-                }
-                if let Some(input) = state.input.take() {
-                    break input;
-                }
-                state = exchange.wake.wait(state).unwrap_or_else(PoisonError::into_inner);
-            }
-        };
-        let confidence = match plan.as_ref().map_err(Clone::clone).and_then(|plan| run(plan, &input)) {
+    while let Some(input) = next_input(exchange) {
+        if gpu.is_none() {
+            gpu = super::gpu::ready().map(|ready| ready as Shared);
+        }
+        let (confidence, gpu_failed) = run_once(&mut gpu, &plan, &input);
+        if let Some(error) = gpu_failed {
+            super::gpu::disable(&error);
+        }
+        let confidence = match confidence {
             Ok(confidence) => confidence,
             Err(error) => {
                 if !said {
@@ -204,8 +259,8 @@ impl Segmenter {
     /// Takes a new mask's confidence into the ones so far.
     fn blend(&mut self, confidence: Vec<f32>) {
         if self.confidence.len() == MODEL_PIXELS {
-            for (kept, new) in self.confidence.iter_mut().zip(&confidence) {
-                *kept = *kept * (1.0 - NEW_WEIGHT) + new * NEW_WEIGHT;
+            for (kept, &new) in self.confidence.iter_mut().zip(&confidence) {
+                *kept = follow(*kept, new);
             }
         } else {
             self.confidence = confidence;

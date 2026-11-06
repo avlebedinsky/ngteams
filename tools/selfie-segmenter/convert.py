@@ -1,5 +1,7 @@
 """MediaPipe's selfie segmenter (TFLite, NHWC, a custom transposed convolution) as an ONNX graph in NCHW: the
-person segmentation model the camera's background effects run (crates/teams-media/src/video/effects.rs), on tract.
+person segmentation model the camera's background effects run (crates/teams-media/src/video/effects.rs): on the CPU
+by tract, and on the GPU by Burn, from Rust code burn-onnx generates from this ONNX at build time. A development tool,
+run once when the model changes: the app itself never runs Python.
 
 The source is Google's `selfie_segmenter_landscape` (float16, Apache-2.0, the model card's licence):
 https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite

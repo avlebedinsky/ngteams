@@ -83,6 +83,51 @@ const NEXT: &str = "tour-next";
 /// How long a step's views get to settle before their screenshot.
 const SETTLE: Duration = Duration::from_millis(1500);
 
+/// The video effects' camera when whoever runs the tour put a picture at [`PictureCamera::SAMPLE`] (a person's, to see
+/// the effects' edge; it stays in `target/`, never in the repo): that picture, still, at the camera's pace. Without
+/// one the effects preview shows the test pattern.
+struct PictureCamera(teams_media::devices::VideoFrame);
+
+impl PictureCamera {
+    const SAMPLE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/tour-camera.png");
+
+    fn sample() -> Option<Self> {
+        let picture = image::open(Self::SAMPLE).ok()?.to_rgb8();
+        let (width, height) = picture.dimensions();
+        Some(Self(teams_media::devices::VideoFrame {
+            width,
+            height,
+            format: teams_media::devices::PixelFormat::Rgb,
+            stride: width * 3,
+            data: picture.into_raw(),
+        }))
+    }
+}
+
+impl teams_media::devices::Devices for PictureCamera {
+    fn microphone(&self) -> Result<Box<dyn teams_media::devices::AudioSource>, teams_media::devices::DeviceError> {
+        Err(teams_media::devices::DeviceError::Closed)
+    }
+
+    fn speaker(&self) -> Result<Box<dyn teams_media::devices::AudioSink>, teams_media::devices::DeviceError> {
+        Err(teams_media::devices::DeviceError::Closed)
+    }
+
+    fn camera(&self) -> Result<Box<dyn teams_media::devices::VideoSource>, teams_media::devices::DeviceError> {
+        Ok(Box::new(PictureCamera(self.0.clone())))
+    }
+}
+
+impl teams_media::devices::VideoSource for PictureCamera {
+    fn next_frame(
+        &mut self,
+        _: Duration,
+    ) -> Result<Option<teams_media::devices::VideoFrame>, teams_media::devices::DeviceError> {
+        thread::sleep(Duration::from_millis(33));
+        Ok(Some(self.0.clone()))
+    }
+}
+
 /// A step of the tour: its screenshot's name and what it does to the shell shown.
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
@@ -582,12 +627,15 @@ const STEPS: [Step; 5 + 171] = [
     // chosen, the camera off with Preview
     ("settings-video-effects", |shell, _, cx| {
         let model = shell.read(cx).settings().clone();
-        let camera = Arc::new(teams_media::devices::file::FileDevices {
-            input: teams_media::devices::file::AudioInput::Silence,
-            recording: None,
-            camera: teams_media::devices::file::PatternCamera::default(),
-            pacing: teams_media::devices::file::Pacing::RealTime,
-        });
+        let camera: Arc<dyn teams_media::devices::Devices + Send + Sync> = match PictureCamera::sample() {
+            Some(picture) => Arc::new(picture),
+            None => Arc::new(teams_media::devices::file::FileDevices {
+                input: teams_media::devices::file::AudioInput::Silence,
+                recording: None,
+                camera: teams_media::devices::file::PatternCamera::default(),
+                pacing: teams_media::devices::file::Pacing::RealTime,
+            }),
+        };
         teams_ui::settings::attach_camera_preview(&model, teams_ui::CameraPreview::new(camera), cx);
         model.update(cx, |model, cx| {
             model.change(|settings| settings.video_effect = VideoEffect::Stock("office"), cx);

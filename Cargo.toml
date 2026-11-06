@@ -202,6 +202,15 @@ toml_edit = "0.25.17"
 # tract (Sonos; MIT/Apache-2.0), pure Rust: no system library, a few milliseconds a frame. Without its `transformers`
 # ops, which the model doesn't use.
 tract-onnx = { version = "0.23.9", default-features = false }
+# ... and the same model on the GPU where there is one: Burn (Tracel; MIT/Apache-2.0), pure Rust, its wgpu backend
+# (Vulkan; kernel fusion, no autotune: autotuning a model this small costs a minute of GPU on its first run) through
+# CubeCL. The model's code and weights are generated from the ONNX at build time by burn-onnx (teams-media's build
+# script). wgpu here is its own version, beside GPUI's. Their logs under the `debug` cap (crates/teams-log) name the
+# adapter's features and the kernels compiled; the kernels' sources are `trace`, compiled out: no frame data.
+burn = { version = "0.22.0", default-features = false, features = ["std", "wgpu", "vulkan", "fusion"] }
+burn-onnx = { version = "0.22.0", default-features = false, features = ["import"] }
+burn-store = { version = "0.22.1", default-features = false, features = ["std"] }
+cubecl = { version = "0.11.3", default-features = false, features = ["wgpu"] }
 # tests only: the UI kit's `tracing` events forwarded to `log` (its `log` feature, no subscriber), the version the kit
 # already links
 tracing = { version = "0.1.44", default-features = false }
