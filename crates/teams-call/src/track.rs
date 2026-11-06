@@ -613,8 +613,9 @@ fn proxy_link(link: &Value) -> Option<Url> {
 /// The conversation links of a start's answer (see the module docs); `None` unless the answer is a JSON object with a
 /// `conversationController` on the flight proxy at `/api/v2/ep/<host>/conv/<id>`.
 fn answer_links(answer: &[u8]) -> Option<Vec<Link>> {
-    const NAMES: [(CallOperation, &str); 11] = [
+    const NAMES: [(CallOperation, &str); 12] = [
         (CallOperation::UpdateEndpointMetadata, "updateEndpointMetadata"),
+        (CallOperation::UpdateParticipantProperties, "updateParticipantProperties"),
         (CallOperation::Add, "addParticipantAndModality"),
         (CallOperation::Leave, "leave"),
         (CallOperation::Admit, "admit"),

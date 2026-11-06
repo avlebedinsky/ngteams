@@ -1,14 +1,18 @@
 //! The stage of a call that is up, as Teams lays it out: the gallery (a grid of near-square tiles), the speaker view
 //! (the one who speaks, or the one pinned, large over a strip of the others), the self view floating at its bottom
-//! right unless View hid it, and each tile's own menu (Pin for me, Unpin).
+//! right unless View hid it, and each tile's own menu (Pin for me, Unpin). While the far end shares its screen, the
+//! share fills the stage with the people's tiles (the account's own among them) in a strip on its right, as Teams
+//! shows a share; View's Focus on content shows the share alone.
 use super::*;
 
-/// How the stage lays its tiles out: View's Gallery or Speaker.
+/// How the stage lays its tiles out: View's Gallery or Speaker, or (while a share shows) Focus on content.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Layout {
     #[default]
     Gallery,
     Speaker,
+    /// The share alone, the people's strip put away (laid out as the gallery while nothing is shared).
+    Focus,
 }
 
 impl Layout {
@@ -18,6 +22,7 @@ impl Layout {
         match self {
             Self::Gallery => "gallery",
             Self::Speaker => "speaker",
+            Self::Focus => "focus",
         }
     }
 }
@@ -26,6 +31,8 @@ impl Layout {
 const STRIP_HEIGHT: f32 = 112.0;
 /// The width of a tile in the speaker view's strip, px.
 const STRIP_TILE: f32 = 184.0;
+/// The width of the people's strip beside a share, and the height of a tile in it, px (Teams' 16:9 tiles).
+const SHARE_STRIP: (f32, f32) = (236.0, 132.0);
 
 impl CallStage {
     /// The stage of the call up: who rings while nobody is in it, else the tiles as View lays them out, with the self
@@ -46,7 +53,11 @@ impl CallStage {
         };
         let call = active.id.get();
         let lobby = crate::call_lobby::card(active, palette, cx);
-        let body = if tiles.is_empty() {
+        // the far end's share fills the stage, the people beside it (the account's own tile among them)
+        let shared = active.remote_share && active.held.is_none() && active.status != CallStatus::Lobby;
+        let body = if shared {
+            self.share_stage(active, tiles, title, palette, cx)
+        } else if tiles.is_empty() {
             let waiting = active.kind == CallKind::Meeting && active.status == CallStatus::Connected;
             if let Some(since) = active.held {
                 // Teams' held call: who it is with, "On hold" and how long, no rings
@@ -95,11 +106,11 @@ impl CallStage {
                 _ => grid(selector, drawn),
             }
         };
-        let own = if self.self_hidden {
+        let own = if self.self_hidden || shared {
             None
         } else {
             let video = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Own, call));
-            Some(self_view(active, video, palette, cx))
+            Some(self_view(active, video, true, palette, cx))
         };
         div()
             .debug_selector(|| "call-stage".to_owned())
@@ -113,6 +124,67 @@ impl CallStage {
             .children(own)
             .children(self.reactions_shown(active, palette, cx))
             .children(lobby)
+            .into_any_element()
+    }
+
+    /// The far end's share large, its sharer named at its bottom left (its picture fitted in, or that it is coming),
+    /// and the people's tiles in a strip on its right with the account's own last (unless View hid it); Focus on
+    /// content shows the share alone.
+    fn share_stage(
+        &mut self,
+        active: &ActiveCall,
+        tiles: Vec<StageTile>,
+        title: &SharedString,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let call = active.id.get();
+        let sharer = tiles.first().map_or_else(|| title.clone(), |tile| tile.name.clone());
+        let picture = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Share, call));
+        let content = share_content(picture, sharer, palette);
+        if self.layout == Layout::Focus {
+            return div()
+                .debug_selector(|| "call-share-focus".to_owned())
+                .size_full()
+                .child(content)
+                .into_any_element();
+        }
+        let mut strip: Vec<AnyElement> = tiles
+            .into_iter()
+            .map(|tile| {
+                let video = tile
+                    .video
+                    .filter(|_| !self.others_off)
+                    .and_then(|line| self.tiles.as_mut()?.fill(line, call));
+                tile_view(tile, video, (false, false), palette, cx)
+            })
+            .collect();
+        if !self.self_hidden {
+            let video = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Own, call));
+            strip.push(self_view(active, video, false, palette, cx));
+        }
+        div()
+            .debug_selector(|| "call-share-stage".to_owned())
+            .size_full()
+            .flex()
+            .gap_2()
+            .child(div().flex_1().min_w_0().h_full().child(content))
+            .child(
+                div()
+                    .debug_selector(|| "call-share-strip".to_owned())
+                    .w(px(SHARE_STRIP.0))
+                    .flex_none()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap_2()
+                    .children(
+                        strip
+                            .into_iter()
+                            .map(|tile| div().w_full().h(px(SHARE_STRIP.1)).flex_none().child(tile)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -492,9 +564,36 @@ fn name_tag(
         })
 }
 
-/// The account's own tile, floating at the stage's bottom right: its self view while the camera sends, else its mark;
-/// a border while it speaks; its microphone while muted and its hand while raised.
-fn self_view(active: &ActiveCall, video: Option<AnyElement>, palette: Palette, cx: &App) -> AnyElement {
+/// The share as the stage shows it: its picture fitted in (on the stage's own ground, as Teams letterboxes it), or
+/// while its first frame is coming the sharer's screen's mark and who shares; the sharer named at its bottom left.
+fn share_content(picture: Option<AnyElement>, sharer: SharedString, palette: Palette) -> AnyElement {
+    let face = picture.unwrap_or_else(|| {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .text_color(rgb(palette.muted_foreground))
+            .child(Glyph::MONITOR.icon().size(px(40.0)))
+            .child(div().text_sm().child(format!("{sharer} is sharing")))
+            .into_any_element()
+    });
+    div()
+        .debug_selector(|| "call-share".to_owned())
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .child(face)
+        .child(name_tag(sharer, (false, false, false, false), palette))
+        .into_any_element()
+}
+
+/// The account's own tile: floating at the stage's bottom right (`floating`), else filling its place in a strip; its
+/// self view while the camera sends, else its mark; a border while it speaks; its microphone while muted and its hand
+/// while raised.
+fn self_view(active: &ActiveCall, video: Option<AnyElement>, floating: bool, palette: Palette, cx: &App) -> AnyElement {
     let speaking = active.view.speaking && !active.muted;
     let face = video.unwrap_or_else(|| {
         div()
@@ -515,17 +614,20 @@ fn self_view(active: &ActiveCall, video: Option<AnyElement>, palette: Palette, c
     };
     let own = div()
         .debug_selector(|| "call-participant-self".to_owned())
-        .absolute()
-        .bottom_5()
-        .right_5()
-        .w(px(SELF_VIEW.0))
-        .h(px(SELF_VIEW.1))
+        .when(floating, |own| {
+            own.absolute()
+                .bottom_5()
+                .right_5()
+                .w(px(SELF_VIEW.0))
+                .h(px(SELF_VIEW.1))
+        })
+        .when(!floating, gpui::Styled::size_full)
         .rounded_lg()
         .overflow_hidden()
         .bg(rgb(palette.surface))
         .border_2()
         .border_color(rgb(border))
-        .when(!speaking, |own| {
+        .when(!speaking && floating, |own| {
             own.shadow(theme::glow(palette, 0x0000_0000, 0.3, 18.0, 6.0))
         })
         .child(face)

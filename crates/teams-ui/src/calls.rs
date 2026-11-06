@@ -122,6 +122,10 @@ pub struct ActiveCall {
     /// What the meeting shares with everyone in it: its timer, its lock, how to join it, a recording someone runs
     /// ([`teams_core::Event::CallMeeting`]).
     pub meeting: teams_core::MeetingState,
+    /// The account shares its screen (Teams' Share; [`teams_core::Event::CallSharing`]).
+    pub sharing: bool,
+    /// The far end shares its screen, shown on the stage ([`teams_core::Event::CallRemoteShare`]).
+    pub remote_share: bool,
 }
 
 /// A live reaction someone in the call sent ([`teams_core::Event::CallReaction`]).
@@ -475,6 +479,8 @@ pub enum Ask {
     Timer(teams_proto::MeetingTimer),
     /// Lock the meeting (`true`) or unlock it (its organizer's Lock the meeting).
     LockMeeting(bool),
+    /// Share the screen (the desktop asks which), or stop sharing it (Teams' Share and Stop sharing).
+    ToggleShare,
 }
 
 impl Ask {
@@ -502,6 +508,7 @@ impl Ask {
             Self::ToggleHold => "hold",
             Self::Timer(_) => "timer",
             Self::LockMeeting(_) => "lock-meeting",
+            Self::ToggleShare => "share",
         }
     }
 
@@ -905,6 +912,8 @@ impl Calls {
                     | Event::CallHeld { .. }
                     | Event::CallHeldByFarEnd { .. }
                     | Event::CallMeeting { .. }
+                    | Event::CallSharing { .. }
+                    | Event::CallRemoteShare { .. }
                     | Event::CallReaction { .. }
             );
         }
@@ -958,6 +967,8 @@ impl Calls {
             | Event::CallHeld { .. }
             | Event::CallHeldByFarEnd { .. }
             | Event::CallMeeting { .. }
+            | Event::CallSharing { .. }
+            | Event::CallRemoteShare { .. }
             | Event::CallReaction { .. } => self.in_call(event),
             _ => return false,
         }
@@ -991,6 +1002,16 @@ impl Calls {
             Event::CallMeeting { call, state } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.meeting = state.clone();
+                }
+            }
+            Event::CallSharing { call, on } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.sharing = *on;
+                }
+            }
+            Event::CallRemoteShare { call, on } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.remote_share = *on;
                 }
             }
             Event::CallReaction {
@@ -1110,6 +1131,8 @@ impl Calls {
             held: None,
             held_by_far_end: false,
             meeting: teams_core::MeetingState::default(),
+            sharing: false,
+            remote_share: false,
         }
     }
 
@@ -1206,15 +1229,28 @@ impl Calls {
                     held: call.held.is_none(),
                 })
             }
-            Ask::ToggleCamera if self.video.is_none() => Err("no-video"),
-            Ask::ToggleCamera => {
-                let call = self.call.as_ref().ok_or("no-call")?;
-                Ok(CallAction::Camera {
-                    call: call.id,
-                    on: !call.camera,
-                })
-            }
+            Ask::ToggleShare | Ask::ToggleCamera => self.video_action(ask),
         }
+    }
+
+    /// The engine's call action for the camera or Share (each on or off as it isn't now), on the call up; none in a
+    /// build that shows no video.
+    fn video_action(&self, ask: &Ask) -> Result<CallAction, &'static str> {
+        if self.video.is_none() {
+            return Err("no-video");
+        }
+        let call = self.call.as_ref().ok_or("no-call")?;
+        Ok(if *ask == Ask::ToggleShare {
+            CallAction::Share {
+                call: call.id,
+                on: !call.sharing,
+            }
+        } else {
+            CallAction::Camera {
+                call: call.id,
+                on: !call.camera,
+            }
+        })
     }
 
     /// The engine's call action for Raise or Lower hand, a live reaction or End meeting, on the call up.

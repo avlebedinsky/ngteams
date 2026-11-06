@@ -1,5 +1,6 @@
 //! A call's video (M3 Tasks 18, 19): a 1:1 call's far end's picture, a group call's participants' (one per receiving
-//! video line), and the camera's own (the self view), as tiles of the call window's stage
+//! video line), the far end's shared screen (its sharing line's), and the camera's own (the self view), as tiles of
+//! the call window's stage
 //! ([`crate::call_stage::CallStage`]).
 //!
 //! - **The feed** ([`VideoFeed`]) is what the engine's call media shows its frames on ([`teams_core::VideoOutput`]):
@@ -10,9 +11,9 @@
 //!   applied by the media to each frame it sends). [`follow_settings`] keeps both as the settings say.
 //! - **The tiles** ([`Tiles`]) draw the newest frame of each through GPUI's external surface (a texture kept per
 //!   tile, written from the frame's pixels), and count each frame the renderer presented: the trace's `video-tile
-//!   presented` line names the tile (`remote`, `line-1` … `line-9`, `self`) and how many it presented so far, at the
-//!   first frame and every [`TRACE_EVERY`] after it; `video-tile shown`/`hidden` as a tile comes and goes. A tile whose
-//!   last frame is older than [`STALE`] is hidden (the far end's camera went off).
+//!   presented` line names the tile (`remote`, `line-1` … `line-9`, `share`, `self`) and how many it presented so
+//!   far, at the first frame and every [`TRACE_EVERY`] after it; `video-tile shown`/`hidden` as a tile comes and
+//!   goes. A tile whose last frame is older than [`STALE`] is hidden (the far end's camera went off).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -23,6 +24,7 @@ use gpui::{
     ParentElement as _, PixelFrame, PixelRect, PixelSurface, Styled as _, canvas, div,
 };
 use teams_media::devices::{DeviceError, VideoFrame, VideoSink};
+use teams_media::session::SHARING_LINE;
 use teams_media::video::convert::i420_to_bgra;
 use teams_media::video::effects::{Background, BackgroundChoice};
 
@@ -36,8 +38,8 @@ pub const STALE: Duration = Duration::from_secs(2);
 pub const TRACE_EVERY: u64 = 30;
 /// The video lines a call shows: line 0 (a 1:1 call's far end) and a group call's receiving lines.
 pub const LINES: usize = 1 + teams_core::GROUP_SLOTS;
-/// Every tile: each line's, and the self view.
-const TILES: usize = LINES + 1;
+/// Every tile: each line's, the share, and the self view.
+const TILES: usize = LINES + 2;
 /// The trace's names of the lines' tiles.
 const LINE_NAMES: [&str; LINES] = [
     "remote", "line-1", "line-2", "line-3", "line-4", "line-5", "line-6", "line-7", "line-8", "line-9",
@@ -48,6 +50,8 @@ const LINE_NAMES: [&str; LINES] = [
 pub enum Tile {
     /// What a video line brings: 0 a 1:1 call's far end, 1, 2, … a group call's participants.
     Line(usize),
+    /// The screen the far end shares, on its sharing line.
+    Share,
     /// The camera's own, as sent.
     Own,
 }
@@ -58,7 +62,7 @@ impl Tile {
 
     /// Every tile.
     pub fn all() -> impl Iterator<Item = Self> {
-        (0..LINES).map(Self::Line).chain([Self::Own])
+        (0..LINES).map(Self::Line).chain([Self::Share, Self::Own])
     }
 
     /// The trace's name for it.
@@ -66,6 +70,7 @@ impl Tile {
     pub fn name(self) -> &'static str {
         match self {
             Self::Line(line) => LINE_NAMES.get(line).copied().unwrap_or("line"),
+            Self::Share => "share",
             Self::Own => "self",
         }
     }
@@ -74,7 +79,8 @@ impl Tile {
     fn index(self) -> Option<usize> {
         match self {
             Self::Line(line) => (line < LINES).then_some(line),
-            Self::Own => Some(LINES),
+            Self::Share => Some(LINES),
+            Self::Own => Some(LINES + 1),
         }
     }
 }
@@ -209,9 +215,14 @@ impl VideoFeed {
 
 impl teams_core::VideoOutput for VideoFeed {
     fn remote(&self, line: usize) -> Box<dyn VideoSink> {
+        let tile = if line == SHARING_LINE {
+            Tile::Share
+        } else {
+            Tile::Line(line)
+        };
         Box::new(Sink {
             feed: self.clone(),
-            tile: Tile::Line(line),
+            tile,
         })
     }
 

@@ -20,6 +20,20 @@ use crate::{CallWrite, Participant, WriteId, build};
 /// The modality a call's renegotiation and answer name beside the call's others once its media carries video (the
 /// web client's camera-on renegotiation and the answer to it: `["Audio", "Video"]`).
 const VIDEO: &str = "Video";
+/// The modalities a 1:1 call's renegotiation and answer name while a screen is shared on its sharing line: the
+/// sharer's (`["Audio", "ScreenSharer"]`) and the far end's that is shown it (`["Audio", "ScreenViewer"]`), seen
+/// 2026-11-06 (`ab-call --call steps`: Share).
+const SCREEN_SHARER: &str = "ScreenSharer";
+const SCREEN_VIEWER: &str = "ScreenViewer";
+
+/// Which end of a 1:1 call's shared screen the account is ([`Calls::set_screen`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    /// It shares its screen.
+    Sharer,
+    /// It is shown the far end's.
+    Viewer,
+}
 /// How long after the call controller turned the account's renegotiation away (another negotiation in progress, `491`)
 /// it goes again, and how many times at most.
 pub const RENEGOTIATION_RETRY: Duration = Duration::from_secs(3);
@@ -838,6 +852,42 @@ impl Calls {
         }
     }
 
+    /// Which end of a shared screen the account is in `call`, a 1:1 call, now (`None`: no screen is shared): its next
+    /// renegotiation and answer name `ScreenSharer` or `ScreenViewer` beside the call's other modalities, as the web
+    /// client's do while a screen is shared, and neither once it stopped.
+    pub fn set_screen(&mut self, call: CallId, screen: Option<Screen>) {
+        let Some(current) = self.call.as_mut().filter(|current| current.id == call) else {
+            return;
+        };
+        current
+            .modalities
+            .retain(|modality| modality != SCREEN_SHARER && modality != SCREEN_VIEWER);
+        match screen {
+            Some(Screen::Sharer) => current.modalities.push(SCREEN_SHARER.to_owned()),
+            Some(Screen::Viewer) => current.modalities.push(SCREEN_VIEWER.to_owned()),
+            None => {}
+        }
+    }
+
+    /// The account tells `call`'s conversation it shares its screen (`screenSharerAttributes` at the conversation's
+    /// `updateParticipantProperties` link), as the web client's Share does before its renegotiation adds the sharing
+    /// line; its failing ends nothing.
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while the call isn't up or its conversation
+    /// named no such link; nothing was sent.
+    pub fn tell_screen_shared(&mut self, call: CallId) -> Result<(), CallError> {
+        let current = up(&mut self.call, call)?;
+        let link = current
+            .conversation
+            .participant_properties
+            .clone()
+            .ok_or(CallError::NotNow)?;
+        let write = build::screen_sharer(current, &link)?;
+        self.out.send(current, Step::Properties, write);
+        Ok(())
+    }
+
     /// The account's `answer` to the renegotiation of `call` told as [`CallEvent::MediaOffer`].
     ///
     /// # Errors
@@ -1322,7 +1372,8 @@ impl Calls {
                 | Step::Hand
                 | Step::React
                 | Step::MeetingStates
-                | Step::MeetingSettings,
+                | Step::MeetingSettings
+                | Step::Properties,
                 None,
             ) => {}
             (step, None) => self.fail(step, now),

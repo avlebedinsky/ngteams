@@ -710,6 +710,19 @@ a alone). What each of Teams' remaining call controls sends:
   the sharer's `screenSharerAttributes` from then on.
 - **Share in a group call** (the 1:1 call above escalated by an add): the participant properties went as above, but no
   renegotiation followed and the viewer showed nothing before the call ended; the group path wasn't captured.
+- **The native client's share, 1:1.** Share asks the desktop's screen-cast portal (`org.freedesktop.portal.ScreenCast`:
+  `CreateSession`, `SelectSources` for a monitor or a window with the cursor drawn in, `Start`, `OpenPipeWireRemote`)
+  for what to share; the node it names is read over the portal's PipeWire remote for as long as the share, its frames
+  (at most 1080p) sent on a libwebrtc line of their own, `sendonly`, at a still picture's rate. As the web client does,
+  it then posts `screenSharerAttributes` and renegotiates with `["Audio", "ScreenSharer"]`, the offer's new line
+  numbered one past the call's highest and labelled `applicationsharing-video` (libwebrtc appends it after the call's
+  lines; a 1:1 native call has no data line). Stop sharing (or the screen ending at the desktop) stops that line:
+  libwebrtc's next offer rejects it, written as the web client's `m=video 0 RTP/SAVP 34` with its label, out of the
+  bundle, and the renegotiation names `["Audio"]`. The far end's offer that adds a sharing line it sends on is taken
+  receiving (its frames shown apart from the camera's, the share taking the stage with the people beside it; View's
+  Focus on content shows it alone) and answered with `["Audio", "ScreenViewer"]`; an offer rejecting the line ends the
+  share. A sharing line offered `inactive` (every 1:1 start's and invitation's) stays rejected. A group call offers no
+  Share: its path wasn't captured.
 - **Dial pad** (1:1 calls): a pad of 1–9, `*`, 0, `#` with letters, under a Number field that collects what was pressed.
   Each key goes as a DTMF tone on the call's audio sender (the browser's `insertDTMF`, 200 ms tone, 100 ms gap, RFC
   4733 `telephone-event` on the audio line); nothing goes to the signaling. The native client has no dial pad and sends

@@ -1,6 +1,6 @@
 //! The file backend: no audio server and no camera. The microphone is a tone, a WAV file or silence; the speaker
-//! records to a WAV file (or nowhere); the camera is the [`TestPattern`]; received video is counted
-//! ([`FrameCounter`]).
+//! records to a WAV file (or nowhere); the camera is the [`TestPattern`], and so is the screen shared (at
+//! [`SCREEN`]'s size); received video is counted ([`FrameCounter`]).
 //!
 //! With [`Pacing::RealTime`] (what a call needs) a source hands out frames as fast as a device would: the next frame
 //! is due one frame's time after the last, counted from the first, and a read waits for it (or gives `None` when the
@@ -55,6 +55,13 @@ impl Default for PatternCamera {
     }
 }
 
+/// The screen stand-in's size and rate: a 720p screen, shared at a screen's rate.
+pub const SCREEN: PatternCamera = PatternCamera {
+    width: 1280,
+    height: 720,
+    fps: 15,
+};
+
 /// The file backend's devices.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileDevices {
@@ -89,12 +96,23 @@ impl Devices for FileDevices {
     }
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
-        let fps = self.camera.fps.max(1);
-        Ok(Box::new(PatternSource {
-            pattern: TestPattern::new(self.camera.width, self.camera.height),
+        Ok(self.pattern(self.camera))
+    }
+
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        Ok(self.pattern(SCREEN))
+    }
+}
+
+impl FileDevices {
+    /// The test pattern as `shape` says, paced as the devices are.
+    fn pattern(&self, shape: PatternCamera) -> Box<dyn VideoSource> {
+        let fps = shape.fps.max(1);
+        Box::new(PatternSource {
+            pattern: TestPattern::new(shape.width, shape.height),
             index: 0,
             clock: Clock::new(self.pacing, Duration::from_secs(1) / fps),
-        }))
+        })
     }
 }
 

@@ -48,6 +48,8 @@ pub const SPEAKER_NODE: &str = "sandbox-speaker";
 pub const MICROPHONE_NODE: &str = "sandbox-microphone";
 /// The camera's node (the default camera).
 pub const CAMERA_NODE: &str = "sandbox-camera";
+/// The screen's node: what the fake screen-cast portal shares.
+pub const SCREEN_NODE: &str = "sandbox-screen";
 /// The speaker's recording, relative to the sandbox dir.
 pub const SPEAKER_RECORDING: &str = "recordings/speaker.wav";
 /// The `priority.session` of the sandbox's own speaker, microphone and camera: a device added above it becomes the
@@ -419,6 +421,13 @@ impl PrivatePipeWire {
     #[must_use]
     pub fn camera_frames(&self) -> u64 {
         self.media.as_ref().map_or(0, media::MediaHelper::frames_shown)
+    }
+
+    /// The sandbox's screen ([`SCREEN_NODE`]): its node once made, and its frames, as the fake screen-cast portal
+    /// reads them.
+    #[must_use]
+    pub fn screen(&self) -> media::ScreenShown {
+        self.media.as_ref().map(media::MediaHelper::screen).unwrap_or_default()
     }
 
     /// The process ids of the server and the session manager.

@@ -6,9 +6,13 @@
 //!   libwebrtc's video source, which encodes it (an IDR whenever the far end asks) at the rate its bandwidth estimate
 //!   allows. A camera that fails (`DeviceClosed(Camera)`) ends the thread and turns the camera off; the rest of the
 //!   session goes on.
+//! - **The screen thread** runs while the account shares its screen ([`super::MediaSession::share_screen`]): each
+//!   frame turned into I420 at most [`SCREEN_MAX`] and handed to the sharing line's source. A screen whose stream ends
+//!   (the user stopped it at the desktop) ends the thread, told as `DeviceClosed(Screen)`.
 //! - **A decoding thread** runs for each video track the far end sends on: libwebrtc decodes, and each picture goes to
 //!   its video line's sink (made the first time the line brings a frame, [`RemoteSinks`]) once the session's video
-//!   started; a line the negotiated SDP doesn't name (the sharing line) shows nothing.
+//!   started; a sharing line's to [`crate::rtc::SHARING_LINE`]'s; a line the negotiated SDP doesn't name (a group
+//!   offer's sharing line) shows nothing.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,7 +27,7 @@ use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 
 use crate::devices::{PixelFormat, VideoFrame, VideoSink, VideoSource};
-use crate::rtc::{Next, Peer, next_within};
+use crate::rtc::{LineMap, Next, Peer, next_within};
 use crate::video::codec::EncoderSettings;
 use crate::video::convert::{MaxSize, to_i420};
 use crate::video::effects::{BackgroundChoice, Effects};
@@ -32,9 +36,14 @@ use super::{SessionDevice, SessionEvent, Shared};
 
 /// How long the camera and decoding threads wait for a frame before they check whether to stop.
 const FRAME_WAIT: Duration = Duration::from_millis(100);
+/// The largest picture of a screen sent: a bigger screen is scaled down to fit.
+pub const SCREEN_MAX: MaxSize = MaxSize {
+    width: 1920,
+    height: 1080,
+};
 
 /// Where the far end's decoded frames (I420) go: the sink of each video line, made the first time the line brings a
-/// frame (0 the main video line, 1, 2, … a group call's receiving lines).
+/// frame (0 the main video line, 1, 2, … a group call's receiving lines, [`crate::rtc::SHARING_LINE`] a share).
 pub type RemoteSinks = Box<dyn FnMut(usize) -> Box<dyn VideoSink> + Send>;
 
 /// Where our camera's frames go as they are sent, handed from one camera thread to the next.
@@ -76,6 +85,8 @@ pub struct VideoStats {
     pub received: u64,
     /// Pictures shown on a line's sink.
     pub shown: u64,
+    /// Frames of our shared screen handed to libwebrtc.
+    pub screen_sent: u64,
 }
 
 /// The counts and flags the session's threads share.
@@ -88,6 +99,7 @@ pub(super) struct VideoShared {
     unsent: AtomicU64,
     received: AtomicU64,
     shown: AtomicU64,
+    screen_sent: AtomicU64,
     /// The sinks of the far end's video, by line, once the video started.
     sinks: Mutex<Option<LineSinks>>,
     /// The decoding threads.
@@ -109,6 +121,7 @@ impl VideoShared {
             unsent: read(&self.unsent),
             received: read(&self.received),
             shown: read(&self.shown),
+            screen_sent: read(&self.screen_sent),
         }
     }
 
@@ -135,6 +148,8 @@ pub(super) struct SessionVideo {
     background: BackgroundChoice,
     preview: SelfView,
     pub(super) camera: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+    /// The screen thread, while the account shares its screen.
+    pub(super) screen: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
     shared: Option<Arc<Shared>>,
 }
 
@@ -158,6 +173,14 @@ impl SessionVideo {
     /// Stops the camera thread, if one runs, and waits for it.
     pub(super) fn stop_camera(&mut self) {
         if let Some((stop, handle)) = self.camera.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+
+    /// Stops the screen thread, if one runs, and waits for it.
+    pub(super) fn stop_screen(&mut self) {
+        if let Some((stop, handle)) = self.screen.take() {
             stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
         }
@@ -224,6 +247,39 @@ impl CameraLoop {
     fn off(&self) {
         self.shared.video.camera_on.store(false, Ordering::Relaxed);
         self.peer.set_sending(false);
+    }
+}
+
+/// The screen thread.
+pub(super) struct ScreenLoop {
+    pub(super) shared: Arc<Shared>,
+    pub(super) source: NativeVideoSource,
+    pub(super) screen: Box<dyn VideoSource>,
+    pub(super) stop: Arc<AtomicBool>,
+}
+
+impl ScreenLoop {
+    pub(super) fn run(mut self) {
+        let epoch = Instant::now();
+        while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
+            let frame = match self.screen.next_frame(FRAME_WAIT) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::warn!("the shared screen stopped: {error}");
+                    self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Screen));
+                    return;
+                }
+            };
+            let Some(i420) = to_i420(&frame, SCREEN_MAX) else {
+                continue;
+            };
+            let mut sent = RtcVideoFrame::new(VideoRotation::VideoRotation0, to_buffer(&i420));
+            sent.timestamp_us = i64::try_from(epoch.elapsed().as_micros()).unwrap_or(i64::MAX);
+            if self.source.capture_frame(&sent) {
+                VideoShared::count(&self.shared.video.screen_sent);
+            }
+        }
     }
 }
 
@@ -310,7 +366,7 @@ fn from_buffer(buffer: &I420Buffer) -> Option<VideoFrame> {
 /// A decoding thread's parts: the far end's video track and the line it came on.
 pub(super) struct Decoder {
     pub(super) shared: Arc<Shared>,
-    pub(super) lines: Arc<Mutex<Vec<String>>>,
+    pub(super) lines: Arc<Mutex<LineMap>>,
     pub(super) track: RtcVideoTrack,
     pub(super) transceiver: RtpTransceiver,
     /// The lines a decoding thread runs for, and this one's: taken out when it ends.

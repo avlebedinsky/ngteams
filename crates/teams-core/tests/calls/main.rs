@@ -7,6 +7,7 @@
 //!   its calling socket's reconnect.
 //! - `failures`: the native signaling feeds the call tracker; what a failure does (Task 14's decision with
 //!   Codex); the engine stopping hangs up.
+//! - `share`: a 1:1 call's screen shared either way, and the far end's shown.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
 
@@ -20,5 +21,6 @@ mod flows;
 mod group;
 mod in_call;
 mod meeting_state;
+mod share;
 mod support;
 mod video;

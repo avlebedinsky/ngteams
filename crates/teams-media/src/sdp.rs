@@ -27,8 +27,14 @@
 //!   a renegotiation offered by either side names the same lines, and keeps each line's label; a line new to the call
 //!   is numbered one past the highest number the session has.
 //! - **Labels**: a line of ours takes the label the web client gives a line of its kind (`main-audio`, `main-video`,
-//!   `data`), except the sharing line: the last video line of an offer with more than one, while the call has none,
-//!   is `applicationsharing-video`, as in the web client's 1:1 and group offers.
+//!   `data`), except the sharing line: the line our screen goes on ([`NgcSession::mark_sharing`]), or else the last
+//!   video line of an offer with more than one while the call has none, is `applicationsharing-video`, as in the web
+//!   client's 1:1 and group offers.
+//! - **A screen shared, 1:1** (`docs/protocol/calling.md`, "More of a running call"): the far end's offer adding a
+//!   sharing line it sends on is taken, read as one it only sends on, so libwebrtc answers it `recvonly` as the web
+//!   client does; the sharing line of ours a far end's offer names receiving is taken as offered. A sharing line
+//!   offered `inactive` (every 1:1 start's and invitation's) stays rejected. Which lines are sharing lines
+//!   ([`NgcSession::sharing_mids`]) is what routes their frames apart from the camera's.
 //!
 //! - **Video** ([`NgcSession::set_video`], [`VideoLines`]): which of an offer's video lines the call takes is the
 //!   session's to say before libwebrtc sees it: an audio-only call (a group call's, until it takes video) reads every
@@ -229,13 +235,46 @@ impl NgcSdp {
         &self.text
     }
 
-    /// Whether a video line is in use (on a port, whichever way it goes): the media carries video.
+    /// Whether a video line other than the sharing line is in use (on a port, going either way, not `inactive`): the
+    /// media carries video. The web client's answer to a share, its main video line `inactive`, names no `Video`
+    /// modality (seen 2026-11-06).
     #[must_use]
     pub fn carries_video(&self) -> bool {
-        lines(&self.text)
-            .filter_map(media_line)
-            .any(|line| line.media == "video" && line.port != "0")
+        self.video_in_use()
+            .any(|section| section.value("label") != Some(SHARING_LABEL) && section.direction() != Some("inactive"))
     }
+
+    /// Which way the sharing line goes, as its writer sends or receives on it, while one is in use: `None` without
+    /// one, or with one `inactive`.
+    #[must_use]
+    pub fn sharing_line(&self) -> Option<SharingLine> {
+        let section = self
+            .video_in_use()
+            .find(|section| section.value("label") == Some(SHARING_LABEL))?;
+        match section.direction() {
+            Some("sendonly" | "sendrecv") | None => Some(SharingLine::Sends),
+            Some("recvonly") => Some(SharingLine::Receives),
+            _ => None,
+        }
+    }
+
+    /// The video sections on a port.
+    fn video_in_use(&self) -> impl Iterator<Item = Section> {
+        Parsed::ngc(&self.text, self.dialect)
+            .map(|parsed| parsed.media)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|section| section.kind == Kind::Video && !section.rejected())
+    }
+}
+
+/// Which way an SDP's sharing line goes, as the SDP's writer has it ([`NgcSdp::sharing_line`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharingLine {
+    /// Its writer shares a screen on it (`sendonly`).
+    Sends,
+    /// Its writer is shown a screen on it (`recvonly`).
+    Receives,
 }
 
 /// A media line's kind.
@@ -496,6 +535,9 @@ enum Taken {
     Slot,
     /// As offered ([`VideoLines::Offered`]).
     Offered,
+    /// A 1:1 call's sharing line: the far end's screen, read as one it only sends on; or ours, which it receives, as
+    /// offered.
+    Sharing,
 }
 
 /// One call's media session as Teams' dialect sees it: the pairs of libwebrtc's and Teams' mids for every m-line and
@@ -515,6 +557,9 @@ pub struct NgcSession {
     /// A group call's receiving lines' own streams (an SSRC each, by Teams mid), drawn once when the line is taken
     /// and named by every offer and answer of the call: nothing is ever sent on them.
     slot_streams: Vec<(String, u32)>,
+    /// libwebrtc's mid of the line our screen goes on, once [`NgcSession::mark_sharing`] named it: labelled the sharing
+    /// line when our offer adds it.
+    our_sharing: Option<String>,
 }
 
 /// Which half of an exchange an SDP is.
@@ -577,6 +622,12 @@ impl NgcSession {
                     // answer made receive-only already (`410 InvalidFinalAnswerMediaDescriptions`, M3 Task 19). Nothing
                     // is sent on them.
                 }
+                Taken::Sharing => {
+                    // the far end's screen: answered receiving; ours, which it receives, as offered
+                    if section.direction() != Some("recvonly") {
+                        only_theirs(section);
+                    }
+                }
                 Taken::Offered => {}
             }
         }
@@ -605,8 +656,28 @@ impl NgcSession {
             (VideoLines::Main { .. } | VideoLines::Group { .. }, None) if !sharing => Taken::Main,
             (VideoLines::Group { .. }, _) if self.slots.iter().any(|slot| slot == mid) => Taken::Slot,
             (VideoLines::Group { slots }, Some(_)) if !sharing && self.slots.len() < slots => Taken::Slot,
+            // a 1:1 call's sharing line in use: the far end's screen, or ours it receives (never one offered
+            // `inactive`, as every start and invitation offers it)
+            (VideoLines::Main { .. }, _) if sharing && section.direction() != Some("inactive") => Taken::Sharing,
             _ => Taken::No,
         }
+    }
+
+    /// Names the line libwebrtc calls `local` (the one our screen goes on) the sharing line: labelled
+    /// `applicationsharing-video` once our offer adds it.
+    pub fn mark_sharing(&mut self, local: &str) {
+        self.our_sharing = Some(local.to_owned());
+    }
+
+    /// libwebrtc's mids of the call's sharing lines (ours and the far end's, in use or not): their frames are a
+    /// screen's, never a camera's.
+    #[must_use]
+    pub fn sharing_mids(&self) -> Vec<String> {
+        self.lines
+            .iter()
+            .filter(|line| line.label == SHARING_LABEL)
+            .map(|line| line.local.clone())
+            .collect()
     }
 
     /// Takes the receiving line `mid` (by Teams mid), with a stream of its own.
@@ -700,7 +771,7 @@ impl NgcSession {
     /// The place among `parsed`'s sections of the line that becomes the sharing line when libwebrtc adds it: the last
     /// video line of an offer with more than one, while the call has no sharing line yet.
     fn sharing_place(&self, parsed: &Parsed) -> Option<usize> {
-        if self.lines.iter().any(|line| line.label == SHARING_LABEL) {
+        if self.our_sharing.is_some() || self.lines.iter().any(|line| line.label == SHARING_LABEL) {
             return None;
         }
         let video: Vec<usize> = parsed
@@ -730,7 +801,7 @@ impl NgcSession {
         for (place, section) in parsed.media.iter().enumerate() {
             let local = section.mid().ok_or(SdpError::Unwritable("an m-line without a mid"))?;
             if self.by_local(local).is_none() {
-                let label = if sharing == Some(place) {
+                let label = if sharing == Some(place) || self.our_sharing.as_deref() == Some(local) {
                     SHARING_LABEL
                 } else {
                     section.kind.label()

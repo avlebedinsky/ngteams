@@ -23,6 +23,7 @@
 //!   to the system's when the test unplugs it.
 //! - `switch-speaker <name> <hz> <amplitude> <seconds each>`: the speaker moved to `name` and back while it plays.
 //! - `portal-camera <frames> <seconds>`: the camera through the camera portal on the sandbox's bus.
+//! - `portal-screen <frames> <seconds>`: a shared screen through the screen-cast portal on the sandbox's bus.
 
 use std::process::ExitCode;
 use std::thread;
@@ -64,6 +65,9 @@ fn number<T: std::str::FromStr>(args: &[String], at: usize, what: &str) -> Probe
 fn run(args: &[String]) -> ProbeResult {
     if args.first().map(String::as_str) == Some("portal-camera") {
         return choice::portal_camera(number(args, 1, "frames")?, number(args, 2, "seconds")?);
+    }
+    if args.first().map(String::as_str) == Some("portal-screen") {
+        return choice::portal_screen(number(args, 1, "frames")?, number(args, 2, "seconds")?);
     }
     let devices = PipeWireDevices::connect(Reach::Sandbox)?;
     match args.first().map(String::as_str) {

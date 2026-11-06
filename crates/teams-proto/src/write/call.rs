@@ -995,8 +995,9 @@ impl UpdateEndpointMetadata {
     }
 }
 
-/// The sender's own participant properties in the call's conversation (its AI voice consent): `POST` to the
-/// conversation subscription's `updateParticipantProperties` link, with the callback for the update's status.
+/// The sender's own participant properties in the call's conversation (its AI voice consent, or that it shares its
+/// screen): `POST` to the conversation subscription's `updateParticipantProperties` link, with the callback for the
+/// update's status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateParticipantProperties(Built);
 
@@ -1021,15 +1022,44 @@ impl UpdateParticipantProperties {
         status: &str,
         operation_id: &str,
     ) -> Result<Self, CallWriteError> {
+        let property = json!({"aiVoiceConsent": {
+            "sequenceNumber": consent.sequence,
+            "value": {"aiVoiceConsentValue": consent.value},
+        }});
+        Self::with(context, link, from, &property, (status, operation_id))
+    }
+
+    /// `from` sharing its screen (`screenSharerAttributes`, its `sequence`-th, `{"source": 1}` as the web client's
+    /// Share sends it before its renegotiation adds the sharing line, seen 2026-11-06) at `link`, its status called
+    /// back at `status`, the update numbered `operation_id`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't participant properties in their captured shape.
+    pub fn screen_sharer(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        sequence: u64,
+        status: &str,
+        operation_id: &str,
+    ) -> Result<Self, CallWriteError> {
+        let property = json!({"screenSharerAttributes": {
+            "sequenceNumber": sequence,
+            "value": {"source": 1},
+        }});
+        Self::with(context, link, from, &property, (status, operation_id))
+    }
+
+    fn with(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        property: &Value,
+        (status, operation_id): (&str, &str),
+    ) -> Result<Self, CallWriteError> {
         let body = json!({
             "from": from.short_json(),
-            "to": [{
-                "id": from.mri.as_str(),
-                "propertyBag": {"aiVoiceConsent": {
-                    "sequenceNumber": consent.sequence,
-                    "value": {"aiVoiceConsentValue": consent.value},
-                }},
-            }],
+            "to": [{"id": from.mri.as_str(), "propertyBag": property}],
             "links": {"updateParticipantPropertiesStatus": status},
             "operationId": operation_id,
         });

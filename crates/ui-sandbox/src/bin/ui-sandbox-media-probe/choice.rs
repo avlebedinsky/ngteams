@@ -234,6 +234,41 @@ pub fn switch_speaker(devices: &PipeWireDevices, name: &str, tone: Tone, each: D
 
 /// The camera through the camera portal on the sandbox's bus: `frames` of them within `seconds`, or
 /// `camera=refused` when the portal (the user) said no.
+/// The screen through the screen-cast portal on the sandbox's bus (sandbox reach asks only that one): `screen=open`,
+/// its first frame's size and how many frames came, each a later one of the pattern than the one before; or
+/// `screen=refused` and why.
+pub fn portal_screen(wanted: u64, seconds: u64) -> ProbeResult {
+    let devices = PipeWireDevices::connect(Reach::Sandbox)?;
+    let mut screen = match devices.screen() {
+        Ok(screen) => screen,
+        Err(DeviceError::Refused(why)) => {
+            println!("screen=refused");
+            println!("why={why}");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let (mut frames, mut size, mut last, mut in_order) = (0, None, None, true);
+    while frames < wanted && Instant::now() < deadline {
+        let Some(frame) = screen.next_frame(WAIT)? else {
+            continue;
+        };
+        frames += 1;
+        size.get_or_insert((frame.width, frame.height));
+        let index = teams_media::devices::pattern::index_of(&frame);
+        in_order &= last.is_none_or(|last| index > Some(last));
+        last = index.or(last);
+    }
+    println!("screen=open");
+    if let Some((width, height)) = size {
+        println!("size={width}x{height}");
+    }
+    println!("frames={frames}");
+    println!("in_order={}", u8::from(in_order));
+    Ok(())
+}
+
 pub fn portal_camera(wanted: u64, seconds: u64) -> ProbeResult {
     let bus = std::env::var("DBUS_SESSION_BUS_ADDRESS").map_err(|_| "no bus")?;
     let devices = PipeWireDevices::connect_with_camera_portal(Reach::Sandbox, &bus)?;

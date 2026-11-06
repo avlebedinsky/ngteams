@@ -1,6 +1,7 @@
 //! The call window's header, as Teams' call window has it: who the call is with and its state on the left; on the
 //! right its controls in Teams' order (Chat, People, Raise and React in a group call or a meeting, View, More; the
-//! camera and the microphone with their devices; Leave, with End meeting beside it for a meeting's organizer).
+//! camera and the microphone with their devices, and Share (Stop sharing while the account shares: [`super::share`]);
+//! Leave, with End meeting beside it for a meeting's organizer).
 use super::*;
 
 /// Teams' live reactions in React's order: the name the call sends, the reaction's picture's key, and its name.
@@ -70,7 +71,7 @@ impl CallStage {
 
     /// A control's caption, as Teams words it under its icon; none in a narrow window, where the icons stand alone
     /// (their tooltips name them).
-    fn caption(&self, caption: &'static str) -> &'static str {
+    pub(super) fn caption(&self, caption: &'static str) -> &'static str {
         if self.width < COMPACT_BELOW { "" } else { caption }
     }
 
@@ -151,13 +152,20 @@ impl CallStage {
         );
         let hold_or_resume = self.hold(active, palette, cx);
         let held = active.held.is_some();
-        let media = div().flex().items_center().gap_1().children(camera).child(
-            div()
-                .flex()
-                .items_center()
-                .child(microphone)
-                .children(self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx)),
-        );
+        let share = self.share_tool(active, palette, cx);
+        let media = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(camera)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(microphone)
+                    .children(self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx)),
+            )
+            .children(share);
         div()
             .flex()
             .flex_none()
@@ -165,7 +173,7 @@ impl CallStage {
             .gap_1()
             .when_some(hold_or_resume, |bar, hold| bar.child(hold).child(divider(palette)))
             .children(self.meeting_tools(active, palette, cx))
-            .child(self.view_menu(palette, cx))
+            .child(self.view_menu(active.remote_share, palette, cx))
             .children(self.controls_menu(active, palette, cx))
             .child(self.more(palette, cx))
             .child(divider(palette))
@@ -394,9 +402,10 @@ impl CallStage {
             .children(self.devices_menu("call-camera-devices", CAMERAS, "Choose camera and video effects", cx))
     }
 
-    /// View, as Teams' has it: Gallery or Speaker (a check on the one shown), Show videos first, and More options
-    /// (Turn off other videos or Turn on, Hide me or Show me, Full screen).
-    fn view_menu(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// View, as Teams' has it: Gallery or Speaker (a check on the one shown), Focus on content while a share shows
+    /// (`shared`), Show videos first, and More options (Turn off other videos or Turn on, Hide me or Show me, Full
+    /// screen).
+    fn view_menu(&self, shared: bool, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let stage = cx.weak_entity();
         let (layout, videos_first) = (self.layout, self.videos_first);
         let options = ViewOptions {
@@ -431,6 +440,13 @@ impl CallStage {
                                 .checked(layout == Layout::Speaker)
                                 .on_click(pick(Layout::Speaker)),
                         )
+                        .when(shared, |menu| {
+                            menu.item(
+                                menu_item("call-view-focus", Some(Glyph::FOCUS_CONTENT), "Focus on content")
+                                    .checked(layout == Layout::Focus)
+                                    .on_click(pick(Layout::Focus)),
+                            )
+                        })
                         .separator()
                         .item(
                             menu_item("call-view-videos-first", Some(Glyph::VIDEO), "Show videos first")

@@ -87,7 +87,7 @@ mod write;
 
 pub use machine::{
     CallError, CallEvent, CallId, CallState, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity, Incoming,
-    Outcome, Placement,
+    Outcome, Placement, Screen,
 };
 pub use machine::{MeetingState, RECORDER_MRI, Recording};
 pub use read::RemoteEnd;

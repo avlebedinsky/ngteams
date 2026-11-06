@@ -48,6 +48,13 @@ pub(super) enum Command {
         frames: Queue<VideoFrame>,
         ready: mpsc::Sender<Result<(), String>>,
     },
+    /// A shared screen's stream, to the node `node` the screen-cast portal named: no device choice moves it.
+    Screen {
+        id: u64,
+        node: u32,
+        frames: Queue<VideoFrame>,
+        ready: mpsc::Sender<Result<(), String>>,
+    },
     /// Use `name` for `kind` from now on (`None`: the system's default), moving the open streams of that kind.
     Choose {
         kind: DeviceKind,
@@ -73,9 +80,10 @@ impl Held {
     }
 }
 
-/// An open device's stream, and its replacement while one is being linked.
+/// An open device's stream, and its replacement while one is being linked; a shared screen's is of no kind (no choice
+/// moves it).
 struct Entry {
-    kind: DeviceKind,
+    kind: Option<DeviceKind>,
     make: Make,
     live: Held,
     pending: Option<(Held, Instant)>,
@@ -218,10 +226,10 @@ fn listen_core(
 }
 
 fn handle(command: Command, state: &Shared, main_loop: &MainLoopWeak) {
-    let (id, kind, make, ready): (u64, DeviceKind, Make, _) = match command {
+    let (id, kind, make, ready): (u64, Option<DeviceKind>, Make, _) = match command {
         Command::Microphone { id, frames, ready } => (
             id,
-            DeviceKind::Microphone,
+            Some(DeviceKind::Microphone),
             Box::new(move |core: &CoreRc, target: Target<'_>, gate| {
                 streams::microphone(core, frames.clone(), target, gate)
             }),
@@ -229,7 +237,7 @@ fn handle(command: Command, state: &Shared, main_loop: &MainLoopWeak) {
         ),
         Command::Speaker { id, queue, ready } => (
             id,
-            DeviceKind::Speaker,
+            Some(DeviceKind::Speaker),
             Box::new(move |core: &CoreRc, target: Target<'_>, gate| {
                 streams::speaker(core, queue.clone(), target, gate)
             }),
@@ -237,10 +245,21 @@ fn handle(command: Command, state: &Shared, main_loop: &MainLoopWeak) {
         ),
         Command::Camera { id, frames, ready } => (
             id,
-            DeviceKind::Camera,
+            Some(DeviceKind::Camera),
             Box::new(move |core: &CoreRc, target: Target<'_>, gate| {
                 streams::camera(core, frames.clone(), target, gate)
             }),
+            ready,
+        ),
+        Command::Screen {
+            id,
+            node,
+            frames,
+            ready,
+        } => (
+            id,
+            None,
+            Box::new(move |core: &CoreRc, _: Target<'_>, gate| streams::screen(core, frames.clone(), node, gate)),
             ready,
         ),
         Command::Choose { kind, name } => return choose(&mut state.borrow_mut(), kind, name.as_deref()),
@@ -259,7 +278,10 @@ fn handle(command: Command, state: &Shared, main_loop: &MainLoopWeak) {
     };
     let (core, target) = {
         let state = state.borrow();
-        (state.core.clone(), state.choices.get(kind).map(str::to_owned))
+        (
+            state.core.clone(),
+            kind.and_then(|kind| state.choices.get(kind)).map(str::to_owned),
+        )
     };
     let gate = Gate::live();
     let reply = make(&core, target.as_deref(), Rc::clone(&gate)).map(|open| {
@@ -280,7 +302,7 @@ fn choose(state: &mut State, kind: DeviceKind, name: Option<&str>) {
         return;
     }
     let State { core, entries, .. } = state;
-    for entry in entries.values_mut().filter(|entry| entry.kind == kind) {
+    for entry in entries.values_mut().filter(|entry| entry.kind == Some(kind)) {
         entry.replace(core, name);
     }
 }

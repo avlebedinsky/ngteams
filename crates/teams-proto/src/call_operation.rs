@@ -28,8 +28,9 @@ pub enum CallOperation {
     /// `DELETE …/cc/v1/incoming/<call>/…/reject`: the callee declines, at the `callLeg` link the `attach`'s answer
     /// handed out.
     Reject,
-    /// `POST …/conv/<id>/updateParticipantProperties`: the callee's own participant properties (its AI voice consent)
-    /// in the call's conversation, once it answered.
+    /// `POST …/conv/<id>/updateParticipantProperties`: the sender's own participant properties in the call's
+    /// conversation: a callee's AI voice consent once it answered, and either end's `screenSharerAttributes` as its
+    /// Share begins (seen 2026-11-06, `ab-call --call steps`). Names nobody else.
     UpdateParticipantProperties,
     /// `POST …/cc/v1/negotiations/<call>/…/answer`: the callee's answer to a media renegotiation of its answered call,
     /// at the `mediaAnswer` link the renegotiation delivered to its own `mediaRenegotiation` callback handed out.

@@ -35,7 +35,7 @@ const LINE_RESOLUTION: VideoResolution = VideoResolution {
 };
 
 /// The video lines by mid, as the peer names them.
-type Lines = Arc<Mutex<Vec<String>>>;
+type Lines = Arc<Mutex<super::LineMap>>;
 
 /// How long a counting thread waits for a picture before it checks whether the far end hung up.
 const COUNT_WAIT: Duration = Duration::from_millis(100);

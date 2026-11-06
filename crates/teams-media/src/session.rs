@@ -16,7 +16,10 @@
 //! - **the decoding threads** (`teams-media-vid`, one per video track the far end sends on) show each decoded picture
 //!   on its video line's sink, once the session's video started ([`MediaSession::start_video`]);
 //! - **the camera thread** (`teams-media-cam`), while the camera is on ([`MediaSession::set_camera`]), hands the
-//!   camera's frames to libwebrtc, which encodes and sends them while our video line is negotiated to send.
+//!   camera's frames to libwebrtc, which encodes and sends them while our video line is negotiated to send;
+//! - **the screen thread** (`teams-media-scr`), while the account shares its screen ([`MediaSession::share_screen`]),
+//!   hands the screen's frames to libwebrtc on a sharing line of their own; the far end's share comes on its sharing
+//!   line, told to the sinks as [`SHARING_LINE`] ([`MediaSession::set_sharing_lines`]).
 //!
 //! No thread waits on another's device: a stuck speaker only stops what is played, a stuck microphone only what is
 //! sent.
@@ -53,12 +56,12 @@ use crate::devices::{AudioFrame, AudioSink, AudioSource, Devices, FRAME_DURATION
 use crate::processing::{AudioProcessing, ProcessingConfig, from_i16, to_i16};
 use crate::relay::RelayConfig;
 use crate::rtc::{Next, Peer, PeerEvent, next_within};
-pub use crate::rtc::{SdpAnswer, SdpOffer};
+pub use crate::rtc::{SHARING_LINE, SdpAnswer, SdpOffer};
 use control::Control;
 pub use control::SourceRequest;
 #[cfg(feature = "test-support")]
 pub(crate) use video::to_buffer as to_rtc_buffer;
-use video::{CameraLoop, VideoShared};
+use video::{CameraLoop, ScreenLoop, VideoShared};
 pub use video::{RemoteSinks, VideoParts, VideoStats};
 
 mod control;
@@ -93,6 +96,8 @@ pub enum SessionDevice {
     Microphone,
     Speaker,
     Camera,
+    /// The screen being shared (the user stopped it at the desktop, or its stream ended).
+    Screen,
 }
 
 /// What the session reports.
@@ -505,6 +510,74 @@ impl MediaSession {
         Ok(())
     }
 
+    /// The call's sharing lines by libwebrtc's mid, as the dialect names them (`crate::sdp::NgcSession::sharing_mids`):
+    /// their frames go to the sinks as [`SHARING_LINE`], none of them is a camera's line. Set before the SDP that names
+    /// them is applied.
+    pub fn set_sharing_lines(&self, mids: Vec<String>) {
+        self.peer.set_sharing_lines(mids);
+    }
+
+    /// Shares `screen`: its frames sent on a line of its own (sending only), with our offer adding it and that line's
+    /// mid (for the dialect: `crate::sdp::NgcSession::mark_sharing`). Pass the answer to
+    /// [`MediaSession::accept_answer`].
+    ///
+    /// # Errors
+    /// [`Error::Video`] when the video didn't start, [`Error::Rtc`] when libwebrtc refuses the line or makes no offer,
+    /// [`Error::Io`] when the screen thread can't be spawned.
+    pub fn share_screen(&self, screen: Box<dyn VideoSource>) -> Result<(SdpOffer, String), Error> {
+        if self.peer.video_source().is_none() {
+            return Err(Error::Video("the session's video didn't start".into()));
+        }
+        let _step = self.negotiating();
+        let source = self.peer.share_screen()?;
+        let mut video = self.video.lock().unwrap_or_else(PoisonError::into_inner);
+        video.stop_screen();
+        let stop = Arc::new(AtomicBool::new(false));
+        let looped = ScreenLoop {
+            shared: Arc::clone(&self.shared),
+            source,
+            screen,
+            stop: Arc::clone(&stop),
+        };
+        let handle = match thread::Builder::new()
+            .name("teams-media-scr".into())
+            .spawn(move || looped.run())
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.peer.stop_screen();
+                return Err(error.into());
+            }
+        };
+        video.screen = Some((stop, handle));
+        drop(video);
+        let offer = self.peer.offer()?;
+        let mid = self
+            .peer
+            .screen_mid()
+            .ok_or_else(|| Error::Rtc("the screen's line has no mid".into()))?;
+        Ok((offer, mid))
+    }
+
+    /// Stops sharing the screen: its thread stopped and our offer rejecting its line; `None` when none was shared.
+    ///
+    /// # Errors
+    /// As [`MediaSession::offer_audio`].
+    pub fn stop_screen(&self) -> Result<Option<SdpOffer>, Error> {
+        self.video.lock().unwrap_or_else(PoisonError::into_inner).stop_screen();
+        let _step = self.negotiating();
+        if !self.peer.stop_screen() {
+            return Ok(None);
+        }
+        self.peer.offer().map(Some)
+    }
+
+    /// Whether the account shares its screen.
+    #[must_use]
+    pub fn sharing(&self) -> bool {
+        self.peer.screen_mid().is_some()
+    }
+
     /// Whether the camera is on.
     #[must_use]
     pub fn camera_on(&self) -> bool {
@@ -576,7 +649,11 @@ impl MediaSession {
 
     fn shut_down(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        self.video.lock().unwrap_or_else(PoisonError::into_inner).stop_camera();
+        {
+            let mut video = self.video.lock().unwrap_or_else(PoisonError::into_inner);
+            video.stop_camera();
+            video.stop_screen();
+        }
         self.peer.close();
         let threads = std::mem::take(&mut *self.threads.lock().unwrap_or_else(PoisonError::into_inner));
         for handle in threads {

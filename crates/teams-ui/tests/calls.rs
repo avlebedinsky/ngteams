@@ -3260,6 +3260,125 @@ fn a_one_to_one_call_goes_on_hold_and_resumes_as_teams_shows_it() {
     assert!(!drawn(stage, "call-held-controls"));
 }
 
+/// A 1:1 call to b, up, in a build that shows video on `feed`: the rig and the call window.
+fn one_to_one_video_call(feed: &VideoFeed) -> (Rig, &'static mut VisualTestContext) {
+    let rig = video_calling(feed);
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    (rig, stage)
+}
+
+#[test]
+fn a_one_to_one_call_shares_its_screen_from_share_content_and_stops_as_teams_shows_it() {
+    let feed = VideoFeed::new();
+    let (rig, stage) = one_to_one_video_call(&feed);
+    // Share's flyout: "Share content", its screen, window or tab
+    click(stage, "call-share");
+    assert!(drawn(stage, "call-share-content"));
+    click(stage, "call-share-screen");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Share {
+            call: call(1),
+            on: true
+        })
+    );
+    assert!(!drawn(stage, "call-stop-sharing"), "sharing once the engine says so");
+    rig.send(Event::CallSharing {
+        call: call(1),
+        on: true,
+    });
+    rig.cx.run_until_parked();
+    // the red Stop sharing in Share's place
+    assert!(drawn(stage, "call-stop-sharing"));
+    assert!(!drawn(stage, "call-share"));
+    click(stage, "call-stop-sharing");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Share {
+            call: call(1),
+            on: false
+        })
+    );
+    rig.send(Event::CallSharing {
+        call: call(1),
+        on: false,
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-share"));
+    // on hold, Share greys out with the camera and the microphone
+    rig.send(Event::CallHeld {
+        call: call(1),
+        held: true,
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-held-controls") && drawn(stage, "call-share"));
+}
+
+#[test]
+fn the_far_end_s_share_takes_the_stage_with_the_people_beside_it_and_view_focuses_on_it() {
+    let feed = VideoFeed::new();
+    let (rig, stage) = one_to_one_video_call(&feed);
+    assert!(drawn(stage, "call-participant-self"), "the self view floats");
+    click(stage, "call-view");
+    assert!(!drawn(stage, "call-view-focus"), "nothing shared: no Focus on content");
+    stage.simulate_keystrokes("escape");
+    rig.send(Event::CallRemoteShare {
+        call: call(1),
+        on: true,
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-share-stage") && drawn(stage, "call-share"));
+    assert!(drawn(stage, "call-share-strip"), "the people beside the share");
+    assert!(drawn(stage, "call-person-0") && drawn(stage, "call-participant-self"));
+    // the share's frames on its own tile
+    let output: &dyn VideoOutput = &feed;
+    output
+        .remote(teams_media::session::SHARING_LINE)
+        .show(&TestPattern::new(320, 180).frame(1))
+        .unwrap();
+    assert!(drawn(stage, "video-tile-share"));
+    assert!(feed.picture(Tile::REMOTE).is_none(), "no camera's frame");
+    // View's Focus on content: the share alone
+    click(stage, "call-view");
+    click(stage, "call-view-focus");
+    assert!(drawn(stage, "call-share-focus"));
+    assert!(!drawn(stage, "call-share-strip") && !drawn(stage, "call-participant-self"));
+    // the share ends: the call as it was
+    rig.send(Event::CallRemoteShare {
+        call: call(1),
+        on: false,
+    });
+    rig.cx.run_until_parked();
+    assert!(!drawn(stage, "call-share-stage") && !drawn(stage, "call-share-focus"));
+    assert!(drawn(stage, "call-person-0") && drawn(stage, "call-participant-self"));
+}
+
+#[test]
+fn a_group_call_and_a_build_without_video_offer_no_share() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (_windows, group) = in_group_call(&rig, &trace);
+    assert!(!drawn(group, "call-share"), "a group call's share wasn't captured");
+    let rig = calling();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    assert!(
+        !drawn(stage(&rig, &windows), "call-share"),
+        "no video: nothing to share with"
+    );
+}
+
 #[test]
 fn a_one_to_one_call_held_by_its_far_end_shows_on_hold_its_controls_as_they_were() {
     let rig = calling();

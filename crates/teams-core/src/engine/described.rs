@@ -71,6 +71,7 @@ pub(super) fn call(action: &CallAction) -> String {
             timer.remaining_ms
         ),
         CallAction::LockMeeting { call, locked } => format!("call {}: meeting locked {locked}", call.get()),
+        CallAction::Share { call, on } => format!("call {} sharing its screen {on}", call.get()),
     }
 }
 
@@ -171,13 +172,6 @@ fn plain(event: &Event) -> String {
             captions.lines.len()
         ),
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
-        Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),
-        Event::CameraOff { call } => format!("call {}: its camera went off", call.get()),
-        Event::AudioClosed { call, microphone } => format!(
-            "call {}: its {} went away",
-            call.get(),
-            if *microphone { "microphone" } else { "speaker" }
-        ),
         // no names: how many, which lines, who of them speaks
         Event::CallParticipants { call, view } => format!(
             "call {}: {} participant(s), cameras on {}, lines {:?}, speaking {}{}, muted {}, hands up {}",
@@ -192,9 +186,16 @@ fn plain(event: &Event) -> String {
         ),
         // no names: how many wait
         Event::Lobby { call, waiting } => format!("call {}: {} waiting in the lobby", call.get(), waiting.len()),
-        Event::CallOwn { .. } | Event::CallReaction { .. } | Event::CallMeeting { .. } => call_state(event),
-        Event::CallHeld { call, held } => format!("call {} held {held}", call.get()),
-        Event::CallHeldByFarEnd { call, held } => format!("call {} held by its far end {held}", call.get()),
+        Event::Voicemail { .. }
+        | Event::CameraOff { .. }
+        | Event::AudioClosed { .. }
+        | Event::CallOwn { .. }
+        | Event::CallReaction { .. }
+        | Event::CallMeeting { .. }
+        | Event::CallHeld { .. }
+        | Event::CallHeldByFarEnd { .. }
+        | Event::CallSharing { .. }
+        | Event::CallRemoteShare { .. } => call_state(event),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }
@@ -217,7 +218,8 @@ fn call_meeting(call: crate::CallId, state: &teams_call::MeetingState) -> String
     )
 }
 
-/// The account's own state in its call, and a live reaction, by MRI and kind: never the sender's name.
+/// A call's own state (its voicemail, its devices gone, the account's hand, hold and shares) and a live reaction, by
+/// MRI and kind: never the sender's name.
 fn call_state(event: &Event) -> String {
     match event {
         Event::CallOwn {
@@ -232,6 +234,17 @@ fn call_state(event: &Event) -> String {
             call, from, reaction, ..
         } => format!("call {}: reaction {reaction} from {from}", call.get()),
         Event::CallMeeting { call, state } => call_meeting(*call, state),
+        Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),
+        Event::CameraOff { call } => format!("call {}: its camera went off", call.get()),
+        Event::AudioClosed { call, microphone } => format!(
+            "call {}: its {} went away",
+            call.get(),
+            if *microphone { "microphone" } else { "speaker" }
+        ),
+        Event::CallHeld { call, held } => format!("call {} held {held}", call.get()),
+        Event::CallHeldByFarEnd { call, held } => format!("call {} held by its far end {held}", call.get()),
+        Event::CallSharing { call, on } => format!("call {} sharing its screen {on}", call.get()),
+        Event::CallRemoteShare { call, on } => format!("call {}: the far end's screen shown {on}", call.get()),
         _ => String::new(),
     }
 }

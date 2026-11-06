@@ -1,6 +1,6 @@
 //! The device streams the loop thread makes: the microphone, the speaker and the camera, each linked by the session
 //! manager to the device chosen for it ([`Target`]: `target.object`) or, with none chosen, to the system's default,
-//! which it then follows.
+//! which it then follows; and a shared screen's, connected to the node the screen-cast portal named ([`screen`]).
 //!
 //! A chosen device is pinned with `node.dont-move`: WirePlumber takes a stream whose `target.object` names the
 //! current default for one following the default (the rule `PulseAudio` has: it writes `target.node = -1` into the
@@ -184,11 +184,16 @@ fn audio_format() -> Result<Vec<u8>, String> {
 }
 
 fn connect(stream: &StreamRc, direction: Direction, format: &[u8]) -> Result<(), String> {
+    connect_to(stream, direction, None, format)
+}
+
+/// [`connect`], to the node `node` when one is named (a shared screen's).
+fn connect_to(stream: &StreamRc, direction: Direction, node: Option<u32>, format: &[u8]) -> Result<(), String> {
     let pod = Pod::from_bytes(format).ok_or("a format PipeWire can't read")?;
     stream
         .connect(
             direction,
-            None,
+            node,
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
             &mut [pod],
         )
@@ -358,6 +363,46 @@ pub(super) fn camera(
         },
         target,
     )?;
+    let formats = video_formats(Rectangle {
+        width: 640,
+        height: 360,
+    })?;
+    video_capture(stream, frames, gate, (None, &formats))
+}
+
+/// A shared screen's stream: the node `node` the screen-cast portal named, its picture taken at its own size (1080p
+/// preferred) in the formats a camera's may come in.
+pub(super) fn screen(
+    core: &CoreRc,
+    frames: Queue<VideoFrame>,
+    node: u32,
+    gate: Rc<Gate>,
+) -> Result<Box<dyn Any>, String> {
+    let stream = new_stream(
+        core,
+        "teams-screen",
+        properties! {
+            *pipewire::keys::MEDIA_TYPE => "Video",
+            *pipewire::keys::MEDIA_CATEGORY => "Capture",
+            *pipewire::keys::MEDIA_ROLE => "Screen",
+        },
+        None,
+    )?;
+    let formats = video_formats(Rectangle {
+        width: 1920,
+        height: 1080,
+    })?;
+    video_capture(stream, frames, gate, (Some(node), &formats))
+}
+
+/// A video stream's listeners and its connection (to `node` when one is named, offering `formats`): each buffer's
+/// frame queued on `frames` while it is live.
+fn video_capture(
+    stream: StreamRc,
+    frames: Queue<VideoFrame>,
+    gate: Rc<Gate>,
+    (node, formats): (Option<u32>, &[u8]),
+) -> Result<Box<dyn Any>, String> {
     let state = CameraState {
         format: None,
         frames: Feed::new(frames, gate),
@@ -389,7 +434,7 @@ pub(super) fn camera(
         .state_changed(|_, state, _, new| state.frames.state(&new))
         .register()
         .map_err(text)?;
-    connect(&stream, Direction::Input, &camera_formats()?)?;
+    connect_to(&stream, Direction::Input, node, formats)?;
     Ok(Box::new(Open {
         _listener: listener,
         _stream: stream,
@@ -453,8 +498,9 @@ fn camera_buffers() -> Result<Vec<u8>, String> {
     })
 }
 
-/// The camera's offer: any of [`CAMERA_FORMATS`], 640x360 at 15 frames a second preferred, anything up to 4K.
-fn camera_formats() -> Result<Vec<u8>, String> {
+/// A video capture's offer: any of [`CAMERA_FORMATS`], `preferred`'s size at 15 frames a second preferred (a camera's
+/// 640x360, a screen's 1080p), anything up to 4K.
+fn video_formats(preferred: Rectangle) -> Result<Vec<u8>, String> {
     let object = pod::object!(
         SpaTypes::ObjectParamFormat,
         ParamType::EnumFormat,
@@ -481,10 +527,7 @@ fn camera_formats() -> Result<Vec<u8>, String> {
             Choice,
             Range,
             Rectangle,
-            Rectangle {
-                width: 640,
-                height: 360
-            },
+            preferred,
             Rectangle { width: 1, height: 1 },
             Rectangle {
                 width: 4096,

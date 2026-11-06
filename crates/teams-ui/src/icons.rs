@@ -136,6 +136,12 @@ impl Glyph {
     pub const GALLERY: Self = Self(include_bytes!("../assets/icons/layout-grid.svg"));
     /// A call's speaker view.
     pub const SPEAKER_VIEW: Self = Self(include_bytes!("../assets/icons/layout-panel-top.svg"));
+    /// View's Focus on content: the share alone.
+    pub const FOCUS_CONTENT: Self = Self(include_bytes!("../assets/icons/layout-template.svg"));
+    /// A call's Share (Teams' box with its arrow up).
+    pub const SCREEN_SHARE: Self = Self(include_bytes!("../assets/icons/square-arrow-up.svg"));
+    /// A screen, window or tab to share.
+    pub const MONITOR: Self = Self(include_bytes!("../assets/icons/monitor.svg"));
     pub const PIN: Self = Self(include_bytes!("../assets/icons/pin.svg"));
     pub const PIN_OFF: Self = Self(include_bytes!("../assets/icons/pin-off.svg"));
     pub const SEARCH: Self = Self(include_bytes!("../assets/icons/search.svg"));

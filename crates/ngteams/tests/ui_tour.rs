@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 183] = [
+const STEPS: [Step; 5 + 188] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1324,9 +1324,35 @@ const STEPS: [Step; 5 + 183] = [
     ("call-window-held-by-far-end", |shell, _, cx| {
         theme(shell, teams_ui::theme::LIGHT_KEY, cx);
     }),
+    // the account sharing its screen in Teams Dark: the red Stop sharing in Share's place
+    ("call-window-sharing-dark", |shell, _, cx| {
+        held_by_far_end(shell, false, cx);
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        share(shell, (true, false), cx);
+    }),
+    // b sharing its screen: the share takes the stage, b's tile and the account's own in a strip on its right
+    ("call-window-viewing-dark", |shell, _, cx| {
+        share(shell, (false, true), cx);
+    }),
+    // View's Focus on content: the share alone
+    ("call-window-focus-dark", |_, _, cx| {
+        with_stage(cx, |stage, cx| {
+            stage.set_layout(teams_ui::call_stage::Layout::Focus, cx);
+        });
+    }),
+    // the same in Teams Light
+    ("call-window-viewing", |shell, _, cx| {
+        with_stage(cx, |stage, cx| {
+            stage.set_layout(teams_ui::call_stage::Layout::Gallery, cx);
+        });
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+    }),
+    ("call-window-sharing", |shell, _, cx| {
+        share(shell, (true, false), cx);
+    }),
     // someone waiting in a meeting's lobby, as whoever may admit sees them: "Waiting in the lobby", Deny and Admit
     ("call-lobby-dark", |shell, _, cx| {
-        held_by_far_end(shell, false, cx);
+        share(shell, (false, false), cx);
         theme(shell, teams_ui::theme::DARK_KEY, cx);
         lobby(
             shell,
@@ -1507,6 +1533,14 @@ fn theme(shell: &Entity<Shell>, key: &'static str, cx: &mut App) {
     model.update(cx, |model, cx| {
         model.change(|settings| settings.appearance.theme = key, cx);
     });
+}
+
+/// The made-up 1:1 call's shares as the engine tells them: the account's own (`sharing`), b's (`shown`).
+fn share(shell: &Entity<Shell>, (sharing, shown): (bool, bool), cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    let call = teams_core::CallId::for_tests(FAKE_CALL);
+    models.apply(teams_core::Event::CallSharing { call, on: sharing }, cx);
+    models.apply(teams_core::Event::CallRemoteShare { call, on: shown }, cx);
 }
 
 /// The made-up group call's number.
@@ -1818,11 +1852,13 @@ fn fake_call(shell: &Entity<Shell>, cx: &mut App) {
         models.apply(event, cx);
     }
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let pattern = TestPattern::new(640, 360);
+        let (pattern, screen) = (TestPattern::new(640, 360), TestPattern::new(1280, 720));
         let output: &dyn VideoOutput = &feed;
         let mut sink = output.remote(0);
+        // b's shared screen on its sharing line (shown while the call tells b shares)
+        let mut shared = output.remote(teams_media::session::SHARING_LINE);
         for frame in 0.. {
-            if sink.show(&pattern.frame(frame)).is_err() {
+            if sink.show(&pattern.frame(frame)).is_err() || shared.show(&screen.frame(frame)).is_err() {
                 break;
             }
             cx.background_executor().timer(Duration::from_millis(100)).await;

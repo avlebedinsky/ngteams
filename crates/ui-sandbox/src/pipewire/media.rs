@@ -3,6 +3,9 @@
 //! - **The camera** (`sandbox-camera`, a video source): `teams-media`'s test pattern ([`TestPattern`]), I420 at the
 //!   size and rate asked, a frame on each tick of its own timer (it drives its graph, as a camera does), each frame
 //!   carrying its index.
+//! - **The screen** (`sandbox-screen`): the same pattern at 720p, 15 frames a second, on a stream of the kind a
+//!   compositor's screen cast is (`Stream/Output/Video`, so no camera list names it); its node is what the sandbox's
+//!   fake screen-cast portal hands out ([`MediaHelper::screen_node`]).
 //! - **The recording**: a capture of the speaker's monitor, written to a WAV file whose header is brought up to date
 //!   every second, each buffer marked on its [`Timeline`] (when its first sample was heard).
 //! - **Devices added and removed while it runs** ([`super::nodes`]): another microphone playing a tone of its own, or
@@ -23,7 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -41,13 +44,13 @@ use pipewire::spa::pod::serialize::PodSerializer;
 use pipewire::spa::pod::{self, Pod, Property, Value};
 use pipewire::spa::utils::{Direction, Fraction, Rectangle, SpaTypes};
 use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
-use teams_media::devices::file::PatternCamera;
+use teams_media::devices::file::{PatternCamera, SCREEN};
 use teams_media::devices::pattern::TestPattern;
 use teams_media::devices::pipewire::CONFIG_OVERRIDES;
 use teams_media::devices::wav::WavWriter;
 
 use super::timeline::{Timeline, now_us, samples_to_us};
-use super::{CAMERA_NODE, SPEAKER_NODE};
+use super::{CAMERA_NODE, SCREEN_NODE, SPEAKER_NODE};
 use crate::{SOCKET_WAIT, SandboxResult};
 
 /// The camera and the recording, stopped (and the recording's header brought up to date) on drop.
@@ -55,7 +58,15 @@ pub struct MediaHelper {
     commands: pipewire::channel::Sender<Command>,
     thread: Option<JoinHandle<()>>,
     frames: Arc<AtomicU64>,
+    screen: ScreenShown,
     recorded: Timeline,
+}
+
+/// The sandbox's screen as it is shown: its node once the server made it (`0` before), and its frames so far.
+#[derive(Clone, Default)]
+pub struct ScreenShown {
+    pub node: Arc<AtomicU32>,
+    pub frames: Arc<AtomicU64>,
 }
 
 /// What the helper's thread is asked.
@@ -89,6 +100,7 @@ impl MediaHelper {
         let (commands, commands_rx) = pipewire::channel::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let frames = Arc::new(AtomicU64::new(0));
+        let screen = ScreenShown::default();
         let recorded = Timeline::new();
         let setup = Setup {
             recorded: recorded.clone(),
@@ -97,6 +109,7 @@ impl MediaHelper {
             recording: recording.to_owned(),
             camera,
             frames: Arc::clone(&frames),
+            screen: screen.clone(),
         };
         let thread = thread::Builder::new()
             .name("ui-sandbox-media".to_owned())
@@ -109,6 +122,7 @@ impl MediaHelper {
             commands,
             thread: Some(thread),
             frames,
+            screen,
             recorded,
         };
         match ready_rx.recv_timeout(SOCKET_WAIT) {
@@ -122,6 +136,18 @@ impl MediaHelper {
     #[must_use]
     pub fn frames_shown(&self) -> u64 {
         self.frames.load(Ordering::Relaxed)
+    }
+
+    /// The sandbox's screen: its node (once made) and its frames, shared with the fake screen-cast portal.
+    #[must_use]
+    pub fn screen(&self) -> ScreenShown {
+        self.screen.clone()
+    }
+
+    /// The sandbox's screen's node, once the server made it.
+    #[must_use]
+    pub fn screen_node(&self) -> Option<u32> {
+        Some(self.screen.node.load(Ordering::Relaxed)).filter(|node| *node != 0)
     }
 
     /// When the recording's samples were heard.
@@ -163,6 +189,7 @@ struct Setup {
     recording: PathBuf,
     camera: PatternCamera,
     frames: Arc<AtomicU64>,
+    screen: ScreenShown,
 }
 
 pub(super) fn text(error: impl std::fmt::Display) -> String {
@@ -196,6 +223,16 @@ impl Setup {
         });
         let period = Duration::from_secs(1) / self.camera.fps.max(1);
         timer
+            .update_timer(Some(period), Some(period))
+            .into_sync_result()
+            .map_err(text)?;
+        let screen = Camera::show_screen(&core, self.screen)?;
+        let screen_ticks = screen.stream.clone();
+        let screen_timer = main_loop.loop_().add_timer(move |_| {
+            let _ = screen_ticks.trigger_process();
+        });
+        let period = Duration::from_secs(1) / SCREEN.fps;
+        screen_timer
             .update_timer(Some(period), Some(period))
             .into_sync_result()
             .map_err(text)?;
@@ -350,6 +387,58 @@ struct Showing {
 }
 
 impl Camera {
+    /// The sandbox's screen (see the module docs): its node told on `shown` once the server made it.
+    fn show_screen(core: &CoreRc, shown: ScreenShown) -> Result<Self, String> {
+        let pattern = TestPattern::new(SCREEN.width, SCREEN.height);
+        let props = properties! {
+            *pipewire::keys::MEDIA_TYPE => "Video",
+            *pipewire::keys::MEDIA_CATEGORY => "Source",
+            *pipewire::keys::MEDIA_ROLE => "Screen",
+            *pipewire::keys::NODE_NAME => SCREEN_NODE,
+            *pipewire::keys::NODE_DESCRIPTION => "Sandbox screen",
+        };
+        let stream = StreamRc::new(core.clone(), SCREEN_NODE, props).map_err(text)?;
+        let showing = Showing {
+            pattern,
+            index: Rc::default(),
+            frames: shown.frames,
+        };
+        let node = shown.node;
+        let listener = stream
+            .add_local_listener_with_user_data(showing)
+            .param_changed(|stream, showing, id, param| {
+                if id == ParamType::Format.as_raw() && param.is_some() {
+                    let _ = buffers(showing.pattern)
+                        .and_then(|params| stream.update_params(&mut [as_pod(&params)?]).map_err(text));
+                }
+            })
+            .state_changed(move |stream, _, _, _| {
+                let id = stream.node_id();
+                if id != u32::MAX {
+                    node.store(id, Ordering::Relaxed);
+                }
+            })
+            .process(show_frame)
+            .register()
+            .map_err(text)?;
+        let format = camera_format(pattern, SCREEN.fps)?;
+        stream
+            .connect(
+                Direction::Output,
+                None,
+                StreamFlags::DRIVER | StreamFlags::MAP_BUFFERS,
+                &mut [as_pod(&format)?],
+            )
+            .map_err(text)?;
+        Ok(Self {
+            stream: stream.clone(),
+            _open: Open {
+                _listener: listener,
+                _stream: stream,
+            },
+        })
+    }
+
     fn show(core: &CoreRc, camera: PatternCamera, frames: Arc<AtomicU64>) -> Result<Self, String> {
         let pattern = TestPattern::new(camera.width, camera.height);
         let props = properties! {

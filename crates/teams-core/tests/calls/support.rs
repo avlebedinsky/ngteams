@@ -24,7 +24,7 @@ use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, 
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayServer;
-use teams_media::session::SessionConfig;
+use teams_media::session::{SHARING_LINE, SessionConfig};
 use teams_media::tone::{Tone, level_at};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
@@ -267,10 +267,11 @@ pub struct Account {
 }
 
 /// The frames an account's calls showed: the far end's, decoded (a 1:1 call's on line 0, a group call's participants'
-/// on the lines after it), and its own camera's as sent.
+/// on the lines after it, a shared screen on its sharing line), and its own camera's as sent.
 #[derive(Clone, Default)]
 pub struct Shown {
     pub remote: FrameCounter,
+    pub share: FrameCounter,
     pub lines: Arc<std::sync::Mutex<std::collections::BTreeMap<usize, FrameCounter>>>,
     pub preview: FrameCounter,
 }
@@ -290,6 +291,9 @@ impl VideoOutput for Shown {
     fn remote(&self, line: usize) -> Box<dyn VideoSink> {
         if line == 0 {
             return Box::new(self.remote.clone());
+        }
+        if line == SHARING_LINE {
+            return Box::new(self.share.clone());
         }
         Box::new(self.lines.lock().unwrap().entry(line).or_default().clone())
     }
@@ -517,6 +521,10 @@ impl Devices for Counted {
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
         self.devices.camera()
+    }
+
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.devices.screen()
     }
 }
 

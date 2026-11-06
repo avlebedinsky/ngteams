@@ -16,6 +16,11 @@
 //! channel's) is started once the far end's SDP was applied (`teams_media::mcp`). The camera is off when a call starts;
 //! only the account's action turns it on. The test call's media is a 1:1 call's (the media controller answers it, its
 //! camera turned by a renegotiation); a call whose video can't start carries audio only.
+//! **A screen shared, 1:1** (`docs/protocol/calling.md`, "More of a running call"): the account's screen, picked at the
+//! desktop's portal ([`pick_screen`]), goes on a sharing line of its own its renegotiation adds ([`share`], stopped by
+//! [`stop_share`]); the far end's goes on the sharing line its renegotiation adds, which the dialect answers receiving
+//! and whose frames go to the video output's [`teams_media::session::SHARING_LINE`] sink.
+//!
 //! Every step that blocks (the allocation, opening a device, an SDP command, the session's close) runs on tokio's
 //! blocking pool, never on the engine's thread; the session's own threads carry the media.
 
@@ -23,6 +28,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use teams_call::CallId;
+use teams_media::devices::VideoSource;
 use teams_media::devices::{Devices, VideoSink};
 use teams_media::relay::{self, RelayConfig, RelayServer, teams_relay};
 use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
@@ -249,6 +255,7 @@ fn set_up(
         Some(offer) => {
             let theirs = ngc(offer)?;
             let theirs = dialect.read_offer(&theirs).map_err(|error| text(&error))?;
+            session.set_sharing_lines(dialect.sharing_mids());
             let answer = session.accept_offer(theirs).map_err(|error| text(&error))?;
             if group {
                 session
@@ -423,6 +430,20 @@ pub(crate) enum MediaDone {
     },
     /// The call's devices opened (or not).
     Opened { call: CallId, result: Result<(), String> },
+    /// The screen the user picked to share (or why there is none).
+    ScreenPicked {
+        call: CallId,
+        result: Result<Box<dyn VideoSource>, String>,
+        reply: super::Waiting,
+    },
+    /// The account's screen shared (`on`) or no longer, with our renegotiation's offer adding or rejecting its line
+    /// (none when nothing was shared), or why not.
+    Shared {
+        call: CallId,
+        on: bool,
+        result: Result<Option<NgcSdp>, String>,
+        reply: super::Waiting,
+    },
 }
 
 /// A call's running media.
@@ -446,6 +467,8 @@ pub(super) struct LiveMedia {
     /// A renegotiation of ours gave way to the far end's: the far end's is answered with our camera's line only
     /// receiving, and our camera's line offered again once it was ([`offer_camera`]).
     pub(super) reoffer_owed: bool,
+    /// Who shares a screen in the call now.
+    pub(super) shares: Shares,
     /// Who is in the call, whose video each receiving line shows, who speaks; a group call's that takes video
     /// ([`LiveMedia::is_group`]) has its camera go by describing its lines again, its receiving lines carrying the
     /// participants the source requests chose.
@@ -454,6 +477,14 @@ pub(super) struct LiveMedia {
     pub(super) capabilities: u64,
     /// The number of a group call's latest media descriptions (its start's, join's or `accept`'s is `1`).
     pub(super) described: u64,
+}
+
+/// Who shares a screen in a 1:1 call: the account (`own`), the far end (`theirs`: its sharing line in use, our answer
+/// receiving on it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Shares {
+    pub(super) own: bool,
+    pub(super) theirs: bool,
 }
 
 /// What the session's reports since the last look mean for the call.
@@ -475,6 +506,8 @@ pub(super) enum MediaChange {
     },
     /// Who spoke last in a group call: the dominant speakers' audio source ids, as its mixer told them.
     Speakers(Vec<i64>),
+    /// The screen the account shares ended at the desktop (the user stopped it there): nothing more goes on its line.
+    ScreenEnded,
     Captions(Vec<teams_media::captions::Caption>),
 }
 
@@ -483,6 +516,7 @@ impl LiveMedia {
         Self {
             camera: prepared.video.then_some(false),
             reoffer_owed: false,
+            shares: Shares::default(),
             gallery: Gallery::new(prepared.group_call, prepared.group.is_some()),
             capabilities: 0,
             described: 1,
@@ -568,6 +602,7 @@ impl LiveMedia {
             SessionDevice::Camera => self.camera_stopped(),
             SessionDevice::Microphone => Some(MediaChange::AudioClosed { microphone: true }),
             SessionDevice::Speaker => Some(MediaChange::AudioClosed { microphone: false }),
+            SessionDevice::Screen => self.shares.own.then_some(MediaChange::ScreenEnded),
         }
     }
 
@@ -642,6 +677,7 @@ pub(super) fn apply(live: &LiveMedia, answer: MediaContent) -> impl FnOnce() -> 
         let result = ngc(&answer).and_then(|answer| {
             let mut dialect = lock(&dialect);
             let answer = dialect.read_answer(&answer).map_err(|error| error.to_string())?;
+            session.set_sharing_lines(dialect.sharing_mids());
             session.accept_answer(answer).map_err(|error| error.to_string())?;
             // a group call's control plane, on the data channel our offer made
             if group {
@@ -694,10 +730,79 @@ pub(super) fn answer(live: &LiveMedia, offer: MediaContent) -> impl FnOnce() -> 
                 dialect.set_video(VideoLines::Main { sending: false });
             }
             let offer = dialect.read_offer(&offer).map_err(|error| error.to_string())?;
+            // the far end's screen's frames are the share's, not a camera's
+            session.set_sharing_lines(dialect.sharing_mids());
             let answer = session.accept_offer(offer).map_err(|error| error.to_string())?;
             dialect.write_answer(&answer).map_err(|error| error.to_string())
         });
         MediaDone::Answered { call, result }
+    }
+}
+
+/// Asks the user which screen to share, off the engine's thread (the desktop's portal asks and waits for their
+/// answer): the call's negotiations go on meanwhile.
+pub(super) fn pick_screen(
+    call: CallId,
+    devices: Arc<dyn Devices + Send + Sync>,
+    reply: super::Waiting,
+) -> impl FnOnce() -> MediaDone + Send + use<> {
+    move || MediaDone::ScreenPicked {
+        call,
+        result: devices.screen().map_err(|error| error.to_string()),
+        reply,
+    }
+}
+
+/// Shares `screen` on a sharing line of its own and offers it, off the engine's thread; `reply` is answered once the
+/// machine took the offer.
+pub(super) fn share(
+    live: &LiveMedia,
+    screen: Box<dyn VideoSource>,
+    reply: super::Waiting,
+) -> impl FnOnce() -> MediaDone + Send + use<> {
+    let (call, session, dialect) = (live.call, Arc::clone(&live.session), Arc::clone(&live.dialect));
+    move || {
+        let result = session
+            .share_screen(screen)
+            .map_err(|error| error.to_string())
+            .and_then(|(offer, mid)| {
+                let mut dialect = lock(&dialect);
+                dialect.mark_sharing(&mid);
+                let written = dialect.write_offer(&offer).map_err(|error| error.to_string());
+                session.set_sharing_lines(dialect.sharing_mids());
+                written.map(Some)
+            });
+        if result.is_err() {
+            // whatever went of it stops: no line of ours is left sending a screen nobody negotiated
+            let _ = session.stop_screen();
+        }
+        MediaDone::Shared {
+            call,
+            on: true,
+            result,
+            reply,
+        }
+    }
+}
+
+/// Stops sharing the screen and offers its line rejected, off the engine's thread; `reply` is answered as [`share`]'s.
+pub(super) fn stop_share(live: &LiveMedia, reply: super::Waiting) -> impl FnOnce() -> MediaDone + Send + use<> {
+    let (call, session, dialect) = (live.call, Arc::clone(&live.session), Arc::clone(&live.dialect));
+    move || {
+        let result = session
+            .stop_screen()
+            .map_err(|error| error.to_string())
+            .and_then(|offer| {
+                offer
+                    .map(|offer| lock(&dialect).write_offer(&offer).map_err(|error| error.to_string()))
+                    .transpose()
+            });
+        MediaDone::Shared {
+            call,
+            on: false,
+            result,
+            reply,
+        }
     }
 }
 

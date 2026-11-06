@@ -4,8 +4,9 @@
 //! speaker moved to the device the user chose and back without ever saying they closed (the tone goes on, from the
 //! other device or into the other recording); a microphone chosen while it is the default kept when a device plugged
 //! in above it becomes the default, and falling back when a chosen device is unplugged; following the system, both moved with a device plugged in above the
-//! system's and back once it is unplugged; and the personal build's camera route, through the sandbox's fake camera
-//! portal on the sandbox's bus: granted, denied, and refused outright for a bus outside the sandbox.
+//! system's and back once it is unplugged; the personal build's camera route, through the sandbox's fake camera
+//! portal on the sandbox's bus: granted, denied, and refused outright for a bus outside the sandbox; and a shared
+//! screen's, through its fake screen-cast portal there.
 //!
 //! Without `pipewire` and `wireplumber` (and for the portal, the compositors and `dbus-daemon`) the tests say so and
 //! pass, unless `GPUI_SMOKE_REQUIRE=1`. Nothing here plays aloud or opens a real device: the server is a private one
@@ -394,5 +395,56 @@ fn the_camera_comes_through_the_sandbox_s_camera_portal_only_when_allowed() {
         .unwrap_err()
         .to_string();
     assert!(refused.contains("refused") && refused.contains("sandbox"), "{refused}");
+    assert!(listener.accept().is_err(), "the canary bus was reached");
+}
+
+/// A shared screen's route, on the sandbox's fake screen-cast portal (sandbox reach asks only the sandbox's bus): its
+/// session made, its sources picked, the sandbox's synthetic screen started and its remote handed over, and the
+/// screen's frames (the 720p pattern, in order) coming through it; a bus outside the sandbox refused before anything is
+/// asked.
+#[test]
+fn a_shared_screen_comes_through_the_sandbox_s_screen_cast_portal() {
+    let options = SandboxOptions {
+        pipewire: Some(PipeWireOptions::default()),
+        ..SandboxOptions::default()
+    };
+    let Some(sandbox) = ui_sandbox::sandbox_or_skip("the_screen_cast_portal", &options).unwrap() else {
+        return;
+    };
+    let env = sandbox.client_env();
+    let seen = probe(&env, &["portal-screen", "10", "20"]).unwrap_or_else(|error| panic!("{error}{}", sandbox.logs()));
+    assert_eq!(seen["screen"], "open", "{seen:?}");
+    assert_eq!(seen["size"], "1280x720", "the sandbox's screen: {seen:?}");
+    assert!(value::<u64>(&seen, "frames") >= 10, "{seen:?}");
+    assert_eq!(seen["in_order"], "1", "{seen:?}");
+    let calls = sandbox.bus().portal_calls();
+    let asked: Vec<(&str, &str)> = calls.iter().map(|call| (call.method, call.answer)).collect();
+    assert_eq!(
+        asked,
+        [
+            ("ScreenCast.CreateSession", "session"),
+            ("ScreenCast.SelectSources", "selected"),
+            ("ScreenCast.Start", "screen"),
+            ("ScreenCast.OpenPipeWireRemote", "remote"),
+        ]
+    );
+    assert!(calls.iter().all(|call| call.sender == calls[0].sender), "one caller");
+
+    // a bus outside the sandbox (a canary) is refused before anything is asked of it
+    let outside = TempDir::new().unwrap();
+    let canary = outside.path().join("bus");
+    let listener = UnixListener::bind(&canary).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut elsewhere: Vec<(&str, OsString)> = env
+        .into_iter()
+        .filter(|(name, _)| *name != "DBUS_SESSION_BUS_ADDRESS")
+        .collect();
+    elsewhere.push((
+        "DBUS_SESSION_BUS_ADDRESS",
+        format!("unix:path={}", canary.display()).into(),
+    ));
+    let refused = probe(&elsewhere, &["portal-screen", "10", "20"]).unwrap();
+    assert_eq!(refused["screen"], "refused", "{refused:?}");
+    assert!(refused["why"].contains("sandbox"), "{refused:?}");
     assert!(listener.accept().is_err(), "the canary bus was reached");
 }

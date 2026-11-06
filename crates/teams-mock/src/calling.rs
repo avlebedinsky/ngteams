@@ -426,8 +426,8 @@ pub(crate) fn now_rfc3339() -> String {
 }
 
 /// The conversation a start or a join opens (`answers.json`'s call start answer, on `conversation`), with the links a
-/// meeting's conversation hands out besides (seen 2026-11-06): its endpoint state, its published states and its
-/// messages.
+/// meeting's conversation hands out besides (seen 2026-11-06): its endpoint state, its published states, its
+/// messages and the participants' own properties.
 fn conversation_answer(conversation: &str) -> Value {
     let answers: Value = serde_json::from_str(ECHO_ANSWERS).unwrap_or_default();
     let text = answers["call_start_answer"].to_string();
@@ -442,6 +442,7 @@ fn conversation_answer(conversation: &str) -> Value {
         "sendMessage",
         "updateMeetingStates",
         "updateMeetingSettings",
+        "updateParticipantProperties",
     ] {
         answer["links"][op] = json!(conversation_url(conversation, Some(op)));
     }
@@ -920,6 +921,16 @@ pub(crate) fn renegotiate_video(state: &mut State, id: &str, account: &str) -> b
     renegotiate_with(state, id, account, State::peer_video_offer)
 }
 
+/// As [`renegotiate`], the peer sharing its screen (`on`, a sharing line added) or no longer (that line rejected).
+pub(crate) fn renegotiate_share(state: &mut State, id: &str, account: &str, on: bool) -> bool {
+    let offer = if on {
+        State::peer_share_on
+    } else {
+        State::peer_share_off
+    };
+    renegotiate_with(state, id, account, offer)
+}
+
 fn renegotiate_with(
     state: &mut State,
     id: &str,
@@ -992,6 +1003,7 @@ fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
                 "sendMessage",
                 "updateMeetingStates",
                 "updateMeetingSettings",
+                "updateParticipantProperties",
             ] {
                 response["output"]["links"][op] = json!(conversation_url(&call.conversation, Some(op)));
             }

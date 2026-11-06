@@ -42,6 +42,14 @@ impl State {
         None
     }
 
+    pub(crate) fn peer_share_on(&mut self, _call: &str, _account: &str) -> Option<Value> {
+        None
+    }
+
+    pub(crate) fn peer_share_off(&mut self, _call: &str, _account: &str) -> Option<Value> {
+        None
+    }
+
     pub(crate) fn peer_accept(&mut self, _call: &str, _account: &str, _answer: &Value) -> bool {
         false
     }
@@ -291,6 +299,18 @@ mod on {
         pub(crate) fn peer_video_offer(&mut self, call: &str, account: &str) -> Option<Value> {
             self.peers.stats(call, account)?;
             Some(content(&self.peers.peer(call, account)?.video_offer().ok()?))
+        }
+
+        /// The peer's renegotiation sharing its screen with `account` in call `call`; `None` without media or a peer.
+        pub(crate) fn peer_share_on(&mut self, call: &str, account: &str) -> Option<Value> {
+            self.peers.stats(call, account)?;
+            Some(content(&self.peers.peer(call, account)?.share_offer(true).ok()?))
+        }
+
+        /// The peer's renegotiation that stops sharing its screen; `None` without media, a peer or a share.
+        pub(crate) fn peer_share_off(&mut self, call: &str, account: &str) -> Option<Value> {
+            self.peers.stats(call, account)?;
+            Some(content(&self.peers.peer(call, account)?.share_offer(false).ok()?))
         }
 
         /// The peer takes `account`'s answer to its offer; whether it did.

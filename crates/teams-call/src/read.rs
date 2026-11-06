@@ -86,6 +86,8 @@ pub(crate) struct Conversation {
     pub(crate) remove_state: Option<CallLink>,
     /// `sendMessage`: where the account's live reactions go.
     pub(crate) send_message: Option<CallLink>,
+    /// `updateParticipantProperties`: where the account tells it shares its screen.
+    pub(crate) participant_properties: Option<CallLink>,
     /// The conversation itself (its `conversationController`): where a meeting's organizer ends it for everyone.
     pub(crate) controller: Option<CallLink>,
     /// `updateMeetingStates` and `updateMeetingSettings`: where the meeting's timer and its lock change.
@@ -107,6 +109,7 @@ impl Conversation {
             publish_state: at("publishState"),
             remove_state: at("removeState"),
             send_message: at("sendMessage"),
+            participant_properties: at("updateParticipantProperties"),
             controller: None,
             meeting_states: at("updateMeetingStates"),
             meeting_settings: at("updateMeetingSettings"),

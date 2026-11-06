@@ -324,9 +324,11 @@ exercise these views against the mock.
 
 Calls open a separate window; closing it leaves the call. Its toolbar follows Teams': Hold (1:1 calls; Resume while
 held), Chat (the call's chat beside the stage), People, Raise and React (group calls and meetings), View (Gallery or
-Speaker, Show videos first; More options: Turn off other videos, Hide me, Full screen), More, camera, microphone and
-Leave (End meeting, after a confirmation, for a meeting's organizer). A 1:1 call the far end holds shows its avatar
-over "On hold". The main window keeps an in-call strip.
+Speaker, Focus on content while a share shows, Show videos first; More options: Turn off other videos, Hide me, Full
+screen), More, camera, microphone, Share (1:1 calls with video: "Share content", the screen or window picked at the
+desktop's screen-cast portal; Stop sharing while shared) and Leave (End meeting, after a confirmation, for a meeting's
+organizer). A 1:1 call the far end holds shows its avatar over "On hold"; the far end's shared screen takes the stage,
+the people beside it. The main window keeps an in-call strip.
 Ctrl+Shift+M mutes, Ctrl+Shift+O toggles camera, Ctrl+Shift+K raises or lowers the hand and Ctrl+Shift+H leaves.
 Camera starts off; only the user's action turns it on.
 Notifications, tray and device access use the session selected at startup: desktop for the user's normal app,

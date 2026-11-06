@@ -345,6 +345,8 @@ impl Models {
             | Event::CallHeld { .. }
             | Event::CallHeldByFarEnd { .. }
             | Event::CallMeeting { .. }
+            | Event::CallSharing { .. }
+            | Event::CallRemoteShare { .. }
             | Event::CallReaction { .. } => {
                 self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
             }

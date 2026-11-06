@@ -14,6 +14,10 @@
 //! [`PrivateBus::start_camera_portal`]): it answers `AccessCamera` with the user's answer the test sets
 //! ([`PrivateBus::set_camera_allowed`]), and `OpenPipeWireRemote`, once access was granted to that caller, with a
 //! connection to the sandbox's PipeWire (the whole server, where the real portal's remote shows only the cameras).
+//! Beside it on the same object, a fake screen-cast portal (`org.freedesktop.portal.ScreenCast`): `CreateSession`,
+//! `SelectSources` and `Start` each answered at once (the user's pick: the sandbox's synthetic screen, its node as
+//! `Start`'s one stream), and `OpenPipeWireRemote` on a started session with a connection to the sandbox's PipeWire.
+//! Every call is recorded as the camera portal's are.
 
 use std::{
     collections::HashMap,
@@ -22,7 +26,10 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Stdio},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use zbus::{
@@ -30,7 +37,7 @@ use zbus::{
     interface,
     message::Header,
     names::BusName,
-    zvariant::{OwnedFd, OwnedObjectPath, Value},
+    zvariant::{ObjectPath, OwnedFd, OwnedObjectPath, Value},
 };
 
 use crate::{SOCKET_WAIT, SandboxResult, clean_command, spawn, wait_until};
@@ -54,9 +61,11 @@ const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 pub struct PortalCall {
     /// The caller's unique bus name.
     pub sender: String,
-    /// `AccessCamera` or `OpenPipeWireRemote`.
+    /// `AccessCamera` or `OpenPipeWireRemote` (the camera's); `CreateSession`, `SelectSources`, `Start`,
+    /// `OpenPipeWireRemote` or `Close` (the screen cast's, each its method name with `ScreenCast.` before it).
     pub method: &'static str,
-    /// What the portal answered: `granted`, `denied`, `remote` or `refused`.
+    /// What the portal answered: `granted`, `denied`, `remote`, `refused`, `session`, `selected`, `screen`, `none` or
+    /// `closed`.
     pub answer: &'static str,
 }
 
@@ -99,6 +108,8 @@ struct Records {
     camera_denied: bool,
     /// The callers granted the camera.
     camera_granted: Vec<String>,
+    /// The screen-cast sessions started, by caller and session path.
+    screen_cast_started: Vec<(String, String)>,
 }
 
 type Shared = Arc<Mutex<Records>>;
@@ -347,6 +358,157 @@ impl CameraPortal {
     }
 }
 
+/// The fake `org.freedesktop.portal.ScreenCast` (see the module docs).
+struct ScreenCastPortal {
+    records: Shared,
+    /// The sandbox's PipeWire socket, which `OpenPipeWireRemote` connects to.
+    pipewire: PathBuf,
+    /// The sandbox's screen's node (`0` until the server made it).
+    node: Arc<AtomicU32>,
+}
+
+impl ScreenCastPortal {
+    fn record(&self, sender: String, method: &'static str, answer: &'static str) {
+        records(&self.records)
+            .portal_calls
+            .push(PortalCall { sender, method, answer });
+    }
+
+    /// Answers a request at once: its `Response` (`code`, `results`) at the request object the caller's token names.
+    async fn respond(
+        connection: &zbus::Connection,
+        sender: &str,
+        options: &HashMap<&str, Value<'_>>,
+        (code, results): (u32, HashMap<&str, Value<'_>>),
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        let path = request_path(sender, &token_of(options, "handle_token"));
+        connection
+            .emit_signal(
+                Some(sender),
+                path.as_str(),
+                REQUEST_INTERFACE,
+                "Response",
+                &(code, results),
+            )
+            .await?;
+        OwnedObjectPath::try_from(path).map_err(failed)
+    }
+}
+
+/// The token an option names (`handle_token`, `session_handle_token`), else `t`.
+fn token_of(options: &HashMap<&str, Value<'_>>, name: &str) -> String {
+    match options.get(name) {
+        Some(Value::Str(token)) => token.as_str().to_owned(),
+        _ => "t".to_owned(),
+    }
+}
+
+#[interface(name = "org.freedesktop.portal.ScreenCast")]
+impl ScreenCastPortal {
+    /// A session, at the path its token names (as the real portal derives it).
+    async fn create_session(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        let sender = sender(&header);
+        let session = format!(
+            "{PORTAL_PATH}/session/{}/{}",
+            sender.trim_start_matches(':').replace('.', "_"),
+            token_of(&options, "session_handle_token")
+        );
+        self.record(sender.clone(), "ScreenCast.CreateSession", "session");
+        let mut results = HashMap::new();
+        results.insert("session_handle", Value::from(session.as_str()));
+        Self::respond(connection, &sender, &options, (0, results)).await
+    }
+
+    async fn select_sources(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        session: ObjectPath<'_>,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        drop(session);
+        let sender = sender(&header);
+        self.record(sender.clone(), "ScreenCast.SelectSources", "selected");
+        Self::respond(connection, &sender, &options, (0, HashMap::new())).await
+    }
+
+    /// The user's pick: the sandbox's screen as the session's one stream; none (the request ended) before its node
+    /// was made.
+    async fn start(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        session: ObjectPath<'_>,
+        parent_window: &str,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        let _ = parent_window;
+        let sender = sender(&header);
+        let node = self.node.load(Ordering::Relaxed);
+        if node == 0 {
+            self.record(sender.clone(), "ScreenCast.Start", "none");
+            return Self::respond(connection, &sender, &options, (2, HashMap::new())).await;
+        }
+        records(&self.records)
+            .screen_cast_started
+            .push((sender.clone(), session.to_string()));
+        self.record(sender.clone(), "ScreenCast.Start", "screen");
+        let stream: (u32, HashMap<&str, Value<'_>>) = (node, HashMap::new());
+        let mut results = HashMap::new();
+        results.insert("streams", Value::from(vec![stream]));
+        Self::respond(connection, &sender, &options, (0, results)).await
+    }
+
+    /// A connection to the sandbox's PipeWire, for a session its caller started.
+    #[zbus(name = "OpenPipeWireRemote")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "zbus hands a method its message header by value"
+    )]
+    fn open_pipewire_remote(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        session: ObjectPath<'_>,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<OwnedFd> {
+        drop(options);
+        let sender = sender(&header);
+        let started = (sender.clone(), session.to_string());
+        if !records(&self.records).screen_cast_started.contains(&started) {
+            self.record(sender, "ScreenCast.OpenPipeWireRemote", "refused");
+            return Err(zbus::fdo::Error::AccessDenied("the session wasn't started".to_owned()));
+        }
+        let remote = UnixStream::connect(&self.pipewire).map_err(failed)?;
+        self.record(sender, "ScreenCast.OpenPipeWireRemote", "remote");
+        Ok(OwnedFd::from(std::os::fd::OwnedFd::from(remote)))
+    }
+
+    #[zbus(property)]
+    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
+    fn available_source_types(&self) -> u32 {
+        // a monitor or a window
+        3
+    }
+
+    #[zbus(property)]
+    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
+    fn available_cursor_modes(&self) -> u32 {
+        // hidden, embedded, metadata
+        7
+    }
+
+    #[zbus(property, name = "version")]
+    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
+    fn version(&self) -> u32 {
+        4
+    }
+}
+
 /// `text` as a D-Bus address value: bytes outside `[-0-9A-Za-z_/.\*]` percent-escaped.
 #[must_use]
 pub fn escape_address_value(text: &str) -> String {
@@ -482,20 +644,27 @@ impl PrivateBus {
         Ok(())
     }
 
-    /// Starts the fake camera portal, its remotes on the PipeWire at `pipewire` (the sandbox's socket), unless it runs.
+    /// Starts the fake camera and screen-cast portals, their remotes on the PipeWire at `pipewire` (the sandbox's
+    /// socket), the screen cast sharing the node `screen` holds (once the server made it), unless they run.
     ///
     /// # Errors
     /// The connection or the name can't be had.
-    pub fn start_camera_portal(&self, pipewire: &Path) -> SandboxResult {
+    pub fn start_camera_portal(&self, pipewire: &Path, screen: Arc<AtomicU32>) -> SandboxResult {
         let mut running = self.portal.lock().unwrap_or_else(PoisonError::into_inner);
         if running.is_none() {
             let portal = CameraPortal {
                 records: Arc::clone(&self.records),
                 pipewire: pipewire.to_owned(),
             };
+            let cast = ScreenCastPortal {
+                records: Arc::clone(&self.records),
+                pipewire: pipewire.to_owned(),
+                node: screen,
+            };
             let connection = Builder::address(self.address.as_str())?
                 .name(PORTAL_NAME)?
                 .serve_at(PORTAL_PATH, portal)?
+                .serve_at(PORTAL_PATH, cast)?
                 .build()?;
             *running = Some(connection);
         }

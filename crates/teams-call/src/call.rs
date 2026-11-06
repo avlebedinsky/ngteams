@@ -169,6 +169,8 @@ pub(crate) enum Step {
     MeetingStates,
     /// The meeting locked or unlocked: its failing ends nothing (the lock stays as last told).
     MeetingSettings,
+    /// The account's own participant properties (that it shares its screen): its failing ends nothing.
+    Properties,
 }
 
 impl Step {
@@ -201,6 +203,7 @@ impl Step {
             Self::Resume => "resume",
             Self::MeetingStates => "update_meeting_states",
             Self::MeetingSettings => "update_meeting_settings",
+            Self::Properties => "update_participant_properties",
         }
     }
 }
@@ -331,6 +334,8 @@ pub(crate) struct Call {
     pub(crate) published: u64,
     /// What the meeting shares with everyone in it, as last told, and what its next changes name.
     pub(crate) meeting: crate::machine::Meeting,
+    /// The account's `screenSharerAttributes` told so far: each Share tells the next.
+    pub(crate) screen_shares: u64,
 }
 
 impl Call {
@@ -387,6 +392,7 @@ impl Call {
             endpoint_states: 1,
             published: 0,
             meeting: crate::machine::Meeting::default(),
+            screen_shares: 0,
         }
     }
 

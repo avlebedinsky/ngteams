@@ -442,6 +442,12 @@ pub enum Event {
         call: CallId,
         state: teams_call::MeetingState,
     },
+    /// The account shares its screen in its 1:1 call (`on`) or no longer, as its [`CallAction::Share`] was taken (or,
+    /// not taken, as it stands; the screen ended at the desktop stops it too).
+    CallSharing { call: CallId, on: bool },
+    /// The far end of the account's 1:1 call shares its screen (`on`: its frames come to the video output's sharing
+    /// sink, `teams_media::session::SHARING_LINE`) or no longer.
+    CallRemoteShare { call: CallId, on: bool },
     /// Someone in the account's call sent a live reaction (the account's own too, as the service echoes it): who, their
     /// name as given, and the reaction (`like`, `heart`, `applause`, `laugh`, `surprised`).
     CallReaction {
@@ -2909,6 +2915,7 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
         CallAction::Hold { call, held } => Act::Hold(call, held),
         CallAction::Timer { call, timer } => Act::Timer(call, timer),
         CallAction::LockMeeting { call, locked } => Act::LockMeeting(call, locked),
+        CallAction::Share { call, on } => Act::Share(call, on),
     })
 }
 

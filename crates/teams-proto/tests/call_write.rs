@@ -1605,3 +1605,39 @@ fn hold_and_resume_go_at_their_links_in_the_captured_shape() {
         Err(CallWriteError::Unmapped)
     ));
 }
+
+#[test]
+fn a_screen_sharer_s_participant_properties_go_in_the_captured_shape() {
+    let status = callback(PUSH_A, "34343434", "conversation", "updateParticipantPropertiesStatus");
+    let properties = UpdateParticipantProperties::screen_sharer(
+        &context(),
+        &link(&conv("Synthetic1", "updateParticipantProperties")),
+        &participant(LAB_A),
+        2,
+        &status,
+        "00000000-0000-4000-8000-0000000000f1",
+    )
+    .unwrap();
+    assert_eq!(teams_proto::Request::method(&properties).as_str(), "POST");
+    let body = teams_proto::Request::body(&properties).unwrap();
+    assert_eq!(body["to"][0]["id"], json!(LAB_A));
+    assert_eq!(
+        body["to"][0]["propertyBag"],
+        json!({"screenSharerAttributes": {"sequenceNumber": 2, "value": {"source": 1}}})
+    );
+    assert_eq!(body["links"]["updateParticipantPropertiesStatus"], json!(status));
+    assert_eq!(body["operationId"], json!("00000000-0000-4000-8000-0000000000f1"));
+    assert_eq!(body["from"]["id"], json!(LAB_A));
+    // only at the conversation's own link
+    assert!(matches!(
+        UpdateParticipantProperties::screen_sharer(
+            &context(),
+            &link(&conv("Synthetic1", "updateEndpointState")),
+            &participant(LAB_A),
+            1,
+            &status,
+            "00000000-0000-4000-8000-0000000000f2",
+        ),
+        Err(CallWriteError::Unmapped)
+    ));
+}

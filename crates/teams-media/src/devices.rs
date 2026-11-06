@@ -166,7 +166,7 @@ pub trait VideoSink: Send {
     fn show(&mut self, frame: &VideoFrame) -> Result<(), DeviceError>;
 }
 
-/// A backend: opens the microphone, the speaker and the camera.
+/// A backend: opens the microphone, the speaker and the camera, and the screen the user shares.
 pub trait Devices {
     /// # Errors
     /// The microphone can't be opened.
@@ -179,4 +179,12 @@ pub trait Devices {
     /// # Errors
     /// The camera can't be opened.
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError>;
+
+    /// The screen (or window) the user picks to share, as the backend asks them; none by default.
+    ///
+    /// # Errors
+    /// The backend shares no screen, the user picked none, or it can't be opened.
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        Err(DeviceError::Refused("no screen to share here".to_owned()))
+    }
 }

@@ -5,6 +5,7 @@
 use std::time::Instant;
 
 use teams_proto::Mri;
+use teams_proto::UpdateParticipantProperties;
 use teams_proto::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CallLink, ChannelParameters, DecideLobby,
@@ -321,6 +322,18 @@ pub(crate) fn hand(call: &mut Call, link: &CallLink, lowered: Option<&str>) -> R
     };
     call.published = sequence;
     Ok(write)
+}
+
+/// The account sharing its screen, told at the conversation's `updateParticipantProperties` link as its next
+/// `screenSharerAttributes`, with a callback for the update's status.
+pub(crate) fn screen_sharer(call: &mut Call, link: &CallLink) -> Result<CallWrite, CallError> {
+    let sequence = call.screen_shares + 1;
+    let status = call.callback(Kind::Conversation, "updateParticipantPropertiesStatus")?;
+    let operation = guid()?;
+    let write =
+        UpdateParticipantProperties::screen_sharer(&call.context, link, &call.me, sequence, &status, &operation)?;
+    call.screen_shares = sequence;
+    Ok(CallWrite::ParticipantProperties(write))
 }
 
 /// A live reaction `reaction` at the conversation's `sendMessage` link.

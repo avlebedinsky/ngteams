@@ -18,6 +18,11 @@
 //! [`PipeWireDevices::connect_with_camera_portal`] names a portal's bus outright; sandbox reach takes only one inside
 //! the UI sandbox's dir (the sandbox's own bus, where its fake portal answers), never the desktop's.
 //!
+//! **A shared screen** ([`Devices::screen`], [`screen_route`]): always through the screen-cast portal
+//! ([`super::portal::open_screen_cast`]) on the session bus, which asks the user what to share and hands over the
+//! node and a remote to reach it on; the screen's stream runs on that remote, for as long as the share. Sandbox reach
+//! asks only the UI sandbox's bus (its fake portal answers with the sandbox's synthetic screen), never the desktop's.
+//!
 //! **The devices there are and the user's choice** ([`DeviceDirectory`]): the loop thread watches the server's
 //! registry and the session manager's defaults ([`listing`]); a choice moves the open streams of its kind to the
 //! device chosen, or back to the system's default, without the devices noticing (`serve`). With no device chosen, a
@@ -300,6 +305,21 @@ pub fn camera_route(reach: Reach, env: &SessionEnv) -> CameraRoute {
     }
 }
 
+/// The screen-cast portal's bus `reach` asks in the session `env` describes (see the module docs), or why there is
+/// none: the session bus, which sandbox reach takes only when it is the UI sandbox's ([`portal_bus`]).
+///
+/// # Errors
+/// [`DeviceError::Refused`] with the reason.
+pub fn screen_route(reach: Reach, env: &SessionEnv) -> Result<String, DeviceError> {
+    let address = session_bus(env).ok_or_else(|| {
+        refused(format!(
+            "no session bus for the screen-cast portal: neither {SESSION_BUS_ENV} nor XDG_RUNTIME_DIR is set"
+        ))
+    })?;
+    portal_bus(reach, env, &address)?;
+    Ok(address)
+}
+
 /// The session bus's address: `DBUS_SESSION_BUS_ADDRESS`, else the bus in the runtime dir.
 fn session_bus(env: &SessionEnv) -> Option<String> {
     if let Some(address) = env.vars.get(SESSION_BUS_ENV).filter(|value| !value.is_empty()) {
@@ -375,6 +395,8 @@ fn unescape_address(value: &str) -> Option<String> {
 pub struct PipeWireDevices {
     connection: Arc<Connection>,
     camera: CameraRoute,
+    /// The screen-cast portal's bus, or why there is none ([`screen_route`]).
+    screen: Result<String, String>,
     /// The client config a connection takes (the sandbox's), for the portal's remotes too.
     client_conf: Option<PathBuf>,
     choices: Arc<Mutex<Choices>>,
@@ -423,6 +445,7 @@ impl PipeWireDevices {
         Ok(Self {
             connection: Arc::new(connection),
             camera,
+            screen: screen_route(reach, env).map_err(|error| error.to_string()),
             client_conf: endpoint.client_conf,
             choices: Arc::default(),
             remotes: Arc::default(),
@@ -521,6 +544,32 @@ impl Devices for PipeWireDevices {
             ready,
         })?;
         Ok(Box::new(Speaker { queue, _stream: stream }))
+    }
+
+    /// The screen (or window) the user picks at the screen-cast portal, its stream on the remote the portal hands over
+    /// (its session closed once the source goes).
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        let bus = self.screen.as_ref().map_err(|why| refused(why.clone()))?;
+        let mut cast = portal::open_screen_cast(bus)?;
+        let remote = cast
+            .remote
+            .take()
+            .ok_or_else(|| DeviceError::Portal("the screen-cast portal handed over no remote".to_owned()))?;
+        let connection = Arc::new(Connection::start(remote, self.client_conf.clone(), Choices::default())?);
+        let frames = Queue::new(QUEUED_VIDEO);
+        let shared = frames.clone();
+        let node = cast.node;
+        let stream = Self::open(&connection, |id, ready| Command::Screen {
+            id,
+            node,
+            frames: shared,
+            ready,
+        })?;
+        Ok(Box::new(Screen {
+            frames,
+            _stream: stream,
+            _cast: cast,
+        }))
     }
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
@@ -694,6 +743,19 @@ struct Camera {
 }
 
 impl VideoSource for Camera {
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<VideoFrame>, DeviceError> {
+        self.frames.recv(timeout)
+    }
+}
+
+/// A shared screen: its frames, its stream (on the portal's remote), and the portal's session it lives in.
+struct Screen {
+    frames: Queue<VideoFrame>,
+    _stream: StreamGuard,
+    _cast: portal::ScreenCast,
+}
+
+impl VideoSource for Screen {
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<VideoFrame>, DeviceError> {
         self.frames.recv(timeout)
     }

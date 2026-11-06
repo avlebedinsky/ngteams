@@ -351,7 +351,9 @@ impl Sandbox {
         if let Some(pipewire) = &options.pipewire {
             let tools = PipeWireTools::find()?;
             let started = PrivatePipeWire::start(&tools, sandbox.dir.path(), pipewire)?;
-            sandbox.bus.start_camera_portal(&started.socket())?;
+            sandbox
+                .bus
+                .start_camera_portal(&started.socket(), started.screen().node)?;
             sandbox.pipewire = Some(started);
         }
         Ok(sandbox)

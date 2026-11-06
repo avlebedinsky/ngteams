@@ -11,7 +11,10 @@
 //!   gathering ended (or [`GATHER_SETTLE`] after the first candidate), with the candidates written into its first line
 //!   in use, as the web client writes them ([`Peer::local_sdp`]).
 //! - **Which video lines are which**: line 0 the main video line, 1, 2, … a group call's receiving lines, read from
-//!   the negotiated SDP ([`Peer::video_line`]).
+//!   the negotiated SDP ([`Peer::video_line`]); a sharing line (a screen, ours or the far end's: the dialect names
+//!   them, [`Peer::set_sharing_lines`]) is none of them, its frames the share's ([`SHARING_LINE`]).
+//! - **A screen shared** ([`Peer::share_screen`]): a line of its own, sending only, its track fed by the screen's
+//!   frames; stopped ([`Peer::stop_screen`]), the next offer rejects that line, as the web client's does.
 //! - **Sending**: the audio track carries what the session hands it ([`Peer::audio`]); the camera's track is on the
 //!   main video line from the line's first negotiation on and sends only while the camera is on (its encoding active:
 //!   [`Peer::set_sending`]), so turning a group call's camera changes no SDP.
@@ -63,6 +66,13 @@ pub const GATHER_TIMEOUT: Duration = Duration::from_secs(15);
 pub const GATHER_SETTLE: Duration = Duration::from_secs(2);
 /// The stream id our tracks name (`a=msid`).
 const STREAM_ID: &str = "teams-media";
+/// The stream id our screen's track names (`a=msid`): a stream of its own, as the web client's.
+const SCREEN_STREAM_ID: &str = "teams-media-screen";
+/// The video line a sharing line's frames are told as (`crate::session::RemoteSinks`): no camera's line.
+pub const SHARING_LINE: usize = usize::MAX;
+/// The most a screen is sent at, bits a second, and its frame rate: a still picture's detail before its motion.
+const SCREEN_MAX_BITRATE: u64 = 2_500_000;
+const SCREEN_FPS: f64 = 15.0;
 
 /// The process's libwebrtc: one factory (its signaling, worker and network threads) for every call, and one idle
 /// peer connection of its own kept for the process's life.
@@ -359,6 +369,20 @@ struct Video {
     rolled_back: bool,
 }
 
+/// The call's video lines by mid, as the negotiated SDP names them: the camera's (the main one first, then the
+/// receiving ones), and the sharing lines.
+#[derive(Default)]
+pub(crate) struct LineMap {
+    video: Vec<String>,
+    sharing: Vec<String>,
+}
+
+/// Our screen's track and the line it goes on, while the account shares it.
+struct Screen {
+    source: NativeVideoSource,
+    transceiver: RtpTransceiver,
+}
+
 /// The call's peer.
 pub(crate) struct Peer {
     pc: PeerConnection,
@@ -368,10 +392,12 @@ pub(crate) struct Peer {
     video: Mutex<Option<Video>>,
     channel: Arc<Mutex<Option<DataChannel>>>,
     gathering: Arc<Gathering>,
-    /// The video lines by mid: the main one first, then the receiving ones.
-    lines: Arc<Mutex<Vec<String>>>,
+    /// The video lines by mid: the main one first, then the receiving ones; and the sharing lines.
+    lines: Arc<Mutex<LineMap>>,
     /// The sharing line of a group offer of ours: no line of ours.
     sharing: Mutex<Option<RtpTransceiver>>,
+    /// Our screen, while it is shared.
+    screen: Mutex<Option<Screen>>,
     events: Events,
 }
 
@@ -400,8 +426,9 @@ impl Peer {
             video: Mutex::new(None),
             channel: Arc::new(Mutex::new(None)),
             gathering: Arc::new(Gathering::default()),
-            lines: Arc::new(Mutex::new(Vec::new())),
+            lines: Arc::new(Mutex::new(LineMap::default())),
             sharing: Mutex::new(None),
+            screen: Mutex::new(None),
             events,
         };
         peer.observe();
@@ -486,19 +513,80 @@ impl Peer {
         &self.audio
     }
 
-    /// The video line of the transceiver `mid` (0 the main one, 1, 2, … a group call's receiving lines), once the SDP
-    /// negotiated it.
-    pub(crate) fn video_line(lines: &Mutex<Vec<String>>, mid: &str) -> Option<usize> {
-        lines
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .position(|line| line == mid)
+    /// The video line of the transceiver `mid` (0 the main one, 1, 2, … a group call's receiving lines, once the SDP
+    /// negotiated it; [`SHARING_LINE`] a sharing line).
+    pub(crate) fn video_line(lines: &Mutex<LineMap>, mid: &str) -> Option<usize> {
+        let lines = lines.lock().unwrap_or_else(PoisonError::into_inner);
+        if lines.sharing.iter().any(|line| line == mid) {
+            return Some(SHARING_LINE);
+        }
+        lines.video.iter().position(|line| line == mid)
     }
 
     /// The video lines by mid, shared with whoever shows what they bring.
-    pub(crate) fn lines(&self) -> Arc<Mutex<Vec<String>>> {
+    pub(crate) fn lines(&self) -> Arc<Mutex<LineMap>> {
         Arc::clone(&self.lines)
+    }
+
+    /// The call's sharing lines by mid, as the dialect names them: none of them is a camera's line.
+    pub(crate) fn set_sharing_lines(&self, mids: Vec<String>) {
+        self.lines.lock().unwrap_or_else(PoisonError::into_inner).sharing = mids;
+    }
+
+    /// Puts our screen on a line of its own, sending only (its encoder software H.264, its rate a still picture's): the
+    /// source its frames go to. The line is in our next offer ([`Peer::offer`]), its mid then [`Peer::screen_mid`].
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] when the media's runtime can't start or libwebrtc refuses the line.
+    pub(crate) fn share_screen(&self) -> Result<NativeVideoSource, Error> {
+        let mut screen = self.screen.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(screen) = screen.as_ref() {
+            return Ok(screen.source.clone());
+        }
+        let source = {
+            let _runtime = runtime()?.enter();
+            NativeVideoSource::new(VideoResolution::default(), true)
+        };
+        let track = factory().create_video_track("teams-media-screen", source.clone());
+        let transceiver = self
+            .pc
+            .add_transceiver(
+                MediaStreamTrack::Video(track),
+                RtpTransceiverInit {
+                    direction: RtpTransceiverDirection::SendOnly,
+                    stream_ids: vec![SCREEN_STREAM_ID.to_owned()],
+                    send_encodings: Vec::new(),
+                },
+            )
+            .map_err(rtc)?;
+        let sender = transceiver.sender();
+        sender.set_video_encoder_backend(VideoEncoderBackend::Software);
+        screen_encoding(&sender);
+        *screen = Some(Screen {
+            source: source.clone(),
+            transceiver,
+        });
+        Ok(source)
+    }
+
+    /// The mid of our screen's line, once an offer named it.
+    pub(crate) fn screen_mid(&self) -> Option<String> {
+        self.screen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|screen| screen.transceiver.mid())
+    }
+
+    /// Stops our screen's line: the next offer rejects it. Whether one was shared.
+    pub(crate) fn stop_screen(&self) -> bool {
+        let Some(screen) = self.screen.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return false;
+        };
+        if let Err(error) = screen.transceiver.stop() {
+            log::debug!("the screen's line can't be stopped: {}", error.message);
+        }
+        true
     }
 
     /// Makes the camera's track (sent at most as `settings` say, only once [`Peer::set_sending`] turned it on).
@@ -782,13 +870,19 @@ impl Peer {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .and_then(RtpTransceiver::mid);
+        let screen = self.screen_mid();
         let text = local.to_string();
-        let lines: Vec<String> = video_mids(&text)
-            .into_iter()
-            .filter(|mid| Some(mid) != sharing.as_ref())
-            .collect();
+        let lines = {
+            let mut map = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+            map.video = video_mids(&text)
+                .into_iter()
+                .filter(|mid| {
+                    Some(mid) != sharing.as_ref() && Some(mid) != screen.as_ref() && !map.sharing.contains(mid)
+                })
+                .collect();
+            map.video.clone()
+        };
         let main_sends = lines.first().is_some_and(|mid| line_sends(&text, mid));
-        *self.lines.lock().unwrap_or_else(PoisonError::into_inner) = lines;
         if let Some(video) = self.video().as_mut() {
             // the send stream is made again once the line sends: an answer that only receives makes none
             if video.rolled_back && main_sends {
@@ -849,6 +943,20 @@ fn reattach(video: &Video) {
         log::debug!("the camera's track can't be put on its line again: {}", error.message);
     }
     sender.set_video_encoder_backend(VideoEncoderBackend::Software);
+}
+
+/// A screen's encoding: its detail kept before its motion, at a still picture's rate.
+fn screen_encoding(sender: &RtpSender) {
+    let mut parameters = sender.parameters();
+    for encoding in &mut parameters.encodings {
+        encoding.active = true;
+        encoding.max_bitrate = Some(SCREEN_MAX_BITRATE);
+        encoding.max_framerate = Some(SCREEN_FPS);
+    }
+    parameters.set_degradation_preference(DegradationPreference::MaintainResolution);
+    if let Err(error) = sender.set_parameters(parameters) {
+        log::debug!("the screen's encoding can't be set: {}", error.message);
+    }
 }
 
 /// The camera's encoding active as the camera is, within its bounds.

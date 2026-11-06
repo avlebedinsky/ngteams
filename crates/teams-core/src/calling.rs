@@ -67,6 +67,7 @@ mod captions;
 pub use captions::{CallCaptions, Caption, CaptionPhase};
 mod gallery;
 mod media;
+mod share;
 
 pub use gallery::{CallParticipant, CallView, HEARING_LEVEL, SPEAKING_HOLD, SPEAKING_LEVEL};
 pub use media::{CLOSED_GRACE, CONNECT_WITHIN, CallMedia, CallVideo, GROUP_SLOTS, RECOVER_WITHIN, Relay, VideoOutput};
@@ -203,6 +204,10 @@ pub enum CallAction {
     },
     /// The meeting locked (`true`: nobody else can join) or unlocked by its organizer, as Teams' Lock the meeting.
     LockMeeting { call: CallId, locked: bool },
+    /// A 1:1 call's screen shared (`true`: the user picks it at the desktop's portal, its frames sent on a sharing line
+    /// of its own) or no longer, as Teams' Share and Stop sharing ([`Event::CallSharing`] tells it as it stands). A
+    /// call whose media carries no video shares nothing.
+    Share { call: CallId, on: bool },
 }
 
 impl CallAction {
@@ -324,6 +329,7 @@ pub(crate) enum Act {
     Hold(CallId, bool),
     Timer(CallId, teams_proto::MeetingTimer),
     LockMeeting(CallId, bool),
+    Share(CallId, bool),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -1128,7 +1134,10 @@ where
     // --- the media ---
 
     fn media_done(&mut self, done: MediaDone, now: Instant) {
-        if !matches!(done, MediaDone::Opened { .. } | MediaDone::GroupCamera { .. }) {
+        if !matches!(
+            done,
+            MediaDone::Opened { .. } | MediaDone::GroupCamera { .. } | MediaDone::ScreenPicked { .. }
+        ) {
             self.sdp_running = false;
         }
         self.media_step_done(done, now);
@@ -1232,16 +1241,16 @@ where
                 Err(why) => self.media_failed(call, &why, now),
             },
             MediaDone::Answered { call, result } => {
-                let live = self.live.as_mut().filter(|live| live.call == call);
                 let answered = result.and_then(|answer| {
-                    let content = match live {
-                        Some(live) if live.is_group() => live.answer_content(&answer),
-                        // a 1:1 call's answer names the `Video` modality while a video line is in use; a group
-                        // call's names the call's own, as the web client's
-                        _ => {
-                            self.calls.set_video(call, answer.carries_video());
-                            media::content(&answer)
-                        }
+                    let group = self.live.as_mut().filter(|live| live.call == call && live.is_group());
+                    // a 1:1 call's answer names the `Video` modality while a video line is in use, and the screen's
+                    // while one is shared; a group call's names the call's own, as the web client's
+                    let content = if let Some(live) = group {
+                        live.answer_content(&answer)
+                    } else {
+                        self.calls.set_video(call, answer.carries_video());
+                        self.answered_share(call, &answer);
+                        media::content(&answer)
                     };
                     self.calls
                         .answer_media(call, content)
@@ -1292,6 +1301,13 @@ where
                 let turned = self.group_camera_turned(call, on, result);
                 let _ = reply.send(turned.map(|()| call).map_err(EngineError::from));
             }
+            MediaDone::ScreenPicked { call, result, reply } => self.screen_picked(call, result, reply),
+            MediaDone::Shared {
+                call,
+                on,
+                result,
+                reply,
+            } => self.shared((call, on), result, reply, now),
         }
     }
 
@@ -1390,6 +1406,7 @@ where
                     self.emit(Event::CameraOff { call });
                 }
                 MediaChange::AudioClosed { microphone } => self.emit(Event::AudioClosed { call, microphone }),
+                MediaChange::ScreenEnded => self.screen_ended(call),
                 MediaChange::Captions(lines) => self.caption_received(call, lines),
                 MediaChange::Speakers(speakers) => {
                     if let Some(live) = self.live.as_mut() {
@@ -1487,6 +1504,10 @@ where
                 .map(|()| call)
                 .map_err(CallActionError::from),
             act @ (Act::Timer(..) | Act::LockMeeting(..)) => self.meeting_act(act),
+            Act::Share(call, on) => {
+                self.share(call, on, reply);
+                return self.drive(now);
+            }
             Act::Renegotiate(call) => match self.live.as_ref().filter(|live| live.call == call) {
                 // the machine first: the session's new offer would replace the one it waits on
                 Some(live) => match self.calls.begin_renegotiation(call) {

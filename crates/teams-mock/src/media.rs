@@ -10,7 +10,8 @@
 //!
 //! **Video** (M3 Task 18): a peer takes the main video line it is offered and sends its camera (the file backend's
 //! test pattern) on it once a video line is in use, its decoded frames counted in its stats; it offers video of its
-//! own in a renegotiation ([`LoopbackPeer::video_offer`]). Its media is libwebrtc's, as the native client's.
+//! own in a renegotiation ([`LoopbackPeer::video_offer`]), and shares a screen (the file backend's 720p pattern) on a
+//! sharing line of its own ([`LoopbackPeer::share_offer`]). Its media is libwebrtc's, as the native client's.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -96,6 +97,7 @@ impl LoopbackPeer {
     /// [`PeerError`] when the offer doesn't convert or the session refuses it.
     pub fn answer(&mut self, offer: &NgcSdp) -> Result<NgcSdp, PeerError> {
         let offer = self.dialect.read_offer(offer)?;
+        self.session.set_sharing_lines(self.dialect.sharing_mids());
         let answer = self.session.accept_offer(offer)?;
         let answer = self.dialect.write_answer(&answer)?;
         if answer.carries_video() {
@@ -115,6 +117,33 @@ impl LoopbackPeer {
             .offer_video(true)?
             .ok_or_else(|| teams_media::Error::Rtc("the video line already sends".into()))?;
         Ok(self.dialect.write_offer(&offer)?)
+    }
+
+    /// Its renegotiation sharing its screen (`on`: the file backend's screen, a 720p test pattern, on a sharing line of
+    /// its own, sending only) or no longer (that line rejected), in `sdp-ngc-1.0`.
+    ///
+    /// # Errors
+    /// [`PeerError`] when the session can't share or offer (nothing shared to stop), or the offer doesn't convert.
+    pub fn share_offer(&mut self, on: bool) -> Result<NgcSdp, PeerError> {
+        if !on {
+            let offer = self
+                .session
+                .stop_screen()?
+                .ok_or_else(|| teams_media::Error::Rtc("no screen is shared".into()))?;
+            return Ok(self.dialect.write_offer(&offer)?);
+        }
+        let devices = FileDevices {
+            input: teams_media::devices::file::AudioInput::Silence,
+            recording: None,
+            camera: teams_media::devices::file::PatternCamera::default(),
+            pacing: teams_media::devices::file::Pacing::RealTime,
+        };
+        let screen = devices.screen().map_err(teams_media::Error::from)?;
+        let (offer, mid) = self.session.share_screen(screen)?;
+        self.dialect.mark_sharing(&mid);
+        let offer = self.dialect.write_offer(&offer)?;
+        self.session.set_sharing_lines(self.dialect.sharing_mids());
+        Ok(offer)
     }
 
     /// Hands its camera to the session, once.
@@ -150,6 +179,7 @@ impl LoopbackPeer {
     /// [`PeerError`] when the answer doesn't convert or the session refuses it.
     pub fn accept_answer(&mut self, answer: &NgcSdp) -> Result<(), PeerError> {
         let answer = self.dialect.read_answer(answer)?;
+        self.session.set_sharing_lines(self.dialect.sharing_mids());
         Ok(self.session.accept_answer(answer)?)
     }
 

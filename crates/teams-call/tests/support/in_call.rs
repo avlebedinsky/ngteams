@@ -24,7 +24,13 @@ fn up_with(now: Instant, accepted: &Value) -> (Calls, CallId) {
         panic!("{placed:#?}");
     };
     let mut answer = conversation_answer();
-    for op in ["updateEndpointState", "publishState", "removeState", "sendMessage"] {
+    for op in [
+        "updateEndpointState",
+        "publishState",
+        "removeState",
+        "sendMessage",
+        "updateParticipantProperties",
+    ] {
         answer["links"][op] = json!(conv(&format!("/{op}")));
     }
     calls.on_outcome(start, &ok(&answer), now);
@@ -52,6 +58,7 @@ fn bodies(effects: &[Effect]) -> Vec<(WriteId, &'static str, Value)> {
                     CallWrite::EndMeeting(write) => write.body(),
                     CallWrite::Hold(write) => write.body(),
                     CallWrite::Resume(write) => write.body(),
+                    CallWrite::ParticipantProperties(write) => write.body(),
                     _ => None,
                 };
                 Some((*id, write.name(), body.unwrap_or(Value::Null)))
@@ -438,4 +445,37 @@ fn the_music_on_hold_of_the_account_s_own_hold_tells_no_hold_by_the_far_end() {
     calls.on_outcome(id, &ok(&json!({})), now);
     calls.on_delivery(&delivery(&roster, &music_entry(9, false)), Observed::Nothing, now);
     assert!(!tells_far_hold(&effects(&mut calls)));
+}
+
+#[test]
+fn a_screen_shared_is_told_to_the_conversation_and_named_in_the_call_s_modalities() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    let modalities = |calls: &Calls| calls.call.as_ref().unwrap().modalities.clone();
+    calls.set_screen(call, Some(crate::Screen::Sharer));
+    assert_eq!(modalities(&calls), ["Audio", "ScreenSharer"]);
+    calls.tell_screen_shared(call).unwrap();
+    let told = bodies(&effects(&mut calls));
+    let [(_, "update_participant_properties", body)] = &told[..] else {
+        panic!("{told:#?}");
+    };
+    assert_eq!(
+        body["to"][0]["propertyBag"]["screenSharerAttributes"],
+        json!({"sequenceNumber": 1, "value": {"source": 1}})
+    );
+    assert!(body["links"]["updateParticipantPropertiesStatus"].as_str().is_some());
+    // each share tells the next
+    calls.tell_screen_shared(call).unwrap();
+    let told = bodies(&effects(&mut calls));
+    assert_eq!(
+        told[0].2["to"][0]["propertyBag"]["screenSharerAttributes"]["sequenceNumber"],
+        json!(2)
+    );
+    // the far end's screen shown, then none: the viewer's modality, then the call's own
+    calls.set_screen(call, Some(crate::Screen::Viewer));
+    assert_eq!(modalities(&calls), ["Audio", "ScreenViewer"]);
+    calls.set_screen(call, None);
+    assert_eq!(modalities(&calls), ["Audio"]);
+    let other = CallId(call.get() + 1);
+    assert!(matches!(calls.tell_screen_shared(other), Err(CallError::NoSuchCall)));
 }
