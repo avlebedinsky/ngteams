@@ -5,7 +5,9 @@ use teams_proto::{
     AttachCall, DecideLobby, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, RenegotiateMedia, ReportRinging, Request,
     StartCall, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
 };
-use teams_proto::{EndConversation, HoldCall, PublishState, RemoveState, ResumeCall, SendCallReaction};
+use teams_proto::{
+    AcceptTransfer, EndConversation, HoldCall, PublishState, RemoveState, ResumeCall, SendCallReaction, TransferCall,
+};
 use teams_proto::{UpdateMeetingSettings, UpdateMeetingStates};
 
 /// The id a write's outcome comes back under ([`crate::Calls::on_outcome`]). Unique for the machine's life.
@@ -59,6 +61,8 @@ pub enum CallWrite {
     Resume(ResumeCall),
     MeetingStates(UpdateMeetingStates),
     MeetingSettings(UpdateMeetingSettings),
+    Transfer(TransferCall),
+    AcceptTransfer(AcceptTransfer),
 }
 
 impl CallWrite {
@@ -92,6 +96,8 @@ impl CallWrite {
             Self::Resume(write) => sink.submit(id, write),
             Self::MeetingStates(write) => sink.submit(id, write),
             Self::MeetingSettings(write) => sink.submit(id, write),
+            Self::Transfer(write) => sink.submit(id, write),
+            Self::AcceptTransfer(write) => sink.submit(id, write),
         }
     }
 
@@ -126,6 +132,8 @@ impl CallWrite {
             Self::Resume(_) => "resume",
             Self::MeetingStates(_) => "update_meeting_states",
             Self::MeetingSettings(_) => "update_meeting_settings",
+            Self::Transfer(_) => "transfer",
+            Self::AcceptTransfer(_) => "transfer_acceptance",
         }
     }
 }

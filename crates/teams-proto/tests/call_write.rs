@@ -21,7 +21,7 @@ use teams_proto::{
     ReportRinging, RespondError, Response, StartCall, StartParts, Transport, UpdateEndpointMetadata,
     UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
 };
-use teams_proto::{HoldCall, ResumeCall};
+use teams_proto::{AcceptTransfer, HoldCall, ResumeCall, TransferCall, Transferor};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -1640,4 +1640,130 @@ fn a_screen_sharer_s_participant_properties_go_in_the_captured_shape() {
         ),
         Err(CallWriteError::Unmapped)
     ));
+}
+
+#[test]
+fn a_person_added_to_a_call_goes_with_its_group_chat_and_no_invitation_data_as_captured() {
+    let invitee = Invitee {
+        mri: Mri::new(LAB_C),
+        participant_id: Some("00000000-0000-4000-8000-0000000000e4".into()),
+    };
+    let links = Links::new()
+        .with(
+            "addParticipantSuccess",
+            callback(PUSH_A, "07070707", "conversation", "addParticipantSuccess"),
+        )
+        .with(
+            "addParticipantFailure",
+            callback(PUSH_A, "08080808", "conversation", "addParticipantFailure"),
+        );
+    let at = link(&conv("Conv1", "add"));
+    let add = AddToCall::person(&context(), &at, &participant(LAB_A), &invitee, GROUP, &links).unwrap();
+    let body = teams_proto::Request::body(&add).unwrap();
+    assert_eq!(
+        body["participants"]["to"],
+        json!([{"id": LAB_C, "participantId": "00000000-0000-4000-8000-0000000000e4"}])
+    );
+    assert_eq!(body["participants"]["from"]["id"], json!(LAB_A));
+    assert_eq!(body["participantInvitationData"], json!({}));
+    assert_eq!(body["groupChat"], json!({"threadId": GROUP, "messageId": null}));
+    assert!(body["links"]["addParticipantFailure"].as_str().is_some());
+    assert_eq!(add.invitee().as_str(), LAB_C);
+    // never the account itself, a bot, a chat that isn't a group's, or another link
+    let me = Invitee {
+        mri: Mri::new(LAB_A),
+        participant_id: None,
+    };
+    let bot = Invitee {
+        mri: Mri::new(ECHO),
+        participant_id: None,
+    };
+    for (who, chat) in [(&me, GROUP), (&bot, GROUP), (&invitee, MEETING)] {
+        assert!(matches!(
+            AddToCall::person(&context(), &at, &participant(LAB_A), who, chat, &links),
+            Err(CallWriteError::Unmapped)
+        ));
+    }
+    let other = Links::new().with("acceptance", callback(PUSH_A, "09090909", "call", "acceptance"));
+    assert!(AddToCall::person(&context(), &at, &participant(LAB_A), &invitee, GROUP, &other).is_err());
+}
+
+#[test]
+fn a_transfer_goes_at_the_leg_s_transfer_link_and_its_acceptance_at_the_delivered_link_as_captured() {
+    let links = Links::new()
+        .with(
+            "transferAcceptance",
+            callback(PUSH_A, "0d0d0d0d", "call", "transferAcceptance"),
+        )
+        .with(
+            "transferCompletion",
+            callback(PUSH_A, "0e0e0e0e", "call", "transferCompletion"),
+        );
+    let at = link(&cc("active", "Call1", "transfer"));
+    let transfer = TransferCall::new(&context(), &at, &participant(LAB_A), &Mri::new(LAB_C), &links).unwrap();
+    assert_eq!(teams_proto::Request::method(&transfer).as_str(), "POST");
+    let body = teams_proto::Request::body(&transfer).unwrap();
+    assert_eq!(body["callTransfer"]["target"], json!({"id": LAB_C}));
+    assert_eq!(
+        body["callTransfer"]["transferor"],
+        json!({"details": {"id": LAB_A, "endpointId": "00000000-0000-4000-8000-0000000000e1",
+            "participantId": "00000000-0000-4000-8000-0000000000e2", "languageId": "en-us"},
+            "authorizationToken": null})
+    );
+    assert_eq!(
+        body["callTransfer"]["transferContext"],
+        json!({"customContext": {"callDetails": {}}})
+    );
+    assert!(body["callTransfer"]["links"]["transferCompletion"].as_str().is_some());
+    assert!(matches!(
+        TransferCall::new(&context(), &at, &participant(LAB_A), &Mri::new(LAB_A), &links),
+        Err(CallWriteError::Unmapped)
+    ));
+    assert!(matches!(
+        TransferCall::new(
+            &context(),
+            &link(&cc("active", "Call1", "hold")),
+            &participant(LAB_A),
+            &Mri::new(LAB_C),
+            &links
+        ),
+        Err(CallWriteError::Unmapped)
+    ));
+    let accepted = AcceptTransfer::new(&context(), &link(&cc("transfer", "Call1", "acceptance"))).unwrap();
+    assert_eq!(
+        teams_proto::Request::body(&accepted),
+        Some(json!({"transferAcceptance": {}}))
+    );
+    assert!(AcceptTransfer::new(&context(), &link(&cc("transfer", "Call1", "completion"))).is_err());
+}
+
+#[test]
+fn the_transferred_party_s_call_to_the_target_names_its_transferor_as_delivered() {
+    let details = json!({"id": LAB_A, "displayName": "Lab A", "endpointId": "e", "participantId": "p",
+        "tenantId": "00000000-0000-4000-8000-0000000000d0", "region": "amer", "propertyBag": null});
+    let transferor = Transferor::new(details.clone(), Some("placeholder-transfer-authorization".into()));
+    assert_eq!(
+        transferor.mri().map(|mri| mri.as_str().to_owned()).as_deref(),
+        Some(LAB_A)
+    );
+    assert_eq!(transferor.display_name(), Some("Lab A"));
+    assert!(!format!("{transferor:?}").contains("placeholder-transfer-authorization"));
+    let target = Invitee {
+        mri: Mri::new(LAB_C),
+        participant_id: Some("00000000-0000-4000-8000-0000000000e5".into()),
+    };
+    let start = StartCall::transferred(&context(), &start_parts(PUSH_B, LAB_B, None), &target, &transferor).unwrap();
+    let body = teams_proto::Request::body(&start).unwrap();
+    assert_eq!(body["participants"]["to"][0]["id"], json!(LAB_C));
+    assert_eq!(body["groupChat"], Value::Null);
+    assert_eq!(
+        body["callInvitation"]["transferor"],
+        json!({"details": details, "authorizationToken": "placeholder-transfer-authorization"})
+    );
+    assert_eq!(body["callInvitation"]["replaces"], Value::Null);
+    let me = Invitee {
+        mri: Mri::new(LAB_B),
+        participant_id: None,
+    };
+    assert!(StartCall::transferred(&context(), &start_parts(PUSH_B, LAB_B, None), &me, &transferor).is_err());
 }

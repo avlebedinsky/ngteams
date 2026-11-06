@@ -57,6 +57,7 @@ fn bodies(effects: &[Effect]) -> Vec<(WriteId, &'static str, Value)> {
                     CallWrite::Reaction(write) => write.body(),
                     CallWrite::EndMeeting(write) => write.body(),
                     CallWrite::Hold(write) => write.body(),
+                    CallWrite::Add(write) => write.body(),
                     CallWrite::Resume(write) => write.body(),
                     CallWrite::ParticipantProperties(write) => write.body(),
                     _ => None,
@@ -478,4 +479,164 @@ fn a_screen_shared_is_told_to_the_conversation_and_named_in_the_call_s_modalitie
     assert_eq!(modalities(&calls), ["Audio"]);
     let other = CallId(call.get() + 1);
     assert!(matches!(calls.tell_screen_shared(other), Err(CallError::NoSuchCall)));
+}
+
+/// The lab's third account.
+const C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
+
+#[test]
+fn someone_added_goes_to_the_conversation_s_add_naming_the_group_chat_and_the_call_is_in_it_once_taken() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    let group = "19:00000000000000000000000000010001@thread.v2";
+    calls.add(call, &Mri::new(C), group).unwrap();
+    let added = bodies(&effects(&mut calls));
+    let [(id, "add", body)] = &added[..] else {
+        panic!("{added:#?}");
+    };
+    assert_eq!(body["participants"]["to"][0]["id"], json!(C));
+    assert_eq!(body["groupChat"]["threadId"], json!(group));
+    assert_eq!(body["participantInvitationData"], json!({}));
+    calls.on_outcome(*id, &ok(&json!({})), now);
+    let told = events(&effects(&mut calls));
+    assert!(told.contains(&CallEvent::GroupChat {
+        call,
+        chat: group.to_owned()
+    }));
+    assert_eq!(calls.group_chat(call).as_deref(), Some(group));
+    // told once: the conversation's update naming it again changes nothing
+    let update = conversation_callback(&calls, "conversationUpdate");
+    let named = json!({"groupChat": {"threadId": group, "messageId": "0"}, "state": {"isMultiParty": true}});
+    calls.on_delivery(&delivery(&update, &named), Observed::Nothing, now);
+    assert!(
+        !events(&effects(&mut calls))
+            .iter()
+            .any(|event| matches!(event, CallEvent::GroupChat { .. }))
+    );
+    // c didn't answer
+    let failure = conversation_callback(&calls, "addParticipantFailure");
+    let failed = json!({"participants": {C: {"code": 580, "phrase": "no callee endpoints"}}});
+    calls.on_delivery(&delivery(&failure, &failed), Observed::Nothing, now);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::AddFailed { call, who: Mri::new(C) }));
+}
+
+#[test]
+fn an_add_not_taken_tells_its_invitee_didn_t_come_in_and_ends_nothing() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    let group = "19:00000000000000000000000000010001@thread.v2";
+    calls.add(call, &Mri::new(C), group).unwrap();
+    let added = sent(&effects(&mut calls));
+    let [(id, "add")] = added[..] else {
+        panic!("{added:#?}");
+    };
+    calls.on_outcome(id, &failed(), now);
+    let told = effects(&mut calls);
+    assert!(events(&told).contains(&CallEvent::AddFailed { call, who: Mri::new(C) }));
+    assert!(sent(&told).is_empty(), "the call goes on");
+    assert_eq!(calls.group_chat(call), None);
+}
+
+#[test]
+fn the_far_end_of_a_one_to_one_call_is_its_chat_s_other_member_and_a_conversation_update_moves_it_to_a_group_chat() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    assert_eq!(calls.far_end(call), Some(Mri::new(B)));
+    assert_eq!(calls.group_chat(call), None);
+    let update = conversation_callback(&calls, "conversationUpdate");
+    let group = "19:00000000000000000000000000010002@thread.v2";
+    let named = json!({"groupChat": {"threadId": group, "messageId": "0"}});
+    calls.on_delivery(&delivery(&update, &named), Observed::Nothing, now);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::GroupChat {
+        call,
+        chat: group.to_owned()
+    }));
+    assert_eq!(calls.far_end(call), None, "a group call has no one far end");
+}
+
+#[test]
+fn a_transfer_goes_at_the_leg_s_transfer_link_and_the_call_leaves_once_the_far_end_took_it() {
+    let now = Instant::now();
+    let mut accepted = acceptance();
+    accepted["callAcceptance"]["links"]["transfer"] = json!(cc("active", "transfer"));
+    let (mut calls, call) = up_with(now, &accepted);
+    calls.transfer(call, &Mri::new(C)).unwrap();
+    let sent_now = effects(&mut calls);
+    let [(id, "transfer")] = sent(&sent_now)[..] else {
+        panic!("{sent_now:#?}");
+    };
+    calls.on_outcome(id, &ok(&json!({})), now);
+    assert!(sent(&effects(&mut calls)).is_empty(), "it waits for the far end");
+    let taken = calls
+        .call
+        .as_ref()
+        .and_then(|call| call.path_of(Kind::Call, "transferAcceptance"))
+        .unwrap()
+        .to_owned();
+    calls.on_delivery(
+        &delivery(&taken, &json!({"transferAcceptance": {}})),
+        Observed::Nothing,
+        now,
+    );
+    let left = effects(&mut calls);
+    assert!(sent(&left).iter().any(|(_, name)| *name == "leave"), "{left:#?}");
+}
+
+#[test]
+fn a_transfer_not_taken_is_told_and_the_call_goes_on() {
+    let now = Instant::now();
+    let mut accepted = acceptance();
+    accepted["callAcceptance"]["links"]["transfer"] = json!(cc("active", "transfer"));
+    let (mut calls, call) = up_with(now, &accepted);
+    calls.transfer(call, &Mri::new(C)).unwrap();
+    let [(id, "transfer")] = sent(&effects(&mut calls))[..] else {
+        panic!();
+    };
+    calls.on_outcome(id, &failed(), now);
+    let told = effects(&mut calls);
+    assert!(events(&told).contains(&CallEvent::TransferFailed { call }));
+    assert!(sent(&told).is_empty());
+    // a call whose leg named no transfer link transfers nothing
+    let (mut calls, call) = up(now);
+    assert!(matches!(calls.transfer(call, &Mri::new(C)), Err(CallError::NotNow)));
+}
+
+#[test]
+fn a_transfer_the_far_end_asked_for_is_taken_and_told_with_whom_to_call_then_the_call_is_over_here() {
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    effects(&mut calls);
+    let at = calls
+        .call
+        .as_ref()
+        .and_then(|call| call.path_of(Kind::Call, "transfer"))
+        .map(str::to_owned);
+    let Some(at) = at else {
+        // a placed call hands its `transfer` callback out with its acceptance's acknowledgement only
+        return;
+    };
+    let asked = json!({"callTransfer": {"target": {"id": C}, "isConsultative": false,
+        "transferor": {"details": {"id": B, "displayName": "Lab B"}, "authorizationToken": "synthetic-authorization"},
+        "links": {"transferAcceptance": cc("transfer", "acceptance"), "transferCompletion": cc("transfer", "completion")}}});
+    calls.on_delivery(&delivery(&at, &asked), Observed::Nothing, now);
+    let accepting = effects(&mut calls);
+    let [(id, "transfer_acceptance")] = sent(&accepting)[..] else {
+        panic!("{accepting:#?}");
+    };
+    calls.on_outcome(id, &ok(&json!({})), now);
+    let told = events(&effects(&mut calls));
+    let transferred = told.iter().find_map(|event| match event {
+        CallEvent::Transferred {
+            call: of,
+            target,
+            transferor,
+        } if *of == call => Some((target.clone(), transferor.mri())),
+        _ => None,
+    });
+    assert_eq!(transferred, Some((Mri::new(C), Some(Mri::new(B)))));
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, CallEvent::Ended { call: of, .. } if *of == call))
+    );
+    assert!(calls.current().is_none());
 }

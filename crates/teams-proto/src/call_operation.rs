@@ -81,6 +81,13 @@ pub enum CallOperation {
     /// `POST …/cc/v1/holdSession/<call>/…/resume`: the sender takes its call off hold, at the `resume` link the hold's
     /// answer handed out (seen 2026-11-06, `ab-call --call steps`: Resume). Names nobody else.
     Resume,
+    /// `POST …/cc/v1/active/<call>/…/transfer`: the sender transfers its 1:1 call's far end to someone else (a blind
+    /// transfer: `callTransfer.target`), at the call leg's `transfer` link (seen 2026-11-06, `ab-call --call steps`:
+    /// Transfer). Names the target, whom the far end then calls.
+    Transfer,
+    /// `POST …/cc/v1/transfer/<call>/…/acceptance`: the transferred party takes the transfer its far end asked for,
+    /// at the `transferAcceptance` link the `callTransfer` delivery handed out (seen 2026-11-06). Names nobody.
+    TransferAcceptance,
     /// `DELETE …/conv/<id>`: the organizer ends the meeting for everyone in it, at the conversation's own URL (seen
     /// 2026-11-06, `meeting-steps`: End meeting). Reaches only who is in it.
     EndConversation,
@@ -93,7 +100,7 @@ pub enum CallOperation {
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 30] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
@@ -122,6 +129,8 @@ impl CallOperation {
         Self::Resume,
         Self::UpdateMeetingStates,
         Self::UpdateMeetingSettings,
+        Self::Transfer,
+        Self::TransferAcceptance,
     ];
 
     /// The protocol operation name.
@@ -156,6 +165,8 @@ impl CallOperation {
             Self::Resume => "resume",
             Self::UpdateMeetingStates => "update_meeting_states",
             Self::UpdateMeetingSettings => "update_meeting_settings",
+            Self::Transfer => "transfer",
+            Self::TransferAcceptance => "transfer_acceptance",
         }
     }
 
@@ -188,7 +199,9 @@ impl CallOperation {
             | Self::SendMessage
             | Self::Hold
             | Self::Resume
-            | Self::UpdateMeetingStates => "POST",
+            | Self::UpdateMeetingStates
+            | Self::Transfer
+            | Self::TransferAcceptance => "POST",
         }
     }
 
@@ -220,6 +233,8 @@ impl CallOperation {
             Self::Resume => "resume",
             Self::UpdateMeetingStates => "updateMeetingStates",
             Self::UpdateMeetingSettings => "updateMeetingSettings",
+            Self::Transfer => "transfer",
+            Self::TransferAcceptance => "acceptance",
             // the conversation's own URL, the call leg's own: no segment after it
             Self::Join | Self::KeepAlive | Self::EndConversation => "",
         }

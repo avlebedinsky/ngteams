@@ -188,6 +188,54 @@ fn is_media_callback(agent: &Callback, path: &str) -> bool {
             || is_acknowledged_at(path))
 }
 
+/// Whether `path` is a call's `transfer` callback (`…/call/transfer/`), where a transfer the far end asked for is
+/// delivered.
+fn is_transfer_callback(path: &str) -> bool {
+    path.ends_with("/call/transfer/")
+}
+
+/// Binds the `transferAcceptance` link a transfer delivered at a live call's or an answered invitation's `transfer`
+/// callback hands out (`callTransfer.links.transferAcceptance`, `…/cc/v1/transfer/<call>/…/acceptance` on the same call,
+/// seen 2026-11-06): where the transferred party takes it.
+fn bind_transfer(inner: &mut Inner, delivery: &Delivery) {
+    if let Some(offer) = inner.offers.iter_mut().find(|offer| offer.transfers_at(&delivery.path)) {
+        let call = offer.invitation.leg.1.clone();
+        if let Some(link) = transfer_link(&delivery.body, &call)
+            && !offer.links.contains(&link)
+        {
+            offer.links.push(link);
+        }
+        return;
+    }
+    let Some(call) = inner.calls.iter_mut().find(|call| {
+        call.state == State::Live
+            && call
+                .agent
+                .as_ref()
+                .is_some_and(|agent| delivery.path.starts_with(&agent.path))
+    }) else {
+        return;
+    };
+    let Some(link) = call
+        .controller
+        .as_ref()
+        .and_then(|(_, id)| transfer_link(&delivery.body, id))
+    else {
+        return;
+    };
+    if !call.links.contains(&link) {
+        call.links.push(link);
+    }
+}
+
+/// The `transferAcceptance` link a transfer's delivery `body` hands out for the call `call`, on the flight proxy.
+fn transfer_link(body: &[u8], call: &str) -> Option<Link> {
+    let url = proxy_link(strict_json(body)?.pointer("/callTransfer/links/transferAcceptance")?)?;
+    let (_, at, kind, last) = controller_path(&url)?;
+    (at == call && kind == "transfer" && last == CallOperation::TransferAcceptance.segment())
+        .then(|| (CallOperation::TransferAcceptance, url.as_str().to_owned()))
+}
+
 /// Whether `path` is a media acknowledgement callback (`…/call/mediaAcknowledgement/`): it binds no link, its
 /// delivery waits only for its receipt.
 fn is_acknowledged_at(path: &str) -> bool {
@@ -481,6 +529,10 @@ impl Tracker {
             offer.end();
             return Observed::RingEnded;
         }
+        if is_transfer_callback(&delivery.path) {
+            bind_transfer(&mut inner, delivery);
+            return Observed::Nothing;
+        }
         let negotiated = if let Some(offer) = inner
             .offers
             .iter_mut()
@@ -678,10 +730,11 @@ fn acceptance_links(body: &[u8]) -> Option<(Controller, Vec<Link>)> {
 /// `callAcceptance.links`, a retarget's `links`); `None` unless every link that names a call names the same one, and at
 /// least one does.
 fn controller_links(links: &Map<String, Value>) -> Option<(Controller, Vec<Link>)> {
-    const NAMES: [(CallOperation, &str, &str); 6] = [
+    const NAMES: [(CallOperation, &str, &str); 7] = [
         (CallOperation::Acknowledge, "acknowledgement", "callAcceptance"),
         (CallOperation::KeepAlive, "callLeg", "active"),
         (CallOperation::Hold, "hold", "active"),
+        (CallOperation::Transfer, "transfer", "active"),
         (
             CallOperation::ApplyChannelParameters,
             "applyChannelParameters",

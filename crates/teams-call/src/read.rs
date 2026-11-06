@@ -185,6 +185,8 @@ pub(crate) struct AcceptAnswer {
     pub(crate) group_media: GroupMediaLinks,
     /// The call leg's `hold` link: where the account puts the call on hold.
     pub(crate) hold: Option<CallLink>,
+    /// The call leg's `transfer` link: where the account transfers the call's far end.
+    pub(crate) transfer: Option<CallLink>,
 }
 
 /// Where a group call's media lines are described (`updateMediaDescriptions`) and its send capabilities given
@@ -218,6 +220,7 @@ pub(crate) fn accept_answer(body: &[u8]) -> AcceptAnswer {
         call_leg: link(&acknowledgement, "/links/callLeg"),
         group_media: GroupMediaLinks::of(&acknowledgement),
         hold: link(&acknowledgement, "/links/hold"),
+        transfer: link(&acknowledgement, "/links/transfer"),
     }
 }
 
@@ -233,6 +236,7 @@ pub(crate) struct Retarget {
     pub(crate) call_leg: CallLink,
     pub(crate) group_media: GroupMediaLinks,
     pub(crate) hold: Option<CallLink>,
+    pub(crate) transfer: Option<CallLink>,
 }
 
 /// The retarget a media answer's acknowledgement `body` tells, if it is one ([`Retarget`]): a success naming the new
@@ -252,6 +256,7 @@ pub(crate) fn retarget(body: &[u8]) -> Option<Retarget> {
         call_leg: link(&body, "/links/callLeg")?,
         group_media: GroupMediaLinks::of(&body),
         hold: link(&body, "/links/hold"),
+        transfer: link(&body, "/links/transfer"),
     })
 }
 
@@ -273,6 +278,8 @@ pub(crate) struct Acceptance {
     pub(crate) group_media: GroupMediaLinks,
     /// The call leg's `hold` link: where the account puts the call on hold.
     pub(crate) hold: Option<CallLink>,
+    /// The call leg's `transfer` link: where the account transfers the call's far end.
+    pub(crate) transfer: Option<CallLink>,
 }
 
 /// The acceptance delivery `body`; `None` unless it is a `callAcceptance`.
@@ -288,6 +295,7 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
         voicemail: acceptance.pointer("/acceptedBy/endpointType").and_then(Value::as_str) == Some("voicemail"),
         group_media: GroupMediaLinks::of(acceptance),
         hold: link(acceptance, "/links/hold"),
+        transfer: link(acceptance, "/links/transfer"),
     })
 }
 
@@ -858,4 +866,56 @@ mod tests {
             "no endpoint in the call"
         );
     }
+}
+
+/// Who an `add` failed to bring in, as its `addParticipantFailure` delivery names them (`{"participants": {<MRI>:
+/// {"code", "phrase", …}}, "participantInfos": […]}`, seen 2026-11-06 when the invitee had no endpoint to ring).
+pub(crate) fn add_failed(body: &[u8]) -> Vec<Mri> {
+    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    body.get("participants")
+        .and_then(Value::as_object)
+        .map(|participants| participants.keys().map(Mri::new).collect())
+        .unwrap_or_default()
+}
+
+/// The group chat a conversation update names (`groupChat.threadId`): a 1:1 call's new group chat once someone was
+/// added to it (seen 2026-11-06, both ends told).
+pub(crate) fn update_group_chat(body: &[u8]) -> Option<String> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let chat = body.pointer("/groupChat/threadId")?.as_str()?;
+    teams_proto::is_group_chat_id(chat).then(|| chat.to_owned())
+}
+
+/// A transfer the far end asked for, delivered at the account's `transfer` callback (`{"callTransfer": {"target":
+/// {"id"}, "isConsultative", "transferor": {"details", "authorizationToken"}, "links": {"transferAcceptance",
+/// "transferCompletion"}}}`, seen 2026-11-06): whom to call, who transferred, and where the transfer is taken.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TransferAsked {
+    pub(crate) target: Mri,
+    pub(crate) transferor: teams_proto::Transferor,
+    pub(crate) acceptance: CallLink,
+}
+
+/// The transfer `body` asks for; `None` unless it is a blind transfer (a consultative one wasn't captured) whose
+/// target, transferor and acceptance link read.
+pub(crate) fn transfer_asked(body: &[u8]) -> Option<TransferAsked> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let transfer = body.get("callTransfer")?;
+    if transfer.get("isConsultative").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let target = Mri::new(transfer.pointer("/target/id")?.as_str()?);
+    let details = transfer.pointer("/transferor/details")?.clone();
+    details.get("id")?.as_str()?;
+    let authorization = transfer
+        .pointer("/transferor/authorizationToken")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some(TransferAsked {
+        target,
+        transferor: teams_proto::Transferor::new(details, authorization),
+        acceptance: link(transfer, "/links/transferAcceptance")?,
+    })
 }

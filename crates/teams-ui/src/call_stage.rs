@@ -47,9 +47,12 @@
 mod captions;
 mod chat_pane;
 mod gallery;
+mod invite;
 mod meeting;
 mod people_pane;
 mod share;
+mod transfer;
+pub use transfer::Asking;
 mod toolbar;
 pub use gallery::Layout;
 pub use meeting::{ATTENDANCE_FILE, TimerChange, attendance_list, timer_after, timer_text};
@@ -223,6 +226,10 @@ pub struct CallStage {
     hands: Vec<String>,
     /// End meeting asks first: its confirmation shows.
     confirm_end: bool,
+    /// People's "Invite someone or dial a number" box, while the pane shows it.
+    inviting: Option<invite::Finder>,
+    /// Transfer's (or Consult's) dialog, while it is open.
+    dialog: Option<transfer::Dialog>,
     /// The meeting the call is, as its chat's thread names it (its join link), read once per call.
     meeting: Option<MeetingLink>,
     /// More → Timer opened the timer's bar before the meeting runs one: five minutes, paused, until it is sent.
@@ -322,6 +329,8 @@ impl CallStage {
             others_off: false,
             hands: Vec::new(),
             confirm_end: false,
+            inviting: None,
+            dialog: None,
             meeting: None,
             timer_draft: false,
             timer_edit: None,
@@ -983,6 +992,7 @@ impl Render for CallStage {
             (None, None) => SharedString::from("Call"),
         };
         self.retitle(&title, window);
+        self.follow_invite_box(window, cx);
         self.width = f32::from(window.viewport_size().width);
         let body = self.body((live.as_ref(), ended.as_ref()), &title, palette, cx);
         let header = self.header(live.as_ref(), title, palette, cx);
@@ -1007,6 +1017,7 @@ impl Render for CallStage {
             .children(captions);
         let confirmation = self.end_confirmation(palette, cx);
         let lock = self.lock_confirmation(palette, cx);
+        let dialog = live.as_ref().and_then(|_| self.transfer_dialog(palette, cx));
         let sheet = crate::sheet::float(
             div().flex_1().min_h_0().w_full(),
             panes,
@@ -1036,6 +1047,7 @@ impl Render for CallStage {
             .child(sheet)
             .children(confirmation)
             .children(lock)
+            .children(dialog)
     }
 }
 

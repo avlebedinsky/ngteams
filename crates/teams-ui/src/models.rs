@@ -347,6 +347,10 @@ impl Models {
             | Event::CallMeeting { .. }
             | Event::CallSharing { .. }
             | Event::CallRemoteShare { .. }
+            | Event::CallGroupChat { .. }
+            | Event::CallAddFailed { .. }
+            | Event::CallTransferFailed { .. }
+            | Event::CallTransferred { .. }
             | Event::CallReaction { .. } => {
                 self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
             }

@@ -1010,6 +1010,8 @@ impl Core for FakeCore {
             | CallAction::Timer { call, .. }
             | CallAction::LockMeeting { call, .. }
             | CallAction::Share { call, .. }
+            | CallAction::Add { call, .. }
+            | CallAction::Transfer { call, .. }
             | CallAction::Renegotiate { call } => call,
             CallAction::Call { .. }
             | CallAction::TestCall { .. }

@@ -150,6 +150,9 @@ impl Offer {
                     | CallOperation::Resume
                     | CallOperation::UpdateMeetingStates
                     | CallOperation::UpdateMeetingSettings
+                    | CallOperation::Add
+                    | CallOperation::Transfer
+                    | CallOperation::TransferAcceptance
             ),
             OfferState::Leaving => operation == CallOperation::Leave,
             OfferState::Declined => operation == CallOperation::Reject,
@@ -245,6 +248,19 @@ impl Offer {
                         && url.query() == controller.query();
                     fits.then(|| (operation, url.as_str().to_owned()))
                 })
+                .chain(
+                    // the add: its link is named `addParticipantAndModality`, its path ends in `add`
+                    proxy_link(
+                        response
+                            .pointer("/output/links/addParticipantAndModality")
+                            .unwrap_or(&Value::Null),
+                    )
+                    .filter(|url| {
+                        url.path() == format!("{}/{}", controller.path(), CallOperation::Add.segment())
+                            && url.query() == controller.query()
+                    })
+                    .map(|url| (CallOperation::Add, url.as_str().to_owned())),
+                )
                 .collect::<Vec<_>>()
             })
             .collect()
@@ -294,10 +310,11 @@ impl Offer {
     /// `…/cc/v1/active/<call>/<n>/<leg>/<n>`) and its `applyChannelParameters`
     /// (`…/cc/v1/mcProxy/<call>/…/applyChannelParameters`, a group call's). Whether anything bound.
     pub(crate) fn bind_acceptance(&mut self, answer: &[u8]) -> bool {
-        const NAMES: [(CallOperation, &str, &str); 5] = [
+        const NAMES: [(CallOperation, &str, &str); 6] = [
             (CallOperation::Renegotiate, "mediaRenegotiation", "active"),
             (CallOperation::KeepAlive, "callLeg", "active"),
             (CallOperation::Hold, "hold", "active"),
+            (CallOperation::Transfer, "transfer", "active"),
             (
                 CallOperation::UpdateMediaDescriptions,
                 "updateMediaDescriptions",
@@ -334,6 +351,12 @@ impl Offer {
 
     /// Whether a delivery at `path` carries a link of the answered call's media negotiation ([`super::media_link`]): at
     /// a `mediaRenegotiation` or `mediaAnswer` callback on the call agent the sent attach bound.
+    pub(crate) fn transfers_at(&self, path: &str) -> bool {
+        self.state == OfferState::Answered
+            && super::is_transfer_callback(path)
+            && self.agent.as_ref().is_some_and(|agent| path.starts_with(&agent.path))
+    }
+
     pub(crate) fn negotiates_at(&self, path: &str) -> bool {
         self.state == OfferState::Answered
             && self

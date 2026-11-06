@@ -389,6 +389,28 @@ impl StartCall {
         Self::start(context, parts, body, Expect::ChatStart, None)
     }
 
+    /// The transferred party's call to the target of the transfer its far end asked for: a 1:1 call to `target`, its
+    /// `callInvitation.transferor` the delivered `transferor` with its authorization (seen 2026-11-06, the web callee
+    /// once its far end transferred it).
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when `target` isn't a work account other than the caller.
+    pub fn transferred(
+        context: &CallContext,
+        parts: &StartParts,
+        target: &Invitee,
+        transferor: &Transferor,
+    ) -> Result<Self, CallWriteError> {
+        if !target.mri.as_str().starts_with("8:orgid:") || target.mri == parts.from.mri {
+            return Err(CallWriteError::Unmapped);
+        }
+        let mut body = start_body(parts, None, &[target.json()], Value::Null);
+        if let Some(slot) = body.pointer_mut("/callInvitation/transferor") {
+            *slot = transferor.json();
+        }
+        Self::start(context, parts, body, Expect::ChatStart, None)
+    }
+
     /// The call of the meeting whose chat is `chat` (see the type's docs).
     ///
     /// # Errors
@@ -555,6 +577,48 @@ impl AddToCall {
         let built = operation(context, CallOperation::Add, link, Some(body))?;
         Ok(Self {
             invitee: parts.invitee.mri.clone(),
+            url: link.url().clone(),
+            built,
+        })
+    }
+
+    /// Someone added to a call between people, as the web client's People pane adds them (seen 2026-11-06, `ab-call
+    /// --call steps`): `from` the account, `to` the invitee with a fresh participant id, no invitation data, the call's
+    /// group chat (`group_chat`: a 1:1 call's new group chat of the three, made first, or a group call's own) with no
+    /// message, and the `addParticipantSuccess`/`addParticipantFailure` callbacks of `links`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't such an `add` in its captured shape: the invitee not a work account or
+    /// the account itself, the chat not a group chat, a link of another operation.
+    pub fn person(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        invitee: &Invitee,
+        group_chat: &str,
+        links: &Links,
+    ) -> Result<Self, CallWriteError> {
+        if !invitee.mri.as_str().starts_with("8:orgid:")
+            || invitee.mri == from.mri
+            || !crate::is_group_chat_id(group_chat)
+            || links
+                .iter()
+                .any(|(name, _)| !["addParticipantSuccess", "addParticipantFailure"].contains(&name))
+        {
+            return Err(CallWriteError::Unmapped);
+        }
+        let body = json!({
+            "disableUnmute": false,
+            "participants": {"from": from.json(), "to": [invitee.json()]},
+            "participantInvitationData": {},
+            "replacementDetails": null,
+            "groupContext": null,
+            "groupChat": {"threadId": group_chat, "messageId": null},
+            "links": links.json(),
+        });
+        let built = operation(context, CallOperation::Add, link, Some(body))?;
+        Ok(Self {
+            invitee: invitee.mri.clone(),
             url: link.url().clone(),
             built,
         })
@@ -1476,5 +1540,121 @@ impl ResumeCall {
             "debugContent": {"causeId": parts::guid().map_err(CallWriteError::Random)?},
         });
         Ok(Self(operation(context, CallOperation::Resume, link, Some(body))?))
+    }
+}
+
+/// A 1:1 call's far end transferred to someone else (a blind transfer): `POST` to the call leg's `transfer` link
+/// `{"callTransfer": {"target": {"id"}, "transferor": {"details": {id, endpointId, participantId, languageId},
+/// "authorizationToken": null}, "links": {"transferAcceptance", "transferCompletion"}, "transferContext":
+/// {"customContext": {"callDetails": {}}}}}` (seen 2026-11-06, `ab-call --call steps`: Transfer to an audio call),
+/// answered `202`. The far end is told at its own `transfer` callback and calls the target; the transferor is told
+/// at `transferAcceptance` once it took it, and then leaves the call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferCall(Built);
+
+impl TransferCall {
+    /// `from`'s call transferred to `target` at `link`, its acceptance and completion told at the callbacks of `links`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a `transfer` in its captured shape: the target not a work account or
+    /// the account itself, a link of another operation.
+    pub fn new(
+        context: &CallContext,
+        link: &CallLink,
+        from: &CallParticipant,
+        target: &Mri,
+        links: &Links,
+    ) -> Result<Self, CallWriteError> {
+        if !target.as_str().starts_with("8:orgid:")
+            || *target == from.mri
+            || links
+                .iter()
+                .any(|(name, _)| !["transferAcceptance", "transferCompletion"].contains(&name))
+        {
+            return Err(CallWriteError::Unmapped);
+        }
+        let mut details = from.json();
+        if let Some(details) = details.as_object_mut() {
+            details.remove("displayName");
+        }
+        let body = json!({
+            "callTransfer": {
+                "target": {"id": target.as_str()},
+                "transferor": {"details": details, "authorizationToken": null},
+                "links": links.json(),
+                "transferContext": {"customContext": {"callDetails": {}}},
+            },
+        });
+        Ok(Self(operation(context, CallOperation::Transfer, link, Some(body))?))
+    }
+}
+
+/// The transfer the far end asked for, taken by the transferred party: `POST {"transferAcceptance": {}}` to the
+/// `transferAcceptance` link its `callTransfer` delivery handed out (seen 2026-11-06), before it calls the target
+/// ([`StartCall::transferred`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcceptTransfer(Built);
+
+impl AcceptTransfer {
+    /// The transfer taken at `link`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when `link` isn't a transfer's acceptance link.
+    pub fn new(context: &CallContext, link: &CallLink) -> Result<Self, CallWriteError> {
+        let body = json!({"transferAcceptance": {}});
+        Ok(Self(operation(
+            context,
+            CallOperation::TransferAcceptance,
+            link,
+            Some(body),
+        )?))
+    }
+}
+
+call_write!(TransferCall, AcceptTransfer);
+
+/// Who transferred the account's call, as the `callTransfer` delivery names them: their details (`id`,
+/// `displayName`, `endpointId`, `participantId`, tenant, region…, kept as delivered) and the authorization the call
+/// controller minted for the transfer, which the transferred party's call to the target hands back to it
+/// (`callInvitation.transferor`). Its `Debug` never shows the authorization.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Transferor {
+    details: Value,
+    authorization: Option<String>,
+}
+
+impl Transferor {
+    /// The transferor `details` as delivered, with the `authorization` the delivery carried.
+    #[must_use]
+    pub fn new(details: Value, authorization: Option<String>) -> Self {
+        Self { details, authorization }
+    }
+
+    /// Who transferred the call.
+    #[must_use]
+    pub fn mri(&self) -> Option<Mri> {
+        self.details.get("id").and_then(Value::as_str).map(Mri::new)
+    }
+
+    /// Their name as the delivery gave it.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        self.details
+            .get("displayName")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+    }
+
+    fn json(&self) -> Value {
+        json!({"details": self.details, "authorizationToken": self.authorization})
+    }
+}
+
+impl fmt::Debug for Transferor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transferor")
+            .field("mri", &self.mri())
+            .field("authorization", &self.authorization.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
     }
 }

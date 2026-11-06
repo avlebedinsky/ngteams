@@ -13,7 +13,10 @@ use teams_proto::{
     MediaDescriptions, MeetingInfo, RenegotiateMedia, ReportRinging, StartCall, StartParts, UpdateEndpointMetadata,
     UpdateEndpointState, UpdateMediaDescriptions,
 };
-use teams_proto::{EndConversation, HoldCall, PublishState, RemoveState, ResumeCall, SendCallReaction};
+use teams_proto::{
+    AcceptTransfer, EndConversation, HoldCall, PublishState, RemoveState, ResumeCall, SendCallReaction, TransferCall,
+    Transferor,
+};
 
 use crate::agent::{Kind, guid};
 use crate::call::{
@@ -58,12 +61,15 @@ pub(crate) fn start(
     );
     match placement {
         Placement::TestCall { .. } => offer.required_features = None,
-        Placement::Chat { group_chat: None, .. } => offer.required_features = Some(ONE_TO_ONE_FEATURES.to_owned()),
+        Placement::Chat { group_chat: None, .. } | Placement::Transferred { .. } => {
+            offer.required_features = Some(ONE_TO_ONE_FEATURES.to_owned());
+        }
         Placement::Chat { .. } | Placement::Meeting { .. } | Placement::Channel { .. } => {}
     }
     let parts = start_parts(call, identity, group, offer)?;
     let start = match placement {
         Placement::TestCall { echo } => StartCall::echo_test(&call.context, &parts, echo)?,
+        Placement::Transferred { target, transferor } => transferred(call, &parts, target, transferor)?,
         Placement::Chat { callees, group_chat } => {
             let callees = callees.iter().map(invitee).collect::<Result<Vec<_>, _>>()?;
             StartCall::in_chat(&call.context, &parts, &callees, group_chat.as_deref())?
@@ -73,6 +79,16 @@ pub(crate) fn start(
         Placement::Channel { channel } => StartCall::meet_now(&call.context, &parts, channel)?,
     };
     Ok(CallWrite::Start(start))
+}
+
+/// The transferred party's call to `target`, naming its `transferor`.
+fn transferred(call: &Call, parts: &StartParts, target: &Mri, transferor: &Transferor) -> Result<StartCall, CallError> {
+    Ok(StartCall::transferred(
+        &call.context,
+        parts,
+        &invitee(target)?,
+        transferor,
+    )?)
 }
 
 /// What a start sends besides its kind: the call's callbacks, modalities and `offer`.
@@ -356,6 +372,43 @@ pub(crate) fn hold(call: &mut Call, link: &CallLink, held: bool) -> Result<CallW
         let links = call.links(Kind::Call, &["resumeCompletion"])?;
         CallWrite::Resume(ResumeCall::new(&call.context, link, &links)?)
     })
+}
+
+/// `invitee` added to the call at the conversation's `add` `link`, the call's `group_chat` named, its outcome told at
+/// new `addParticipantSuccess` and `addParticipantFailure` callbacks.
+pub(crate) fn add_person(
+    call: &mut Call,
+    link: &CallLink,
+    invitee_mri: &Mri,
+    group_chat: &str,
+) -> Result<CallWrite, CallError> {
+    let links = call.links(Kind::Conversation, &["addParticipantSuccess", "addParticipantFailure"])?;
+    Ok(CallWrite::Add(AddToCall::person(
+        &call.context,
+        link,
+        &call.me,
+        &invitee(invitee_mri)?,
+        group_chat,
+        &links,
+    )?))
+}
+
+/// The call's far end transferred to `target` at the call leg's `transfer` `link`, its acceptance and completion told
+/// at new callbacks.
+pub(crate) fn transfer(call: &mut Call, link: &CallLink, target: &Mri) -> Result<CallWrite, CallError> {
+    let links = call.links(Kind::Call, &["transferAcceptance", "transferCompletion"])?;
+    Ok(CallWrite::Transfer(TransferCall::new(
+        &call.context,
+        link,
+        &call.me,
+        target,
+        &links,
+    )?))
+}
+
+/// The transfer the far end asked for, taken at its `transferAcceptance` `link`.
+pub(crate) fn accept_transfer(call: &Call, link: &CallLink) -> Result<CallWrite, CallError> {
+    Ok(CallWrite::AcceptTransfer(AcceptTransfer::new(&call.context, link)?))
 }
 
 /// The meeting ended for everyone, at the conversation's own URL.

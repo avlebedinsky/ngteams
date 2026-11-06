@@ -32,6 +32,13 @@ impl CallStage {
                 roster_row(format!("call-roster-{index}"), name, signs, palette)
             }));
         }
+        rows.extend(
+            active
+                .invited
+                .iter()
+                .enumerate()
+                .map(|(index, invited)| self.invited_row(index, invited, palette, cx)),
+        );
         let heading = if active.kind == CallKind::Meeting {
             format!("In this meeting ({})", rows.len())
         } else {
@@ -48,6 +55,7 @@ impl CallStage {
         let close = div().flex().items_center().gap_1().children(more).child(close);
         side_pane("call-roster-pane", "Participants", close, palette)
             .children(self.invite(active, palette, cx))
+            .children(self.invite_box(palette, cx))
             .child(
                 div()
                     .id("call-roster-scroll")
@@ -111,6 +119,54 @@ impl CallStage {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// Someone the account added who isn't in the call yet, as Teams lists them: ringing ("Calling…"), or "No response"
+    /// with its call-again once they didn't come in.
+    fn invited_row(
+        &self,
+        index: usize,
+        invited: &calls::Invited,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = SharedString::from(invited.name.clone());
+        let again = (invited.no_response && !self.core.read_only()).then(|| {
+            let ask = Ask::Add {
+                invitee: invited.mri.clone(),
+                name: invited.name.clone(),
+            };
+            let id = format!("call-roster-call-again-{index}");
+            selected_by(
+                id.clone(),
+                icon_button(SharedString::from(id), Glyph::REFRESH, "Call again")
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| this.ask(ask.clone(), cx))),
+            )
+        });
+        let state = if invited.no_response {
+            "No response"
+        } else {
+            "Calling…"
+        };
+        div()
+            .debug_selector(move || format!("call-roster-invited-{index}"))
+            .h(px(48.0))
+            .px_4()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(hand_ring(people::avatar(Some(&name), None, Size::Small), false))
+            .child(div().flex_1().min_w_0().truncate().child(name))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(state),
+            )
+            .children(again)
+            .into_any_element()
     }
 
     /// Copy meeting link put the meeting's link on the clipboard: Share invite says so.

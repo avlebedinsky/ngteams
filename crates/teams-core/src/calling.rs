@@ -67,6 +67,7 @@ mod captions;
 pub use captions::{CallCaptions, Caption, CaptionPhase};
 mod gallery;
 mod media;
+mod people;
 mod share;
 
 pub use gallery::{CallParticipant, CallView, HEARING_LEVEL, SPEAKING_HOLD, SPEAKING_LEVEL};
@@ -208,6 +209,13 @@ pub enum CallAction {
     /// of its own) or no longer, as Teams' Share and Stop sharing ([`Event::CallSharing`] tells it as it stands). A
     /// call whose media carries no video shares nothing.
     Share { call: CallId, on: bool },
+    /// `invitee` added to the call, as Teams' People pane adds someone (seen 2026-11-06): a 1:1 call first gets a new
+    /// group chat of the three and becomes a group call in it ([`Event::CallGroupChat`]); a group call's own chat is
+    /// named. The invitee rings; one who doesn't come in is told ([`Event::CallAddFailed`]).
+    Add { call: CallId, invitee: Mri },
+    /// The 1:1 call's far end transferred to `target`, as Teams' Transfer to an audio call (seen 2026-11-06): once the
+    /// far end took it the account leaves the call; one not taken is told ([`Event::CallTransferFailed`]).
+    Transfer { call: CallId, target: Mri },
 }
 
 impl CallAction {
@@ -330,6 +338,8 @@ pub(crate) enum Act {
     Timer(CallId, teams_proto::MeetingTimer),
     LockMeeting(CallId, bool),
     Share(CallId, bool),
+    Add(CallId, Mri),
+    Transfer(CallId, Mri),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -384,6 +394,8 @@ enum CallStep {
     Push(Option<PushEvent>),
     Written(CallTried),
     CaptionWritten(captions::Operation, CallTried),
+    /// A 1:1 call's new group chat made (or not) for someone added to it.
+    ChatMade(Box<(CallId, Mri, CallTried)>),
     Due,
     Prepared(Box<Result<Prepared, String>>),
     /// A call's media set up again once it was let in from its meeting's lobby ([`Calling::rebuild`]).
@@ -456,6 +468,10 @@ pub(crate) struct Calling<C, T> {
     preparing: Option<Preparing>,
     /// The call told placing as its setup began, until the machine tells it placing in turn (told once).
     told_placing: Option<CallId>,
+    /// A 1:1 call's new group chat being made for someone added to it ([`CallAction::Add`]).
+    making: Option<people::Making>,
+    /// The call to the target of a transfer the far end asked for, placed once the transferred call's media is gone.
+    transfer_to: Option<(CallId, Placement)>,
     /// While the account holds its call: that call, and whether the user had the microphone muted (what the hold's end
     /// gives back; a mute asked while held is kept here).
     held_mute: Option<(CallId, bool)>,
@@ -526,6 +542,8 @@ where
             preparing: None,
             told_placing: None,
             held_mute: None,
+            making: None,
+            transfer_to: None,
             media_steps: JoinSet::new(),
             sdp_steps: VecDeque::new(),
             sdp_running: false,
@@ -557,7 +575,7 @@ where
                     step = self.next() => self.step(step),
                 }
             }
-            self.shut_down().await;
+            Box::pin(self.shut_down()).await;
         });
         CallingTask { actions, task }
     }
@@ -581,6 +599,7 @@ where
         let looking = self.live.is_some();
         tokio::select! {
             (operation, tried) = captions::next(self.captions.writing.as_mut()) => CallStep::CaptionWritten(operation, tried),
+            made = people::made(self.making.as_mut()) => CallStep::ChatMade(Box::new(made)),
             event = next_push(self.push.as_mut()) => CallStep::Push(event),
             landed = land(self.writing.as_mut()) => match landed {
                 Landed::Tried(tried) => CallStep::Written(tried),
@@ -606,6 +625,10 @@ where
         match step {
             CallStep::Push(event) => self.pushed(event, now),
             CallStep::CaptionWritten(operation, tried) => self.caption_written(operation, &tried),
+            CallStep::ChatMade(made) => {
+                let (call, invitee, tried) = *made;
+                self.chat_made(call, invitee, &tried);
+            }
             CallStep::Written(tried) => self.written(tried, now),
             CallStep::Due => self.due(now),
             CallStep::Prepared(prepared) => self.prepared(*prepared, now),
@@ -831,6 +854,23 @@ where
                 self.roster_told(event);
             }
             CallEvent::Held { call, held } => self.held(call, held),
+            CallEvent::GroupChat { call, chat } => {
+                log::info!("call {}: in a group chat now", call.get());
+                self.emit(Event::CallGroupChat { call, chat });
+            }
+            CallEvent::AddFailed { call, who } => {
+                log::info!("call {}: someone added didn't come in", call.get());
+                self.emit(Event::CallAddFailed { call, who });
+            }
+            CallEvent::TransferFailed { call } => {
+                log::info!("call {}: its transfer wasn't taken", call.get());
+                self.emit(Event::CallTransferFailed { call });
+            }
+            CallEvent::Transferred {
+                call,
+                target,
+                transferor,
+            } => self.transferred(call, target, transferor),
             CallEvent::HeldByFarEnd { call, held } => {
                 log::info!("call {}: held by its far end {held}", call.get());
                 self.emit(Event::CallHeldByFarEnd { call, held });
@@ -1119,6 +1159,7 @@ where
             call,
             status: CallStatus::Ended(end),
         });
+        self.call_transfer_target(call);
     }
 
     /// Closes the running media off the engine's thread (its close joins the session's threads).
@@ -1508,6 +1549,7 @@ where
                 self.share(call, on, reply);
                 return self.drive(now);
             }
+            act @ (Act::Add(..) | Act::Transfer(..)) => self.people_act(act),
             Act::Renegotiate(call) => match self.live.as_ref().filter(|live| live.call == call) {
                 // the machine first: the session's new offer would replace the one it waits on
                 Some(live) => match self.calls.begin_renegotiation(call) {
@@ -1608,9 +1650,9 @@ where
             }
             _ if busy || self.calls.current().is_some() => return refuse(reply, CallActionError::Busy),
             Act::Join(chat) if !self.calls.joinable(chat) => return refuse(reply, CallError::NotJoinable.into()),
-            Act::Place(Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. }) => {
-                (None, None, VideoKind::OneToOne)
-            }
+            Act::Place(
+                Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. } | Placement::Transferred { .. },
+            ) => (None, None, VideoKind::OneToOne),
             Act::Place(Placement::Chat { .. } | Placement::Meeting { .. } | Placement::Channel { .. })
             | Act::Join(_)
             | Act::JoinChannel(..) => (None, None, VideoKind::Group),

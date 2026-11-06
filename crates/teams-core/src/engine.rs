@@ -448,6 +448,23 @@ pub enum Event {
     /// The far end of the account's 1:1 call shares its screen (`on`: its frames come to the video output's sharing
     /// sink, `teams_media::session::SHARING_LINE`) or no longer.
     CallRemoteShare { call: CallId, on: bool },
+    /// The account's call is in the group chat `chat` from now on: a 1:1 call someone was added to
+    /// ([`CallAction::Add`]) is a group call in the new chat of the three.
+    CallGroupChat { call: CallId, chat: String },
+    /// Someone added to the account's call didn't come in: the add wasn't taken, or they didn't answer (Teams' "No
+    /// response").
+    CallAddFailed { call: CallId, who: Mri },
+    /// The account's transfer of its call ([`CallAction::Transfer`]) wasn't taken: the call stays as it was, held.
+    CallTransferFailed { call: CallId },
+    /// The far end transferred the account's call to `target` (`by` its name as the transfer gave it): the call is
+    /// over, and the engine calls `target` at once, as Teams does (its call told as any start is).
+    CallTransferred {
+        call: CallId,
+        target: Mri,
+        by: Option<String>,
+        /// The 1:1 chat of the account and the target: the new call's.
+        chat: Option<String>,
+    },
     /// Someone in the account's call sent a live reaction (the account's own too, as the service echoes it): who, their
     /// name as given, and the reaction (`like`, `heart`, `applause`, `laugh`, `surprised`).
     CallReaction {
@@ -2977,6 +2994,8 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
         CallAction::Timer { call, timer } => Act::Timer(call, timer),
         CallAction::LockMeeting { call, locked } => Act::LockMeeting(call, locked),
         CallAction::Share { call, on } => Act::Share(call, on),
+        CallAction::Add { call, invitee } => Act::Add(call, invitee),
+        CallAction::Transfer { call, target } => Act::Transfer(call, target),
     })
 }
 

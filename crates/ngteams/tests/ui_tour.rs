@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 195] = [
+const STEPS: [Step; 5 + 201] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1396,9 +1396,68 @@ const STEPS: [Step; 5 + 195] = [
     ("call-window-sharing", |shell, _, cx| {
         share(shell, (true, false), cx);
     }),
+    // Transfer in the 1:1 call: it holds the call, "Transfer the call" with someone typed and found
+    ("call-window-transfer", |shell, _, cx| {
+        share(shell, (false, false), cx);
+        held_by_far_end(shell, false, cx);
+        held(shell, true, cx);
+        with_stage_window(cx, |stage, window, cx| {
+            stage.open_transfer(teams_ui::call_stage::Asking::Transfer, window, cx);
+            stage.transfer_found(vec![tour_person()], cx);
+        });
+    }),
+    // someone picked: "Transfer to an audio call" and Transfer
+    ("call-window-transfer-picked", |_, _, cx| {
+        with_stage_window(cx, |stage, window, cx| stage.pick_transfer(tour_person(), window, cx));
+    }),
+    // and in Teams Dark
+    ("call-window-transfer-picked-dark", |shell, _, cx| {
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+    }),
+    // People in the 1:1 call, someone typed in "Invite someone" and found
+    ("call-window-invite", |shell, _, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        held(shell, false, cx);
+        with_stage_window(cx, |stage, window, cx| {
+            stage.close_transfer(cx);
+            stage.show_roster(true, cx);
+            stage.found_to_invite("lab", vec![tour_person()], window, cx);
+        });
+    }),
+    // they were added: the call is a group call in its new chat, its toolbar a group call's, and they didn't answer
+    ("call-window-invited", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        let call = teams_core::CallId::for_tests(FAKE_CALL);
+        let person = tour_person();
+        models.calls.update(cx, |calls, cx| {
+            calls.invited(call, teams_proto::Mri::new(&person.mri), person.name.clone(), cx);
+        });
+        models.apply(
+            teams_core::Event::CallGroupChat {
+                call,
+                chat: "19:00000000000000000000000000010001@thread.v2".to_owned(),
+            },
+            cx,
+        );
+        models.apply(
+            teams_core::Event::CallAddFailed {
+                call,
+                who: teams_proto::Mri::new(&person.mri),
+            },
+            cx,
+        );
+        with_stage_window(cx, |stage, window, cx| {
+            stage.found_to_invite("", Vec::new(), window, cx);
+        });
+    }),
+    // and in Teams Dark
+    ("call-window-invited-dark", |shell, _, cx| {
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+    }),
     // someone waiting in a meeting's lobby, as whoever may admit sees them: "Waiting in the lobby", Deny and Admit
     ("call-lobby-dark", |shell, _, cx| {
         share(shell, (false, false), cx);
+        with_stage(cx, |stage, cx| stage.show_roster(false, cx));
         theme(shell, teams_ui::theme::DARK_KEY, cx);
         lobby(
             shell,

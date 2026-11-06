@@ -90,6 +90,12 @@ pub enum Placement {
     /// A new meeting in the channel `channel` (its Meet now): nobody rings; the service answers with the meeting's
     /// conversation and posts the meeting to the channel (`docs/protocol/calling.md`, "A channel's meeting").
     Channel { channel: String },
+    /// The call to `target` a transfer of the account's call asked for, naming who transferred it
+    /// ([`CallEvent::Transferred`]): a 1:1 call, as the web client places it once it took the transfer.
+    Transferred {
+        target: Mri,
+        transferor: teams_proto::Transferor,
+    },
 }
 
 /// Where a call is, as the account is told.
@@ -198,6 +204,21 @@ pub enum CallEvent {
     },
     /// The account's call on hold (`held`) or off it, as its Hold or Resume was taken (or, not taken, as it was).
     Held { call: CallId, held: bool },
+    /// Someone the account added to its call wasn't brought in: the `add` wasn't taken, or its failure was delivered
+    /// (they didn't answer, or had no endpoint to ring). Teams shows them "No response".
+    AddFailed { call: CallId, who: Mri },
+    /// The call is in the group chat `chat` from now on: a 1:1 call someone was added to (the account's `add` was
+    /// taken, or a conversation update named it), a group call's from then on.
+    GroupChat { call: CallId, chat: String },
+    /// The account's transfer of its call wasn't taken: the call stays as it was.
+    TransferFailed { call: CallId },
+    /// The far end transferred the account's call to `target` and the account took it: the call is over here, and
+    /// [`Placement::Transferred`] is the call to the target the web client places then.
+    Transferred {
+        call: CallId,
+        target: Mri,
+        transferor: teams_proto::Transferor,
+    },
     /// The far end of the account's call put it on hold (`held`: the service's music-on-hold app came into its roster
     /// while the account held nothing) or took it off hold (the app left).
     HeldByFarEnd { call: CallId, held: bool },
@@ -510,6 +531,35 @@ impl Calls {
         (call.callback_at(path).is_some() || followed).then_some(call.id)
     }
 
+    /// The group chat `call` is in, while it is up and is a group call's: a group chat's call, or a 1:1 call someone
+    /// was added to ([`CallEvent::GroupChat`]). `None` for a 1:1 call, a meeting's, or another call.
+    #[must_use]
+    pub fn group_chat(&self, call: CallId) -> Option<String> {
+        let current = self.call.as_ref().filter(|current| current.id == call)?;
+        current
+            .caption_thread
+            .clone()
+            .filter(|chat| teams_proto::is_group_chat_id(chat))
+    }
+
+    /// The far end of the 1:1 call `call`, while it is up: the other member of its 1:1 chat. `None` for a group call, a
+    /// meeting's, the test call, or another call.
+    #[must_use]
+    pub fn far_end(&self, call: CallId) -> Option<Mri> {
+        let current = self
+            .call
+            .as_ref()
+            .filter(|current| current.id == call && current.phase == Phase::Connected)?;
+        let pair = teams_proto::one_to_one_pair(current.caption_thread.as_deref()?)?;
+        pair.into_iter().find(|member| *member != self.identity.mri)
+    }
+
+    /// The account, as its calls name it.
+    #[must_use]
+    pub fn me(&self) -> &Mri {
+        &self.identity.mri
+    }
+
     /// The keep-alive interval the call's services asked for, once the call is up.
     #[must_use]
     pub fn keep_alive_interval(&self) -> Option<Duration> {
@@ -545,7 +595,7 @@ impl Calls {
             Placement::TestCall { echo } => Side::Placed {
                 echo: Some(echo.clone()),
             },
-            Placement::Chat { .. } => Side::Placed { echo: None },
+            Placement::Chat { .. } | Placement::Transferred { .. } => Side::Placed { echo: None },
             Placement::Meeting { .. } | Placement::Channel { .. } => Side::Meeting,
         };
         let mut call = self.new_call(side, now)?;
@@ -559,6 +609,9 @@ impl Calls {
                 group_chat: None,
             } if callees.len() == 1 => teams_proto::one_to_one_id(self.identity.mri.as_str(), callees[0].as_str()),
             Placement::Channel { channel } => Some(channel.clone()),
+            Placement::Transferred { target, .. } => {
+                teams_proto::one_to_one_id(self.identity.mri.as_str(), target.as_str())
+            }
             _ => None,
         };
         if let Placement::Channel { channel } = placement {
@@ -1074,6 +1127,38 @@ impl Calls {
         Ok(())
     }
 
+    /// The account adds `invitee` to its call, as Teams' People pane does (seen 2026-11-06): the conversation's `add`
+    /// naming the call's `group_chat` (a 1:1 call's new group chat of the three, which the account made first; a group
+    /// call's own). Once it is taken the call is a group call in that chat ([`CallEvent::GroupChat`]); the invitee
+    /// rings, and one who doesn't come in is told ([`CallEvent::AddFailed`]).
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while it isn't up or names no `add` link, a
+    /// write error for an invitee or chat out of the captured shape; nothing was sent.
+    pub fn add(&mut self, call: CallId, invitee: &Mri, group_chat: &str) -> Result<(), CallError> {
+        let current = up(&mut self.call, call)?;
+        let link = current.conversation.add.clone().ok_or(CallError::NotNow)?;
+        let write = build::add_person(current, &link, invitee, group_chat)?;
+        let id = self.out.send(current, Step::Invite, write);
+        current.invites.insert(id, (invitee.clone(), group_chat.to_owned()));
+        Ok(())
+    }
+
+    /// The account transfers its 1:1 call's far end to `target`, as Teams' Transfer to an audio call does (seen
+    /// 2026-11-06): the call leg's `transfer`. Once the far end took it (its `transferAcceptance` delivered) the account
+    /// leaves the call; one not taken is told ([`CallEvent::TransferFailed`]) and the call stays as it was.
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] while it isn't up or its leg named no
+    /// `transfer` link, a write error for a target out of the captured shape; nothing was sent.
+    pub fn transfer(&mut self, call: CallId, target: &Mri) -> Result<(), CallError> {
+        let current = up(&mut self.call, call)?;
+        let link = current.transfer.clone().ok_or(CallError::NotNow)?;
+        let write = build::transfer(current, &link, target)?;
+        self.out.send(current, Step::Transfer, write);
+        Ok(())
+    }
+
     /// The account hangs up `call`: cancels it while it rings at its callees, leaves it once it is up. An invitation
     /// that rings here is declined instead ([`Self::decline`]), and so is one being answered whose `accept` hasn't
     /// gone out yet (the account isn't in the call before it, and only a decline ends the ring).
@@ -1362,6 +1447,12 @@ impl Calls {
             // not ended for everyone: the account leaves it alone, as a hang-up does
             (Step::EndMeeting, None) => self.leave(Ending::HungUp, now),
             (Step::Hold | Step::Resume, body) => self.held(step, body),
+            (Step::Invite, body) => self.invited_person(write, body.is_some()),
+            (Step::Transfer, None) => {
+                let id = call.id;
+                self.out.event(CallEvent::TransferFailed { call: id });
+            }
+            (Step::AcceptTransfer, body) => self.transfer_taken(body.is_some()),
             (_, Some(_))
             | (
                 Step::KeepAlive
@@ -1391,6 +1482,65 @@ impl Calls {
         }
         let (id, held) = (call.id, call.resume.is_some());
         self.out.event(CallEvent::Held { call: id, held });
+    }
+
+    /// The outcome of the `add` `write` of someone (`taken` or not): taken, the call is in its group chat from now on;
+    /// not taken, the invitee wasn't brought in.
+    fn invited_person(&mut self, write: WriteId, taken: bool) {
+        let Some(call) = self.call.as_mut() else { return };
+        let Some((who, chat)) = call.invites.remove(&write) else {
+            return;
+        };
+        if taken {
+            in_group_chat(call, &mut self.out, chat);
+        } else {
+            let id = call.id;
+            self.out.event(CallEvent::AddFailed { call: id, who });
+        }
+    }
+
+    /// The far end's transfer, taken (`taken`) or not: taken, the call is over here and the account calls the target
+    /// ([`CallEvent::Transferred`], the old call's own end left to the far end, as the web client leaves it); not taken,
+    /// the call goes on as it was.
+    fn transfer_taken(&mut self, taken: bool) {
+        let Some(call) = self.call.as_mut() else { return };
+        let Some(asked) = call.transferred.take() else {
+            return;
+        };
+        if !taken {
+            log::info!("call {}: its transfer wasn't taken", call.id.get());
+            return;
+        }
+        let id = call.id;
+        self.out.event(CallEvent::Transferred {
+            call: id,
+            target: asked.target,
+            transferor: asked.transferor,
+        });
+        self.finish(End::Remote(RemoteEnd::default()));
+    }
+
+    /// A transfer the far end asked for, at the call's `transfer` callback: taken at once, as the web client takes it
+    /// (seen 2026-11-06); one that doesn't read (a consultative transfer, not captured) or comes while the call isn't up
+    /// changes nothing.
+    fn transfer_asked(&mut self, delivery: &Delivery) {
+        let Some(call) = self.call.as_mut().filter(|call| call.phase == Phase::Connected) else {
+            return;
+        };
+        let Some(asked) = read::transfer_asked(&delivery.body) else {
+            log::info!("call {}: a transfer it doesn't read", call.id.get());
+            return;
+        };
+        if call.transferred.is_some() {
+            return;
+        }
+        match build::accept_transfer(call, &asked.acceptance) {
+            Ok(write) => {
+                call.transferred = Some(asked);
+                self.out.send(call, Step::AcceptTransfer, write);
+            }
+            Err(error) => log::warn!("call {}: its transfer can't be taken: {error}", call.id.get()),
+        }
     }
 
     /// The `leave` was taken: the call is over here.
@@ -1474,12 +1624,26 @@ impl Calls {
                 self.echo_present(now);
             }
             (Kind::Conversation, "receiveMessage") => self.message_received(delivery),
-            (Kind::Conversation, "conversationUpdate") => self.conversation_updated(delivery),
+            (Kind::Conversation, "conversationUpdate") => {
+                self.conversation_updated(delivery);
+                // a 1:1 call someone was added to: its new group chat named
+                if let (Some(call), Some(chat)) = (self.call.as_mut(), read::update_group_chat(&delivery.body)) {
+                    in_group_chat(call, &mut self.out, chat);
+                }
+            }
             (Kind::Conversation, "addParticipantFailure") => {
                 if let Some(call) = self.call.as_mut().filter(|call| call.caption_inviting) {
                     call.caption_inviting = false;
                     self.out.event(CallEvent::CaptionFailed { call: call.id });
                 }
+                self.add_failed(delivery);
+            }
+            (Kind::Call, "transfer") => self.transfer_asked(delivery),
+            // the far end took the account's transfer: the account leaves, as the web client does
+            (Kind::Call, "transferAcceptance")
+                if self.call.as_ref().is_some_and(|call| call.phase == Phase::Connected) =>
+            {
+                self.leave(Ending::HungUp, now);
             }
             // progress and conversation updates
             _ => {}
@@ -1549,6 +1713,9 @@ impl Calls {
         }
         if retarget.hold.is_some() {
             call.hold = retarget.hold;
+        }
+        if retarget.transfer.is_some() {
+            call.transfer = retarget.transfer;
         }
         if let Some(keep_alive) = call.keep_alive.as_mut() {
             keep_alive.link = Some(retarget.call_leg);
@@ -1758,6 +1925,18 @@ impl Calls {
         music_told(call, &mut self.out, &delivery.body);
     }
 
+    /// An `add`'s failure delivered: each person it names (but a service the account added) wasn't brought in.
+    fn add_failed(&mut self, delivery: &Delivery) {
+        let Some(call) = self.call.as_ref() else { return };
+        let id = call.id;
+        for who in read::add_failed(&delivery.body)
+            .into_iter()
+            .filter(|who| who.as_str().starts_with("8:"))
+        {
+            self.out.event(CallEvent::AddFailed { call: id, who });
+        }
+    }
+
     /// A message at the conversation's `receiveMessage` callback: a live reaction told; anything else changes nothing.
     fn message_received(&mut self, delivery: &Delivery) {
         let Some(call) = self.call.as_ref() else { return };
@@ -1805,6 +1984,7 @@ impl Calls {
         call.renegotiation = answer.renegotiation;
         call.group_media = answer.group_media;
         call.hold = answer.hold;
+        call.transfer = answer.transfer;
         self.connect((answer.keep_alive, answer.call_leg), now);
     }
 
@@ -1887,6 +2067,7 @@ impl Calls {
             call.renegotiation.clone_from(&acceptance.renegotiation);
             call.group_media.clone_from(&acceptance.group_media);
             call.hold.clone_from(&acceptance.hold);
+            call.transfer.clone_from(&acceptance.transfer);
         }
         self.acknowledge(delivery);
         if let (Some(call), Some(media)) = (self.call.as_ref(), acceptance.answer) {
@@ -2064,6 +2245,15 @@ fn music_told(call: &mut Call, out: &mut Out, body: &[u8]) {
             held: far_end,
         });
     }
+}
+
+/// The call is in the group chat `chat` from now on (someone was added to it): told once, when it changed.
+fn in_group_chat(call: &mut Call, out: &mut Out, chat: String) {
+    if call.caption_thread.as_deref() == Some(chat.as_str()) {
+        return;
+    }
+    call.caption_thread = Some(chat.clone());
+    out.event(CallEvent::GroupChat { call: call.id, chat });
 }
 
 fn lobby_told(call: &mut Call, out: &mut Out, me: &Mri) {

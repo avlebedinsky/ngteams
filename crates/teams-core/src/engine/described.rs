@@ -72,6 +72,9 @@ pub(super) fn call(action: &CallAction) -> String {
         ),
         CallAction::LockMeeting { call, locked } => format!("call {}: meeting locked {locked}", call.get()),
         CallAction::Share { call, on } => format!("call {} sharing its screen {on}", call.get()),
+        // no names: that someone was added
+        CallAction::Add { call, .. } => format!("call {}: someone added", call.get()),
+        CallAction::Transfer { call, .. } => format!("call {}: transferred", call.get()),
     }
 }
 
@@ -186,23 +189,11 @@ fn plain(event: &Event) -> String {
         ),
         // no names: how many wait
         Event::Lobby { call, waiting } => format!("call {}: {} waiting in the lobby", call.get(), waiting.len()),
-        Event::Voicemail { .. }
-        | Event::CameraOff { .. }
-        | Event::AudioClosed { .. }
-        | Event::CallOwn { .. }
-        | Event::CallReaction { .. }
-        | Event::CallMeeting { .. }
-        | Event::CallHeld { .. }
-        | Event::CallHeldByFarEnd { .. }
-        | Event::CallSharing { .. }
-        | Event::CallRemoteShare { .. } => call_state(event),
+        // the account's own state in its call, a reaction, a hold, an add, a transfer
+        _ if !call_state(event).is_empty() => call_state(event),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
-        Event::Message { .. }
-        | Event::Typing { .. }
-        | Event::Queued(_)
-        | Event::Outbox(_)
-        | Event::Failed { .. }
-        | Event::CatchUpFailed { .. } => String::new(),
+        // a message, typing, the outbox and a failed catch-up are told by their own lines
+        _ => String::new(),
     }
 }
 
@@ -245,6 +236,10 @@ fn call_state(event: &Event) -> String {
         Event::CallHeldByFarEnd { call, held } => format!("call {} held by its far end {held}", call.get()),
         Event::CallSharing { call, on } => format!("call {} sharing its screen {on}", call.get()),
         Event::CallRemoteShare { call, on } => format!("call {}: the far end's screen shown {on}", call.get()),
+        Event::CallGroupChat { call, .. } => format!("call {}: in a group chat now", call.get()),
+        Event::CallAddFailed { call, .. } => format!("call {}: someone added didn't come in", call.get()),
+        Event::CallTransferFailed { call } => format!("call {}: its transfer wasn't taken", call.get()),
+        Event::CallTransferred { call, .. } => format!("call {}: transferred by its far end", call.get()),
         _ => String::new(),
     }
 }

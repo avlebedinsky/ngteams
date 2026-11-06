@@ -3750,3 +3750,126 @@ fn the_timer_reads_and_changes_as_teams_does() {
     assert_eq!(cancelled.state, TimerState::Cancelled);
     assert_eq!(timer_after(None, TimerChange::Reset, 0, 0), None, "no timer to reset");
 }
+
+/// The lab's third account, as People's box and Transfer find it.
+const LAB_SEA: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
+
+/// The people the fake core knows: the lab's third account.
+fn knows_sea(rig: &Rig) {
+    rig.core.calendar.lock().unwrap().people = vec![teams_core::Invitable {
+        mri: LAB_SEA.to_owned(),
+        name: "Lab Sea".to_owned(),
+        address: "sea@example.com".to_owned(),
+    }];
+}
+
+/// `typed` in the box at `selector`, and what it found shown.
+fn find(stage: &mut VisualTestContext, selector: &str, typed: &str) {
+    click(stage, selector);
+    stage.simulate_input(typed);
+    stage.executor().advance_clock(std::time::Duration::from_millis(400));
+    draw(stage);
+}
+
+#[test]
+fn people_adds_someone_to_a_one_to_one_call_which_becomes_a_group_call_and_lists_who_doesn_t_answer() {
+    let rig = calling();
+    knows_sea(&rig);
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    click(stage, "call-roster");
+    find(stage, "call-invite", "Lab");
+    click(stage, "call-invite-found-0");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Add {
+            call: call(1),
+            invitee: Mri::new(LAB_SEA)
+        })
+    );
+    // listed ringing at once, the call still a 1:1 call's until the add was taken
+    assert!(drawn(stage, "call-roster-invited-0"));
+    assert!(drawn(stage, "call-hold"));
+    rig.send(Event::CallGroupChat {
+        call: call(1),
+        chat: "19:00000000000000000000000000010001@thread.v2".to_owned(),
+    });
+    rig.cx.run_until_parked();
+    // a group call's toolbar: Raise, no Hold or Transfer
+    assert!(drawn(stage, "call-raise-hand"));
+    assert!(!drawn(stage, "call-hold"));
+    assert!(!drawn(stage, "call-transfer"));
+    rig.send(Event::CallAddFailed {
+        call: call(1),
+        who: Mri::new(LAB_SEA),
+    });
+    rig.cx.run_until_parked();
+    click(stage, "call-roster-call-again-0");
+    let adds = actions(&rig)
+        .into_iter()
+        .filter(|action| matches!(action, CallAction::Add { .. }))
+        .count();
+    assert_eq!(adds, 2, "called again");
+}
+
+#[test]
+fn transfer_holds_the_call_asks_whom_and_transfers_it_and_cancel_leaves_it_held() {
+    let rig = calling();
+    knows_sea(&rig);
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let stage = stage(&rig, &windows);
+    click(stage, "call-transfer");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Hold {
+            call: call(1),
+            held: true
+        })
+    );
+    assert!(drawn(stage, "call-transfer-dialog"));
+    click(stage, "call-transfer-cancel");
+    assert!(!drawn(stage, "call-transfer-dialog"));
+    assert!(
+        !actions(&rig)
+            .iter()
+            .any(|action| matches!(action, CallAction::Hold { held: false, .. })),
+        "Cancel leaves the call held"
+    );
+    rig.send(Event::CallHeld {
+        call: call(1),
+        held: true,
+    });
+    rig.cx.run_until_parked();
+    click(stage, "call-transfer");
+    assert!(drawn(stage, "call-transfer-dialog"));
+    stage.simulate_input("Lab");
+    stage.executor().advance_clock(std::time::Duration::from_millis(400));
+    click(stage, "call-transfer-found-0");
+    assert!(drawn(stage, "call-transfer-picked"));
+    assert!(drawn(stage, "call-transfer-how"));
+    click(stage, "call-transfer-go");
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Transfer {
+            call: call(1),
+            target: Mri::new(LAB_SEA)
+        })
+    );
+    assert!(!drawn(stage, "call-transfer-dialog"));
+    // one not taken: the call stays held, and its bar says so
+    rig.send(Event::CallTransferFailed { call: call(1) });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-resume"));
+}

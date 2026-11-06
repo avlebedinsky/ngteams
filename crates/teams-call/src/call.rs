@@ -171,6 +171,12 @@ pub(crate) enum Step {
     MeetingSettings,
     /// The account's own participant properties (that it shares its screen): its failing ends nothing.
     Properties,
+    /// Someone added to the call: its failing ends nothing (told as the add's failure).
+    Invite,
+    /// The call's far end transferred to someone else: its failing ends nothing (the call stays as it was, held).
+    Transfer,
+    /// The transfer the far end asked for, taken: the account calls the target once it was.
+    AcceptTransfer,
 }
 
 impl Step {
@@ -187,7 +193,7 @@ impl Step {
             Self::Decline => "reject",
             Self::Acknowledge => "acknowledge",
             Self::EndpointMetadata => "update_endpoint_metadata",
-            Self::Add => "add",
+            Self::Add | Self::Invite => "add",
             Self::Leave => "leave",
             Self::Renegotiate => "renegotiate",
             Self::MediaAnswer => "media_answer",
@@ -204,6 +210,8 @@ impl Step {
             Self::MeetingStates => "update_meeting_states",
             Self::MeetingSettings => "update_meeting_settings",
             Self::Properties => "update_participant_properties",
+            Self::Transfer => "transfer",
+            Self::AcceptTransfer => "transfer_acceptance",
         }
     }
 }
@@ -290,6 +298,12 @@ pub(crate) struct Call {
     pub(crate) hold: Option<CallLink>,
     /// While the account holds the call: the `resume` link its hold's answer handed out.
     pub(crate) resume: Option<CallLink>,
+    /// The call leg's `transfer` link, from the same as `hold`: where the account transfers the far end.
+    pub(crate) transfer: Option<CallLink>,
+    /// The `add`s of people that went, by their write: whom, and the group chat it named.
+    pub(crate) invites: BTreeMap<WriteId, (Mri, String)>,
+    /// The transfer the far end asked for, while its acceptance goes.
+    pub(crate) transferred: Option<crate::read::TransferAsked>,
     /// The music-on-hold app in the call's roster, as last delivered: whose hold it plays for.
     pub(crate) music: Option<Music>,
     /// Who is in the call, as its roster updates tell it.
@@ -372,6 +386,9 @@ impl Call {
             group_media: GroupMediaLinks::default(),
             hold: None,
             resume: None,
+            transfer: None,
+            invites: BTreeMap::new(),
+            transferred: None,
             music: None,
             roster: Roster::default(),
             echo_joined: false,

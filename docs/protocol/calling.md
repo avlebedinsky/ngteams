@@ -736,7 +736,17 @@ a alone). What each of Teams' remaining call controls sends:
   delivery at its own `transfer` callback (the target, `isConsultative: false`, the transferor's details and an
   `authorizationToken` the call controller minted, and `transferAcceptance`/`transferCompletion` links on the call
   controller); it posts `{"transferAcceptance": {}}` to the first and starts a new call to the target whose
-  `callInvitation.transferor` carries those details and that token. Its screen moves to the new call.
+  `callInvitation.transferor` carries those details and that token. Its screen moves to the new call. The transferor
+  is told at its `transferAcceptance` callback (`{"transferAcceptance": {}}`) about 2 s after its `transfer`, and its
+  `leave` follows at once (the `transferCompletion` after that reports the call ended). The native client does the
+  same (`CallAction::Transfer`): the dialog holds the call, its Transfer posts the `transfer` to the leg's link (bound
+  from the acceptance, the `accept`'s answer or a retarget, as `hold`), and the `transferAcceptance` delivery makes it
+  leave; a `transfer` not taken is told (`Event::CallTransferFailed`) and the call stays held. Transferred, it takes a
+  blind transfer at once as the web client does (`transferAcceptance`), the call is over here, and the engine calls the
+  target with `callInvitation.transferor` as delivered (the authorization goes back to the call controller only; the
+  logger redacts it) once the old call's media is closed (`Event::CallTransferred`, then the new call told as any
+  start). The voicemail choice and the call topic weren't captured and aren't offered; a consultative transfer
+  delivered (`isConsultative: true`) isn't taken.
 - **Consult** (1:1 calls) holds the call and asks "Consult then transfer the call" (the person; Cancel, Start a call,
   Open chat). Start a call places an ordinary call to them in their 1:1 chat while the first call stays held in a
   floating card (its name, "Hold" and how long, Resume, Leave); the consult call's toolbar leads with an outlined
@@ -748,7 +758,16 @@ a alone). What each of Teams' remaining call controls sends:
   <the new chat>, "messageId": null}, "links": {"addParticipantSuccess", "addParticipantFailure"}}` (`202`). The call
   becomes a group call at once: Teams' toolbar trades Transfer, Consult, Dial pad and Hold for Raise, React and Controls,
   Leave gains its options, People shows "Currently in this call (3)", Mute all, the account as Organizer, and the
-  invitee ringing (then "No response" with a call-again button, and "People added to the chat").
+  invitee ringing (then "No response" with a call-again button, and "People added to the chat"). Its
+  `addParticipantFailure` delivery names the invitee (`participants.<MRI>`: `580` "no callee endpoints were found"
+  when they had none to ring); the conversation's next update names the new chat (`groupChat.threadId`) and
+  `isMultiParty`, at both ends. The native client does the same (`CallAction::Add`): in a 1:1 call it makes the group
+  chat (the typed `CreateChat` of the three) and posts the `add` naming it; once the `add` is taken (or a conversation
+  update names a group chat) the call is a group call in that chat (`Event::CallGroupChat`), and an add not taken or
+  failed is told (`Event::CallAddFailed`). In a group call the `add` names the call's own chat (built from the 1:1
+  shape; not captured). People (its box reads "Invite someone": no numbers are dialled) lists the invitee "Calling…", then "No
+  response" with Call again; it offers work
+  accounts only, never a number (no calls to phones). "People added to the chat" and Mute all aren't built.
 - **Record** (More's Record and transcribe: Start recording, Start transcription) asks the spoken language and what to
   record first, then adds Microsoft's recording bot (`28:bdd75849-…`) to the conversation (`addParticipant`, its
   `participantInvitationData.botData` naming the call, the chat, the recorder's features and an

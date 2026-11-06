@@ -75,9 +75,9 @@ impl CallStage {
         if self.width < COMPACT_BELOW { "" } else { caption }
     }
 
-    /// Whether the call takes Hold: a 1:1 call's that is up (Teams offers Hold there, not in a group call or a
+    /// Whether the call takes Hold (and Transfer): a 1:1 call's that is up (Teams offers Hold there, not in a group call or a
     /// meeting), never the test call's or in the read-only mode.
-    fn takes_hold(&self, active: &ActiveCall) -> bool {
+    pub(super) fn takes_hold(&self, active: &ActiveCall) -> bool {
         let one_to_one = matches!(active.kind, CallKind::Chat | CallKind::Incoming)
             && active.view.participants.len() <= 1
             && active
@@ -115,6 +115,24 @@ impl CallStage {
             cx,
             |this, _, cx| this.ask(Ask::ToggleHold, cx),
         ))
+    }
+
+    /// A 1:1 call's Transfer, first in Teams' toolbar: it holds the call and asks whom (its dialog); greyed out while
+    /// the call is held, as Teams has it.
+    fn transfer_tools(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> Option<Vec<AnyElement>> {
+        if !self.takes_transfer(active) {
+            return None;
+        }
+        let transfer = tool(
+            ("call-transfer", Glyph::PHONE_FORWARDED, self.caption("Transfer")),
+            ("Transfer", None),
+            false,
+            palette,
+            cx,
+            |this, window, cx| this.open_transfer(transfer::Asking::Transfer, window, cx),
+        );
+        let held = active.held.is_some();
+        Some(vec![on_hold(div().child(transfer), held)])
     }
 
     /// Whether the call takes Raise and React: a group call's or a meeting's that is up, as Teams offers them (a 1:1
@@ -166,11 +184,13 @@ impl CallStage {
                     .children(self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx)),
             )
             .children(share);
+        let transfer = self.transfer_tools(active, palette, cx);
         div()
             .flex()
             .flex_none()
             .items_center()
             .gap_1()
+            .children(transfer.into_iter().flatten())
             .when_some(hold_or_resume, |bar, hold| bar.child(hold).child(divider(palette)))
             .children(self.meeting_tools(active, palette, cx))
             .child(self.view_menu(active.remote_share, palette, cx))

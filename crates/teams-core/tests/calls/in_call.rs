@@ -175,3 +175,158 @@ async fn a_one_to_one_call_goes_on_hold_and_comes_off_it_its_lines_as_they_were(
     // the call's lines stay as they are: nothing is renegotiated
     assert!(at("renegotiate").is_none(), "{sent:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn someone_added_to_a_one_to_one_call_makes_it_a_group_call_in_a_new_chat_of_the_three() {
+    let lab = crate::support::Lab::start().await;
+    let mut a = lab.account_without_video(LAB_A, A_TONE).await;
+    let mut b = lab.account_without_video(LAB_B, B_TONE).await;
+    let call = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: AB_CHAT.into() })
+        .await
+        .unwrap();
+    let ringing = b.incoming().await;
+    answer(&mut b, ringing.call).await;
+    a.status(call, &CallStatus::Connected).await;
+    a.handle
+        .requests()
+        .call(CallAction::Add {
+            call,
+            invitee: teams_proto::Mri::new(LAB_C),
+        })
+        .await
+        .unwrap();
+    // the call is in a new group chat of the three, its `add` naming it
+    let chat = a
+        .next(|event| match event {
+            Event::CallGroupChat { call: of, chat } if *of == call => Some(chat.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(teams_proto::is_group_chat_id(&chat), "{chat}");
+    let added = lab
+        .mock
+        .calls()
+        .into_iter()
+        .flat_map(|call| call.added)
+        .collect::<Vec<_>>();
+    assert_eq!(added, [(LAB_C.to_owned(), chat.clone())]);
+    // c has no endpoint to ring: it doesn't come in
+    let who = a
+        .next(|event| match event {
+            Event::CallAddFailed { call: of, who } if *of == call => Some(who.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(who.as_str(), LAB_C);
+    // the account itself can't be added
+    for invitee in [LAB_A] {
+        let refused = a
+            .handle
+            .requests()
+            .call(CallAction::Add {
+                call,
+                invitee: teams_proto::Mri::new(invitee),
+            })
+            .await;
+        assert!(refused.is_err(), "{invitee}: {refused:?}");
+    }
+}
+
+/// a's call to b in their 1:1 chat, answered: a, b, and the call as each has it.
+async fn one_to_one(lab: &Lab) -> (Account, Account, CallId, CallId) {
+    let mut a = lab.account_without_video(LAB_A, A_TONE).await;
+    let mut b = lab.account_without_video(LAB_B, B_TONE).await;
+    let call = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: AB_CHAT.into() })
+        .await
+        .unwrap();
+    let ringing = b.incoming().await;
+    let call_b = answer(&mut b, ringing.call).await;
+    a.status(call, &CallStatus::Connected).await;
+    (a, b, call, call_b)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transferred_call_ends_for_its_transferor_and_its_far_end_calls_the_target_naming_who_transferred_it() {
+    let lab = crate::support::Lab::start().await;
+    let (mut a, mut b, call, call_b) = one_to_one(&lab).await;
+    a.handle
+        .requests()
+        .call(CallAction::Hold { call, held: true })
+        .await
+        .unwrap();
+    assert!(held(&mut a, call).await);
+    a.handle
+        .requests()
+        .call(CallAction::Transfer {
+            call,
+            target: teams_proto::Mri::new(LAB_C),
+        })
+        .await
+        .unwrap();
+    // b is told and takes it: its call is over, and it calls c
+    let (target, by) = b
+        .next(|event| match event {
+            Event::CallTransferred {
+                call: of, target, by, ..
+            } if *of == call_b => Some((target.clone(), by.clone())),
+            _ => None,
+        })
+        .await;
+    assert_eq!(target.as_str(), LAB_C);
+    assert!(by.is_some(), "the transferor's name, as the transfer gave it");
+    b.ended(call_b).await;
+    let placed = b
+        .next(|event| match event {
+            Event::Call {
+                call: of,
+                status: CallStatus::Placing,
+            } if *of != call_b => Some(*of),
+            _ => None,
+        })
+        .await;
+    // a leaves once b took the transfer
+    a.ended(call).await;
+    let first = lab
+        .mock
+        .calls()
+        .into_iter()
+        .find(|known| known.caller == LAB_A)
+        .expect("a's call");
+    let sent = |who: &str| -> Vec<String> {
+        first
+            .requests
+            .iter()
+            .filter(|(_, account)| account == who)
+            .map(|(op, _)| op.clone())
+            .collect()
+    };
+    assert!(sent(LAB_A).iter().any(|op| op == "transfer"), "{:?}", sent(LAB_A));
+    assert!(sent(LAB_B).iter().any(|op| op == "acceptance"), "{:?}", sent(LAB_B));
+    // b's call to c goes once its media is set up
+    let to_c = || {
+        lab.mock
+            .calls()
+            .into_iter()
+            .find(|known| known.caller == LAB_B && known.legs.iter().any(|leg| leg.callee == LAB_C))
+    };
+    crate::support::wait_until(|| to_c().is_some()).await;
+    let transferor = to_c()
+        .and_then(|to_c| to_c.transferor)
+        .expect("it names its transferor");
+    assert_eq!(transferor["details"]["id"], serde_json::json!(LAB_A));
+    assert_eq!(
+        transferor["authorizationToken"],
+        serde_json::json!("mock-transfer-authorization")
+    );
+    b.handle
+        .requests()
+        .call(CallAction::HangUp { call: placed })
+        .await
+        .unwrap();
+}

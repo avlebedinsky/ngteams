@@ -126,6 +126,18 @@ pub struct ActiveCall {
     pub sharing: bool,
     /// The far end shares its screen, shown on the stage ([`teams_core::Event::CallRemoteShare`]).
     pub remote_share: bool,
+    /// Who the account added to the call and isn't in it yet ([`Ask::Add`]), in the order added: People lists them
+    /// ringing, or "No response" once they didn't come in ([`teams_core::Event::CallAddFailed`]).
+    pub invited: Vec<Invited>,
+}
+
+/// Someone the account added to its call, until the roster has them in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invited {
+    pub mri: Mri,
+    pub name: String,
+    /// They didn't come in (Teams' "No response", with its call-again).
+    pub no_response: bool,
 }
 
 /// A live reaction someone in the call sent ([`teams_core::Event::CallReaction`]).
@@ -137,6 +149,34 @@ pub struct LiveReaction {
     /// `like`, `heart`, `applause`, `laugh` or `surprised`.
     pub reaction: String,
     pub at: Instant,
+}
+
+/// Whether `event` is one of the engine's call events (what [`Calls::apply`] takes).
+fn is_call_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::CallingRegistration(_)
+            | Event::IncomingCall(_)
+            | Event::RingEnded { .. }
+            | Event::Call { .. }
+            | Event::Voicemail { .. }
+            | Event::CameraOff { .. }
+            | Event::AudioClosed { .. }
+            | Event::CallCaptions { .. }
+            | Event::CallParticipants { .. }
+            | Event::Lobby { .. }
+            | Event::CallOwn { .. }
+            | Event::CallHeld { .. }
+            | Event::CallHeldByFarEnd { .. }
+            | Event::CallGroupChat { .. }
+            | Event::CallAddFailed { .. }
+            | Event::CallTransferFailed { .. }
+            | Event::CallTransferred { .. }
+            | Event::CallMeeting { .. }
+            | Event::CallSharing { .. }
+            | Event::CallRemoteShare { .. }
+            | Event::CallReaction { .. }
+    )
 }
 
 /// How long a live reaction shows on the stage, as Teams floats one up and away.
@@ -481,6 +521,16 @@ pub enum Ask {
     LockMeeting(bool),
     /// Share the screen (the desktop asks which), or stop sharing it (Teams' Share and Stop sharing).
     ToggleShare,
+    /// Add `invitee` (named `name`) to the call, as People's "Invite someone" does, or call them again
+    /// once they didn't answer.
+    Add {
+        invitee: Mri,
+        name: String,
+    },
+    /// Transfer the 1:1 call's far end to `target` (Teams' Transfer to an audio call).
+    Transfer {
+        target: Mri,
+    },
 }
 
 impl Ask {
@@ -509,6 +559,8 @@ impl Ask {
             Self::Timer(_) => "timer",
             Self::LockMeeting(_) => "lock-meeting",
             Self::ToggleShare => "share",
+            Self::Add { .. } => "add",
+            Self::Transfer { .. } => "transfer",
         }
     }
 
@@ -896,26 +948,7 @@ impl Calls {
     /// Applies one of the engine's call events; nothing while calls aren't shown. Whether it was one.
     pub fn apply(&mut self, event: &Event, cx: &mut Context<Self>) -> bool {
         if !self.shown {
-            return matches!(
-                event,
-                Event::CallingRegistration(_)
-                    | Event::IncomingCall(_)
-                    | Event::RingEnded { .. }
-                    | Event::Call { .. }
-                    | Event::Voicemail { .. }
-                    | Event::CameraOff { .. }
-                    | Event::AudioClosed { .. }
-                    | Event::CallCaptions { .. }
-                    | Event::CallParticipants { .. }
-                    | Event::Lobby { .. }
-                    | Event::CallOwn { .. }
-                    | Event::CallHeld { .. }
-                    | Event::CallHeldByFarEnd { .. }
-                    | Event::CallMeeting { .. }
-                    | Event::CallSharing { .. }
-                    | Event::CallRemoteShare { .. }
-                    | Event::CallReaction { .. }
-            );
+            return is_call_event(event);
         }
         match event {
             Event::CallingRegistration(report) => {
@@ -956,6 +989,13 @@ impl Calls {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.check.saw(view);
                     active.view = view.clone();
+                    // someone added is in the call now: no longer listed apart
+                    active.invited.retain(|invited| {
+                        !view
+                            .participants
+                            .iter()
+                            .any(|participant| participant.mri == invited.mri.as_str())
+                    });
                 }
             }
             Event::Lobby { call, waiting } => {
@@ -969,7 +1009,10 @@ impl Calls {
             | Event::CallMeeting { .. }
             | Event::CallSharing { .. }
             | Event::CallRemoteShare { .. }
+            | Event::CallGroupChat { .. }
+            | Event::CallAddFailed { .. }
             | Event::CallReaction { .. } => self.in_call(event),
+            Event::CallTransferFailed { .. } | Event::CallTransferred { .. } => self.transfer_told(event),
             _ => return false,
         }
         cx.notify();
@@ -1014,6 +1057,22 @@ impl Calls {
                     active.remote_share = *on;
                 }
             }
+            // a 1:1 call someone was added to is a group call in its new chat from now on
+            Event::CallGroupChat { call, chat } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.chat = Some(chat.clone());
+                }
+            }
+            Event::CallAddFailed { call, who } => {
+                if let Some(invited) = self
+                    .call
+                    .as_mut()
+                    .filter(|active| active.id == *call)
+                    .and_then(|active| active.invited.iter_mut().find(|invited| invited.mri == *who))
+                {
+                    invited.no_response = true;
+                }
+            }
             Event::CallReaction {
                 call,
                 from,
@@ -1035,6 +1094,37 @@ impl Calls {
                     active.reactions.drain(..over);
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// `who` (named `name`) was added to `call`: People lists them ringing until the roster has them in the call; one
+    /// called again rings again.
+    pub fn invited(&mut self, call: CallId, who: Mri, name: String, cx: &mut Context<Self>) {
+        let Some(active) = self.call.as_mut().filter(|active| active.id == call) else {
+            return;
+        };
+        active.invited.retain(|invited| invited.mri != who);
+        active.invited.push(Invited {
+            mri: who,
+            name,
+            no_response: false,
+        });
+        cx.notify();
+    }
+
+    /// The account's transfer not taken (the call stays held, and its bar says so), or the far end's transfer taken (the
+    /// engine calls the target now: a call with them in their 1:1 chat).
+    fn transfer_told(&mut self, event: &Event) {
+        match event {
+            Event::CallTransferFailed { call } if self.call.as_ref().is_some_and(|active| active.id == *call) => {
+                self.refused = Some(Refused {
+                    ask: "transfer",
+                    why: "not-transferred",
+                    text: "The call couldn't be transferred.".to_owned(),
+                });
+            }
+            Event::CallTransferred { chat, .. } => self.asked = Some((CallKind::Chat, chat.clone())),
             _ => {}
         }
     }
@@ -1133,6 +1223,7 @@ impl Calls {
             meeting: teams_core::MeetingState::default(),
             sharing: false,
             remote_share: false,
+            invited: Vec::new(),
         }
     }
 
@@ -1222,13 +1313,7 @@ impl Calls {
             Ask::ToggleHand | Ask::React(_) | Ask::EndMeeting | Ask::Timer(_) | Ask::LockMeeting(_) => {
                 self.meeting_action(ask)
             }
-            Ask::ToggleHold => {
-                let call = self.call.as_ref().ok_or("no-call")?;
-                Ok(CallAction::Hold {
-                    call: call.id,
-                    held: call.held.is_none(),
-                })
-            }
+            Ask::ToggleHold | Ask::Add { .. } | Ask::Transfer { .. } => self.one_to_one_action(ask),
             Ask::ToggleShare | Ask::ToggleCamera => self.video_action(ask),
         }
     }
@@ -1250,6 +1335,25 @@ impl Calls {
                 call: call.id,
                 on: !call.camera,
             }
+        })
+    }
+
+    /// The engine's call action for Hold or Resume, someone added, or a transfer, on the call up.
+    fn one_to_one_action(&self, ask: &Ask) -> Result<CallAction, &'static str> {
+        let call = self.call.as_ref().ok_or("no-call")?;
+        Ok(match ask {
+            Ask::Add { invitee, .. } => CallAction::Add {
+                call: call.id,
+                invitee: invitee.clone(),
+            },
+            Ask::Transfer { target } => CallAction::Transfer {
+                call: call.id,
+                target: target.clone(),
+            },
+            _ => CallAction::Hold {
+                call: call.id,
+                held: call.held.is_none(),
+            },
         })
     }
 
@@ -1334,6 +1438,15 @@ impl Calls {
                     CallAction::Camera { on, .. } => {
                         active.camera = *on;
                         active.check.camera |= *on;
+                    }
+                    // listed ringing at once, as Teams lists them; called again, ringing again
+                    CallAction::Add { invitee, .. } => {
+                        let name = match ask {
+                            Ask::Add { name, .. } => name.clone(),
+                            _ => String::new(),
+                        };
+                        self.invited(call, invitee.clone(), name, cx);
+                        return;
                     }
                     _ => return,
                 }

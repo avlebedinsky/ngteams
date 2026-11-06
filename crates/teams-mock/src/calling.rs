@@ -91,6 +91,8 @@ pub struct Leg {
     pub declined: bool,
     /// The `mediaRenegotiation` callback its answer handed out, where the call's renegotiation goes.
     renegotiation: Option<String>,
+    /// The `transfer` callback its answer handed out, where a transfer of its callee is delivered.
+    transfer: Option<String>,
     /// The `rosterUpdate` callback its `attach` handed out.
     roster: Option<String>,
     /// The `receiveMessage` callback its `attach` handed out.
@@ -115,6 +117,13 @@ pub struct MockCall {
     /// The tenant each `add` named for its invitation (`participantInvitationData.invitationData.meetingInfo.tenantId`,
     /// empty when it named none), in order.
     pub add_tenants: Vec<String>,
+    /// Each person an `add` brought into the call (a work account, not a service), with the group chat it named, in
+    /// order.
+    pub added: Vec<(String, String)>,
+    /// The call's caller transferred its far end: whom to, and the transferor's `transferAcceptance` callback.
+    pub transferred: Option<(String, Option<String>)>,
+    /// The `callInvitation.transferor` its start named: a transferred party's call to the transfer's target.
+    pub transferor: Option<Value>,
     /// The caller's callbacks (none when the mock plays the caller).
     caller_links: Option<Callbacks>,
     /// A renegotiation forwarded from one client of the call to another, waiting for its answer: who renegotiated and
@@ -320,6 +329,10 @@ fn start(state: &mut State, caller: &str, body: &Value) -> Option<ResponseTempla
         .map(str::to_owned);
     let offer = body.pointer("/callInvitation/mediaContent").cloned();
     let index = new_call(state, caller, &callees, group_chat, Some(Callbacks::of(body)), offer);
+    state.calling.calls[index].transferor = body
+        .pointer("/callInvitation/transferor")
+        .filter(|transferor| !transferor.is_null())
+        .cloned();
     log(state, index, caller, "start");
     let call = state.calling.calls[index].clone();
     ring_callees(state, index);
@@ -374,6 +387,7 @@ fn new_call(
                 accepted_by: None,
                 declined: false,
                 renegotiation: None,
+                transfer: None,
                 roster: None,
                 messages: None,
                 updates: None,
@@ -385,6 +399,9 @@ fn new_call(
         negotiation: None,
         joined: Vec::new(),
         offer,
+        added: Vec::new(),
+        transferred: None,
+        transferor: None,
         roster: Vec::new(),
         roster_version: 0,
         roster_watchers: Vec::new(),
@@ -534,6 +551,7 @@ fn accept_by_controller(state: &mut State, index: usize, acceptance: Option<&str
         body["callAcceptance"]["mediaContent"] = answer;
     }
     body["callAcceptance"]["links"]["hold"] = json!(hold_url(&id));
+    body["callAcceptance"]["links"]["transfer"] = json!(transfer_url(&id));
     if call_is_group(state, index) {
         // a group call's acceptance hands out where its lines are described again (as captured; the echo call's
         // fixture names none)
@@ -603,6 +621,10 @@ fn conversation_op(
             }
         }
         "leave" => leave(state, index, body),
+        "add" if adds_person(body) => {
+            add_person(state, index, body);
+            return Some(status(202));
+        }
         "add" => {
             let tenant = body
                 .pointer("/participantInvitationData/invitationData/meetingInfo/tenantId")
@@ -664,6 +686,43 @@ fn conversation_op(
         _ => return None,
     }
     Some(status(200))
+}
+
+/// Whether an `add` brings a person (a work account) in, rather than a service.
+fn adds_person(body: &Value) -> bool {
+    body.pointer("/participants/to/0/id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("8:"))
+}
+
+/// A person added to call `index` (a work account, as People adds one): kept with the group chat the `add` named; one
+/// with no calling endpoint to ring didn't come in, as captured (`addParticipantFailure`, 580 "no callee endpoints were
+/// found"). Ringing an invitee who has one isn't the mock's.
+fn add_person(state: &mut State, index: usize, body: &Value) {
+    let invitee = body
+        .pointer("/participants/to/0/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let chat = body
+        .pointer("/groupChat/threadId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if let Some(call) = state.calling.calls.get_mut(index) {
+        call.added.push((invitee.clone(), chat));
+    }
+    if state.calling_endpoints(&invitee).is_empty() {
+        let failure = body
+            .pointer("/links/addParticipantFailure")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let phrase = "Audio-video modality controller could not invite participant to this conversation since no callee endpoints were found.";
+        let delivered = json!({"participants": {invitee.as_str(): {"code": 580, "subCode": 5205, "phrase": phrase,
+            "resultCategories": ["UnexpectedServerError"]}},
+            "participantInfos": [{"participant": {"id": invitee}, "transactionEnd": {"code": 580}}]});
+        state.call_back(failure.as_deref(), delivered);
+    }
 }
 
 /// The meeting ended for everyone at its conversation's own URL (its organizer's End meeting): everyone in it gets the
@@ -787,6 +846,16 @@ fn controller_op(
                 202,
                 &json!({"holdResponse": {"links": {"resume": resume}}, "debugContent": null}),
             ))
+        }
+        ("active", "transfer") => transfer(state, index, account, body),
+        // the transferred party took it: the transferor is told
+        ("transfer", "acceptance") => {
+            let told = state.calling.calls[index]
+                .transferred
+                .as_ref()
+                .and_then(|(_, at)| at.clone());
+            state.call_back(told.as_deref(), json!({"transferAcceptance": {}, "debugContent": null}));
+            Some(status(202))
         }
         ("holdSession", "resume") => {
             roster::leave(state, index, MUSIC_ON_HOLD);
@@ -1034,10 +1103,15 @@ fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
         .pointer("/callAcceptance/links/mediaRenegotiation")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let transfer = body
+        .pointer("/callAcceptance/links/transfer")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let leg_state = leg_mut(state, index, leg)?;
     leg_state.accepted_by = Some(endpoint);
     leg_state.attached.retain(|(_, end)| !others.contains(end));
     leg_state.renegotiation = renegotiation;
+    leg_state.transfer = transfer;
     let roster_link = leg_state.roster.clone();
     let messages = leg_state.messages.clone();
     let updates = leg_state.updates.clone();
@@ -1068,6 +1142,7 @@ fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     {
         links.remove("controlVideoStreaming");
         links.insert("hold".to_owned(), json!(hold_url(&call.id)));
+        links.insert("transfer".to_owned(), json!(transfer_url(&call.id)));
     }
     Some(json_answer(200, &answer))
 }
@@ -1094,7 +1169,45 @@ fn acceptance_body(call: &MockCall, callee: &str, endpoint_type: Option<&str>, m
         body["callAcceptance"]["mediaContent"] = media;
     }
     body["callAcceptance"]["links"]["hold"] = json!(hold_url(&call.id));
+    body["callAcceptance"]["links"]["transfer"] = json!(transfer_url(&call.id));
     body
+}
+
+/// The call leg's `transfer` link of call `id`, handed out beside its `hold`.
+fn transfer_url(id: &str) -> String {
+    cc_url(&format!("active/{id}/1/a3/1/transfer"))
+}
+
+/// The caller of call `index` transfers its callee (a blind transfer, as captured): the callee is told at its own
+/// `transfer` callback, with whom to call, who transferred it, a made-up authorization and where it takes the transfer.
+fn transfer(state: &mut State, index: usize, account: &str, body: &Value) -> Option<ResponseTemplate> {
+    let target = body.pointer("/callTransfer/target/id")?.as_str()?.to_owned();
+    let acceptance = body
+        .pointer("/callTransfer/links/transferAcceptance")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let call = state.calling.calls.get_mut(index)?;
+    call.transferred = Some((target.clone(), acceptance));
+    let id = call.id.clone();
+    let callee = call.legs.iter().find(|leg| leg.accepted_by.is_some())?.transfer.clone();
+    let mut details = body
+        .pointer("/callTransfer/transferor/details")
+        .cloned()
+        .unwrap_or(Value::Null);
+    details["displayName"] = json!(state.display_name(account));
+    let delivered = json!({"callTransfer": {
+        "target": {"id": target, "displayName": null},
+        "replacementDetails": null,
+        "isConsultative": false,
+        "transferor": {"details": details, "authorizationToken": "mock-transfer-authorization"},
+        "newCallModalities": [],
+        "links": {
+            "transferAcceptance": cc_url(&format!("transfer/{id}/1/t/1/acceptance")),
+            "transferCompletion": cc_url(&format!("transfer/{id}/1/t/1/completion")),
+        },
+    }});
+    state.call_back(callee.as_deref(), delivered);
+    Some(status(202))
 }
 
 /// The service's music-on-hold app, in a held call's roster while the hold lasts (as captured).
