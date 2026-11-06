@@ -43,6 +43,8 @@ pub(super) fn call(action: &CallAction) -> String {
     match action {
         CallAction::Captions { call, enabled } => format!("call {} captions {enabled}", call.get()),
         CallAction::CaptionLanguage { call, .. } => format!("call {} caption spoken language", call.get()),
+        CallAction::Record { call, .. } => format!("call {} start recording", call.get()),
+        CallAction::StopRecording { call } => format!("call {} stop recording", call.get()),
         CallAction::Call { chat } => format!("a call from {chat}"),
         CallAction::TestCall { echo } => format!("the test call of {echo}"),
         CallAction::Join { chat } => format!("a join of the call in {chat}"),
@@ -173,6 +175,12 @@ fn plain(event: &Event) -> String {
             call.get(),
             captions.phase,
             captions.lines.len()
+        ),
+        Event::CallRecording { call, recording } => format!(
+            "call {}: recording {:?}{}",
+            call.get(),
+            recording.phase,
+            if recording.problem.is_some() { ", failed" } else { "" }
         ),
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
         // no names: how many, which lines, who of them speaks

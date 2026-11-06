@@ -772,14 +772,43 @@ a alone). What each of Teams' remaining call controls sends:
   shape; not captured). People (its box reads "Invite someone": no numbers are dialled) lists the invitee "Calling…", then "No
   response" with Call again; it offers work
   accounts only, never a number (no calls to phones). "People added to the chat" and Mute all aren't built.
-- **Record** (More's Record and transcribe: Start recording, Start transcription) asks the spoken language and what to
-  record first, then adds Microsoft's recording bot (`28:bdd75849-…`) to the conversation (`addParticipant`, its
-  `participantInvitationData.botData` naming the call, the chat, the recorder's features and an
-  `initiatorUserToken`: the starting user's token for the recorder service, `scp access_recorder_service`) and posts
-  the start to the recorder service (`…callrecorder…/v2/oncommand/<id>`, `action: "start"`). Everyone sees a red dot by
-  the call's duration and "Recording and transcription — Started by …". Stop asks "Stop recording and transcription?"
-  and posts `action: "stop"` there. **The native client doesn't start a recording**: it would hand the user's token to
-  a bot, which AGENTS.md's credential rule forbids without the user's sign-off.
+- **Record** (More's Record and transcribe: Start recording, Start transcription; while it records Stop recording, Stop
+  transcription, Show transcript) asks "Start recording and transcription" first: the spoken language (English (US)),
+  and under More options "Choose what to record" (Video and audio, Audio only), Cancel and Confirm. Confirm fetches the
+  account's token for the recorder service (aud `4580fd1d-…`, `scp access_recorder_service`; a refresh-token grant of
+  `4580fd1d-…/.default` like any other audience), then posts the conversation's `addParticipant` (a meeting's `add`)
+  inviting Microsoft's recording bot (`28:bdd75849-…`, a fresh participant id) with
+  `participantInvitationData.botData`: the call's chain id, its chat, the recorder's features, `mode:
+  "RecordingAndTranscription"`, `spokenLanguage: ""` and `initiatorUserToken`, that recorder token (a meeting's also
+  `exchangeId: null` and `meetingOrganizer`, and the request `groupChat`). `202`, then `addParticipantSuccess`. The
+  bot's roster entry names its `endpointMetadata.commandUrl`
+  (`…flightproxy…/ep/<allocated>.callrecorder.teams.cloud.microsoft:<port>/v2/oncommand/<guid>`), and the client
+  posts the start there with the recorder token as its bearer (no skypetoken, `requestid` and the chain id as
+  headers): `{"timestamp", "participantMri", "participantLegId", "action": "start", "processingModes": ["recording",
+  "realTimeTranscript"], "actionParameters": {"recordingFeatures", "recordingStorageSettings": [{"StorageType":
+  "OnedriveForBusiness", "StorageLocation": "Recordings", "FileName": "<title>-<local YYYYMMDD_HHMMSS>-Meeting
+  Recording"}], "correlationId", "meetingTitle", "exchangeId": null, "recordingMode": "Normal", "spokenLanguage",
+  "type": "start"}, "participantSkypeToken": ""}` (a call's title "Call with <name>", a meeting's its own, with
+  `meetingOrganizer`); `200` `{"CorrelationId"}`. Start transcription alone posts `"mode": "transcription",
+  "processingModes": ["realTimeTranscript"]` and a `…-Meeting Transcript` file, and opens the transcript pane. The bot's
+  `processingModes.recording` turns `Active` (`userId` the starter, `properties.recordVideo`), then
+  `realTimeTranscript`. The starter sees "Recording and transcription — Started by you. Let everyone know they're being
+  included. Privacy policy"; everyone the red dot by the duration. Stop asks "Stop recording and transcription?"
+  (Cancel, Stop) and posts `{"timestamp", "participantMri", "participantLegId", "action": "stop", "processingModes":
+  ["recording", "realTimeTranscript"], "participantSkypeToken": ""}` to the same link (the newest the roster named);
+  the bot stays, both modes `Inactive`, and "Recording and transcription have stopped. You stopped recording. If you
+  change your mind, you can start them again anytime." shows. A start after that goes straight to the command link. The
+  native client does the same (`CallAction::Record`, `CallAction::StopRecording`, the typed `CaptionWrite::record` and
+  `stop_recording`, each one attempt): the bot is invited as live captions invite it unless it is in the call already,
+  the start waits for its command link, and a refused start or stop says why in Teams' words ("Recording not started.
+  Your IT admin has disabled Recording." for `401`/`403`, "Recording cannot be started for this call." when the bot
+  couldn't join, "Something went wrong. Try to start recording again." otherwise; no refusal was captured, the lab
+  tenant records). Not offered: Audio only and Start transcription (their stop and the transcript pane weren't
+  captured), Show transcript. Run natively 2026-11-06 (lab a and b in their 1:1 call): a's start invited the bot,
+  posted the start (`200`), both windows showed the notice and the red dot; a's stop (`200`) ended it on both. The
+  transcript card came at once and `Call with AI2-<stamp>-Meeting Recording` about a minute after the stop, in the 1:1
+  chat and its Shared tab; the chat's Recap tab lists only meeting recordings and this computer's caption transcripts,
+  so a 1:1 call's cloud recording opens on the web from its card.
 - **Timer** (More's Timer, group calls and meetings): a bar over the stage (time, play/pause, reset, a progress bar;
   the time edits with +1/+5/+10 min and Start or Cancel timer). Each change posts the conversation's
   `updateMeetingStates` with `meetingStates.timer: {"sequenceNumber", "value": {"data": <JSON text: adhocTimer,
@@ -823,8 +852,8 @@ The native client sends the timer and the lock as captured (`CallAction::Timer`,
 organizer's only; a pause sends what is left then, which no capture showed), reads the conversation's updates and the
 recording bot's entry into `teams_call::MeetingState` (the bot is left out of the people, as Teams hides it), and
 shows the timer's bar and editor, the lock's question and notices, Meeting info and the recording's notice and red
-dot. People's Download attendance list is made locally from the roster's `endpointJoinTime`s. Not built: starting a
-recording (the user's token would go to the recording bot), Notes (a Loop page), Controls' Enable lobby and Allow all
+dot, and starts and stops a recording (Record, above). People's Download attendance list is made locally from the
+roster's `endpointJoinTime`s. Not built: Notes (a Loop page), Controls' Enable lobby and Allow all
 participants to (their requests weren't captured), Help and Report a concern (no captured target), Accessibility
 settings and Don't show chat bubbles (the app has neither), Call health, Apps (its loaded pane wasn't captured), and
 the Dial pad (the user doesn't want one).

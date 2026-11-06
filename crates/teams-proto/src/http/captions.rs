@@ -50,9 +50,11 @@ impl<C: Credentials> HttpTransport<C> {
         }
         let mut headers = plain_headers(Service::Calling, true);
         headers.extend_from_slice(write.headers());
-        let auth = match ic3.as_ref() {
-            Some(token) => Auth::Bearer(token),
-            None => Auth::Recorder {
+        let auth = match (ic3.as_ref(), write.kind()) {
+            (Some(token), _) => Auth::Bearer(token),
+            // a recording's start and stop carry the recorder token alone, as the web client sends them
+            (None, CaptionWriteKind::Record | CaptionWriteKind::StopRecord) => Auth::Bearer(&recorder),
+            (None, _) => Auth::Recorder {
                 bearer: &recorder,
                 skype: &skype,
             },

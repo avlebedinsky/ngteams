@@ -1,6 +1,10 @@
-//! Microsoft's built-in caption service, as captured from the Teams call controls.
+//! Microsoft's built-in caption service, as captured from the Teams call controls: Microsoft's recording bot, which
+//! both runs live captions and records and transcribes a call ([`CaptionWrite::record`]).
 //! Credentials are attached only by the transport, never stored in a request or its debug representation.
 use std::fmt;
+
+mod record;
+pub use record::RecordStart;
 
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
@@ -118,6 +122,10 @@ pub enum CaptionWriteKind {
     Invite,
     Start,
     Language,
+    /// Start recording and transcription ([`CaptionWrite::record`]).
+    Record,
+    /// Stop recording and transcription ([`CaptionWrite::stop_recording`]).
+    StopRecord,
 }
 
 /// Invalid caption protocol parts. The error never contains a URL, identity, token or caption text.
@@ -252,7 +260,10 @@ impl CaptionWrite {
                 body["participantInvitationData"]["botData"]["initiatorUserToken"] = json!(recorder.expose());
             }
             // Teams sends the Skype credential in the header; the captured body field is empty.
-            CaptionWriteKind::Start | CaptionWriteKind::Language => body["participantSkypeToken"] = json!(""),
+            CaptionWriteKind::Start
+            | CaptionWriteKind::Language
+            | CaptionWriteKind::Record
+            | CaptionWriteKind::StopRecord => body["participantSkypeToken"] = json!(""),
         }
         body.to_string().into_bytes()
     }

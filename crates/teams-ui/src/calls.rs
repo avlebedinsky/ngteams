@@ -163,6 +163,7 @@ fn is_call_event(event: &Event) -> bool {
             | Event::CameraOff { .. }
             | Event::AudioClosed { .. }
             | Event::CallCaptions { .. }
+            | Event::CallRecording { .. }
             | Event::CallParticipants { .. }
             | Event::Lobby { .. }
             | Event::CallOwn { .. }
@@ -534,6 +535,15 @@ pub enum Ask {
     Transfer {
         target: Mri,
     },
+    /// Start recording and transcription (More → Record and transcribe → Start recording, confirmed): the call's
+    /// `title` as its recording is named, a meeting's `organizer`, the spoken `language` picked.
+    Record {
+        title: String,
+        organizer: Option<String>,
+        language: String,
+    },
+    /// Stop recording and transcription (Stop recording, confirmed).
+    StopRecording,
 }
 
 impl Ask {
@@ -565,6 +575,8 @@ impl Ask {
             Self::ToggleShare => "share",
             Self::Add { .. } => "add",
             Self::Transfer { .. } => "transfer",
+            Self::Record { .. } => "record",
+            Self::StopRecording => "stop-recording",
         }
     }
 
@@ -671,6 +683,8 @@ pub struct Calls {
     captions: teams_core::CallCaptions,
     /// The caption pane as the user shows it, and whether the captions are saved.
     pane: CaptionPane,
+    /// The account's own start or stop of a recording in its call (empty once the call ends).
+    recording: teams_core::CallRecording,
     echo: Option<Mri>,
     registered: bool,
     ringing: Option<IncomingCall>,
@@ -777,6 +791,12 @@ impl Calls {
         );
         let local = running && (show || self.pane.saving);
         (!local).then_some(Ask::Captions(show))
+    }
+
+    /// The account's own start or stop of a recording in its call, and why the last one failed.
+    #[must_use]
+    pub fn recording(&self) -> &teams_core::CallRecording {
+        &self.recording
     }
 
     /// Whether this build shows calls at all.
@@ -1037,6 +1057,11 @@ impl Calls {
                     self.captions = captions.clone();
                 }
             }
+            Event::CallRecording { call, recording } => {
+                if self.call.as_ref().is_some_and(|active| active.id == *call) {
+                    self.recording = *recording;
+                }
+            }
             Event::Call { call, status } => self.status(*call, status),
             Event::Voicemail { call } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
@@ -1212,6 +1237,7 @@ impl Calls {
         if self.call.as_ref().is_none_or(|active| active.id != call) {
             self.captions = teams_core::CallCaptions::default();
             self.pane.shown = false;
+            self.recording = teams_core::CallRecording::default();
             self.call = Some(self.adopt(call));
             self.ended = None;
             self.refused = None;
@@ -1235,6 +1261,7 @@ impl Calls {
         if let CallStatus::Ended(end) = status {
             self.captions = teams_core::CallCaptions::default();
             self.pane.shown = false;
+            self.recording = teams_core::CallRecording::default();
             active.check.failed = matches!(end, End::Failed(_));
             // a refusal during the call was shown in its bar: how it ended is what is told now; but the start's own
             // refusal (its media couldn't be set up, told as it ended) says why it never connected
@@ -1385,6 +1412,7 @@ impl Calls {
                 self.meeting_action(ask)
             }
             Ask::ToggleHold | Ask::Add { .. } | Ask::Transfer { .. } => self.one_to_one_action(ask),
+            Ask::Record { .. } | Ask::StopRecording => self.record_action(ask),
             Ask::ToggleShare | Ask::ToggleCamera => self.video_action(ask),
         }
     }
@@ -1450,6 +1478,28 @@ impl Calls {
                 locked: *locked,
             }),
             _ => Err("not-organizer"),
+        }
+    }
+
+    /// The engine's action for a recording's start or stop, on the call up once it is connected (not the test call's).
+    fn record_action(&self, ask: &Ask) -> Result<CallAction, &'static str> {
+        let call = self
+            .call
+            .as_ref()
+            .filter(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall)
+            .ok_or("no-call")?;
+        match ask {
+            Ask::Record {
+                title,
+                organizer,
+                language,
+            } => Ok(CallAction::Record {
+                call: call.id,
+                title: title.clone(),
+                organizer: organizer.clone(),
+                language: language.clone(),
+            }),
+            _ => Ok(CallAction::StopRecording { call: call.id }),
         }
     }
 

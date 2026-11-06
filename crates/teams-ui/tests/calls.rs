@@ -3638,6 +3638,114 @@ fn a_recording_someone_runs_and_the_lock_s_change_show_their_notices() {
     assert!(!drawn(stage, "call-recording-dot"), "the recording stopped");
 }
 
+/// More's Record and transcribe opened by the keyboard (it leads More, as in Teams), its `item` drawn.
+fn open_record_menu(stage: &mut VisualTestContext, item: &'static str) {
+    for downs in 1..=3 {
+        click(stage, "call-more");
+        let keys = format!("{} right", vec!["down"; downs].join(" "));
+        stage.simulate_keystrokes(&keys);
+        if drawn(stage, item) {
+            return;
+        }
+        stage.simulate_keystrokes("escape");
+        draw(stage);
+    }
+    panic!("Record and transcribe doesn't offer {item}");
+}
+
+fn recording_by(by: &str) -> teams_core::MeetingState {
+    teams_core::MeetingState {
+        recording: Some(teams_core::Recording { by: Some(Mri::new(by)) }),
+        ..teams_core::MeetingState::default()
+    }
+}
+
+#[test]
+fn the_account_starts_a_recording_after_asking_its_language_and_stops_it_after_asking() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    open_record_menu(stage, "call-record-start");
+    click(stage, "call-record-start");
+    assert!(drawn(stage, "call-record-dialog"), "Start recording asks first");
+    let before = actions(&rig).len();
+    click(stage, "call-record-cancel");
+    assert!(!drawn(stage, "call-record-dialog"));
+    assert_eq!(actions(&rig).len(), before, "Cancel sends nothing");
+    open_record_menu(stage, "call-record-start");
+    click(stage, "call-record-start");
+    click(stage, "call-record-language");
+    // one the scrolled list shows at once
+    click(stage, "call-record-language-ar-sa");
+    click(stage, "call-record-confirm");
+    let Some(CallAction::Record {
+        title,
+        organizer,
+        language,
+        ..
+    }) = actions(&rig).last().cloned()
+    else {
+        panic!("{:?}", actions(&rig));
+    };
+    assert_eq!(language, "ar-sa");
+    assert!(title.starts_with("Call with "), "{title}");
+    assert_eq!(organizer, None, "a call names no organizer");
+    assert!(!drawn(stage, "call-record-dialog"));
+    stop_own_recording(&rig, stage);
+}
+
+/// The account's own recording told, then stopped after asking.
+fn stop_own_recording(rig: &Rig, stage: &mut VisualTestContext) {
+    // the roster tells the account's recording: its own notice, with the privacy policy
+    meeting(rig, recording_by(LAB_A));
+    assert!(drawn(stage, "call-recording-notice"));
+    assert!(drawn(stage, "call-recording-privacy"));
+    assert!(drawn(stage, "call-recording-dot"));
+    // Stop recording asks first
+    open_record_menu(stage, "call-record-stop");
+    click(stage, "call-record-stop");
+    assert!(drawn(stage, "call-record-stop-dialog"));
+    let before = actions(rig).len();
+    click(stage, "call-record-stop-cancel");
+    assert_eq!(actions(rig).len(), before, "Cancel sends nothing");
+    open_record_menu(stage, "call-record-stop");
+    click(stage, "call-record-stop");
+    click(stage, "call-record-stop-confirm");
+    assert_eq!(actions(rig).last(), Some(&CallAction::StopRecording { call: call(1) }));
+    meeting(rig, teams_core::MeetingState::default());
+    assert!(drawn(stage, "call-recording-stopped"), "it says it stopped");
+    assert!(!drawn(stage, "call-recording-dot"));
+    click(stage, "call-recording-stopped-close");
+    assert!(!drawn(stage, "call-recording-stopped"));
+}
+
+#[test]
+fn a_refused_recording_says_why_and_someone_else_s_shows_who_started_it() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    rig.send(Event::CallRecording {
+        call: call(1),
+        recording: teams_core::CallRecording {
+            phase: teams_core::RecordingPhase::Idle,
+            problem: Some(teams_core::RecordingProblem {
+                heading: "Couldn't start recording",
+                detail: "Recording not started. Your IT admin has disabled Recording.",
+            }),
+        },
+    });
+    rig.cx.run_until_parked();
+    assert!(drawn(stage, "call-recording-problem"));
+    click(stage, "call-recording-problem-close");
+    assert!(!drawn(stage, "call-recording-problem"));
+    meeting(&rig, recording_by(LAB_B));
+    assert!(drawn(stage, "call-recording-notice"));
+    assert!(
+        !drawn(stage, "call-recording-privacy"),
+        "only its starter is told to let everyone know"
+    );
+    // anyone in the call may stop it
+    open_record_menu(stage, "call-record-stop");
+}
+
 #[test]
 fn a_meeting_s_organizer_locks_it_after_asking_and_its_info_shows_how_to_join() {
     let rig = calling();

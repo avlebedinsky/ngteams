@@ -381,9 +381,14 @@ impl CallStage {
         let recording = state.recording.is_some();
         if recording && !self.recording_seen {
             self.recording_notice = true;
+            self.record.stopped = None;
         }
         if !recording {
             self.recording_notice = false;
+            if self.recording_seen {
+                // it stopped: whoever stopped it, the notice says so
+                self.record.stopped = Some(std::mem::take(&mut self.record.stopping));
+            }
         }
         self.recording_seen = recording;
         if state.timer.is_some() {
@@ -416,15 +421,21 @@ impl CallStage {
             .as_ref()
             .filter(|_| self.recording_notice)
             .map(|recording| {
-                let who = recording
-                    .by
-                    .as_ref()
-                    .map_or_else(|| SharedString::from(SOMEONE), |mri| self.name_of(active, mri));
-                notice(
-                    ("call-recording-notice", Glyph::RECORD, "Recording and transcription"),
+                let line = if recording.by.as_ref().is_some_and(|by| by.as_str() == self.core.me()) {
+                    Self::started_by_you(palette)
+                } else {
+                    let who = recording
+                        .by
+                        .as_ref()
+                        .map_or_else(|| SharedString::from(SOMEONE), |mri| self.name_of(active, mri));
                     SharedString::from(format!(
                         "Started by {who}. By attending this meeting, you agree to being included."
-                    )),
+                    ))
+                    .into_any_element()
+                };
+                notice(
+                    ("call-recording-notice", Glyph::RECORD, "Recording and transcription"),
+                    line,
                     palette,
                     cx.listener(|this, _, _, cx| {
                         this.recording_notice = false;
@@ -432,7 +443,8 @@ impl CallStage {
                     }),
                 )
             });
-        if lock.is_none() && recording.is_none() {
+        let others = self.recording_notices(palette, cx);
+        if lock.is_none() && recording.is_none() && others.is_empty() {
             return None;
         }
         Some(
@@ -445,6 +457,7 @@ impl CallStage {
                 .flex_col()
                 .items_center()
                 .gap_2()
+                .children(others)
                 .children(recording)
                 .children(lock)
                 .into_any_element(),
@@ -1033,9 +1046,9 @@ fn join_details(join: &teams_proto::MeetingJoinInfo, palette: Palette) -> gpui::
 }
 
 /// A notice over the stage, as Teams' (the lock's, a recording's): its icon and heading with a Close, its line under.
-fn notice(
+pub(super) fn notice(
     (selector, glyph, heading): (&'static str, Glyph, &'static str),
-    line: SharedString,
+    line: impl IntoElement,
     palette: Palette,
     close: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -1075,7 +1088,12 @@ fn notice(
 }
 
 /// A link in the brand's colour, underlined, that opens `url` in the browser.
-fn link_text(selector: &'static str, text: SharedString, url: String, palette: Palette) -> gpui::Stateful<gpui::Div> {
+pub(super) fn link_text(
+    selector: &'static str,
+    text: SharedString,
+    url: String,
+    palette: Palette,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .debug_selector(move || selector.to_owned())
         .id(selector)

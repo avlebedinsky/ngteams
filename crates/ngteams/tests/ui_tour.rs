@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 202] = [
+const STEPS: [Step; 5 + 207] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1580,7 +1580,69 @@ const STEPS: [Step; 5 + 202] = [
             model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
         });
     }),
+    // More → Record and transcribe → Start recording: "Start recording and transcription" asks the spoken language
+    ("call-group-record", |shell, _, cx| {
+        recording_state(shell, None, cx);
+        with_stage(cx, |stage, cx| {
+            stage.show_meeting_info(false, cx);
+            stage.open_record_dialog(cx);
+        });
+    }),
+    // and in Teams Dark
+    ("call-group-record-dark", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+    }),
+    // the account's own recording: "Started by you", its privacy policy, and the red dot
+    ("call-group-recording-by-you-dark", |shell, _, cx| {
+        with_stage(cx, CallStage::close_record_dialog);
+        recording_state(shell, Some(LAB_A), cx);
+    }),
+    // Stop recording asks first
+    ("call-group-record-stop-dark", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.confirm_stop_recording(true, cx));
+    }),
+    // in Teams Light, it stopped, and a start the policy refused
+    ("call-group-recording-stopped", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+        with_stage(cx, |stage, cx| stage.confirm_stop_recording(false, cx));
+        recording_state(shell, None, cx);
+        let models = shell.read(cx).models().clone();
+        models.apply(
+            teams_core::Event::CallRecording {
+                call: teams_core::CallId::for_tests(GROUP_CALL),
+                recording: teams_core::CallRecording {
+                    phase: teams_core::RecordingPhase::Idle,
+                    problem: Some(teams_core::RecordingProblem {
+                        heading: "Couldn't start recording",
+                        detail: "Recording not started. Your IT admin has disabled Recording.",
+                    }),
+                },
+            },
+            cx,
+        );
+    }),
 ];
+
+/// The made-up group call recording, started by `by`, or not recording (`None`), as the roster tells it.
+fn recording_state(shell: &Entity<Shell>, by: Option<&str>, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::CallMeeting {
+            call: teams_core::CallId::for_tests(GROUP_CALL),
+            state: teams_core::MeetingState {
+                recording: by.map(|by| teams_core::Recording { by: Some(Mri::new(by)) }),
+                ..teams_core::MeetingState::default()
+            },
+        },
+        cx,
+    );
+}
 
 /// The made-up group call's meeting state, as the engine tells it: a timer running for a minute already, Lab Bee's
 /// recording, how to join, and the meeting `locked` or not.

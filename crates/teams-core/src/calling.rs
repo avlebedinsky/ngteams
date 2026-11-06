@@ -65,6 +65,8 @@
 
 mod captions;
 pub use captions::{CallCaptions, Caption, CaptionPhase};
+mod recording;
+pub use recording::{CallRecording, RecordingPhase, RecordingProblem};
 mod gallery;
 mod media;
 mod people;
@@ -153,6 +155,17 @@ pub enum CallAction {
     Captions { call: CallId, enabled: bool },
     /// Change shared spoken language after the user confirms everyone is speaking it.
     CaptionLanguage { call: CallId, language: String },
+    /// Start recording and transcription (More → Record and transcribe → Start recording, confirmed): the call's
+    /// `title` as Teams names its recording ("Call with …", a meeting's title), a meeting's `organizer`'s name, and the
+    /// spoken `language` picked (a `teams_proto::captions::SPOKEN_LANGUAGES` code).
+    Record {
+        call: CallId,
+        title: String,
+        organizer: Option<String>,
+        language: String,
+    },
+    /// Stop recording and transcription (Stop recording, confirmed), whoever started them.
+    StopRecording { call: CallId },
     /// A call from the chat `chat`: a 1:1 chat's other member, or a group chat's other members as the store holds
     /// them.
     Call { chat: String },
@@ -319,6 +332,8 @@ pub(crate) type Waiting = oneshot::Sender<Result<CallId, EngineError>>;
 pub(crate) enum Act {
     Captions(CallId, bool),
     CaptionLanguage(CallId, String),
+    /// A recording started (`Some`) or stopped.
+    Record(CallId, Option<teams_proto::captions::RecordStart>),
     Place(Placement),
     Join(String),
     /// The meeting that runs in a channel joined: the channel, and the meeting as CSA names it, read as the media is
@@ -394,6 +409,7 @@ enum CallStep {
     Push(Option<PushEvent>),
     Written(CallTried),
     CaptionWritten(captions::Operation, CallTried),
+    RecordWritten(recording::Operation, CallTried),
     /// A 1:1 call's new group chat made (or not) for someone added to it.
     ChatMade(Box<(CallId, Mri, CallTried)>),
     Due,
@@ -405,6 +421,17 @@ enum CallStep {
     MediaLost,
     Responded(DeliveryKey, bool),
     Look,
+}
+
+/// What the recording bot's write in flight (live captions' or a recording's) came to; never, while there is none.
+async fn service_written(
+    captions: Option<&mut (captions::Operation, Attempt)>,
+    recording: Option<&mut (recording::Operation, Attempt)>,
+) -> CallStep {
+    tokio::select! {
+        (operation, tried) = captions::next(captions) => CallStep::CaptionWritten(operation, tried),
+        (operation, tried) = recording::next(recording) => CallStep::RecordWritten(operation, tried),
+    }
 }
 
 /// The engine's hold on its calling, which runs as a task of its own ([`Calling::spawn`]).
@@ -458,6 +485,7 @@ impl CallingTask {
 pub(crate) struct Calling<C, T> {
     calls: Calls,
     captions: captions::Captions,
+    recording: recording::Recordings,
     outbox: Arc<Outbox<T>>,
     client: Arc<Client<HttpTransport<C>>>,
     media: CallMedia,
@@ -532,6 +560,7 @@ where
         Self {
             calls: Calls::new(parts.identity),
             captions: captions::Captions::default(),
+            recording: recording::Recordings::default(),
             outbox,
             client,
             media: parts.media,
@@ -594,11 +623,35 @@ where
         emit_to(&self.events, event);
     }
 
+    /// Microsoft's recording bot changed in the call's roster: live captions and a recording waiting for it go on.
+    fn service_changed(&mut self, call: CallId) {
+        self.caption_service_changed(call);
+        self.record_service_changed(call);
+    }
+
+    /// Microsoft's recording bot couldn't join the call.
+    fn service_join_failed(&mut self, call: CallId) {
+        self.record_join_failed(call);
+        if self.up == Some(call) {
+            self.caption_fail("Live captions could not join this call. Try again.");
+        }
+    }
+
+    /// An action of Microsoft's recording bot: live captions shown or hidden, their language, a recording.
+    fn service_act(&mut self, act: Act) -> Result<CallId, CallActionError> {
+        match act {
+            Act::Captions(call, enabled) => self.caption_toggle(call, enabled),
+            Act::CaptionLanguage(call, language) => self.caption_language(call, &language),
+            Act::Record(call, start) => self.record(call, start),
+            _ => Err(CallActionError::Call(CallError::NotNow)),
+        }
+    }
+
     /// The next thing to do; never, while there is nothing.
     async fn next(&mut self) -> CallStep {
         let looking = self.live.is_some();
         tokio::select! {
-            (operation, tried) = captions::next(self.captions.writing.as_mut()) => CallStep::CaptionWritten(operation, tried),
+            step = service_written(self.captions.writing.as_mut(), self.recording.writing.as_mut()) => step,
             made = people::made(self.making.as_mut()) => CallStep::ChatMade(Box::new(made)),
             event = next_push(self.push.as_mut()) => CallStep::Push(event),
             landed = land(self.writing.as_mut()) => match landed {
@@ -625,6 +678,7 @@ where
         match step {
             CallStep::Push(event) => self.pushed(event, now),
             CallStep::CaptionWritten(operation, tried) => self.caption_written(operation, &tried),
+            CallStep::RecordWritten(operation, tried) => self.record_written(operation, &tried),
             CallStep::ChatMade(made) => {
                 let (call, invitee, tried) = *made;
                 self.chat_made(call, invitee, &tried);
@@ -801,12 +855,8 @@ where
     /// What the machine tells: to the account, and to the media.
     fn told(&mut self, event: CallEvent, now: Instant) {
         match event {
-            CallEvent::CaptionService { call, .. } => self.caption_service_changed(call),
-            CallEvent::CaptionFailed { call } => {
-                if self.up == Some(call) {
-                    self.caption_fail("Live captions could not join this call. Try again.");
-                }
-            }
+            CallEvent::CaptionService { call, .. } => self.service_changed(call),
+            CallEvent::CaptionFailed { call } => self.service_join_failed(call),
             CallEvent::Incoming(incoming) => {
                 let group = incoming.group_chat.is_some();
                 self.offers.insert(incoming.call, (incoming.offer, group));
@@ -1148,6 +1198,7 @@ where
     fn ended(&mut self, call: CallId, end: End) {
         self.held_mute = None;
         self.caption_ended(call);
+        self.record_ended(call);
         if self.up == Some(call) {
             self.up = None;
         }
@@ -1426,6 +1477,7 @@ where
 
     fn look_at_media(&mut self, now: Instant) {
         self.caption_check(now);
+        self.record_check(now);
         let Some(live) = self.live.as_mut() else { return };
         let call = live.call;
         if self
@@ -1505,8 +1557,7 @@ where
     fn act(&mut self, act: Act, reply: Waiting) {
         let now = Instant::now();
         let answer = match act {
-            Act::Captions(call, enabled) => self.caption_toggle(call, enabled),
-            Act::CaptionLanguage(call, language) => self.caption_language(call, &language),
+            Act::Captions(..) | Act::CaptionLanguage(..) | Act::Record(..) => self.service_act(act),
             Act::Place(_) | Act::Join(_) | Act::JoinChannel(..) | Act::Answer(_) => return self.set_up(act, reply),
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),
             Act::HangUp(call) => self.hang_up(call, now),

@@ -494,7 +494,7 @@ impl CallStage {
         .into_any_element()
     }
 
-    /// More: Language and speech (captions), Video effects and settings (a build that shows video), and Audio settings
+    /// More: Record and transcribe, Language and speech (captions), Video effects and settings (a build that shows video), and Audio settings
     /// (the main window's settings on their Calls page).
     fn more(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let stage = cx.weak_entity();
@@ -505,6 +505,7 @@ impl CallStage {
                 .live(cx)
                 .is_some_and(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall);
         let tools = self.more_tools(cx);
+        let record = self.record_tools(cx);
         selected_by(
             "call-more",
             Button::new("call-more")
@@ -514,6 +515,7 @@ impl CallStage {
                 .child(tool_face(Glyph::MORE, self.caption("More")))
                 .tooltip("More actions")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, window, cx| {
+                    let menu = recording::record_menu(menu, &stage, record, window, cx);
                     let menu = meeting::more_items(menu, &stage, tools);
                     let menu = if video {
                         menu.item(effects_item("call-more-video-effects", stage.clone()))

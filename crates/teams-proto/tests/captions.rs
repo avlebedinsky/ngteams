@@ -228,3 +228,44 @@ async fn wrong_token_actor_and_read_only_refuse_before_any_post() {
     );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn recording_start_and_stop_carry_the_recorder_token_alone() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"CorrelationId":"synthetic"})))
+        .mount(&server)
+        .await;
+    let transport = transport(&server, true);
+    let link = CaptionCommandLink::parse(COMMAND).unwrap();
+    let start = teams_proto::captions::RecordStart {
+        title: "Call with Lab B".into(),
+        organizer: None,
+        language: "en-us".into(),
+        stamp: "20261106_120144".into(),
+    };
+    for write in [
+        CaptionWrite::record(&context(), &link, &actor(), &chat(), &start).unwrap(),
+        CaptionWrite::stop_recording(&context(), &link, &actor(), &chat()).unwrap(),
+    ] {
+        assert!(transport.deliver_caption(write).await.unwrap().unwrap().is_success());
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    for (request, action) in requests.iter().zip(["start", "stop"]) {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["action"], action);
+        assert_eq!(body["processingModes"], json!(["recording", "realTimeTranscript"]));
+        assert_eq!(body["participantSkypeToken"], "");
+        assert!(!request.headers.contains_key("x-skypetoken"));
+        assert!(request.headers.contains_key("requestid"));
+        let header = request.headers.get("authorization").unwrap().to_str().unwrap();
+        let claims: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(header.split('.').nth(1).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["aud"], RECORDER_AUDIENCE);
+    }
+}

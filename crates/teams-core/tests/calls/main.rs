@@ -21,6 +21,7 @@ mod flows;
 mod group;
 mod in_call;
 mod meeting_state;
+mod recording;
 mod share;
 mod support;
 mod video;

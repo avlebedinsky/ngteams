@@ -1,5 +1,5 @@
 //! Caption operations use their own outcome path: a service failure never fails the voice call.
-use teams_proto::captions::{CAPTION_SERVICE_MRI, CaptionService, CaptionWrite};
+use teams_proto::captions::{CAPTION_SERVICE_MRI, CaptionService, CaptionWrite, RecordStart};
 
 use super::{CallError, CallEvent, CallId, Calls};
 use crate::agent::Kind;
@@ -41,6 +41,27 @@ impl Calls {
         match language {
             Some(language) => CaptionWrite::language(&call.context, &service.command, &call.me, thread, language),
             None => CaptionWrite::start(&call.context, &service.command, &call.me, thread),
+        }
+        .map_err(|_| CallError::NotNow)
+    }
+
+    /// Starts recording and transcription as `start` names it (`Some`), or stops them (`None`), on the recording bot's
+    /// command link: the bot must be in the call already ([`Calls::caption_invite`] invites it).
+    ///
+    /// # Errors
+    /// The call must be connected and its recording bot's command link known; `start` must be one the web client
+    /// would send.
+    pub fn record_command(&self, id: CallId, start: Option<&RecordStart>) -> Result<CaptionWrite, CallError> {
+        let call = self
+            .call
+            .as_ref()
+            .filter(|call| call.id == id && call.phase == Phase::Connected)
+            .ok_or(CallError::NotNow)?;
+        let service = call.caption_service.as_ref().ok_or(CallError::NotNow)?;
+        let thread = call.caption_thread.as_deref().ok_or(CallError::NotNow)?;
+        match start {
+            Some(start) => CaptionWrite::record(&call.context, &service.command, &call.me, thread, start),
+            None => CaptionWrite::stop_recording(&call.context, &service.command, &call.me, thread),
         }
         .map_err(|_| CallError::NotNow)
     }

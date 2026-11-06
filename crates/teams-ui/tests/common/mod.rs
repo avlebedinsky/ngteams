@@ -1093,6 +1093,8 @@ impl Core for FakeCore {
         let named = match action {
             CallAction::Captions { call, .. }
             | CallAction::CaptionLanguage { call, .. }
+            | CallAction::Record { call, .. }
+            | CallAction::StopRecording { call }
             | CallAction::Answer { call }
             | CallAction::Decline { call }
             | CallAction::HangUp { call }

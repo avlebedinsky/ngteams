@@ -50,6 +50,7 @@ mod gallery;
 mod invite;
 mod meeting;
 mod people_pane;
+mod recording;
 mod share;
 mod transfer;
 pub use transfer::Asking;
@@ -246,6 +247,8 @@ pub struct CallStage {
     /// A recording ran when last seen, and its notice shows.
     recording_seen: bool,
     recording_notice: bool,
+    /// Record and transcribe's dialogs and notices.
+    record: recording::RecordUi,
     /// Meeting info's Copy join info put the join info on the clipboard.
     join_info_copied: bool,
     /// The live reactions' floating while some show.
@@ -341,6 +344,7 @@ impl CallStage {
             lock_notice: None,
             recording_seen: false,
             recording_notice: false,
+            record: recording::RecordUi::default(),
             join_info_copied: false,
             reacting: None,
             width: f32::MAX,
@@ -496,9 +500,12 @@ impl CallStage {
             self.float_reactions(active, cx);
             self.order_hands(active);
             self.meeting_seen(active);
+            self.record_problem_seen(cx);
         } else {
             self.confirm_end = false;
             self.confirm_lock = false;
+            self.record.dialog = None;
+            self.record.confirm_stop = false;
             // the call's Mute notifications held them back only while it ran
             crate::notify::mute_in_call(false, cx);
             if let Some(tiles) = &mut self.tiles {
@@ -1022,6 +1029,10 @@ impl Render for CallStage {
             .children(captions);
         let confirmation = self.end_confirmation(palette, cx);
         let lock = self.lock_confirmation(palette, cx);
+        let record = live.as_ref().and_then(|_| self.record_dialog_view(palette, cx));
+        let stop_record = live
+            .as_ref()
+            .and_then(|_| self.stop_recording_confirmation(palette, cx));
         let dialog = live.as_ref().and_then(|_| self.transfer_dialog(palette, cx));
         let sheet = crate::sheet::float(
             div().flex_1().min_h_0().w_full(),
@@ -1052,6 +1063,8 @@ impl Render for CallStage {
             .child(sheet)
             .children(confirmation)
             .children(lock)
+            .children(record)
+            .children(stop_record)
             .children(dialog)
     }
 }

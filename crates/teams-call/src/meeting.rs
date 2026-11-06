@@ -2,8 +2,9 @@
 //! call"), as its conversation and its roster tell it: the timer (the conversation's `meetingStates.timer`), the lock
 //! (`meetingDetails.meetingCapability.lockMeeting`), how to join it (`meetingDetails.invitation`), and a recording
 //! someone runs (Microsoft's recording bot in the roster, its endpoint's `processingModes.recording`). The account
-//! changes the timer and the lock ([`Calls::set_timer`], [`Calls::lock_meeting`]); it starts no recording (that would
-//! hand the user's token to the recording bot). Each change is told as [`CallEvent::Meeting`].
+//! changes the timer and the lock ([`Calls::set_timer`], [`Calls::lock_meeting`]) and starts or stops a recording
+//! through the recording bot's command link ([`Calls::record_command`]). Each change is told as
+//! [`CallEvent::Meeting`].
 
 use serde_json::Value;
 use teams_proto::{MeetingJoinInfo, MeetingTimer, Mri, TimerUpdate, UpdateMeetingSettings, UpdateMeetingStates};

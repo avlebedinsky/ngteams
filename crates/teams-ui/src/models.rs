@@ -339,6 +339,7 @@ impl Models {
             | Event::CameraOff { .. }
             | Event::AudioClosed { .. }
             | Event::CallCaptions { .. }
+            | Event::CallRecording { .. }
             | Event::CallParticipants { .. }
             | Event::Lobby { .. }
             | Event::CallOwn { .. }
