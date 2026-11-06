@@ -1,9 +1,15 @@
 //! A chat's system messages in Teams' words (`teams_ui::system_message`): the line or card each kind shows in a chat
 //! and the chat list's preview of it. Every value here is made up.
 
+// test code throughout (its helpers panic like the tests do)
+#![cfg(test)]
+
 use teams_store::Message;
 use teams_ui::chat_list;
-use teams_ui::system_message::{CardKind, Naming, Preview, Shown, duration_text, people, preview, shown};
+use teams_ui::system_message::{
+    self, CardKind, EventIcon, EventLine, Naming, Preview, Shown, Span, days_left, duration_text, expiry_clause,
+    people, preview,
+};
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
 const BEN: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
@@ -24,6 +30,7 @@ impl Naming for Names {
 
     fn name(&self, mri: &str, carried: Option<&str>) -> String {
         match mri {
+            ME => "Ann Able".to_owned(),
             BEN => "Ben Bee".to_owned(),
             CLEO => "Cleo Sea".to_owned(),
             _ => carried.unwrap_or("Unknown user").to_owned(),
@@ -31,12 +38,45 @@ impl Naming for Names {
     }
 }
 
-fn line(text: &str) -> Shown {
-    Shown::Line(text.to_owned())
+/// What a system message shows, its lines told by their words (their icons and marks checked on their own).
+#[derive(Debug, PartialEq, Eq)]
+enum Said {
+    Line(String),
+    Timed(String),
+    Card {
+        kind: CardKind,
+        title: String,
+        detail: String,
+    },
+    Nothing,
 }
 
-fn timed(text: &str) -> Shown {
-    Shown::TimedLine(text.to_owned())
+/// [`system_message::shown`], its lines as their words.
+fn shown(kind: &str, content: &str, conversation: &str, sender: Option<&str>, names: &dyn Naming) -> Option<Said> {
+    Some(
+        match system_message::shown(kind, content, conversation, sender, names)? {
+            Shown::Line(line) => Said::Line(line.text()),
+            Shown::TimedLine(line) => Said::Timed(line.text()),
+            Shown::Card { kind, title, detail } => Said::Card { kind, title, detail },
+            Shown::Nothing => Said::Nothing,
+        },
+    )
+}
+
+/// [`system_message::shown`]'s line, as it is.
+fn shown_line(kind: &str, content: &str, conversation: &str) -> EventLine {
+    match system_message::shown(kind, content, conversation, Some(BEN), &Names) {
+        Some(Shown::Line(line) | Shown::TimedLine(line)) => line,
+        other => panic!("not a line: {other:?}"),
+    }
+}
+
+fn line(text: &str) -> Said {
+    Said::Line(text.to_owned())
+}
+
+fn timed(text: &str) -> Said {
+    Said::Timed(text.to_owned())
 }
 
 fn part(mri: &str, seconds: u64) -> String {
@@ -64,33 +104,28 @@ fn a_length_is_worded_as_teams_words_it() {
 }
 
 #[test]
-fn a_meeting_chats_meeting_is_a_card_titled_by_the_chat() {
+fn a_meeting_chats_meeting_is_a_line_after_its_time_its_length_in_bold() {
     assert_eq!(
         shown("Event/Call", STARTED, MEETING, Some(BEN), &Names),
-        Some(Shown::Card {
-            kind: CardKind::MeetingStarted,
-            title: None,
-            detail: "Meeting started".to_owned()
-        })
+        Some(timed("Meeting started"))
     );
+    let end = ended(&[(BEN, 3697), (ME, 3697)]);
     assert_eq!(
-        shown(
-            "Event/Call",
-            &ended(&[(BEN, 1930), (ME, 1930)]),
-            MEETING,
-            Some(BEN),
-            &Names
-        ),
-        Some(Shown::Card {
-            kind: CardKind::MeetingEnded,
-            title: None,
-            detail: "Meeting ended: 32m 10s".to_owned()
-        })
+        shown_line("Event/Call", &end, MEETING),
+        EventLine {
+            icon: EventIcon::Meeting,
+            spans: vec![
+                Span::Text("Meeting ended: ".to_owned()),
+                Span::Strong("1h 1m 37s".to_owned())
+            ],
+        }
     );
+    assert_eq!(shown_line("Event/Call", STARTED, MEETING).icon, EventIcon::Meeting);
+    assert_eq!(shown_line("Event/Call", STARTED, ONE_TO_ONE).icon, EventIcon::Call);
     // an end with nobody in it: nothing, as in Teams
     assert_eq!(
         shown("Event/Call", &ended(&[]), MEETING, Some(BEN), &Names),
-        Some(Shown::Nothing)
+        Some(Said::Nothing)
     );
 }
 
@@ -139,6 +174,131 @@ fn recording(status: &str, code: &str, contents: &str) -> String {
     )
 }
 
+const LINK: &str = "https://madeup-my.sharepoint.com/:v:/g/personal/ben_madeup/MadeUpToken";
+
+/// A recording ready on its file in the organizer's (Cleo's) OneDrive, stopped by `terminator` when given.
+fn saved_recording(status: &str, code: &str, terminator: Option<&str>) -> String {
+    let terminator = terminator
+        .map(|mri| format!("<RecordingTerminatorId value=\"{mri}\" />"))
+        .unwrap_or_default();
+    format!(
+        "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"{status}\" code=\"{code}\" />\
+         <Title>Weekly sync</Title><a href=\"{LINK}\">Play</a>\
+         <MeetingOrganizerId value=\"{CLEO}\" /><RecordingInitiatorId value=\"{ME}\" isAutoRecording=\"False\" />\
+         {terminator}<RecordingContent contentTypes=\"Recording+Transcript\" duration=\"0:28:38\">\
+         <item type=\"onedriveForBusinessVideo\" uri=\"{LINK}\" driveId=\"b!drive1\" driveItemId=\"ITEM1\" />\
+         </RecordingContent></URIObject>"
+    )
+}
+
+#[test]
+fn a_meeting_chat_names_everyone_by_name_and_tells_a_recording_saved() {
+    let kind = "RichText/Media_CallRecording";
+    // the account by its name, as Teams' meeting chat names it ("Nick started recording.")
+    assert_eq!(
+        shown(kind, &saved_recording("Initial", "0", None), MEETING, Some(ME), &Names),
+        Some(timed("Ann Able started recording and transcription"))
+    );
+    assert_eq!(
+        shown(
+            kind,
+            &saved_recording("ChunkFinished", "202", Some(BEN)),
+            MEETING,
+            Some(ME),
+            &Names
+        ),
+        Some(timed("Recording and transcription stopped"))
+    );
+    let ready = shown_line(kind, &saved_recording("Success", "200", None), MEETING);
+    assert_eq!(ready.icon, EventIcon::RecordingSaved);
+    assert_eq!(ready.text(), "Recording has been saved to Cleo Sea's OneDrive.");
+    assert!(
+        ready.spans.iter().any(|span| matches!(
+            span,
+            Span::Expiry { link, file } if link == LINK && file.drive == "b!drive1" && file.item == "ITEM1"
+        )),
+        "{ready:?}"
+    );
+    // elsewhere the account is "You", and a ready recording is its card
+    assert_eq!(
+        shown(kind, &saved_recording("Initial", "0", None), GROUP, Some(ME), &Names),
+        Some(timed("You started recording and transcription"))
+    );
+    assert!(matches!(
+        shown(kind, &saved_recording("Success", "200", None), GROUP, Some(ME), &Names),
+        Some(Said::Card {
+            kind: CardKind::Recording,
+            ..
+        })
+    ));
+    let started = shown_line(kind, &saved_recording("Initial", "0", None), MEETING);
+    assert_eq!(started.icon, EventIcon::RecordingStarted);
+    // without an organizer named: whose OneDrive isn't said
+    assert_eq!(
+        shown(
+            kind,
+            &recording("Success", "200", "Recording+Transcript"),
+            MEETING,
+            Some(BEN),
+            &Names
+        ),
+        Some(timed("Recording has been saved to OneDrive."))
+    );
+}
+
+#[test]
+fn a_recording_stopped_names_who_stopped_it() {
+    let kind = "RichText/Media_CallRecording";
+    let stopped = |terminator: &str| {
+        format!(
+            "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"ChunkFinished\" code=\"202\" />\
+             <RecordingTerminatorId value=\"{terminator}\" /><RecordingContent contentTypes=\"Recording\" \
+             duration=\"0:01:00\"></RecordingContent></URIObject>"
+        )
+    };
+    assert_eq!(
+        shown(kind, &stopped(BEN), MEETING, Some(BEN), &Names),
+        Some(timed("Ben Bee stopped recording."))
+    );
+    assert_eq!(
+        shown_line(kind, &stopped(BEN), MEETING).icon,
+        EventIcon::RecordingStopped
+    );
+}
+
+#[test]
+fn an_expiry_is_counted_in_days_up() {
+    let day = 24 * 60 * 60 * 1_000;
+    let now = 1_000_000_000_000;
+    assert_eq!(days_left(now + 102 * day + 1, now), Some(103));
+    assert_eq!(days_left(now + 120 * day, now), Some(120));
+    assert_eq!(days_left(now + 1, now), Some(1));
+    assert_eq!(days_left(now, now), None);
+    assert_eq!(expiry_clause(now + 120 * day, now), " and will expire in 120 days");
+    assert_eq!(expiry_clause(now + 5, now), " and will expire in 1 day");
+    assert_eq!(expiry_clause(now - 5, now), "");
+}
+
+#[test]
+fn an_anonymous_member_is_marked_unverified() {
+    let joined = format!(
+        r#"{{"eventtime":1,"initiator":"{BEN}","members":[{{"id":"8:teamsvisitor:abc","friendlyname":"Note Taker"}}]}}"#
+    );
+    let line = shown_line("ThreadActivity/MemberJoined", &joined, MEETING);
+    assert_eq!(line.icon, EventIcon::Invited);
+    assert_eq!(
+        line.spans,
+        vec![
+            Span::Text("Note Taker".to_owned()),
+            Span::Unverified,
+            Span::Text(" was invited to the meeting.".to_owned())
+        ]
+    );
+    let left = shown_line("ThreadActivity/MemberLeft", &joined, MEETING);
+    assert_eq!(left.icon, EventIcon::Left);
+    assert_eq!(left.text(), "Note Taker left the chat.");
+}
+
 #[test]
 fn a_recording_is_a_line_while_it_runs_and_a_card_once_ready() {
     let kind = "RichText/Media_CallRecording";
@@ -170,7 +330,7 @@ fn a_recording_is_a_line_while_it_runs_and_a_card_once_ready() {
             Some(BEN),
             &Names
         ),
-        Some(timed("Recording stopped. Saving recording\u{2026}"))
+        Some(timed("Recording stopped."))
     );
     assert_eq!(
         shown(
@@ -186,13 +346,13 @@ fn a_recording_is_a_line_while_it_runs_and_a_card_once_ready() {
         shown(
             kind,
             &recording("Success", "200", "Recording+Transcript"),
-            MEETING,
+            GROUP,
             Some(BEN),
             &Names
         ),
-        Some(Shown::Card {
+        Some(Said::Card {
             kind: CardKind::Recording,
-            title: Some("Weekly sync-Meeting Recording".to_owned()),
+            title: "Weekly sync-Meeting Recording".to_owned(),
             detail: "Recording and transcript \u{b7} 16m 50s".to_owned()
         })
     );
@@ -205,7 +365,7 @@ fn a_recording_is_a_line_while_it_runs_and_a_card_once_ready() {
             Some(BEN),
             &Names
         ),
-        Some(Shown::Nothing)
+        Some(Said::Nothing)
     );
     // a state no capture showed: the placeholder stands for it
     assert_eq!(
@@ -221,20 +381,19 @@ fn a_recording_is_a_line_while_it_runs_and_a_card_once_ready() {
 }
 
 #[test]
-fn a_transcript_is_a_card() {
+fn a_transcript_is_a_card_but_in_a_meeting_chat_whose_recap_card_tells_it() {
+    let transcript = r#"{\"callId\":\"c\",\"isDeleted\":false}"#;
     assert_eq!(
-        shown(
-            "RichText/Media_CallTranscript",
-            r#"{\"callId\":\"c\",\"isDeleted\":false}"#,
-            MEETING,
-            Some(BEN),
-            &Names
-        ),
-        Some(Shown::Card {
+        shown("RichText/Media_CallTranscript", transcript, GROUP, Some(BEN), &Names),
+        Some(Said::Card {
             kind: CardKind::Transcript,
-            title: Some("Transcript".to_owned()),
+            title: "Transcript".to_owned(),
             detail: "Transcript is available".to_owned()
         })
+    );
+    assert_eq!(
+        shown("RichText/Media_CallTranscript", transcript, MEETING, Some(BEN), &Names),
+        Some(Said::Nothing)
     );
 }
 
@@ -260,7 +419,7 @@ fn members_joining_and_leaving_are_worded_by_the_chat() {
     );
     assert_eq!(
         shown(joined, &members(&[ME], false), MEETING, Some(MEETING), &Names),
-        Some(line("You were invited to the meeting."))
+        Some(line("Ann Able was invited to the meeting."))
     );
     assert_eq!(
         shown(joined, &members(&[BEN, CLEO], false), MEETING, Some(MEETING), &Names),
@@ -343,7 +502,7 @@ fn additions_removals_and_the_chats_name_are_worded_as_in_teams() {
     );
     assert_eq!(
         shown(kind, &add(BEN, &[BOT], ""), GROUP, Some(GROUP), &Names),
-        Some(Shown::Nothing)
+        Some(Said::Nothing)
     );
 }
 

@@ -340,28 +340,41 @@ reads them, `teams_ui::system_message` words them). A kind or a shape not listed
   carries `<conversationType>"huddleGroupCall"</conversationType>`, and its start names the starter in a
   `<partlist type="started">`. The web client takes the length from the last participant's `<duration>` and draws
   nothing for an end without one (an end with `count="0"` was seen). In a meeting chat it shows "Meeting started" and
-  "Meeting ended: <length>" (the native client: as a card titled by the chat's name, with the time); in a 1:1 or
+  "Meeting ended: <length>" (the length in bold), each a line after its icon and time, the end followed by the
+  meeting's recap card ([recap.md](recap.md#what-the-web-client-shows)); a start followed at once by its own end is
+  left out (a lab capture of 2026-11-05: the meeting transcribed only showed its end alone). In a 1:1 or
   group chat "Call started", "Call ended <length>", or "Call missed" for someone else's call with fewer than two
   participants; a huddle "<name> started a meeting." and "Meeting ended <length>". A length reads `1h 2m 3s`, its
   zero parts left out.
 - **`RichText/Media_CallRecording`**: a `<URIObject type="Video.2/CallRecording.1">` with
   `<RecordingStatus status code>`, `<Title>` (the meeting's), `<a href>` (the player's link, empty until ready),
-  `<OriginalName v>` (the file's name), `<RecordingInitiatorId value isAutoRecording>`, and
-  `<RecordingContent contentTypes duration>` (`Recording`, `Transcript` or `Recording+Transcript`; none in a
-  channel's; the length a .NET time span, `h:mm:ss.fffffff`). Three states were seen, each a message of its own:
-  `Initial`/`0` (started: "<name> started recording." or "… started recording and transcription"),
-  `ChunkFinished`/`202` (stopped: "Recording stopped. Saving recording…", "Recording and transcription stopped") and
-  `Success`/`200` (ready: the recording's card, its name and length; in a meeting's chat "View recap" opens its
-  Recap tab, [recap.md](recap.md), elsewhere Teams on the web). The `Transcript`
-  half of a recording is drawn as nothing, as the web client does. Another state or contents is no event.
+  `<OriginalName v>` (the file's name), `<MeetingOrganizerId value>` and `<MeetingOrganizerTenantId value>`,
+  `<RecordingInitiatorId value isAutoRecording>`, `<RecordingTerminatorId value>` (once someone stopped it),
+  `<Identifiers>` (`<Id type="callId" value>`: the call its meeting's end names), and
+  `<RecordingContent contentTypes timestamp duration canVideoExpire>` (`Recording`, `Transcript` or
+  `Recording+Transcript`; none in a channel's; `timestamp` when it began, UTC with 7 decimals; the length a .NET time
+  span, `h:mm:ss.fffffff`), which once ready holds `<item type="onedriveForBusinessVideo" uri driveId driveItemId>`
+  (the file in the organizer's OneDrive) and `<item type="onedriveForBusinessTranscript" uri id driveId
+  driveItemId>`. Three states were seen, each a message of its own: `Initial`/`0` (started: "<name> started
+  recording." or "… started recording and transcription"), `ChunkFinished`/`202` (stopped: "<name> stopped
+  recording." with a terminator, else "Recording stopped.", or "Recording and transcription stopped") and
+  `Success`/`200` (ready: in a meeting chat "Recording has been saved to <organizer>'s OneDrive and will expire in
+  <n> days." with "Remove expiration" for the organizer, the expiry read from the file, [recap.md](recap.md); in a
+  1:1 or group chat the recording's card, its name and length, opening Teams on the web). A meeting chat names
+  everyone by name, the account too (the lab account's own name before "started recording.", and the user's own name in
+  their Teams). The `Transcript` half of a recording is drawn as nothing, as the web client does. Another state or
+  contents is no event.
 - **`RichText/Media_CallTranscript`**: JSON with every quote escaped (`{\"callId\":…}`): `callId`, `scopeId`,
-  `iCalUid`, `meetingOrganizerId`, `isDeleted` (always `false` here), `isExportedToOdsp`. Drawn as the transcript's
-  card ("Transcript is available"), read in the meeting's Recap tab ([recap.md](recap.md)).
+  `iCalUid`, `meetingOrganizerId`, `isDeleted` (always `false` here), `isExportedToOdsp`. In a meeting chat it draws
+  nothing of its own: the meeting's recap card holds its Transcript chip; elsewhere the transcript's card
+  ("Transcript is available"). Read in the meeting's Recap tab ([recap.md](recap.md)).
 - **`ThreadActivity/MemberJoined` and `MemberLeft`**: JSON `{eventtime, initiator, members: [{id, friendlyname,
   meetingMemberType?}]}`; `meetingMemberType` was only ever `temp` (joined for the meeting). A meeting chat: "<names>
   was/were invited to the meeting.", "<names> left the chat."; a temporary member "has temporarily joined the chat.",
   "no longer has access to the chat."; another chat "joined the conversation.". Names: one, "A and B", "A and n
-  others"; a member's `friendlyname` names them when no profile does (a visitor's).
+  others"; a member's `friendlyname` names them when no profile does (a visitor's). Teams draws its unverified mark
+  after the name of someone who isn't verified (the user's Teams showed it for a note-taking bot invited to a
+  meeting); the native client draws it for a Teams visitor (`8:teamsvisitor:`), the one such member a store showed.
 - **`ThreadActivity/TopicUpdate`** (`<topicupdate>` with `initiator` and `value`): "<name> named the meeting <value>."
   in a meeting chat, "<name> changed the group name to <value>." elsewhere, "… removed the group name …" without one.
 - **`ThreadActivity/DeleteMember`** (`<deletemember>` with `initiator` and `target`s): the initiator alone "left the

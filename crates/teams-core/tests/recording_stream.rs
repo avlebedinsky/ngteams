@@ -251,3 +251,52 @@ async fn a_recording_s_file_says_whether_it_may_be_downloaded() {
     ));
     rig.handle.shutdown();
 }
+
+#[tokio::test]
+async fn a_recording_s_expiry_is_read_from_its_item() {
+    let rig = running_engine().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/personal/made_up_user_contoso_test/_api/v2.1/drives/b!madeup/items/ITEM1",
+        ))
+        .and(query_param("$select", "expiration"))
+        .and(header("authorization", "Bearer synthetic-site-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
+            {"expiration": {"expirationDateTime": "2027-02-14T17:30:00Z", "isExpirationModifiable": true}}
+        )))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    assert_eq!(
+        rig.handle
+            .recording_expiration(SHARE, "b!madeup", "ITEM1")
+            .await
+            .unwrap(),
+        Some(1_802_626_200_000)
+    );
+    // refused, then failed on the way; a link off a personal site is never asked for
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403))
+        .up_to_n_times(1)
+        .mount(&rig.server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&rig.server)
+        .await;
+    assert!(matches!(
+        rig.handle.recording_expiration(SHARE, "b!madeup", "ITEM1").await,
+        Err(EngineError::FileUnavailable)
+    ));
+    assert!(matches!(
+        rig.handle.recording_expiration(SHARE, "b!madeup", "ITEM1").await,
+        Err(EngineError::FileUnread)
+    ));
+    assert!(matches!(
+        rig.handle
+            .recording_expiration("https://example.com/no-file", "b!madeup", "ITEM1")
+            .await,
+        Err(EngineError::FileUnavailable)
+    ));
+    rig.handle.shutdown();
+}

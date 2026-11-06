@@ -20,11 +20,11 @@
 use std::sync::Arc;
 
 use teams_proto::recap::transcript_language;
-use teams_proto::recording::{read_manifest, read_recording_file};
+use teams_proto::recording::{read_expiration, read_manifest, read_recording_file};
 use teams_proto::transcript::{MAX_TRANSCRIPT, read_vtt};
 use teams_proto::{
     Client, Credentials, HttpError, HttpTransport, MediaSegmentLink, MeetingContent, MeetingContents, Presentation,
-    RecordingAccess, RecordingFile, RecordingManifest, TranscriptLocation,
+    RecordingAccess, RecordingExpiration, RecordingFile, RecordingManifest, TranscriptLocation,
 };
 
 use crate::engine::{EngineError, Responder};
@@ -98,6 +98,21 @@ impl<C: Credentials + 'static> Recaps<C> {
                 }),
                 Err(error) => {
                     log::info!("a meeting recording's item couldn't be read: {error}");
+                    Err(file_error(&error))
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// When the recording `read` names expires (ms since the epoch), as its item says; `None` when it says none.
+    pub(crate) fn expiration(&self, read: RecordingExpiration, reply: Responder<Option<i64>>) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client.transport().recording_expiration(&read).await {
+                Ok(answer) => Ok(read_expiration(answer.body())),
+                Err(error) => {
+                    log::info!("a meeting recording's expiry couldn't be read: {error}");
                     Err(file_error(&error))
                 }
             };

@@ -19,6 +19,9 @@
 //!   (it selects `accessViewpoint` among the item's other fields): whether the account may download the recording
 //!   (`accessViewpoint.canDownload`), its file name and size ([`read_recording_file`]). Its bytes are read at the
 //!   download link Graph hands out for its sharing link, as any shared file's ([`crate::FileDownload`]).
+//! - **When it expires** is a read of its item on the same site ([`RecordingExpiration`]):
+//!   `GET <site>/_api/v2.1/drives/<drive>/items/<item>?$select=expiration`, as the web client reads it for the meeting
+//!   chat's recap card ("Expires in 103 days"); its answer's `expiration.expirationDateTime` ([`read_expiration`]).
 
 use std::fmt;
 
@@ -172,6 +175,46 @@ pub fn read_recording_file(body: &[u8]) -> Option<RecordingAccess> {
         name,
         size,
     })
+}
+
+/// Where a recording's expiry is read: its item, on the personal site that holds it, with that site's token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordingExpiration {
+    site: DriveSite,
+    url: String,
+}
+
+impl RecordingExpiration {
+    /// The expiry of item `item` of drive `drive`, on the personal site `link` is on (as [`RecordingManifest::of`]).
+    #[must_use]
+    pub fn of(link: &str, drive: &str, item: &str) -> Option<Self> {
+        let (site, item) = item_address(link, drive, item)?;
+        let url = format!("{item}?$select=expiration");
+        Some(Self { site, url })
+    }
+
+    /// The personal site the recording is on: its token's audience.
+    #[must_use]
+    pub fn site(&self) -> &DriveSite {
+        &self.site
+    }
+
+    /// The address its expiry is read at.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
+/// When the recording an item read ([`RecordingExpiration`]) answered for expires, ms since the epoch: its
+/// `expiration.expirationDateTime` (RFC 3339 with an offset, as captured). `None` when it says none (a recording set
+/// never to expire has no date), or the answer isn't one.
+#[must_use]
+pub fn read_expiration(body: &[u8]) -> Option<i64> {
+    let answer: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let text = answer.get("expiration")?.get("expirationDateTime")?.as_str()?;
+    let at = time::OffsetDateTime::parse(text.trim(), &time::format_description::well_known::Rfc3339).ok()?;
+    i64::try_from(at.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
 /// The personal site of `link`: an address on it, or a sharing link to one of its files (`/:<kind>:/<g|r>/personal/…`).

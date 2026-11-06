@@ -12,8 +12,11 @@ browser and "Download as .vtt"). No value from it is copied here; the ids below 
   participants' count, Search, chat details and "…".
 - **The chat** shows, once the meeting ended, a recap card: the meeting's name and the span of its first recording,
   Share and "View recap", its contents (a Transcript chip) and the recording's thumbnail ("Saving…" while it is
-  processed, "2 recordings" with two, "Expires in 120 days"). A recording's own message ("Recording has been saved to
-  <organizer>'s OneDrive…") and the start and stop lines stay in the chat. "View recap" opens the Recap tab.
+  processed, "2 recordings" with two, "Expires in 120 days" with one, "Set to expire" with two). A recording's own
+  message ("Recording has been saved to <organizer>'s OneDrive and will expire in 120 days. Remove expiration") and
+  the start and stop lines stay in the chat, each a line after its icon. "View recap" opens the Recap tab. The span
+  is the meeting's schedule for a scheduled one (the user's Teams: "6:30 PM - 7:00 PM" for a recording begun at
+  6:31), its first recording's for one met now, its transcript's for one only transcribed.
 - **The Recap tab**: a box with the meeting's day and span (the earliest start to the latest end of what it left) and
   its menu of the meeting's sessions, the one shown checked; "Part 1", "Part 2" when it was recorded more than once;
   Share (a dialog: recipients to share with and grant access to, a message, Copy link, Share), Watch in browser (the
@@ -80,6 +83,11 @@ browser and "Download as .vtt"). No value from it is copied here; the ids below 
   site's `_layouts/15/download.aspx?UniqueId=<listItemUniqueId>` (cookies), answered `video/mp4` with
   `content-disposition: attachment; filename="<meeting>-<yyyymmdd_hhmmss>-Meeting Recording.mp4"` (the item's name).
   Seen in a lab capture of 2026-11-06 (`team-manage` as lab account a, its own "Meeting with AI" recap).
+- **A recording's expiry**: the chat's recap card reads the recording's item,
+  `GET https://<tenant>-my.sharepoint.com/_api/v2.1/drives/<drive>/items/<item>?$select=expiration,…` (with
+  `accessViewpoint`, `sharepointIds/siteUrl` and more) with the site's SharePoint token, answered
+  `{expiration: {expirationDateTime: "<RFC 3339 with an offset>", isExpirationModifiable: true}, …}`: 120 days after
+  the recording was saved, as the tenant set it ("Expires in 120 days", the days counted up).
 - **The license**: the web client reads Graph's `users/<oid>/licenseDetails` to choose the Copilot upsell; both
   accounts it was seen with had no Copilot plan.
 - **Share → Copy link** copies
@@ -161,3 +169,10 @@ recipients (a grant and a post), Delete recap content and the transcript's Delet
 app), the attendance report (the organizer's reports), Notes (Loop), feedback, Download as .docx, and everything
 Copilot: the AI summary, the Speakers chip's speaker insights and their "Upgrade Copilot" upsells (left out by the
 user's choice).
+
+The chat's recap card (`teams_ui::meeting_recap`) is worked out from the chat's own messages (each recording's call,
+file, start and length, the transcript's call); it reads only the recording's thumbnail (Graph, as a shared file's) and
+its expiry (`RecordingExpiration`: the item read above with `$select=expiration` alone, on the personal site's own
+path). View recap and the Transcript chip open the Recap tab at the card's first recording (the chip its transcript from
+the top), the thumbnail plays it there, and Share → Copy link copies the same recap link as the tab's Share. Share's
+recipients and "Remove expiration" (writes) are left out.

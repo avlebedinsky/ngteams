@@ -90,7 +90,7 @@ fn asked(rig: &Rig, what: &str) -> usize {
 }
 
 #[test]
-fn view_recap_on_the_recordings_card_shows_the_recap_tab() {
+fn view_recap_on_the_meetings_recap_card_shows_the_recap_tab() {
     let rig = rig(false);
     let (shell, cx) = shell_window(&rig, fixtures::MEETING);
     assert!(
@@ -104,11 +104,12 @@ fn view_recap_on_the_recordings_card_shows_the_recap_tab() {
         0,
         "nothing read before the Recap shows"
     );
-    click(cx, "view-recap-5");
+    click(cx, "view-recap-6");
     assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Recap);
-    // the card's recording is the part shown: the second
+    // the card's recording is the part shown: the first
     let shown = recap(&shell, cx);
-    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 1);
+    assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 0);
+    click(cx, "recap-part-1");
     click(cx, "recap-part-0");
     assert!(cx.debug_bounds("chat-tab-recap shown").is_some());
     assert!(cx.debug_bounds("recap-view").is_some());
@@ -131,12 +132,33 @@ fn view_recap_on_the_recordings_card_shows_the_recap_tab() {
     assert_eq!(
         asked(&rig, "meeting_transcript"),
         2,
-        "each part shown (Part 2 from the card, then Part 1) has its transcript read"
+        "each part shown (Part 1 from the card, then Part 2) has its transcript read"
     );
-    // back to Chat, and the first recording's card shows Part 1
+    click(cx, "recap-part-1");
+    the_card_s_transcript_and_thumbnail_open_part_1(&shell, &shown, cx);
+}
+
+/// Back to Chat: the card's Transcript chip shows Part 1's transcript, its thumbnail plays Part 1's recording.
+fn the_card_s_transcript_and_thumbnail_open_part_1(
+    shell: &Entity<Shell>,
+    shown: &Entity<RecapView>,
+    cx: &mut VisualTestContext,
+) {
     click(cx, "chat-tab-chat");
-    click(cx, "view-recap-2");
+    click(cx, "recap-card-transcript-6");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Recap);
     assert_eq!(cx.update(|_, cx| shown.read(cx).selected()), 0);
+    assert!(
+        cx.debug_bounds("recap-ai-notice").is_some(),
+        "the transcript from its top"
+    );
+    click(cx, "chat-tab-chat");
+    click(cx, "recap-card-thumbnail-6");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Recap);
+    assert!(
+        cx.debug_bounds("video-player-recap-0").is_some(),
+        "the recording's player made to play"
+    );
 }
 
 #[test]

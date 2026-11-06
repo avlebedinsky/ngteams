@@ -1212,7 +1212,8 @@ impl Shell {
         self.give_title(cx);
     }
 
-    /// Gives the chat view its chat's name as the list has it, when it is a name: a meeting's card is titled by it.
+    /// Gives the chat view its chat's name as the list has it, when it is a name: a meeting's recap card is titled by
+    /// it.
     fn give_title(&mut self, cx: &mut Context<Self>) {
         let (Some(chat), Main::Chat(id)) = (&self.chat, &self.main) else {
             return;
@@ -2098,7 +2099,7 @@ impl Shell {
                 this.run_workflow(flow.clone(), message.clone(), window, cx);
             }
             ChatViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
-            ChatViewEvent::OpenRecap(recording) => this.open_recap(recording.clone(), window, cx),
+            ChatViewEvent::OpenRecap { recording, open } => this.open_recap(recording.clone(), *open, window, cx),
             // a chat has no channel's thread or meeting card
             ChatViewEvent::Action { .. } | ChatViewEvent::OpenThread { .. } | ChatViewEvent::EditMeeting { .. } => {}
         })

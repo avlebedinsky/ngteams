@@ -1,14 +1,20 @@
 //! A chat's system messages in Teams' words: what a call's start and end, a meeting recording, a transcript and the
 //! thread's own events (members added, joined, left or removed, the chat's name, a meeting chat's policy) show, in the
-//! chat (a centred line, or a card) and in the chat list's preview line. The words are the web client's English ones;
-//! which one a message takes follows the web client's own choice (the meeting chat's, a group chat's meeting, a call's).
+//! chat (a line with its icon, or a card) and in the chat list's preview line. The words are the web client's English
+//! ones; which one a message takes follows the web client's own choice (the meeting chat's, a group chat's meeting, a
+//! call's).
+//!
+//! A meeting chat names everyone by name, the account too ("Nick started recording."), as Teams' meeting chat does; a
+//! ready recording there is the line "Recording has been saved to <organizer>'s OneDrive and will expire in n days."
+//! and the transcript is told by the meeting's recap card under its end ([`crate::meeting_recap`]), not a card of its
+//! own.
 //!
 //! `teams_proto::chat` reads the content ([`chat_event`], [`thread_activity`]); a shape it doesn't read is no event
 //! here, and the views keep their placeholder for it.
 
 use teams_proto::chat::{
-    CallEnd, CallStart, ChatEvent, ChatPolicy, Members, MessageType, Recording, RecordingContents, RecordingStatus,
-    Removed, ThreadActivity, TopicUpdate, chat_event, is_call_media, thread_activity,
+    CallEnd, CallStart, ChatEvent, ChatPolicy, Members, MessageType, Recording, RecordingContents, RecordingItem,
+    RecordingStatus, Removed, ThreadActivity, TopicUpdate, chat_event, is_call_media, thread_activity,
 };
 
 /// A meeting card's title when the chat has no name.
@@ -41,11 +47,10 @@ pub fn notifies(message_type: &str) -> bool {
     matches!(message_type, "Text" | "RichText/Html" | "RichText/Media_Card")
 }
 
-/// What a card shows a picture of.
+/// What a card shows a picture of: a 1:1 or group chat's recording or transcript (a meeting chat's are told by its
+/// recap card).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardKind {
-    MeetingStarted,
-    MeetingEnded,
     /// A recording that is ready: played in Teams on the web.
     Recording,
     /// A transcript: read in Teams on the web.
@@ -57,36 +62,123 @@ impl CardKind {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::MeetingStarted => "meeting-started",
-            Self::MeetingEnded => "meeting-ended",
             Self::Recording => "recording",
             Self::Transcript => "transcript",
         }
     }
+}
 
-    /// Whether the card links to Teams on the web (a recording is played there, a transcript read there).
+/// The icon before a system message's line, as Teams draws it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventIcon {
+    /// Someone joined the chat, or was added to it.
+    Joined,
+    /// Someone was invited to the meeting.
+    Invited,
+    /// Someone left, or no longer has access.
+    Left,
+    /// Someone was removed.
+    Removed,
+    /// The chat's name set or taken away.
+    Named,
+    /// A meeting chat's policy.
+    Info,
+    /// A meeting's start or end (a group chat's meeting too).
+    Meeting,
+    /// A call's start or end.
+    Call,
+    /// A call missed.
+    Missed,
+    /// A recording started (Teams' record mark, in the brand colour).
+    RecordingStarted,
+    /// A recording stopped.
+    RecordingStopped,
+    /// A recording saved to OneDrive.
+    RecordingSaved,
+}
+
+impl EventIcon {
+    /// The selectors' name for it.
     #[must_use]
-    pub const fn opens_on_the_web(self) -> bool {
-        matches!(self, Self::Recording | Self::Transcript)
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Joined => "joined",
+            Self::Invited => "invited",
+            Self::Left => "left",
+            Self::Removed => "removed",
+            Self::Named => "named",
+            Self::Info => "info",
+            Self::Meeting => "meeting",
+            Self::Call => "call",
+            Self::Missed => "missed",
+            Self::RecordingStarted => "recording-started",
+            Self::RecordingStopped => "recording-stopped",
+            Self::RecordingSaved => "recording-saved",
+        }
+    }
+}
+
+/// A piece of a system message's line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Span {
+    Text(String),
+    /// Drawn in bold: a meeting's length.
+    Strong(String),
+    /// Teams' "unverified" mark after the name before it: someone who joined anonymously.
+    Unverified,
+    /// " and will expire in n days" for the recording `file` of the sharing link `link` holds, once its item says when
+    /// (nothing until then, or when it never expires).
+    Expiry {
+        link: String,
+        file: RecordingItem,
+    },
+}
+
+/// A system message's line: its icon, then its words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventLine {
+    pub icon: EventIcon,
+    pub spans: Vec<Span>,
+}
+
+impl EventLine {
+    /// `text` alone after `icon`.
+    #[must_use]
+    pub fn plain(icon: EventIcon, text: impl Into<String>) -> Self {
+        Self {
+            icon,
+            spans: vec![Span::Text(text.into())],
+        }
+    }
+
+    /// Its words as plain text (a mark and an expiry not yet known left out).
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.spans
+            .iter()
+            .map(|span| match span {
+                Span::Text(text) | Span::Strong(text) => text.as_str(),
+                Span::Unverified | Span::Expiry { .. } => "",
+            })
+            .collect()
     }
 }
 
 /// A system message as Teams shows it in a chat.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
-    /// A centred line.
-    Line(String),
-    /// A centred line after the message's time: a call's or a recording's state.
-    TimedLine(String),
-    /// A card: a meeting's start or end (the chat's name for its title), a recording or a transcript.
+    /// A line with its icon.
+    Line(EventLine),
+    /// A line with its icon, after the message's time: a call's or a recording's state, a meeting's start or end.
+    TimedLine(EventLine),
+    /// A card: a 1:1 or group chat's recording or transcript.
     Card {
         kind: CardKind,
-        /// The card's own title; `None` for a meeting's, which takes the chat's name.
-        title: Option<String>,
+        title: String,
         detail: String,
     },
-    /// Nothing: Teams draws nothing for it (a call with no length, a transcript's half of a recording, a lone bot
-    /// added).
+    /// Nothing: Teams draws nothing for it (a call with no length, a transcript's half of a recording, a meeting chat's
+    /// transcript, a lone bot added).
     Nothing,
 }
 
@@ -96,6 +188,25 @@ pub trait Naming {
     fn is_me(&self, mri: &str) -> bool;
     /// Someone's name: their profile's, else `carried` (the name the event gives), else a placeholder; never an MRI.
     fn name(&self, mri: &str, carried: Option<&str>) -> String;
+}
+
+/// A meeting chat's naming: everyone by name, the account too, as Teams' meeting chat names them.
+struct ByName<'n>(&'n dyn Naming);
+
+impl Naming for ByName<'_> {
+    fn is_me(&self, _: &str) -> bool {
+        false
+    }
+
+    fn name(&self, mri: &str, carried: Option<&str>) -> String {
+        self.0.name(mri, carried)
+    }
+}
+
+/// Whether `mri` joined anonymously (a Teams visitor): Teams marks them unverified.
+#[must_use]
+pub fn is_unverified(mri: &str) -> bool {
+    mri.starts_with("8:teamsvisitor:")
 }
 
 /// Who did it: "You" for the account.
@@ -142,7 +253,10 @@ pub fn people(message_type: &str, content: &str) -> Vec<String> {
     }
     match chat_event(message_type, content) {
         Some(ChatEvent::CallStarted(start)) => start.initiator.into_iter().collect(),
-        Some(ChatEvent::Recording(recording)) => recording.initiator.into_iter().collect(),
+        Some(ChatEvent::Recording(recording)) => [recording.initiator, recording.terminator, recording.organizer]
+            .into_iter()
+            .flatten()
+            .collect(),
         Some(ChatEvent::MembersJoined(members) | ChatEvent::MembersLeft(members)) => {
             members.members.into_iter().map(|member| member.mri).collect()
         }
@@ -163,44 +277,48 @@ pub fn shown(
     names: &dyn Naming,
 ) -> Option<Shown> {
     let meeting = is_meeting_chat(conversation);
+    let by_name = ByName(names);
+    // the sender is told by the account's own naming: a call missed is someone else's
+    let own = sender.is_some_and(|sender| names.is_me(sender));
+    let names: &dyn Naming = if meeting { &by_name } else { names };
     if message_type == MessageType::AddMember.as_str() {
         return added(&thread_activity(content)?, names);
     }
-    let own = sender.is_some_and(|sender| names.is_me(sender));
     Some(match chat_event(message_type, content)? {
         ChatEvent::CallStarted(start) => call_started(&start, meeting, names),
         ChatEvent::CallEnded(end) => call_ended(&end, meeting, own),
-        ChatEvent::Recording(recording) => recording_shown(&recording, names),
+        ChatEvent::Recording(recording) => recording_shown(&recording, meeting, names),
+        // a meeting chat's transcript is told by the meeting's recap card
+        ChatEvent::Transcript(_) if meeting => Shown::Nothing,
         ChatEvent::Transcript(_) => Shown::Card {
             kind: CardKind::Transcript,
-            title: Some(TRANSCRIPT.to_owned()),
+            title: TRANSCRIPT.to_owned(),
             detail: "Transcript is available".to_owned(),
         },
-        ChatEvent::MembersJoined(members) => Shown::Line(joined(&members, meeting, names)),
-        ChatEvent::MembersLeft(members) => Shown::Line(left(&members, meeting, names)),
+        ChatEvent::MembersJoined(members) => joined(&members, meeting, names),
+        ChatEvent::MembersLeft(members) => left(&members, meeting, names),
         ChatEvent::MembersRemoved(removed) => removed_line(&removed, conversation, names),
-        ChatEvent::TopicUpdated(update) => Shown::Line(topic_line(&update, meeting, names)),
-        ChatEvent::MeetingChatPolicy(policy) => Shown::Line(policy_line(policy).to_owned()),
+        ChatEvent::TopicUpdated(update) => {
+            Shown::Line(EventLine::plain(EventIcon::Named, topic_line(&update, meeting, names)))
+        }
+        ChatEvent::MeetingChatPolicy(policy) => Shown::Line(EventLine::plain(EventIcon::Info, policy_line(policy))),
     })
 }
 
 fn call_started(start: &CallStart, meeting: bool, names: &dyn Naming) -> Shown {
-    if start.huddle {
+    let text = if start.huddle {
         // a group chat's meeting: who started it
-        return Shown::TimedLine(match start.initiator.as_deref() {
+        match start.initiator.as_deref() {
             Some(initiator) if names.is_me(initiator) => "You started a meeting.".to_owned(),
             Some(initiator) => format!("{} started a meeting.", names.name(initiator, None)),
             None => "Meeting started".to_owned(),
-        });
-    }
-    if meeting {
-        return Shown::Card {
-            kind: CardKind::MeetingStarted,
-            title: None,
-            detail: "Meeting started".to_owned(),
-        };
-    }
-    Shown::TimedLine("Call started".to_owned())
+        }
+    } else if meeting {
+        "Meeting started".to_owned()
+    } else {
+        return Shown::TimedLine(EventLine::plain(EventIcon::Call, "Call started"));
+    };
+    Shown::TimedLine(EventLine::plain(EventIcon::Meeting, text))
 }
 
 fn call_ended(end: &CallEnd, meeting: bool, own: bool) -> Shown {
@@ -208,24 +326,23 @@ fn call_ended(end: &CallEnd, meeting: bool, own: bool) -> Shown {
         return Shown::Nothing;
     };
     let length = duration_text(duration);
-    if end.huddle {
-        return Shown::TimedLine(format!("Meeting ended {length}"));
-    }
-    if meeting {
-        return Shown::Card {
-            kind: CardKind::MeetingEnded,
-            title: None,
-            detail: format!("Meeting ended: {length}"),
-        };
-    }
-    // someone else's call that nobody else joined
-    if end.participants.len() < 2 && !own {
-        return Shown::TimedLine("Call missed".to_owned());
-    }
-    Shown::TimedLine(format!("Call ended {length}"))
+    let (icon, words) = if end.huddle {
+        (EventIcon::Meeting, "Meeting ended ")
+    } else if meeting {
+        (EventIcon::Meeting, "Meeting ended: ")
+    } else if end.participants.len() < 2 && !own {
+        // someone else's call that nobody else joined
+        return Shown::TimedLine(EventLine::plain(EventIcon::Missed, "Call missed"));
+    } else {
+        (EventIcon::Call, "Call ended ")
+    };
+    Shown::TimedLine(EventLine {
+        icon,
+        spans: vec![Span::Text(words.to_owned()), Span::Strong(length)],
+    })
 }
 
-fn recording_shown(recording: &Recording, names: &dyn Naming) -> Shown {
+fn recording_shown(recording: &Recording, meeting: bool, names: &dyn Naming) -> Shown {
     let both = match recording.contents {
         // the transcript's half of a recording: Teams shows only the recording's
         RecordingContents::Transcript => return Shown::Nothing,
@@ -238,22 +355,29 @@ fn recording_shown(recording: &Recording, names: &dyn Naming) -> Shown {
         .filter(|_| !recording.automatic)
         .map(|mri| actor(names, mri));
     match recording.status {
-        RecordingStatus::Started => Shown::TimedLine(match (initiator, both) {
-            (Some(initiator), false) => format!("{initiator} started recording."),
-            (Some(initiator), true) => format!("{initiator} started recording and transcription"),
-            (None, false) => "Recording has started".to_owned(),
-            (None, true) => "Recording and transcription has started".to_owned(),
-        }),
-        RecordingStatus::Stopped => Shown::TimedLine(if both {
-            "Recording and transcription stopped".to_owned()
-        } else {
-            "Recording stopped. Saving recording\u{2026}".to_owned()
-        }),
+        RecordingStatus::Started => Shown::TimedLine(EventLine::plain(
+            EventIcon::RecordingStarted,
+            match (initiator, both) {
+                (Some(initiator), false) => format!("{initiator} started recording."),
+                (Some(initiator), true) => format!("{initiator} started recording and transcription"),
+                (None, false) => "Recording has started".to_owned(),
+                (None, true) => "Recording and transcription has started".to_owned(),
+            },
+        )),
+        RecordingStatus::Stopped => Shown::TimedLine(EventLine::plain(
+            EventIcon::RecordingStopped,
+            match (recording.terminator.as_deref(), both) {
+                (_, true) => "Recording and transcription stopped".to_owned(),
+                (Some(terminator), false) => format!("{} stopped recording.", actor(names, terminator)),
+                (None, false) => "Recording stopped.".to_owned(),
+            },
+        )),
+        RecordingStatus::Ready if meeting => Shown::TimedLine(saved(recording, names)),
         RecordingStatus::Ready => {
             let what = if both { "Recording and transcript" } else { "Recording" };
             Shown::Card {
                 kind: CardKind::Recording,
-                title: Some(recording.name().unwrap_or("Recording").to_owned()),
+                title: recording.name().unwrap_or("Recording").to_owned(),
                 detail: match recording.duration {
                     Some(duration) => format!("{what} \u{b7} {}", duration_text(duration)),
                     None => what.to_owned(),
@@ -261,6 +385,46 @@ fn recording_shown(recording: &Recording, names: &dyn Naming) -> Shown {
             }
         }
     }
+}
+
+/// A meeting chat's recording ready: "Recording has been saved to <organizer>'s OneDrive and will expire in n days.",
+/// the expiry once its item says it.
+fn saved(recording: &Recording, names: &dyn Naming) -> EventLine {
+    let whose = recording.organizer.as_deref().map_or_else(
+        || "OneDrive".to_owned(),
+        |organizer| format!("{}'s OneDrive", names.name(organizer, None)),
+    );
+    let mut spans = vec![Span::Text(format!("Recording has been saved to {whose}"))];
+    if let (Some(link), Some(file)) = (&recording.link, &recording.file) {
+        spans.push(Span::Expiry {
+            link: link.clone(),
+            file: file.clone(),
+        });
+    }
+    spans.push(Span::Text(".".to_owned()));
+    EventLine {
+        icon: EventIcon::RecordingSaved,
+        spans,
+    }
+}
+
+/// " and will expire in n days": how long until `expires` (ms) from `now` (ms), the days counted up, as Teams counts
+/// them; "" once it is past.
+#[must_use]
+pub fn expiry_clause(expires: i64, now: i64) -> String {
+    match days_left(expires, now) {
+        Some(1) => " and will expire in 1 day".to_owned(),
+        Some(days) => format!(" and will expire in {days} days"),
+        None => String::new(),
+    }
+}
+
+/// The days until `expires` (ms) from `now` (ms), counted up (a part of a day is a day); `None` once it is past.
+#[must_use]
+pub fn days_left(expires: i64, now: i64) -> Option<i64> {
+    let left = expires.checked_sub(now).filter(|left| *left > 0)?;
+    let day = i64::try_from(DAY_MS).ok()?;
+    Some((left + day - 1) / day)
 }
 
 /// "A", "A and B", "A and 3 others": Teams' list of the people a line names.
@@ -276,6 +440,34 @@ fn listed(names: &[String]) -> String {
     }
 }
 
+/// [`listed`] as a line's spans, each name shown followed by Teams' unverified mark when it is someone's who joined
+/// anonymously.
+fn listed_spans(names: &[(String, bool)]) -> Vec<Span> {
+    let name = |(name, unverified): &(String, bool)| {
+        let mut spans = vec![Span::Text(name.clone())];
+        if *unverified {
+            spans.push(Span::Unverified);
+        }
+        spans
+    };
+    match names {
+        [] => Vec::new(),
+        [one] => name(one),
+        [one, two] => {
+            let mut spans = name(one);
+            spans.push(Span::Text(" and ".to_owned()));
+            spans.extend(name(two));
+            spans
+        }
+        [one, rest @ ..] => {
+            let others = if rest.len() == 1 { "other" } else { "others" };
+            let mut spans = name(one);
+            spans.push(Span::Text(format!(" and {} {others}", rest.len())));
+            spans
+        }
+    }
+}
+
 /// `singular` for one person (`plural` for the account alone, or several).
 fn verb<'a>(members: &Members, names: &dyn Naming, singular: &'a str, plural: &'a str) -> &'a str {
     match members.members.as_slice() {
@@ -284,44 +476,48 @@ fn verb<'a>(members: &Members, names: &dyn Naming, singular: &'a str, plural: &'
     }
 }
 
-fn member_names(members: &Members, names: &dyn Naming) -> String {
-    let called: Vec<String> = members
+fn member_names(members: &Members, names: &dyn Naming) -> Vec<Span> {
+    let called: Vec<(String, bool)> = members
         .members
         .iter()
         .map(|member| {
-            if names.is_me(&member.mri) {
+            let name = if names.is_me(&member.mri) {
                 "You".to_owned()
             } else {
                 names.name(&member.mri, member.name.as_deref())
-            }
+            };
+            (name, is_unverified(&member.mri))
         })
         .collect();
-    listed(&called)
+    listed_spans(&called)
 }
 
-fn joined(members: &Members, meeting: bool, names: &dyn Naming) -> String {
+/// `who` and then `rest`, after `icon`.
+fn named_line(icon: EventIcon, mut who: Vec<Span>, rest: String) -> Shown {
+    who.push(Span::Text(rest));
+    Shown::Line(EventLine { icon, spans: who })
+}
+
+fn joined(members: &Members, meeting: bool, names: &dyn Naming) -> Shown {
     let who = member_names(members, names);
     if members.temporary {
-        format!(
-            "{who} {} temporarily joined the chat.",
-            verb(members, names, "has", "have")
-        )
+        let has = verb(members, names, "has", "have");
+        named_line(EventIcon::Joined, who, format!(" {has} temporarily joined the chat."))
     } else if meeting {
-        format!("{who} {} invited to the meeting.", verb(members, names, "was", "were"))
+        let was = verb(members, names, "was", "were");
+        named_line(EventIcon::Invited, who, format!(" {was} invited to the meeting."))
     } else {
-        format!("{who} joined the conversation.")
+        named_line(EventIcon::Joined, who, " joined the conversation.".to_owned())
     }
 }
 
-fn left(members: &Members, meeting: bool, names: &dyn Naming) -> String {
+fn left(members: &Members, meeting: bool, names: &dyn Naming) -> Shown {
     let who = member_names(members, names);
     if meeting && !members.temporary {
-        format!("{who} left the chat.")
+        named_line(EventIcon::Left, who, " left the chat.".to_owned())
     } else {
-        format!(
-            "{who} no longer {} access to the chat.",
-            verb(members, names, "has", "have")
-        )
+        let has = verb(members, names, "has", "have");
+        named_line(EventIcon::Left, who, format!(" no longer {has} access to the chat."))
     }
 }
 
@@ -336,9 +532,9 @@ fn added(activity: &ThreadActivity, names: &dyn Naming) -> Option<Shown> {
         .filter(|target| target.as_str() != initiator)
         .collect();
     if targets.is_empty() {
-        return Some(Shown::Line(format!(
-            "{} joined the conversation.",
-            actor(names, initiator)
+        return Some(Shown::Line(EventLine::plain(
+            EventIcon::Joined,
+            format!("{} joined the conversation.", actor(names, initiator)),
         )));
     }
     // a lone bot added: Teams shows nothing
@@ -348,11 +544,14 @@ fn added(activity: &ThreadActivity, names: &dyn Naming) -> Option<Shown> {
         return Some(Shown::Nothing);
     }
     let whom: Vec<String> = targets.iter().map(|target| object(names, target, None)).collect();
-    Some(Shown::Line(format!(
-        "{} added {} to the chat{}.",
-        actor(names, initiator),
-        listed(&whom),
-        share_clause(activity)
+    Some(Shown::Line(EventLine::plain(
+        EventIcon::Joined,
+        format!(
+            "{} added {} to the chat{}.",
+            actor(names, initiator),
+            listed(&whom),
+            share_clause(activity)
+        ),
     )))
 }
 
@@ -380,19 +579,26 @@ fn removed_line(removed: &Removed, conversation: &str, names: &dyn Naming) -> Sh
         .iter()
         .map(|target| object(names, target, None))
         .collect();
+    let line = |icon, text: String| Shown::Line(EventLine::plain(icon, text));
     // removed by the chat itself
     if removed.initiator == conversation || is_thread(&removed.initiator) {
         return match whom.as_slice() {
             [] => Shown::Nothing,
-            [one] => Shown::Line(format!("{one} was removed from the chat.")),
-            _ => Shown::Line(format!("{} were removed from the chat.", listed(&whom))),
+            [one] => line(EventIcon::Removed, format!("{one} was removed from the chat.")),
+            _ => line(
+                EventIcon::Removed,
+                format!("{} were removed from the chat.", listed(&whom)),
+            ),
         };
     }
     let initiator = actor(names, &removed.initiator);
     if whom.is_empty() {
-        return Shown::Line(format!("{initiator} left the chat."));
+        return line(EventIcon::Left, format!("{initiator} left the chat."));
     }
-    Shown::Line(format!("{initiator} removed {} from the chat.", listed(&whom)))
+    line(
+        EventIcon::Removed,
+        format!("{initiator} removed {} from the chat.", listed(&whom)),
+    )
 }
 
 fn topic_line(update: &TopicUpdate, meeting: bool, names: &dyn Naming) -> String {

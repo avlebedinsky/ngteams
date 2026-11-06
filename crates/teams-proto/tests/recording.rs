@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_proto::recording::{
-    MEDIA_HOST_SUFFIX, RecordingFile, RecordingManifest, SegmentTime, TrackKind, is_media_host, is_media_link,
-    read_manifest, read_recording_file,
+    MEDIA_HOST_SUFFIX, RecordingExpiration, RecordingFile, RecordingManifest, SegmentTime, TrackKind, is_media_host,
+    is_media_link, read_expiration, read_manifest, read_recording_file,
 };
 use teams_proto::{Credentials, HttpTransport, RecordingAccess};
 use url::Url;
@@ -362,4 +362,48 @@ async fn the_file_is_read_with_the_site_s_token() {
         tokens.audiences.lock().unwrap().as_slice(),
         ["https://madeup-my.sharepoint.com"]
     );
+}
+
+#[tokio::test]
+async fn a_recording_s_expiry_is_read_from_its_item_with_the_site_s_token() {
+    let server = MockServer::start().await;
+    let tokens = Arc::new(FakeTokens::default());
+    let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/personal/lab_a/_api/v2.1/drives/b!drive1/items/ITEM1"))
+        .and(query_param("$select", "expiration"))
+        .and(header("authorization", "Bearer placeholder-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"@odata.etag":"made-up","expiration":{"expirationDateTime":"2027-02-14T09:30:00-08:00","isExpirationModifiable":true}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let read = RecordingExpiration::of(SHARING_LINK, "b!drive1", "ITEM1").unwrap();
+    let answer = transport.recording_expiration(&read).await.expect("the item");
+    // 2027-02-14 17:30 UTC
+    assert_eq!(read_expiration(answer.body()), Some(1_802_626_200_000));
+    assert_eq!(
+        tokens.audiences.lock().unwrap().as_slice(),
+        ["https://madeup-my.sharepoint.com"]
+    );
+}
+
+#[test]
+fn an_expiry_is_read_only_as_an_instant() {
+    assert_eq!(
+        read_expiration(br#"{"expiration":{"expirationDateTime":"2027-02-14T17:30:00Z"}}"#),
+        Some(1_802_626_200_000)
+    );
+    // a recording set never to expire names no date
+    assert_eq!(read_expiration(br#"{"expiration":{"expirationDateTime":null}}"#), None);
+    assert_eq!(read_expiration(br#"{"expiration":{}}"#), None);
+    assert_eq!(
+        read_expiration(br#"{"expiration":{"expirationDateTime":"in 120 days"}}"#),
+        None
+    );
+    assert_eq!(read_expiration(b"not json"), None);
+    // an item off a personal site, or an id that isn't one, is no read
+    assert!(RecordingExpiration::of("https://example.com/video", "b!drive1", "ITEM1").is_none());
+    assert!(RecordingExpiration::of(SHARING_LINK, "b!drive1", "../ITEM1").is_none());
 }

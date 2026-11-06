@@ -174,6 +174,16 @@ impl<C: Credentials> HttpTransport<C> {
         self.drive_read(file.site(), file.url()).await
     }
 
+    /// A meeting recording's item's expiry, read on the personal site that holds it with that site's token
+    /// ([`crate::RecordingExpiration`]); the answer is read by [`crate::recording::read_expiration`].
+    ///
+    /// # Errors
+    /// Returns transport, credentials, or unsuccessful service responses (a recording the account may not read is a
+    /// 403 or 404).
+    pub async fn recording_expiration(&self, read: &crate::RecordingExpiration) -> Result<Response, HttpError> {
+        self.drive_read(read.site(), read.url()).await
+    }
+
     async fn drive_read(&self, site: &DriveSite, url: &str) -> Result<Response, HttpError> {
         self.drive_read_with(site, url, &[]).await
     }

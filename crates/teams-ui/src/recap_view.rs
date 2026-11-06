@@ -40,6 +40,7 @@ use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use teams_media::player::State;
 use teams_proto::RecordingAccess;
 use teams_proto::chat::SharedFile;
 use teams_proto::recap::{RecapPart, recap_link, recap_parts};
@@ -116,6 +117,8 @@ pub struct RecapView {
     spoken: Option<(usize, usize)>,
     /// The recording asked for ("View recap" on its card) before the parts were read.
     wanted: Option<String>,
+    /// The recap card's thumbnail asked for the shown recording to play before the parts were read.
+    play_wanted: bool,
     search_box: Entity<InputState>,
     search: Option<Search>,
     /// What was searched for: searched again once the transcript it was asked of arrives.
@@ -158,6 +161,7 @@ impl RecapView {
             watched: HashMap::new(),
             spoken: None,
             wanted: None,
+            play_wanted: false,
             search_box,
             search: None,
             query: String::new(),
@@ -247,6 +251,9 @@ impl RecapView {
                 this.settle_parts(shown.as_deref(), cx);
                 if let Some(recording) = this.wanted.take() {
                     this.show_recording(recording, cx);
+                }
+                if std::mem::take(&mut this.play_wanted) {
+                    this.play_when_shown(cx);
                 }
                 this.organizer_name(cx);
                 this.read_transcript(cx);
@@ -348,6 +355,29 @@ impl RecapView {
         {
             self.select_part(index, cx);
         }
+    }
+
+    /// The recap card's Transcript chip: the shown part's transcript from its top (the transcript is the recap's only
+    /// pane, beside the recording).
+    pub fn show_transcript(&mut self, cx: &mut Context<Self>) {
+        self.spoken = None;
+        self.scroll.scroll_to_item(0);
+        cx.notify();
+    }
+
+    /// The recap card's thumbnail: the shown part's recording plays (resumed where it was paused, from its start
+    /// otherwise; left alone while it plays), once the parts are read.
+    pub fn play_when_shown(&mut self, cx: &mut Context<Self>) {
+        if self.parts().is_none() {
+            self.play_wanted = true;
+            return;
+        }
+        let Some(player) = self.player(cx) else { return };
+        player.update(cx, |player, cx| match player.state() {
+            Some(State::Playing | State::Loading | State::Buffering) => {}
+            Some(State::Paused) => player.toggle(cx),
+            _ => player.play_from(Duration::ZERO, cx),
+        });
     }
 
     /// Reads the shown part's transcript, when it has one not read yet (or whose read failed and is asked again).
@@ -1455,7 +1485,7 @@ fn empty_state(glyph: Glyph, words: &'static str, palette: Palette) -> gpui::Div
 }
 
 /// A row of one of the recap's menus.
-fn menu_row(selector: &'static str, glyph: Glyph, label: &'static str) -> PopupMenuItem {
+pub(crate) fn menu_row(selector: &'static str, glyph: Glyph, label: &'static str) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| {
         div()
             .debug_selector(move || selector.to_owned())

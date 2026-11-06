@@ -1,7 +1,10 @@
-//! A meeting's chat as Teams shows it, on GPUI's test context over the fake engine (`common`): the meeting's start and
-//! end as cards titled by the chat's name, a recording's state as lines after their time and a card once it is ready,
-//! the transcript's card, who was invited or left as lines; none of them with an author row, and a thread never named
-//! as a sender, not even for a kind this build doesn't show. Every id, name and value here is made up.
+//! A meeting's chat as Teams shows it, on GPUI's test context over the fake engine (`common`): the thread's events and
+//! the meeting's and its recording's states as lines after their icons (the times first for a call's or a recording's,
+//! the meeting's length in bold, an anonymous member marked unverified), the recording saved with its expiry, the
+//! transcript told by the recap card under the meeting's end (View recap, Transcript, the thumbnail with its length and
+//! expiry, Share), a meeting's start left out when its end follows at once; none of them with an author row, and a
+//! thread never named as a sender, not even for a kind this build doesn't show. Every id, name and value here is made
+//! up.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -12,13 +15,17 @@ use super::parts;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use teams_store::Message;
 use teams_ui::ViewTrace;
-use teams_ui::chat_view::{Body, ChatView, ChatViewEvent, EventCard, MessageItem};
+use teams_ui::chat_view::{Body, ChatView, ChatViewEvent, MessageItem, RecapOpen};
 use teams_ui::settings::Settings;
-use teams_ui::system_message::CardKind;
+use teams_ui::system_message::{EventIcon, Span};
 
 const MEETING: &str = "19:meeting_bWFkZS11cA@thread.v2";
+const CALL: &str = "00000000-0000-4000-8000-0000000000c1";
+const LINK: &str = "https://madeup-my.sharepoint.com/:v:/g/personal/lab_b/MadeUpRecording";
+/// 2026-01-01 12:00 UTC.
 const NOON: i64 = 1_767_268_800_000;
 const MINUTE: i64 = 60_000;
+const DAY: i64 = 24 * 60 * MINUTE;
 
 fn message(id: &str, sender: &str, kind: &str, content: &str, minute: i64) -> Message {
     Message {
@@ -38,12 +45,23 @@ fn message(id: &str, sender: &str, kind: &str, content: &str, minute: i64) -> Me
     }
 }
 
+/// A recording's message of the call in `status` (with its code) holding `contents`, started by b at 13:01; once ready
+/// its link and its file in b's OneDrive.
 fn recording(status: &str, code: &str, contents: &str) -> String {
+    let ready = status == "Success";
+    let link = if ready { LINK } else { "" };
+    let file = if ready {
+        format!("<item type=\"onedriveForBusinessVideo\" uri=\"{LINK}\" driveId=\"b!drive1\" driveItemId=\"ITEM1\" />")
+    } else {
+        String::new()
+    };
     format!(
         "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"{status}\" code=\"{code}\" />\
-         <Title>Weekly sync</Title><a href=\"\">Play</a><OriginalName v=\"Weekly sync-Meeting Recording.mp4\" />\
-         <RecordingInitiatorId value=\"{LAB_B}\" isAutoRecording=\"False\" />\
-         <RecordingContent contentTypes=\"{contents}\" duration=\"0:16:50.3\"></RecordingContent></URIObject>"
+         <Title>Weekly sync</Title><a href=\"{link}\">Play</a><OriginalName v=\"Weekly sync-Meeting Recording.mp4\" />\
+         <MeetingOrganizerId value=\"{LAB_B}\" /><RecordingInitiatorId value=\"{LAB_B}\" isAutoRecording=\"False\" />\
+         <Identifiers><Id type=\"callId\" value=\"{CALL}\" /></Identifiers>\
+         <RecordingContent contentTypes=\"{contents}\" timestamp=\"2026-01-01T13:01:00.0000000Z\" duration=\"0:28:38.3\">\
+         {file}</RecordingContent></URIObject>"
     )
 }
 
@@ -80,7 +98,9 @@ fn until_the_meeting() -> Vec<Message> {
             "3",
             LAB_B,
             "Event/Call",
-            "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType>",
+            &format!(
+                "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType><callId>{CALL}</callId>"
+            ),
             60,
         ),
         message(
@@ -105,7 +125,7 @@ fn until_the_meeting() -> Vec<Message> {
 fn from_the_meeting() -> Vec<Message> {
     let part = |mri: &str| {
         format!(
-            "<part identity=\"{mri}\"><name>{mri}</name><displayName>x</displayName><duration>1930</duration></part>"
+            "<part identity=\"{mri}\"><name>{mri}</name><displayName>x</displayName><duration>3697</duration></part>"
         )
     };
     vec![
@@ -121,34 +141,35 @@ fn from_the_meeting() -> Vec<Message> {
             LAB_B,
             "Event/Call",
             &format!(
-                "<ended/><partlist alt=\"\" count=\"2\">{}{}</partlist><callEventType>callEnded</callEventType>",
+                "<ended/><partlist alt=\"\" count=\"2\">{}{}</partlist><callEventType>callEnded</callEventType>\
+                 <callId>{CALL}</callId>",
                 part(LAB_B),
                 part(LAB_A)
             ),
-            92,
+            122,
         ),
         message(
             "9",
             LAB_B,
             "RichText/Media_CallRecording",
             &recording("Success", "200", "Recording+Transcript"),
-            93,
+            123,
         ),
         message(
             "10",
             LAB_B,
             "RichText/Media_CallTranscript",
-            r#"{\"callId\":\"c\",\"isDeleted\":false}"#,
-            94,
+            &format!(r#"{{\"callId\":\"{CALL}\",\"isDeleted\":false}}"#),
+            124,
         ),
-        message("11", MEETING, "ThreadActivity/SomethingNew", "<somethingnew/>", 95),
+        message("11", MEETING, "ThreadActivity/SomethingNew", "<somethingnew/>", 125),
         // an addition naming no initiator: a shape no capture showed, kept as the placeholder
         message(
             "12",
             MEETING,
             "ThreadActivity/AddMember",
             &format!("<addmember><eventtime>4</eventtime><target>{LAB_A}</target></addmember>"),
-            96,
+            126,
         ),
     ]
 }
@@ -167,7 +188,7 @@ fn meeting_window(rig: &Rig) -> (Entity<ChatView>, &'static mut VisualTestContex
     let parts = parts::parts(rig, Settings::default(), Arc::new(ViewTrace::off()));
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
     let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, MEETING.to_owned(), window, cx));
-    cx.simulate_resize(size(px(800.0), px(1600.0)));
+    cx.simulate_resize(size(px(900.0), px(1600.0)));
     draw(cx);
     (view, cx)
 }
@@ -176,93 +197,135 @@ fn items(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> Vec<MessageItem
     cx.update(|_, cx| view.read(cx).message_items().cloned().collect())
 }
 
-fn card(kind: CardKind, title: &str, detail: &str) -> Body {
-    Body::Card(Box::new(EventCard {
-        kind,
-        title: title.to_owned().into(),
-        detail: detail.to_owned().into(),
-    }))
+/// What a row says: its kind and, for a line, its icon and words.
+type Said = (&'static str, Option<(EventIcon, String)>);
+
+/// A row's kind and, for a line, its icon and words.
+fn said(body: &Body) -> Said {
+    match body {
+        Body::Event(line) | Body::TimedEvent(line) => (body.kind(), Some((line.icon, line.text()))),
+        Body::MeetingEnded(end) => (body.kind(), Some((end.line.icon, end.line.text()))),
+        _ => (body.kind(), None),
+    }
+}
+
+fn rig_with(messages: Vec<Message>) -> Rig {
+    let rig = Rig::start();
+    rig.core.messages.lock().unwrap().insert(MEETING.to_owned(), messages);
+    let mut names = rig.core.names.lock().unwrap();
+    names.insert(LAB_A.to_owned(), "Lab Ay".to_owned());
+    names.insert(LAB_B.to_owned(), "Lab Bee".to_owned());
+    drop(names);
+    rig.core.expirations.lock().unwrap().insert(
+        "ITEM1".to_owned(),
+        chrono::Utc::now().timestamp_millis() + 102 * DAY + DAY / 2,
+    );
+    rig.cx.update(teams_ui::window::init);
+    rig
 }
 
 #[test]
 fn a_meeting_chat_shows_its_system_messages_as_teams_does() {
-    let rig = Rig::start();
-    rig.core
-        .messages
-        .lock()
-        .unwrap()
-        .insert(MEETING.to_owned(), meeting_messages());
-    rig.core
-        .names
-        .lock()
-        .unwrap()
-        .insert(LAB_B.to_owned(), "Lab Bee".to_owned());
-    rig.cx.update(teams_ui::window::init);
+    let rig = rig_with(meeting_messages());
     let (view, cx) = meeting_window(&rig);
-    let shown: Vec<(String, Body)> = items(&view, cx).into_iter().map(|item| (item.id, item.body)).collect();
-    let event = |text: &str| Body::Event(text.to_owned().into());
-    let timed = |text: &str| Body::TimedEvent(text.to_owned().into());
+    let shown = items(&view, cx);
+    let rows: Vec<(String, Said)> = shown.iter().map(|item| (item.id.clone(), said(&item.body))).collect();
+    let line = |kind, icon, text: &str| (kind, Some((icon, text.to_owned())));
     assert_eq!(
-        shown,
+        rows,
         vec![
-            ("1".to_owned(), event("You and Lab Bee were invited to the meeting.")),
-            ("2".to_owned(), event("Lab Bee named the meeting Weekly sync.")),
+            // the account by its name, as Teams' meeting chat names it
             (
-                "3".to_owned(),
-                card(CardKind::MeetingStarted, "Meeting", "Meeting started")
-            ),
-            ("4".to_owned(), timed("Lab Bee started recording.")),
-            // "5", the transcript's half of the recording, shows nothing
-            ("6".to_owned(), shown_text(&items(&view, cx), "6"),),
-            ("7".to_owned(), event("Note Taker has temporarily joined the chat.")),
-            (
-                "8".to_owned(),
-                card(CardKind::MeetingEnded, "Meeting", "Meeting ended: 32m 10s")
-            ),
-            (
-                "9".to_owned(),
-                card(
-                    CardKind::Recording,
-                    "Weekly sync-Meeting Recording",
-                    "Recording and transcript \u{b7} 16m 50s"
+                "1".to_owned(),
+                line(
+                    "event",
+                    EventIcon::Invited,
+                    "Lab Ay and Lab Bee were invited to the meeting."
                 )
             ),
             (
-                "10".to_owned(),
-                card(CardKind::Transcript, "Transcript", "Transcript is available")
+                "2".to_owned(),
+                line("event", EventIcon::Named, "Lab Bee named the meeting Weekly sync.")
             ),
             (
-                "11".to_owned(),
-                Body::UnsupportedEvent("ThreadActivity/SomethingNew".to_owned())
+                "3".to_owned(),
+                line("timed-event", EventIcon::Meeting, "Meeting started")
             ),
             (
-                "12".to_owned(),
-                Body::UnsupportedEvent("ThreadActivity/AddMember".to_owned())
+                "4".to_owned(),
+                line("timed-event", EventIcon::RecordingStarted, "Lab Bee started recording.")
             ),
+            // "5", the transcript's half of the recording, shows nothing
+            ("6".to_owned(), ("text", None)),
+            (
+                "7".to_owned(),
+                line(
+                    "event",
+                    EventIcon::Joined,
+                    "Note Taker has temporarily joined the chat."
+                )
+            ),
+            (
+                "8".to_owned(),
+                line("meeting-ended", EventIcon::Meeting, "Meeting ended: 1h 1m 37s")
+            ),
+            (
+                "9".to_owned(),
+                line(
+                    "timed-event",
+                    EventIcon::RecordingSaved,
+                    "Recording has been saved to Lab Bee's OneDrive."
+                )
+            ),
+            // "10", the transcript: the recap card tells it
+            ("11".to_owned(), ("unsupported-event", None)),
+            ("12".to_owned(), ("unsupported-event", None)),
         ]
     );
+    // the recording's expiry, once its item says it, counted in days up
+    let Some(Body::TimedEvent(saved)) = shown.iter().find(|item| item.id == "9").map(|item| &item.body) else {
+        panic!("no recording saved");
+    };
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).drawn_text(saved)),
+        "Recording has been saved to Lab Bee's OneDrive and will expire in 103 days."
+    );
+    let visitor = shown.iter().find(|item| item.id == "7").map(|item| item.body.clone());
+    assert!(
+        matches!(&visitor, Some(Body::Event(line)) if line.spans.contains(&Span::Unverified)),
+        "{visitor:?}"
+    );
+    the_recap_card(&shown);
     drawn_without_authors(cx);
-    view_recap_tells_the_shell(&view, cx);
-
-    // the chat's name titles the meeting's cards
-    cx.update(|_, cx| view.update(cx, |view, cx| view.set_title(Some("Weekly sync".into()), cx)));
-    draw(cx);
-    let titled = items(&view, cx);
-    let body_of = |id: &str| titled.iter().find(|item| item.id == id).map(|item| item.body.clone());
-    assert_eq!(
-        body_of("3"),
-        Some(card(CardKind::MeetingStarted, "Weekly sync", "Meeting started"))
-    );
-    assert_eq!(
-        body_of("8"),
-        Some(card(CardKind::MeetingEnded, "Weekly sync", "Meeting ended: 32m 10s"))
-    );
+    the_card_opens_the_recap(&view, cx);
 }
 
-/// Every system row is drawn centred without an author: no sender's name or avatar, never the thread's id; the cards
-/// as their kinds, a recording's and a transcript's with "View recap" (the meeting's Recap tab, in the app).
+/// The meeting's end carries its recap card: its recording, its transcript and its span.
+fn the_recap_card(shown: &[MessageItem]) {
+    let Some(Body::MeetingEnded(end)) = shown.iter().find(|item| item.id == "8").map(|item| &item.body) else {
+        panic!("no meeting end");
+    };
+    let card = end.recap.as_ref().expect("a recap card");
+    assert_eq!(card.recordings.len(), 1);
+    assert_eq!(card.recordings[0].link, LINK);
+    assert!(card.transcript);
+    assert!(!card.saving);
+    assert_eq!(card.badge().as_deref(), Some("28m 38s"));
+    // the recording's own span: 13:01 and its 28 minutes
+    let start = NOON + 61 * MINUTE;
+    assert_eq!(card.span, Some((start, start + (28 * 60 + 38) * 1_000)));
+    let link = card.share_link(MEETING).expect("a recap link");
+    assert!(
+        link.starts_with("https://teams.microsoft.com/l/meetingrecap?"),
+        "{link}"
+    );
+    assert!(link.contains("driveItemId=ITEM1"), "{link}");
+}
+
+/// Every system row is drawn without an author: no sender's name or avatar, never the thread's id; the recap card with
+/// its controls, its thumbnail's expiry and the unverified mark.
 fn drawn_without_authors(cx: &mut VisualTestContext) {
-    for id in ["1", "2", "4", "7", "11"] {
+    for id in ["1", "2", "3", "4", "7", "8", "9", "11"] {
         assert!(
             cx.debug_bounds(sel(&format!("event-{id}"))).is_some(),
             "event {id} drawn"
@@ -272,30 +335,26 @@ fn drawn_without_authors(cx: &mut VisualTestContext) {
             "event {id} has no avatar"
         );
     }
-    for (id, kind) in [
-        ("3", "meeting-started"),
-        ("8", "meeting-ended"),
-        ("9", "recording"),
-        ("10", "transcript"),
+    for selector in [
+        "recap-card-8",
+        "view-recap-8",
+        "recap-card-share-8",
+        "recap-card-transcript-8",
+        "recap-card-thumbnail-8",
+        "recap-card-expiry-8",
+        "unverified-7-0",
+        "event-icon recording-started",
+        "event-icon recording-saved",
     ] {
-        assert!(
-            cx.debug_bounds(sel(&format!("event-card-{id} {kind}"))).is_some(),
-            "card {id} drawn"
-        );
+        assert!(cx.debug_bounds(selector).is_some(), "{selector} drawn");
     }
-    // a recording and a transcript open the meeting's recap in the app, not Teams on the web; a meeting's card neither
-    assert!(cx.debug_bounds("view-recap-9").is_some());
-    assert!(cx.debug_bounds("view-recap-10").is_some());
-    assert!(cx.debug_bounds("open-on-the-web-9").is_none());
-    assert!(cx.debug_bounds("view-recap-8").is_none());
-    assert!(cx.debug_bounds("open-on-the-web-8").is_none());
     assert!(cx.debug_bounds("unsupported-11").is_some());
     // the message among them keeps its author
     assert!(cx.debug_bounds("avatar-6").is_some());
 }
 
-/// "View recap" on the recording's card tells the shell to show the Recap tab.
-fn view_recap_tells_the_shell(view: &Entity<ChatView>, cx: &mut VisualTestContext) {
+/// View recap, the Transcript chip and the thumbnail each tell the shell to show the Recap tab at the recording.
+fn the_card_opens_the_recap(view: &Entity<ChatView>, cx: &mut VisualTestContext) {
     let told: Rc<RefCell<Vec<ChatViewEvent>>> = Rc::default();
     let kept = Rc::clone(&told);
     cx.update(|_, cx| {
@@ -304,21 +363,56 @@ fn view_recap_tells_the_shell(view: &Entity<ChatView>, cx: &mut VisualTestContex
         })
         .detach();
     });
-    let button = cx.debug_bounds("view-recap-9").expect("View recap is drawn");
-    cx.simulate_click(button.center(), Modifiers::none());
-    cx.run_until_parked();
-    assert!(
-        matches!(told.borrow().as_slice(), [ChatViewEvent::OpenRecap(_)]),
-        "the recap asked for once: {:?}",
-        told.borrow()
+    for selector in ["view-recap-8", "recap-card-transcript-8", "recap-card-thumbnail-8"] {
+        let button = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+    let opened = |open| ChatViewEvent::OpenRecap {
+        recording: Some(LINK.to_owned()),
+        open,
+    };
+    assert_eq!(
+        *told.borrow(),
+        vec![
+            opened(RecapOpen::Recap),
+            opened(RecapOpen::Transcript),
+            opened(RecapOpen::Play)
+        ]
     );
 }
 
-/// The body of the message `id` as shown (a text message's, compared as itself).
-fn shown_text(items: &[MessageItem], id: &str) -> Body {
-    let body = items.iter().find(|item| item.id == id).map(|item| item.body.clone());
-    assert!(matches!(body, Some(Body::Text(_))), "{id} is a text: {body:?}");
-    body.unwrap()
+#[test]
+fn a_meeting_s_start_followed_at_once_by_its_end_is_left_out() {
+    let mut messages = from_the_meeting();
+    messages.retain(|message| ["8", "10"].contains(&message.id.as_str()));
+    messages.insert(
+        0,
+        message(
+            "3",
+            LAB_B,
+            "Event/Call",
+            &format!(
+                "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType><callId>{CALL}</callId>"
+            ),
+            60,
+        ),
+    );
+    let rig = rig_with(messages);
+    let (view, cx) = meeting_window(&rig);
+    let shown = items(&view, cx);
+    let ids: Vec<&str> = shown.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, ["8"], "the start is left out, the transcript told by the card");
+    let Some(Body::MeetingEnded(end)) = shown.first().map(|item| &item.body) else {
+        panic!("no meeting end");
+    };
+    let card = end.recap.as_ref().expect("a transcript's recap card");
+    assert!(card.transcript);
+    assert!(card.recordings.is_empty());
+    assert!(cx.debug_bounds("recap-card-transcript-8").is_some());
+    assert!(cx.debug_bounds("recap-card-thumbnail-8").is_none());
 }
 
 /// A test selector (selectors live as long as the test).

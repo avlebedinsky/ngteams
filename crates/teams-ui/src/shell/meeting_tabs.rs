@@ -1,7 +1,8 @@
 //! A meeting chat's tabs in its header, as browser Teams has them: Chat, Shared and Recap after the meeting's name, the
 //! one shown underlined. Chat is the conversation; Shared what the chat shared ([`SharedView`]); Recap the meeting's
-//! recordings and transcripts ([`RecapView`]), also opened by a recording's or transcript's card ("View recap"). Each
-//! tab's view is made when first shown and kept while its chat is; another chat opens on Chat.
+//! recordings and transcripts ([`RecapView`]), also opened by the meeting's recap card in the chat (View recap, its
+//! Transcript chip, its recording's thumbnail). Each tab's view is made when first shown and kept while its chat is;
+//! another chat opens on Chat.
 //!
 //! Teams' other tabs are left out: Q&A, the Meeting Whiteboard, Attendance and Breakout Rooms are apps of their own
 //! (Viva Engage, Whiteboard's canvas, the organizer's reports) the app has no reach to, and "+" adds an app to the
@@ -141,12 +142,27 @@ impl Shell {
         cx.notify();
     }
 
-    /// "View recap" on a card: the Recap tab, at the card's recording when it names one.
-    pub fn open_recap(&mut self, recording: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// The recap card's View recap, Transcript or thumbnail: the Recap tab, at the card's recording when it names one,
+    /// showing `open` (its transcript from the top, or its recording playing).
+    pub fn open_recap(
+        &mut self,
+        recording: Option<String>,
+        open: crate::chat_view::RecapOpen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.show_chat_tab(ChatTab::Recap, window, cx);
-        if let (Some(recording), Some(recap)) = (recording, &self.meeting_tabs.recap) {
-            recap.update(cx, |recap, cx| recap.show_recording(recording, cx));
-        }
+        let Some(recap) = &self.meeting_tabs.recap else { return };
+        recap.update(cx, |recap, cx| {
+            if let Some(recording) = recording {
+                recap.show_recording(recording, cx);
+            }
+            match open {
+                crate::chat_view::RecapOpen::Recap => {}
+                crate::chat_view::RecapOpen::Transcript => recap.show_transcript(cx),
+                crate::chat_view::RecapOpen::Play => recap.play_when_shown(cx),
+            }
+        });
     }
 
     /// The chat's name as the list has it.

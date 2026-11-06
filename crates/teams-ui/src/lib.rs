@@ -107,6 +107,7 @@ pub mod inline;
 pub mod join_team;
 pub mod keyboard;
 pub mod link_preview;
+pub mod meeting_recap;
 pub mod manage_team;
 pub mod models;
 pub mod motion;

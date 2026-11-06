@@ -4,8 +4,8 @@
 
 use teams_proto::chat::Field;
 use teams_proto::chat::{
-    CallEnd, CallStart, ChatEvent, ChatPolicy, Member, Members, RecordingContents, RecordingStatus, Removed,
-    TopicUpdate, chat_event, meeting_times, thread_activity,
+    CallEnd, CallStart, ChatEvent, ChatPolicy, Member, Members, RecordingContents, RecordingItem, RecordingStatus,
+    Removed, TopicUpdate, chat_event, meeting_times, thread_activity,
 };
 
 const ANN: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -181,6 +181,65 @@ fn a_recording_reads_its_state_its_contents_its_name_and_its_length() {
                 && recording.contents == RecordingContents::Recording
                 && recording.duration == Some(((24 + 2) * 60 + 3) * 60 + 4)
     ));
+}
+
+/// A recording ready, shaped as a lab meeting's was: its organizer, who stopped it, its call, its start, its file and
+/// its transcript on that file.
+const READY: &str = "<URIObject format_version=\"1.1\" type=\"Video.2/CallRecording.1\" url_thumbnail=\"\" uri=\"\" \
+    version=\"1.0\"><RecordingStatus status=\"Success\" code=\"200\" shortChunk=\"False\"><amsErrorResult />\
+    </RecordingStatus><SessionEndReason value=\"RecordingStopCommand\" /><Title>Weekly sync</Title>\
+    <a href=\"https://madeup-my.sharepoint.com/:v:/g/personal/ann_madeup/MadeUpShare\">Play</a>\
+    <OriginalName v=\"Weekly sync-20260102_100010-Meeting Recording.mp4\" />\
+    <MeetingOrganizerId value=\"8:orgid:00000000-0000-4000-8000-00000000000a\" />\
+    <MeetingOrganizerTenantId value=\"00000000-0000-4000-8000-0000000000f0\" />\
+    <RecordingInitiatorId value=\"8:orgid:00000000-0000-4000-8000-00000000000a\" isAutoRecording=\"False\" />\
+    <RecordingTerminatorId value=\"8:orgid:00000000-0000-4000-8000-00000000000b\" />\
+    <Identifiers><Id type=\"callId\" value=\"00000000-0000-4000-8000-0000000000c1\" />\
+    <Id type=\"callLegId\" value=\"00000000-0000-4000-8000-0000000000c2\" /></Identifiers>\
+    <RecordingContent contentTypes=\"Recording+Transcript\" timestamp=\"2026-01-02T10:00:10.0360480Z\" \
+    duration=\"0:28:38.92\" canVideoExpire=\"True\"><item type=\"video\" uri=\"\" />\
+    <item type=\"onedriveForBusinessVideo\" uri=\"https://madeup-my.sharepoint.com/:v:/g/personal/ann_madeup/MadeUpShare\" \
+    driveId=\"b!drive1\" driveItemId=\"ITEM1\" />\
+    <item type=\"onedriveForBusinessTranscript\" uri=\"https://madeup-my.sharepoint.com/personal/ann_madeup/_api/v2.1/\
+    drives/b!drive1/items/ITEM1/versions/current/media/transcripts/t1/content\" id=\"t1\" driveId=\"b!drive1\" \
+    driveItemId=\"ITEM1\" /></RecordingContent><RequestedExports /></URIObject>";
+
+#[test]
+fn a_ready_recording_reads_its_call_organizer_file_and_transcript() {
+    let Some(ChatEvent::Recording(ready)) = chat_event("RichText/Media_CallRecording", READY) else {
+        panic!("not a recording");
+    };
+    assert_eq!(ready.call_id.as_deref(), Some("00000000-0000-4000-8000-0000000000c1"));
+    assert_eq!(ready.organizer.as_deref(), Some(ANN));
+    assert_eq!(ready.tenant.as_deref(), Some("00000000-0000-4000-8000-0000000000f0"));
+    assert_eq!(ready.terminator.as_deref(), Some(BEN));
+    // 2026-01-02 10:00:10.036 UTC
+    assert_eq!(ready.started, Some(1_767_348_010_036));
+    assert_eq!(ready.duration, Some(28 * 60 + 38));
+    assert_eq!(
+        ready.file,
+        Some(RecordingItem {
+            drive: "b!drive1".to_owned(),
+            item: "ITEM1".to_owned()
+        })
+    );
+    assert!(
+        ready
+            .transcript
+            .as_deref()
+            .is_some_and(|uri| uri.ends_with("/media/transcripts/t1/content")),
+        "{:?}",
+        ready.transcript
+    );
+    // a recording started has none of what its ready message gives
+    let Some(ChatEvent::Recording(started)) = chat_event(
+        "RichText/Media_CallRecording",
+        &recording("Initial", "0", Some("Recording"), "0:00:00"),
+    ) else {
+        panic!("not a recording");
+    };
+    assert_eq!((started.file, started.transcript, started.call_id), (None, None, None));
+    assert_eq!(started.started, Some(1_767_348_010_000));
 }
 
 #[test]

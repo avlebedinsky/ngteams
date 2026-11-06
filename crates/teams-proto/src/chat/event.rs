@@ -32,7 +32,7 @@ pub enum ChatEvent {
     /// `Event/Call` with `<ended/>`: a call (or a meeting) ended.
     CallEnded(CallEnd),
     /// `RichText/Media_CallRecording`: a meeting recording started, stopped, or is ready.
-    Recording(Recording),
+    Recording(Box<Recording>),
     /// `RichText/Media_CallTranscript`: a meeting's transcript is ready.
     Transcript(Transcript),
     /// `ThreadActivity/MemberJoined`: people joined the chat (a meeting's: were invited, or joined for the meeting).
@@ -107,6 +107,28 @@ pub struct Recording {
     pub automatic: bool,
     /// Its player's link (`<a href>`, empty until it is ready), when it is an `https` link.
     pub link: Option<String>,
+    /// When it began, ms since the epoch (`RecordingContent`'s `timestamp`, UTC with up to 7 decimals).
+    pub started: Option<i64>,
+    /// The call it is of (`<Id type="callId">`): the one its meeting's end names.
+    pub call_id: Option<String>,
+    /// The meeting's organizer (`MeetingOrganizerId`'s `value`, an MRI): whose OneDrive holds it.
+    pub organizer: Option<String>,
+    /// The organizer's tenant (`MeetingOrganizerTenantId`'s `value`).
+    pub tenant: Option<String>,
+    /// Who stopped it (`RecordingTerminatorId`'s `value`), once someone stopped it.
+    pub terminator: Option<String>,
+    /// Its file in the organizer's OneDrive (`<item type="onedriveForBusinessVideo">`'s `driveId` and `driveItemId`),
+    /// once ready.
+    pub file: Option<RecordingItem>,
+    /// Its transcript's address on that file (`<item type="onedriveForBusinessTranscript">`'s `uri`), once ready.
+    pub transcript: Option<String>,
+}
+
+/// A ready recording's file: its drive and its item there.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RecordingItem {
+    pub drive: String,
+    pub item: String,
 }
 
 impl Recording {
@@ -182,7 +204,7 @@ pub enum ChatPolicy {
 pub fn chat_event(message_type: &str, content: &str) -> Option<ChatEvent> {
     match message_type {
         "Event/Call" => call(content),
-        "RichText/Media_CallRecording" => recording(content).map(ChatEvent::Recording),
+        "RichText/Media_CallRecording" => recording(content).map(|recording| ChatEvent::Recording(Box::new(recording))),
         "RichText/Media_CallTranscript" => transcript(content).map(ChatEvent::Transcript),
         "ThreadActivity/MemberJoined" => members(content).map(ChatEvent::MembersJoined),
         "ThreadActivity/MemberLeft" => members(content).map(ChatEvent::MembersLeft),
@@ -343,7 +365,42 @@ fn recording(content: &str) -> Option<Recording> {
             .map(str::trim)
             .filter(|link| link.starts_with("https://"))
             .map(str::to_owned),
+        started: first_attribute(&html, "recordingcontent", "timestamp").and_then(utc_instant),
+        call_id: elements(&html)
+            .find(|element| element.value().name() == "id" && element.value().attr("type") == Some("callId"))
+            .and_then(|element| value_of(element.value().attr("value"))),
+        organizer: value_of(first_attribute(&html, "meetingorganizerid", "value")),
+        tenant: value_of(first_attribute(&html, "meetingorganizertenantid", "value")),
+        terminator: value_of(first_attribute(&html, "recordingterminatorid", "value")),
+        file: content_item(&html, "onedriveForBusinessVideo").and_then(|item| {
+            Some(RecordingItem {
+                drive: value_of(item.value().attr("driveid"))?,
+                item: value_of(item.value().attr("driveitemid"))?,
+            })
+        }),
+        transcript: content_item(&html, "onedriveForBusinessTranscript")
+            .and_then(|item| value_of(item.value().attr("uri")))
+            .filter(|uri| uri.starts_with("https://")),
     })
+}
+
+/// An attribute's value, trimmed, when it has one.
+fn value_of(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// The `<item>` of a recording's `RecordingContent` of type `kind`.
+fn content_item<'h>(html: &'h Html, kind: &str) -> Option<ElementRef<'h>> {
+    elements(html).find(|element| element.value().name() == "item" && element.value().attr("type") == Some(kind))
+}
+
+/// An RFC 3339 instant (`2026-11-05T08:13:46.0225228Z`) as ms since the epoch.
+fn utc_instant(text: &str) -> Option<i64> {
+    let at = ::time::OffsetDateTime::parse(text.trim(), &::time::format_description::well_known::Rfc3339).ok()?;
+    i64::try_from(at.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
 /// A .NET time span (`[d.]h:mm:ss[.fffffff]`) in whole seconds.

@@ -100,6 +100,8 @@ pub struct FakeCore {
     /// With a file's bytes, where its streams stop being answered: one asked from there is held in `held_streams`.
     pub hold_streams_from: Mutex<Option<u64>>,
     pub held_streams: Mutex<Vec<Answer<teams_core::FileStream>>>,
+    /// When `recording_expiration` says each meeting recording expires (ms), by its item; any other never does.
+    pub expirations: Mutex<HashMap<String, i64>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
@@ -770,6 +772,11 @@ impl Core for FakeCore {
         } else {
             Reply::ready(Err(teams_core::EngineError::FileUnavailable))
         }
+    }
+
+    fn recording_expiration(&self, _: String, _: String, item: String) -> Reply<Option<i64>> {
+        locked(&self.asked).push("recording_expiration");
+        Reply::ready(Ok(locked(&self.expirations).get(&item).copied()))
     }
 
     fn recording_segment(&self, part: teams_proto::MediaSegmentLink) -> Reply<Vec<u8>> {

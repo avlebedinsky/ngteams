@@ -104,7 +104,8 @@ pub use read::{
 };
 pub use recap::{MCPS_AUDIENCE, MeetingContent, MeetingContents, RecapPart, TranscriptLocation};
 pub use recording::{
-    MediaSegmentLink, Presentation, PresentedTrack, RecordingAccess, RecordingFile, RecordingManifest, TrackKind,
+    MediaSegmentLink, Presentation, PresentedTrack, RecordingAccess, RecordingExpiration, RecordingFile,
+    RecordingManifest, TrackKind,
 };
 pub use recurrence::{Pattern as RecurrencePattern, Recurrence, WeekIndex, Weekday};
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};

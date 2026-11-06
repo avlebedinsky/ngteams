@@ -29,11 +29,13 @@
 //!   "Add reaction". A forwarded message shows its content in Teams' forward card under the arrow, the original's
 //!   sender (asked of the engine as any sender) and the original's time, a link to the original ([`crate::forwarded`]:
 //!   in the app when the shell has its chat, told as [`ChatViewEvent::OpenOriginal`]). A system message
-//!   ([`crate::system_message`]) is drawn centred with no author row, in Teams' words:
-//!   a line (members added, joined, left or removed, the chat's name, a meeting chat's policy), a line after its time
-//!   (a call's start or end, a recording's state), or a card (a meeting's start and end titled by the chat's name, a
-//!   recording and a transcript with the link to Teams on the web); one Teams draws nothing for (a call's end with no
-//!   length, the transcript's half of a recording, a lone bot added) isn't shown. A message type or shape this build
+//!   ([`crate::system_message`]) is drawn with no author row, in Teams' words (its `events` module): a line after its
+//!   icon (members added, joined, left or removed, the chat's name, a meeting chat's policy), a line after its icon and
+//!   time (a call's or a meeting's start or end, a recording's state), a meeting chat's meeting end with its recap card
+//!   ([`crate::meeting_recap`]: View recap, the transcript, the recording's thumbnail and expiry, Share), or a 1:1 or
+//!   group chat's recording or transcript card with the link to Teams on the web; one Teams draws nothing for (a
+//!   call's end with no length, the transcript's half of a recording, a meeting chat's transcript, a meeting's start
+//!   followed at once by its end, a lone bot added) isn't shown. A message type or shape this build
 //!   doesn't show is a placeholder that names no content (the thread's own centred, never named by its id);
 //!   `Control/…` messages (typing) are signals, never shown.
 //! - **Typing**: who is typing now ([`crate::Chats::typing`]), under the messages; it goes off with their end of
@@ -120,6 +122,7 @@ use crate::files;
 use crate::forwarded::{self, ForwardOrigin, Original};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::link_preview;
+use crate::meeting_recap::{self, RecapCard};
 use crate::models::Models;
 use crate::people::{Face, Shown};
 use crate::picture_viewer::{self, OpenPicture, Viewed, Viewing};
@@ -130,15 +133,18 @@ use crate::selection::{self, MessageKey, Scope, TextSelection};
 use crate::sending::{self, Again, Note, RowState};
 use crate::settings::SettingsModel;
 use crate::shell::ShellParts;
-use crate::system_message::{self, CardKind, Naming, Shown as SystemShown};
+use crate::system_message::{self, CardKind, EventIcon, EventLine, Naming, Shown as SystemShown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
 
 pub mod channel;
+mod events;
 
 use channel::{ChannelLooks, THREAD_EVENT};
 pub use channel::{MeetingCard, Place, Replies};
+use events::Expiry;
+pub use events::UNVERIFIED;
 
 actions!(
     teams_ui,
@@ -214,7 +220,7 @@ pub const UNSHOWN_CONTENT: &str = "This message has content that can't be shown 
 /// (`teams_proto::chat::web_chat_link`). The channel view shows neither with it: no channel deep link was captured.
 pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
 
-/// A meeting chat's recording or transcript card's button: the meeting's Recap tab, as Teams' card opens it.
+/// A meeting chat's recap card's button: the meeting's Recap tab, as Teams' card opens it.
 pub const VIEW_RECAP: &str = "View recap";
 /// The divider at the read horizon.
 pub const NEW_MESSAGES: &str = "New messages";
@@ -338,6 +344,17 @@ impl MessageAction {
     }
 }
 
+/// What a meeting chat's recap card asks the Recap tab to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecapOpen {
+    /// The recap (View recap).
+    Recap,
+    /// Its transcript (the Transcript chip).
+    Transcript,
+    /// Its recording, playing (the thumbnail).
+    Play,
+}
+
 /// What the chat view tells its owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatViewEvent {
@@ -354,9 +371,9 @@ pub enum ChatViewEvent {
     },
     /// "More actions" → "Create workflows" on a message: the Workflows dialog for it.
     CreateWorkflows(crate::workflow_run::MessageRef),
-    /// A meeting chat's recording or transcript card's "View recap": the chat's Recap tab, at the card's recording (its
-    /// sharing link) when it is a recording's.
-    OpenRecap(Option<String>),
+    /// A meeting chat's recap card's View recap, Transcript or thumbnail: the chat's Recap tab, at the card's recording
+    /// (its sharing link) when the meeting was recorded, showing `open`.
+    OpenRecap { recording: Option<String>, open: RecapOpen },
     /// A channel post's "Reply in thread" or its replies' summary: its thread, opened beside the channel.
     OpenThread { post: String },
     /// A channel meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`),
@@ -418,11 +435,15 @@ impl PartialEq for RenderedText {
 pub enum Body {
     Text(RenderedText),
     Deleted,
-    /// A system message as a centred line of its own, with no author (members added, joined or left, the chat's name).
-    Event(SharedString),
-    /// A system message as a centred line after its time (a call's start or end, a recording's state).
-    TimedEvent(SharedString),
-    /// A system message as a centred card (a meeting's start or end, a recording, a transcript).
+    /// A system message as a line of its own after its icon, with no author (members added, joined or left, the
+    /// chat's name).
+    Event(EventLine),
+    /// A system message as a line after its icon and time (a call's or a meeting's start or end, a recording's state).
+    TimedEvent(EventLine),
+    /// A meeting chat's meeting end: its line, and the meeting's recap card under it when it left a recording or a
+    /// transcript ([`crate::meeting_recap`]).
+    MeetingEnded(Box<MeetingEnd>),
+    /// A system message as a centred card (a 1:1 or group chat's recording or transcript).
     Card(Box<EventCard>),
     /// A card a bot or a workflow posted, drawn as Teams draws it ([`crate::card_view`]).
     Cards(ShownCards),
@@ -444,6 +465,7 @@ impl Body {
             Self::Deleted => "deleted",
             Self::Event(_) => "event",
             Self::TimedEvent(_) => "timed-event",
+            Self::MeetingEnded(_) => "meeting-ended",
             Self::Card(card) => card.kind.name(),
             Self::Cards(_) => "cards",
             Self::Meeting(_) => "meeting",
@@ -457,9 +479,18 @@ impl Body {
     pub const fn is_system(&self) -> bool {
         matches!(
             self,
-            Self::Event(_) | Self::TimedEvent(_) | Self::Card(_) | Self::UnsupportedEvent(_)
+            Self::Event(_) | Self::TimedEvent(_) | Self::MeetingEnded(_) | Self::Card(_) | Self::UnsupportedEvent(_)
         )
     }
+}
+
+/// A meeting chat's meeting end as shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingEnd {
+    /// "Meeting ended: 1h 1m 37s".
+    pub line: EventLine,
+    /// The meeting's recap card, when it left a recording or a transcript (or one is being saved).
+    pub recap: Option<RecapCard>,
 }
 
 /// A system message's card: what it is, its title and the line under it.
@@ -620,8 +651,12 @@ struct Systems {
     shown: HashMap<String, (i64, u64, Option<SystemShown>)>,
     /// Raised whenever a name the view knows changes: system messages name people.
     names_revision: u64,
-    /// The chat's name, as the chat list has it: a meeting's card is titled by it.
+    /// The chat's name, as the chat list has it: a meeting's recap card is titled by it.
     title: Option<SharedString>,
+    /// A meeting chat's recap cards, by the call each is of, as its messages last said them.
+    recaps: HashMap<Option<String>, RecapCard>,
+    /// When each recording a row names expires, as asked of its item.
+    expiries: HashMap<teams_proto::chat::RecordingItem, Expiry>,
 }
 
 /// How a system message names people in this view: their name as the engine has it, else the one the event gives,
@@ -2228,18 +2263,24 @@ impl ChatView {
     }
 
     /// Asks the engine for the people the rows name: the senders (their profile's name and their picture), events'
-    /// members, forwarded messages' original senders (the account too: a forward names it, never "You") and who is
-    /// typing.
+    /// members (the account too in a meeting chat, whose events name it by its name), forwarded messages' original
+    /// senders (the account too: a forward names it, never "You") and who is typing.
     fn want_names(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<String> = Vec::new();
         let mut originals: Vec<String> = Vec::new();
+        let named_by_name = system_message::is_meeting_chat(&self.conversation);
         let messages = std::mem::take(&mut self.messages);
         for message in &messages {
             if let Some(sender) = &message.sender {
                 wanted.push(sender.clone());
             }
             if !is_text_type(&message.message_type) && message.delete_time.is_none() {
-                wanted.extend(system_message::people(&message.message_type, &message.content));
+                let named = system_message::people(&message.message_type, &message.content);
+                if named_by_name {
+                    originals.extend(named);
+                } else {
+                    wanted.extend(named);
+                }
             }
             if is_text_type(&message.message_type)
                 && let Some(sender) =
@@ -2489,7 +2530,7 @@ impl ChatView {
                 return Some(Body::Meeting(Box::new(card)));
             }
             if let Some(line) = self.looks.meeting_call_line(message) {
-                return Some(Body::TimedEvent(line.into()));
+                return Some(Body::TimedEvent(EventLine::plain(EventIcon::Meeting, line)));
             }
             // the channel's own events: Teams' post list has them filtered out (its info pane tells them)
             if message.message_type.starts_with(THREAD_EVENT) {
@@ -2506,19 +2547,17 @@ impl ChatView {
         }
         let kind = message.message_type.clone();
         Some(match self.system(message) {
-            Some(SystemShown::Line(text)) => Body::Event(text.into()),
-            Some(SystemShown::TimedLine(text)) => Body::TimedEvent(text.into()),
+            Some(SystemShown::Line(line)) => Body::Event(line),
+            Some(SystemShown::TimedLine(line)) if self.is_meeting_end(message) => {
+                Body::MeetingEnded(Box::new(MeetingEnd {
+                    line,
+                    recap: self.recap_of(message),
+                }))
+            }
+            Some(SystemShown::TimedLine(line)) => Body::TimedEvent(line),
             Some(SystemShown::Card { kind, title, detail }) => Body::Card(Box::new(EventCard {
                 kind,
-                title: title.map_or_else(
-                    || {
-                        self.systems
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| system_message::MEETING.into())
-                    },
-                    SharedString::from,
-                ),
+                title: title.into(),
                 detail: detail.into(),
             })),
             Some(SystemShown::Nothing) => return None,
@@ -2532,7 +2571,22 @@ impl ChatView {
         })
     }
 
-    /// The chat's name, as the chat list has it: a meeting's card is titled by it.
+    /// Whether `message` is a meeting chat's meeting end (not a group chat's meeting's).
+    fn is_meeting_end(&self, message: &Message) -> bool {
+        system_message::is_meeting_chat(&self.conversation)
+            && matches!(
+                teams_proto::chat::chat_event(&message.message_type, &message.content),
+                Some(teams_proto::chat::ChatEvent::CallEnded(end)) if !end.huddle
+            )
+    }
+
+    /// The recap card of the call the meeting end `message` ends, when the meeting left something to show.
+    fn recap_of(&self, message: &Message) -> Option<RecapCard> {
+        let call = teams_proto::chat::meeting_times(&message.content).and_then(|times| times.call_id);
+        self.systems.recaps.get(&call).filter(|card| card.shows()).cloned()
+    }
+
+    /// The chat's name, as the chat list has it: a meeting's recap card is titled by it.
     pub fn set_title(&mut self, title: Option<SharedString>, cx: &mut Context<Self>) {
         if self.systems.title != title {
             self.systems.title = title;
@@ -2774,8 +2828,11 @@ impl ChatView {
             self.looks.read(&messages);
         }
         let mut replies = self.replies_of(&messages);
+        if system_message::is_meeting_chat(&self.conversation) {
+            self.systems.recaps = meeting_recap::recap_cards(&messages);
+        }
         let shown: Vec<&Message> = messages.iter().filter(|message| self.shows(message)).collect();
-        let rows: Vec<MessageItem> = shown
+        let mut rows: Vec<MessageItem> = shown
             .into_iter()
             .filter_map(|message| self.item(message, &notes))
             .map(|mut item| {
@@ -2783,6 +2840,9 @@ impl ChatView {
                 item
             })
             .collect();
+        if system_message::is_meeting_chat(&self.conversation) {
+            events::drop_bare_starts(&mut rows, &messages);
+        }
         self.messages = messages;
         let mut items = arrange(&self.conversation, rows, self.history, self.horizon, &Local);
         items.extend(self.pending(&known, now_ms).into_iter().map(Item::Pending));
@@ -2798,6 +2858,7 @@ impl ChatView {
             self.selected = None;
         }
         self.close_gone();
+        self.ask_expiries(cx);
         // the account's reactions changed: its most used may have too
         let own = self
             .message_items()
@@ -3033,7 +3094,12 @@ impl ChatView {
             .relative()
             .w_full()
             .px_4()
-            .pt(px(if item.header { 12.0 } else { 2.0 }))
+            // a system line sits close to the rows beside it, as Teams lists them
+            .pt(px(if item.header && !item.body.is_system() {
+                12.0
+            } else {
+                2.0
+            }))
             .flex();
         // a click on a message selects nothing, as in Teams: its actions show under the pointer, and the keyboard
         // selects (nor does it move the focus: the list's own mouse down keeps it where it was)
@@ -3045,9 +3111,7 @@ impl ChatView {
             }
         }));
         let row = if item.body.is_system() {
-            let recap = self.recap_opener(item, cx);
-            row.flex_col()
-                .child(system_row(item, &self.conversation, palette, clock::cycle(cx), recap))
+            row.flex_col().child(self.system_row(item, palette, cx))
         } else {
             // someone else's message beside their avatar's column, Teams' way; the account's own to the right
             let avatar = (!item.own).then(|| self.avatar_column(item, palette, cx));
@@ -4169,159 +4233,6 @@ fn new_messages_row(palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// A system message's row, centred and with no author, as Teams draws it: a line (after its time, for a call's or a
-/// recording's), a card, or the placeholder of a kind this build doesn't show with the link to Teams on the web.
-fn system_row(
-    item: &MessageItem,
-    conversation: &str,
-    palette: Palette,
-    cycle: HourCycle,
-    recap: Option<forwarded::OnOpen>,
-) -> AnyElement {
-    let id = item.id.clone();
-    let selector = move || format!("event-{id}");
-    match &item.body {
-        Body::Event(text) => centered_line(text.clone(), palette)
-            .debug_selector(selector)
-            .into_any_element(),
-        Body::TimedEvent(text) => centered_line(
-            format!("{}\u{2003}{text}", time_of_day(item.arrival_time, cycle)),
-            palette,
-        )
-        .debug_selector(selector)
-        .into_any_element(),
-        Body::Card(card) => event_card(item, card, conversation, palette, cycle, recap),
-        Body::UnsupportedEvent(_) => centered_line(SharedString::default(), palette)
-            .debug_selector(selector)
-            .child(web_line(
-                &format!("unsupported-{}", item.id),
-                UNSUPPORTED,
-                &item.id,
-                web_chat_link(conversation),
-                palette,
-            ))
-            .into_any_element(),
-        Body::Text(_) | Body::Deleted | Body::Cards(_) | Body::Meeting(_) | Body::Unsupported(_) => {
-            div().into_any_element()
-        }
-    }
-}
-
-/// The time of day of `ms` on `cycle`'s clock: a system message's day is its separator's.
-fn time_of_day(ms: i64, cycle: HourCycle) -> String {
-    DateTime::from_timestamp_millis(ms).map_or_else(String::new, |at| {
-        at.with_timezone(&Local).format(cycle.time_of_day()).to_string()
-    })
-}
-
-/// A system message's card, centred: its icon in a tinted circle, its title over its detail and time, and for a
-/// recording or a transcript in a meeting's chat "View recap" (`recap`: the chat's Recap tab, where it plays), else
-/// the link that opens it in Teams on the web.
-fn event_card(
-    item: &MessageItem,
-    card: &EventCard,
-    conversation: &str,
-    palette: Palette,
-    cycle: HourCycle,
-    recap: Option<forwarded::OnOpen>,
-) -> AnyElement {
-    let glyph = match card.kind {
-        CardKind::MeetingStarted | CardKind::MeetingEnded => Glyph::VIDEO,
-        CardKind::Recording => Glyph::PLAY,
-        CardKind::Transcript => Glyph::TRANSCRIPT,
-    };
-    let icon = div()
-        .size(px(36.0))
-        .flex_none()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgb(palette.selected))
-        .text_color(rgb(palette.brand))
-        .child(glyph.icon());
-    let detail = format!("{}\u{2003}{}", card.detail, time_of_day(item.arrival_time, cycle));
-    let text = div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(palette.foreground))
-                .truncate()
-                .child(card.title.clone()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette.muted_foreground))
-                .truncate()
-                .child(detail),
-        );
-    let action = card_action(item, card, conversation, recap);
-    let selector = format!("event-card-{} {}", item.id, card.kind.name());
-    div()
-        .w_full()
-        .py_2()
-        .flex()
-        .justify_center()
-        .child(
-            div()
-                .debug_selector(move || selector)
-                .w(px(CARD_WIDTH))
-                .max_w_full()
-                .px_4()
-                .py_3()
-                .flex()
-                .items_center()
-                .gap_3()
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(palette.border))
-                .bg(rgb(palette.surface))
-                .child(icon)
-                .child(text)
-                .children(action),
-        )
-        .into_any_element()
-}
-
-/// A recording's or a transcript's card's button: "View recap" in a meeting's chat (`recap`), else the link to Teams
-/// on the web; none on a meeting's start or end.
-fn card_action(
-    item: &MessageItem,
-    card: &EventCard,
-    conversation: &str,
-    recap: Option<forwarded::OnOpen>,
-) -> Option<gpui::Div> {
-    if let Some(open) = recap {
-        let selector = format!("view-recap-{}", item.id);
-        return Some(
-            div().debug_selector(move || selector.clone()).flex_none().child(
-                Button::new(SharedString::from(format!("view-recap-{}", item.id)))
-                    .label(VIEW_RECAP)
-                    .primary()
-                    .with_size(Size::XSmall)
-                    .on_click(open),
-            ),
-        );
-    }
-    card.kind.opens_on_the_web().then(|| {
-        let link = web_chat_link(conversation);
-        let open = format!("open-on-the-web-{}", item.id);
-        div().debug_selector(move || open.clone()).flex_none().child(
-            Button::new(SharedString::from(format!("open-on-the-web-{}", item.id)))
-                .label(OPEN_ON_THE_WEB)
-                .ghost()
-                .with_size(Size::XSmall)
-                .on_click(move |_, _, cx| cx.open_url(&link)),
-        )
-    })
-}
-
 /// A message's header, Teams' way: the sender's name (none on the account's own) and its time (on `cycle`'s clock),
 /// both muted, over the bubble's left edge, then "Edited" once edited. The time's test selector is
 /// `message-time-<id> <time>`.
@@ -4341,33 +4252,6 @@ fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle) -> AnyEle
         .child(time)
         .children(item.edited.then(edited_mark))
         .into_any_element()
-}
-
-/// What a meeting chat's recording or transcript card's "View recap" does: tells [`ChatViewEvent::OpenRecap`]. `None`
-/// for any other row, and in a chat that isn't a meeting's (its card keeps the link to Teams on the web).
-impl ChatView {
-    fn recap_opener(&self, item: &MessageItem, cx: &mut Context<Self>) -> Option<forwarded::OnOpen> {
-        let Body::Card(card) = &item.body else {
-            return None;
-        };
-        if !card.kind.opens_on_the_web() || !system_message::is_meeting_chat(&self.conversation) {
-            return None;
-        }
-        let recording = self
-            .messages
-            .iter()
-            .find(|message| message.id == item.id)
-            .and_then(
-                |message| match teams_proto::chat::chat_event(&message.message_type, &message.content) {
-                    Some(teams_proto::chat::ChatEvent::Recording(recording)) => recording.link,
-                    _ => None,
-                },
-            );
-        Some(Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-            cx.stop_propagation();
-            cx.emit(ChatViewEvent::OpenRecap(recording.clone()));
-        })))
-    }
 }
 
 /// The header of a forwarded message's card ([`forwarded::header`]); a click on the original's time tells
@@ -4556,7 +4440,9 @@ fn bubble(
             chat.web_link(&item.id),
             palette,
         ),
-        Body::Event(_) | Body::TimedEvent(_) | Body::Card(_) | Body::UnsupportedEvent(_) => div().into_any_element(),
+        Body::Event(_) | Body::TimedEvent(_) | Body::MeetingEnded(_) | Body::Card(_) | Body::UnsupportedEvent(_) => {
+            div().into_any_element()
+        }
     };
     let selector = format!("bubble-{}", item.id);
     let bubble = div()

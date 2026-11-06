@@ -30,7 +30,8 @@ pub use code::{CODE_BLOCK_ITEMTYPE, Code, CodeRun, Token, language_of};
 pub use compose::{ComposeError, MessageText};
 pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, MeetingTimes, Member, Members, Recording,
-    RecordingContents, RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media, meeting_times,
+    RecordingContents, RecordingItem, RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media,
+    meeting_times,
 };
 pub use files::{
     FILE_TYPE, FileKind, FilePreview, SharedFile, SharedFiles, is_file_link, is_sharepoint_host, shared_files,

@@ -623,6 +623,8 @@ enum Request {
         teams_proto::RecordingManifest,
         Responder<Arc<teams_proto::Presentation>>,
     ),
+    /// When a meeting recording expires, by its item ([`crate::recap`]).
+    RecordingExpiration(teams_proto::RecordingExpiration, Responder<Option<i64>>),
     /// A part of a meeting recording's presentation ([`crate::recap`]).
     RecordingSegment(teams_proto::MediaSegmentLink, Responder<Vec<u8>>),
     /// What a meeting recording's file is to the account, by its item ([`crate::recap`]).
@@ -1400,6 +1402,17 @@ impl EngineRequests {
         self.ask(|reply| Request::RecordingPresentation(manifest, reply))
     }
 
+    /// When the meeting recording that is item `item` of drive `drive` on the personal site `link` is on (its sharing
+    /// link) expires, ms since the epoch, as its item says, read now ([`crate::recap`]): what a meeting chat's recap
+    /// card counts its days by. `None` when it says none; [`EngineError::FileUnavailable`] when the account can't read
+    /// it, [`EngineError::FileUnread`] when the read failed on the way.
+    pub fn recording_expiration(&self, link: &str, drive: &str, item: &str) -> Reply<Option<i64>> {
+        let Some(read) = teams_proto::RecordingExpiration::of(link, drive, item) else {
+            return Reply::ready(Err(EngineError::FileUnavailable));
+        };
+        self.ask(|reply| Request::RecordingExpiration(read, reply))
+    }
+
     /// A part (an initialization or a media segment) of a meeting recording's presentation
     /// ([`Self::recording_presentation`]), read now ([`crate::recap`]): [`EngineError::FileUnavailable`] when it is
     /// refused (its address expired: the presentation is read again), [`EngineError::FileUnread`] when the read failed
@@ -1932,6 +1945,7 @@ where
             Request::MeetingTranscript(location, reply) => self.recaps.transcript(&location, reply),
             Request::TranscriptLanguage(location, reply) => self.recaps.language(&location, reply),
             Request::RecordingPresentation(manifest, reply) => self.recaps.presentation(manifest, reply),
+            Request::RecordingExpiration(read, reply) => self.recaps.expiration(read, reply),
             Request::RecordingSegment(part, reply) => self.recaps.segment(part, reply),
             Request::RecordingFile(file, reply) => self.recaps.file(file, reply),
             Request::Write(action, reply) => {

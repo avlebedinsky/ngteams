@@ -147,6 +147,13 @@ pub trait Core: Send + Sync + 'static {
         let _ = (link, drive, item);
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
+    /// When the meeting recording that is item `item` of drive `drive` on the personal site of its sharing link
+    /// `link` expires, ms since the epoch, as its item says: what a meeting chat's recap card counts its days by.
+    /// `None` when it says none; a fake without recordings knows none.
+    fn recording_expiration(&self, link: String, drive: String, item: String) -> Reply<Option<i64>> {
+        let _ = (link, drive, item);
+        Reply::ready(Ok(None))
+    }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -674,6 +681,10 @@ impl Core for EngineRequests {
 
     fn recording_file(&self, link: String, drive: String, item: String) -> Reply<teams_proto::RecordingAccess> {
         EngineRequests::recording_file(self, &link, &drive, &item)
+    }
+
+    fn recording_expiration(&self, link: String, drive: String, item: String) -> Reply<Option<i64>> {
+        EngineRequests::recording_expiration(self, &link, &drive, &item)
     }
 
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {

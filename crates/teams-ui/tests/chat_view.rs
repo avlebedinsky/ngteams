@@ -57,6 +57,7 @@ use teams_ui::models::TYPING_TIMEOUT;
 use teams_ui::rich_text::Rendered;
 use teams_ui::settings::{Settings, SettingsModel, TimeFormat};
 use teams_ui::shell::{Shell, ShellParts};
+use teams_ui::system_message::{EventIcon, EventLine};
 
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 const AC: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000c@unq.gbl.spaces";
@@ -310,7 +311,10 @@ fn the_messages_show_oldest_first_with_their_markers_reactions_and_events() {
         ],
         "the control message is never shown"
     );
-    assert_eq!(shown[0].body, Body::Event("You added Lab Bee to the chat.".into()));
+    assert_eq!(
+        shown[0].body,
+        Body::Event(EventLine::plain(EventIcon::Joined, "You added Lab Bee to the chat."))
+    );
     assert_eq!(shown[4].body, Body::Unsupported("RichText/Media_Card".to_owned()));
     assert_eq!(
         shown[1].reactions,
@@ -385,7 +389,7 @@ fn shape(items: &[Item]) -> Vec<String> {
 fn a_sender_s_messages_group_within_five_minutes_and_days_are_separated() {
     let utc = FixedOffset::east_opt(0).unwrap();
     let mut event = row("e", LAB_B, NOON + 30 * MINUTE);
-    event.body = Body::Event("added".into());
+    event.body = Body::Event(EventLine::plain(EventIcon::Joined, "added"));
     event.message_type = "ThreadActivity/AddMember".to_owned();
     let rows = vec![
         row("1", LAB_B, NOON),

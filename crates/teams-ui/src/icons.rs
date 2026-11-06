@@ -88,7 +88,10 @@ impl Glyph {
     pub const CIRCLE_ALERT: Self = Self(include_bytes!("../assets/icons/circle-alert.svg"));
     pub const CIRCLE_CHECK: Self = Self(include_bytes!("../assets/icons/circle-check.svg"));
     pub const CIRCLE_MINUS: Self = Self(include_bytes!("../assets/icons/circle-minus.svg"));
+    pub const RECORD: Self = Self(include_bytes!("../assets/icons/circle-dot.svg"));
+    pub const RECORD_STOP: Self = Self(include_bytes!("../assets/icons/circle-stop.svg"));
     pub const CLOCK: Self = Self(include_bytes!("../assets/icons/clock.svg"));
+    pub const CLOUD_UPLOAD: Self = Self(include_bytes!("../assets/icons/cloud-upload.svg"));
     pub const CODE: Self = Self(include_bytes!("../assets/icons/square-code.svg"));
     pub const COPY: Self = Self(include_bytes!("../assets/icons/copy.svg"));
     pub const DOWNLOAD: Self = Self(include_bytes!("../assets/icons/download.svg"));
@@ -128,6 +131,7 @@ impl Glyph {
     pub const PENCIL: Self = Self(include_bytes!("../assets/icons/pencil.svg"));
     pub const PHONE: Self = Self(include_bytes!("../assets/icons/phone.svg"));
     pub const PHONE_OFF: Self = Self(include_bytes!("../assets/icons/phone-off.svg"));
+    pub const PHONE_MISSED: Self = Self(include_bytes!("../assets/icons/phone-missed.svg"));
     pub const PLAY: Self = Self(include_bytes!("../assets/icons/circle-play.svg"));
     pub const PLAY_MEDIA: Self = Self(include_bytes!("../assets/icons/play.svg"));
     pub const PLUS: Self = Self(include_bytes!("../assets/icons/plus.svg"));
@@ -152,6 +156,9 @@ impl Glyph {
     pub const TRANSCRIPT: Self = Self(include_bytes!("../assets/icons/file-text.svg"));
     pub const TRASH: Self = Self(include_bytes!("../assets/icons/trash.svg"));
     pub const USER: Self = Self(include_bytes!("../assets/icons/user-round.svg"));
+    pub const USER_LEFT: Self = Self(include_bytes!("../assets/icons/user-round-arrow-left.svg"));
+    pub const USER_MINUS: Self = Self(include_bytes!("../assets/icons/user-round-minus.svg"));
+    pub const UNVERIFIED: Self = Self(include_bytes!("../assets/icons/badge-question-mark.svg"));
     /// Everyone in a chat (the mention picker's Everyone).
     pub const USERS: Self = Self(include_bytes!("../assets/icons/users-round.svg"));
     pub const VIDEO: Self = Self(include_bytes!("../assets/icons/video.svg"));

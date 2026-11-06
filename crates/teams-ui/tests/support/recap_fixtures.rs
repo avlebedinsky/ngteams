@@ -100,8 +100,9 @@ pub fn messages(me: &str) -> Vec<Message> {
             "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Success\" code=\"200\" />\
              <Title>{TITLE}</Title><a href=\"{}\">Play</a><OriginalName v=\"{TITLE}-Meeting Recording.mp4\" />\
              <RecordingInitiatorId value=\"8:orgid:{ORGANIZER}\" isAutoRecording=\"False\" />\
-             <RecordingContent contentTypes=\"Recording+Transcript\" duration=\"0:02:00.0\"></RecordingContent>\
-             </URIObject>",
+             <RecordingContent contentTypes=\"Recording+Transcript\" duration=\"0:02:00.0\">\
+             <item type=\"onedriveForBusinessVideo\" uri=\"{0}\" driveId=\"b!drive1\" driveItemId=\"{item}\" />\
+             </RecordingContent></URIObject>",
             sharing_link(item)
         )
     };
@@ -137,6 +138,19 @@ pub fn messages(me: &str) -> Vec<Message> {
             &recording("ITEM1"),
             None,
             7,
+        ),
+        // the meeting's end, its recordings saved after it: its recap card holds them
+        message(
+            "6",
+            &format!("8:orgid:{ORGANIZER}"),
+            "Event/Call",
+            &format!(
+                "<ended/><partlist alt=\"\" count=\"1\"><part identity=\"8:orgid:{ORGANIZER}\">\
+                 <name>8:orgid:{ORGANIZER}</name><duration>360</duration></part></partlist>\
+                 <callEventType>callEnded</callEventType>"
+            ),
+            None,
+            6,
         ),
         message(
             "1",
