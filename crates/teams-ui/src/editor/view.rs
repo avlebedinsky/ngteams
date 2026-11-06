@@ -112,7 +112,7 @@ impl Editor {
     }
 
     /// Block `index`'s text element.
-    fn block_text(&self, index: usize, palette: Palette, focused: bool, cx: &App) -> BlockText {
+    pub(super) fn block_text(&self, index: usize, palette: Palette, focused: bool, cx: &App) -> BlockText {
         let block = &self.doc.blocks[index];
         let placeholder = index == 0 && self.is_empty() && !self.placeholder.is_empty();
         let mut content = if placeholder {
@@ -230,7 +230,7 @@ impl Editor {
                 )
                 .child(body)
                 .into_any_element(),
-            Kind::Paragraph | Kind::Heading(_) => row
+            Kind::Paragraph | Kind::Heading(_) | Kind::Picture(_) => row
                 .pl(px(rich_text::INDENT * f32::from(block.indent)))
                 .child(body)
                 .into_any_element(),
@@ -362,7 +362,10 @@ impl Render for Editor {
         let rows: Vec<AnyElement> = markers
             .into_iter()
             .enumerate()
-            .map(|(index, marker)| self.row(index, marker, palette, focused, cx))
+            .map(|(index, marker)| match self.doc.blocks[index].kind {
+                Kind::Picture(id) => self.picture_row(index, id, palette, focused, cx),
+                _ => self.row(index, marker, palette, focused, cx),
+            })
             .collect();
         let scroll = div()
             .id("rich-editor-scroll")
@@ -435,7 +438,7 @@ fn input_and_mouse(editor: Entity<Editor>) -> impl IntoElement {
 }
 
 /// A block's text: GPUI's styled text, its layout kept for the editor, the cursor drawn in it.
-struct BlockText {
+pub(super) struct BlockText {
     id: ElementId,
     index: usize,
     text: StyledText,

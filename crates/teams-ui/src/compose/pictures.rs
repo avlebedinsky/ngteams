@@ -1,0 +1,44 @@
+//! A picture pasted into the box is sent at once, as Teams' box sends one: to the media service, readable by this
+//! conversation alone (`Core::upload_picture`, through the engine's outbox), while it shows in the box; the message
+//! then names it ([`crate::editor::pictures`]). Files a paste brings that aren't pictures are attached as a drop's are.
+
+use std::path::PathBuf;
+
+use gpui::{Context, Window};
+
+use super::Compose;
+use crate::editor::pictures::PictureState;
+
+impl Compose {
+    /// Sends picture `id` of the editor (just put in the box, or its Retry pressed).
+    pub(super) fn send_picture(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(picture) = self.editor.read(cx).picture(id).map(|picture| picture.bytes.clone()) else {
+            return;
+        };
+        if self.read_only.is_some() {
+            return;
+        }
+        let reply = self.core.upload_picture(self.conversation.clone(), (*picture).clone());
+        let editor = self.editor.clone();
+        cx.spawn(async move |_, cx| {
+            let state = match reply.await {
+                Ok(object) => PictureState::Sent(object),
+                Err(error) => PictureState::Failed(error.to_string().into()),
+            };
+            editor.update(cx, |editor, cx| editor.set_picture_state(id, state, cx));
+        })
+        .detach();
+    }
+
+    /// Attaches the files a paste brought that aren't pictures, where the box takes files.
+    pub(super) fn pasted_files(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        if self.accepts_files() {
+            self.attach_files(paths, window, cx);
+        } else {
+            self.show_problem(
+                "Files can't be attached here. Paste a picture, or send the file in a chat.",
+                cx,
+            );
+        }
+    }
+}

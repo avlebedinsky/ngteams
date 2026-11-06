@@ -16,7 +16,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_proto::{
     Client, Credentials, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MessagePicture, PastedFormat, Read as _,
-    Refusal, Service,
+    Refusal, Service, Transport as _,
 };
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -208,5 +208,76 @@ async fn a_picture_larger_than_a_plain_body_is_read_from_ams() {
         picture.bytes.len(),
         large.len(),
         "a photo's original past the 4 MB a plain body may take"
+    );
+}
+
+#[tokio::test]
+async fn a_pasted_picture_is_sent_as_the_web_client_sends_one_on_the_ams_base() {
+    let server = MockServer::start().await;
+    let tokens = Arc::new(FakeTokens::default());
+    let transport = transport(&server, &tokens).with_ams(AMS_BASE).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/v1/objects/"))
+        .respond_with(ResponseTemplate::new(201).set_body_raw(format!("{{\"id\":\"{OBJECT}\"}}"), "application/json"))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/v1/objects/{OBJECT}/content/imgpsh").as_str()))
+        .respond_with(ResponseTemplate::new(201))
+        .mount(&server)
+        .await;
+    let chat = "19:made-up-a_made-up-b@unq.gbl.spaces";
+    let create = teams_proto::CreatePicture::new(chat, PastedFormat::Png).unwrap();
+    let answer = transport.deliver(create).await.unwrap();
+    assert_eq!(answer.status(), 201);
+    let object = teams_proto::CreatePicture::read_answer(answer.body()).unwrap();
+    assert_eq!(object, OBJECT);
+    let picture = teams_proto::PastedPicture {
+        format: PastedFormat::Png,
+        bytes: b"\x89PNG\r\n\x1a\nmade-up picture".to_vec(),
+    };
+    let upload = teams_proto::UploadPicture::new(&object, &picture).unwrap();
+    assert_eq!(transport.deliver(upload).await.unwrap().status(), 201);
+
+    let requests = server.received_requests().await.unwrap();
+    let [created, uploaded] = requests.as_slice() else {
+        panic!("{} requests", requests.len())
+    };
+    let header = |request: &wiremock::Request, name: &str| {
+        request
+            .headers
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(created.url.path(), "/v1/objects/", "the creation's trailing slash");
+    assert_eq!(header(created, "x-ams-post-sharing-mode"), ["Inline"]);
+    assert_eq!(header(created, "content-type"), ["application/json"]);
+    assert_eq!(header(created, "x-ms-migration"), ["True"]);
+    let body: serde_json::Value = serde_json::from_slice(&created.body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "type": "pish/image",
+            "permissions": {chat: ["read"]},
+            "sharingMode": "Inline",
+            "filename": "MicrosoftTeams-image.png",
+        })
+    );
+    assert_eq!(
+        header(uploaded, "content-type"),
+        ["application/octet-stream"],
+        "one type: the bytes'"
+    );
+    assert_eq!(header(uploaded, "authorization"), ["Bearer placeholder-token"]);
+    assert_eq!(uploaded.body, picture.bytes);
+    assert!(
+        tokens
+            .audiences
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .all(|audience| audience == IC3_AUDIENCE)
     );
 }

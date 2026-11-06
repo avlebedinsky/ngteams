@@ -22,6 +22,7 @@ mod channel_sections;
 pub use channel_own::ChannelOwn;
 pub use channel_sections::{ChannelSection, ChannelSectionAction, ChannelSectionWrite, ChannelSections};
 pub use write::{ChannelChange, ChannelData, ChannelRead, ChannelTarget, ChannelWrite};
+pub use write::{CreatePicture, MAX_SENT_PICTURE, UploadPicture};
 pub mod chat;
 mod client;
 mod emoticon;
@@ -58,7 +59,7 @@ pub use ids::{
 };
 pub use log_shape::{log_url, path_shape};
 
-pub use ams::{MessagePicture, PastedFormat, PastedPicture};
+pub use ams::{MessagePicture, PastedFormat, PastedPicture, sent_picture};
 pub use calendar::{
     Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, ChannelEventRead,
     ChannelEventRef, EventKind, EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS,

@@ -917,3 +917,70 @@ async fn a_lab_only_group_chat_is_written_to_a_new_one_included() -> TestResult 
 
     Ok(())
 }
+
+/// A made-up pasted picture's object.
+const PICTURE: &str = "0-eus-d10-00000000000000000000000000000001";
+
+#[tokio::test]
+async fn a_pasted_picture_is_posted_as_teams_writes_it_with_its_object_in_amsreferences() -> TestResult {
+    let picture = teams_proto::sent_picture(PICTURE, (198, 53)).ok_or("an object id")?;
+    let text = MessageText::new(
+        rich(vec![
+            Node::Paragraph(vec![run("Look")]),
+            Node::Paragraph(vec![Node::Image(picture.clone())]),
+        ]),
+        [],
+    )?;
+    assert_eq!(text.pictures(), [PICTURE]);
+    let request = SendMessage::new(AB_CHAT, lab_a(), text).composed_at(NEW_YEAR_MS);
+    let sent = sent(ChatWrite::Send(request)).await?;
+    let body = sent.body.ok_or("a body")?;
+    assert_eq!(body["amsreferences"], json!([PICTURE]));
+    assert_eq!(
+        body["content"],
+        format!(
+            "<p>Look</p><p><img src=\"https://us-api.asm.skype.com/v1/objects/{PICTURE}/views/imgo\" \
+             itemtype=\"http://schema.skype.com/AMSImage\" width=\"198\" height=\"53\" alt=\"image\" \
+             id=\"x_{PICTURE}\" itemid=\"{PICTURE}\"></p>"
+        )
+    );
+    // it reads back as the picture it was
+    let read = parse_html(body["content"].as_str().ok_or("content")?);
+    assert_eq!(read.nodes[1], Node::Paragraph(vec![Node::Image(picture)]));
+    Ok(())
+}
+
+#[test]
+fn only_a_picture_sent_for_the_message_is_in_its_text() {
+    let good = teams_proto::sent_picture(PICTURE, (10, 10)).unwrap();
+    let refused = [
+        // another host
+        Image {
+            src: format!("https://example.com/v1/objects/{PICTURE}/views/imgo"),
+            ..good.clone()
+        },
+        // another object than its itemid
+        Image {
+            item_id: Some("0-eus-d10-other".to_owned()),
+            ..good.clone()
+        },
+        // not an AMS picture
+        Image {
+            item_type: None,
+            ..good.clone()
+        },
+        // no size
+        Image {
+            size: None,
+            ..good.clone()
+        },
+    ];
+    for image in refused {
+        assert_eq!(
+            MessageText::new(rich(vec![Node::Image(image.clone())]), []),
+            Err(ComposeError::Image),
+            "{image:?}"
+        );
+    }
+    assert!(teams_proto::sent_picture("../x", (1, 1)).is_none());
+}

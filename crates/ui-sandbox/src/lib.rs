@@ -10,6 +10,8 @@
 //!   PipeWire a fake camera portal handing out remotes on it.
 //! - **Virtual input** ([`input`]): a keyboard and a pointer in the nested niri, through its
 //!   `zwp_virtual_keyboard_manager_v1` and `zwlr_virtual_pointer_manager_v1`.
+//! - **A clipboard of its own** ([`clipboard`]): content put on the nested niri's selection through its data-control
+//!   protocol for the app to paste, and what the selection holds read back; the desktop's clipboard is never touched.
 //! - **A no-op URI opener** ([`opener`]): `xdg-open` (and the other launchers GPUI tries) first on the client's
 //!   `PATH`, recording what it was asked to open and opening nothing.
 //! - **A private PipeWire** ([`pipewire`], when [`SandboxOptions::pipewire`] asks): its own server and session
@@ -26,6 +28,7 @@
 //! to a display, so there's no vblank: the cadence is weston's timer.
 
 pub mod bus;
+pub mod clipboard;
 pub mod input;
 pub mod opener;
 pub mod pipewire;
@@ -39,7 +42,7 @@ use std::{
     os::{fd::BorrowedFd, unix::fs::PermissionsExt as _},
     path::{Component, Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -48,6 +51,7 @@ use tempfile::TempDir;
 
 use crate::{
     bus::PrivateBus,
+    clipboard::{Clipboard, Offers},
     input::VirtualInput,
     opener::Opened,
     pipewire::{PipeWireOptions, PipeWireTools, PrivatePipeWire},
@@ -302,6 +306,8 @@ pub struct Sandbox {
     /// Dropped (stopped) before the dir they live in.
     bus: PrivateBus,
     pipewire: Option<PrivatePipeWire>,
+    /// What [`Sandbox::set_clipboard`] put up, served until replaced or cleared.
+    clipboard: Mutex<Option<Clipboard>>,
     helpers: Vec<Child>,
     dir: TempDir,
     options: SandboxOptions,
@@ -315,6 +321,10 @@ pub struct Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        // stopped while the compositor is still there to take its offer back
+        if let Ok(mut clipboard) = self.clipboard.lock() {
+            clipboard.take();
+        }
         for child in self.helpers.iter_mut().rev() {
             let _ = child.kill();
             let _ = child.wait();
@@ -338,6 +348,7 @@ impl Sandbox {
         let mut sandbox = Self {
             bus,
             pipewire: None,
+            clipboard: Mutex::new(None),
             helpers: Vec::new(),
             dir,
             options: options.clone(),
@@ -409,6 +420,48 @@ impl Sandbox {
     /// The compositor refuses the connection or doesn't offer the protocols.
     pub fn input(&self) -> SandboxResult<VirtualInput> {
         VirtualInput::connect(&self.wayland, (self.options.width, self.options.height))
+    }
+
+    /// Puts `offers` on the nested niri's clipboard, each MIME type answered with its bytes, as a copy in another
+    /// program would: the app can paste them once its window has keyboard focus. They are served until the next
+    /// call, [`Sandbox::clear_clipboard`], a copy in the app, or the sandbox's end.
+    ///
+    /// # Errors
+    /// See [`Clipboard::offer`].
+    pub fn set_clipboard(&self, offers: Offers) -> SandboxResult {
+        let served = Clipboard::offer(&self.wayland, offers)?;
+        let replaced = self
+            .clipboard
+            .lock()
+            .map_err(|_| "the clipboard's lock is poisoned")?
+            .replace(served);
+        // stopped outside the lock; the compositor has cancelled it already, the new offer holding the selection
+        drop(replaced);
+        Ok(())
+    }
+
+    /// Stops serving what [`Sandbox::set_clipboard`] put up; the clipboard is empty then unless something newer took
+    /// it.
+    ///
+    /// # Errors
+    /// The clipboard's lock is poisoned.
+    pub fn clear_clipboard(&self) -> SandboxResult {
+        let cleared = self
+            .clipboard
+            .lock()
+            .map_err(|_| "the clipboard's lock is poisoned")?
+            .take();
+        drop(cleared);
+        Ok(())
+    }
+
+    /// What the nested niri's clipboard holds now, whoever put it up ([`Sandbox::set_clipboard`] or a copy in the
+    /// app), each MIME type read in full; empty when the clipboard is.
+    ///
+    /// # Errors
+    /// See [`clipboard::read`].
+    pub fn read_clipboard(&self) -> SandboxResult<Offers> {
+        clipboard::read(&self.wayland)
     }
 
     fn with_mesa_egl(command: &mut Command) {

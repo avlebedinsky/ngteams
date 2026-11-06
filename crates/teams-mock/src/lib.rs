@@ -456,6 +456,26 @@ impl ChatServiceMock {
             .await;
     }
 
+    /// Answers a pasted picture's send as the async gateway did (`docs/protocol/chat.md`, "Pictures sent"): every
+    /// object's creation (`POST /v1/objects/`) `201` with `{"id": object}`, and its bytes put into it
+    /// (`PUT /v1/objects/<object>/content/imgpsh`) `201`; then a `GET` of its `imgo` view answers `png`.
+    pub async fn serve_picture_sends(&self, object: &str, png: Vec<u8>) {
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/v1/objects/"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({ "id": object })))
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(wiremock::matchers::path(format!("/v1/objects/{object}/content/imgpsh")))
+            .respond_with(ResponseTemplate::new(201))
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+        self.serve_bytes(&format!("/v1/objects/{object}/views/imgo"), "image/png", png)
+            .await;
+    }
+
     /// Answers every `GET` of exactly `path` with the part of `body` its `Range: bytes=<first>-<last>` asks for, as a
     /// `206` with its `Content-Range` (the whole of it as a `200` without one), before the world sees it: a test's
     /// stand-in for a shared file at the download link Graph hands out, which the world has none of. Below the answers

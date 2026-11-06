@@ -200,8 +200,8 @@ impl Editor {
                 }
             }))
             .on_action(cx.listener(|this, _: &Cut, _, cx| this.cut(cx)))
-            .on_action(cx.listener(|this, _: &Paste, _, cx| this.paste(false, cx)))
-            .on_action(cx.listener(|this, _: &PastePlain, _, cx| this.paste(true, cx)))
+            .on_action(cx.listener(|this, _: &Paste, window, cx| this.paste(false, window.scale_factor(), cx)))
+            .on_action(cx.listener(|this, _: &PastePlain, window, cx| this.paste(true, window.scale_factor(), cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)));
         Self::on_format_actions(root, cx)

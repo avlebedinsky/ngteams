@@ -54,6 +54,10 @@ pub struct FakeCore {
     pub hold_uploads: Mutex<bool>,
     pub held_uploads: Mutex<Vec<Answer<teams_proto::UploadedFile>>>,
     pub upload_answers: Mutex<VecDeque<Result<teams_proto::UploadedFile, EngineError>>>,
+    /// Every picture sent, with its conversation, in order; each answered from `picture_answers`, else an object of
+    /// its own (`0-made-up-d1-<n>`).
+    pub picture_uploads: Mutex<Vec<(String, teams_proto::PastedPicture)>>,
+    pub picture_answers: Mutex<VecDeque<Result<String, EngineError>>>,
     pub me: AccountMri,
     pub stopped: Mutex<bool>,
     pub asked: Mutex<Vec<&'static str>>,
@@ -445,6 +449,13 @@ impl Core for FakeCore {
                 .pop_front()
                 .unwrap_or_else(|| Ok(uploaded_file(name))),
         )
+    }
+    fn upload_picture(&self, conversation: String, picture: teams_proto::PastedPicture) -> Reply<String> {
+        let mut uploads = locked(&self.picture_uploads);
+        uploads.push((conversation, picture));
+        let made = format!("0-made-up-d1-{}", uploads.len());
+        drop(uploads);
+        Reply::ready(locked(&self.picture_answers).pop_front().unwrap_or(Ok(made)))
     }
     fn meeting(&self, chat: String) -> Reply<Option<teams_core::MeetingDetails>> {
         let found = locked(&self.meetings).get(&chat).cloned();

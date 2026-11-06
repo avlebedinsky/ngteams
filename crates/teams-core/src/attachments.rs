@@ -5,8 +5,9 @@ use serde_json::Value;
 use std::{io::Read as _, path::PathBuf, sync::Arc};
 use teams_proto::chat::ChatReads;
 use teams_proto::{
-    Client, Credentials, DriveSite, DriveWrite, HttpError, HttpTransport, MAX_ATTACHMENT_SIZE, OwnDrive,
-    ShortProfileLookup, Transport, UploadedFile, direct_file_grants,
+    Client, CreatePicture, Credentials, DriveSite, DriveWrite, HttpError, HttpTransport, MAX_ATTACHMENT_SIZE,
+    MAX_SENT_PICTURE, OwnDrive, PastedPicture, ShortProfileLookup, Transport, UploadPicture, UploadedFile,
+    direct_file_grants,
 };
 use teams_proto::{Mri, chat_members, one_to_one_pair};
 
@@ -42,6 +43,28 @@ where
                 return;
             };
             let answer = upload(&client, &outbox, path).await;
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// A picture pasted into a message in `conversation`, sent as Teams' web client sends one: an object only that
+    /// conversation may read, then the picture's bytes into it. The answer is the object's id, which the message's
+    /// `<img>` names. Each write is one attempt through the outbox ([`send_picture`]); a failed upload leaves an empty
+    /// object nobody is shown, as the web client's retries do.
+    pub(crate) fn picture(&self, conversation: String, picture: PastedPicture, reply: Responder<String>) {
+        let outbox = Arc::clone(&self.outbox);
+        let slots = Arc::clone(&self.slots);
+        let read_only = self.client.transport().is_read_only();
+        tokio::task::spawn_local(async move {
+            let Ok(_slot) = slots.acquire_owned().await else {
+                let _ = reply.send(Err(EngineError::Stopped));
+                return;
+            };
+            let answer = if read_only {
+                Err(failed("This app is read-only."))
+            } else {
+                picture_object(&outbox, &conversation, &picture).await
+            };
             let _ = reply.send(answer);
         });
     }
@@ -282,6 +305,53 @@ async fn send<T: Transport<Error = HttpError>>(outbox: &Outbox<T>, write: DriveW
                 "The file service didn't confirm the upload or share. Check your connection before trying again.",
             )),
             CallTried::Throttled(_) => Err(failed("The file service is busy. Try again.")),
+        };
+    }
+}
+
+/// The object a picture is sent in: made for `conversation` alone, then filled with the picture's bytes.
+async fn picture_object<T: Transport<Error = HttpError>>(
+    outbox: &Outbox<T>,
+    conversation: &str,
+    picture: &PastedPicture,
+) -> Result<String, EngineError> {
+    if picture.bytes.len() > MAX_SENT_PICTURE {
+        return Err(failed("This picture is too large to send. Send it as a file instead."));
+    }
+    let create =
+        CreatePicture::new(conversation, picture.format).ok_or_else(|| failed("This picture can't be sent here."))?;
+    let answer = send_picture(outbox, create).await?;
+    let object = CreatePicture::read_answer(&answer)
+        .ok_or_else(|| failed("The picture service's answer couldn't be read. Try again."))?;
+    let upload = UploadPicture::new(&object, picture).ok_or_else(|| failed("This picture can't be sent."))?;
+    send_picture(outbox, upload).await?;
+    Ok(object)
+}
+
+/// One picture write through the outbox, another attempt only as [`CallRetries`] allows; its answer's body.
+async fn send_picture<T, R>(outbox: &Outbox<T>, write: R) -> Result<Vec<u8>, EngineError>
+where
+    T: Transport<Error = HttpError>,
+    R: teams_proto::Request + Clone + Send,
+{
+    let mut retries = CallRetries::default();
+    loop {
+        let tried = outbox.try_picture(write.clone()).await;
+        if let Some(wait) = retries.again(&tried) {
+            tokio::time::sleep(wait).await;
+            continue;
+        }
+        return match tried {
+            CallTried::Answered(answer) if answer.is_success() => Ok(answer.body().to_vec()),
+            CallTried::Answered(answer) => Err(failed(&format!(
+                "The picture service answered {}. Try again.",
+                answer.status()
+            ))),
+            CallTried::Denied(reason) | CallTried::NotSent(reason) => Err(failed(&reason)),
+            CallTried::Uncertain(_) => Err(failed(
+                "The picture service didn't confirm the upload. Check your connection before trying again.",
+            )),
+            CallTried::Throttled(_) => Err(failed("The picture service is busy. Try again.")),
         };
     }
 }

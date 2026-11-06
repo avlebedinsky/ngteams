@@ -4,7 +4,9 @@
 //! - `ui-sandbox-probe [--open-url URL]`: opens the window (only inside a sandbox: `ui_sandbox::window_allowed`) and
 //!   prints `ready` once it has presented a few frames, `active true|false` as it gains and loses focus,
 //!   `key ctrl=<b> shift=<b> alt=<b> name=<key> char=<Some("x")|None>` per key down and
-//!   `down x=<x> y=<y> button=<button>` per mouse button down (window pixels). With `--open-url`, it asks GPUI's
+//!   `down x=<x> y=<y> button=<button>` per mouse button down (window pixels); on Ctrl+V, what GPUI reads from the
+//!   clipboard, `clipboard empty` or `clipboard` and an entry each (`text="…"`, `image=<mime>:<bytes>`,
+//!   `paths=[…]`). With `--open-url`, it asks GPUI's
 //!   `open_url` for `URL` once ready and prints `open-url`. It quits when the window closes.
 //! - `ui-sandbox-probe --list-fds [--write-fd N]`: opens no window; prints `fds <n> <n> ...`, the descriptors it
 //!   inherited, then writes `hello from the sandbox` to descriptor `N` (a pipe) and exits.
@@ -19,9 +21,9 @@ use std::{
 };
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, Render, Styled as _, Window, WindowBounds, WindowOptions, WindowingModes, div, px,
-    rgb, size,
+    App, AppContext as _, Bounds, ClipboardEntry, ClipboardItem, Context, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, Styled as _, Window, WindowBounds, WindowOptions,
+    WindowingModes, div, px, rgb, size,
 };
 
 /// The probe window's Wayland app id.
@@ -138,6 +140,31 @@ fn report_key(event: &KeyDownEvent) {
     ));
 }
 
+/// What a clipboard read gave, as the probe prints it.
+fn describe_clipboard(item: Option<&ClipboardItem>) -> String {
+    let Some(item) = item else {
+        return "clipboard empty".to_owned();
+    };
+    let entries: Vec<String> = item
+        .entries()
+        .iter()
+        .map(|entry| match entry {
+            ClipboardEntry::String(text) => format!("text={:?}", text.text()),
+            ClipboardEntry::Image(image) => format!("image={}:{}", image.format.mime_type(), image.bytes.len()),
+            ClipboardEntry::ExternalPaths(paths) => format!("paths={:?}", paths.paths()),
+        })
+        .collect();
+    format!("clipboard {}", entries.join(" "))
+}
+
+/// Prints what the clipboard holds on Ctrl+V.
+fn report_paste(event: &KeyDownEvent, cx: &App) {
+    let keystroke = &event.keystroke;
+    if keystroke.modifiers.control && keystroke.key == "v" {
+        say(&describe_clipboard(cx.read_from_clipboard().as_ref()));
+    }
+}
+
 /// Prints a mouse button down.
 fn report_down(event: &MouseDownEvent) {
     say(&format!(
@@ -154,7 +181,10 @@ impl Render for Probe {
             .size_full()
             .bg(rgb(COLOR))
             .track_focus(&self.focus)
-            .on_key_down(|event, _, _| report_key(event))
+            .on_key_down(|event, _, cx| {
+                report_key(event);
+                report_paste(event, cx);
+            })
             .on_mouse_down(MouseButton::Left, |event, _, _| report_down(event))
             .on_mouse_down(MouseButton::Right, |event, _, _| report_down(event))
     }

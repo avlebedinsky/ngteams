@@ -11,7 +11,9 @@ audio/video calls, and the calendar and meeting flows. Earlier milestone outcome
 and live runs at those milestones, rather than today's commands. Shared rules for Claude Code and Codex are in
 [AGENTS.md](AGENTS.md).
 
-The client also stages dropped files as private attachments, retains compose drafts while sends are pending,
+The client also stages dropped files as private attachments, pastes pictures into the compose box (a screenshot, a
+browser's copied image, picture files a file manager copied) and sends them inline as Teams does, retains compose
+drafts while sends are pending,
 opens people search results as chats, and keeps unread badges in sync with read receipts. Editing message text
 keeps its existing file references and cards. Channel menus provide management, notification and section
 preferences, email and workflow actions. Calls and meetings support Teams
@@ -259,6 +261,7 @@ scripts/run-lab.sh a --shot chats
 scripts/run-lab.sh a --key ctrl+k
 scripts/run-lab.sh a --type '<lab chat name>'
 scripts/run-lab.sh a --click 300 200
+scripts/run-lab.sh a --clipboard image/png shot.png text/plain note.txt
 scripts/run-lab.sh a --windows
 scripts/run-lab.sh a --status
 scripts/run-lab.sh a --stop

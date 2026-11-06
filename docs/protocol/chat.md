@@ -446,10 +446,8 @@ it showed the image inline) and pressed Enter.
   `…/status`. The creation's `permissions` may carry further keys (`@:composer`), and its `type` is `sharing/file` or
   `sharing/videototranscode` for other media.
 
-The original M1 image-sending scope was limited to captured shapes (see `docs/backlog/ams-image-sending.md`).
-Creation identifies the conversation in `permissions`; the content upload identifies only the object, and `forward`
-can change its readers. The original capture did not establish the later upload/forward responses. Current image
-sending remains unimplemented; this is a protocol/feature gap, not an active write-fence denial.
+The M1 scope stopped at these shapes while every write to an object was denied. With the lab's write fence gone,
+the native client now sends pictures ([Pictures sent](#pictures-sent-team-manage-2026-11-06)).
 
 ### The object created once (ab-image-object)
 
@@ -480,14 +478,42 @@ tree has none of it.
 run): it names no reader at all, no conversation, MRI or permission, so it can't say who may read the object now. The
 200s and the 403 show that the service checks readers, and only for the accounts the lab holds; they can never show
 that nobody else can read it. Even with a complete reader list the race between that read and the upload (a `forward`
-from any client) would need evidence of its own. So sending images stays deferred: the upload stays unmapped and there
-is no `SendImage`. What would reopen it is in `docs/backlog/ams-image-sending.md`. Showing a received picture is a read
+from any client) would need evidence of its own. That question belonged to the fence, which is gone; pictures are
+sent now ([Pictures sent](#pictures-sent-team-manage-2026-11-06)). Showing a received picture is a read
 of its own ([Pictures in messages](#pictures-in-messages)).
 
 The first run was **breached**: 15 s after the creation the laptop's lid closed and the machine suspended for eight
 minutes; on resume the fence found its connection to both browsers gone and killed them. `fence.log` has nothing of
 that run after 01:46:05Z and its captures end there too, so nothing shows what, if anything, the browsers sent between
 the resume and the kill. The second run (`…/20261022T020426Z`) came out clean (`ab-image-object: ok`).
+
+## Pictures sent (team-manage, 2026-11-06)
+
+Browser Teams as a, in the a–b chat, with nothing held (`team-manage` with its writes let through, its steps pasting a
+made-up PNG into the box as a clipboard paste, then Enter):
+
+- **In the box** the pasted picture shows at once, in a paragraph of its own after the text, in Teams' picture frame
+  (a small one centred in the 18rem square), the editor's element an `InlineImage` holding a `blob:` URL. **Nothing
+  goes out while it sits in the box**: no object is made before Send.
+- **On Send** the object is made (`POST /v1/objects/` on the async gateway, the body and `x-ams-post-sharing-mode:
+  Inline` exactly as [above](#images-sending-denied-ab-image); answered `201` `{"id": "0-eus-d10-<32 hex>"}`), then
+  the bytes go in (`PUT /v1/objects/<id>/content/imgpsh`, `content-type: application/octet-stream`, the `ic3` bearer
+  token, `x-ms-migration: True`, `x-ms-test-user: False`): answered `201`. A later attempt adds `content-range: bytes
+  0-<last>/<length>` and `x-ams-resumable-upload-supported: true`. Once the bytes are in, the page read the object's
+  `imgo` view back (`GET /v1/<own object id>/objects/<id>/views/imgo?v=1`, `200`). The message shows a pending mark
+  until its post goes out; messages go out in order, so an earlier one still uploading holds the later ones.
+- **The post itself wasn't captured**: the capture's request interception stalls the browser's upload of the larger
+  picture (71 KB; a 3 KB one went through), and the posts queued behind it. A received pasted picture
+  ([Pictures in messages](#pictures-in-messages)) shows what the post carries: the `<img>` with `itemtype` AMSImage,
+  `src` the object's `imgo` view on `us-api.asm.skype.com`, `width` and `height`, `id` `x_<object>`, `itemid` the
+  object and `alt` `image`, in a paragraph of its own, and the object's id in the message's `amsreferences`.
+
+The native client sends a pasted picture the same way (`teams_proto::CreatePicture`, `UploadPicture`, each a single
+attempt through the outbox, `teams_core::attachments`), but **at paste time**, while the picture is in the box, as
+the file attachments are uploaded when chosen; Send waits for it. Its post writes the `<img>` above in the received
+form's attribute order (`teams_proto::sent_picture`, `MessageText`), without the received ones' `itemscope="png"`,
+whose value for another format no capture showed, and the object in `amsreferences`. An object made for a picture removed
+before Send stays empty of readers but the chat's, unreferenced, and expires with the media service's 25 days.
 
 ## Pictures in messages
 

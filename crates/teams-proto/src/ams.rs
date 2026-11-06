@@ -33,6 +33,17 @@ pub enum PastedFormat {
 }
 
 impl PastedFormat {
+    /// The file extension a picture of this format is named with.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Gif => "gif",
+            Self::Webp => "webp",
+        }
+    }
+
     /// The format `bytes` start with (their signature), if they are a picture of one.
     #[must_use]
     pub fn sniff(bytes: &[u8]) -> Option<Self> {
@@ -152,11 +163,28 @@ fn is_host_name(name: &str) -> bool {
 
 /// An object id in one path segment: 1 to [`MAX_OBJECT_ID`] ASCII letters, digits, `-`, `_` and `.` (the media
 /// service's are like `0-eus-d9-<hex>`), not `.` or `..`.
-fn is_object_id(id: &str) -> bool {
+pub(crate) fn is_object_id(id: &str) -> bool {
     (1..=MAX_OBJECT_ID).contains(&id.len())
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         && id != "."
         && id != ".."
+}
+
+/// The view of a sent picture its message names: the object's original (`imgo`) on the media service's host.
+const SENT_PICTURE_BASE: &str = "https://us-api.asm.skype.com/v1/objects";
+
+/// The `<img>` a message shows a picture sent into `object` with, at `given` CSS pixels, as the web client writes a
+/// pasted picture (`docs/protocol/chat.md`, "Pictures sent"): `itemtype` `AMSImage`, `itemid` the object, its `imgo`
+/// view. `None` for an id that isn't an object's.
+#[must_use]
+pub fn sent_picture(object: &str, given: (u32, u32)) -> Option<crate::chat::Image> {
+    is_object_id(object).then(|| crate::chat::Image {
+        src: format!("{SENT_PICTURE_BASE}/{object}/views/imgo"),
+        alt: Some("image".to_owned()),
+        item_type: Some(crate::chat::AMS_IMAGE_ITEMTYPE.to_owned()),
+        item_id: Some(object.to_owned()),
+        size: Some((given.0.max(1), given.1.max(1))),
+    })
 }

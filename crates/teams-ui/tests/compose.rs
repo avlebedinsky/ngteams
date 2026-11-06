@@ -2325,3 +2325,164 @@ fn send_and_emoji_sit_inside_the_box_and_its_accent_line_follows_the_focus() {
     focus_list(&view, cx);
     assert!(cx.debug_bounds("compose-accent").is_none(), "none without it");
 }
+
+/// A made-up picture, `width` by `height`, as PNG bytes.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let picture = image::RgbaImage::from_pixel(width, height, image::Rgba([40, 120, 200, 255]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    picture.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
+/// Puts `entries` on the test platform's clipboard.
+fn clipboard(cx: &mut VisualTestContext, entries: Vec<gpui::ClipboardEntry>) {
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem { entries }));
+}
+
+fn image_entry(bytes: Vec<u8>) -> gpui::ClipboardEntry {
+    gpui::ClipboardEntry::Image(gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes))
+}
+
+fn string_entry(text: &str) -> gpui::ClipboardEntry {
+    gpui::ClipboardEntry::String(gpui::ClipboardString::new(text.to_owned()))
+}
+
+fn picture_uploads(rig: &Rig) -> Vec<(String, teams_proto::PastedFormat)> {
+    rig.core
+        .picture_uploads
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(conversation, picture)| (conversation.clone(), picture.format))
+        .collect()
+}
+
+#[test]
+fn a_pasted_picture_shows_in_the_box_is_sent_at_once_and_the_message_names_it() {
+    let rig = rig_with(Vec::new());
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    type_text(cx, "Look");
+    keys(cx, "shift-enter");
+    clipboard(cx, vec![image_entry(png(64, 40))]);
+    keys(cx, "ctrl-v");
+    assert_eq!(picture_uploads(&rig), [(AB.to_owned(), teams_proto::PastedFormat::Png)]);
+    assert!(cx.debug_bounds("editor-picture-1").is_some(), "its thumbnail");
+    assert!(
+        cx.debug_bounds("editor-picture-remove-1").is_some(),
+        "its Remove button"
+    );
+    assert_eq!(
+        typed(&view, cx),
+        "Look\n\n",
+        "a picture adds no text: its line, and the cursor on the next"
+    );
+    keys(cx, "enter");
+    let actions = actions(&rig);
+    let text = text_of(&actions[0]);
+    assert_eq!(text.pictures(), ["0-made-up-d1-1"]);
+    // shown at its pixels' size over the screen's scale (the test window's is 2), as a browser gives a pasted picture
+    assert_eq!(
+        text.html(),
+        "<p>Look</p><p><img src=\"https://us-api.asm.skype.com/v1/objects/0-made-up-d1-1/views/imgo\" \
+         itemtype=\"http://schema.skype.com/AMSImage\" width=\"32\" height=\"20\" alt=\"image\" \
+         id=\"x_0-made-up-d1-1\" itemid=\"0-made-up-d1-1\"></p>"
+    );
+    assert!(cx.debug_bounds("editor-picture-1").is_none(), "the box is emptied");
+}
+
+#[test]
+fn a_picture_removed_from_the_box_is_not_sent_and_undo_brings_it_back() {
+    let rig = rig_with(Vec::new());
+    let (_view, cx, _) = chat_window(&rig, Settings::default());
+    type_text(cx, "Only text");
+    clipboard(cx, vec![image_entry(png(30, 30))]);
+    keys(cx, "ctrl-v");
+    click(cx, "editor-picture-remove-1");
+    assert!(cx.debug_bounds("editor-picture-1").is_none());
+    keys(cx, "ctrl-z");
+    assert!(cx.debug_bounds("editor-picture-1").is_some(), "undo");
+    click(cx, "editor-picture-remove-1");
+    keys(cx, "enter");
+    let actions = actions(&rig);
+    assert_eq!(text_of(&actions[0]).html(), "<p>Only text</p>");
+    assert!(text_of(&actions[0]).pictures().is_empty());
+}
+
+#[test]
+fn text_of_its_own_beside_a_picture_and_a_plain_paste_paste_text_and_send_nothing() {
+    let rig = rig_with(Vec::new());
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    // a spreadsheet's cells offer their picture beside their text: the text is pasted
+    clipboard(cx, vec![string_entry("Cell one\tCell two"), image_entry(png(20, 10))]);
+    keys(cx, "ctrl-v");
+    assert_eq!(typed(&view, cx), "Cell one\tCell two");
+    // Ctrl+Shift+V pastes text alone
+    clipboard(cx, vec![string_entry(" and more"), image_entry(png(20, 10))]);
+    keys(cx, "ctrl-shift-v");
+    assert_eq!(typed(&view, cx), "Cell one\tCell two and more");
+    assert!(picture_uploads(&rig).is_empty());
+    // a browser's "Copy image" with the picture's address as its text: the picture
+    clipboard(
+        cx,
+        vec![
+            string_entry("https://made-up.example/picture.png"),
+            image_entry(png(20, 10)),
+        ],
+    );
+    keys(cx, "ctrl-v");
+    assert_eq!(picture_uploads(&rig).len(), 1);
+    // text alone pastes as before
+    clipboard(cx, vec![string_entry("!")]);
+    keys(cx, "ctrl-v");
+    assert_eq!(
+        typed(&view, cx),
+        "Cell one\tCell two and more\n\n!",
+        "after the picture"
+    );
+}
+
+#[test]
+fn a_picture_that_failed_to_send_holds_the_message_until_retried() {
+    let rig = rig_with(Vec::new());
+    let (_view, cx, _) = chat_window(&rig, Settings::default());
+    rig.core
+        .picture_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(teams_core::EngineError::Attachment {
+            why: "The picture service is busy. Try again.".to_owned(),
+        }));
+    clipboard(cx, vec![image_entry(png(16, 16))]);
+    keys(cx, "ctrl-v");
+    assert!(cx.debug_bounds("editor-picture-retry-1").is_some(), "Retry shown");
+    keys(cx, "enter");
+    assert!(actions(&rig).is_empty(), "nothing sent while it isn't");
+    click(cx, "editor-picture-retry-1");
+    assert_eq!(picture_uploads(&rig).len(), 2, "sent again");
+    assert!(cx.debug_bounds("editor-picture-retry-1").is_none());
+    keys(cx, "enter");
+    let actions = actions(&rig);
+    assert_eq!(text_of(&actions[0]).pictures(), ["0-made-up-d1-2"]);
+}
+
+#[test]
+fn copied_files_paste_their_pictures_inline_and_attach_the_rest() {
+    let rig = rig_with(Vec::new());
+    let (_view, cx, _) = chat_window(&rig, Settings::default());
+    let dir = tempfile::tempdir().unwrap();
+    let picture = dir.path().join("screenshot.png");
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&picture, png(48, 48)).unwrap();
+    std::fs::write(&notes, b"synthetic file").unwrap();
+    clipboard(
+        cx,
+        vec![
+            string_entry(&format!("{}\n{}", picture.display(), notes.display())),
+            gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(vec![picture, notes.clone()].into())),
+        ],
+    );
+    keys(cx, "ctrl-v");
+    assert_eq!(picture_uploads(&rig).len(), 1, "the picture inline");
+    assert_eq!(*rig.core.uploads.lock().unwrap(), [notes], "the other file attached");
+    assert!(cx.debug_bounds("editor-picture-1").is_some());
+}

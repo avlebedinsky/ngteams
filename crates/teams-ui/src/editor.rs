@@ -20,13 +20,15 @@
 //! - **Copy and paste**: a copy puts the selection's plain text on the clipboard with the rich text itself beside it,
 //!   so a paste into an editor keeps every format it has; a paste of HTML another program offers keeps what the editor
 //!   writes; any other paste, and every paste into a block of code, is plain text, a paragraph per line (in a list
-//!   item an item per line, in a block of code its lines).
+//!   item an item per line, in a block of code its lines). A picture on the clipboard, or picture files a file manager
+//!   copied, go in the box as pictures of their own, where its owner takes them ([`pictures`]).
 //! - **Typing goes through GPUI's input handler** ([`EntityInputHandler`]), so an input method composes text in place.
 
 pub mod convert;
 pub mod doc;
 mod input;
 mod keys;
+pub mod pictures;
 pub mod toolbar;
 mod view;
 
@@ -81,6 +83,10 @@ pub enum EditorEvent {
     Blur,
     /// The user asked to send what it holds.
     Submit,
+    /// A picture was put in the box ([`pictures`]), or its Retry pressed: its owner sends it, by its id.
+    Picture(u64),
+    /// A paste brought files that aren't pictures: its owner attaches them.
+    Files(Vec<std::path::PathBuf>),
 }
 
 /// One step of undo: the document and the selection before it.
@@ -140,6 +146,10 @@ pub struct Editor {
     /// The least height it keeps.
     min_height: Option<Pixels>,
     pub(crate) read_only: bool,
+    /// The pictures put in the box, by id ([`pictures`]), kept while it lives so undo brings one back.
+    pictures: HashMap<u64, pictures::Picture>,
+    next_picture: u64,
+    takes_pictures: bool,
     _focus: Vec<Subscription>,
 }
 
@@ -186,6 +196,9 @@ impl Editor {
             max_height: None,
             min_height: None,
             read_only: false,
+            pictures: HashMap::new(),
+            next_picture: 0,
+            takes_pictures: false,
             _focus: subscriptions,
         }
     }
@@ -468,11 +481,11 @@ impl Editor {
             _ if head.block == 0 => {}
             _ => self.edit(Step::Other, cx, move |doc, _| {
                 let before = head.block - 1;
-                if doc.blocks[before].kind == Kind::Rule {
+                if doc.blocks[before].kind.is_atom() {
                     doc.blocks.remove(before);
                     return Selection::caret(Pos::new(before, 0));
                 }
-                if doc.blocks[head.block].kind == Kind::Rule {
+                if doc.blocks[head.block].kind.is_atom() {
                     doc.blocks.remove(head.block);
                     return Selection::caret(Pos::new(before, doc.blocks[before].len()));
                 }
@@ -498,7 +511,7 @@ impl Editor {
             }
         };
         self.edit(Step::Other, cx, move |doc, _| {
-            if to.block > head.block && doc.blocks[to.block].kind == Kind::Rule {
+            if to.block > head.block && doc.blocks[to.block].kind.is_atom() {
                 doc.blocks.remove(to.block);
                 return Selection::caret(head);
             }
@@ -707,7 +720,7 @@ impl Editor {
             let range = doc.blocks_of(start, end);
             let text = doc.blocks[range.clone()]
                 .iter()
-                .filter(|block| block.kind != Kind::Rule)
+                .filter(|block| !block.kind.is_atom())
                 .map(Block::text)
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -899,12 +912,21 @@ impl Editor {
     /// Pastes what the clipboard holds: an editor's rich text with its formats, else its text. Into a block of code
     /// it is plain text, as Teams pastes there; and rich text that shows nothing (a paragraph break copied alone) gives
     /// way to the text beside it.
-    pub fn paste(&mut self, plain: bool, cx: &mut Context<Self>) {
+    ///
+    /// Pictures and files are taken first ([`pictures`]) unless `plain`; `scale` is the screen's, which a picture's
+    /// shown size is its pixels' over.
+    pub fn paste(&mut self, plain: bool, scale: f32, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else { return };
+        if !plain && self.paste_pictures(&item, scale, cx) {
+            return;
+        }
         let text = item.text();
-        let rich = (!plain)
-            .then(|| item.metadata().and_then(|metadata| input::doc_of_metadata(metadata)))
-            .flatten();
+        // the metadata of the text the item holds, beside a picture or files too
+        let metadata = item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::String(text) => text.metadata.as_deref(),
+            _ => None,
+        });
+        let rich = (!plain).then(|| metadata.and_then(input::doc_of_metadata)).flatten();
         let in_code = self.block_kind() == Kind::Code;
         match rich {
             Some(doc) if !in_code && (!doc.is_blank() || text.is_none()) => self.paste_doc(doc, cx),
@@ -971,7 +993,7 @@ fn set_kinds(doc: &mut Doc, range: Range<usize>, kind: Kind) {
             last += count - 1;
             continue;
         }
-        if block.kind != Kind::Rule {
+        if !block.kind.is_atom() {
             if !(kind.is_list() && block.kind.is_list()) {
                 block.indent = 0;
             }

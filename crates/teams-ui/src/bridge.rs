@@ -49,6 +49,12 @@ pub trait Core: Send + Sync + 'static {
         let _ = path;
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
+    /// A picture pasted into a message in `conversation`, sent to the media service readable by that conversation
+    /// alone; the reply is its object's id, which the message's `<img>` names.
+    fn upload_picture(&self, conversation: String, picture: teams_proto::PastedPicture) -> Reply<String> {
+        let _ = (conversation, picture);
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
     /// Native Power Automate requests for this account. A fake without workflow support returns a connection error.
     fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
         let _ = request;
@@ -465,6 +471,10 @@ impl Core for EngineRequests {
 
     fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
         EngineRequests::upload_file(self, path)
+    }
+
+    fn upload_picture(&self, conversation: String, picture: teams_proto::PastedPicture) -> Reply<String> {
+        EngineRequests::upload_picture(self, conversation, picture)
     }
     fn me(&self) -> &str {
         EngineRequests::me(self)

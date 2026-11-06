@@ -671,6 +671,8 @@ impl<T> Answer<T> {
 /// A request to the engine's thread, with where its answer goes.
 enum Request {
     UploadFile(PathBuf, Responder<teams_proto::UploadedFile>),
+    /// A picture pasted into a message in a conversation, sent into an object only it may read: the object's id.
+    UploadPicture(String, teams_proto::PastedPicture, Responder<String>),
     /// What a meeting left, by its chat ([`crate::recap`]).
     MeetingContents(String, Responder<Vec<teams_proto::MeetingContent>>),
     /// A meeting transcript's `WebVTT`, by its address on its item ([`crate::recap`]).
@@ -932,6 +934,12 @@ impl EngineRequests {
     /// Uploads a local file privately. Sharing waits for the message's Send action.
     pub fn upload_file(&self, path: PathBuf) -> Reply<teams_proto::UploadedFile> {
         self.ask(|reply| Request::UploadFile(path, reply))
+    }
+
+    /// Sends a picture pasted into a message in `conversation` to the media service, readable by that conversation
+    /// alone; the reply is the object's id, which the message then shows. Nothing is posted to the chat.
+    pub fn upload_picture(&self, conversation: String, picture: teams_proto::PastedPicture) -> Reply<String> {
+        self.ask(|reply| Request::UploadPicture(conversation, picture, reply))
     }
     /// The account's MRI: who the engine writes as, and whose read horizon and unread counts it answers with.
     #[must_use]
@@ -2151,6 +2159,7 @@ where
     async fn on_request(&mut self, request: Request) {
         match request {
             Request::UploadFile(path, reply) => self.uploads.upload(path, reply),
+            Request::UploadPicture(conversation, picture, reply) => self.uploads.picture(conversation, picture, reply),
             Request::MeetingContents(thread, reply) => self.recaps.contents(thread, reply),
             Request::MeetingTranscript(location, reply) => self.recaps.transcript(&location, reply),
             Request::TranscriptLanguage(location, reply) => self.recaps.language(&location, reply),

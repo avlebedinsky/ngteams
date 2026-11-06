@@ -13,14 +13,14 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use teams_proto::Mri;
-use teams_proto::chat::{Code, CodeRun, List, Marks, Node, Quote, Token};
+use teams_proto::chat::{Code, CodeRun, Image, List, Marks, Node, Quote, Token};
 
 use super::doc::{Attrs, Block, Doc, Kind, MAX_INDENT, Run};
 
 /// Why a message's text can't be loaded into the editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CantLoad {
-    /// A picture: sending one is an attachment, which the editor doesn't make.
+    /// A picture a message shows: the editor takes pictures pasted into it, not those a message already has.
     #[error("it shows an image")]
     Image,
     #[error("it was read only in part")]
@@ -45,15 +45,26 @@ pub enum Load {
 }
 
 /// The document as rich text, and the MRI each mention names by its `item_id` (`0`, `1`, … in order). Nothing when
-/// it shows nothing.
+/// it shows nothing. A picture is left out (a copy's text); [`to_nodes_with`] writes it.
 #[must_use]
 pub fn to_nodes(doc: &Doc) -> (Vec<Node>, Vec<(String, Mri)>) {
+    to_nodes_with(doc, &|_| None)
+}
+
+/// [`to_nodes`], each picture written as `pictures` gives it by its id (a message's `<img>` once it is sent, in a
+/// paragraph of its own as Teams writes one); one it gives nothing for is left out.
+#[must_use]
+pub fn to_nodes_with(doc: &Doc, pictures: &dyn Fn(u64) -> Option<Image>) -> (Vec<Node>, Vec<(String, Mri)>) {
     let first = doc.blocks.iter().position(|block| !block.is_blank());
     let last = doc.blocks.iter().rposition(|block| !block.is_blank());
     let (Some(first), Some(last)) = (first, last) else {
         return (Vec::new(), Vec::new());
     };
-    let mut writer = Writer::default();
+    let mut writer = Writer {
+        nodes: Vec::new(),
+        mentioned: Vec::new(),
+        pictures,
+    };
     let blocks = &doc.blocks[first..=last];
     let mut index = 0;
     while index < blocks.len() {
@@ -62,13 +73,13 @@ pub fn to_nodes(doc: &Doc) -> (Vec<Node>, Vec<(String, Mri)>) {
     (writer.nodes, writer.mentioned)
 }
 
-#[derive(Default)]
-struct Writer {
+struct Writer<'a> {
     nodes: Vec<Node>,
     mentioned: Vec<(String, Mri)>,
+    pictures: &'a dyn Fn(u64) -> Option<Image>,
 }
 
-impl Writer {
+impl Writer<'_> {
     /// Writes the block at `index` (and those that go with it: a quote's lines, a list's items); the index after them.
     fn block(&mut self, blocks: &[Block], index: usize) -> usize {
         let block = &blocks[index];
@@ -93,6 +104,12 @@ impl Writer {
             }
             Kind::Rule => {
                 self.nodes.push(Node::Rule);
+                index + 1
+            }
+            Kind::Picture(id) => {
+                if let Some(picture) = (self.pictures)(id) {
+                    self.nodes.push(Node::Paragraph(vec![Node::Image(picture)]));
+                }
                 index + 1
             }
             Kind::Code => {

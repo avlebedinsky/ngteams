@@ -12,6 +12,8 @@ mod channel_admin;
 pub use channel_admin::{ChannelChange, ChannelData, ChannelRead, ChannelTarget, ChannelWrite};
 mod chat;
 mod meeting_options;
+mod picture;
+pub use picture::{CreatePicture, MAX_SENT_PICTURE, UploadPicture};
 mod team;
 
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};

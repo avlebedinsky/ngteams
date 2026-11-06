@@ -34,6 +34,11 @@ pub(super) fn clipboard_metadata(nodes: &[Node], mentioned: &[(String, Mri)]) ->
     json!({ RICH_KEY: { "text": rich, "mentions": mentions } }).to_string()
 }
 
+/// Whether a clipboard item's metadata is an editor's own rich text (a copy within the app).
+pub(super) fn is_own_rich_text(metadata: &str) -> bool {
+    serde_json::from_str::<Value>(metadata).is_ok_and(|value| value.get(RICH_KEY).is_some())
+}
+
 /// The document a clipboard item's metadata holds: an editor's rich text, or another program's HTML (read by
 /// `teams-proto`'s sanitizing reader, its pictures as their `alt`).
 pub(super) fn doc_of_metadata(metadata: &str) -> Option<Doc> {

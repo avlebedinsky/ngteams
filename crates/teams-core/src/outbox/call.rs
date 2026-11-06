@@ -133,6 +133,13 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         tried
     }
 
+    /// One attempt at a picture's write (its object made, its bytes put: `crate::attachments`), as a calendar write's.
+    pub async fn try_picture<R: Request + Send>(&self, write: R) -> CallTried {
+        let tried = self.try_once(write).await;
+        log::info!("picture write: {}", tried.summary());
+        tried
+    }
+
     /// One attempt at a new channel's write (`crate::channels`), as a calendar write's.
     pub async fn try_channel<R: Request + Send>(&self, write: R) -> CallTried {
         let tried = self.try_once(write).await;

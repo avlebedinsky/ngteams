@@ -51,6 +51,7 @@
 //! `changed` each time what it holds changes), never its text.
 
 pub mod attachments;
+mod pictures;
 mod translated;
 
 use std::cell::Cell;
@@ -161,7 +162,20 @@ pub const MAX_ROWS: usize = 8;
 /// What `teams-proto` refuses in a message's text ([`ComposeError`]): a mention of anyone but a work account or
 /// everyone in a group chat, a text too long, …
 pub fn message_of(doc: &Doc, quotes: &[Node]) -> Result<Option<MessageText>, ComposeError> {
-    let (nodes, mentioned) = convert::to_nodes(doc);
+    message_of_with(doc, quotes, &|_| None)
+}
+
+/// [`message_of`], each picture in `doc` as `pictures` gives it by its id (the editor's, once sent:
+/// [`Editor::picture_node`]).
+///
+/// # Errors
+/// As [`message_of`].
+pub fn message_of_with(
+    doc: &Doc,
+    quotes: &[Node],
+    pictures: &dyn Fn(u64) -> Option<teams_proto::chat::Image>,
+) -> Result<Option<MessageText>, ComposeError> {
+    let (nodes, mentioned) = convert::to_nodes_with(doc, pictures);
     if nodes.is_empty() {
         return Ok(None);
     }
@@ -634,6 +648,8 @@ impl Compose {
                 cx.notify();
             }
             EditorEvent::Submit => this.send(window, cx),
+            EditorEvent::Picture(id) => this.send_picture(*id, cx),
+            EditorEvent::Files(paths) => this.pasted_files(paths, window, cx),
         });
         let format_bar = cx.new(|cx| FormatBar::new(editor.clone(), cx));
         let bar_events = cx.subscribe_in(
@@ -654,6 +670,8 @@ impl Compose {
         } else {
             (conversation == NOTES).then_some(READ_ONLY_NOTES)
         };
+        // a picture pasted goes to the media service for this conversation, so a box that sends takes them
+        editor.update(cx, |editor, _| editor.set_takes_pictures(note.is_none()));
         Self {
             send_focus: cx.focus_handle(),
             core: parts.core,
@@ -932,13 +950,17 @@ impl Compose {
         if !self.files_ready() {
             return self.show_problem("Wait for your files to upload, or retry or remove a failed file.", cx);
         }
+        if !self.editor.read(cx).pictures_ready() {
+            return self.show_problem("Wait for your pictures to upload, or retry or remove a failed one.", cx);
+        }
         let doc = self.editor.read(cx).doc().clone();
         let quotes = match &self.mode {
             Mode::New => Vec::new(),
             Mode::Reply(quoted) => vec![quoted.node()],
             Mode::Edit { quotes, .. } => quotes.clone(),
         };
-        let built = match message_of(&doc, &quotes) {
+        let editor = self.editor.read(cx);
+        let built = match message_of_with(&doc, &quotes, &|id| editor.picture_node(id)) {
             Ok(Some(built)) => built,
             Ok(None) if !self.attachments.is_empty() => match empty_file_text() {
                 Ok(text) => text,
@@ -1388,7 +1410,9 @@ impl Compose {
     /// send; once it holds something, a round button lit in the brand gradient that pops in, a button to the keyboard
     /// and to assistive tools as the kit's is.
     fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty()) || !self.files_ready();
+        let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty())
+            || !self.files_ready()
+            || !self.editor.read(cx).pictures_ready();
         let tip = match (matches!(self.mode, Mode::Edit { .. }), self.expanded) {
             (true, false) => "Save (Enter)",
             (true, true) => "Save (Ctrl+Enter)",

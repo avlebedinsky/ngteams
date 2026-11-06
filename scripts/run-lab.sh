@@ -8,6 +8,8 @@
 #   scripts/run-lab.sh <alias> --key <spec>     key, e.g. ctrl+k, Down, Enter
 #   scripts/run-lab.sh <alias> --type <text>    type text (never a password)
 #   scripts/run-lab.sh <alias> --click <x> <y>  click in output pixels
+#   scripts/run-lab.sh <alias> --clipboard <mime> <path> [<mime> <path>]...  the files on the sandbox's clipboard,
+#                                               one offer, for the app to paste (e.g. image/png shot.png text/plain a.txt)
 #   scripts/run-lab.sh <alias> --windows        list this sandbox's windows
 #   scripts/run-lab.sh <alias> --status         status and file locations
 #   scripts/run-lab.sh <alias> --stop           stop app, broker and sandbox; retain logs and account data
@@ -35,7 +37,7 @@ die() {
     exit 1
 }
 
-usage() { sed -n '2,17s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,19s/^# \{0,1\}//p' "$0"; }
 
 build() {
     echo "building ngteams and ui-sandbox-run (target/lab)..."
@@ -208,6 +210,21 @@ case "${1:-}" in
     ask "${1#--}" "$2"
     ;;
 --click) [[ $# == 3 ]] || die "--click needs x and y"; ask click "$2" "$3" ;;
+--clipboard)
+    shift
+    (($# >= 2 && $# % 2 == 0)) || die "--clipboard needs <mime> <path> pairs"
+    offers=()
+    while (($#)); do
+        [[ "$1" =~ ^[^[:space:]/]+/[^[:space:]]+$ ]] || die "not a MIME type: $1"
+        # The runner reads the file, from its own directory: forward an absolute path, which the control line
+        # (words split at whitespace) carries only without whitespace.
+        file="$(realpath -e -- "$2")" || die "no such file: $2"
+        [[ "$file" != *[[:space:]]* ]] || die "a clipboard file's path may not contain whitespace: $file"
+        offers+=("$1" "$file")
+        shift 2
+    done
+    ask clipboard "${offers[@]}"
+    ;;
 --windows) [[ $# == 1 ]] || die "--windows takes no arguments"; ask windows ;;
 -h | --help) usage ;;
 *) die "unknown option $1 (see --help)" ;;

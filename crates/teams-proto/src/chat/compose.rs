@@ -15,7 +15,9 @@
 //!   [`mention_entry`], the only place it is built); a no-break space (U+00A0) as `&nbsp;`, as the web client writes
 //!   the one after a mention; a mention of everyone in a group chat in the same form, its MRI the chat's id and its
 //!   `mentionType` `everyone` (`mention-everyone.json`, captured in `abc-everyone` on 2026-10-29);
-//! - an image is refused: sending one is an attachment (M1 Task 20 decides), not a message's text.
+//! - a picture sent to the media service (`crate::ams::sent_picture`: itemtype `AMSImage`, its `imgo` view on an AMS
+//!   host, `itemid` its object) as the web client writes a pasted picture, its object in the post's `amsreferences`
+//!   ([`MessageText::pictures`]); any other image is refused.
 //!
 //! Every mentioned MRI is exposed by [`MessageText::participants`]; a quote adds nobody
 //! (the quoted message is the chat's own), nor does a mention of everyone in a group chat, named by the chat's id
@@ -51,7 +53,7 @@ pub enum ComposeError {
     /// bot's mention needs its app id, which isn't modelled.
     #[error("a mention of {0}, which isn't a work account or a group chat")]
     NotAPerson(Mri),
-    /// An image: sending one is an attachment, not a message's text.
+    /// An image that isn't a picture sent to the media service for this message ([`crate::ams::sent_picture`]).
     #[error("an image can't be sent in a message's text")]
     Image,
     /// A link whose `href` isn't `http`, `https` or `mailto`.
@@ -83,6 +85,7 @@ pub struct MessageText {
     files: Vec<crate::UploadedFile>,
     text: RichText,
     mentioned: BTreeMap<String, Mri>,
+    pictures: Vec<String>,
     html: String,
     mentions: Vec<Value>,
     quoted: Vec<Value>,
@@ -124,12 +127,14 @@ impl MessageText {
             quoted,
             participants,
             everyone,
+            pictures,
             ..
         } = render;
         Ok(Self {
             files: Vec::new(),
             text,
             mentioned: table,
+            pictures,
             html,
             mentions,
             quoted,
@@ -177,6 +182,12 @@ impl MessageText {
     #[must_use]
     pub fn mentioned(&self) -> &BTreeMap<String, Mri> {
         &self.mentioned
+    }
+
+    /// The media service's objects of the pictures it shows, in order: the post's `amsreferences`.
+    #[must_use]
+    pub fn pictures(&self) -> &[String] {
+        &self.pictures
     }
 
     /// The HTML `content` it is sent as.
@@ -293,6 +304,7 @@ struct Render<'a> {
     quoted: Vec<Value>,
     participants: BTreeSet<Mri>,
     everyone: BTreeSet<String>,
+    pictures: Vec<String>,
 }
 
 /// The marks in the order they open, with their tags: bold as Teams' editor writes it (`strong`), and nested as its
@@ -315,6 +327,7 @@ impl<'a> Render<'a> {
             quoted: Vec::new(),
             participants: BTreeSet::new(),
             everyone: BTreeSet::new(),
+            pictures: Vec::new(),
         }
     }
 
@@ -375,10 +388,49 @@ impl<'a> Render<'a> {
                 self.html.push_str("</p>");
             }
             Node::Rule => self.html.push_str("<hr>"),
-            Node::Image(_) => return Err(ComposeError::Image),
+            Node::Image(image) => self.picture(image)?,
             Node::Quote(quote) => self.quote(quote, depth)?,
             Node::List(list) => self.list(list, depth)?,
             Node::Code(code) => self.code(code),
+        }
+        Ok(())
+    }
+
+    /// A picture sent to the media service, as a received pasted picture is written (`docs/protocol/chat.md`, "Pictures
+    /// in messages", its attributes in that order); its object goes in `amsreferences`. The received ones' `itemscope`
+    /// (`png`) is left out: its value for another format was never seen.
+    fn picture(&mut self, image: &crate::chat::Image) -> Result<(), ComposeError> {
+        let view = crate::MessagePicture::of(&image.src).ok_or(ComposeError::Image)?;
+        let object = view.object().to_owned();
+        if image.item_type.as_deref() != Some(crate::chat::html::AMS_IMAGE_ITEMTYPE)
+            || image.item_id.as_deref() != Some(object.as_str())
+            || view.view() != "imgo"
+        {
+            return Err(ComposeError::Image);
+        }
+        let (width, height) = image.size.ok_or(ComposeError::Image)?;
+        let src = escape(&image.src);
+        let alt = escape(image.alt.as_deref().unwrap_or("image"));
+        let object_html = escape(&object);
+        self.push(&[
+            "<img src=\"",
+            &src,
+            "\" itemtype=\"",
+            crate::chat::html::AMS_IMAGE_ITEMTYPE,
+            "\" width=\"",
+            &width.to_string(),
+            "\" height=\"",
+            &height.to_string(),
+            "\" alt=\"",
+            &alt,
+            "\" id=\"x_",
+            &object_html,
+            "\" itemid=\"",
+            &object_html,
+            "\">",
+        ]);
+        if !self.pictures.contains(&object) {
+            self.pictures.push(object);
         }
         Ok(())
     }

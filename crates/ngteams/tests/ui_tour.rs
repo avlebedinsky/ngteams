@@ -165,7 +165,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 231] = [
+const STEPS: [Step; 5 + 235] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1820,7 +1820,45 @@ const STEPS: [Step; 5 + 231] = [
         };
         group_controls(shell, (false, true), muted, cx);
     }),
+    // a picture on the clipboard pasted into the a–b chat's box below its text (the app's own clipboard, in the
+    // sandbox), sent to the mock's media service at once, as Teams shows a pasted picture before Send
+    ("compose-picture", |shell, window, cx| {
+        theme(shell, "teams-light", cx);
+        shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+        paste_picture(shell, window, cx);
+    }),
+    ("compose-picture-dark", |shell, _, cx| theme(shell, "teams-dark", cx)),
+    // sent: the message with the picture in the chat
+    ("chat-picture-sent-dark", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.send(window, cx));
+    }),
+    ("chat-picture-sent", |shell, _, cx| theme(shell, "teams-light", cx)),
 ];
+
+/// Puts a made-up picture on the app's clipboard and pastes it into the open chat's box after a line of text, as
+/// Ctrl+V does.
+fn paste_picture(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    let mut png = Vec::new();
+    if made_up_dashboard()
+        .write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .is_err()
+    {
+        return;
+    }
+    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(
+        gpui::ImageFormat::Png,
+        png,
+    )));
+    let scale = window.scale_factor();
+    with_compose(shell, cx, |compose, cx| {
+        compose.focus(window, cx);
+        compose.editor().update(cx, |editor, cx| {
+            editor.paste_plain("Here is the dashboard", cx);
+            editor.enter(true, false, window, cx);
+            editor.paste(false, scale, cx);
+        });
+    });
+}
 
 /// The made-up group call transcribing for the account, recording the audio alone (`audio`) or not, as the roster
 /// tells it.
@@ -3103,6 +3141,10 @@ impl MockLab {
         seed_many_chats(&mock)?;
         seed_group(&mock, &runtime)?;
         seed_pictures(&mock, &runtime)?;
+        // a picture pasted into the box is sent to the mock's media service (`paste_picture`)
+        let mut png = Vec::new();
+        made_up_dashboard().write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+        runtime.block_on(mock.serve_picture_sends(PASTED_OBJECT, png));
         seed_files(&mock, &runtime)?;
         seed_mixed(&mock, &runtime)?;
         seed_own(&mock)?;
@@ -3202,6 +3244,9 @@ fn seed_many_chats(mock: &ChatServiceMock) -> SandboxResult {
 /// A pasted picture's made-up object, and the view of it b's message names (on the media service's host, read from
 /// the account's AMS base).
 const PICTURE_OBJECT: &str = "0-eus-d9-00000000000000000000000000000abc";
+
+/// The media service's object a picture pasted into the box is sent into (made up).
+const PASTED_OBJECT: &str = "0-eus-d9-00000000000000000000000000000ab9";
 
 /// An emoticon's `<img>` as Teams sends it, in its span (`docs/protocol/chat.md`, "Pictures in messages").
 fn emoticon(id: &str, alt: &str, side: u32) -> String {

@@ -12,7 +12,7 @@ the normal composer/outbox. Files above 250 MB still need an upload-session impl
 that remaining work and historical context. See [the current protocol](../protocol/chat.md#chat-file-upload-and-specific-recipient-sharing).
 
 M2 Task 23 asked to capture the web client sending a file in the a–b chat with every write of it denied (as M1 Task
-20 did for images, `docs/backlog/ams-image-sending.md`), and to decide from that whether a file's sharing can be
+20 did for images, `docs/protocol/chat.md` "Images: sending, denied"), and to decide from that whether a file's sharing can be
 fenced. The capture (`proto-lab run ab-file`, 2026-10-22, written up in `docs/protocol/chat.md`, "Files: sending,
 denied") never got as far as a write of the file:
 

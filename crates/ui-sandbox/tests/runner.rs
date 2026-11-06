@@ -115,7 +115,11 @@ mod tests {
             fs::read_to_string(dir.path().join("trace.jsonl")).unwrap(),
             "synthetic runner trace\n"
         );
+        let pasted = dir.path().join("synthetic-clipboard.txt");
+        fs::write(&pasted, "synthetic clipboard").unwrap();
+        let pasted = pasted.to_str().unwrap();
         for command in [
+            vec!["clipboard", "text/plain", pasted, "text/html", pasted],
             vec!["screen", "synthetic_screen"],
             vec!["windows"],
             vec!["key", "ctrl+shift+Tab"],
@@ -141,6 +145,9 @@ mod tests {
             vec!["scroll", "10", "20"],
             vec!["scroll", "10", "20", "1", "extra"],
             vec!["type", "💻"],
+            vec!["clipboard"],
+            vec!["clipboard", "text/plain"],
+            vec!["clipboard", "text/plain", "synthetic-clipboard.txt"],
             vec!["unknown"],
         ] {
             let output = ask(dir.path(), &command);

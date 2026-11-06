@@ -15,8 +15,10 @@
 //! - `ui-sandbox-run <command> --dir <run> [args]`: one command to a running `serve`, its answer printed (`ok …` or
 //!   `error …`, the exit status saying which): `shot <name>` (the window, to `<run>/shots/<name>.png`), `screen <name>`
 //!   (the whole output), `key <spec>` (`ctrl+k`, `Down`, `Enter`, `a`: `ui_sandbox::input::parse_key`), `type <text>`,
-//!   `click <x> <y>` (output pixels), `scroll <x> <y> <notches>` (the wheel there, positive down), `windows` (niri's
-//!   list), `stop`.
+//!   `click <x> <y>` (output pixels), `scroll <x> <y> <notches>` (the wheel there, positive down),
+//!   `clipboard <mime> <path> [<mime> <path> ...]` (the files, read now, on the sandbox's clipboard together, each
+//!   under its MIME type: `ui_sandbox::clipboard`; paths absolute, without whitespace), `windows` (niri's list),
+//!   `stop`.
 
 use std::fs::{self, File};
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -28,13 +30,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ui_sandbox::clipboard;
 use ui_sandbox::input::{VirtualInput, keys, parse_key};
 use ui_sandbox::pipewire::PipeWireOptions;
 use ui_sandbox::{NIRI_FULL_WINDOW, Sandbox, SandboxOptions, SandboxResult, Tools, clean_command, spawn};
 
 const USAGE: &str = "usage: ui-sandbox-run serve --dir <run> [--pipewire] --broker <program> [--broker-arg A]... --app \
                      <program> [--app-arg A]...\n       ui-sandbox-run shot|screen <name> | key <spec> | type <text> | click \
-                     <x> <y> | scroll <x> <y> <notches> | windows | stop  --dir <run>";
+                     <x> <y> | scroll <x> <y> <notches> | clipboard <mime> <path> [<mime> <path>]... | windows | \
+                     stop  --dir <run>";
 
 /// How long the app gets to quit on SIGTERM before it is killed, and the broker to see its socket close.
 const GRACE: Duration = Duration::from_secs(5);
@@ -285,6 +289,13 @@ impl Controls<'_> {
                 };
                 self.input()?.click(x, y, keys::BTN_LEFT)?;
                 Ok(String::new())
+            }
+            "clipboard" => {
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let offers = clipboard::offers_from_files(&words)?;
+                let count = offers.len();
+                self.sandbox.set_clipboard(offers)?;
+                Ok(format!("{count} types"))
             }
             "windows" => Ok(self.sandbox.niri_msg(&["windows"])?.replace('\n', " | ")),
             other => Err(format!("unknown command {other:?}").into()),

@@ -416,6 +416,14 @@ impl<C: Credentials> HttpTransport<C> {
             return self.exchange(outgoing).await;
         }
         let mut headers = plain_headers(request.service, body.is_some() || request.service == Service::Presence);
+        // a request naming its own body's type (a picture's bytes) sends that one alone
+        if request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(CONTENT_TYPE.as_str()))
+        {
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case(CONTENT_TYPE.as_str()));
+        }
         headers.extend(request.headers);
         if request.service == Service::Calling && body.as_ref().is_some_and(Vec::is_empty) {
             headers.push(("content-length".to_owned(), "0".to_owned()));
@@ -741,7 +749,7 @@ impl<C: Credentials> HttpTransport<C> {
         {
             let mut segments = url.path_segments_mut().map_err(|()| refused(Refusal::NotAllowed))?;
             segments.pop_if_empty().extend(endpoint.segments());
-            if (service == Service::Presence && ups_slash(endpoint)) || service == Service::Mcps {
+            if trailing_slash(service, endpoint) {
                 // UPS's paths end in a slash, as every captured one did (but a subscription's), and MCPS's
                 segments.push("");
             }
@@ -1517,7 +1525,7 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
     let segments = endpoint.segments();
     let mut wanted = decoded_path(base).unwrap_or_default();
     wanted.extend(segments.iter().cloned());
-    if (service == Service::Presence && ups_slash(endpoint)) || service == Service::Mcps {
+    if trailing_slash(service, endpoint) {
         wanted.push(String::new());
     }
     let service_rule = match service {
@@ -1548,6 +1556,17 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         && decoded_path(url).is_some_and(|path| path == wanted)
         && query_is(url, endpoint.query())
         && service_rule
+}
+
+/// Whether `endpoint`'s path on `service` ends in a slash: UPS's ([`ups_slash`]), MCPS's, and AMS's object creation
+/// (`v1/objects/`, as the web client's was captured).
+fn trailing_slash(service: Service, endpoint: &Endpoint) -> bool {
+    match service {
+        Service::Presence => ups_slash(endpoint),
+        Service::Mcps => true,
+        Service::Ams => endpoint.segments() == ["v1", "objects"],
+        _ => false,
+    }
 }
 
 /// Whether a UPS path ends in a slash: every captured one did but the presence subscription's

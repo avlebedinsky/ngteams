@@ -74,9 +74,17 @@ pub enum Kind {
     Code,
     /// A horizontal rule: no text.
     Rule,
+    /// A picture pasted into the box, by its id in the editor's pictures (`crate::editor::pictures`): no text.
+    Picture(u64),
 }
 
 impl Kind {
+    /// Whether it is a block with no text of its own, taken whole (a rule, a picture).
+    #[must_use]
+    pub const fn is_atom(self) -> bool {
+        matches!(self, Self::Rule | Self::Picture(_))
+    }
+
     /// Whether it is a list's item.
     #[must_use]
     pub const fn is_list(self) -> bool {
@@ -130,7 +138,7 @@ impl Block {
     /// Whether it shows nothing: no text but whitespace and no mention (a rule shows itself).
     #[must_use]
     pub fn is_blank(&self) -> bool {
-        self.kind != Kind::Rule
+        !self.kind.is_atom()
             && self
                 .runs
                 .iter()
@@ -436,7 +444,7 @@ impl Doc {
         let head = &mut self.blocks[start.block];
         let from = head.snap(start.offset, false);
         head.split_off(from);
-        if head.kind == Kind::Rule {
+        if head.kind.is_atom() {
             // a rule has no text to join: what follows takes its place
             (head.kind, head.indent) = tail_kind;
         }
@@ -453,7 +461,7 @@ impl Doc {
             return at;
         }
         let host_kind = self.blocks[at.block].kind;
-        if fragment.len() == 1 && fragment[0].kind != Kind::Rule && host_kind != Kind::Rule {
+        if fragment.len() == 1 && !fragment[0].kind.is_atom() && !host_kind.is_atom() {
             let one = fragment.remove(0);
             let host = &mut self.blocks[at.block];
             if host.is_empty() && one.kind == Kind::Code {
@@ -465,7 +473,7 @@ impl Doc {
             return Pos::new(at.block, offset);
         }
         let mut head = self.blocks.remove(at.block);
-        let tail = if head.kind == Kind::Rule {
+        let tail = if head.kind.is_atom() {
             Block::default()
         } else {
             let runs = head.split_off(at.offset);
@@ -473,7 +481,7 @@ impl Doc {
         };
         let first = fragment.remove(0);
         let mut out = Vec::with_capacity(fragment.len() + 3);
-        if head.kind != Kind::Rule && first.kind != Kind::Rule {
+        if !head.kind.is_atom() && !first.kind.is_atom() {
             if head.is_empty() {
                 (head.kind, head.indent) = (first.kind, first.indent);
             }
@@ -482,14 +490,14 @@ impl Doc {
             out.push(head);
         } else {
             // an empty line before a rule pasted on it goes
-            if head.kind == Kind::Rule || !head.is_empty() {
+            if head.kind.is_atom() || !head.is_empty() {
                 out.push(head);
             }
             out.push(first);
         }
         out.extend(fragment);
         let caret = match out.last_mut() {
-            Some(last) if last.kind != Kind::Rule => {
+            Some(last) if !last.kind.is_atom() => {
                 let end = last.len();
                 last.insert_runs(end, tail.runs);
                 Pos::new(out.len() - 1, end)
@@ -511,7 +519,7 @@ impl Doc {
         let tail = block.split_off(at.offset);
         let (kind, indent) = match block.kind {
             Kind::Heading(_) if tail.is_empty() => (Kind::Paragraph, 0),
-            Kind::Rule => (Kind::Paragraph, 0),
+            Kind::Rule | Kind::Picture(_) => (Kind::Paragraph, 0),
             kind => (kind, block.indent),
         };
         if at.offset == 0 && matches!(block.kind, Kind::Heading(_)) && !tail.is_empty() {
@@ -528,7 +536,7 @@ impl Doc {
     /// Puts `text` (no `\n`, or line breaks within the block) at `at` with `attrs`; the place after it.
     pub fn insert_text(&mut self, at: Pos, text: &str, attrs: Attrs) -> Pos {
         let at = self.clamp(at, true);
-        if self.blocks[at.block].kind == Kind::Rule {
+        if self.blocks[at.block].kind.is_atom() {
             // typing on a rule types in a paragraph after it
             self.blocks.insert(at.block + 1, Block::default());
             return self.insert_text(Pos::new(at.block + 1, 0), text, attrs);

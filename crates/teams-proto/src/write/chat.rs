@@ -629,7 +629,7 @@ fn message_body(fields: &MessageFields<'_>) -> Value {
         "callId": "",
         "state": 0,
         "version": fields.version,
-        "amsreferences": [],
+        "amsreferences": fields.text.pictures(),
         "crossPostChannels": [],
     });
     if let (Some(id), Some(object)) = (fields.client_message_id, body.as_object_mut()) {
