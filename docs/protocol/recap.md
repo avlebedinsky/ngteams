@@ -139,6 +139,31 @@ browser), the user's own account's debug log showing the download refused for an
   for an initialization segment, a `moof` (`tfhd` with the defaults, `tfdt`, `trun` of sizes) and its `mdat` for a
   media segment.
 
+## A 1:1 or group call's recording
+
+Seen in a lab capture of 2026-11-06 (`team-manage` as lab account a, its 1:1 chat with lab account b holding three call
+recordings and two calls transcribed without recording; the chat, each card's View recap, the sessions menu, the
+Transcript pane and "…").
+
+- **The chat** has the same tabs as a meeting's (Chat, Shared, Notes, Recap, Storyline). A recording's states are the
+  same lines as a meeting's ("<name> started recording.", "<name> stopped recording.", "Recording has been saved to
+  <name>'s OneDrive and will expire in 120 days. Remove expiration", the account named by its own name there too), and
+  under the saved line the same recap card as a meeting's, of that recording alone: titled by the recording ("Call
+  with <name>"), its day and its own span, Share, View recap, the Transcript chip when it was transcribed, the
+  thumbnail with its length and "Expires in 120 days". A call transcribed and not recorded has a card of its own (no
+  thumbnail); a transcript a recording of its call holds has none.
+- **The recording's message** names no organizer (`MeetingOrganizerId` empty) and no transcript item; it names where
+  it is kept instead, `<RecordingStorage type="RecordingInitiatorOneDrive" userId="<oid>">`, the one who started it.
+- **The Recap tab** reads what the chat's calls left with the meeting's read, the chat's own id as `threadId`:
+  `contents/?threadId=<1:1 chat>` lists each call's recording under `resources` as a meeting's (its sharing link, call,
+  drive, item and times, `organizerId` the one whose OneDrive holds it). The calls' `TranscriptV2` resources come only
+  under `invalidResources`, with no `location`; the recording's item lists no transcripts (`media` empty in the
+  `select=media/transcripts` read). Choosing a session reads the same list narrowed by `&recapCallId=<call>`. The
+  sessions menu lists the recordings alone (each by its day and span), the player and "…" (Go
+  to Meeting Recaps) are a meeting's, and the Transcript pane says "No transcript available" ("The transcript for this
+  meeting was never created, has expired, or has been deleted."). The recording is played as a meeting's (the item's
+  `content?format=dash`, `streamembed.aspx`).
+
 ## What `ngteams` does
 
 `teams_proto::recap` reads MCPS's answer (`MeetingContents`, `Service::Mcps`, the GTM `mcpService`) and the
@@ -178,3 +203,11 @@ its expiry (`RecordingExpiration`: the item read above with `$select=expiration`
 path). View recap and the Transcript chip open the Recap tab at the card's first recording (the chip its transcript from
 the top), the thumbnail plays it there, and Share → Copy link copies the same recap link as the tab's Share. Share's
 recipients and "Remove expiration" (writes) are left out.
+
+A 1:1 or group chat's calls ([above](#a-11-or-group-calls-recording)) are shown the same way: each recording saved is
+the saved line (its owner the `RecordingStorage` user when no organizer is named) with its recap card under it, a
+transcript no recording of its call holds a card of its own (`teams_ui::meeting_recap::call_cards`), and the chat has
+the tabs while it holds one. Its Recap tab makes the meeting's read with the chat's id; a recording with no transcript
+to read keeps the Transcript pane, saying there is none as Teams does, and the chat's captions saved on this computer
+stay parts of their own (Teams' transcript of the same time would win, as a meeting's). The recap link Share copies
+keeps the meeting's shape (`threadType=meeting`): the call's own wasn't captured.

@@ -23,8 +23,11 @@
 //!   named by the transcript's language as its item's transcripts give it), synced to where it plays.
 //! - **Calls' captions saved on this computer** ([`crate::call_transcript`]): each saved transcript of the chat's calls
 //!   is a part of its own, marked "Saved on this computer", its transcript and AI summary as a Teams transcript's
-//!   (`local`), with Delete transcript in More options. Teams' own transcript of the same time wins; a chat that isn't
-//!   a meeting's shows its saved transcripts alone (Teams has no recap of it to read).
+//!   (`local`), with Delete transcript in More options. Teams' own transcript of the same time wins.
+//! - **A 1:1 or group chat's calls**: their cloud recordings are listed by the same read as a meeting's (the chat's id
+//!   for the meeting's), each a part played, downloaded and summarized as a meeting's; Teams lists their transcripts
+//!   with no address to read (`docs/protocol/recap.md`), so such a part's Transcript says there is none, as Teams'
+//!   does, and the chat's saved captions stay parts of their own.
 //! - **Its states**: a spinner while the recap or a transcript is read; one that can't be read says so and offers to try
 //!   again, or Teams on the web; a meeting that left nothing says so.
 //!
@@ -85,6 +88,11 @@ pub const NOTHING_LEFT: &str = "This meeting wasn't recorded or transcribed.";
 pub const SAVING: &str = "Saving recording\u{2026} It shows here once it's ready.";
 /// The words a transcript that couldn't be read shows.
 pub const TRANSCRIPT_UNREAD: &str = "The transcript couldn't be loaded.";
+/// What the Transcript pane of a recording without a transcript says, as Teams' Recap says it.
+pub const NO_TRANSCRIPT_YET: &str = "No transcript available";
+/// Under [`NO_TRANSCRIPT_YET`].
+pub const NO_TRANSCRIPT_WHY: &str =
+    "The transcript for this meeting was never created, has expired, or has been deleted.";
 
 /// The panes beside the recording, as Teams' Recap has them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,15 +304,11 @@ impl RecapView {
         self.contents = Contents::Reading;
         // a recording's file that couldn't be read is read again with the recap
         self.recording_files.retain(|_, read| !matches!(read, FileRead::Failed));
-        // a chat that isn't a meeting's has no recap at Teams: its saved transcripts alone
-        let reply = crate::system_message::is_meeting_chat(&self.conversation)
-            .then(|| self.core.meeting_contents(self.conversation.clone()));
+        // a 1:1 or group chat's calls' recordings are listed by the same read as a meeting's, by the chat's id
+        let reply = self.core.meeting_contents(self.conversation.clone());
         let saved = self.core.call_transcripts(self.conversation.clone());
         self.reading = Some(cx.spawn(async move |this, cx| {
-            let answer = match reply {
-                Some(reply) => reply.await.map(|contents| recap_parts(&contents)),
-                None => Ok(Vec::new()),
-            };
+            let answer = reply.await.map(|contents| recap_parts(&contents));
             let saved = saved.await.unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 this.contents = this.local.merge(answer.ok(), saved, this.core.me());
@@ -1181,6 +1185,8 @@ impl RecapView {
     /// The panes' pills (AI summary, and Transcript for a part with one) and the pane shown.
     fn panes_card(&mut self, window: &mut Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let has_transcript = self.part().is_some_and(|part| part.transcript.is_some());
+        // a recording without a transcript keeps the pane, saying there is none, as Teams' Recap does
+        let offers_transcript = has_transcript || self.part().is_some_and(|part| part.recording.is_some());
         let shown = self.pane(cx);
         let pill = |pane: Pane, label: &'static str, key: &'static str, cx: &mut Context<Self>| {
             let chosen = shown == pane;
@@ -1208,11 +1214,22 @@ impl RecapView {
         };
         let mut pills = div().flex_none().flex().gap_2().px_4().pt_4().pb_2();
         pills = pills.child(pill(Pane::AiSummary, "AI summary", "summary", cx));
-        if has_transcript {
+        if offers_transcript {
             pills = pills.child(pill(Pane::Transcript, "Transcript", "transcript", cx));
         }
         let body = match shown {
             Pane::Transcript if has_transcript => self.transcript_pane(window, palette, cx),
+            Pane::Transcript if offers_transcript => {
+                let state = empty_state(Glyph::TRANSCRIPT, NO_TRANSCRIPT_YET, palette).child(
+                    div()
+                        .max_w(px(320.0))
+                        .text_sm()
+                        .text_center()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(NO_TRANSCRIPT_WHY),
+                );
+                centred(state, palette).into_any_element()
+            }
             Pane::AiSummary | Pane::Transcript => self.summary_pane(palette, cx),
         };
         card(palette)

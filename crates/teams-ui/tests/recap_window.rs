@@ -6,7 +6,9 @@
 //! downloaded and failed), the Recap of a meeting transcribed and not recorded, and the Shared tab; Part 1's AI summary
 //! offered, being made, failed, made, and previewed before it is sent to the chat (made by a fake `claude`, or a
 //! made-up summary kept for the run). A 1:1 chat's call captions saved on this computer: the Transcript chip under its
-//! call's end, its Recap (the transcript, its AI summary made, its Delete transcript confirmation).
+//! call's end, its Recap (the transcript, its AI summary made, its Delete transcript confirmation). The same chat's call
+//! recorded: its recording's recap card under its saved line, its Recap at the recording (its Transcript saying there is
+//! none, as Teams' does).
 //! The test runs itself again inside the sandbox once per page and theme; the parent screenshots each window into
 //! `target/ui-shots/recap-*.png`. `RECAP_PAGES` (a comma list) picks pages.
 //!
@@ -45,7 +47,10 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 const CHILD_ENV: &str = "TEAMS_UI_RECAP_WINDOW_TEST";
 
 /// Each page and the themes it is shot in.
-const PAGES: [(&str, &[&str]); 24] = [
+const PAGES: [(&str, &[&str]); 27] = [
+    ("call-chat", &[LIGHT_KEY, DARK_KEY]),
+    ("call-recap", &[LIGHT_KEY, DARK_KEY]),
+    ("call-transcript", &[LIGHT_KEY]),
     ("saved-chat", &[LIGHT_KEY, DARK_KEY]),
     ("saved", &[LIGHT_KEY, DARK_KEY]),
     ("saved-summary", &[LIGHT_KEY]),
@@ -252,6 +257,84 @@ fn seed_saved(core: &FakeCore) {
     );
     seed_saved_transcript(core, &me);
 }
+
+/// The a–b chat's call recorded too (the call pages): its recording's start, stop and save in the chat, a recording
+/// kept in a's OneDrive that MCPS lists by the chat's id with no transcript to read, as Teams lists a call's.
+fn seed_call(core: &FakeCore) {
+    seed_saved(core);
+    let me = core.me().to_owned();
+    let oid = me.trim_start_matches("8:orgid:").to_owned();
+    let minute = 60_000;
+    let at = fixtures::START + 3 * minute;
+    let link = fixtures::sharing_link(CALL_ITEM);
+    let recording = |status: &str, code: &str, file: bool| {
+        let (href, item) = if file {
+            (
+                link.clone(),
+                format!(
+                    "<item type=\"onedriveForBusinessVideo\" uri=\"{link}\" driveId=\"b!drive1\" driveItemId=\"{CALL_ITEM}\" />"
+                ),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+        format!(
+            "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"{status}\" code=\"{code}\" />\
+             <Title>Call with Bo Lab</Title><a href=\"{href}\">Play</a><MeetingOrganizerId value=\"\" />\
+             <RecordingInitiatorId value=\"{me}\" isAutoRecording=\"False\" />\
+             <RecordingStorage type=\"RecordingInitiatorOneDrive\" userId=\"{oid}\" />\
+             <Identifiers><Id type=\"callId\" value=\"{CALL_ID}\" /></Identifiers>\
+             <RecordingContent contentTypes=\"Recording+Transcript\" timestamp=\"2026-01-02T10:03:00Z\" \
+             duration=\"0:00:51\">{item}</RecordingContent></URIObject>"
+        )
+    };
+    let message = |id: &str, content: String, when: i64| teams_store::Message {
+        conversation_id: SAVED_CHAT.to_owned(),
+        id: id.to_owned(),
+        version: 1,
+        client_message_id: None,
+        sender: Some(me.clone()),
+        sender_name: None,
+        message_type: "RichText/Media_CallRecording".to_owned(),
+        content,
+        properties: None,
+        arrival_time: when,
+        compose_time: Some(when),
+        edit_time: None,
+        delete_time: None,
+    };
+    if let Some(messages) = locked(&core.messages).get_mut(SAVED_CHAT) {
+        messages.push(message("c1", recording("Initial", "0", false), at));
+        messages.push(message("c2", recording("ChunkFinished", "202", false), at + minute));
+        messages.push(message("c3", recording("Success", "200", true), at + 2 * minute));
+        messages.sort_by_key(|message| message.arrival_time);
+    }
+    locked(&core.meeting_contents).insert(
+        SAVED_CHAT.to_owned(),
+        vec![teams_proto::MeetingContent {
+            kind: teams_proto::recap::ContentKind::Recording,
+            location: link.clone(),
+            call_id: Some(CALL_ID.to_owned()),
+            drive_id: Some("b!drive1".to_owned()),
+            item_id: Some(CALL_ITEM.to_owned()),
+            start_ms: Some(at),
+            end_ms: Some(at + 51_000),
+            web_url: None,
+            organizer_id: Some(oid),
+            tenant_id: Some("00000000-0000-4000-8000-0000000000f0".to_owned()),
+        }],
+    );
+    locked(&core.recordings).insert(CALL_ITEM.to_owned());
+    locked(&core.thumbnails).insert(link, poster());
+    locked(&core.expirations).insert(
+        CALL_ITEM.to_owned(),
+        chrono::Utc::now().timestamp_millis() + 119 * 24 * 3_600_000 + 3_600_000,
+    );
+}
+
+/// The a–b call's recording: its item and its call.
+const CALL_ITEM: &str = "ITEM5";
+const CALL_ID: &str = "00000000-0000-4000-8000-0000000000c5";
 
 /// The a–b call's captions saved on this computer: a's and Bo's lines over a minute.
 fn seed_saved_transcript(core: &FakeCore, me: &str) {
@@ -501,6 +584,9 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
     }
     seed_download(&core, &page);
     seed_summary(&page, cx);
+    if page.starts_with("call") {
+        seed_call(&core);
+    }
     if page.starts_with("saved") {
         seed_saved(&core);
         if page == "saved-summary" {
@@ -518,7 +604,7 @@ fn open(theme: &'static str, page: String, cx: &mut App) -> gpui::Result<()> {
     let bridge = cx.new(|cx| Bridge::start(source, shared, models.clone(), cx));
     let chat = if page == "transcript-only" {
         fixtures::TRANSCRIPT_ONLY
-    } else if page.starts_with("saved") {
+    } else if page.starts_with("saved") || page.starts_with("call") {
         SAVED_CHAT
     } else {
         fixtures::MEETING
@@ -607,7 +693,7 @@ fn last(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
 /// Opens the page's tab.
 fn step(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
     let tab = match page {
-        "chat" | "saved-chat" => ChatTab::Chat,
+        "chat" | "saved-chat" | "call-chat" => ChatTab::Chat,
         "shared" => ChatTab::Shared,
         _ => ChatTab::Recap,
     };
@@ -626,6 +712,11 @@ fn then(shell: &Entity<Shell>, page: &str, _: &mut Window, cx: &mut App) {
         }
         "part-2" => recap.select_part(1, cx),
         "saved" => recap.show_saved(1, cx),
+        "call-recap" => recap.show_recording(fixtures::sharing_link(CALL_ITEM), cx),
+        "call-transcript" => {
+            recap.show_recording(fixtures::sharing_link(CALL_ITEM), cx);
+            recap.show_transcript(cx);
+        }
         "saved-summary" => {
             recap.show_saved(1, cx);
             recap.show_pane(teams_ui::recap_view::Pane::AiSummary, cx);

@@ -115,6 +115,9 @@ pub struct Recording {
     pub organizer: Option<String>,
     /// The organizer's tenant (`MeetingOrganizerTenantId`'s `value`).
     pub tenant: Option<String>,
+    /// Whose OneDrive holds it (`RecordingStorage`'s `userId`, an object id, as an MRI): a 1:1 or group call's
+    /// recording names no organizer, only this (its initiator's, `type="RecordingInitiatorOneDrive"`).
+    pub storage_owner: Option<String>,
     /// Who stopped it (`RecordingTerminatorId`'s `value`), once someone stopped it.
     pub terminator: Option<String>,
     /// Its file in the organizer's OneDrive (`<item type="onedriveForBusinessVideo">`'s `driveId` and `driveItemId`),
@@ -371,6 +374,13 @@ fn recording(content: &str) -> Option<Recording> {
             .and_then(|element| value_of(element.value().attr("value"))),
         organizer: value_of(first_attribute(&html, "meetingorganizerid", "value")),
         tenant: value_of(first_attribute(&html, "meetingorganizertenantid", "value")),
+        storage_owner: value_of(first_attribute(&html, "recordingstorage", "userid")).map(|owner| {
+            if owner.starts_with("8:") {
+                owner
+            } else {
+                format!("8:orgid:{owner}")
+            }
+        }),
         terminator: value_of(first_attribute(&html, "recordingterminatorid", "value")),
         file: content_item(&html, "onedriveForBusinessVideo").and_then(|item| {
             Some(RecordingItem {

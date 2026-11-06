@@ -165,8 +165,10 @@ fn a_recording_without_a_transcript_has_nothing_to_summarize() {
     let (_shell, cx) = shell_window(&rig, fixtures::MEETING);
     click(cx, "chat-tab-recap");
     assert!(drawn(cx, "recap-pane-summary shown"));
-    assert!(!drawn(cx, "recap-pane-transcript"));
     assert!(drawn(cx, state(teams_ui::recap_view::NO_TRANSCRIPT)));
+    // its Transcript pane stays, saying there is none, as Teams' Recap does
+    click(cx, "recap-pane-transcript");
+    assert!(drawn(cx, "recap-state No transcript available"));
 }
 
 #[test]

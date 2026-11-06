@@ -1,9 +1,9 @@
 //! A chat's system messages as Teams draws them ([`super::ChatView`]'s rows, no author row): a line with its icon in
 //! the avatars' column (a recording started in the brand colour), its time first for a call's, a meeting's or a
 //! recording's, a meeting's length in bold, Teams' unverified mark after an anonymous member's name, and a recording's
-//! expiry once its item says it; under a meeting chat's meeting end its recap card ([`crate::meeting_recap`]); a 1:1
-//! or group chat's recording or transcript as a card that opens Teams on the web; a kind this build doesn't show as
-//! its placeholder.
+//! expiry once its item says it; under a meeting chat's meeting end its recap card ([`crate::meeting_recap`]); in a
+//! 1:1 or group chat, a recording's recap card under its "saved" line and a transcript's on its own, each opening the
+//! chat's Recap tab as Teams' do; a kind this build doesn't show as its placeholder.
 
 use chrono::{DateTime, Local};
 use gpui::{
@@ -21,15 +21,14 @@ use teams_proto::chat::{ChatEvent, RecordingItem, chat_event, meeting_times, web
 use teams_store::Message;
 
 use super::{
-    AVATAR, AVATAR_GAP, Body, CARD_WIDTH, ChatView, ChatViewEvent, EventCard, MessageItem, OPEN_ON_THE_WEB, RecapOpen,
-    UNSUPPORTED, VIEW_RECAP, web_line,
+    AVATAR, AVATAR_GAP, Body, ChatView, ChatViewEvent, MessageItem, RecapOpen, UNSUPPORTED, VIEW_RECAP, web_line,
 };
 use crate::clock::HourCycle;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::{PictureSource, PictureState, thumbnail};
 use crate::meeting_recap::{CONTENT, RecapCard, TRANSCRIPT};
 use crate::rich_text::tint;
-use crate::system_message::{CardKind, EventIcon, EventLine, Span, expiry_clause};
+use crate::system_message::{EventIcon, EventLine, Span, expiry_clause, is_meeting_chat};
 use crate::theme::Palette;
 
 /// The widest a recap card is drawn, px.
@@ -189,7 +188,11 @@ impl ChatView {
                     .children(saved)
                     .into_any_element()
             }
-            Body::Card(card) => event_card(item, card, &self.conversation, palette, cycle),
+            Body::Card(card) => div()
+                .w_full()
+                .debug_selector(selector)
+                .child(self.recap_card(item, card, palette, cx))
+                .into_any_element(),
             Body::UnsupportedEvent(_) => div()
                 .w_full()
                 .py_2()
@@ -341,12 +344,15 @@ impl ChatView {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let title = self
-            .systems
-            .title
-            .clone()
-            .or_else(|| card.title.clone().map(SharedString::from))
-            .unwrap_or_else(|| crate::system_message::MEETING.into());
+        // a meeting's card is titled by its chat's name, a call's by its recording's ("Call with …"), as Teams' are
+        let chat = self.systems.title.clone();
+        let own = card.title.clone().map(SharedString::from);
+        let title = if is_meeting_chat(&self.conversation) {
+            chat.or(own)
+        } else {
+            own.or(chat)
+        }
+        .unwrap_or_else(|| crate::system_message::MEETING.into());
         let line = card.span_line(&Local, crate::clock::cycle(cx));
         let share = card.share_link(&self.conversation).map(|link| {
             let button = icon_button(
@@ -594,84 +600,4 @@ pub(super) fn drop_bare_starts(rows: &mut Vec<MessageItem>, messages: &[Message]
             index += 1;
         }
     }
-}
-
-/// A 1:1 or group chat's recording or transcript card, centred: its icon in a tinted circle, its title over its detail
-/// and time, and the link that opens it in Teams on the web.
-fn event_card(
-    item: &MessageItem,
-    card: &EventCard,
-    conversation: &str,
-    palette: Palette,
-    cycle: HourCycle,
-) -> AnyElement {
-    let glyph = match card.kind {
-        CardKind::Recording => Glyph::PLAY,
-        CardKind::Transcript => Glyph::TRANSCRIPT,
-    };
-    let icon = div()
-        .size(px(36.0))
-        .flex_none()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgb(palette.selected))
-        .text_color(rgb(palette.brand))
-        .child(glyph.icon());
-    let detail = format!("{}\u{2003}{}", card.detail, time_of_day(item.arrival_time, cycle));
-    let text = div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(palette.foreground))
-                .truncate()
-                .child(card.title.clone()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette.muted_foreground))
-                .truncate()
-                .child(detail),
-        );
-    let link = web_chat_link(conversation);
-    let open = format!("open-on-the-web-{}", item.id);
-    let action = div().debug_selector(move || open.clone()).flex_none().child(
-        Button::new(SharedString::from(format!("open-on-the-web-{}", item.id)))
-            .label(OPEN_ON_THE_WEB)
-            .ghost()
-            .with_size(gpui_component::Size::XSmall)
-            .on_click(move |_, _, cx| cx.open_url(&link)),
-    );
-    let selector = format!("event-card-{} {}", item.id, card.kind.name());
-    div()
-        .w_full()
-        .py_2()
-        .flex()
-        .justify_center()
-        .child(
-            div()
-                .debug_selector(move || selector)
-                .w(px(CARD_WIDTH))
-                .max_w_full()
-                .px_4()
-                .py_3()
-                .flex()
-                .items_center()
-                .gap_3()
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(palette.border))
-                .bg(rgb(palette.surface))
-                .child(icon)
-                .child(text)
-                .child(action),
-        )
-        .into_any_element()
 }

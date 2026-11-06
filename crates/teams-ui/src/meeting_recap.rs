@@ -17,6 +17,10 @@
 //!   tab's Share copies it).
 //!
 //! It is one card per meeting so a later card part (an AI summary) can be added to [`RecapCard`] beside the others.
+//!
+//! A 1:1 or group chat's calls have the same card, drawn where Teams' chat draws it ([`call_cards`]): under each
+//! recording's "Recording has been saved" line, of that recording alone, and at a transcript's message when no
+//! recording of its call holds a transcript. Its actions open the chat's own Recap tab, as a meeting's do.
 
 use std::collections::HashMap;
 
@@ -259,16 +263,107 @@ fn gather(message: &Message, calls: &mut HashMap<Option<String>, Gathered>) {
     }
 }
 
+/// A 1:1 or group chat's recap cards in its `messages` (in any order), by the message each is drawn at, as Teams draws
+/// them there (no meeting end to hang one under): one under each recording saved, of that recording alone (its own
+/// span, its Transcript chip when it was transcribed), and one at a transcript's message when no recording of its call
+/// holds a transcript (its span the transcript's own, when its message says it).
+#[must_use]
+pub fn call_cards(messages: &[Message]) -> HashMap<String, RecapCard> {
+    let mut ordered: Vec<(&Message, ChatEvent)> = messages
+        .iter()
+        .filter(|message| message.delete_time.is_none())
+        .filter_map(|message| Some((message, chat_event(&message.message_type, &message.content)?)))
+        .collect();
+    ordered.sort_by_key(|(message, _)| message.arrival_time);
+    let recordings = || {
+        ordered.iter().filter_map(|(message, event)| match event {
+            ChatEvent::Recording(recording) => Some((*message, recording.as_ref())),
+            _ => None,
+        })
+    };
+    let mut cards = HashMap::new();
+    for (message, recording) in recordings() {
+        if recording.status == RecordingStatus::Ready
+            && recording.contents != RecordingContents::Transcript
+            && let Some(card) = recording_card(recording)
+        {
+            cards.insert(message.id.clone(), card);
+        }
+    }
+    for (message, event) in &ordered {
+        let ChatEvent::Transcript(transcript) = event else {
+            continue;
+        };
+        let call = transcript.call_id.as_deref();
+        let of_call = || recordings().filter(|(_, recording)| recording.call_id.as_deref() == call);
+        // a recording of the call that holds its transcript tells it, as Teams' chat does
+        let held = of_call().any(|(_, recording)| {
+            recording.status == RecordingStatus::Ready
+                && recording.contents == RecordingContents::RecordingAndTranscript
+        });
+        if held {
+            continue;
+        }
+        let first = of_call().map(|(_, recording)| recording).next();
+        // the transcript's own span: its half's stop nearest the transcript's message
+        let span = of_call()
+            .filter(|(_, recording)| {
+                recording.contents == RecordingContents::Transcript && recording.status == RecordingStatus::Stopped
+            })
+            .min_by_key(|(stopped, _)| stopped.arrival_time.abs_diff(message.arrival_time))
+            .and_then(|(_, recording)| span_of(recording.started, recording.duration));
+        cards.insert(
+            message.id.clone(),
+            RecapCard {
+                call_id: transcript.call_id.clone(),
+                title: first.and_then(|recording| recording.title.clone()),
+                span,
+                transcript: true,
+                organizer: first
+                    .and_then(|recording| recording.organizer.clone().or_else(|| recording.storage_owner.clone())),
+                tenant: first.and_then(|recording| recording.tenant.clone()),
+                ..RecapCard::default()
+            },
+        );
+    }
+    cards
+}
+
+/// The card of one recording saved: its own span, its transcript when it was transcribed; `None` without its link.
+fn recording_card(recording: &teams_proto::chat::Recording) -> Option<RecapCard> {
+    let ready = CardRecording {
+        link: recording.link.clone()?,
+        file: recording.file.clone(),
+        duration: recording.duration,
+        started: recording.started,
+        transcript: recording.transcript.clone(),
+    };
+    Some(RecapCard {
+        call_id: recording.call_id.clone(),
+        title: recording.title.clone(),
+        span: span_of(recording.started, recording.duration),
+        recordings: vec![ready],
+        transcript: recording.contents == RecordingContents::RecordingAndTranscript,
+        saving: false,
+        organizer: recording.organizer.clone().or_else(|| recording.storage_owner.clone()),
+        tenant: recording.tenant.clone(),
+        transcribed: None,
+    })
+}
+
+/// A span from its start (ms) and its length (s).
+fn span_of(started: Option<i64>, duration: Option<u64>) -> Option<(i64, i64)> {
+    let start = started?;
+    let length = i64::try_from(duration?).ok()?;
+    Some((start, start.saturating_add(length.saturating_mul(1_000))))
+}
+
 fn settled(mut gathered: Gathered) -> RecapCard {
     let card = &mut gathered.card;
     card.recordings
         .sort_by_key(|recording| recording.started.unwrap_or(i64::MAX));
     card.saving = gathered.stopped > card.recordings.len();
-    let span_of = |recording: &CardRecording| {
-        let start = recording.started?;
-        let length = i64::try_from(recording.duration?).ok()?;
-        Some((start, start.saturating_add(length.saturating_mul(1_000))))
-    };
+    let span_of = |recording: &CardRecording| span_of(recording.started, recording.duration);
     card.span = gathered
         .scheduled
         .or_else(|| card.recordings.first().and_then(span_of))

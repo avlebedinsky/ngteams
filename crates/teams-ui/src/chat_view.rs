@@ -134,7 +134,7 @@ use crate::selection::{self, MessageKey, Scope, TextSelection};
 use crate::sending::{self, Again, Note, RowState};
 use crate::settings::SettingsModel;
 use crate::shell::ShellParts;
-use crate::system_message::{self, CardKind, EventIcon, EventLine, Naming, Shown as SystemShown};
+use crate::system_message::{self, EventIcon, EventLine, Naming, Shown as SystemShown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
@@ -195,8 +195,6 @@ const AVATAR_GAP: f32 = 12.0;
 const BUBBLE_INSET: f32 = 16.0;
 /// The column right of someone else's bubble that holds the "mentions you" mark, px.
 const MARK_COLUMN: f32 = 28.0;
-/// A system message's card's width, px (narrower when the pane is).
-const CARD_WIDTH: f32 = 480.0;
 /// A message's header's height, rem: the avatar beside it starts below it, level with the bubble.
 const HEADER_REMS: f32 = 1.5;
 /// Messages read from the store at a time; older ones load when fewer rows than this are above the view.
@@ -445,11 +443,12 @@ pub enum Body {
     Event(EventLine),
     /// A system message as a line after its icon and time (a call's or a meeting's start or end, a recording's state).
     TimedEvent(EventLine),
-    /// A meeting chat's meeting end: its line, and the meeting's recap card under it when it left a recording or a
-    /// transcript ([`crate::meeting_recap`]).
+    /// A meeting chat's meeting end, or any other chat's recording saved: its line, and the recap card under it (the
+    /// meeting's when it left a recording or a transcript, the recording's) ([`crate::meeting_recap`]).
     MeetingEnded(Box<MeetingEnd>),
-    /// A system message as a centred card (a 1:1 or group chat's recording or transcript).
-    Card(Box<EventCard>),
+    /// A 1:1 or group chat's transcript that no recording of its call holds: its recap card alone
+    /// ([`crate::meeting_recap::call_cards`]).
+    Card(Box<RecapCard>),
     /// A card a bot or a workflow posted, drawn as Teams draws it ([`crate::card_view`]).
     Cards(ShownCards),
     /// A meeting scheduled in a channel, drawn as Teams' meeting card ([`channel::meeting_card`]).
@@ -471,7 +470,7 @@ impl Body {
             Self::Event(_) => "event",
             Self::TimedEvent(_) => "timed-event",
             Self::MeetingEnded(_) => "meeting-ended",
-            Self::Card(card) => card.kind.name(),
+            Self::Card(_) => "transcript",
             Self::Cards(_) => "cards",
             Self::Meeting(_) => "meeting",
             Self::Unsupported(_) => "unsupported",
@@ -489,21 +488,13 @@ impl Body {
     }
 }
 
-/// A meeting chat's meeting end as shown.
+/// A meeting chat's meeting end, or any other chat's recording saved, as shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeetingEnd {
-    /// "Meeting ended: 1h 1m 37s".
+    /// "Meeting ended: 1h 1m 37s", "Recording has been saved to …".
     pub line: EventLine,
-    /// The meeting's recap card, when it left a recording or a transcript (or one is being saved).
+    /// The meeting's recap card, when it left a recording or a transcript (or one is being saved); the recording's.
     pub recap: Option<RecapCard>,
-}
-
-/// A system message's card: what it is, its title and the line under it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EventCard {
-    pub kind: CardKind,
-    pub title: SharedString,
-    pub detail: SharedString,
 }
 
 /// A reaction key on a message: how many reacted with it, and whether the account did.
@@ -662,6 +653,8 @@ struct Systems {
     title: Option<SharedString>,
     /// A meeting chat's recap cards, by the call each is of, as its messages last said them.
     recaps: HashMap<Option<String>, RecapCard>,
+    /// Any other chat's recap cards of its calls' recordings and transcripts, by the message each is drawn at.
+    calls: HashMap<String, RecapCard>,
     /// When each recording a row names expires, as asked of its item.
     expiries: HashMap<teams_proto::chat::RecordingItem, Expiry>,
 }
@@ -2327,8 +2320,8 @@ impl ChatView {
     }
 
     /// Asks the engine for the people the rows name: the senders (their profile's name and their picture), events'
-    /// members (the account too in a meeting chat, whose events name it by its name), forwarded messages' original
-    /// senders (the account too: a forward names it, never "You") and who is typing.
+    /// members (the account too in a meeting chat, whose events name it by its name, and as a recording's owner),
+    /// forwarded messages' original senders (the account too: a forward names it, never "You") and who is typing.
     fn want_names(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<String> = Vec::new();
         let mut originals: Vec<String> = Vec::new();
@@ -2344,6 +2337,8 @@ impl ChatView {
                     originals.extend(named);
                 } else {
                     wanted.extend(named);
+                    // a recording's owner is named by name, the account too
+                    originals.extend(system_message::named_by_name(&message.message_type, &message.content));
                 }
             }
             if is_text_type(&message.message_type)
@@ -2624,12 +2619,16 @@ impl ChatView {
                     recap: self.recap_of(message),
                 }))
             }
+            // any other chat's recording saved: its recap card under its line
+            Some(SystemShown::TimedLine(line)) if self.systems.calls.contains_key(&message.id) => {
+                Body::MeetingEnded(Box::new(MeetingEnd {
+                    line,
+                    recap: self.systems.calls.get(&message.id).cloned(),
+                }))
+            }
             Some(SystemShown::TimedLine(line)) => Body::TimedEvent(line),
-            Some(SystemShown::Card { kind, title, detail }) => Body::Card(Box::new(EventCard {
-                kind,
-                title: title.into(),
-                detail: detail.into(),
-            })),
+            // a transcript a recording of its call holds is told by that recording's card
+            Some(SystemShown::Transcript) => Body::Card(Box::new(self.systems.calls.get(&message.id).cloned()?)),
             Some(SystemShown::Nothing) => return None,
             // the thread's own: never shown as from a sender
             None if kind.starts_with("ThreadActivity/")
@@ -2654,6 +2653,13 @@ impl ChatView {
     fn recap_of(&self, message: &Message) -> Option<RecapCard> {
         let call = teams_proto::chat::meeting_times(&message.content).and_then(|times| times.call_id);
         self.systems.recaps.get(&call).filter(|card| card.shows()).cloned()
+    }
+
+    /// Whether the chat (not a meeting's) holds a recap card of a call's recording or transcript: its Recap tab has
+    /// something of Teams' to show.
+    #[must_use]
+    pub fn has_call_recaps(&self) -> bool {
+        !self.systems.calls.is_empty()
     }
 
     /// The chat's name, as the chat list has it: a meeting's recap card is titled by it.
@@ -2908,6 +2914,8 @@ impl ChatView {
         let mut replies = self.replies_of(&messages);
         if system_message::is_meeting_chat(&self.conversation) {
             self.systems.recaps = meeting_recap::recap_cards(&messages);
+        } else if self.place == Place::Chat {
+            self.systems.calls = meeting_recap::call_cards(&messages);
         }
         let saved = self.saved_rows(&messages, cx);
         let shown = saved::with_saved(messages.iter().filter(|message| self.shows(message)).collect(), &saved);

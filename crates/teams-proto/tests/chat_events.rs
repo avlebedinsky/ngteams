@@ -242,6 +242,39 @@ fn a_ready_recording_reads_its_call_organizer_file_and_transcript() {
     assert_eq!(started.started, Some(1_767_348_010_000));
 }
 
+/// A 1:1 call's recording ready, shaped as a lab call's was: no organizer named, its file in its initiator's OneDrive,
+/// no transcript item on it.
+const CALL_READY: &str = "<URIObject format_version=\"1.1\" type=\"Video.2/CallRecording.1\" uri=\"\" version=\"1.0\">\
+    <RecordingStatus status=\"Success\" code=\"200\" shortChunk=\"False\"><amsErrorResult /></RecordingStatus>\
+    <Title>Call with Ben</Title><a href=\"https://madeup-my.sharepoint.com/:v:/g/personal/ann_madeup/MadeUpCall\">Play</a>\
+    <OriginalName v=\"Call with Ben-20260102_100010-Meeting Recording.mp4\" /><MeetingOrganizerId value=\"\" />\
+    <MeetingOrganizerTenantId value=\"\" />\
+    <RecordingInitiatorId value=\"8:orgid:00000000-0000-4000-8000-00000000000a\" isAutoRecording=\"False\" />\
+    <RecordingStorage type=\"RecordingInitiatorOneDrive\" userId=\"00000000-0000-4000-8000-00000000000a\" />\
+    <Identifiers><Id type=\"callId\" value=\"00000000-0000-4000-8000-0000000000c3\" /></Identifiers>\
+    <RecordingContent contentTypes=\"Recording+Transcript\" timestamp=\"2026-01-02T10:00:10.0000000Z\" \
+    duration=\"0:00:51.54\" canVideoExpire=\"True\"><item type=\"video\" uri=\"\" />\
+    <item type=\"onedriveForBusinessVideo\" uri=\"https://madeup-my.sharepoint.com/:v:/g/personal/ann_madeup/MadeUpCall\" \
+    driveId=\"b!drive1\" driveItemId=\"ITEM3\" /></RecordingContent><RequestedExports /></URIObject>";
+
+#[test]
+fn a_calls_recording_names_whose_onedrive_holds_it_and_no_organizer() {
+    let Some(ChatEvent::Recording(ready)) = chat_event("RichText/Media_CallRecording", CALL_READY) else {
+        panic!("not a recording");
+    };
+    assert_eq!(ready.organizer, None);
+    assert_eq!(ready.tenant, None);
+    assert_eq!(ready.storage_owner.as_deref(), Some(ANN));
+    assert_eq!(ready.duration, Some(51));
+    assert_eq!(ready.transcript, None);
+    assert_eq!(ready.file.map(|file| file.item).as_deref(), Some("ITEM3"));
+    // a meeting's names its organizer and no storage
+    let Some(ChatEvent::Recording(meeting)) = chat_event("RichText/Media_CallRecording", READY) else {
+        panic!("not a recording");
+    };
+    assert_eq!(meeting.storage_owner, None);
+}
+
 #[test]
 fn a_recording_in_a_state_or_with_contents_no_capture_showed_is_no_event() {
     for content in [

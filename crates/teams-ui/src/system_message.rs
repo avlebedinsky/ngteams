@@ -1,13 +1,13 @@
 //! A chat's system messages in Teams' words: what a call's start and end, a meeting recording, a transcript and the
 //! thread's own events (members added, joined, left or removed, the chat's name, a meeting chat's policy) show, in the
-//! chat (a line with its icon, or a card) and in the chat list's preview line. The words are the web client's English
-//! ones; which one a message takes follows the web client's own choice (the meeting chat's, a group chat's meeting, a
-//! call's).
+//! chat (a line with its icon, or a recap card) and in the chat list's preview line. The words are the web client's
+//! English ones; which one a message takes follows the web client's own choice (the meeting chat's, a group chat's
+//! meeting, a call's).
 //!
-//! A meeting chat names everyone by name, the account too ("Nick started recording."), as Teams' meeting chat does; a
-//! ready recording there is the line "Recording has been saved to <organizer>'s OneDrive and will expire in n days."
-//! and the transcript is told by the meeting's recap card under its end ([`crate::meeting_recap`]), not a card of its
-//! own.
+//! A meeting chat names everyone by name, the account too ("Nick started recording."), as Teams' meeting chat does. A
+//! ready recording is the line "Recording has been saved to <owner>'s OneDrive and will expire in n days." in every
+//! chat; a meeting chat's transcript is told by the meeting's recap card under its end, any other chat's recording and
+//! transcript by a recap card of their own ([`crate::meeting_recap`]).
 //!
 //! `teams_proto::chat` reads the content ([`chat_event`], [`thread_activity`]); a shape it doesn't read is no event
 //! here, and the views keep their placeholder for it.
@@ -19,8 +19,6 @@ use teams_proto::chat::{
 
 /// A meeting card's title when the chat has no name.
 pub const MEETING: &str = "Meeting";
-/// A transcript card's title.
-pub const TRANSCRIPT: &str = "Transcript";
 /// A day, ms: how far back shared history reaches is told in days.
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 
@@ -45,27 +43,6 @@ pub fn is_thread(sender: &str) -> bool {
 #[must_use]
 pub fn notifies(message_type: &str) -> bool {
     matches!(message_type, "Text" | "RichText/Html" | "RichText/Media_Card")
-}
-
-/// What a card shows a picture of: a 1:1 or group chat's recording or transcript (a meeting chat's are told by its
-/// recap card).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CardKind {
-    /// A recording that is ready: played in Teams on the web.
-    Recording,
-    /// A transcript: read in Teams on the web.
-    Transcript,
-}
-
-impl CardKind {
-    /// The trace's and the selectors' name for it.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Recording => "recording",
-            Self::Transcript => "transcript",
-        }
-    }
 }
 
 /// The icon before a system message's line, as Teams draws it.
@@ -171,12 +148,9 @@ pub enum Shown {
     Line(EventLine),
     /// A line with its icon, after the message's time: a call's or a recording's state, a meeting's start or end.
     TimedLine(EventLine),
-    /// A card: a 1:1 or group chat's recording or transcript.
-    Card {
-        kind: CardKind,
-        title: String,
-        detail: String,
-    },
+    /// A 1:1 or group chat's transcript: its recap card ([`crate::meeting_recap::call_cards`]) when no recording of
+    /// its call holds it.
+    Transcript,
     /// Nothing: Teams draws nothing for it (a call with no length, a transcript's half of a recording, a meeting chat's
     /// transcript, a lone bot added).
     Nothing,
@@ -253,16 +227,33 @@ pub fn people(message_type: &str, content: &str) -> Vec<String> {
     }
     match chat_event(message_type, content) {
         Some(ChatEvent::CallStarted(start)) => start.initiator.into_iter().collect(),
-        Some(ChatEvent::Recording(recording)) => [recording.initiator, recording.terminator, recording.organizer]
-            .into_iter()
-            .flatten()
-            .collect(),
+        Some(ChatEvent::Recording(recording)) => [
+            recording.initiator,
+            recording.terminator,
+            recording.organizer,
+            recording.storage_owner,
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         Some(ChatEvent::MembersJoined(members) | ChatEvent::MembersLeft(members)) => {
             members.members.into_iter().map(|member| member.mri).collect()
         }
         Some(ChatEvent::MembersRemoved(removed)) => std::iter::once(removed.initiator).chain(removed.targets).collect(),
         Some(ChatEvent::TopicUpdated(update)) => vec![update.initiator],
         _ => Vec::new(),
+    }
+}
+
+/// Whom a system message names by name in any chat, the account too: a recording's owner ("saved to <name>'s
+/// OneDrive").
+#[must_use]
+pub fn named_by_name(message_type: &str, content: &str) -> Option<String> {
+    match chat_event(message_type, content)? {
+        ChatEvent::Recording(recording) if recording.status == RecordingStatus::Ready => {
+            recording.organizer.or(recording.storage_owner)
+        }
+        _ => None,
     }
 }
 
@@ -287,14 +278,10 @@ pub fn shown(
     Some(match chat_event(message_type, content)? {
         ChatEvent::CallStarted(start) => call_started(&start, meeting, names),
         ChatEvent::CallEnded(end) => call_ended(&end, meeting, own),
-        ChatEvent::Recording(recording) => recording_shown(&recording, meeting, names),
+        ChatEvent::Recording(recording) => recording_shown(&recording, names),
         // a meeting chat's transcript is told by the meeting's recap card
         ChatEvent::Transcript(_) if meeting => Shown::Nothing,
-        ChatEvent::Transcript(_) => Shown::Card {
-            kind: CardKind::Transcript,
-            title: TRANSCRIPT.to_owned(),
-            detail: "Transcript is available".to_owned(),
-        },
+        ChatEvent::Transcript(_) => Shown::Transcript,
         ChatEvent::MembersJoined(members) => joined(&members, meeting, names),
         ChatEvent::MembersLeft(members) => left(&members, meeting, names),
         ChatEvent::MembersRemoved(removed) => removed_line(&removed, conversation, names),
@@ -342,7 +329,7 @@ fn call_ended(end: &CallEnd, meeting: bool, own: bool) -> Shown {
     })
 }
 
-fn recording_shown(recording: &Recording, meeting: bool, names: &dyn Naming) -> Shown {
+fn recording_shown(recording: &Recording, names: &dyn Naming) -> Shown {
     let both = match recording.contents {
         // the transcript's half of a recording: Teams shows only the recording's
         RecordingContents::Transcript => return Shown::Nothing,
@@ -372,25 +359,17 @@ fn recording_shown(recording: &Recording, meeting: bool, names: &dyn Naming) -> 
                 (None, false) => "Recording stopped.".to_owned(),
             },
         )),
-        RecordingStatus::Ready if meeting => Shown::TimedLine(saved(recording, names)),
-        RecordingStatus::Ready => {
-            let what = if both { "Recording and transcript" } else { "Recording" };
-            Shown::Card {
-                kind: CardKind::Recording,
-                title: recording.name().unwrap_or("Recording").to_owned(),
-                detail: match recording.duration {
-                    Some(duration) => format!("{what} \u{b7} {}", duration_text(duration)),
-                    None => what.to_owned(),
-                },
-            }
-        }
+        // its recap card goes under it: a meeting chat's under the meeting's end, any other chat's under this line
+        RecordingStatus::Ready => Shown::TimedLine(saved(recording, names)),
     }
 }
 
-/// A meeting chat's recording ready: "Recording has been saved to <organizer>'s OneDrive and will expire in n days.",
-/// the expiry once its item says it.
+/// A recording ready: "Recording has been saved to <owner>'s OneDrive and will expire in n days.", the expiry once its
+/// item says it; the owner the meeting's organizer, or for a call's recording the one whose OneDrive holds it, named
+/// by name (Teams' 1:1 chat says the account's own name there too).
 fn saved(recording: &Recording, names: &dyn Naming) -> EventLine {
-    let whose = recording.organizer.as_deref().map_or_else(
+    let owner = recording.organizer.as_deref().or(recording.storage_owner.as_deref());
+    let whose = owner.map_or_else(
         || "OneDrive".to_owned(),
         |organizer| format!("{}'s OneDrive", names.name(organizer, None)),
     );

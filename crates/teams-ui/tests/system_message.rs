@@ -1,5 +1,5 @@
-//! A chat's system messages in Teams' words (`teams_ui::system_message`): the line or card each kind shows in a chat
-//! and the chat list's preview of it. Every value here is made up.
+//! A chat's system messages in Teams' words (`teams_ui::system_message`): the line each kind shows in a chat (a 1:1
+//! or group chat's transcript its recap card) and the chat list's preview of it. Every value here is made up.
 
 // test code throughout (its helpers panic like the tests do)
 #![cfg(test)]
@@ -7,8 +7,7 @@
 use teams_store::Message;
 use teams_ui::chat_list;
 use teams_ui::system_message::{
-    self, CardKind, EventIcon, EventLine, Naming, Preview, Shown, Span, days_left, duration_text, expiry_clause,
-    people, preview,
+    self, EventIcon, EventLine, Naming, Preview, Shown, Span, days_left, duration_text, expiry_clause, people, preview,
 };
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -43,11 +42,7 @@ impl Naming for Names {
 enum Said {
     Line(String),
     Timed(String),
-    Card {
-        kind: CardKind,
-        title: String,
-        detail: String,
-    },
+    Transcript,
     Nothing,
 }
 
@@ -57,7 +52,7 @@ fn shown(kind: &str, content: &str, conversation: &str, sender: Option<&str>, na
         match system_message::shown(kind, content, conversation, sender, names)? {
             Shown::Line(line) => Said::Line(line.text()),
             Shown::TimedLine(line) => Said::Timed(line.text()),
-            Shown::Card { kind, title, detail } => Said::Card { kind, title, detail },
+            Shown::Transcript => Said::Transcript,
             Shown::Nothing => Said::Nothing,
         },
     )
@@ -219,18 +214,29 @@ fn a_meeting_chat_names_everyone_by_name_and_tells_a_recording_saved() {
         )),
         "{ready:?}"
     );
-    // elsewhere the account is "You", and a ready recording is its card
+    // elsewhere the account is "You"; a ready recording is the same line (its recap card goes under it)
     assert_eq!(
         shown(kind, &saved_recording("Initial", "0", None), GROUP, Some(ME), &Names),
         Some(timed("You started recording and transcription"))
     );
-    assert!(matches!(
+    assert_eq!(
         shown(kind, &saved_recording("Success", "200", None), GROUP, Some(ME), &Names),
-        Some(Said::Card {
-            kind: CardKind::Recording,
-            ..
-        })
-    ));
+        Some(timed("Recording has been saved to Cleo Sea's OneDrive."))
+    );
+    // a call's recording names no organizer: the OneDrive that holds it, the account's too by its name, as Teams' 1:1
+    // chat says it
+    let call = recording("Success", "200", "Recording").replace(
+        "<RecordingContent",
+        &format!(
+            "<RecordingStorage type=\"RecordingInitiatorOneDrive\" userId=\"{}\" /><RecordingContent",
+            ME.trim_start_matches("8:orgid:")
+        ),
+    );
+    assert_eq!(
+        shown(kind, &call, ONE_TO_ONE, Some(ME), &Names),
+        Some(timed("Recording has been saved to Ann Able's OneDrive."))
+    );
+    assert!(people(kind, &call).contains(&ME.to_owned()));
     let started = shown_line(kind, &saved_recording("Initial", "0", None), MEETING);
     assert_eq!(started.icon, EventIcon::RecordingStarted);
     // without an organizer named: whose OneDrive isn't said
@@ -300,7 +306,7 @@ fn an_anonymous_member_is_marked_unverified() {
 }
 
 #[test]
-fn a_recording_is_a_line_while_it_runs_and_a_card_once_ready() {
+fn a_recording_is_a_line_while_it_runs_and_once_saved() {
     let kind = "RichText/Media_CallRecording";
     assert_eq!(
         shown(
@@ -350,11 +356,7 @@ fn a_recording_is_a_line_while_it_runs_and_a_card_once_ready() {
             Some(BEN),
             &Names
         ),
-        Some(Said::Card {
-            kind: CardKind::Recording,
-            title: "Weekly sync-Meeting Recording".to_owned(),
-            detail: "Recording and transcript \u{b7} 16m 50s".to_owned()
-        })
+        Some(timed("Recording has been saved to OneDrive."))
     );
     // the transcript's half of a recording: nothing, as in Teams
     assert_eq!(
@@ -385,11 +387,7 @@ fn a_transcript_is_a_card_but_in_a_meeting_chat_whose_recap_card_tells_it() {
     let transcript = r#"{\"callId\":\"c\",\"isDeleted\":false}"#;
     assert_eq!(
         shown("RichText/Media_CallTranscript", transcript, GROUP, Some(BEN), &Names),
-        Some(Said::Card {
-            kind: CardKind::Transcript,
-            title: "Transcript".to_owned(),
-            detail: "Transcript is available".to_owned()
-        })
+        Some(Said::Transcript)
     );
     assert_eq!(
         shown("RichText/Media_CallTranscript", transcript, MEETING, Some(BEN), &Names),

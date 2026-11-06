@@ -221,6 +221,79 @@ fn a_transcript_alone_shows_no_player_and_who_stopped_it() {
     assert!(cx.debug_bounds("recap-stopped").is_some());
 }
 
+/// A made-up 1:1 chat with a's call recorded and transcribed: Teams' chat names its recording, MCPS lists it by the
+/// chat's id with no transcript to read (as a 1:1 call's lists it).
+const CALL_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+
+fn call_rig() -> Rig {
+    let rig = rig(false);
+    let mut chat = fixtures::conversation(CALL_CHAT);
+    chat.kind = teams_store::ConversationKind::OneToOne;
+    chat.topic = None;
+    locked(&rig.core.conversations).push(chat);
+    let link = fixtures::sharing_link("ITEM5");
+    let ready = format!(
+        "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"Success\" code=\"200\" />\
+         <Title>Call with Bo Lab</Title><a href=\"{link}\">Play</a><MeetingOrganizerId value=\"\" />\
+         <RecordingInitiatorId value=\"8:orgid:{0}\" isAutoRecording=\"False\" />\
+         <RecordingStorage type=\"RecordingInitiatorOneDrive\" userId=\"{0}\" />\
+         <Identifiers><Id type=\"callId\" value=\"00000000-0000-4000-8000-0000000000c5\" /></Identifiers>\
+         <RecordingContent contentTypes=\"Recording+Transcript\" timestamp=\"2026-01-02T10:00:00Z\" duration=\"0:00:51\">\
+         <item type=\"onedriveForBusinessVideo\" uri=\"{link}\" driveId=\"b!drive1\" driveItemId=\"ITEM5\" />\
+         </RecordingContent></URIObject>",
+        fixtures::ORGANIZER
+    );
+    let mut message = fixtures::messages(&rig.core.me).remove(0);
+    message.conversation_id = CALL_CHAT.to_owned();
+    message.id = "51".to_owned();
+    message.content = ready;
+    locked(&rig.core.messages).insert(CALL_CHAT.to_owned(), vec![message]);
+    let mut contents = fixtures::recorded();
+    contents.retain(|content| content.kind == teams_proto::recap::ContentKind::Recording);
+    contents.truncate(1);
+    contents[0].location = link;
+    contents[0].item_id = Some("ITEM5".to_owned());
+    locked(&rig.core.meeting_contents).insert(CALL_CHAT.to_owned(), contents);
+    rig
+}
+
+#[test]
+fn a_calls_recording_in_a_1_1_chat_opens_in_its_recap_tab() {
+    let rig = call_rig();
+    let (shell, cx) = shell_window(&rig, CALL_CHAT);
+    // the chat holds a call's recording: it has the tabs, and its card no web link
+    assert!(cx.debug_bounds("chat-tab-recap").is_some());
+    assert!(cx.debug_bounds("open-on-the-web-51").is_none());
+    click(cx, "view-recap-51");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Recap);
+    assert_eq!(asked(&rig, "meeting_contents"), 1, "read by the chat's own id");
+    let shown = recap(&shell, cx);
+    let parts = cx
+        .update(|_, cx| shown.read(cx).parts().map(<[_]>::to_vec))
+        .expect("read");
+    assert_eq!(parts.len(), 1);
+    assert_eq!(
+        parts[0].recording.as_deref(),
+        Some(fixtures::sharing_link("ITEM5").as_str())
+    );
+    for selector in ["recap-recording", "recap-watch", "recap-more"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector} drawn");
+    }
+    // Teams lists no transcript to read for it: its Transcript says there is none, as Teams' Recap does
+    click(cx, "recap-pane-transcript");
+    assert!(
+        cx.debug_bounds(Box::leak(
+            format!("recap-state {}", teams_ui::recap_view::NO_TRANSCRIPT_YET).into_boxed_str()
+        ))
+        .is_some()
+    );
+    assert_eq!(asked(&rig, "meeting_transcript"), 0);
+    // the card's Transcript chip opens the same pane
+    click(cx, "chat-tab-chat");
+    click(cx, "recap-card-transcript-51");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Recap);
+}
+
 #[test]
 fn a_recap_that_cant_be_read_says_so_and_reads_again() {
     let rig = rig(true);

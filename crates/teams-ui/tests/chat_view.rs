@@ -14,6 +14,9 @@ mod common;
 // the shell's and a chat view's parts over the rig
 #[path = "common/parts.rs"]
 mod parts;
+// a 1:1 call's recording and transcript, as their recap cards
+#[path = "chat_view/call_recap.rs"]
+mod call_recap;
 // the files a message carries, as cards
 #[path = "chat_view/cards.rs"]
 mod cards;
