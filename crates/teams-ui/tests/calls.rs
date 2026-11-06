@@ -3959,6 +3959,59 @@ fn a_refused_recording_says_why_and_someone_else_s_shows_who_started_it() {
     open_record_menu(stage, "call-record-stop");
 }
 
+/// The account's own start, told `phase` by the engine (and a failure, when it failed).
+fn own_start(rig: &Rig, phase: teams_core::RecordingPhase, problem: Option<teams_core::RecordingProblem>) {
+    rig.send(Event::CallRecording {
+        call: call(1),
+        recording: teams_core::CallRecording { phase, problem },
+    });
+    rig.cx.run_until_parked();
+}
+
+#[test]
+fn a_pending_start_says_it_is_starting_until_the_roster_tells_it_or_it_fails() {
+    let rig = calling();
+    let stage = group_call_up(&rig);
+    // a transcription: Teams' "Starting transcription…", no recording's mark
+    open_record_menu(stage, "call-transcribe-start");
+    click(stage, "call-transcribe-start");
+    click(stage, "call-transcribe-confirm");
+    own_start(&rig, teams_core::RecordingPhase::Starting, None);
+    assert!(drawn(stage, "call-record-pending"));
+    assert!(!drawn(stage, "call-recording-pending"));
+    click(stage, "call-record-pending-close");
+    assert!(!drawn(stage, "call-record-pending"), "Close puts it away");
+    own_start(&rig, teams_core::RecordingPhase::Idle, None);
+    meeting(&rig, transcribing_by(LAB_A, false));
+    assert!(drawn(stage, "call-transcription-notice"));
+    meeting(&rig, teams_core::MeetingState::default());
+    // a recording: the notice again, the record mark greyed by the duration, a spinner atop the open transcript
+    open_record_menu(stage, "call-record-start");
+    click(stage, "call-record-start");
+    click(stage, "call-record-confirm");
+    own_start(&rig, teams_core::RecordingPhase::Starting, None);
+    assert!(drawn(stage, "call-record-pending"), "a new start shows it again");
+    assert!(drawn(stage, "call-recording-pending"));
+    assert!(drawn(stage, "call-transcript-pending"));
+    // it took longer than Teams waits: Teams' words, and the pending marks go
+    own_start(
+        &rig,
+        teams_core::RecordingPhase::Idle,
+        Some(teams_core::RecordingProblem {
+            heading: "Couldn't start recording and transcription.",
+            detail: "Please try again. Contact your IT admin if this keeps happening.",
+        }),
+    );
+    assert!(drawn(stage, "call-recording-problem"));
+    for gone in [
+        "call-record-pending",
+        "call-recording-pending",
+        "call-transcript-pending",
+    ] {
+        assert!(!drawn(stage, gone), "{gone} goes");
+    }
+}
+
 #[test]
 fn a_meeting_s_organizer_locks_it_after_asking_and_its_info_shows_how_to_join() {
     let rig = calling();

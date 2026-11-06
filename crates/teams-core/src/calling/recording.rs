@@ -14,8 +14,10 @@ use teams_proto::{Credentials, HttpError, Transport};
 use super::{Act, CallAction, CallActionError, CallId, CallTried, Calling};
 use crate::engine::Event;
 
-/// How long the recording bot may take to join before a start is told failed.
-const JOIN_WITHIN: Duration = Duration::from_secs(60);
+/// How long a start may take, the recording bot's joining included, before it is told failed: about as long as the
+/// web client keeps trying (it tried a start whose request went unanswered every 20 s for 3 min 20 s before it gave up,
+/// `docs/protocol/calling.md`), as the bot took 15 to 27 s to join in the lab.
+const JOIN_WITHIN: Duration = Duration::from_secs(200);
 
 /// What the account's own recording or transcription action is doing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,12 +50,16 @@ pub struct CallRecording {
 struct Problems {
     not_for_this_call: RecordingProblem,
     something_wrong: RecordingProblem,
+    /// The start took longer than [`JOIN_WITHIN`].
+    timed_out: RecordingProblem,
     policy: RecordingProblem,
     pending: RecordingProblem,
     stop_failed: RecordingProblem,
 }
 
 const START_FAILED: &str = "Couldn't start recording";
+/// What the web client says once it gave up on a start that went unanswered.
+const TIMED_OUT: &str = "Please try again. Contact your IT admin if this keeps happening.";
 const RECORDING: Problems = Problems {
     not_for_this_call: RecordingProblem {
         heading: START_FAILED,
@@ -62,6 +68,10 @@ const RECORDING: Problems = Problems {
     something_wrong: RecordingProblem {
         heading: START_FAILED,
         detail: "Something went wrong. Try to start recording again.",
+    },
+    timed_out: RecordingProblem {
+        heading: "Couldn't start recording and transcription.",
+        detail: TIMED_OUT,
     },
     policy: RecordingProblem {
         heading: START_FAILED,
@@ -87,6 +97,10 @@ const TRANSCRIPTION: Problems = Problems {
     something_wrong: RecordingProblem {
         heading: TRANSCRIBE_FAILED,
         detail: "Something went wrong. Try to start transcription again.",
+    },
+    timed_out: RecordingProblem {
+        heading: TRANSCRIBE_FAILED,
+        detail: TIMED_OUT,
     },
     policy: RecordingProblem {
         heading: TRANSCRIBE_FAILED,
@@ -316,7 +330,7 @@ where
 
     pub(super) fn record_check(&mut self, now: Instant) {
         if self.recording.writing.is_none() && self.recording.deadline.is_some_and(|deadline| deadline <= now) {
-            self.record_fail(self.recording.problems().something_wrong);
+            self.record_fail(self.recording.problems().timed_out);
         }
     }
 

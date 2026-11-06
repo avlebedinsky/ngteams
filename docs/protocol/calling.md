@@ -923,8 +923,22 @@ a alone). What each of Teams' remaining call controls sends:
   the bot's `Media_CallRecording` states for the transcript alone (`Initial`, `ChunkFinished`, then `Success` seconds
   after the call ended, its file `…-Meeting Transcript.mp4`), drawn as nothing, and a `Media_CallTranscript` at
   the start, whose card (the call's span, View recap, the Transcript chip, no thumbnail) both sides show. The Recap
-  tab's sessions list the recordings alone, as Teams' do (recap.md), so the call transcribed alone isn't among them and
-  its card's View recap opens the latest recording (what Teams' opens there wasn't captured). The recording's ran
+  tab's sessions list the recordings alone, as Teams' do; the card's View recap shows the call on its own, its
+  Transcript saying there is none, as Teams' does ([recap.md](recap.md#a-11-or-group-calls-recording)).
+
+  **While a start is pending** (seen 2026-11-06, `ab-call` steps, lab a ↔ b, a driving): Confirm shows the starter at
+  once a one-line notice over the stage, muted, its glyph and a Close: "Starting transcription..." (the transcript's
+  glyph) or "Starting recording and transcription..." (the record glyph); Teams' strings also hold "Starting
+  recording", "Starting audio recording" and "Starting audio recording and transcription". Meanwhile More's Start
+  transcription is disabled (Start recording wasn't), a recording's start greys the record mark left of the duration,
+  and the open Transcript pane shows a spinner over its rows; a transcription's starter's pane opened before the
+  start was told. The transcription ran about 15 s after Confirm, the notice turning into "Transcription has started".
+  A recording's start whose command a capture hold kept unanswered: the web client sent the start again every 20 s,
+  ten times, then, 3 min 20 s after Confirm, the notice turned into "Couldn't start recording and transcription."
+  ("Couldn't {{action}} recording and transcription." in its strings) — "Please try again. Contact your IT admin if this
+  keeps happening.", with a warning glyph, and the mark went. The native client shows the same notice, greyed mark and
+  spinner while its own start is `RecordingPhase::Starting` (each command still sent once), and fails a start not done
+  within 200 s in those words (a transcription's "Couldn't start transcription" over the same line). The recording's ran
   natively 2026-11-06 (lab a and b in their 1:1 call): a's start invited the bot,
   posted the start (`200`), both windows showed the notice and the red dot; a's stop (`200`) ended it on both. The
   transcript card came at once and `Call with AI2-<stamp>-Meeting Recording` about a minute after the stop, in the 1:1

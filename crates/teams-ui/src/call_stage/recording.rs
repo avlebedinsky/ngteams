@@ -95,6 +95,10 @@ pub(super) struct RecordUi {
     pub(super) transcript: Vec<TranscriptRow>,
     /// The transcript's "Switch to live captions" bar was put away.
     pub(super) transcript_tip_closed: bool,
+    /// The account's own start last confirmed: its notice shows while the start is pending ([`super::transcript`]).
+    pub(super) pending: Option<super::transcript::Pending>,
+    /// That notice was put away.
+    pub(super) pending_closed: bool,
 }
 
 /// What More's Record and transcribe offers now.
@@ -302,6 +306,8 @@ impl CallStage {
             (format!("Call with {title}"), None)
         };
         let organizer = organizer.map(|name| name.to_string());
+        self.record.pending = Some(super::transcript::Pending::new(dialog.start, dialog.audio_only));
+        self.record.pending_closed = false;
         let ask = match dialog.start {
             Start::Transcription => Ask::Transcribe {
                 title,
@@ -602,7 +608,13 @@ impl CallStage {
             )
         });
         let transcription = self.transcription_notice(active, palette, cx);
-        problem.into_iter().chain(stopped).chain(transcription).collect()
+        let pending = self.pending_notice(palette, cx);
+        problem
+            .into_iter()
+            .chain(pending)
+            .chain(stopped)
+            .chain(transcription)
+            .collect()
     }
 }
 

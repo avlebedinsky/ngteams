@@ -55,7 +55,7 @@ impl CallStage {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .children(live.and_then(|active| transcript::indicator(active, palette)))
+                            .children(live.and_then(|active| self.duration_mark(active, palette, cx)))
                             .child(
                                 div()
                                     .debug_selector(|| "call-window-status".to_owned())

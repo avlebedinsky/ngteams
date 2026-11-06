@@ -12,10 +12,16 @@
 //!   translation's language and Close, a bar offering live captions instead ("Switch to live captions"), "AI-generated
 //!   content may be incorrect", and a row per start and stop of the transcription, as the roster told them. What is
 //!   said isn't shown: no capture showed the transcript's speech reaching the call (the live captions show it).
+//! - **While the account's own start is pending** (the bot invited and told to start, 15 to 27 s in the lab): a
+//!   one-line notice, "Starting transcription…" or "Starting recording and transcription…" ([`Pending`]), with a
+//!   Close; a recording's mark left of the duration, greyed; and a spinner atop the open Transcript pane. A start that
+//!   fails says why ([`super::recording`]); one that takes longer than Teams waits says "Couldn't start recording and
+//!   transcription." ([`teams_core::RecordingProblem`]).
 
-use super::recording::{Stopped, TranscriptRow};
+use super::recording::{Start, Stopped, TranscriptRow};
 use super::*;
 use crate::translate;
+use teams_core::RecordingPhase;
 
 /// What the meeting's privacy policy link opens: Microsoft's privacy statement, as Teams links it when the
 /// organization names none.
@@ -227,6 +233,15 @@ impl CallStage {
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .children(self.pending_start(cx).map(|_| {
+                            div()
+                                .debug_selector(|| "call-transcript-pending".to_owned())
+                                .flex()
+                                .justify_center()
+                                .py_2()
+                                .text_color(rgb(palette.brand))
+                                .child(Glyph::LOADING.icon().size(px(24.0)))
+                        }))
                         .child(
                             transcript_line(
                                 Glyph::INFO,
@@ -331,6 +346,98 @@ fn translate_item(
             settings.change(|settings| settings.caption_translate_to = code, cx);
         });
     })
+}
+
+/// The account's own start, from its dialog's Confirm until the roster says it runs (or it fails): what Teams' window
+/// shows its starter meanwhile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Pending {
+    start: Start,
+    audio_only: bool,
+}
+
+impl Pending {
+    pub(super) fn new(start: Start, audio_only: bool) -> Self {
+        Self { start, audio_only }
+    }
+
+    /// Whether it starts a recording (whose mark shows greyed meanwhile).
+    fn records(self) -> bool {
+        self.start != Start::Transcription
+    }
+
+    /// Its notice's words and glyph, as Teams words them (the recording's alone and the audio's from Teams' own
+    /// strings, not seen shown).
+    fn words(self) -> (&'static str, Glyph) {
+        match (self.start, self.audio_only) {
+            (Start::Transcription, _) => ("Starting transcription\u{2026}", Glyph::CALL_TRANSCRIPT),
+            (Start::Both, false) => ("Starting recording and transcription\u{2026}", Glyph::RECORD),
+            (Start::Both, true) => ("Starting audio recording and transcription\u{2026}", Glyph::MIC),
+            (Start::Recording, false) => ("Starting recording\u{2026}", Glyph::RECORD),
+            (Start::Recording, true) => ("Starting audio recording\u{2026}", Glyph::MIC),
+        }
+    }
+}
+
+impl CallStage {
+    /// The account's own start while it is pending.
+    pub(super) fn pending_start(&self, cx: &App) -> Option<Pending> {
+        let starting = self.calls.read(cx).recording().phase == RecordingPhase::Starting;
+        self.record.pending.filter(|_| starting)
+    }
+
+    /// "Starting transcription…" (or the recording's) while the account's start is pending, until it is closed.
+    pub(super) fn pending_notice(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let pending = self.pending_start(cx).filter(|_| !self.record.pending_closed)?;
+        let (words, glyph) = pending.words();
+        let close = icon_button("call-record-pending-close", Glyph::X, "Close")
+            .xsmall()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.record.pending_closed = true;
+                cx.notify();
+            }));
+        Some(
+            div()
+                .debug_selector(|| "call-record-pending".to_owned())
+                .occlude()
+                .w(px(320.0))
+                .max_w_full()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(palette.border))
+                .bg(rgb(palette.surface))
+                .text_sm()
+                .text_color(rgb(palette.muted_foreground))
+                .shadow_md()
+                .child(glyph.icon().size(px(16.0)).flex_none())
+                .child(div().flex_1().min_w_0().child(words))
+                .child(selected_by("call-record-pending-close", close))
+                .into_any_element(),
+        )
+    }
+
+    /// The duration's mark: the recording's or the transcription's ([`indicator`]), else a recording's greyed while
+    /// the account's start of it is pending, as Teams greys it.
+    pub(super) fn duration_mark(&self, active: &ActiveCall, palette: Palette, cx: &App) -> Option<AnyElement> {
+        indicator(active, palette).or_else(|| {
+            self.pending_start(cx)
+                .filter(|pending| pending.records())
+                .map(|pending| {
+                    let (_, glyph) = pending.words();
+                    div()
+                        .debug_selector(|| "call-recording-pending".to_owned())
+                        .flex_none()
+                        .text_color(rgb(palette.on_frame).opacity(0.5))
+                        .child(glyph.icon().size(px(14.0)))
+                        .into_any_element()
+                })
+        })
+    }
 }
 
 /// A line of the transcript: its mark and its text.
