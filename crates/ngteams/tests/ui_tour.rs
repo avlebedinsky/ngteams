@@ -164,7 +164,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 173] = [
+const STEPS: [Step; 5 + 174] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1084,7 +1084,7 @@ const STEPS: [Step; 5 + 173] = [
         let calendar = shell.read(cx).calendar_view().clone();
         calendar.update(cx, |calendar, cx| calendar.meet(false, cx));
     }),
-    // Add calendar: its dialog on Add from directory, a person picked
+    // Add calendar: its dialog on Add from directory, the box's suggestions open over the disabled Add
     ("calendar-add-calendar", |shell, window, cx| {
         let settings = shell.read(cx).settings().clone();
         settings.update(cx, |model, cx| {
@@ -1094,8 +1094,13 @@ const STEPS: [Step; 5 + 173] = [
         calendar.update(cx, |calendar, cx| {
             calendar.close_meet_now(cx);
             calendar.open_add_calendar(window, cx);
-            calendar.pick_person(tour_person(), window, cx);
+            calendar.search_directory("avery@example.com", window, cx);
         });
+    }),
+    // a person picked: their chip in the box's place, Add enabled
+    ("calendar-add-calendar-picked", |shell, window, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| calendar.pick_person(tour_person(), window, cx));
     }),
     // the person added: "People's calendars" in the pane, their busy times (the mock's) beside the account's events
     ("calendar-people", |shell, _, cx| {
@@ -1183,11 +1188,14 @@ const STEPS: [Step; 5 + 173] = [
             form.toggle_formatting(window, cx);
         });
     }),
-    // the globe's time zones: the start's date, time and zone, the end's in London on its own date
+    // the globe's time zones: the start in Honolulu on its own date there, the end in London
     ("event-form-zones-dark", |_, _, cx| {
         with_event_form(cx, |form, _, cx| {
             form.show_side(event_form::Side::Day, cx);
             form.show_zones(true, cx);
+            if let Ok(honolulu) = "Pacific/Honolulu".parse::<event_form::zones::Tz>() {
+                form.set_zone(false, honolulu, cx);
+            }
             if let Ok(london) = "Europe/London".parse::<event_form::zones::Tz>() {
                 form.set_zone(true, london, cx);
             }

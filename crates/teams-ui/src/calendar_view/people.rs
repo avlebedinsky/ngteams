@@ -337,6 +337,13 @@ impl CalendarView {
         }
     }
 
+    /// Types `query` in the dialog's box: the people it names are looked for.
+    pub fn search_directory(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(adding) = &self.others.adding else { return };
+        adding.query.update(cx, |input, cx| input.set_value(query, window, cx));
+        self.search_people(query.trim().to_owned(), cx);
+    }
+
     /// Looks for the people `query` names, a moment after the typing stops.
     fn search_people(&mut self, query: String, cx: &mut Context<Self>) {
         let Some(adding) = &mut self.others.adding else { return };
@@ -599,15 +606,16 @@ impl CalendarView {
                     .text_color(rgb(palette.muted_foreground))
                     .child("Select a person from your organization's directory to view their calendar."),
             )
-            .children(picked)
-            .child(
-                div()
+            // the person picked takes the box's place, as Teams' does: what the box finds is shown only before a
+            // pick, over the Add it leaves disabled
+            .child(match picked {
+                Some(picked) => picked,
+                None => div()
                     .debug_selector(|| "calendar-add-query".to_owned())
                     .relative()
                     .child(Input::new(&adding.query))
-                    // over the dialog's rows under the box
                     .children(found.map(|found| gpui::deferred(found).with_priority(1))),
-            )
+            })
             .children(problem)
             .child(div().flex().child(selected_by("calendar-add-add", add)))
     }
@@ -764,9 +772,10 @@ fn picked_chip(person: &Invitable, palette: Palette, cx: &mut Context<CalendarVi
                 "calendar-add-unpick",
                 icon_button("calendar-add-unpick", Glyph::X, "Remove")
                     .xsmall()
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(adding) = &mut this.others.adding {
                             adding.picked = None;
+                            adding.query.update(cx, |input, cx| input.focus(window, cx));
                         }
                         cx.notify();
                     })),

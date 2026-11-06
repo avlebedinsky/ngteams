@@ -959,6 +959,8 @@ fn add_calendar_finds_a_person_adds_their_calendar_and_shows_their_busy_times() 
     draw(cx);
     click(cx, "calendar-add-found-0");
     assert!(cx.debug_bounds("calendar-add-picked").is_some());
+    // the person picked takes the box's place, as Teams' does
+    assert!(cx.debug_bounds("calendar-add-query").is_none());
     click(cx, "calendar-add-add");
     assert!(cx.debug_bounds("calendar-add-dialog").is_none());
     let people = cx.update(|_, cx| view.read(cx).people().to_vec());

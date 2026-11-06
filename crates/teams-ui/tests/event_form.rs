@@ -699,3 +699,17 @@ fn a_channel_s_meeting_cancelled_from_its_details_is_cancelled_on_the_team_s_cal
     assert_eq!(post, "1793680050510");
     assert_eq!(*channel, channel_place().channel);
 }
+
+#[test]
+fn the_globe_s_zone_pickers_open_and_pick_a_zone() {
+    let rig = Rig::start();
+    let (form, cx, _, _) = window(&rig, new_seed());
+    click(cx, "event-zones");
+    click(cx, "event-start-zone");
+    click(cx, "event-start-zone-pacific-honolulu");
+    click(cx, "event-end-zone");
+    click(cx, "event-end-zone-pacific-niue");
+    let zones = cx.update(|_, cx| form.read(cx).zones()).unwrap();
+    assert_eq!(zones.start.name(), "Pacific/Honolulu");
+    assert_eq!(zones.end.name(), "Pacific/Niue");
+}
