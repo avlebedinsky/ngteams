@@ -234,6 +234,8 @@ fn assert_refusals(info: &str) {
         );
     }
     for line in refusals {
+        // what the line says, after its timestamp (19:… is also an hour of the day)
+        let said = line.split_once("refused_read_only").map_or(line, |(_, said)| said);
         for absent in [
             "19:",
             "read-only-private",
@@ -245,7 +247,7 @@ fn assert_refusals(info: &str) {
             "authorization",
         ] {
             assert!(
-                !line.contains(absent),
+                !said.contains(absent),
                 "refusal discloses payload or credentials: {line}"
             );
         }
