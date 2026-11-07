@@ -23,10 +23,11 @@ use teams_ctl::client::Timeouts;
 use teams_ctl::codec::{LineReader, decode_request};
 use teams_ctl::path::Env;
 use teams_ctl::protocol::{
-    AccountRow, AppStatus, CALL_ANSWER, CallRow, ChatRef, ChatRow, CtlError, CtlEvent, ErrorCode, EventFilter,
-    EventLine, Hello, ManualStatus, MemberRow, MessageRow, MessageSource, OpenTarget, OutboxRow, OutboxState, Outcome,
-    OwnStatus, PROTOCOL_VERSION, Request, RequestLine, Response, ResponseLine, SYNC_ANSWER, StatusChoice, SyncReport,
-    Toggle, UiState, Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT, WindowOp, WindowState,
+    AccountRow, AppStatus, CALENDAR_ANSWER, CALL_ANSWER, CalendarRow, CallRow, ChatRef, ChatRow, CtlError, CtlEvent,
+    ErrorCode, EventFilter, EventLine, Hello, ManualStatus, MemberRow, MessageRow, MessageSource, OpenTarget,
+    OutboxRow, OutboxState, Outcome, OwnStatus, PROTOCOL_VERSION, Request, RequestLine, Response, ResponseLine,
+    SYNC_ANSWER, StatusChoice, SyncReport, Toggle, UiState, Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT,
+    WindowOp, WindowState,
 };
 
 /// What the fake server does with a request after the `hello`: lines to send back, then whether to read on.
@@ -677,6 +678,182 @@ fn call_cases() -> Vec<Case> {
             shows: &["7   a@lab.invalid  19:lab@thread.v2  connected camera"],
         },
     ]
+}
+
+fn calendar_row(id: &str, subject: &str, joinable: bool) -> CalendarRow {
+    CalendarRow {
+        id: s(id),
+        subject: s(subject),
+        start: 1_793_000_000_000,
+        end: 1_793_001_800_000,
+        all_day: false,
+        cancelled: false,
+        online: joinable,
+        joinable,
+        location: joinable.then(|| s("Microsoft Teams Meeting")),
+        organizer: Some(s("Avery Example")),
+    }
+}
+
+/// The calendar commands: each one's request, and what its answer shows (its lines hold these).
+fn calendar_cases() -> Vec<Case> {
+    let listed = || Response::Calendar {
+        events: vec![
+            calendar_row("AAMk-sync", "Weekly sync", true),
+            calendar_row("AAMk-day", "Release day", false),
+        ],
+    };
+    let today = Request::Calendar { from: None, to: None };
+    let week = Request::Calendar {
+        from: Some(s("2026-11-02")),
+        to: Some(s("2026-11-08")),
+    };
+    vec![
+        Case {
+            args: &["calendar"],
+            account: None,
+            request: today.clone(),
+            response: listed(),
+            shows: &["AAMk-sync", "online,joinable  Weekly sync", "Release day"],
+        },
+        Case {
+            args: &["calendar", "--today"],
+            account: None,
+            request: today,
+            response: listed(),
+            shows: &["Weekly sync"],
+        },
+        Case {
+            args: &[
+                "--account",
+                "1",
+                "calendar",
+                "--from",
+                "2026-11-02",
+                "--to",
+                "2026-11-08",
+            ],
+            account: Some("1"),
+            request: week,
+            response: listed(),
+            shows: &["Release day"],
+        },
+        Case {
+            args: &["calendar", "--from", "2026-11-02"],
+            account: None,
+            request: Request::Calendar {
+                from: Some(s("2026-11-02")),
+                to: None,
+            },
+            response: Response::Calendar { events: vec![] },
+            shows: &["ID", "START"],
+        },
+        Case {
+            args: &["calendar", "show", "AAMk-sync"],
+            account: None,
+            request: Request::CalendarEvent { event: s("AAMk-sync") },
+            response: Response::CalendarEvent(calendar_row("AAMk-sync", "Weekly sync", true)),
+            shows: &[
+                "subject:   Weekly sync",
+                "location:  Microsoft Teams Meeting",
+                "organizer: Avery Example",
+            ],
+        },
+    ]
+}
+
+/// `join meeting`, with and without `--now`.
+fn join_meeting_cases() -> Vec<Case> {
+    let join = |now| Request::JoinMeeting {
+        event: s("AAMk-sync"),
+        now,
+    };
+    vec![
+        Case {
+            args: &["join", "meeting", "AAMk-sync"],
+            account: None,
+            request: join(false),
+            response: Response::Done,
+            shows: &[],
+        },
+        Case {
+            args: &["--account", "a@lab.invalid", "join", "meeting", "AAMk-sync", "--now"],
+            account: Some("a@lab.invalid"),
+            request: join(true),
+            response: Response::Call(call_row("connecting", false, false, false)),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  connecting"],
+        },
+    ]
+}
+
+#[test]
+fn each_calendar_command_asks_its_request_and_prints_its_answer() {
+    for case in calendar_cases().into_iter().chain(join_meeting_cases()) {
+        let args = case.args;
+        let (run, request) = run_one(Server::answering(case.response), args);
+        assert_eq!(run.code, 0, "{args:?}: {}", run.stderr);
+        assert_eq!(request.request, case.request, "{args:?}");
+        assert_eq!(request.account.as_deref(), case.account, "{args:?}");
+        for shown in case.shows {
+            assert!(run.stdout.contains(shown), "{args:?}: {shown:?} not in\n{}", run.stdout);
+        }
+        if case.shows.is_empty() {
+            assert_eq!(run.stdout, "", "{args:?}");
+        }
+    }
+}
+
+#[test]
+fn a_calendar_date_that_does_not_read_or_a_join_without_a_chat_is_a_usage_error() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        &["calendar", "--from", "2026-13-01"][..],
+        &["calendar", "--to", "tomorrow"],
+        &["calendar", "--today", "--from", "2026-11-02"],
+        &["calendar", "show"],
+        &["join"],
+        &["join", "meeting"],
+    ] {
+        let run = ctl(home.path(), &home.path().join("nobody.sock"), args);
+        assert_eq!(run.code, 2, "{args:?}: {}", run.stderr);
+    }
+}
+
+#[test]
+fn a_meeting_s_join_is_waited_for_as_a_call_command_and_a_calendar_read_past_its_read() {
+    let parsed = |args: &[&str]| Cli::try_parse_from([&["ngteamsctl"][..], args].concat()).unwrap();
+    let default = Timeouts::default().read;
+    for args in [&["join", "meeting", "AAMk"][..], &["join", "meeting", "AAMk", "--now"]] {
+        assert_eq!(answer_time(&parsed(args).command), CALL_ANSWER + default, "{args:?}");
+    }
+    for args in [&["calendar"][..], &["calendar", "show", "AAMk"]] {
+        assert_eq!(
+            answer_time(&parsed(args).command),
+            CALENDAR_ANSWER + default,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn an_event_without_a_meeting_exits_1_with_its_code() {
+    let server = Server::new(Box::new(|request: &RequestLine| {
+        (
+            vec![error_line(
+                request.id,
+                ErrorCode::NoMeeting,
+                "Release day isn't a Teams meeting the app can join",
+            )],
+            true,
+        )
+    }));
+    let run = ctl(
+        server.dir.path(),
+        &server.path,
+        &["join", "meeting", "AAMk-day", "--now"],
+    );
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(run.stderr.contains("no_meeting: Release day"), "{}", run.stderr);
 }
 
 #[test]

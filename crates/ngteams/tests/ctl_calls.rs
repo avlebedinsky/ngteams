@@ -4,7 +4,9 @@
 //! as b (it plays b, no client of b's runs); a answers, declines, calls the a–b chat and hangs up only by a command,
 //! each asked through the calls' model as the call buttons ask, so the model's refusals (busy, no call, not ringing,
 //! no video) come back as the command's error. The view trace counts the asks: a switch already as asked asks
-//! nothing. The app without calling answers `no_calling`. Every id is made up or the mock's own.
+//! nothing. A meeting of a's calendar (the mock's middle tier) is joined only where its media setup fails, so nothing
+//! of it goes to the calling service. The app without calling answers `no_calling`. Every id is made up or the mock's
+//! own.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -34,14 +36,14 @@ use teams_core::account::AccountEngine;
 use teams_core::engine::{self, EngineOptions, Parts, Push};
 use teams_core::{CallFloor, CallMedia, CallParts, CallStatus, Identity, Outbox, Relay};
 use teams_ctl::ClientError;
-use teams_ctl::protocol::{CallRow, CtlError, ErrorCode, Request, Response, Toggle};
+use teams_ctl::protocol::{CalendarRow, CallRow, CtlError, ErrorCode, Request, Response, Toggle, local_today};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
 use teams_media::tone::Tone;
-use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, TENANT, TrouterMock};
+use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, MIDDLE_TIER_BASE, TENANT, TrouterMock};
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport, Mri};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, Trouter, TrouterCredentials};
@@ -154,7 +156,7 @@ struct Lab {
     cx: TestAppContext,
     _trouter: TrouterMock,
     _dir: tempfile::TempDir,
-    _runtime: tokio::runtime::Runtime,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl Lab {
@@ -216,7 +218,7 @@ impl Lab {
             cx,
             _trouter: trouter,
             _dir: dir,
-            _runtime: runtime,
+            runtime,
         };
         lab.settle(Calls::registered);
         lab
@@ -321,7 +323,13 @@ fn a_engine(
         renewals: broadcast::channel(4).0,
     });
     let origin = mock.origin();
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
+    // the calendar read from the mock's middle tier: a meeting's join from its event
+    let http = || {
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
+            .unwrap()
+            .with_middle_tier(MIDDLE_TIER_BASE)
+            .unwrap()
+    };
     let transport = Arc::new(http());
     let options = Options {
         ping_interval: Duration::from_millis(300),
@@ -601,6 +609,45 @@ fn a_call_from_a_chat_rings_until_hung_up_and_one_whose_window_closed_is_left() 
     lab.settle(|calls| calls.call().is_none());
     assert!(lab.listed().is_empty());
     assert_eq!(lab.refused(Request::HangUp).code, ErrorCode::NoCall);
+}
+
+/// This week's event called `subject`, as `calendar` lists it.
+fn this_weeks(lab: &Lab, subject: &str) -> CalendarRow {
+    let today = local_today();
+    let last = (0..6).fold(today, |day, _| day.succ_opt().unwrap());
+    let request = Request::Calendar {
+        from: Some(today.format("%Y-%m-%d").to_string()),
+        to: Some(last.format("%Y-%m-%d").to_string()),
+    };
+    let Ok(Response::Calendar { events }) = lab.ask(request) else {
+        panic!("the calendar wasn't read");
+    };
+    events
+        .into_iter()
+        .find(|event| event.subject == subject)
+        .unwrap_or_else(|| panic!("no {subject} this week"))
+}
+
+#[test]
+fn a_meeting_joined_now_whose_media_setup_fails_after_its_call_was_told_is_refused() {
+    let lab = Lab::start(false);
+    let event = this_weeks(&lab, "Product all hands");
+    assert!(event.joinable, "{event:?}");
+    // the relay's credentials refused a second after asked: the engine has told the join's call by then
+    lab.runtime.block_on(
+        lab.mock
+            .refuse_next_after("GET", "/trap/tokens", 500, Duration::from_secs(1)),
+    );
+    let refused = lab.refused(Request::JoinMeeting {
+        event: event.id,
+        now: true,
+    });
+    assert_eq!(refused.code, ErrorCode::Engine, "{refused:?}");
+    assert!(refused.message.contains("relay"), "{}", refused.message);
+    assert_eq!(lab.traced.asked("join-meeting"), 1);
+    lab.settle(|calls| calls.call().is_none() && !calls.busy());
+    assert!(lab.listed().is_empty());
+    assert!(lab.mock.calls().is_empty(), "nothing went to the calling service");
 }
 
 #[test]

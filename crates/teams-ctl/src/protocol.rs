@@ -41,6 +41,12 @@ pub const SYNC_ANSWER: std::time::Duration = std::time::Duration::from_secs(300)
 /// where the call stands).
 pub const CALL_ANSWER: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long the app takes at most to answer a calendar read (`calendar`, `calendar show`): one read of the service
+/// takes up to the transport's 30 s, and up to twice that and a throttled service's wait (at most 30 s) more when it
+/// is tried again (a token renewed, or the service throttling); a range over 62 days is read 62 days at a time. Past
+/// it the app answers [`ErrorCode::Timeout`].
+pub const CALENDAR_ANSWER: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// What to do about a write whose answer didn't come in time: it may still go out, so it is looked for before it is
 /// written again.
 pub const UNANSWERED_WRITE: &str = "`ngteamsctl events --follow --kind outbox` shows its row as it changes, and \
@@ -223,6 +229,62 @@ pub enum Request {
     },
     /// Open a Teams link (a meeting's join link) as the app would.
     OpenLink { url: String },
+}
+
+/// How a calendar date is spelled on the wire and the command line.
+pub const DATE_FORMAT: &str = "%Y-%m-%d";
+
+/// The window [`Request::Calendar`] reads, in ms since the epoch: from the local midnight starting `from` to the one
+/// ending `to`, both days included. Without `from` it starts `today`; without `to` it ends with its first day.
+///
+/// # Errors
+/// [`ErrorCode::BadRequest`] for a date that isn't `YYYY-MM-DD`, or a `to` before the first day.
+pub fn calendar_window(from: Option<&str>, to: Option<&str>, today: chrono::NaiveDate) -> Result<(i64, i64), CtlError> {
+    let date = |text: &str| {
+        chrono::NaiveDate::parse_from_str(text.trim(), DATE_FORMAT)
+            .map_err(|_| CtlError::new(ErrorCode::BadRequest, format!("{text:?} isn't a date (YYYY-MM-DD)")))
+    };
+    let first = from.map(date).transpose()?.unwrap_or(today);
+    let last = to.map(date).transpose()?.unwrap_or(first);
+    if last < first {
+        return Err(CtlError::new(
+            ErrorCode::BadRequest,
+            format!("the calendar's last day ({last}) is before its first ({first})"),
+        ));
+    }
+    let Some(after) = last.succ_opt() else {
+        return Err(CtlError::new(
+            ErrorCode::BadRequest,
+            format!("{last} is the calendar's last day"),
+        ));
+    };
+    Ok((midnight_in(&chrono::Local, first), midnight_in(&chrono::Local, after)))
+}
+
+/// Today in the local time zone, as [`calendar_window`] counts it.
+#[must_use]
+pub fn local_today() -> chrono::NaiveDate {
+    chrono::Local::now().date_naive()
+}
+
+/// The first instant of `date` in `zone`, in ms since the epoch: its midnight, the earlier one where a change of clock
+/// repeats it. Where the clock skips midnight the day starts when it jumps, the first time on the clock that date has
+/// (the next day's midnight when the whole date is skipped).
+#[must_use]
+pub fn midnight_in<Tz: chrono::TimeZone>(zone: &Tz, date: chrono::NaiveDate) -> i64 {
+    use chrono::Offset as _;
+    let midnight = date.and_time(chrono::NaiveTime::MIN);
+    if let Some(time) = zone.from_local_datetime(&midnight).earliest() {
+        return time.timestamp_millis();
+    }
+    // the jump is at midnight on the clock before it: the offset a day earlier, before the change
+    let as_utc = midnight.and_utc().timestamp_millis();
+    midnight
+        .checked_sub_signed(chrono::TimeDelta::days(1))
+        .map_or(as_utc, |day_before| {
+            let before = zone.offset_from_utc_datetime(&day_before).fix();
+            as_utc - i64::from(before.local_minus_utc()) * 1000
+        })
 }
 
 /// What [`Request::Window`] does to the main window.
@@ -649,6 +711,8 @@ pub enum ErrorCode {
     NotRinging,
     /// No camera to turn on.
     NoVideo,
+    /// The calendar event isn't a Teams meeting the app can join.
+    NoMeeting,
     /// No tray item to hide the window to.
     NoTray,
     /// The main window is closed.
@@ -682,6 +746,7 @@ impl ErrorCode {
             Self::NoCall => "no_call",
             Self::NotRinging => "not_ringing",
             Self::NoVideo => "no_video",
+            Self::NoMeeting => "no_meeting",
             Self::NoTray => "no_tray",
             Self::NoWindow => "no_window",
             Self::UnknownAction => "unknown_action",

@@ -769,22 +769,8 @@ impl Shell {
 
     /// The calendar's Join: the meeting's pre-join, in its own window; while a call is up or rings, its refusal.
     pub fn open_prejoin(&mut self, to_join: MeetingToJoin, cx: &mut Context<Self>) {
-        let busy = self.models.calls.read(cx).busy();
-        if busy || self.busy_elsewhere(cx) {
-            let ask = Ask::JoinMeeting {
-                chat: to_join.chat,
-                meeting: to_join.meeting,
-            };
-            let why = if busy { "busy" } else { "another-account" };
-            calls::refuse_here(&self.models.calls, &self.trace, &ask, why, cx);
-            return;
-        }
-        self.trace
-            .record(&TraceLine::new("call", "prejoin").conversation(&to_join.chat));
-        self.models
-            .calls
-            .update(cx, |calls, cx| calls.open_prejoin(to_join, cx));
-        crate::call_window::raise(cx);
+        let busy_elsewhere = self.busy_elsewhere(cx);
+        calls::show_prejoin(&self.models.calls, &self.trace, to_join, busy_elsewhere, cx);
     }
 
     /// A meeting's Join where only its chat is known (the meeting chat's header, an event whose link names no

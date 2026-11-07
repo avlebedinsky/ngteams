@@ -1816,6 +1816,18 @@ fn logged_chat(ask: &Ask) -> String {
 /// Join now of the pre-join that shows: its choices kept for its call, its join asked. Nothing while none shows or its
 /// join is under way.
 pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, cx: &mut App) {
+    join_now_then(calls, core, trace, cx, |_, _| {});
+}
+
+/// [`join_now`], and then `then` told whether the engine took its join, as [`ask_then`] tells it (`false` too when
+/// nothing was asked: no pre-join shows or its join is under way). `then` is told later, never while this runs.
+pub fn join_now_then(
+    calls: &Entity<Calls>,
+    core: &Arc<dyn Core>,
+    trace: &Arc<ViewTrace>,
+    cx: &mut App,
+    then: impl FnOnce(bool, &mut App) + 'static,
+) {
     let asked = calls.update(cx, |calls, cx| {
         let prejoin = calls.prejoin.as_mut().filter(|prejoin| !prejoin.joining)?;
         prejoin.joining = true;
@@ -1840,20 +1852,48 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
         })
         .map(|asked| (asked, starts.then_some(to_join.title)))
     });
-    if let Some((asked, title)) = asked {
-        let titled = match (&asked, title) {
-            (Ask::MeetNow { channel }, Some(title)) if !title.trim().is_empty() => Some((channel.clone(), title)),
-            _ => None,
-        };
-        ask(calls, core, trace, asked, cx);
-        // as Teams' pre-join does: its subject titles the new meeting's post once the service posted it (the engine
-        // looks for the post, and titles nothing when the meeting didn't start); a Meet now refused here asks nothing,
-        // so no other meeting's post of the account's in that channel is titled
-        let went = calls.read(cx).prejoin().is_some_and(|prejoin| prejoin.joining);
-        if let Some((channel, title)) = titled.filter(|_| went) {
-            drop(core.title_meet_now(channel, title.trim().to_owned()));
-        }
+    let Some((asked, title)) = asked else {
+        cx.defer(move |cx| then(false, cx));
+        return;
+    };
+    let titled = match (&asked, title) {
+        (Ask::MeetNow { channel }, Some(title)) if !title.trim().is_empty() => Some((channel.clone(), title)),
+        _ => None,
+    };
+    ask_then(calls, core, trace, asked, cx, then);
+    // as Teams' pre-join does: its subject titles the new meeting's post once the service posted it (the engine
+    // looks for the post, and titles nothing when the meeting didn't start); a Meet now refused here asks nothing,
+    // so no other meeting's post of the account's in that channel is titled
+    let went = calls.read(cx).prejoin().is_some_and(|prejoin| prejoin.joining);
+    if let Some((channel, title)) = titled.filter(|_| went) {
+        drop(core.title_meet_now(channel, title.trim().to_owned()));
     }
+}
+
+/// The calendar's Join: `to_join`'s pre-join, in its own window; while a call of the account is up, rings or is being
+/// set up, or another account's is (`busy_elsewhere`: calls are one at a time across the accounts), its refusal instead.
+/// Whether the pre-join shows (never in a build that shows no calls).
+pub fn show_prejoin(
+    calls: &Entity<Calls>,
+    trace: &Arc<ViewTrace>,
+    to_join: MeetingToJoin,
+    busy_elsewhere: bool,
+    cx: &mut App,
+) -> bool {
+    let busy = calls.read(cx).busy();
+    if busy || busy_elsewhere {
+        let ask = Ask::JoinMeeting {
+            chat: to_join.chat,
+            meeting: to_join.meeting,
+        };
+        let why = if busy { "busy" } else { "another-account" };
+        refuse_here(calls, trace, &ask, why, cx);
+        return false;
+    }
+    trace.record(&TraceLine::new("call", "prejoin").conversation(&to_join.chat));
+    calls.update(cx, |calls, cx| calls.open_prejoin(to_join, cx));
+    crate::call_window::raise(cx);
+    calls.read(cx).prejoin().is_some()
 }
 
 /// The user asks that something nothing stands for (no chat open to call or join): traced, and told; nothing in a

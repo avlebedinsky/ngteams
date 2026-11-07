@@ -66,7 +66,7 @@ pub async fn answer(
     if let Request::Calls = request {
         return cx.update(|cx| listed(&alive(running, cx)?, account, cx));
     }
-    let target = cx.update(|cx| target(&alive(running, cx)?, account, cx))?;
+    let target = cx.update(|cx| target(&alive(running, cx)?, account, Fallback::Busy, cx))?;
     let executor = cx.background_executor().clone();
     let late = format!(
         "the call wasn't answered in {}s: `ngteamsctl calls` shows where it stands",
@@ -76,18 +76,35 @@ pub async fn answer(
 }
 
 /// The account a call command acts on, with what its ask needs.
-struct Target {
-    account: Addressed,
-    calls: Entity<Calls>,
-    trace: Arc<ViewTrace>,
+pub(super) struct Target {
+    pub account: Addressed,
+    pub calls: Entity<Calls>,
+    pub trace: Arc<ViewTrace>,
     /// The window's accounts: whether another one rings, is in a call or sets one up, read as the ask is made.
-    accounts: Entity<Accounts>,
+    pub accounts: Entity<Accounts>,
     /// Held by a `mute` or a `camera` from before its switch is read until it is answered.
     switches: Rc<tokio::sync::Mutex<()>>,
 }
 
-/// The account `wanted` names, otherwise the busy one, otherwise the one shown (see the module docs).
-fn target(running: &Entity<Running>, wanted: Option<&str>, cx: &App) -> Result<Target, CtlError> {
+/// The account a command acts on when `--account` names none.
+#[derive(Clone, Copy)]
+pub(super) enum Fallback {
+    /// The one ringing, in a call or setting one up, otherwise the one shown: a call command's.
+    Busy,
+    /// The one shown: a calendar event's join, whose event is the account's own.
+    Shown,
+}
+
+/// The account `wanted` names, otherwise the one `fallback` says (see the module docs).
+///
+/// # Errors
+/// The account isn't one, its engine stopped, or the app shows no calls ([`ErrorCode::NoCalling`]).
+pub(super) fn target(
+    running: &Entity<Running>,
+    wanted: Option<&str>,
+    fallback: Fallback,
+    cx: &App,
+) -> Result<Target, CtlError> {
     let running = running.read(cx);
     let busy = || {
         running
@@ -96,7 +113,11 @@ fn target(running: &Entity<Running>, wanted: Option<&str>, cx: &App) -> Result<T
             .find(|(_, _, bridge)| calls_of(bridge, cx).read(cx).busy())
             .map(|(mri, _, _)| mri.as_str())
     };
-    let (mri, upn, bridge) = address::known(running, wanted.or_else(busy), cx)?;
+    let wanted = match fallback {
+        Fallback::Busy => wanted.or_else(busy),
+        Fallback::Shown => wanted,
+    };
+    let (mri, upn, bridge) = address::known(running, wanted, cx)?;
     let calls = calls_of(bridge, cx).clone();
     if !calls.read(cx).shows() {
         return Err(CtlError::new(
@@ -187,7 +208,7 @@ fn ended_row(upn: &str, ended: &Ended) -> CallRow {
 
 /// What a command waits for once the engine took its ask.
 #[derive(Clone, Copy)]
-enum Settle {
+pub(super) enum Settle {
     /// A start's or a join's call told (or gone already).
     Started,
     /// The invitation `0` answered: its call told.
@@ -297,7 +318,7 @@ fn no_call() -> CtlError {
 }
 
 /// The error of an ask that went nowhere, as the calls' model kept why.
-fn refusal(refused: Option<&Refused>) -> CtlError {
+pub(super) fn refusal(refused: Option<&Refused>) -> CtlError {
     let Some(refused) = refused else {
         return CtlError::new(ErrorCode::Engine, "the call action went nowhere");
     };
@@ -315,7 +336,7 @@ fn refusal(refused: Option<&Refused>) -> CtlError {
 }
 
 /// The answer once `target`'s calls show what `settle` waits for (see the module docs).
-async fn settled(target: &Target, settle: Settle, cx: &mut AsyncApp) -> Result<Response, CtlError> {
+pub(super) async fn settled(target: &Target, settle: Settle, cx: &mut AsyncApp) -> Result<Response, CtlError> {
     let upn = target.account.upn.clone();
     let shown = move |calls: &Calls| -> Option<Result<Response, CtlError>> {
         let up = || up_row(&upn, calls).map(|row| Ok(Response::Call(row)));

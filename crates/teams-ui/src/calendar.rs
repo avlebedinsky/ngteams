@@ -180,6 +180,22 @@ fn range_title(span: Span) -> String {
     }
 }
 
+/// `event`'s title as Teams shows it: `(No title)` without a subject, a cancelled event's saying so (once: the service
+/// usually renames it already).
+#[must_use]
+pub fn event_title(event: &CalendarEvent) -> String {
+    let subject = if event.subject.is_empty() {
+        "(No title)"
+    } else {
+        event.subject.as_str()
+    };
+    if event.cancelled && !subject.to_lowercase().starts_with("canceled") {
+        format!("Canceled: {subject}")
+    } else {
+        subject.to_owned()
+    }
+}
+
 /// Local midnight of `date` in ms since the epoch (the first instant of the day where a change of clock skips it).
 fn midnight_ms(date: NaiveDate) -> i64 {
     let midnight = date.and_time(NaiveTime::MIN);
@@ -270,16 +286,7 @@ impl Shown {
     /// Its title as Teams shows it: a cancelled event's says so (once: the service usually renames it already).
     #[must_use]
     pub fn title(&self) -> String {
-        let subject = if self.event.subject.is_empty() {
-            "(No title)"
-        } else {
-            self.event.subject.as_str()
-        };
-        if self.event.cancelled && !subject.to_lowercase().starts_with("canceled") {
-            format!("Canceled: {subject}")
-        } else {
-            subject.to_owned()
-        }
+        event_title(&self.event)
     }
 
     /// Whether it is drawn in the all-day strip: an all-day event, or one that lasts a whole day or more.

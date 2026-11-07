@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use teams_ctl::codec::{BadLine, decode_request};
 use teams_ctl::protocol::{
     ChatRef, CtlError, CtlEvent, ErrorCode, EventFilter, EventLine, Hello, OpenTarget, Outcome, Request, RequestLine,
-    Response, ResponseLine,
+    Response, ResponseLine, calendar_window, local_today, midnight_in,
 };
 
 /// The variant's place: exhaustive, so a new request fails to compile here until it has a sample.
@@ -310,7 +310,7 @@ fn every_response_round_trips_through_its_line() {
     );
 }
 
-const CODES: [ErrorCode; 17] = [
+const CODES: [ErrorCode; 18] = [
     ErrorCode::UnknownAccount,
     ErrorCode::UnknownChat,
     ErrorCode::AmbiguousChat,
@@ -319,6 +319,7 @@ const CODES: [ErrorCode; 17] = [
     ErrorCode::NoCall,
     ErrorCode::NotRinging,
     ErrorCode::NoVideo,
+    ErrorCode::NoMeeting,
     ErrorCode::NoTray,
     ErrorCode::NoWindow,
     ErrorCode::UnknownAction,
@@ -446,4 +447,97 @@ fn a_filter_lets_through_the_kinds_it_names_and_their_prefixes() {
         ..EventFilter::default()
     };
     assert!(star.wants_kind("lagged"));
+}
+
+fn day(text: &str) -> chrono::NaiveDate {
+    chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+}
+
+const HOUR: i64 = 3_600_000;
+
+#[test]
+fn a_calendar_window_runs_from_its_first_local_midnight_to_the_one_after_its_last_day() {
+    let today = day("2026-11-07");
+    let (start, end) = calendar_window(None, None, today).unwrap();
+    // a day, give or take a change of clock
+    assert!((23 * HOUR..=25 * HOUR).contains(&(end - start)), "{start}..{end}");
+    assert_eq!(
+        calendar_window(Some("2026-11-07"), None, day("2001-01-01")).unwrap(),
+        (start, end)
+    );
+    assert_eq!(
+        calendar_window(Some("2026-11-07"), Some("2026-11-07"), today).unwrap(),
+        (start, end)
+    );
+    let (week_start, week_end) = calendar_window(Some("2026-11-02"), Some("2026-11-08"), today).unwrap();
+    assert!(
+        (week_end - week_start - 7 * 24 * HOUR).abs() <= HOUR,
+        "{week_start}..{week_end}"
+    );
+    assert!(week_start < start && end < week_end, "today is inside the week");
+    // without a first day, the last one counts from today
+    let (from_today, _) = calendar_window(None, Some("2026-11-09"), today).unwrap();
+    assert_eq!(from_today, start);
+}
+
+#[test]
+fn a_calendar_window_refuses_a_date_that_does_not_read_and_days_the_wrong_way_round() {
+    let today = day("2026-11-07");
+    for (from, to) in [
+        (Some("2026-13-01"), None),
+        (None, Some("tomorrow")),
+        (Some("07.11.2026"), None),
+        (Some("2026-11-08"), Some("2026-11-07")),
+    ] {
+        let refused = calendar_window(from, to, today).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::BadRequest, "{from:?}..{to:?}");
+    }
+    let backwards = calendar_window(None, Some("2026-11-06"), today).unwrap_err();
+    assert!(backwards.message.contains("before"), "{}", backwards.message);
+    // no day after the last one there is
+    let last = calendar_window(None, None, chrono::NaiveDate::MAX).unwrap_err();
+    assert_eq!(last.code, ErrorCode::BadRequest);
+}
+
+#[test]
+fn today_s_window_holds_now() {
+    let (start, end) = calendar_window(None, None, local_today()).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    assert!((start..end).contains(&now), "{start}..{end} without {now}");
+}
+
+/// `date` at `hour` UTC, in ms since the epoch.
+fn utc(date: &str, hour: u32) -> i64 {
+    day(date).and_hms_opt(hour, 0, 0).unwrap().and_utc().timestamp_millis()
+}
+
+#[test]
+fn a_day_starts_at_its_local_midnight_or_when_the_clock_jumps_over_it() {
+    use chrono_tz::{
+        America::{Havana, Santiago},
+        Pacific::Apia,
+    };
+    assert_eq!(midnight_in(&Santiago, day("2026-11-07")), utc("2026-11-07", 3));
+    // the clock goes back from 01:00 to 00:00: the first of the two midnights (-04, not -05)
+    assert_eq!(midnight_in(&Havana, day("2026-11-01")), utc("2026-11-01", 4));
+    // the clock jumps from 00:00 to 01:00: the day starts at 01:00 (-03), as -04's midnight
+    assert_eq!(midnight_in(&Santiago, day("2026-09-06")), utc("2026-09-06", 4));
+    assert_eq!(
+        midnight_in(&Santiago, day("2026-09-07")) - midnight_in(&Santiago, day("2026-09-06")),
+        23 * HOUR
+    );
+    // a date skipped whole is an empty day: it starts as the next one does
+    assert_eq!(midnight_in(&Apia, day("2011-12-30")), utc("2011-12-30", 10));
+    assert_eq!(
+        midnight_in(&Apia, day("2011-12-31")),
+        midnight_in(&Apia, day("2011-12-30"))
+    );
+    // no day before the first one there is to take the clock's offset from: its midnight as UTC
+    assert_eq!(
+        midnight_in(&chrono::Utc, chrono::NaiveDate::MIN),
+        chrono::NaiveDate::MIN
+            .and_time(chrono::NaiveTime::MIN)
+            .and_utc()
+            .timestamp_millis()
+    );
 }

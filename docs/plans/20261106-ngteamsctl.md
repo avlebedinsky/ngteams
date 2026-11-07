@@ -170,7 +170,8 @@
   never serializing internal types, so the wire format doesn't follow internal renames.
 - Error codes: `unknown_account`, `unknown_chat`, `ambiguous_chat`, `busy`, `no_calling`, `no_call`, `not_ringing`,
   `no_tray`, `no_window`, `unknown_action`, `refused_read_only`, `stopped`, `timeout`, `bad_request`,
-  `version_mismatch`, `engine` (with the engine error's message).
+  `version_mismatch`, `engine` (with the engine error's message); ➕ `no_video`, and `no_meeting` (a calendar event
+  that isn't a Teams meeting the app can join, Task 12).
 - **Own status values**: `available | busy | dnd | away | reset`. `reset` means `ManualStatus::Automatic`, so the
   app's idle policy decides again. These are exactly the menu's choices.
 - **Event catalogue**: `{"event":"<kind>","account":"<upn>","at":<ms>,…}`. Each kind carries only what its source
@@ -466,13 +467,17 @@
 - Create: `crates/ngteams/src/ctl/calendar.rs`
 - Modify: `crates/ngteams/src/ctl/dispatch.rs`, `crates/teams-ctl/src/cli.rs`
 - Create: `crates/ngteams/tests/ctl_calendar.rs`
+- ➕ Modify: `crates/teams-ctl/src/protocol.rs` (`ErrorCode::NoMeeting`, `CALENDAR_ANSWER`, `calendar_window`),
+  `crates/teams-ui/src/calls.rs` (`calls::show_prejoin`, the calendar Join's pre-join, which `Shell::open_prejoin`
+  now calls), `crates/teams-ui/src/calendar.rs` (`event_title`), `crates/ngteams/src/ctl/calls.rs` (its target,
+  settle and refusal shared), `crates/teams-ctl/tests/{cli,protocol}.rs`
 
-- [ ] `calendar [--today | --from <date> --to <date>]` and `calendar show <id>` through `Core::calendar` /
+- [x] `calendar [--today | --from <date> --to <date>]` and `calendar show <id>` through `Core::calendar` /
       `calendar_event`
-- [ ] `join meeting <event id>`: opens the prejoin as the calendar's Join does. `--now` joins through
+- [x] `join meeting <event id>`: opens the prejoin as the calendar's Join does. `--now` joins through
       `Ask::JoinMeeting` with the saved devices, the join chat and meeting taken from the event.
-- [ ] tests: listing a range, an event's details, join through the prejoin and `--now`, an event without a meeting
-- [ ] run `cargo test -p ngteams --test ctl_calendar`, which must pass before the next task
+- [x] tests: listing a range, an event's details, join through the prejoin and `--now`, an event without a meeting
+- [x] run `cargo test -p ngteams --test ctl_calendar`, which must pass before the next task
 
 ### Task 13: hand-off of a second launch and of meeting links
 

@@ -12,6 +12,8 @@
 //!   chooses it, and `sync`, its catch-up now.
 //! - the call commands ([`calls`]): through the account addressed, or the one ringing or in the call, asked as the call
 //!   buttons ask.
+//! - the calendar commands ([`calendar`]): the account's events through the account addressed, and its meetings
+//!   joined as the calendar's Join and the pre-join's Join now join them.
 //! - `subscribe` ([`events`]): answered `subscribed` with the stream the connection writes from then on.
 //!
 //! A request the app doesn't serve yet is a [`ErrorCode::BadRequest`]; once the app is going, every request is
@@ -27,7 +29,7 @@ use teams_ui::{Account, Bridge, Desktop, Engine, Link, Status};
 
 use super::address::{self, Addressed};
 use super::listener::Answer;
-use super::{calls, events, reads, ui, writes};
+use super::{calendar, calls, events, reads, ui, writes};
 use crate::app::Running;
 
 /// The app's version, as `hello` and `status` tell it.
@@ -76,6 +78,9 @@ async fn ask(
     }
     if calls::serves(request) {
         return calls::answer(running, account, request, cx).await;
+    }
+    if calendar::serves(request) {
+        return calendar::answer(running, account, request, cx).await;
     }
     if writes::serves_status(request) {
         return cx.update(|cx| writes::own_status(&alive(running, cx)?, account, request, cx));

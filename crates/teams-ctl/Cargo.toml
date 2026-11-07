@@ -20,6 +20,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# time zones whose clocks skip a midnight, for the calendar's day boundaries
+chrono-tz.workspace = true
 # each test's sockets and directories, in a directory of its own
 tempfile.workspace = true
 

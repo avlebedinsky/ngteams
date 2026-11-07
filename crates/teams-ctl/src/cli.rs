@@ -19,6 +19,9 @@
 //! - **Calls**: `calls` lists the call up and the invitation that rings; `call`, `join`, `answer`, `decline`,
 //!   `hangup`, `mute` and `camera` answer with the call's row as the app shows it once the engine took the ask, the
 //!   app answering within [`CALL_ANSWER`]. They default to the account ringing or in the call.
+//! - **Calendar**: `calendar` lists the account's events of today, or of the days `--from` and `--to` name;
+//!   `calendar show <id>` one event. `join meeting <id>` opens a meeting's pre-join as the calendar's Join does, and
+//!   with `--now` joins it as the pre-join's Join now does, answering with the call's row as `join` does.
 //! - **Events**: `events --follow` prints every event the filters let through until the app closes the stream;
 //!   without `--follow`, `events` prints the first one and exits. `wait <kind>` prints the first event of that kind
 //!   whose JSON line matches `--match`, within `--timeout` (which the connect and the subscribe spend too). A kind
@@ -35,8 +38,9 @@ use regex::Regex;
 use crate::client::{Client, ClientError, Events, Refused, Timeouts};
 use crate::path::{Env, Mode};
 use crate::protocol::{
-    CALL_ANSWER, CtlEvent, EventFilter, EventLine, OpenTarget, OutboxState, Outcome, Request, Response, ResponseLine,
-    SYNC_ANSWER, StatusChoice, Toggle, UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT, WindowOp,
+    CALENDAR_ANSWER, CALL_ANSWER, CtlEvent, DATE_FORMAT, EventFilter, EventLine, OpenTarget, OutboxState, Outcome,
+    Request, Response, ResponseLine, SYNC_ANSWER, StatusChoice, Toggle, UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT,
+    WindowOp,
 };
 use crate::render;
 
@@ -144,6 +148,22 @@ pub enum Command {
     },
     /// Bring the window to the front.
     Activate,
+    /// The account's calendar events: today's, or those of the days `--from` and `--to` name; `calendar show <id>`
+    /// one event.
+    #[command(args_conflicts_with_subcommands = true)]
+    Calendar {
+        #[command(subcommand)]
+        command: Option<CalendarCommand>,
+        /// Today's events (what `calendar` alone lists).
+        #[arg(long, conflicts_with_all = ["from", "to"])]
+        today: bool,
+        /// The first day (YYYY-MM-DD); today without it.
+        #[arg(long, value_name = "DATE", value_parser = date)]
+        from: Option<String>,
+        /// The last day, included (YYYY-MM-DD); the first day without it.
+        #[arg(long, value_name = "DATE", value_parser = date)]
+        to: Option<String>,
+    },
     #[command(flatten)]
     Write(WriteCommand),
     #[command(flatten)]
@@ -292,10 +312,14 @@ pub enum CallCommand {
     Decline,
     /// Leave the call up (or cancel it while it rings at its callees).
     Hangup,
-    /// Join the running call of a group chat.
+    /// Join the running call of a group chat; `join meeting <event>` a calendar event's meeting.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Join {
+        #[command(subcommand)]
+        command: Option<JoinCommand>,
         /// The chat's id or title.
-        chat: String,
+        #[arg(required = true)]
+        chat: Option<String>,
     },
     /// Mute the microphone in the call up (`on`), unmute it (`off`), or the other way round (`toggle`).
     Mute {
@@ -307,6 +331,27 @@ pub enum CallCommand {
         #[arg(value_enum)]
         op: ToggleArg,
     },
+}
+
+/// `join meeting`.
+#[derive(Debug, Subcommand)]
+pub enum JoinCommand {
+    /// A calendar event's meeting: its pre-join opened, as the calendar's Join opens it; with `--now`, joined at once
+    /// as the pre-join's Join now joins it (the microphone on, the camera off, the devices the settings chose).
+    Meeting {
+        /// The event's id, as `calendar` lists it.
+        event: String,
+        /// Join at once rather than open the pre-join.
+        #[arg(long)]
+        now: bool,
+    },
+}
+
+/// `calendar show`.
+#[derive(Debug, Subcommand)]
+pub enum CalendarCommand {
+    /// One event, by its id as `calendar` lists it.
+    Show { event: String },
 }
 
 /// A switch set on, off, or to the other state.
@@ -635,6 +680,14 @@ fn request(command: &Command, stdin: &mut dyn FnMut() -> io::Result<String>) -> 
             name: name.clone().unwrap_or_default(),
         },
         Command::Activate => Request::Activate,
+        Command::Calendar {
+            command: Some(CalendarCommand::Show { event }),
+            ..
+        } => Request::CalendarEvent { event: event.clone() },
+        Command::Calendar { from, to, .. } => Request::Calendar {
+            from: from.clone(),
+            to: to.clone(),
+        },
         Command::Events { kinds, filter, .. } => Request::Subscribe {
             filter: filter.filter(kinds.clone()),
         },
@@ -714,7 +767,16 @@ fn call_request(call: &CallCommand) -> Request {
         CallCommand::Answer => Request::Answer,
         CallCommand::Decline => Request::Decline,
         CallCommand::Hangup => Request::HangUp,
-        CallCommand::Join { chat } => Request::Join { chat: chat.clone() },
+        CallCommand::Join {
+            command: Some(JoinCommand::Meeting { event, now }),
+            ..
+        } => Request::JoinMeeting {
+            event: event.clone(),
+            now: *now,
+        },
+        CallCommand::Join { chat, .. } => Request::Join {
+            chat: chat.clone().unwrap_or_default(),
+        },
         CallCommand::Mute { op } => Request::Mute { op: toggle(*op) },
         CallCommand::Camera { op } => Request::Camera { op: toggle(*op) },
     }
@@ -772,8 +834,9 @@ fn ask(cli: &Cli, mut client: Client, request: Request, out: &mut dyn Write, err
 }
 
 /// How long `command`'s answer is waited for: a write's past the app's own bound on it ([`WRITE_ANSWER`], and
-/// [`WRITE_WAIT`] more with `--wait`), a `sync`'s past [`SYNC_ANSWER`], a call command's past [`CALL_ANSWER`], so the
-/// app's answer (its own timeout too) comes first; any other's the client's default.
+/// [`WRITE_WAIT`] more with `--wait`), a `sync`'s past [`SYNC_ANSWER`], a call command's (`join meeting` too) past
+/// [`CALL_ANSWER`], a calendar read's past [`CALENDAR_ANSWER`], so the app's answer (its own timeout too) comes first;
+/// any other's the client's default.
 #[must_use]
 pub fn answer_time(command: &Command) -> Duration {
     let slack = Timeouts::default().read;
@@ -783,6 +846,7 @@ pub fn answer_time(command: &Command) -> Duration {
         Command::Sync => SYNC_ANSWER + slack,
         Command::Call(CallCommand::Calls) => slack,
         Command::Call(_) => CALL_ANSWER + slack,
+        Command::Calendar { .. } => CALENDAR_ANSWER + slack,
         _ => slack,
     }
 }
@@ -995,6 +1059,13 @@ fn written(result: io::Result<()>) -> Exit {
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Exit::Ok,
         Err(_) => Exit::Error,
     }
+}
+
+/// A day `calendar --from` and `--to` take: `YYYY-MM-DD`.
+fn date(value: &str) -> Result<String, String> {
+    chrono::NaiveDate::parse_from_str(value, DATE_FORMAT)
+        .map(|_| value.to_owned())
+        .map_err(|_| format!("{value:?} isn't a date (YYYY-MM-DD)"))
 }
 
 /// `--timeout`'s seconds, fractions allowed.
