@@ -340,18 +340,24 @@
   record of it yet), `crates/teams-ui/src/desktop.rs` (a `ui_state()` read and call-window open/closed)
 - Create: `crates/ngteams/src/ctl/ticker.rs`
 - Modify: `crates/ngteams/tests/ctl_events.rs`
+- ➕ Create: `crates/ngteams/src/ctl/watch.rs` (the observers, beside `events.rs`'s hub and tap). Modify:
+  `crates/teams-ui/src/tray.rs` (observers told when a chat's count changes, not only the total),
+  `crates/teams-ui/src/call_window.rs` (observers told when the call's window opens or closes),
+  `crates/teams-core/src/calendar.rs` (`instant` public, for an event's start), `crates/teams-ui/tests/{notify,desktop}.rs`,
+  `crates/ngteams/tests/support/app.rs` (account added / removed)
 
-- [ ] `unread`: observe each account's `Tray`, sent when a chat's count or the total changes
-- [ ] `own_status`: observe each account's `OwnPresence`, comparing what it reports
-- [ ] `signed_out` from `Models` status; `notification`, `ui`, `call_window`, `account_added`, `account_removed`
+- [x] `unread`: observe each account's `Tray`, sent when a chat's count or the total changes
+- [x] `own_status`: observe each account's `OwnPresence`, comparing what it reports
+- [x] `signed_out` from `Models` status; `notification`, `ui`, `call_window`, `account_added`, `account_removed`
       from where they change
-- [ ] `meeting_starting`: a per-account ticker over the stored calendar (`Core::calendar` refreshed every few
+- [x] `meeting_starting`: a per-account ticker over the stored calendar (`Core::calendar` refreshed every few
       minutes), skipping cancelled and all-day events. It runs only while a subscriber asks for the kind and fires
-      once per event per lead.
-- [ ] tests: unread up, down and total; own status from the menu and from the idle policy; a notification shown;
+      once per event per lead. (One ticker task reads every account in turn, each refreshed on its own schedule.)
+- [x] tests: unread up, down and total; own status from the menu and from the idle policy; a notification shown;
       navigation → `ui`; sign-out; the ticker firing once at each lead (advanced clock, `teams-mock` calendar) and not
-      at all without a subscriber
-- [ ] run `cargo test -p ngteams --test ctl_events`, which must pass before the next task
+      at all without a subscriber (the ticker's test uses a core of its own answering the calendar: the harness's
+      engine has no token, so its calendar read would sign the account out)
+- [x] run `cargo test -p ngteams --test ctl_events`, which must pass before the next task
 
 ### Task 7: UI commands and action dispatch
 

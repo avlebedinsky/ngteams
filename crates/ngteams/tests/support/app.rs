@@ -165,6 +165,42 @@ fn removal_waits_for_shutdown_and_the_last_account_quits_even_when_forget_fails(
 }
 
 #[test]
+fn an_account_added_and_one_removed_are_told_to_the_event_streams() {
+    use teams_ctl::protocol::{CtlEvent, EventFilter};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (setup, first) = setup(dir.path(), 1);
+    let (_, second) = self::setup(dir.path(), 2);
+    let cx = TestAppContext::single();
+    let running = open(&cx, &setup, first);
+    let wanted = crate::ctl::events::Wanted {
+        filter: EventFilter {
+            kinds: vec!["account_*".to_owned()],
+            ..EventFilter::default()
+        },
+        ..crate::ctl::events::Wanted::default()
+    };
+    let stream = cx.read(|cx| running.read(cx).hub().subscribe(wanted));
+    let added = started(&setup, second.clone());
+    cx.update(|cx| running.update(cx, |running, cx| running.added(added, cx)));
+    // the forget must never reach the real Secret Service: without the accounts' file it returns before any lookup
+    std::fs::remove_file(setup.paths.accounts_file()).unwrap();
+    let key = cx.read(|cx| running.read(cx).bridges[1].0.clone());
+    cx.update(|cx| running.update(cx, |running, cx| running.remove(&key, cx)));
+    wait(&cx, |cx| running.read(cx).bridges.len() == 1);
+    let told: Vec<(Option<String>, CtlEvent)> = std::iter::from_fn(|| stream.try_recv().ok())
+        .map(|line| (line.account, line.event))
+        .collect();
+    let upn = Some(second.upn);
+    assert_eq!(
+        told,
+        [(upn.clone(), CtlEvent::AccountAdded), (upn, CtlEvent::AccountRemoved)]
+    );
+    cx.update(quit);
+    cx.run_until_parked();
+}
+
+#[test]
 fn an_invalid_added_account_reports_the_failure_in_its_existing_prompt() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = setup(dir.path(), 1);

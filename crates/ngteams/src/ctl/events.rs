@@ -7,6 +7,9 @@
 //! stream closed by its connection's thread, which watches for that (`listener`), and stops counting as one at once,
 //! whatever its filter. With no subscriber the sources build no event at all. The quit closes every stream.
 //!
+//! The app's own state's events (`unread`, `own_status`, `signed_out`, `notification`, `ui`, `call_window`,
+//! `account_added`, `account_removed`) come from [`super::watch`], and `meeting_starting` from [`super::ticker`].
+//!
 //! **The engine's events** come from each account's [`Bridge`] tap ([`tap`]), set when the account starts (at the
 //! launch or added later), which sees each event just before the models apply it, and maps it to the wire's
 //! ([`map`]):
@@ -144,6 +147,60 @@ struct Subscriber {
     id: u64,
     wanted: Wanted,
     sender: async_channel::Sender<EventLine>,
+    /// The meetings told it, each by its id, its start and the lead it was told at ([`Hub::meetings`]).
+    told: HashSet<(String, i64, u32)>,
+}
+
+impl Subscriber {
+    /// The `meetings` of `account` whose lead came at `now` (see [`Hub::meetings`]); `false` once it is to be dropped.
+    fn tell_meetings(&mut self, account: &Origin, meetings: &[Meeting], now: i64) -> bool {
+        let leads = leads(&self.wanted.filter).to_vec();
+        // what can't come again is forgotten
+        self.told
+            .retain(|(_, start, lead)| moment(*start, *lead) + super::ticker::GRACE_MS > now);
+        let due = meetings.iter().flat_map(|meeting| {
+            leads.iter().filter_map(move |&lead| {
+                let at = moment(meeting.start, lead);
+                (at..at + super::ticker::GRACE_MS)
+                    .contains(&now)
+                    .then_some((meeting, lead))
+            })
+        });
+        for (meeting, lead) in due {
+            let event = CtlEvent::MeetingStarting {
+                id: meeting.id.clone(),
+                subject: meeting.subject.clone(),
+                start: meeting.start,
+                minutes: i64::from(lead),
+                joinable: meeting.joinable,
+            };
+            let key = (meeting.id.clone(), meeting.start, lead);
+            if self.told.contains(&key) || !self.wanted.lets(&account.mri, &event) {
+                continue;
+            }
+            self.told.insert(key);
+            let line = EventLine {
+                account: Some(account.upn.clone()),
+                at: now,
+                event,
+            };
+            if !deliver(&self.sender, line) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// A meeting of an account's calendar as the ticker reads it ([`super::ticker`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Meeting {
+    pub id: String,
+    pub subject: String,
+    /// Its start, in ms since the epoch.
+    pub start: i64,
+    /// It can be joined (a Teams meeting).
+    pub joinable: bool,
 }
 
 /// The subscribers (see the module docs). Foreground only.
@@ -151,9 +208,57 @@ struct Subscriber {
 pub struct Hub {
     subscribers: RefCell<Vec<Subscriber>>,
     next: Cell<u64>,
+    /// The calendar's ticker runs ([`super::ticker`]).
+    ticking: Cell<bool>,
 }
 
 impl Hub {
+    /// Whether a subscriber wants events of `kind`; those whose client hung up are dropped first.
+    #[must_use]
+    pub fn wants(&self, kind: &str) -> bool {
+        let mut subscribers = self.subscribers.borrow_mut();
+        subscribers.retain(|subscriber| !subscriber.sender.is_closed());
+        subscribers
+            .iter()
+            .any(|subscriber| subscriber.wanted.filter.wants_kind(kind))
+    }
+
+    /// The longest lead, in minutes, a subscriber wants `meeting_starting` at (0 with none).
+    #[must_use]
+    pub fn longest_lead(&self) -> u32 {
+        self.subscribers
+            .borrow()
+            .iter()
+            .filter(|subscriber| subscriber.wanted.filter.wants_kind(super::ticker::KIND))
+            .flat_map(|subscriber| leads(&subscriber.wanted.filter).iter().copied())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Marks the ticker running: `false` when it ran already.
+    pub fn start_ticking(&self) -> bool {
+        !self.ticking.replace(true)
+    }
+
+    /// Marks the ticker stopped (nobody wants its events).
+    pub fn stop_ticking(&self) {
+        self.ticking.set(false);
+    }
+
+    /// Whether the ticker runs.
+    #[must_use]
+    pub fn ticking(&self) -> bool {
+        self.ticking.get()
+    }
+
+    /// The `meetings` of `account` at `now` (ms since the epoch) to each subscriber whose lead for one came within the
+    /// last [`super::ticker::GRACE_MS`], once per meeting and lead.
+    pub fn meetings(&self, account: &Origin, meetings: &[Meeting], now: i64) {
+        self.subscribers
+            .borrow_mut()
+            .retain_mut(|subscriber| subscriber.tell_meetings(account, meetings, now));
+    }
+
     /// Whether anyone listens: without a subscriber no event is built. A subscriber whose client hung up is dropped
     /// here, whatever its filter.
     #[must_use]
@@ -172,7 +277,12 @@ impl Hub {
         let mut subscribers = self.subscribers.borrow_mut();
         // those gone meanwhile with no event since: dropped, so they don't pile up
         subscribers.retain(|subscriber| !subscriber.sender.is_closed());
-        subscribers.push(Subscriber { id, wanted, sender });
+        subscribers.push(Subscriber {
+            id,
+            wanted,
+            sender,
+            told: HashSet::new(),
+        });
         stream
     }
 
@@ -231,6 +341,20 @@ impl Hub {
     }
 }
 
+/// The leads, in minutes, `filter` wants `meeting_starting` at: its own, else [`super::ticker::DEFAULT_LEADS`].
+fn leads(filter: &EventFilter) -> &[u32] {
+    if filter.leads.is_empty() {
+        super::ticker::DEFAULT_LEADS
+    } else {
+        &filter.leads
+    }
+}
+
+/// When a meeting starting at `start` is told at `lead` minutes before it.
+fn moment(start: i64, lead: u32) -> i64 {
+    start.saturating_sub(i64::from(lead) * 60_000)
+}
+
 /// `line` to a subscriber, never waiting: `false` when it is to be dropped (its connection went, or it fell behind and
 /// was sent `lagged`).
 fn deliver(sender: &async_channel::Sender<EventLine>, line: EventLine) -> bool {
@@ -265,21 +389,48 @@ fn reaction_rows(reactions: &[Reaction], me: &str) -> Vec<ReactionRow> {
 }
 
 /// The account an event came on, as its tap holds it.
+#[derive(Clone)]
 pub struct Origin {
     pub upn: String,
     pub mri: String,
     pub core: Arc<dyn Core>,
 }
 
+impl Origin {
+    /// The account `upn`, whose bridge is `bridge`.
+    #[must_use]
+    pub fn of(upn: &str, bridge: &Entity<Bridge>, cx: &App) -> Self {
+        let core = bridge.read(cx).core();
+        Self {
+            upn: upn.to_owned(),
+            mri: core.me().to_owned(),
+            core,
+        }
+    }
+}
+
+/// The app's accounts, as they run when asked.
+pub type Accounts = Rc<dyn Fn(&App) -> Vec<Origin>>;
+
+/// The accounts `running` runs when asked, in the rail's order; none once the app is gone.
+#[must_use]
+pub fn accounts_of(running: WeakEntity<Running>) -> Accounts {
+    Rc::new(move |cx| {
+        running.upgrade().map_or_else(Vec::new, |running| {
+            running
+                .read(cx)
+                .bridges()
+                .iter()
+                .map(|(_, upn, bridge)| Origin::of(upn, bridge, cx))
+                .collect()
+        })
+    })
+}
+
 /// The tap of `bridge`, the account `upn`'s, publishing its engine's events on `hub` (see the module docs).
 pub fn tap(hub: &Rc<Hub>, upn: &str, bridge: &Entity<Bridge>, cx: &App) {
     let held = bridge.read(cx);
-    let core = held.core();
-    let account = Origin {
-        upn: upn.to_owned(),
-        mri: core.me().to_owned(),
-        core,
-    };
+    let account = Origin::of(upn, bridge, cx);
     let calls = held.models().calls.clone();
     let cutoff = Cell::new(now_ms());
     let hub = Rc::clone(hub);
@@ -552,9 +703,15 @@ pub async fn subscribe(
         from,
         filter,
     };
+    let meetings = wanted.filter.wants_kind(super::ticker::KIND);
     cx.update(|cx| {
-        let running = alive(running, cx)?;
-        Ok(running.read(cx).hub().subscribe(wanted))
+        let alive = alive(running, cx)?;
+        let hub = Rc::clone(alive.read(cx).hub());
+        let stream = hub.subscribe(wanted);
+        if meetings {
+            super::ticker::start(&hub, accounts_of(running.clone()), cx);
+        }
+        Ok(stream)
     })
 }
 

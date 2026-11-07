@@ -220,12 +220,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         ctl: None,
         hub: Rc::default(),
     });
-    running.update(cx, |running, cx| {
-        running.tap_first(cx);
-        for started in others {
-            running.add_started(started, cx);
-        }
-    });
+    start_others(&running, others, cx);
     let window = match desktop.update(cx, Desktop::open_window) {
         Ok(window) => window,
         Err(error) => {
@@ -240,6 +235,22 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     follow_desktop(&desktop, running, cx);
     connect(&desktop, bus, cx);
     Ok(Launched { window, desktop })
+}
+
+/// The first account watched for the event streams, the `others` started after it, and the app's own events watched;
+/// before the window opens, so its shells are watched as they are made.
+fn start_others<S: SecretStore + 'static>(running: &Entity<Running>, others: Vec<Started<S>>, cx: &mut App) {
+    running.update(cx, |running, cx| {
+        running.watch_first(cx);
+        for started in others {
+            running.add_started(started, cx);
+        }
+    });
+    let (hub, desktop) = {
+        let held = running.read(cx);
+        (Rc::clone(held.hub()), held.desktop.clone())
+    };
+    crate::ctl::watch::app(&hub, &desktop, crate::ctl::events::accounts_of(running.downgrade()), cx);
 }
 
 /// `running` held for the app's life, and the control socket at `ctl` served over it until its quit.
@@ -352,10 +363,18 @@ impl Running {
         &self.hub
     }
 
-    /// The first account's bridge tapped for the event streams (the others are as they start).
-    fn tap_first(&self, cx: &App) {
+    /// The first account watched for the event streams (the others are as they start).
+    fn watch_first(&self, cx: &mut App) {
         if let Some((_, upn, bridge)) = self.bridges.first() {
-            crate::ctl::events::tap(&self.hub, upn, bridge, cx);
+            crate::ctl::watch::account(&self.hub, upn, bridge, &self.desktop, cx);
+        }
+    }
+
+    /// `event` of the account `upn` (its bridge `bridge`) told to the event streams, while anyone listens.
+    fn tell(&self, upn: &str, bridge: &Entity<Bridge>, event: teams_ctl::protocol::CtlEvent, cx: &mut App) {
+        if self.hub.listening() {
+            let origin = crate::ctl::events::Origin::of(upn, bridge, cx);
+            self.hub.publish(&origin, event, cx);
         }
     }
 
@@ -376,7 +395,6 @@ impl Running {
             .detach();
         }
         let (models, bridge) = bridge(engine.handle, calls.as_ref(), cx);
-        crate::ctl::events::tap(&self.hub, &account.upn, &bridge, cx);
         let hint = if self.read_only {
             READ_ONLY_SIGNED_OUT_HINT
         } else {
@@ -398,6 +416,8 @@ impl Running {
             detail: account.upn.clone().into(),
         };
         self.desktop.update(cx, |desktop, cx| desktop.add_account(parts, cx));
+        crate::ctl::watch::account(&self.hub, &account.upn, &bridge, &self.desktop, cx);
+        self.tell(&account.upn, &bridge, teams_ctl::protocol::CtlEvent::AccountAdded, cx);
         self.bridges.push((key, account.upn, bridge));
     }
 
@@ -485,6 +505,7 @@ impl Running {
             return;
         };
         let (key, upn, bridge) = self.bridges.remove(index);
+        self.tell(&upn, &bridge, teams_ctl::protocol::CtlEvent::AccountRemoved, cx);
         let last = self.bridges.is_empty();
         // its own settings go with it; the next account, when it was the first, takes the first's place
         let next = self.bridges.first().map(|(next, _, _)| next.clone());
@@ -631,6 +652,13 @@ pub fn bridges(cx: &App) -> Vec<Entity<Bridge>> {
 pub fn ctl_listening(cx: &App) -> bool {
     cx.try_global::<Held>()
         .is_some_and(|held| held.running.read(cx).hub.listening())
+}
+
+/// Whether the `meeting_starting` ticker runs ([`crate::ctl::events::Hub::ticking`]); not before the launch.
+#[must_use]
+pub fn ctl_ticking(cx: &App) -> bool {
+    cx.try_global::<Held>()
+        .is_some_and(|held| held.running.read(cx).hub.ticking())
 }
 
 /// Quits the app: every account's engine shut down first ([`Running`]'s quit), then the app; before the app was

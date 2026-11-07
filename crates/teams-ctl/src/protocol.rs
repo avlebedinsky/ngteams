@@ -771,7 +771,8 @@ pub enum CtlEvent {
         chat: String,
     },
     TeamsChanged,
-    /// A chat's unread count or the account's total changed.
+    /// A chat's unread count or the account's total (its unread chats) changed: a line per chat whose count changed,
+    /// or one without a chat (count 0) for the badge's first count.
     Unread {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         chat: Option<String>,
@@ -782,7 +783,9 @@ pub enum CtlEvent {
         mri: String,
         availability: String,
     },
-    /// The account's reported status changed (from the menu, ctl or the idle policy).
+    /// The account's reported status changed (from the menu, ctl or the idle policy): `connecting`, `available`,
+    /// `busy`, `do-not-disturb`, `away`, `not-set` (a status chosen whose report failed), `inactive` (idle), `halted`
+    /// or `stopped`.
     OwnStatus {
         availability: String,
     },

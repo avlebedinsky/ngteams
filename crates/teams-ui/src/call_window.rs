@@ -331,6 +331,7 @@ impl CallWindows {
             window,
             _events: events,
         });
+        cx.notify();
     }
 
     /// How the window opens: centred, Teams' call window's size, the app's app id.
@@ -354,6 +355,7 @@ impl CallWindows {
         self.trace_closed(&open, false);
         remove(open.window, cx);
         cx.emit(CallWindowsEvent::Closed);
+        cx.notify();
     }
 
     /// The user closed the window (its own close, or the Close of a call's end or a test call's results, which takes
@@ -377,6 +379,7 @@ impl CallWindows {
             remove(open.window, cx);
         }
         cx.emit(CallWindowsEvent::Closed);
+        cx.notify();
     }
 
     /// A window went away: the call's, without being asked to here, is as the user closing it.

@@ -11,7 +11,7 @@ mod ctl_support;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,13 +26,16 @@ use teams_core::{
 use teams_ctl::ClientError;
 use teams_ctl::protocol::{
     Connection, CtlEvent, ErrorCode, EventFilter, EventLine, MessageSource, OutboxState, PersonRow, ReactionRow,
+    UiState, View, WindowState,
 };
 use teams_proto::Mri;
 use teams_store::{
     Applied, Conversation, ConversationKind, Member, Message, NameSource, OutboxEntry, OutboxKind, PictureState,
     Profile, ReactionChange, Store,
 };
-use teams_ui::{Bridge, Calls};
+use teams_ui::{Bridge, Calls, Desktop, Root, Shell};
+
+use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 
 const BEE: &str = "8:orgid:00000000-0000-4000-8000-0000000000b1";
 const ONE_TO_ONE: &str = "19:00000000-0000-4000-8000-0000000000b1_00000000-0000-4000-8000-0000000000ff@unq.gbl.spaces";
@@ -173,7 +176,8 @@ struct Subscriber {
 struct App {
     cx: TestAppContext,
     socket: PathBuf,
-    _dir: tempfile::TempDir,
+    desktop: Entity<Desktop>,
+    dir: tempfile::TempDir,
 }
 
 impl App {
@@ -182,8 +186,64 @@ impl App {
         let socket = socket_in(&dir);
         let cx = TestAppContext::single();
         let others = [(OTHER_UPN, "00000000-0000-4000-8000-0000000000fe")];
-        launched_with_others(&cx, dir.path(), &socket, &Rc::new(Cell::new(0)), seed, &others);
-        Self { cx, socket, _dir: dir }
+        let (launched, _) = launched_with_others(&cx, dir.path(), &socket, &Rc::new(Cell::new(0)), seed, &others);
+        Self {
+            cx,
+            socket,
+            desktop: launched.desktop,
+            dir,
+        }
+    }
+
+    /// The first account's store, opened beside its engine as the service's writes would change it.
+    fn store(&self) -> Store {
+        let dir = self.dir.path();
+        let paths = PersonalPaths::new(dir.join("config/ngteams"), dir.join("share/ngteams"));
+        let account = PersonalAccount::new(
+            UPN,
+            "00000000-0000-4000-8000-0000000000ff",
+            "00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        Store::open(&paths.store_file(&account).unwrap()).unwrap()
+    }
+
+    /// [`App::read_until`], GPUI's clock advanced by `step` each time (its timers fire).
+    fn read_advancing(
+        &self,
+        subscriber: &Subscriber,
+        step: Duration,
+        mut last: impl FnMut(&EventLine) -> bool,
+    ) -> Vec<EventLine> {
+        let start = Instant::now();
+        let mut read = Vec::new();
+        loop {
+            self.cx.executor().advance_clock(step);
+            self.cx.run_until_parked();
+            while let Ok(line) = subscriber.lines.try_recv() {
+                let Some(line) = line else { return read };
+                let done = last(&line);
+                read.push(line);
+                if done {
+                    return read;
+                }
+            }
+            assert!(start.elapsed() < WAIT, "the events didn't come in time: {read:?}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The shell the window shows.
+    fn shell(&self) -> Entity<Shell> {
+        let window = self.cx.read(|cx| self.desktop.read(cx).window().unwrap());
+        self.cx.update(|cx| {
+            window
+                .update(cx, |kit, _, cx| {
+                    let root = kit.view().clone().downcast::<Root>().unwrap();
+                    root.read(cx).shell_in(cx).cloned().unwrap()
+                })
+                .unwrap()
+        })
     }
 
     /// The bridge of the account at `index`.
@@ -887,4 +947,586 @@ fn an_outbox_row_is_told_as_where_it_stands() {
         (row.id, row.write.as_str(), row.chat.as_deref()),
         (7, "send", Some(PROJECT))
     );
+}
+
+fn unread(chat: Option<&str>, count: u64, total: u64) -> CtlEvent {
+    CtlEvent::Unread {
+        chat: chat.map(str::to_owned),
+        count,
+        total,
+    }
+}
+
+/// Bee's messages `ids` of `chat`, stored as the service's delivery would store them, and the account's engine telling
+/// the chat changed.
+fn delivered(app: &App, store: &mut Store, chat: &str, ids: &[&str]) {
+    for id in ids {
+        let at = now_ms();
+        store
+            .upsert_message(&message(chat, id, BEE, at, "<p>Hey</p>"), None)
+            .unwrap();
+    }
+    app.tell(
+        0,
+        Event::ConversationChanged {
+            conversation: chat.to_owned(),
+        },
+    );
+}
+
+const STEP: Duration = Duration::from_millis(100);
+
+#[test]
+fn unread_is_told_as_the_badge_counts_each_chat_up_and_down_with_the_total() {
+    let app = App::start();
+    let tray = app.cx.read(|cx| {
+        let rail = app.desktop.read(cx).accounts().read(cx);
+        rail.tile(ME).unwrap().tray.clone()
+    });
+    // the badge's first count, before anyone listens: nothing is unread
+    pump_until(&app.cx, STEP, |cx| tray.read(cx).total() == Some(0));
+    let counts = app.subscribe(None, kinds(&["unread"]), false).unwrap();
+    let mut store = app.store();
+
+    delivered(&app, &mut store, ONE_TO_ONE, &["11"]);
+    let read = app.read_advancing(&counts, STEP, |_| true);
+    assert_eq!(events(read), [unread(Some(ONE_TO_ONE), 1, 1)]);
+    delivered(&app, &mut store, PROJECT, &["12", "13"]);
+    let read = app.read_advancing(&counts, STEP, |_| true);
+    assert_eq!(events(read), [unread(Some(PROJECT), 2, 2)]);
+    // a chat's count up, the total as it was
+    delivered(&app, &mut store, ONE_TO_ONE, &["14"]);
+    let read = app.read_advancing(&counts, STEP, |_| true);
+    assert_eq!(events(read), [unread(Some(ONE_TO_ONE), 2, 2)]);
+    // the 1:1 chat read: down to nothing, the total with it
+    let horizon = teams_store::ReadHorizon {
+        conversation_id: ONE_TO_ONE.to_owned(),
+        user: ME.to_owned(),
+        last_read_arrival: now_ms(),
+        updated: now_ms(),
+        raw: None,
+    };
+    store.set_read_horizon(&horizon).unwrap();
+    app.tell(
+        0,
+        Event::ReadHorizon {
+            conversation: ONE_TO_ONE.to_owned(),
+        },
+    );
+    let read = app.read_advancing(&counts, STEP, |_| true);
+    assert_eq!(read[0].account.as_deref(), Some(UPN));
+    assert_eq!(events(read), [unread(Some(ONE_TO_ONE), 0, 1)]);
+    quit(&app.cx);
+}
+
+#[test]
+fn unread_changes_name_each_chat_that_changed_and_a_first_count_alone() {
+    use ngteams::ctl::watch::{Counts, unread_changes};
+
+    let counts = |chats: &[(&str, u64)], total: Option<u64>| Counts {
+        chats: chats.iter().map(|(chat, count)| ((*chat).to_owned(), *count)).collect(),
+        total,
+    };
+    let none = counts(&[], None);
+    assert_eq!(unread_changes(&none, &counts(&[], Some(0))), [unread(None, 0, 0)]);
+    let one = counts(&[("a", 1)], Some(1));
+    let two = counts(&[("a", 3), ("b", 1)], Some(2));
+    assert_eq!(
+        unread_changes(&one, &two),
+        [unread(Some("a"), 3, 2), unread(Some("b"), 1, 2)]
+    );
+    assert_eq!(
+        unread_changes(&two, &counts(&[("b", 1)], Some(1))),
+        [unread(Some("a"), 0, 1)]
+    );
+    assert!(unread_changes(&two, &two).is_empty());
+}
+
+fn statuses(lines: Vec<EventLine>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| match line.event {
+            CtlEvent::OwnStatus { availability } => availability,
+            other => panic!("not an own status: {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn own_status_is_told_as_the_idle_policy_and_the_status_menu_set_it() {
+    let app = App::start();
+    let settings = app.cx.read(|cx| app.desktop.read(cx).settings().clone());
+    app.cx
+        .update(|cx| settings.update(cx, teams_ui::SettingsModel::confirm_first_run));
+    let own = app.subscribe(None, kinds(&["own_status"]), false).unwrap();
+    let registered = || app.tell(0, Event::Registration(teams_core::RegistrationReport::Registered));
+
+    // automatic, the window used since the start: the idle policy reports available
+    registered();
+    assert_eq!(statuses(app.read_advancing(&own, STEP, |_| true)), ["available"]);
+    // the engine has no endpoint in fact (no push channel here): it refuses, and the next tick says so
+    let next = |app: &App| statuses(app.read_advancing(&own, Duration::from_secs(1), |_| true));
+    assert_eq!(next(&app), ["connecting"]);
+    // the status menu's busy, reported once registered again
+    let shell = app.shell();
+    app.cx.update(|cx| {
+        shell.update(cx, |shell, cx| {
+            shell.choose_status(teams_ui::settings::ManualStatus::Busy, cx);
+        });
+    });
+    registered();
+    assert_eq!(statuses(app.read_advancing(&own, STEP, |_| true)), ["busy"]);
+    assert_eq!(next(&app), ["connecting"]);
+    quit(&app.cx);
+}
+
+#[test]
+fn reporting_is_named_as_the_wire_tells_it() {
+    use ngteams::ctl::watch::reporting_name;
+    use teams_core::{Choice, Reporting};
+    use teams_proto::ManualAvailability;
+
+    let named = [
+        (Reporting::Connecting, "connecting"),
+        (Reporting::Available, "available"),
+        (Reporting::Manual(ManualAvailability::Available), "available"),
+        (Reporting::Manual(ManualAvailability::Busy), "busy"),
+        (Reporting::Manual(ManualAvailability::DoNotDisturb), "do-not-disturb"),
+        (Reporting::Manual(ManualAvailability::Away), "away"),
+        (Reporting::NotSet(Choice::Automatic), "not-set"),
+        (Reporting::Inactive, "inactive"),
+        (Reporting::Halted, "halted"),
+        (Reporting::Quit, "stopped"),
+    ];
+    for (reporting, name) in named {
+        assert_eq!(reporting_name(reporting), name);
+    }
+}
+
+/// A notification server that shows everything, each with an id of its own.
+#[derive(Default)]
+struct Shows(std::sync::atomic::AtomicU32);
+
+impl teams_ui::NotificationServer for Shows {
+    fn show(
+        &self,
+        _: &teams_ui::Notice,
+        _: u32,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<u32, String>> + Send>> {
+        let id = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Box::pin(async move { Ok(id) })
+    }
+
+    fn close(&self, _: u32) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+}
+
+#[test]
+fn a_notification_shown_is_told_with_its_title_and_chat() {
+    let app = App::start();
+    app.cx.update(|cx| {
+        app.desktop
+            .update(cx, |desktop, cx| desktop.use_server(Arc::new(Shows::default()), cx));
+    });
+    let shown = app.subscribe(None, kinds(&["notification"]), false).unwrap();
+    let lunch = message(PROJECT, "21", BEE, now_ms(), "<p>Lunch?</p>");
+    app.tell(0, arrived(lunch, Applied::Inserted, Source::Delivery));
+    let read = app.read_advancing(&shown, Duration::from_millis(50), |_| true);
+    assert_eq!(read[0].account.as_deref(), Some(UPN));
+    let CtlEvent::Notification { title, chat } = &read[0].event else {
+        panic!("a notification: {read:?}");
+    };
+    assert_eq!(
+        (title.as_str(), chat.as_deref()),
+        ("Bee Example in Project", Some(PROJECT))
+    );
+    quit(&app.cx);
+}
+
+fn shown(lines: &[EventLine]) -> Vec<(Option<String>, UiState)> {
+    lines
+        .iter()
+        .map(|line| match &line.event {
+            CtlEvent::Ui { state } => (line.account.clone(), state.clone()),
+            other => panic!("not a ui event: {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn navigation_is_told_as_what_the_window_shows() {
+    let app = App::start();
+    let ui = app.subscribe(None, kinds(&["ui"]), false).unwrap();
+    let in_view =
+        |view: View| move |line: &EventLine| matches!(&line.event, CtlEvent::Ui { state } if state.view == view);
+    // the chat list loaded, which names the chat
+    let shell = app.shell();
+    let list = app.cx.read(|cx| shell.read(cx).list().clone());
+    pump_until(&app.cx, STEP, |cx| list.read(cx).row(PROJECT).is_some());
+
+    app.cx.update(|cx| {
+        app.desktop
+            .update(cx, |desktop, cx| desktop.open_chat_of(ME, PROJECT.to_owned(), cx));
+    });
+    let read = app.read_until(&ui, in_view(View::Chat));
+    let project = UiState {
+        shown: Some(UPN.to_owned()),
+        view: View::Chat,
+        chat: Some(PROJECT.to_owned()),
+        chat_title: Some("Project".to_owned()),
+        window: WindowState::Shown,
+        call_window: false,
+    };
+    assert_eq!(shown(&read).last(), Some(&(Some(UPN.to_owned()), project.clone())));
+
+    // the chat renamed: its list names it anew, the shell left as it was
+    let mut store = app.store();
+    store
+        .upsert_conversation(&Conversation {
+            id: PROJECT.to_owned(),
+            kind: ConversationKind::Group,
+            topic: Some("Budget".to_owned()),
+            version: 2,
+            last_activity: None,
+        })
+        .unwrap();
+    app.tell(
+        0,
+        Event::ConversationChanged {
+            conversation: PROJECT.to_owned(),
+        },
+    );
+    let read = app.read_until(
+        &ui,
+        |line| matches!(&line.event, CtlEvent::Ui { state } if state.chat_title.as_deref() == Some("Budget")),
+    );
+    let budget = UiState {
+        chat_title: Some("Budget".to_owned()),
+        ..project
+    };
+    assert_eq!(shown(&read).last(), Some(&(Some(UPN.to_owned()), budget)));
+
+    let window = app.cx.read(|cx| app.desktop.read(cx).window().unwrap());
+    let shell = app.shell();
+    app.cx.update(|cx| {
+        window
+            .update(cx, |_, window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.open_settings_page(teams_ui::settings_view::Page::General, window, cx);
+                });
+            })
+            .unwrap();
+    });
+    let read = app.read_until(&ui, in_view(View::Settings));
+    let (account, state) = shown(&read).pop().unwrap();
+    assert_eq!((account.as_deref(), state.chat), (Some(UPN), None));
+
+    // the other account shown: told as its own
+    app.cx
+        .update(|cx| app.desktop.update(cx, |desktop, cx| desktop.switch(OTHER, cx)));
+    let read = app.read_until(&ui, |line| line.account.as_deref() == Some(OTHER_UPN));
+    let (_, state) = shown(&read).pop().unwrap();
+    assert_eq!(state.shown.as_deref(), Some(OTHER_UPN));
+    quit(&app.cx);
+}
+
+#[test]
+fn a_subscriber_wanting_meetings_starts_the_ticker_and_another_does_not() {
+    let app = App::start();
+    let ticking = || app.cx.read(ngteams::app::ctl_ticking);
+    let typing = app.subscribe(None, kinds(&["typing"]), false).unwrap();
+    assert!(!ticking(), "nobody wants meetings");
+    let meetings = app.subscribe(None, kinds(&["meeting_*"]), false).unwrap();
+    assert!(ticking(), "a subscriber wants meetings");
+    drop((typing, meetings));
+    quit(&app.cx);
+}
+
+#[test]
+fn a_sign_out_is_told_as_the_account_s() {
+    let app = App::start();
+    let out = app.subscribe(None, kinds(&["signed_out", "presence"]), false).unwrap();
+    let bridge = app.bridge(1);
+    app.cx.update(|cx| {
+        let stopped = bridge.update(cx, |bridge, cx| bridge.sign_out("Signed out".into(), cx));
+        stopped.detach();
+    });
+    app.mark(0, "marker");
+    let read = app.read_until(&out, |line| is_marker(line, "marker"));
+    let told: Vec<(Option<&str>, &CtlEvent)> = read
+        .iter()
+        .filter(|line| !is_marker(line, "marker"))
+        .map(|line| (line.account.as_deref(), &line.event))
+        .collect();
+    assert_eq!(told, [(Some(OTHER_UPN), &CtlEvent::SignedOut)]);
+    quit(&app.cx);
+}
+
+/// The ticker over a calendar of its own (a core that answers the calendar alone), with the hub as `subscribe` fills it.
+mod ticking {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ngteams::ctl::events::{Accounts, Hub, Origin, Wanted};
+    use ngteams::ctl::ticker::{self, TICK};
+    use teams_core::sync::{CatchUpReport, Synced};
+    use teams_core::{
+        Action, Answer, CalendarEvent, FileStream, OwnStatus, Person, PictureBytes, Reply, Strip, Transient,
+        TransientSent,
+    };
+    use teams_proto::EventTime;
+    use teams_store::{MessagePage, PageCursor, Reaction, ReadHorizon};
+    use teams_ui::Core;
+
+    use super::*;
+
+    /// The account's calendar: what the service gives and the store keeps are the same here. One `held` never answers
+    /// a read from the service (as the engine holds it through a catch-up).
+    struct Calendar {
+        events: Mutex<Vec<CalendarEvent>>,
+        reads: AtomicUsize,
+        held: Option<Mutex<Vec<Answer<Vec<CalendarEvent>>>>>,
+    }
+
+    impl Calendar {
+        fn new(events: Vec<CalendarEvent>, held: bool) -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(events),
+                reads: AtomicUsize::new(0),
+                held: held.then(|| Mutex::new(Vec::new())),
+            })
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    fn stopped<T>() -> Reply<T> {
+        Reply::ready(Err(EngineError::Stopped))
+    }
+
+    macro_rules! stopped {
+        ($($name:ident($($arg:ty),*) -> $out:ty;)*) => {
+            $(fn $name(&self, $(_: $arg),*) -> Reply<$out> {
+                stopped()
+            })*
+        };
+    }
+
+    impl Core for Calendar {
+        fn me(&self) -> &str {
+            ME
+        }
+
+        fn calendar(&self, _: i64, _: i64) -> Reply<Vec<CalendarEvent>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            match &self.held {
+                Some(held) => {
+                    let (answer, reply) = Reply::later();
+                    held.lock().unwrap().push(answer);
+                    reply
+                }
+                None => Reply::ready(Ok(self.events.lock().unwrap().clone())),
+            }
+        }
+
+        fn stored_calendar(&self, start: i64, end: i64) -> Reply<Vec<CalendarEvent>> {
+            let events = self.events.lock().unwrap();
+            let within = |event: &&CalendarEvent| {
+                let at = teams_core::calendar::instant(event.start);
+                (start..end).contains(&at)
+            };
+            Reply::ready(Ok(events.iter().filter(within).cloned().collect()))
+        }
+
+        stopped! {
+            write(Action) -> OutboxEntry;
+            resend(i64) -> OutboxEntry;
+            transient(Transient) -> TransientSent;
+            own_availability(OwnStatus) -> TransientSent;
+            sync() -> CatchUpReport;
+            load_older(String) -> Option<Synced>;
+            conversations(usize) -> Vec<Conversation>;
+            messages(String, Option<PageCursor>, usize) -> MessagePage;
+            message(String, String) -> Option<Message>;
+            reactions(String, String) -> Vec<Reaction>;
+            members(String) -> Vec<Member>;
+            unread_count(String) -> u64;
+            person(String) -> Person;
+            presence(String) -> Availability;
+            reaction_animation(String) -> Option<Strip>;
+            message_picture(String) -> Option<PictureBytes>;
+            file_thumbnail(String) -> Option<PictureBytes>;
+            file_stream(String, u64, u64) -> FileStream;
+            file_size(String) -> u64;
+            recent_reactions(usize) -> Vec<String>;
+            frequent_reactions(usize) -> Vec<String>;
+            read_horizon(String) -> Option<ReadHorizon>;
+            history_complete(String) -> Option<bool>;
+            outbox_entry(i64) -> Option<OutboxEntry>;
+            outbox_unsettled(String) -> Vec<OutboxEntry>;
+            left_by_earlier_runs() -> Vec<OutboxEntry>;
+            search(String, Vec<String>, usize) -> Vec<teams_store::SearchHit>;
+            teams() -> Option<Vec<teams_store::Team>>;
+            chat_listing() -> teams_core::ChatListing;
+            sync_conversation(String) -> Synced;
+            reply_roots(String) -> Vec<(String, String)>;
+            call(teams_core::CallAction) -> CallId;
+        }
+    }
+
+    /// An event `id` starting `minutes` after `now`, a Teams meeting when `online`.
+    fn event(id: &str, now: i64, minutes: i64, online: bool) -> CalendarEvent {
+        let entry = json!({
+            "objectId": id,
+            "subject": format!("Subject {id}"),
+            "startTime": "2025-07-01T00:00:00Z",
+            "endTime": "2025-07-01T00:30:00Z",
+            "isOnlineMeeting": online,
+        });
+        let mut event = CalendarEvent::stored(&entry.to_string()).unwrap();
+        event.start = EventTime::Instant(now + minutes * 60_000);
+        event.end = EventTime::Instant(now + (minutes + 30) * 60_000);
+        event
+    }
+
+    fn told(stream: &events::Stream) -> Vec<(String, i64)> {
+        std::iter::from_fn(|| stream.try_recv().ok())
+            .map(|line| match line.event {
+                CtlEvent::MeetingStarting {
+                    id,
+                    minutes,
+                    subject,
+                    joinable,
+                    ..
+                } => {
+                    assert_eq!(subject, format!("Subject {id}"));
+                    assert_eq!(joinable, id == "standup", "{id}");
+                    (id, minutes)
+                }
+                other => panic!("not a meeting: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn wanting(leads: &[u32]) -> Wanted {
+        Wanted {
+            filter: EventFilter {
+                leads: leads.to_vec(),
+                ..kinds(&["meeting_starting"])
+            },
+            ..Wanted::default()
+        }
+    }
+
+    #[test]
+    fn a_meeting_is_told_once_at_each_lead_and_the_ticker_runs_only_while_wanted() {
+        let cx = TestAppContext::single();
+        let now = cx.read(ticker::wall_ms);
+        let mut cancelled = event("cancelled", now, 6, true);
+        cancelled.cancelled = true;
+        let mut all_day = event("all-day", now, 6, false);
+        all_day.all_day = true;
+        let calendar = Calendar::new(
+            vec![
+                event("standup", now, 7, true),
+                event("lunch", now, 9, false),
+                cancelled,
+                all_day,
+            ],
+            false,
+        );
+        let accounts = accounts(&[(ME, &calendar)]);
+        let hub = Rc::new(Hub::default());
+
+        // nobody wants meetings: the ticker stops at once, reading nothing
+        cx.update(|cx| ticker::start(&hub, accounts.clone(), cx));
+        cx.run_until_parked();
+        assert!(!hub.ticking());
+        assert_eq!(calendar.reads(), 0);
+
+        let defaults = hub.subscribe(wanting(&[]));
+        let six = hub.subscribe(wanting(&[6]));
+        // a lead whose moment passed before it subscribed: never told late
+        let ten = hub.subscribe(wanting(&[10]));
+        cx.update(|cx| ticker::start(&hub, accounts.clone(), cx));
+        cx.run_until_parked();
+        assert!(hub.ticking());
+        // a second start while it runs starts nothing more
+        cx.update(|cx| ticker::start(&hub, accounts.clone(), cx));
+        for _ in 0..(10 * 60 / TICK.as_secs()) {
+            cx.executor().advance_clock(TICK);
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            told(&defaults),
+            [
+                ("standup".to_owned(), 5),
+                ("lunch".to_owned(), 5),
+                ("standup".to_owned(), 0),
+                ("lunch".to_owned(), 0),
+            ]
+        );
+        assert_eq!(told(&six), [("standup".to_owned(), 6), ("lunch".to_owned(), 6)]);
+        assert!(told(&ten).is_empty());
+        // read from the service at the start and every five minutes since
+        assert_eq!(calendar.reads(), 3);
+
+        // everyone gone: the ticker stops at its next tick
+        drop((defaults, six, ten));
+        cx.executor().advance_clock(TICK);
+        cx.run_until_parked();
+        assert!(!hub.ticking());
+    }
+
+    /// The accounts the ticker reads: each MRI's calendar.
+    fn accounts(calendars: &[(&str, &Arc<Calendar>)]) -> Accounts {
+        let origins: Vec<Origin> = calendars
+            .iter()
+            .map(|(mri, calendar)| Origin {
+                upn: format!("{mri}@example.test"),
+                mri: (*mri).to_owned(),
+                core: Arc::clone(calendar) as Arc<dyn Core>,
+            })
+            .collect();
+        Rc::new(move |_| origins.clone())
+    }
+
+    #[test]
+    fn a_read_from_the_service_that_never_answers_holds_up_no_meeting() {
+        let cx = TestAppContext::single();
+        let now = cx.read(ticker::wall_ms);
+        // the first account's read is held (a catch-up the engine is in), the other's answers
+        let held = Calendar::new(vec![event("standup", now, 7, true)], true);
+        let answered = Calendar::new(vec![event("lunch", now, 9, false)], false);
+        let hub = Rc::new(Hub::default());
+        let defaults = hub.subscribe(wanting(&[]));
+        cx.update(|cx| ticker::start(&hub, accounts(&[(ME, &held), (OTHER, &answered)]), cx));
+        cx.run_until_parked();
+        for _ in 0..(10 * 60 / TICK.as_secs()) {
+            cx.executor().advance_clock(TICK);
+            cx.run_until_parked();
+        }
+        // the held account's stored meeting and the other's both told on time
+        assert_eq!(
+            told(&defaults),
+            [
+                ("standup".to_owned(), 5),
+                ("lunch".to_owned(), 5),
+                ("standup".to_owned(), 0),
+                ("lunch".to_owned(), 0),
+            ]
+        );
+        // one read at a time: the held one is never read again while it runs
+        assert_eq!((held.reads(), answered.reads()), (1, 3));
+
+        // a subscriber looking further ahead than the last read reached: read again at the next tick
+        let hour = hub.subscribe(wanting(&[60]));
+        cx.executor().advance_clock(TICK);
+        cx.run_until_parked();
+        assert_eq!((held.reads(), answered.reads()), (1, 4));
+        drop((defaults, hour));
+    }
 }

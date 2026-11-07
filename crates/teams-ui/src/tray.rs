@@ -243,13 +243,21 @@ impl Tray {
     }
 
     /// A count's result: the chats it counted, as of `revisions`; the total is how many of them hold anything unread.
+    /// The observers are told when the total or a chat's count changed (the control socket's `unread` follows both).
     fn counted(&mut self, chats: Vec<(String, Counted)>, cx: &mut Context<Self>) -> bool {
-        self.counted = chats.into_iter().collect();
+        let counted: HashMap<String, Counted> = chats.into_iter().collect();
+        let recounted = counted.len() != self.counted.len()
+            || counted
+                .iter()
+                .any(|(chat, now)| self.counted.get(chat).is_none_or(|before| before.unread != now.unread));
+        self.counted = counted;
         let unread = self.counted.values().filter(|counted| counted.unread > 0).count();
         let total = u64::try_from(unread).unwrap_or(u64::MAX);
         if self.total != Some(total) {
             self.total = Some(total);
             self.show(cx);
+            cx.notify();
+        } else if recounted {
             cx.notify();
         }
         if std::mem::take(&mut self.again) {

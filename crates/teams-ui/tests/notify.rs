@@ -44,6 +44,8 @@ struct Notifying {
     notifier: Entity<Notifier>,
     server: Arc<FakeServer>,
     opened: Arc<Mutex<Vec<String>>>,
+    /// Each notification told shown ([`NotifierEvent::Shown`]): its chat and title.
+    told: Arc<Mutex<Vec<(String, String)>>>,
     viewing: Arc<Mutex<Option<String>>>,
     settings: Entity<SettingsModel>,
     written: Written,
@@ -94,6 +96,8 @@ impl Notifying {
         let settings = rig.cx.update(|cx| cx.new(|_| SettingsModel::in_memory(settings)));
         let models = rig.models.clone();
         let (shown, given, recorded) = (Arc::clone(&viewing), Arc::clone(&server), Arc::clone(&opened));
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let telling = Arc::clone(&told);
         let notifier = rig.cx.update(|cx| {
             let notifier = cx.new(|cx| {
                 let mut notifier = Notifier::new(core, &models, settings.clone(), trace, cx);
@@ -104,6 +108,9 @@ impl Notifying {
             cx.subscribe(&notifier, move |_, event, _| match event {
                 NotifierEvent::Open(id) => recorded.lock().unwrap().push(id.clone()),
                 NotifierEvent::OpenChannel(id) => recorded.lock().unwrap().push(format!("channel {id}")),
+                NotifierEvent::Shown { conversation, title } => {
+                    telling.lock().unwrap().push((conversation.clone(), title.clone()));
+                }
             })
             .detach();
             notifier
@@ -113,6 +120,7 @@ impl Notifying {
             notifier,
             server,
             opened,
+            told,
             viewing,
             settings,
             written,
@@ -173,6 +181,14 @@ fn a_delivered_message_from_someone_else_notifies_with_its_name_and_first_line()
     n.arrive(message(TRIO, "2", LAB_C, "<p>hi all</p>", 6_000), Source::Delivery);
     n.settle();
     assert_eq!(n.server.shown()[1].summary, "Cee in Lab trio");
+    // each one shown is told, with its chat and title
+    assert_eq!(
+        *n.told.lock().unwrap(),
+        [
+            (AB.to_owned(), "Bee".to_owned()),
+            (TRIO.to_owned(), "Cee in Lab trio".to_owned())
+        ]
+    );
     // the trace says which chat and what kind, never a name or text
     assert_eq!(
         n.shown_lines(),
@@ -575,6 +591,11 @@ fn more_than_three_in_one_chat_collapse_into_one() {
     assert_eq!(
         (notice.kind, notice.body.as_str()),
         (NoticeKind::Collapsed, "4 new messages")
+    );
+    // the collapsed one is told too, titled by its chat
+    assert_eq!(
+        n.told.lock().unwrap().last(),
+        Some(&(AB.to_owned(), notice.summary.clone()))
     );
     n.arrive(
         mentioning(message(AB, "5", LAB_B, "<p>and you</p>", 5_000), LAB_A),

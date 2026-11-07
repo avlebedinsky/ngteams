@@ -1051,7 +1051,8 @@ fn kept(events: &[CalendarEvent], entries: Vec<String>) -> Vec<StoredEvent> {
 
 /// An event's start or end in ms since the epoch: a time without an offset is the desktop's local time, as the
 /// calendar places it (and the service, asked for a window by local midnights, gives it).
-fn instant(time: EventTime) -> i64 {
+#[must_use]
+pub fn instant(time: EventTime) -> i64 {
     match time {
         EventTime::Instant(ms) => ms,
         EventTime::Floating(time) => {

@@ -25,7 +25,7 @@ use notices::{Asked, FakeServer, chat, message};
 use teams_core::{AVAILABLE_REFRESH, Event, MessageChange, OwnStatus, RegistrationReport, Reporting, Source};
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::ViewTrace;
-use teams_ui::desktop::{Desktop, DesktopEvent, DesktopParts};
+use teams_ui::desktop::{Desktop, DesktopEvent, DesktopParts, WindowShown};
 use teams_ui::notify::{GATHER, NoticeKind};
 use teams_ui::settings::Settings;
 use teams_ui::shell::Main;
@@ -287,6 +287,8 @@ fn closing_the_window_quits_without_a_tray_item() {
     assert_eq!(d.traced("window", "opened"), 1);
     d.close(window);
     assert_eq!(d.window(), None);
+    let shown = d.rig.cx.read(|cx| d.desktop.read(cx).ui_state(cx));
+    assert_eq!((shown.window, shown.main), (WindowShown::Closed, None));
     assert_eq!(*d.asked.lock().unwrap(), [DesktopEvent::Quit]);
     assert_eq!(d.traced("window", "closed"), 1);
 }
@@ -298,8 +300,17 @@ fn with_a_tray_item_closing_the_window_keeps_the_app_and_the_tray_shows_it_again
         .cx
         .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(true, cx)));
     let window = d.open();
+    // what the app shows: the account, its shell's view, the window
+    let ui = || d.rig.cx.read(|cx| d.desktop.read(cx).ui_state(cx));
+    let open = ui();
+    assert_eq!(open.account.as_deref(), Some(LAB_A));
+    assert_eq!(
+        (open.window, open.main, open.title, open.call_window),
+        (WindowShown::Shown, Some(Main::Nothing), None, false)
+    );
     d.close(window);
     assert_eq!(d.window(), None);
+    assert_eq!((ui().window, ui().main), (WindowShown::Tray, None));
     assert_eq!(*d.asked.lock().unwrap(), []);
     d.tray(TrayEvent::Open);
     d.rig.cx.run_until_parked();

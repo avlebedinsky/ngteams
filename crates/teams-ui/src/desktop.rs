@@ -31,6 +31,10 @@
 //!   ([`DesktopEvent::AddAccount`], [`DesktopEvent::RemoveAccount`]), which starts or stops the account's engine and
 //!   tells the desktop.
 //!
+//! What it shows (the account, the view, the window, a call's window) reads as one [`UiShown`]
+//! ([`Desktop::ui_state`]); the desktop tells its observers when its window opens or closes or its tray item comes or
+//! goes.
+//!
 //! What it does is traced: `window opened` (the root view's), `window closed`, `tray open`/`quit`, `tray
 //! registered`/`gone` (the item up or down), and the notifier's and the tray's own lines.
 
@@ -88,6 +92,32 @@ pub enum DesktopEvent {
     AddAccount,
     /// The user asked to sign out of the account of this MRI and remove it (its account menu).
     RemoveAccount(String),
+}
+
+/// Where the main window is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowShown {
+    /// Open.
+    Shown,
+    /// Closed while the tray item is up: the app runs on.
+    Tray,
+    /// Closed, with no tray item (a call's window keeps the app).
+    Closed,
+}
+
+/// What the app shows, as [`Desktop::ui_state`] reads it (the control socket's `ui state` and `ui` event). The
+/// observers of the desktop, its accounts, its call windows and the window's shells are told when it may have changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiShown {
+    /// The account the window shows (or would, opened), by its MRI.
+    pub account: Option<String>,
+    /// What its shell shows right of the list, while the window is open.
+    pub main: Option<Main>,
+    /// The chat shown's name as the chat list gives it.
+    pub title: Option<String>,
+    pub window: WindowShown,
+    /// A call's window is open.
+    pub call_window: bool,
 }
 
 /// One account's part of the desktop: its shell's parts, its notifications, its incoming calls' alert and its own
@@ -275,6 +305,7 @@ impl Desktop {
         let opening = cx.subscribe(&notifier, move |this: &mut Self, _, event, cx| match event {
             NotifierEvent::Open(id) => this.open_chat_of(&opened, id.clone(), cx),
             NotifierEvent::OpenChannel(id) => this.open_channel_of(&opened, id.clone(), cx),
+            NotifierEvent::Shown { .. } => {}
         });
         let call_alert = cx.new(|cx| {
             CallAlert::new(
@@ -476,6 +507,37 @@ impl Desktop {
         self.in_tray
     }
 
+    /// What the app shows now ([`UiShown`]).
+    #[must_use]
+    pub fn ui_state(&self, cx: &App) -> UiShown {
+        let account = self.accounts.read(cx).active_key().map(str::to_owned);
+        let shell = self.window.and_then(|window| {
+            let root = window.read(cx).ok()?.view().clone().downcast::<Root>().ok()?;
+            root.read(cx).shell_in(cx).cloned()
+        });
+        let (main, title) = shell.map_or((None, None), |shell| {
+            let shell = shell.read(cx);
+            let main = shell.main().clone();
+            let title = match &main {
+                Main::Chat(id) => shell.list().read(cx).row(id).map(|row| row.name.to_string()),
+                _ => None,
+            };
+            (Some(main), title)
+        });
+        let window = match (self.window, self.in_tray) {
+            (Some(_), _) => WindowShown::Shown,
+            (None, true) => WindowShown::Tray,
+            (None, false) => WindowShown::Closed,
+        };
+        UiShown {
+            account,
+            main,
+            title,
+            window,
+            call_window: self.call_windows.read(cx).window().is_some(),
+        }
+    }
+
     /// The tray item is up (a watcher has it), or down again (its watcher left, or the bus was lost): closing the
     /// window keeps the app, or quits it. Down while the window is closed, the window opens again.
     pub fn set_in_tray(&mut self, in_tray: bool, cx: &mut Context<Self>) {
@@ -485,6 +547,7 @@ impl Desktop {
         self.in_tray = in_tray;
         let change = if in_tray { "registered" } else { "gone" };
         self.parts.shell.trace.record(&TraceLine::new("tray", change));
+        cx.notify();
         if !in_tray && self.window.is_none() {
             self.show(cx);
         }
@@ -513,6 +576,7 @@ impl Desktop {
             None => window::open(cx, app_id, title, self.parts.shell.clone())?,
         };
         self.window = Some(window);
+        cx.notify();
         Ok(window)
     }
 
@@ -572,6 +636,7 @@ impl Desktop {
         }
         self.window = None;
         self.parts.shell.trace.record(&TraceLine::new("window", "closed"));
+        cx.notify();
         // a call's window keeps the app until it closes too
         let call_window = self.call_windows.read(cx).window().is_some();
         log::info!(

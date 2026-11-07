@@ -29,7 +29,8 @@
 //!
 //! **Activating one** (its body, the `default` action) opens its chat: [`NotifierEvent::Open`], or for a team's
 //! channel (the stored conversation's kind when it was shown) [`NotifierEvent::OpenChannel`], which the
-//! [`Desktop`](crate::desktop::Desktop) acts on.
+//! [`Desktop`](crate::desktop::Desktop) acts on. Each one shown is told too ([`NotifierEvent::Shown`]: its chat and
+//! title, for the control socket's event stream).
 //!
 //! **The path.** GPUI's own system notifications reach the bus, but can't replace or close a notification (their tag
 //! replaces nothing on Linux), and each opens a connection of its own with `zbus`'s session-bus constructor, which
@@ -132,6 +133,8 @@ pub enum NotifierEvent {
     Open(String),
     /// A notification of a team's channel was activated: open the channel (never in a chat view).
     OpenChannel(String),
+    /// A notification was shown (the control socket's `notification`): its chat and its title.
+    Shown { conversation: String, title: String },
 }
 
 /// The chat shown in a focused window, if one is: no notification is shown for it.
@@ -402,8 +405,9 @@ impl Notifier {
         })
     }
 
-    /// One notification shown one by one for `conversation`.
-    fn shown_single(&mut self, conversation: &str, kind: NoticeKind, id: u32) {
+    /// `notice`, shown one by one as notification `id`.
+    fn shown_single(&mut self, notice: &Notice, id: u32, cx: &mut Context<Self>) {
+        let (conversation, kind) = (notice.conversation.as_str(), notice.kind);
         let notices = self.shown.entry(conversation.to_owned()).or_default();
         notices.singles.push(id);
         notices.count += 1;
@@ -414,11 +418,21 @@ impl Notifier {
                 .conversation(conversation)
                 .kind(kind.name()),
         );
+        Self::tell_shown(notice, cx);
     }
 
-    /// `conversation`'s notifications collapsed into `id`, for `count` messages (`mentioned`: one mentioned the
-    /// account); the singles it replaced are gone.
-    fn shown_collapsed(&mut self, conversation: &str, id: u32, count: usize, mentioned: bool) {
+    /// Tells the observers `notice` was shown ([`NotifierEvent::Shown`]).
+    fn tell_shown(notice: &Notice, cx: &mut Context<Self>) {
+        cx.emit(NotifierEvent::Shown {
+            conversation: notice.conversation.clone(),
+            title: notice.summary.clone(),
+        });
+    }
+
+    /// Its chat's notifications collapsed into `notice`, shown as `id`, for `count` messages (`mentioned`: one
+    /// mentioned the account); the singles it replaced are gone.
+    fn shown_collapsed(&mut self, notice: &Notice, id: u32, count: usize, mentioned: bool, cx: &mut Context<Self>) {
+        let conversation = notice.conversation.as_str();
         let notices = self.shown.entry(conversation.to_owned()).or_default();
         for single in notices.singles.drain(..) {
             self.ids.remove(&single);
@@ -434,6 +448,7 @@ impl Notifier {
                 .conversation(conversation)
                 .kind(NoticeKind::Collapsed.name()),
         );
+        Self::tell_shown(notice, cx);
     }
 }
 
@@ -703,7 +718,7 @@ async fn show(
     if total <= SINGLES {
         for notice in notices {
             if let Ok(id) = server.show(&notice, 0).await {
-                let _ = this.update(cx, |this, _| this.shown_single(conversation, notice.kind, id));
+                let _ = this.update(cx, |this, cx| this.shown_single(&notice, id, cx));
             }
         }
         return;
@@ -720,7 +735,7 @@ async fn show(
         body: collapsed_body(total, mention),
     };
     if let Ok(id) = server.show(&notice, collapsed.unwrap_or(0)).await {
-        let _ = this.update(cx, |this, _| this.shown_collapsed(conversation, id, total, mention));
+        let _ = this.update(cx, |this, cx| this.shown_collapsed(&notice, id, total, mention, cx));
     }
 }
 
