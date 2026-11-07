@@ -7,7 +7,8 @@
 //! - `call <chat>`, `join <chat>`: the chat named as the reads name it ([`address::chat`]), called or its running call
 //!   joined; `answer`, `decline`: the invitation that rings; `hangup`: the call up left (or its ring cancelled).
 //! - `mute on|off|toggle`, `camera on|off|toggle`: the microphone or the camera of the call up, asked only when it
-//!   isn't as `on`/`off` says already.
+//!   isn't as `on`/`off` says already. They are asked one at a time, each once the one before it was answered: the
+//!   call shows a switch as it is only then, so one asked meanwhile would be compared with what it was before.
 //!
 //! **The account**: the one `--account` names, otherwise the one ringing, in a call or setting one up (calls are one
 //! at a time across the accounts), otherwise the one the window shows. A start, a join or an answer while another
@@ -20,6 +21,7 @@
 //! a declined or left one gone), the call's row ([`Response::Call`]; one that ended says `ended`). All of it within
 //! [`CALL_ANSWER`], past which [`ErrorCode::Timeout`].
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, AsyncApp, Entity, WeakEntity};
@@ -80,6 +82,8 @@ struct Target {
     trace: Arc<ViewTrace>,
     /// The window's accounts: whether another one rings, is in a call or sets one up, read as the ask is made.
     accounts: Entity<Accounts>,
+    /// Held by a `mute` or a `camera` from before its switch is read until it is answered.
+    switches: Rc<tokio::sync::Mutex<()>>,
 }
 
 /// The account `wanted` names, otherwise the busy one, otherwise the one shown (see the module docs).
@@ -106,6 +110,7 @@ fn target(running: &Entity<Running>, wanted: Option<&str>, cx: &App) -> Result<T
         calls,
         trace: Arc::clone(running.trace()),
         accounts: running.desktop().read(cx).accounts().clone(),
+        switches: Rc::clone(running.call_switches()),
     })
 }
 
@@ -195,6 +200,11 @@ enum Settle {
 
 /// The ask `request` stands for on `target`, asked and answered.
 async fn asked(target: &Target, request: &Request, cx: &mut AsyncApp) -> Result<Response, CtlError> {
+    // a switch compared with what the one asked before it made, not what it was while that one was on its way
+    let _switching = match request {
+        Request::Mute { .. } | Request::Camera { .. } => Some(target.switches.lock().await),
+        _ => None,
+    };
     let core = &target.account.core;
     let ask = match request {
         Request::Call { chat } => Ask::Call {

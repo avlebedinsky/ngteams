@@ -141,6 +141,8 @@ pub struct Running {
     hub: Rc<crate::ctl::events::Hub>,
     /// The view trace every account's views record to ([`Launch::trace`]): the control socket's call asks too.
     trace: Arc<ViewTrace>,
+    /// The control socket's `mute` and `camera`, asked one at a time ([`crate::ctl::calls`]).
+    call_switches: Rc<tokio::sync::Mutex<()>>,
 }
 
 /// What [`launch`] started.
@@ -222,6 +224,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         ctl: None,
         hub: Rc::default(),
         trace,
+        call_switches: Rc::default(),
     });
     start_others(&running, others, cx);
     let window = match desktop.update(cx, Desktop::open_window) {
@@ -369,6 +372,11 @@ impl Running {
     /// The view trace the accounts' views record to.
     pub(crate) fn trace(&self) -> &Arc<ViewTrace> {
         &self.trace
+    }
+
+    /// What the control socket's `mute` and `camera` hold while each is asked and answered.
+    pub(crate) fn call_switches(&self) -> &Rc<tokio::sync::Mutex<()>> {
+        &self.call_switches
     }
 
     /// The first account watched for the event streams (the others are as they start).

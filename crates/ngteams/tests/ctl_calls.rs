@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use ctl_support::{ask, quit};
+use ctl_support::{ask, connect, pumped, quit};
 use gpui::{Entity, TestAppContext};
 use ngteams::accounts::{Runner, Started};
 use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
@@ -36,6 +36,7 @@ use teams_core::{CallFloor, CallMedia, CallParts, CallStatus, Identity, Outbox, 
 use teams_ctl::ClientError;
 use teams_ctl::protocol::{CallRow, CtlError, ErrorCode, Request, Response, Toggle};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
+use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
@@ -55,6 +56,26 @@ const PEER_TONE: Tone = Tone {
     hz: 880.0,
     amplitude: 0.5,
 };
+/// How long a's camera takes to open: a command asked meanwhile finds the camera's change still on its way.
+const CAMERA_OPENS: Duration = Duration::from_millis(400);
+
+/// File devices whose camera opens [`CAMERA_OPENS`] late, as a real one takes a moment.
+struct SlowCamera(FileDevices);
+
+impl Devices for SlowCamera {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        self.0.microphone()
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        self.0.speaker()
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        std::thread::sleep(CAMERA_OPENS);
+        self.0.camera()
+    }
+}
 
 /// a's tokens, as the mock takes them.
 struct Tokens {
@@ -318,12 +339,12 @@ fn a_engine(
     let calling = trouter().for_calls(CallStack::new(Arc::clone(&tracker)));
     let push = Push::new(trouter());
     let media = CallMedia {
-        devices: Arc::new(FileDevices {
+        devices: Arc::new(SlowCamera(FileDevices {
             input: AudioInput::Silence,
             recording: None,
             camera: PatternCamera::default(),
             pacing: Pacing::RealTime,
-        }),
+        })),
         relay: Relay::Fixed(vec![RelayServer::udp(relay)]),
         session: SessionConfig {
             processing: ProcessingConfig::OFF,
@@ -453,6 +474,7 @@ fn an_invitation_is_answered_muted_and_its_camera_turned_on_and_off_then_hung_up
     assert_eq!(busy.code, ErrorCode::Busy, "{busy:?}");
 
     switches_ask_only_when_they_differ(&lab);
+    overlapping_switches_end_as_the_later_one_says(&lab);
 
     let left = lab.row(Request::HangUp);
     assert_eq!((left.id.as_str(), left.state.as_str()), (answered.id.as_str(), "ended"));
@@ -483,6 +505,41 @@ fn switches_ask_only_when_they_differ(lab: &Lab) {
     assert_eq!(switched(camera(Toggle::On)), (false, true));
     assert_eq!(switched(camera(Toggle::Off)), (false, false));
     assert_eq!(lab.traced.asked("camera"), 2, "on and off");
+}
+
+/// A `camera on` (a `mute on`) asked, then an `off` from another connection while the `on` is on its way (the camera
+/// opening, [`CAMERA_OPENS`]): the `off` waits for the `on` to be answered and turns it off again, rather than finding
+/// the switch still off and asking nothing.
+fn overlapping_switches_end_as_the_later_one_says(lab: &Lab) {
+    for (kind, switch) in [("camera", camera as fn(Toggle) -> Request), ("mute", mute)] {
+        let before = lab.traced.asked(kind);
+        let (socket, traced) = (lab.socket.clone(), lab.traced.clone());
+        let (on, off) = pumped(&lab.cx, move || {
+            let first = socket.clone();
+            let on = std::thread::spawn(move || connect(&first)?.request(None, switch(Toggle::On)));
+            // the `off` sent once the `on` was asked of the calls, while the engine sets it
+            let start = Instant::now();
+            while traced.asked(kind) == before {
+                assert!(start.elapsed() < WAIT, "{kind} on not asked");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let off = connect(&socket).and_then(|mut client| client.request(None, switch(Toggle::Off)));
+            (on.join().unwrap(), off)
+        });
+        let switched = |answer: Result<Response, ClientError>| match answer {
+            Ok(Response::Call(row)) => (row.muted, row.camera),
+            other => panic!("{kind}: {other:?}"),
+        };
+        let (on, off) = (switched(on), switched(off));
+        let calls = lab.calls();
+        let shown = lab.cx.read(|cx| {
+            let call = calls.read(cx).call().unwrap();
+            (call.muted, call.camera)
+        });
+        assert_eq!(off, (false, false), "{kind} off answered as it is (on answered {on:?})");
+        assert_eq!(shown, (false, false), "{kind} stays off");
+        assert_eq!(lab.traced.asked(kind), before + 2, "{kind} on, then off");
+    }
 }
 
 #[test]
