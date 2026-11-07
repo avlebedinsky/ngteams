@@ -198,13 +198,25 @@ async fn someone_added_to_a_one_to_one_call_makes_it_a_group_call_in_a_new_chat_
         })
         .await
         .unwrap();
-    // the call is in a new group chat of the three, its `add` naming it
-    let chat = a
-        .next(|event| match event {
-            Event::CallGroupChat { call: of, chat } if *of == call => Some(chat.clone()),
+    // the call is in a new group chat of the three, its `add` naming it; c has no endpoint to ring, so it doesn't come
+    // in. The mock calls the failure back as it answers the `add`, so the failure may come before the answer: either
+    // order is taken
+    let (mut chat, mut who) = (None, None);
+    while chat.is_none() || who.is_none() {
+        a.next(|event| match event {
+            Event::CallGroupChat { call: of, chat: made } if *of == call => {
+                chat = Some(made.clone());
+                Some(())
+            }
+            Event::CallAddFailed { call: of, who: failed } if *of == call => {
+                who = Some(failed.clone());
+                Some(())
+            }
             _ => None,
         })
         .await;
+    }
+    let (chat, who) = (chat.unwrap(), who.unwrap());
     assert!(teams_proto::is_group_chat_id(&chat), "{chat}");
     let added = lab
         .mock
@@ -212,14 +224,7 @@ async fn someone_added_to_a_one_to_one_call_makes_it_a_group_call_in_a_new_chat_
         .into_iter()
         .flat_map(|call| call.added)
         .collect::<Vec<_>>();
-    assert_eq!(added, [(LAB_C.to_owned(), chat.clone())]);
-    // c has no endpoint to ring: it doesn't come in
-    let who = a
-        .next(|event| match event {
-            Event::CallAddFailed { call: of, who } if *of == call => Some(who.clone()),
-            _ => None,
-        })
-        .await;
+    assert_eq!(added, [(LAB_C.to_owned(), chat)]);
     assert_eq!(who.as_str(), LAB_C);
     // the account itself can't be added
     for invitee in [LAB_A] {
