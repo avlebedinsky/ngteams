@@ -290,16 +290,18 @@
 - Create: `crates/ngteams/src/ctl/reads.rs`, `ctl/address.rs`
 - Modify: `crates/ngteams/src/ctl/dispatch.rs`, `crates/teams-ui/src/tray.rs` (a per-chat unread accessor)
 - Create: `crates/ngteams/tests/ctl_reads.rs`
+- ➕ Create: `crates/ngteams/tests/ctl_support/mod.rs`, the server tests' shared harness (launch over a seeded store,
+  pumped client, `ask`); `tests/ctl.rs` moved onto it
 
-- [ ] `--account` by UPN, MRI or index, defaulting to the shown account; `unknown_account` otherwise
-- [ ] chat addressing by id or by title derived as `chat_list` derives it (topic, otherwise the other members' names
+- [x] `--account` by UPN, MRI or index, defaulting to the shown account; `unknown_account` otherwise
+- [x] chat addressing by id or by title derived as `chat_list` derives it (topic, otherwise the other members' names
       via `Core::members`/`person`), with `ambiguous_chat` listing the candidates
-- [ ] `accounts`, `chats [--unread] [--limit]`, `messages <chat> [--limit] [--before]`, `search <q>`, `members <chat>`
+- [x] `accounts`, `chats [--unread] [--limit]`, `messages <chat> [--limit] [--before]`, `search <q>`, `members <chat>`
       through `Core`, mapped to wire rows
-- [ ] `unread` (per chat and total) from the account's `Tray`, the badge's own counts
-- [ ] tests: each command over seeded mock data, a 1:1 chat found by the other person's name, addressing errors, an
+- [x] `unread` (per chat and total) from the account's `Tray`, the badge's own counts
+- [x] tests: each command over seeded mock data, a 1:1 chat found by the other person's name, addressing errors, an
       engine that stopped → `stopped`
-- [ ] run `cargo test -p ngteams --test ctl_reads`, which must pass before the next task
+- [x] run `cargo test -p ngteams --test ctl_reads`, which must pass before the next task
 
 ### Task 5: events: the bridge tap, engine kinds and subscriptions
 

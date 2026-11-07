@@ -95,6 +95,18 @@ fn count(rig: &Rig) {
     rig.cx.run_until_parked();
 }
 
+/// The tray's unread chats with their counts, by id.
+fn unread_chats(rig: &Rig, tray: &Entity<Tray>) -> Vec<(String, u64)> {
+    let mut chats: Vec<(String, u64)> = rig.cx.read(|cx| {
+        tray.read(cx)
+            .unread_chats()
+            .map(|(chat, count)| (chat.to_owned(), count))
+            .collect()
+    });
+    chats.sort();
+    chats
+}
+
 #[test]
 fn the_tray_shows_the_unread_total_of_the_listed_chats_as_they_change() {
     let rig = seeded();
@@ -107,6 +119,7 @@ fn the_tray_shows_the_unread_total_of_the_listed_chats_as_they_change() {
     // a's unread chats, each once however many of its messages are unread (two in the a–b chat), not the channel nor
     // the notes
     assert_eq!(rig.cx.read(|cx| tray.read(cx).total()), Some(2));
+    assert_eq!(unread_chats(&rig, &tray), [(AB.to_owned(), 2), (TRIO.to_owned(), 1)]);
     let icon = Arc::new(FakeIcon::default());
     let given = Arc::clone(&icon);
     rig.cx.update(|cx| tray.update(cx, |tray, cx| tray.set_icon(given, cx)));
@@ -142,6 +155,8 @@ fn the_tray_shows_the_unread_total_of_the_listed_chats_as_they_change() {
     count(&rig);
     assert_eq!(icon.shown(), [2, 1]);
     assert_eq!(rig.cx.read(|cx| tray.read(cx).total()), Some(1));
+    // each chat's own count: the read chat is gone, the other holds its four
+    assert_eq!(unread_chats(&rig, &tray), [(TRIO.to_owned(), 4)]);
     let totals: Vec<serde_json::Value> = written
         .lines()
         .into_iter()

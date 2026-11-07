@@ -223,6 +223,15 @@ impl Tray {
         self.total
     }
 
+    /// The counted chats that hold anything unread, each with how many of its messages are, as last counted: the
+    /// chats [`Tray::total`] counts (in no order).
+    pub fn unread_chats(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.counted
+            .iter()
+            .filter(|(_, counted)| counted.unread > 0)
+            .map(|(chat, counted)| (chat.as_str(), counted.unread))
+    }
+
     fn schedule(&mut self, cx: &mut Context<Self>) {
         if self.counting {
             self.again = true;

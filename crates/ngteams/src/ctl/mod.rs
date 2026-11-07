@@ -7,13 +7,18 @@
 //! - [`listener`]: the socket (`0600` in a `0700` directory, a stale one replaced, a live one refused), a thread
 //!   accepting connections and a thread per connection reading its lines.
 //! - [`dispatch`]: each request answered on GPUI's foreground, over the app's accounts as they run.
+//! - [`address`]: the account and the chat a request names.
+//! - [`reads`]: the read commands, through the account's `Core`.
 //!
 //! The requests cross from the connections' threads to the foreground through a channel, where one task takes them in
-//! turn; each answer goes back through a oneshot to the thread that asked. The server serves from the app's launch
-//! (`Launch::ctl`) until its quit, which closes every connection and removes the socket file.
+//! turn and answers each in a task of its own; each answer goes back through a oneshot to the thread that asked. The
+//! server serves from the app's launch (`Launch::ctl`) until its quit, which closes every connection and removes the
+//! socket file.
 
+pub mod address;
 pub mod dispatch;
 pub mod listener;
+pub mod reads;
 
 use std::path::Path;
 
@@ -36,9 +41,14 @@ pub fn serve(path: &Path, running: WeakEntity<Running>, cx: &mut App) -> Result<
     // ends once every connection's thread and the listener's are gone (the stop), each having dropped its sender
     cx.spawn(async move |cx: &mut AsyncApp| {
         while let Ok(job) = asked.recv().await {
-            let answer = cx.update(|cx| dispatch::answer(&running, job.line, cx));
-            // the connection may be gone meanwhile: nobody to tell
-            let _ = job.reply.send(answer);
+            let running = running.clone();
+            // each answered by a task of its own: a read awaiting the engine holds up no other connection
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let answer = dispatch::answer(&running, job.line, cx).await;
+                // the connection may be gone meanwhile: nobody to tell
+                let _ = job.reply.send(answer);
+            })
+            .detach();
         }
     })
     .detach();

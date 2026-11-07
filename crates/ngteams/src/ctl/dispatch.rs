@@ -4,11 +4,14 @@
 //!   told.
 //! - `status`: each account with its engine's state (`connected`, `starting`, `down`, `stopped` or `signed_out`), the
 //!   one the window shows, where the window is (shown, in the tray, closed) and the call up or ringing.
+//! - `accounts`: the accounts as `status` lists them.
+//! - the reads ([`reads`]): through the account the request addresses ([`address`]), awaited on the foreground as
+//!   the views await the engine's replies.
 //!
 //! A request the app doesn't serve yet is a [`ErrorCode::BadRequest`]; once the app is going, every request is
 //! [`ErrorCode::Stopped`].
 
-use gpui::{App, WeakEntity};
+use gpui::{App, AsyncApp, Entity, WeakEntity};
 use teams_ctl::PROTOCOL_VERSION;
 use teams_ctl::protocol::{
     AccountRow, AppStatus, CallRow, CtlError, ErrorCode, Hello, Outcome, Request, RequestLine, Response, ResponseLine,
@@ -16,36 +19,71 @@ use teams_ctl::protocol::{
 };
 use teams_ui::{Account, Bridge, Calls, Desktop, Engine, Link, Status};
 
+use super::address::{self, Addressed};
+use super::reads;
 use crate::app::Running;
 
 /// The app's version, as `hello` and `status` tell it.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `line` answered (see the module docs).
-pub fn answer(running: &WeakEntity<Running>, line: RequestLine, cx: &mut App) -> ResponseLine {
-    let RequestLine { id, request, .. } = line;
-    let outcome = match ask(running, &request, cx) {
+pub async fn answer(running: &WeakEntity<Running>, line: RequestLine, cx: &mut AsyncApp) -> ResponseLine {
+    let RequestLine { id, account, request } = line;
+    let outcome = match ask(running, account.as_deref(), &request, cx).await {
         Ok(response) => Outcome::Ok(response),
         Err(error) => Outcome::Error(error),
     };
     ResponseLine { id, outcome }
 }
 
-fn ask(running: &WeakEntity<Running>, request: &Request, cx: &mut App) -> Result<Response, CtlError> {
-    let running = running
-        .upgrade()
-        .ok_or_else(|| CtlError::new(ErrorCode::Stopped, "the app is quitting"))?;
+/// What a request needs once the app's state was read on the foreground.
+enum Step {
+    /// Answered from that state alone.
+    Answered(Result<Response, CtlError>),
+    /// A read of the account addressed, awaited.
+    Read(Addressed),
+}
+
+async fn ask(
+    running: &WeakEntity<Running>,
+    account: Option<&str>,
+    request: &Request,
+    cx: &mut AsyncApp,
+) -> Result<Response, CtlError> {
+    let step = cx.update(|cx| {
+        let running = alive(running, cx)?;
+        let running = running.read(cx);
+        Ok(match request {
+            Request::Hello { protocol, .. } => Step::Answered(hello(*protocol)),
+            Request::Status => Step::Answered(Ok(Response::Status(status(running, cx)))),
+            Request::Accounts => Step::Answered(Ok(Response::Accounts {
+                accounts: account_rows(running, cx),
+            })),
+            Request::Chats { .. }
+            | Request::Messages { .. }
+            | Request::Unread
+            | Request::Search { .. }
+            | Request::Members { .. } => Step::Read(address::account(running, account, cx)?),
+            _ => Step::Answered(Err(CtlError::new(
+                ErrorCode::BadRequest,
+                "this app doesn't serve that command yet",
+            ))),
+        })
+    })?;
+    match step {
+        Step::Answered(answer) => answer,
+        Step::Read(addressed) => reads::answer(request, &addressed, cx).await,
+    }
+}
+
+/// The app's accounts, unless it is gone or quitting.
+fn alive(running: &WeakEntity<Running>, cx: &App) -> Result<Entity<Running>, CtlError> {
+    let quitting = || CtlError::new(ErrorCode::Stopped, "the app is quitting");
+    let running = running.upgrade().ok_or_else(quitting)?;
     if running.read(cx).quitting() {
-        return Err(CtlError::new(ErrorCode::Stopped, "the app is quitting"));
+        return Err(quitting());
     }
-    match request {
-        Request::Hello { protocol, .. } => hello(*protocol),
-        Request::Status => Ok(Response::Status(status(running.read(cx), cx))),
-        _ => Err(CtlError::new(
-            ErrorCode::BadRequest,
-            "this app doesn't serve that command yet",
-        )),
-    }
+    Ok(running)
 }
 
 fn hello(protocol: u32) -> Result<Response, CtlError> {
@@ -63,10 +101,23 @@ fn hello(protocol: u32) -> Result<Response, CtlError> {
 
 /// The app as `status` tells it.
 fn status(running: &Running, cx: &App) -> AppStatus {
-    let desktop = running.desktop().read(cx);
-    let rail = desktop.accounts().read(cx);
+    let call = running
+        .bridges()
+        .iter()
+        .find_map(|(_, upn, bridge)| call_row(upn, bridge.read(cx), cx));
+    AppStatus {
+        app: APP_VERSION.to_owned(),
+        accounts: account_rows(running, cx),
+        window: window_state(running.desktop().read(cx)),
+        call,
+    }
+}
+
+/// The app's accounts in their order, as `status` and `accounts` list them.
+fn account_rows(running: &Running, cx: &App) -> Vec<AccountRow> {
+    let rail = running.desktop().read(cx).accounts().read(cx);
     let shown = rail.active_key();
-    let accounts = running
+    running
         .bridges()
         .iter()
         .enumerate()
@@ -84,17 +135,7 @@ fn status(running: &Running, cx: &App) -> AppStatus {
                 state: engine_state(bridge.read(cx).models().status.read(cx)).to_owned(),
             }
         })
-        .collect();
-    let call = running
-        .bridges()
-        .iter()
-        .find_map(|(_, upn, bridge)| call_row(upn, bridge.read(cx), cx));
-    AppStatus {
-        app: APP_VERSION.to_owned(),
-        accounts,
-        window: window_state(desktop),
-        call,
-    }
+        .collect()
 }
 
 /// An account's engine as `status` names it: signed out and stopped first, otherwise its push channel's link.
