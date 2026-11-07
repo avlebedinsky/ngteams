@@ -428,14 +428,16 @@
 - Modify: `crates/ngteams/src/ctl/writes.rs`, `crates/teams-ui/src/desktop.rs` (`own_presence_of(key)`),
   `crates/teams-ctl/src/cli.rs`
 - Modify: `crates/ngteams/tests/ctl_writes.rs`
+- ➕ Modify: `crates/ngteams/src/ctl/dispatch.rs`, `crates/teams-ctl/src/protocol.rs` (`SYNC_ANSWER`, the app's bound
+  on a `sync`), `crates/teams-ctl/tests/cli.rs`, `crates/teams-ui/tests/desktop.rs`
 
-- [ ] `status get` (the reported status and the manual choice) and `status set available|busy|dnd|away|reset`, done
+- [x] `status get` (the reported status and the manual choice) and `status set available|busy|dnd|away|reset`, done
       as `Shell::choose_status` does: `set_manual_status` through `SettingsModel::change` plus `choose` on the
       addressed account's `OwnPresence`
-- [ ] `sync` through `Core::sync`, printing the catch-up report
-- [ ] tests: each status, `reset` back to automatic, a ctl-set status surviving an unrelated settings change, the
+- [x] `sync` through `Core::sync`, printing the catch-up report
+- [x] tests: each status, `reset` back to automatic, a ctl-set status surviving an unrelated settings change, the
       second account's status set without touching the first, the `sync` report
-- [ ] run `cargo test -p ngteams --test ctl_writes`, which must pass before the next task
+- [x] run `cargo test -p ngteams --test ctl_writes`, which must pass before the next task
 
 ### Task 11: calls
 

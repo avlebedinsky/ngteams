@@ -1,7 +1,9 @@
 //! The control socket's message writes (`ctl::writes`), through the real protocol and server, over lab account a's
 //! engine on the mock chat service (`teams-mock`, loopback only, through the `test-support` mock origins): each write
 //! goes out through a's outbox, its row answered, and the mock tells b what it did. The read-only mode refuses them
-//! all and sends nothing. Every id and text is made up or the mock's own.
+//! all and sends nothing. `status set` goes out as the status menu's choice does, through a's and b's engines with
+//! their push channels on the mock's Trouter, to the mock's UPS; `sync` is a's catch-up. Every id and text is made up
+//! or the mock's own.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -13,10 +15,10 @@ use std::future::{self, Future};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use ctl_support::{ask, quit};
-use gpui::{AsyncApp, Entity, TestAppContext};
+use ctl_support::{ask, pump_until, quit};
+use gpui::{App, AsyncApp, Entity, TestAppContext};
 use ngteams::accounts::{Runner, Started};
 use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 use ngteams::app::{self, Launch};
@@ -24,18 +26,26 @@ use ngteams::ctl::writes::{self, is_settled};
 use ngteams::setup::Setup;
 use teams_auth::authz::{AuthzClient, Region};
 use teams_auth::secrets::{MemorySecretStore, Secret};
-use teams_auth::session::Session;
+use teams_auth::session::{AccessToken, Renewal, Session};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_core::account::AccountEngine;
-use teams_core::engine::{self, EngineOptions, Parts};
-use teams_core::{Action, CallFloor, EngineRequests, Event, Outbox};
+use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
+use teams_core::{Action, CallFloor, EngineRequests, Event, Outbox, Reporting};
 use teams_ctl::ClientError;
-use teams_ctl::protocol::{CtlError, ErrorCode, OutboxRow, OutboxState, Request, Response, WRITE_ANSWER, WRITE_WAIT};
-use teams_mock::{AB_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
+use teams_ctl::protocol::{
+    CtlError, ErrorCode, ManualStatus, OutboxRow, OutboxState, OwnStatus, Request, Response, StatusChoice, SyncReport,
+    WRITE_ANSWER, WRITE_WAIT,
+};
+use teams_mock::{
+    AB_CHAT, AvailabilityChange, CHANNEL, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, NOTIFICATIONS,
+    PRESENCE_BASE, TENANT, TrouterMock,
+};
 use teams_proto::{Author, Client, Credentials, HttpTransport, Mri};
 use teams_store::{OutboxEntry, OutboxKind, Store};
+use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::bus::BusError;
-use teams_ui::{Bridge, SettingsFile, ViewTrace, compose};
+use teams_ui::{Bridge, Desktop, SettingsFile, ViewTrace, compose};
+use tokio::sync::broadcast;
 
 const UPN: &str = "bot-a@lab.example.test";
 
@@ -171,10 +181,15 @@ impl Drop for Lab {
 /// a's engine as the app starts an account: its session only for the sign-out watch, reaching nothing (an empty
 /// in-memory store, a loopback port nothing listens on).
 fn started(handle: engine::EngineHandle) -> Started<MemorySecretStore> {
-    let mut account = PersonalAccount::new(UPN, LAB_A.strip_prefix("8:orgid:").unwrap(), TENANT).unwrap();
-    account.name = Some("bot-a".to_owned());
+    started_as(handle, UPN, LAB_A, "bot-a")
+}
+
+/// [`started`] for the account `upn`, `mri`, named `name`.
+fn started_as(handle: engine::EngineHandle, upn: &str, mri: &str, name: &str) -> Started<MemorySecretStore> {
+    let mut account = PersonalAccount::new(upn, mri.strip_prefix("8:orgid:").unwrap(), TENANT).unwrap();
+    account.name = Some(name.to_owned());
     let session = Session::new(
-        UPN,
+        upn,
         MemorySecretStore::new(),
         TokenClient::new(EntraConfig::teams_native().with_authority("http://127.0.0.1:9/")).unwrap(),
         AuthzClient::with_endpoint("http://127.0.0.1:9/authz").unwrap(),
@@ -679,4 +694,352 @@ fn a_row_settles_sent_failed_or_once_it_may_have_arrived() {
         ..entry(1, Stored::Sent)
     };
     assert_eq!(writes::row_of(&made).chat.as_deref(), Some("19:made@thread.v2"));
+}
+
+#[test]
+fn sync_answers_what_the_catch_up_stored() {
+    let lab = Lab::start(false);
+    lab.mock.post_as(LAB_B, AB_CHAT, "<p>while away</p>").unwrap();
+
+    let Response::Synced(report) = lab.ask(Request::Sync).unwrap() else {
+        panic!("a sync answers its report");
+    };
+    assert!(report.conversations >= 1, "{report:?}");
+    assert!(report.messages >= 1, "{report:?}");
+    assert_eq!(
+        (report.failed, report.unreadable, report.caught_up),
+        (0, 0, true),
+        "{report:?}"
+    );
+    // stored: the chat holds b's message now
+    let Response::Messages { messages } = lab
+        .ask(Request::Messages {
+            chat: AB_CHAT.to_owned(),
+            limit: Some(5),
+            before: None,
+        })
+        .unwrap()
+    else {
+        panic!("the chat's messages");
+    };
+    assert!(
+        messages.iter().any(|message| message.text == "while away"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_catch_up_report_counts_what_it_did() {
+    let mut report = teams_core::CatchUpReport {
+        conversations: 4,
+        ..teams_core::CatchUpReport::default()
+    };
+    report.messages.inserted = 2;
+    report.messages.updated = 1;
+    report.messages.unchanged = 9;
+    assert_eq!(
+        writes::sync_report(&report),
+        SyncReport {
+            conversations: 4,
+            messages: 3,
+            failed: 0,
+            unreadable: 0,
+            caught_up: true,
+        }
+    );
+}
+
+#[test]
+fn the_read_only_app_tells_its_status_and_syncs_but_sets_no_status() {
+    let lab = Lab::start(true);
+    let Response::OwnStatus(status) = lab.ask(Request::GetStatus).unwrap() else {
+        panic!("its status");
+    };
+    assert_eq!(status.manual, ManualStatus::Automatic);
+    let error = lab.refused(Request::SetStatus {
+        status: StatusChoice::Busy,
+    });
+    assert_eq!(error.code, ErrorCode::RefusedReadOnly);
+    assert!(matches!(lab.ask(Request::Sync), Ok(Response::Synced(_))));
+    let not_reads: Vec<String> = lab
+        .runtime
+        .block_on(lab.mock.received_requests())
+        .iter()
+        .filter(|request| request.method.as_str() != "GET")
+        .map(|request| format!("{} {}", request.method, request.url.path()))
+        .collect();
+    assert_eq!(not_reads, Vec::<String>::new());
+}
+
+const UPN_B: &str = "bot-b@lab.example.test";
+
+/// One account's mock token, for its transport and its push channel alike.
+struct PushTokens {
+    token: String,
+    renewals: broadcast::Sender<Renewal>,
+}
+
+impl Credentials for PushTokens {
+    fn bearer(&self, _audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(Ok(Secret::new(self.token.clone())))
+    }
+
+    fn bearer_rejected(&self, audience: &str, _: &Secret) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        self.bearer(audience)
+    }
+}
+
+impl TrouterCredentials for PushTokens {
+    fn ic3(&self) -> impl Future<Output = Result<AccessToken, TokenError>> + Send {
+        future::ready(Ok(AccessToken {
+            token: Secret::new(self.token.clone()),
+            expires_at: SystemTime::now() + Duration::from_secs(7_200),
+            scopes: Vec::new(),
+        }))
+    }
+
+    fn ic3_after(&self, _old: &Secret) -> impl Future<Output = Result<AccessToken, TokenError>> + Send {
+        self.ic3()
+    }
+
+    fn renewals(&self) -> broadcast::Receiver<Renewal> {
+        self.renewals.subscribe()
+    }
+}
+
+/// The app of lab accounts a and b on the mock, each engine with its push channel on the mock's Trouter (so its own
+/// presence reports, to the mock's UPS), the first run's screen confirmed.
+struct StatusLab {
+    mock: ChatServiceMock,
+    socket: PathBuf,
+    desktop: Entity<Desktop>,
+    cx: TestAppContext,
+    _trouter: TrouterMock,
+    _dir: tempfile::TempDir,
+    _runtime: tokio::runtime::Runtime,
+}
+
+impl StatusLab {
+    fn start() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock = runtime.block_on(ChatServiceMock::start()).unwrap();
+        let trouter = mock.start_trouter().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let a = started_as(pushing(&mock, &trouter, &dir, LAB_A), UPN, LAB_A, "bot-a");
+        let b = started_as(pushing(&mock, &trouter, &dir, LAB_B), UPN_B, LAB_B, "bot-b");
+        let socket = dir.path().join("run/ngteams/ctl.sock");
+        let cx = TestAppContext::single();
+        let launch = Launch {
+            first: a,
+            others: vec![b],
+            settings: app::settings(SettingsFile::new(dir.path().join("settings.toml")), None),
+            bus: Err(BusError::NotGiven),
+            sign_in_again: Rc::new(|_| Rc::new(|_| {})),
+            runner: Runner {
+                setup: Setup::new(PersonalPaths::new(dir.path().join("config"), dir.path().join("data"))).unwrap(),
+                floor: CallFloor::new(),
+                devices: None,
+            },
+            read_only: false,
+            trace: Arc::new(ViewTrace::off()),
+            ctl: Some(socket.clone()),
+        };
+        let Ok(launched) = cx.update(|cx| app::launch(cx, launch)) else {
+            panic!("the window opens");
+        };
+        let desktop = launched.desktop;
+        cx.update(|cx| {
+            let settings = desktop.read(cx).settings().clone();
+            settings.update(cx, teams_ui::SettingsModel::confirm_first_run);
+        });
+        let lab = Self {
+            mock,
+            socket,
+            desktop,
+            cx,
+            _trouter: trouter,
+            _dir: dir,
+            _runtime: runtime,
+        };
+        // each push channel registered: each own presence reports, Available first
+        lab.until(|lab, cx| {
+            [LAB_A, LAB_B]
+                .iter()
+                .all(|mri| lab.reporting(mri, cx) == Reporting::Available)
+        });
+        lab
+    }
+
+    fn ask(&self, account: Option<&str>, request: Request) -> Result<Response, ClientError> {
+        ask(&self.cx, &self.socket, account, request)
+    }
+
+    /// `status set` of `status` for `account`, answered with the status it left.
+    fn set(&self, account: Option<&str>, status: StatusChoice) -> OwnStatus {
+        match self.ask(account, Request::SetStatus { status }) {
+            Ok(Response::OwnStatus(own)) => own,
+            other => panic!("{status:?}: {other:?}"),
+        }
+    }
+
+    fn get(&self, account: Option<&str>) -> OwnStatus {
+        match self.ask(account, Request::GetStatus) {
+            Ok(Response::OwnStatus(own)) => own,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// What account `mri`'s own presence reports.
+    fn reporting(&self, mri: &str, cx: &App) -> Reporting {
+        self.desktop
+            .read(cx)
+            .own_presence_of(mri)
+            .unwrap()
+            .read(cx)
+            .reporting(cx)
+    }
+
+    /// The manual statuses UPS took for `mri`, in order (the endpoint's `PUT`s left out).
+    fn manual_writes(&self, mri: &str) -> Vec<AvailabilityChange> {
+        self.mock
+            .own_availability()
+            .into_iter()
+            .filter(|write| write.account == mri && !matches!(write.change, AvailabilityChange::Endpoint { .. }))
+            .map(|write| write.change)
+            .collect()
+    }
+
+    /// The app stepped until `done`.
+    fn until(&self, mut done: impl FnMut(&Self, &App) -> bool) {
+        pump_until(&self.cx, Duration::ZERO, |cx| done(self, cx));
+    }
+
+    /// The app stepped until UPS took `count` manual statuses for `mri`.
+    fn until_written(&self, mri: &str, count: usize) -> Vec<AvailabilityChange> {
+        self.until(|lab, _| lab.manual_writes(mri).len() >= count);
+        self.manual_writes(mri)
+    }
+}
+
+impl Drop for StatusLab {
+    fn drop(&mut self) {
+        quit(&self.cx);
+    }
+}
+
+/// Account `mri`'s engine on the mock, its fence its own, its transport given the presence base, its push channel on
+/// the mock's Trouter.
+fn pushing(mock: &ChatServiceMock, trouter: &TrouterMock, dir: &tempfile::TempDir, mri: &str) -> EngineHandle {
+    let tokens = Arc::new(PushTokens {
+        token: mock.token(mri).unwrap(),
+        renewals: broadcast::channel(4).0,
+    });
+    let origin = mock.origin();
+    let http = || {
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
+            .unwrap()
+            .for_account(Mri::new(mri))
+            .with_presence(PRESENCE_BASE)
+            .unwrap()
+    };
+    let transport = Arc::new(http());
+    let push = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())
+        .unwrap()
+        .with_options(Options {
+            backoff_base: Duration::from_millis(50),
+            backoff_cap: Duration::from_millis(50),
+            backoff_jitter_percent: 0,
+            ..Options::default()
+        });
+    let store = dir.path().join(format!("{}.sqlite", mri.replace(':', "-")));
+    engine::start(Parts {
+        calls: None,
+        store: Store::open(&store).unwrap(),
+        client: Arc::new(Client::new(http())),
+        outbox: Outbox::new(transport, Author::new(Mri::new(mri), "lab")),
+        push: Some(Push::new(push)),
+        options: EngineOptions::default(),
+        known_names: Vec::new(),
+    })
+    .unwrap()
+}
+
+fn manual(status: &str) -> AvailabilityChange {
+    AvailabilityChange::Manual(status.to_owned())
+}
+
+#[test]
+fn status_set_reports_each_choice_as_the_status_menu_does_and_reset_hands_it_back() {
+    let lab = StatusLab::start();
+    assert_eq!(
+        lab.get(None),
+        OwnStatus {
+            reported: "available".to_owned(),
+            manual: ManualStatus::Automatic,
+        }
+    );
+
+    let steps = [
+        (StatusChoice::Busy, "busy", ManualStatus::Busy, manual("Busy")),
+        (
+            StatusChoice::Dnd,
+            "do-not-disturb",
+            ManualStatus::Dnd,
+            manual("DoNotDisturb"),
+        ),
+        (StatusChoice::Away, "away", ManualStatus::Away, manual("Away")),
+        (
+            StatusChoice::Available,
+            "available",
+            ManualStatus::Available,
+            manual("Available"),
+        ),
+        (
+            StatusChoice::Reset,
+            "available",
+            ManualStatus::Automatic,
+            AvailabilityChange::Reset,
+        ),
+    ];
+    for (count, (choice, reported, chosen, written)) in steps.into_iter().enumerate() {
+        let own = lab.set(None, choice);
+        assert_eq!((own.reported.as_str(), own.manual), (reported, chosen), "{choice:?}");
+        let writes = lab.until_written(LAB_A, count + 1);
+        assert_eq!(writes.last(), Some(&written), "{choice:?}: {writes:?}");
+        assert_eq!(writes.len(), count + 1, "{choice:?}: one write each: {writes:?}");
+        assert_eq!(lab.get(None), own, "{choice:?}: as the app tells it after");
+    }
+    assert!(lab.manual_writes(LAB_B).is_empty(), "b's status untouched");
+}
+
+#[test]
+fn a_status_set_survives_another_setting_s_change_and_b_s_leaves_a_s_alone() {
+    let lab = StatusLab::start();
+    lab.set(None, StatusChoice::Busy);
+    lab.until_written(LAB_A, 1);
+
+    // another setting changed: the saved choice holds, nothing is sent again
+    lab.cx.update(|cx| {
+        let settings = lab.desktop.read(cx).settings().clone();
+        settings.update(cx, |settings, cx| {
+            settings.change(|settings| settings.idle_minutes += 1, cx);
+        });
+    });
+    let busy = OwnStatus {
+        reported: "busy".to_owned(),
+        manual: ManualStatus::Busy,
+    };
+    assert_eq!(lab.get(None), busy);
+
+    // b's own, by its UPN: a's choice and a's reports as they were
+    let b = lab.set(Some(UPN_B), StatusChoice::Dnd);
+    assert_eq!((b.reported.as_str(), b.manual), ("do-not-disturb", ManualStatus::Dnd));
+    assert_eq!(lab.until_written(LAB_B, 1), [manual("DoNotDisturb")]);
+    assert_eq!(lab.get(None), busy);
+    assert_eq!(lab.get(Some("1")), b, "b by its index");
+    assert_eq!(lab.manual_writes(LAB_A), [manual("Busy")]);
 }

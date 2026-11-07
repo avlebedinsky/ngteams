@@ -13,6 +13,9 @@
 //!   `read` with nothing to mark answers done. The client waits a little past the app's bounds ([`answer_time`]);
 //!   a write still unanswered then, or that the app timed out, may still go out, and the error says where to look.
 //!   `send` and `edit` read their text from stdin when it is `-`.
+//! - **Own status**: `status` alone is the app's; `status get` tells the account's reported status and the one
+//!   chosen, `status set` chooses one as the status menu does. `sync` answers with what its catch-up did, the app
+//!   answering within [`SYNC_ANSWER`].
 //! - **Events**: `events --follow` prints every event the filters let through until the app closes the stream;
 //!   without `--follow`, `events` prints the first one and exits. `wait <kind>` prints the first event of that kind
 //!   whose JSON line matches `--match`, within `--timeout` (which the connect and the subscribe spend too). A kind
@@ -29,8 +32,8 @@ use regex::Regex;
 use crate::client::{Client, ClientError, Events, Refused, Timeouts};
 use crate::path::{Env, Mode};
 use crate::protocol::{
-    CtlEvent, EventFilter, EventLine, OpenTarget, OutboxState, Outcome, Request, Response, ResponseLine,
-    UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT, WindowOp,
+    CtlEvent, EventFilter, EventLine, OpenTarget, OutboxState, Outcome, Request, Response, ResponseLine, SYNC_ANSWER,
+    StatusChoice, UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT, WindowOp,
 };
 use crate::render;
 
@@ -63,8 +66,14 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// The app's version, its accounts with their state, the window and the call up.
-    Status,
+    /// The app's version, its accounts with their state, the window and the call up; `status get` and `status set`
+    /// the account's own status.
+    Status {
+        #[command(subcommand)]
+        command: Option<StatusCommand>,
+    },
+    /// Catch the account up with the service now, and print what the catch-up did.
+    Sync,
     /// The app's accounts.
     Accounts,
     /// The account's chats, the most recent first.
@@ -337,6 +346,30 @@ pub enum AccountCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum StatusCommand {
+    /// The status the app reports for the account, and the one chosen (`automatic` while the app decides).
+    Get,
+    /// Choose the account's status as its status menu does; `reset` hands it back to the app.
+    Set {
+        #[arg(value_enum)]
+        status: StatusArg,
+    },
+}
+
+/// The status menu's choices.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum StatusArg {
+    Available,
+    Busy,
+    /// Do not disturb.
+    Dnd,
+    /// Appear away.
+    Away,
+    /// Automatic again: the app decides (available while used, nothing reported once idle).
+    Reset,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum UiCommand {
     /// The account shown, the view, the chat open, and the windows.
     State,
@@ -510,7 +543,16 @@ fn kind(value: &str) -> Result<String, String> {
 fn request(command: &Command, stdin: &mut dyn FnMut() -> io::Result<String>) -> io::Result<Request> {
     Ok(match command {
         Command::Write(write) => write_request(write, stdin)?,
-        Command::Status => Request::Status,
+        Command::Status { command: None } => Request::Status,
+        Command::Status {
+            command: Some(StatusCommand::Get),
+        } => Request::GetStatus,
+        Command::Status {
+            command: Some(StatusCommand::Set { status }),
+        } => Request::SetStatus {
+            status: status_choice(*status),
+        },
+        Command::Sync => Request::Sync,
         Command::Accounts => Request::Accounts,
         Command::Chats { unread, limit } => Request::Chats {
             unread_only: *unread,
@@ -625,6 +667,16 @@ fn window_op(op: WindowArg) -> WindowOp {
     }
 }
 
+fn status_choice(status: StatusArg) -> StatusChoice {
+    match status {
+        StatusArg::Available => StatusChoice::Available,
+        StatusArg::Busy => StatusChoice::Busy,
+        StatusArg::Dnd => StatusChoice::Dnd,
+        StatusArg::Away => StatusChoice::Away,
+        StatusArg::Reset => StatusChoice::Reset,
+    }
+}
+
 fn open_target(target: &OpenArg) -> OpenTarget {
     match target {
         OpenArg::Chat { chat } => OpenTarget::Chat { chat: chat.clone() },
@@ -640,26 +692,25 @@ fn open_target(target: &OpenArg) -> OpenTarget {
 /// Ask `request` and print its answer, waiting for it as long as [`answer_time`] says.
 fn ask(cli: &Cli, mut client: Client, request: Request, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
     let write = matches!(cli.command, Command::Write(_));
-    let timed = if write {
-        client.set_read_timeout(answer_time(&cli.command))
-    } else {
-        Ok(())
-    };
-    match timed.and_then(|()| client.request_line(cli.account.as_deref(), request)) {
+    match client
+        .set_read_timeout(answer_time(&cli.command))
+        .and_then(|()| client.request_line(cli.account.as_deref(), request))
+    {
         Ok(line) => answered(cli, line, out, err),
         Err(error) => ask_failed(err, &error, write),
     }
 }
 
 /// How long `command`'s answer is waited for: a write's past the app's own bound on it ([`WRITE_ANSWER`], and
-/// [`WRITE_WAIT`] more with `--wait`), so the app's answer (its own timeout too) comes first; any other's the client's
-/// default.
+/// [`WRITE_WAIT`] more with `--wait`), a `sync`'s past [`SYNC_ANSWER`], so the app's answer (its own timeout too) comes
+/// first; any other's the client's default.
 #[must_use]
 pub fn answer_time(command: &Command) -> Duration {
     let slack = Timeouts::default().read;
     match command {
         Command::Write(write) if write.waits() => WRITE_ANSWER + WRITE_WAIT + slack,
         Command::Write(_) => WRITE_ANSWER + slack,
+        Command::Sync => SYNC_ANSWER + slack,
         _ => slack,
     }
 }

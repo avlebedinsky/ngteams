@@ -15,28 +15,39 @@
 //! - `new-chat`: the people by MRI, or by UPN as the service's people search finds them (New message's directory
 //!   suggestions); their 1:1 chat for one, a new group chat for more. The row names the chat made once it went out.
 //! - `resend`: an outbox row sent again ([`Core::resend`]), as the window's "Send again" does.
+//! - `status get`: what the account's own presence reports ([`reporting_name`]) and the status chosen in the
+//!   settings. `status set`: chosen as the account menu's status menu chooses it (`Shell::choose_status`), its own
+//!   presence told and the choice saved in the settings, which keep it across the app's runs and re-apply it on any
+//!   other change of the settings; `reset` is Automatic again. The report goes out through the engine as the menu's
+//!   does, and the answer is the status as the choice left it (a report that fails shows as `not-set`).
+//! - `sync`: a catch-up now ([`Core::sync`]), answered with what it did, [`SYNC_ANSWER`] at most. A read, so the
+//!   read-only mode runs it too.
 //!
 //! Each answers with its outbox row as its first attempt left it, [`WRITE_ANSWER`] at most (past it, a timeout saying
 //! the write may still go out); asked to `wait`, once the row settled (sent, failed, or one that may have arrived,
 //! which nothing sends again on its own), [`WRITE_WAIT`] more at most. The read-only mode
-//! refuses every write ([`ErrorCode::RefusedReadOnly`]), as its transport would.
+//! refuses every write ([`ErrorCode::RefusedReadOnly`]), as its transport would; `status set` too.
 
 use std::future::{self, Future};
 use std::pin::pin;
 use std::task::Poll;
 
-use gpui::{AsyncApp, BackgroundExecutor, Entity};
-use teams_core::{Action, SearchScope};
+use gpui::{App, AsyncApp, BackgroundExecutor, Entity};
+use teams_core::{Action, CatchUpReport, SearchScope};
 use teams_ctl::protocol::{
-    CtlError, ErrorCode, OutboxRow, Request, Response, UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT,
+    self, CtlError, ErrorCode, OutboxRow, OwnStatus, Request, Response, SYNC_ANSWER, StatusChoice, SyncReport,
+    UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT,
 };
 use teams_proto::chat::{MessageText, Node};
 use teams_proto::{Mri, SearchKind};
 use teams_store::{Conversation, ConversationKind, OutboxEntry, OutboxKind, OutboxState, counts_unread};
+use teams_ui::settings::ManualStatus;
 use teams_ui::{Chats, Core, compose};
 
 use super::address::{self, Addressed, engine_error};
 use super::events::outbox_row;
+use super::watch::reporting_name;
+use crate::app::Running;
 
 /// How many of a chat's stored messages `read` reads at a time, looking for the one to mark read up to.
 pub const READ_PAGE: usize = 50;
@@ -107,23 +118,130 @@ pub async fn within_answer<T>(
     write: impl Future<Output = Result<T, CtlError>>,
     executor: &BackgroundExecutor,
 ) -> Result<T, CtlError> {
-    let mut write = pin!(write);
-    let mut timer = pin!(executor.timer(WRITE_ANSWER));
+    let late = format!(
+        "the write wasn't answered in {}s: it may still go out. {UNANSWERED_WRITE}",
+        WRITE_ANSWER.as_secs()
+    );
+    within(WRITE_ANSWER, &late, write, executor).await
+}
+
+/// `work`'s answer, unless it takes longer than `bound`: then [`ErrorCode::Timeout`] saying `late`. The work goes on.
+async fn within<T>(
+    bound: std::time::Duration,
+    late: &str,
+    work: impl Future<Output = Result<T, CtlError>>,
+    executor: &BackgroundExecutor,
+) -> Result<T, CtlError> {
+    let mut work = pin!(work);
+    let mut timer = pin!(executor.timer(bound));
     future::poll_fn(|task| {
-        if let Poll::Ready(answer) = write.as_mut().poll(task) {
+        if let Poll::Ready(answer) = work.as_mut().poll(task) {
             return Poll::Ready(answer);
         }
-        timer.as_mut().poll(task).map(|()| {
-            Err(CtlError::new(
-                ErrorCode::Timeout,
-                format!(
-                    "the write wasn't answered in {}s: it may still go out. {UNANSWERED_WRITE}",
-                    WRITE_ANSWER.as_secs()
-                ),
-            ))
-        })
+        timer
+            .as_mut()
+            .poll(task)
+            .map(|()| Err(CtlError::new(ErrorCode::Timeout, late)))
     })
     .await
+}
+
+/// Whether `request` is `status get` or `status set` (see the module docs).
+#[must_use]
+pub fn serves_status(request: &Request) -> bool {
+    matches!(request, Request::GetStatus | Request::SetStatus { .. })
+}
+
+/// `status get` or `status set` for the account `wanted` names (see the module docs).
+///
+/// # Errors
+/// The account isn't one, or its engine stopped ([`address::account`]); `status set` in the read-only mode.
+pub fn own_status(
+    running: &Entity<Running>,
+    wanted: Option<&str>,
+    request: &Request,
+    cx: &mut App,
+) -> Result<Response, CtlError> {
+    let (mri, own, settings) = {
+        let running = running.read(cx);
+        let account = address::account(running, wanted, cx)?;
+        if matches!(request, Request::SetStatus { .. }) && account.core.read_only() {
+            return Err(CtlError::new(
+                ErrorCode::RefusedReadOnly,
+                "the read-only app reports no status",
+            ));
+        }
+        let desktop = running.desktop().read(cx);
+        let own = desktop.own_presence_of(&account.mri).cloned().ok_or_else(|| {
+            CtlError::new(
+                ErrorCode::Stopped,
+                format!("{} isn't in the app's window yet", account.upn),
+            )
+        })?;
+        (account.mri, own, desktop.settings().clone())
+    };
+    if let Request::SetStatus { status } = request {
+        let status = manual_status(*status);
+        own.update(cx, |own, cx| own.choose(status.choice(), cx));
+        // unchanged (the same status chosen again), the settings tell nobody: the own presence was told above
+        settings.update(cx, |settings, cx| {
+            settings.change(|settings| settings.set_manual_status(&mri, status), cx);
+        });
+    }
+    Ok(Response::OwnStatus(OwnStatus {
+        reported: reporting_name(own.read(cx).reporting(cx)).to_owned(),
+        manual: wire_manual(settings.read(cx).settings().manual_status_of(&mri)),
+    }))
+}
+
+/// The settings' status of a status menu's choice.
+#[must_use]
+pub fn manual_status(choice: StatusChoice) -> ManualStatus {
+    match choice {
+        StatusChoice::Available => ManualStatus::Available,
+        StatusChoice::Busy => ManualStatus::Busy,
+        StatusChoice::Dnd => ManualStatus::DoNotDisturb,
+        StatusChoice::Away => ManualStatus::Away,
+        StatusChoice::Reset => ManualStatus::Automatic,
+    }
+}
+
+fn wire_manual(status: ManualStatus) -> protocol::ManualStatus {
+    match status {
+        ManualStatus::Automatic => protocol::ManualStatus::Automatic,
+        ManualStatus::Available => protocol::ManualStatus::Available,
+        ManualStatus::Busy => protocol::ManualStatus::Busy,
+        ManualStatus::DoNotDisturb => protocol::ManualStatus::Dnd,
+        ManualStatus::Away => protocol::ManualStatus::Away,
+    }
+}
+
+/// `sync`: a catch-up of `account` now, answered with what it did (see the module docs).
+///
+/// # Errors
+/// The engine's ([`engine_error`]), or the catch-up took longer than [`SYNC_ANSWER`] (it goes on).
+pub async fn sync(account: &Addressed, cx: &mut AsyncApp) -> Result<Response, CtlError> {
+    let executor = cx.background_executor().clone();
+    let late = format!(
+        "the catch-up didn't end in {}s: it goes on in the app",
+        SYNC_ANSWER.as_secs()
+    );
+    let caught_up = async { account.core.sync().await.map_err(|error| engine_error(&error)) };
+    let report = within(SYNC_ANSWER, &late, caught_up, &executor).await?;
+    Ok(Response::Synced(sync_report(&report)))
+}
+
+/// What a catch-up did, as the wire tells it: its messages are those it stored new or changed.
+#[must_use]
+pub fn sync_report(report: &CatchUpReport) -> SyncReport {
+    let count = |count: usize| u64::try_from(count).unwrap_or(u64::MAX);
+    SyncReport {
+        conversations: count(report.conversations),
+        messages: count(report.messages.inserted.saturating_add(report.messages.updated)),
+        failed: count(report.failed.len()),
+        unreadable: count(report.unreadable.len()),
+        caught_up: report.caught_up(),
+    }
 }
 
 /// The row `request` made; none for a `read` with nothing to mark.

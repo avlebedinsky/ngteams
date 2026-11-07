@@ -23,9 +23,10 @@ use teams_ctl::client::Timeouts;
 use teams_ctl::codec::{LineReader, decode_request};
 use teams_ctl::path::Env;
 use teams_ctl::protocol::{
-    AccountRow, AppStatus, ChatRef, ChatRow, CtlError, CtlEvent, ErrorCode, EventFilter, EventLine, Hello, MemberRow,
-    MessageRow, MessageSource, OpenTarget, OutboxRow, OutboxState, Outcome, PROTOCOL_VERSION, Request, RequestLine,
-    Response, ResponseLine, UiState, Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT, WindowOp, WindowState,
+    AccountRow, AppStatus, ChatRef, ChatRow, CtlError, CtlEvent, ErrorCode, EventFilter, EventLine, Hello,
+    ManualStatus, MemberRow, MessageRow, MessageSource, OpenTarget, OutboxRow, OutboxState, Outcome, OwnStatus,
+    PROTOCOL_VERSION, Request, RequestLine, Response, ResponseLine, SYNC_ANSWER, StatusChoice, SyncReport, UiState,
+    Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT, WindowOp, WindowState,
 };
 
 /// What the fake server does with a request after the `hello`: lines to send back, then whether to read on.
@@ -519,6 +520,86 @@ fn chat_write_cases() -> Vec<Case> {
     ]
 }
 
+fn own_status(reported: &str, manual: ManualStatus) -> Response {
+    Response::OwnStatus(OwnStatus {
+        reported: s(reported),
+        manual,
+    })
+}
+
+fn status_cases() -> Vec<Case> {
+    let set = |status| Request::SetStatus { status };
+    vec![
+        Case {
+            args: &["status", "get"],
+            account: None,
+            request: Request::GetStatus,
+            response: own_status("available", ManualStatus::Automatic),
+            shows: &["reported: available", "manual:   automatic"],
+        },
+        Case {
+            args: &["status", "set", "available"],
+            account: None,
+            request: set(StatusChoice::Available),
+            response: own_status("available", ManualStatus::Available),
+            shows: &["manual:   available"],
+        },
+        Case {
+            args: &["status", "set", "busy"],
+            account: None,
+            request: set(StatusChoice::Busy),
+            response: own_status("busy", ManualStatus::Busy),
+            shows: &["reported: busy"],
+        },
+        Case {
+            args: &["--account", "b@lab.invalid", "status", "set", "dnd"],
+            account: Some("b@lab.invalid"),
+            request: set(StatusChoice::Dnd),
+            response: own_status("do-not-disturb", ManualStatus::Dnd),
+            shows: &["reported: do-not-disturb", "manual:   dnd"],
+        },
+        Case {
+            args: &["status", "set", "away"],
+            account: None,
+            request: set(StatusChoice::Away),
+            response: own_status("away", ManualStatus::Away),
+            shows: &["reported: away"],
+        },
+        Case {
+            args: &["status", "set", "reset"],
+            account: None,
+            request: set(StatusChoice::Reset),
+            response: own_status("available", ManualStatus::Automatic),
+            shows: &["manual:   automatic"],
+        },
+        Case {
+            args: &["sync"],
+            account: None,
+            request: Request::Sync,
+            response: Response::Synced(SyncReport {
+                conversations: 3,
+                messages: 12,
+                failed: 0,
+                unreadable: 0,
+                caught_up: true,
+            }),
+            shows: &["conversations: 3", "messages:      12", "caught up:     yes"],
+        },
+    ]
+}
+
+#[test]
+fn a_status_choice_the_menu_doesn_t_have_is_a_usage_error() {
+    let home = tempfile::tempdir().unwrap();
+    let run = ctl(
+        home.path(),
+        &home.path().join("nobody.sock"),
+        &["status", "set", "offline"],
+    );
+    assert_eq!(run.code, 2, "{}", run.stderr);
+    assert!(run.stderr.contains("offline"), "{}", run.stderr);
+}
+
 #[test]
 fn send_reads_its_text_from_stdin_with_a_dash() {
     let server = Server::answering(outbox(3, "send", OutboxState::Sent));
@@ -578,6 +659,8 @@ fn a_write_s_answer_is_waited_for_past_the_app_s_own_bound_on_it() {
         assert!(with_wait > WRITE_ANSWER + WRITE_WAIT, "{args:?}: {with_wait:?}");
     }
     assert_eq!(answer_time(&parsed(&["chats"]).command), default);
+    assert_eq!(answer_time(&parsed(&["status", "set", "busy"]).command), default);
+    assert_eq!(answer_time(&parsed(&["sync"]).command), SYNC_ANSWER + default);
 }
 
 #[test]
@@ -615,6 +698,7 @@ fn each_command_asks_its_request_and_prints_its_answer() {
         .chain(ui_cases())
         .chain(message_write_cases())
         .chain(chat_write_cases())
+        .chain(status_cases())
     {
         let (run, request) = run_one(Server::answering(case.response), case.args);
         assert_eq!(run.code, 0, "{:?}: {}", case.args, run.stderr);

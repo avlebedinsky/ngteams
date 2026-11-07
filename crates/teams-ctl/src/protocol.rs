@@ -30,6 +30,11 @@ pub const WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// ([`UNANSWERED_WRITE`]).
 pub const WRITE_ANSWER: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// How long the app takes at most to answer a `sync`: a catch-up reads every conversation changed since the last one,
+/// each read bounded by the transport's 30 s. Past it the app answers [`ErrorCode::Timeout`], and the catch-up goes
+/// on.
+pub const SYNC_ANSWER: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// What to do about a write whose answer didn't come in time: it may still go out, so it is looked for before it is
 /// written again.
 pub const UNANSWERED_WRITE: &str = "`ngteamsctl events --follow --kind outbox` shows its row as it changes, and \

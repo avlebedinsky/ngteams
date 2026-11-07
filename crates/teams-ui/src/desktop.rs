@@ -483,6 +483,15 @@ impl Desktop {
         &self.slots[0].own_presence
     }
 
+    /// Account `key`'s own presence as the app reports it.
+    #[must_use]
+    pub fn own_presence_of(&self, key: &str) -> Option<&Entity<OwnPresence>> {
+        self.slots
+            .iter()
+            .find(|slot| slot.key == key)
+            .map(|slot| &slot.own_presence)
+    }
+
     /// The settings every window of the app shows.
     #[must_use]
     pub fn settings(&self) -> &Entity<crate::SettingsModel> {

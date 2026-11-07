@@ -8,7 +8,8 @@
 //! - the reads ([`reads`]): through the account the request addresses ([`address`]), awaited on the foreground as
 //!   the views await the engine's replies.
 //! - the UI commands ([`ui`]): the window, the views it opens, the account it shows and the actions dispatched to it.
-//! - the message writes ([`writes`]): through the account addressed, its outbox.
+//! - the message writes ([`writes`]): through the account addressed, its outbox; its own status as its status menu
+//!   chooses it, and `sync`, its catch-up now.
 //! - `subscribe` ([`events`]): answered `subscribed` with the stream the connection writes from then on.
 //!
 //! A request the app doesn't serve yet is a [`ErrorCode::BadRequest`]; once the app is going, every request is
@@ -58,6 +59,8 @@ enum Step {
     Read(Addressed),
     /// A write of the account addressed, awaited.
     Write(Addressed),
+    /// A catch-up of the account addressed, awaited.
+    Sync(Addressed),
 }
 
 async fn ask(
@@ -68,6 +71,9 @@ async fn ask(
 ) -> Result<Response, CtlError> {
     if ui::serves(request) {
         return ui::answer(running, account, request, cx).await;
+    }
+    if writes::serves_status(request) {
+        return cx.update(|cx| writes::own_status(&alive(running, cx)?, account, request, cx));
     }
     let step = cx.update(|cx| {
         let running = alive(running, cx)?;
@@ -84,6 +90,7 @@ async fn ask(
             | Request::Search { .. }
             | Request::Members { .. } => Step::Read(address::account(running, account, cx)?),
             _ if writes::serves(request) => Step::Write(address::account(running, account, cx)?),
+            Request::Sync => Step::Sync(address::account(running, account, cx)?),
             _ => Step::Answered(Err(CtlError::new(
                 ErrorCode::BadRequest,
                 "this app doesn't serve that command yet",
@@ -94,6 +101,7 @@ async fn ask(
         Step::Answered(answer) => answer,
         Step::Read(addressed) => reads::answer(request, &addressed, cx).await,
         Step::Write(addressed) => writes::answer(request, &addressed, cx).await,
+        Step::Sync(addressed) => writes::sync(&addressed, cx).await,
     }
 }
 

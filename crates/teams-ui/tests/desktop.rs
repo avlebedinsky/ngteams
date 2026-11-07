@@ -538,6 +538,16 @@ fn an_account_added_to_an_open_window_keeps_the_active_shell_and_inherits_the_no
         2
     );
     assert!(d.rig.cx.read(|cx| d.desktop.read(cx).notifier_of(LAB_B).is_some()));
+    // each account's own presence is its own, the first one's the one `own_presence` gives
+    d.rig.cx.read(|cx| {
+        let desktop = d.desktop.read(cx);
+        let (a, b) = (
+            desktop.own_presence_of(LAB_A).unwrap(),
+            desktop.own_presence_of(LAB_B).unwrap(),
+        );
+        assert_eq!(a.entity_id(), desktop.own_presence().entity_id());
+        assert_ne!(a.entity_id(), b.entity_id());
+    });
     d.rig.cx.update(|cx| {
         d.desktop.update(cx, |desktop, cx| {
             desktop.remove_account("missing", cx);
@@ -551,6 +561,7 @@ fn an_account_added_to_an_open_window_keeps_the_active_shell_and_inherits_the_no
     );
     assert!(d.rig.cx.read(|cx| d.desktop.read(cx).tray().read(cx).has_icon()));
     assert!(d.rig.cx.read(|cx| d.desktop.read(cx).notifier_of(LAB_A).is_none()));
+    assert!(d.rig.cx.read(|cx| d.desktop.read(cx).own_presence_of(LAB_A).is_none()));
     assert_eq!(d.window(), Some(window));
     assert!(d.asked.lock().unwrap().is_empty());
 }
