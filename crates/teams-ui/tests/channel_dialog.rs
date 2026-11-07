@@ -151,6 +151,46 @@ fn a_team_s_menu_offers_add_channel_and_opens_the_dialog_on_the_name() {
 }
 
 #[test]
+fn a_team_s_more_options_button_closes_its_open_menu_and_leaves_it_closed() {
+    let rig = rig_with(vec![team(true, true, false)]);
+    let (_shell, cx) = shell_window(&rig);
+    let open = |cx: &mut VisualTestContext| bounds(cx, "team-menu-0").is_some();
+    open_menu(cx);
+    assert!(open(cx), "the team's \"...\" opens its menu");
+    click(cx, "team-more-0");
+    assert!(
+        !open(cx),
+        "the \"...\" of the open menu closes it, not closing and opening it again"
+    );
+    click(cx, "team-more-0");
+    assert!(open(cx), "and opens it again after");
+    // the list's empty foot, under the last line
+    let list = bounds(cx, "sidebar-list").expect("the sidebar's list");
+    let foot = gpui::point(list.center().x, list.bottom() - gpui::px(8.0));
+    cx.simulate_click(foot, Modifiers::none());
+    assert!(!open(cx), "a click elsewhere still closes it");
+}
+
+#[test]
+fn the_type_box_closes_its_open_kinds_and_leaves_them_closed() {
+    let rig = rig_with(vec![team(true, true, false)]);
+    let (shell, cx) = shell_window(&rig);
+    open_dialog(&shell, cx);
+    let open = |cx: &mut VisualTestContext| bounds(cx, "channel-types").is_some();
+    click(cx, "channel-type");
+    assert!(open(cx), "the box opens its kinds");
+    click(cx, "channel-type");
+    assert!(
+        !open(cx),
+        "the box of the open kinds closes them, not closing and opening them again"
+    );
+    click(cx, "channel-type");
+    assert!(open(cx), "and opens them again after");
+    click(cx, "channel-name");
+    assert!(!open(cx), "a click elsewhere still closes them");
+}
+
+#[test]
 fn a_team_that_doesn_t_let_the_account_add_a_channel_offers_no_menu() {
     let rig = rig_with(vec![team(false, false, false)]);
     let (_shell, cx) = shell_window(&rig);

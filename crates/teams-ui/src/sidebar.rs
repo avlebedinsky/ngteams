@@ -32,6 +32,7 @@ use crate::chat_list::{ChatList, ROW_HEIGHT};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::models::Models;
 use crate::teams_list::{CHANNEL_HEIGHT, ChannelMenuAnchor, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
+use crate::teams_page::PopupButton;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::{Shown, status_text};
@@ -796,6 +797,7 @@ impl Sidebar {
                     }
                 })),
         );
+        let pressed = PopupButton::default();
         let menu = open.then(|| {
             let weak = cx.entity().downgrade();
             let (chosen_from, closed, keys) = (weak.clone(), weak.clone(), weak);
@@ -809,6 +811,7 @@ impl Sidebar {
                 focus: &self.menu_focus,
                 palette,
                 anchor: gpui::Anchor::TopLeft,
+                button: pressed.clone(),
             }
             .render(
                 move |choice, window, cx| {
@@ -836,8 +839,7 @@ impl Sidebar {
                 more.invisible().group_hover(group.clone(), gpui::Styled::visible)
             })
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(button)
-            .children(menu)
+            .child(pressed.hold(button, menu))
             .into_any_element()
     }
 

@@ -14,6 +14,7 @@ use teams_store::Team;
 
 use crate::icons::Glyph;
 use crate::shell::menu_row;
+use crate::teams_page::PopupButton;
 use crate::theme::Palette;
 
 /// An entry of a team's "..." menu.
@@ -178,10 +179,12 @@ pub struct Panel<'a> {
     /// The corner of the menu that meets what opened it: the sidebar's opens to the right of its "...", the page's to the
     /// left, as Teams opens them.
     pub anchor: gpui::Anchor,
+    /// The "..." that opened it, whose press is its own ([`PopupButton::hold`]).
+    pub(crate) button: PopupButton,
 }
 
 impl Panel<'_> {
-    /// Draws it: `choose` is told the entry clicked, `close` a click outside.
+    /// Draws it: `choose` is told the entry clicked, `close` a click outside it and outside its "...".
     pub fn render(
         self,
         choose: impl Fn(TeamChoice, &mut Window, &mut App) + Clone + 'static,
@@ -196,6 +199,7 @@ impl Panel<'_> {
             focus,
             palette,
             anchor,
+            button,
         } = self;
         let mut at = 0;
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -240,7 +244,7 @@ impl Panel<'_> {
                         .bg(rgb(palette.surface))
                         .shadow_lg()
                         .text_color(rgb(palette.foreground))
-                        .on_mouse_down_out(close)
+                        .on_mouse_down_out(button.outside(close))
                         .on_key_down(keys)
                         .children(rows),
                 ),

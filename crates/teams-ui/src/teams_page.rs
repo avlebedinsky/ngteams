@@ -853,6 +853,7 @@ impl TeamsPage {
         let id = team.id.clone();
         let group = row_group(index);
         let open = self.menu.as_deref() == Some(id.as_str());
+        let pressed = PopupButton::default();
         let menu = open.then(|| {
             let read_only = self.core.read_only();
             let weak = cx.entity().downgrade();
@@ -867,6 +868,7 @@ impl TeamsPage {
                 focus: &self.menu_focus,
                 palette,
                 anchor: gpui::Anchor::TopRight,
+                button: pressed.clone(),
             }
             .render(
                 move |choice, window, cx| {
@@ -896,26 +898,30 @@ impl TeamsPage {
                 more.invisible().group_hover(group.clone(), gpui::Styled::visible)
             })
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(selected_by(
-                format!("teams-row-more-{index}"),
-                icon_button(
-                    SharedString::from(format!("teams-row-more-button-{index}")),
-                    Glyph::ELLIPSIS,
-                    "More options",
-                )
-                .small()
-                // the rows take the keyboard, Shift+F10 opening this menu
-                .tab_stop(false)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    if this.menu.as_deref() == Some(toggled.as_str()) {
-                        this.close_menu(window, cx);
-                    } else {
-                        this.open_menu(&toggled, false, window, cx);
-                    }
-                })),
-            ))
-            .children(menu)
+            .child(
+                pressed.hold(
+                    selected_by(
+                        format!("teams-row-more-{index}"),
+                        icon_button(
+                            SharedString::from(format!("teams-row-more-button-{index}")),
+                            Glyph::ELLIPSIS,
+                            "More options",
+                        )
+                        .small()
+                        // the rows take the keyboard, Shift+F10 opening this menu
+                        .tab_stop(false)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if this.menu.as_deref() == Some(toggled.as_str()) {
+                                this.close_menu(window, cx);
+                            } else {
+                                this.open_menu(&toggled, false, window, cx);
+                            }
+                        })),
+                    ),
+                    menu,
+                ),
+            )
             .into_any_element()
     }
 
@@ -1121,11 +1127,45 @@ pub(crate) fn chip_base(id: String, chosen: bool, palette: Palette) -> gpui::Sta
         .hover(move |chip| chip.bg(rgb(palette.hover)))
 }
 
+/// Where the button that opens a popup was last laid out ([`PopupButton::hold`]): a press there is the button's, whose
+/// click closes the popup, so the popup's click-outside leaves it alone ([`PopupButton::outside`]).
+#[derive(Clone, Default)]
+pub(crate) struct PopupButton(Rc<Cell<Option<Bounds<Pixels>>>>);
+
+impl PopupButton {
+    /// `close`, told a press outside the popup unless it lands on the button.
+    pub(crate) fn outside(
+        &self,
+        close: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static {
+        let pressed = self.0.clone();
+        move |event, window, cx| {
+            // a press on its own button is that button's, whose click closes the popup: closed here as well, the popup
+            // would be open again by the time that click toggles it
+            if !pressed.get().is_some_and(|button| button.contains(&event.position)) {
+                close(event, window, cx);
+            }
+        }
+    }
+
+    /// `button` with its `popup` after it while open, the button's bounds kept for [`Self::outside`].
+    pub(crate) fn hold(&self, button: impl IntoElement, popup: Option<impl IntoElement>) -> gpui::Div {
+        let held = div();
+        let held = if popup.is_some() {
+            let laid_out = self.0.clone();
+            held.on_children_prepainted(move |children, _, _| laid_out.set(children.first().copied()))
+        } else {
+            held
+        };
+        held.child(button).children(popup)
+    }
+}
+
 /// A popup of menu rows under what opened it, over everything.
 pub(crate) struct PopupMenu {
     menu: gpui::Div,
     /// Where [`with_popup`] last laid out the button that opened it.
-    button: Rc<Cell<Option<Bounds<Pixels>>>>,
+    button: PopupButton,
 }
 
 impl PopupMenu {
@@ -1165,8 +1205,7 @@ pub(crate) fn popup_menu(
     palette: Palette,
     close: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> PopupMenu {
-    let button: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
-    let pressed = button.clone();
+    let button = PopupButton::default();
     PopupMenu {
         menu: div()
             .occlude()
@@ -1181,13 +1220,7 @@ pub(crate) fn popup_menu(
             .bg(rgb(palette.surface))
             .shadow_lg()
             .text_color(rgb(palette.foreground))
-            .on_mouse_down_out(move |event, window, cx| {
-                // a press on its own button is that button's, whose click closes the menu: closed here as well, the
-                // menu would be open again by the time that click toggles it
-                if !pressed.get().is_some_and(|button| button.contains(&event.position)) {
-                    close(event, window, cx);
-                }
-            }),
+            .on_mouse_down_out(button.outside(close)),
         button,
     }
 }
@@ -1195,15 +1228,8 @@ pub(crate) fn popup_menu(
 /// `button` with its menu under it while open, as Teams has a dropdown: pressed while its menu is open, the button
 /// closes it and leaves it closed.
 pub(crate) fn with_popup(button: impl IntoElement, menu: Option<PopupMenu>) -> gpui::Div {
-    let held = div();
-    let held = match &menu {
-        Some(menu) => {
-            let laid_out = menu.button.clone();
-            held.on_children_prepainted(move |children, _, _| laid_out.set(children.first().copied()))
-        }
-        None => held,
-    };
-    held.child(button).children(menu)
+    let pressed = menu.as_ref().map(|menu| menu.button.clone()).unwrap_or_default();
+    pressed.hold(button, menu)
 }
 
 /// A team's line of facts: Private, N people, N channels, its description, split by hairlines.

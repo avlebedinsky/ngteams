@@ -997,6 +997,25 @@ fn a_menus_own_button_closes_it_and_leaves_it_closed() {
 }
 
 #[test]
+fn a_rows_more_options_button_closes_its_open_menu_and_leaves_it_closed() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    open_page(&shell, cx);
+    let open = |cx: &mut VisualTestContext| bounds(cx, "team-menu-0").is_some();
+    open_row_menu(cx, 0);
+    assert!(open(cx), "the row's \"...\" opens its menu");
+    click(cx, "teams-row-more-0");
+    assert!(
+        !open(cx),
+        "the \"...\" of the open menu closes it, not closing and opening it again"
+    );
+    click(cx, "teams-row-more-0");
+    assert!(open(cx), "and opens it again after");
+    click(cx, "teams-page-title");
+    assert!(!open(cx), "a click elsewhere still closes it");
+}
+
+#[test]
 fn the_pending_invites_tab_lists_each_invitation_waiting() {
     let rig = Rig::start();
     *rig.core.invites.lock().unwrap() = vec![teams_proto::PendingInvite {

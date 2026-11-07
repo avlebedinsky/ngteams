@@ -36,6 +36,7 @@ use teams_store::Team;
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard::{self, Handles};
+use crate::teams_page::PopupButton;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -945,20 +946,19 @@ impl ChannelDialog {
                     .size(px(16.0))
                     .text_color(rgb(palette.muted_foreground)),
             );
+        let pressed = PopupButton::default();
+        // a zero-height place right under the box: an anchored element starts at its parent's origin
+        let panel = open.then(|| div().relative().w_full().child(self.types_panel(&pressed, palette, cx)));
         div()
             .flex()
             .flex_col()
             .gap_1()
             .child(label("Choose a channel type", true, palette).child(info))
-            .child(face)
-            // a zero-height place right under the box: an anchored element starts at its parent's origin
-            .when(open, |field| {
-                field.child(div().relative().w_full().child(self.types_panel(palette, cx)))
-            })
+            .child(pressed.hold(face, panel).flex().flex_col().gap_1())
     }
 
-    /// The kinds, in a panel over what's below the box.
-    fn types_panel(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The kinds, in a panel over what's below the box (`pressed`).
+    fn types_panel(&self, pressed: &PopupButton, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.kinds().into_iter().map(|kind| {
             let (title, description, _) = type_words(kind);
             let highlighted = self.type_highlight == Some(kind);
@@ -1004,7 +1004,7 @@ impl ChannelDialog {
                     .border_color(rgb(palette.border))
                     .bg(rgb(palette.surface))
                     .shadow_lg()
-                    .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_types(window, cx)))
+                    .on_mouse_down_out(pressed.outside(cx.listener(|this, _, window, cx| this.close_types(window, cx))))
                     .children(rows),
             ),
         )
