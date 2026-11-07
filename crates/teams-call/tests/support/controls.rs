@@ -10,7 +10,12 @@ const C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
 /// a's group call with b and c in `GROUP`, its start answered with the conversation's `mute` link (none without
 /// `mute`) and its acceptance delivered: up.
 fn group_up(now: Instant, mute: bool) -> (Calls, CallId) {
-    let mut calls = Calls::new(identity(A));
+    group_up_as(identity(A), now, mute)
+}
+
+/// As [`group_up`], the account `account`.
+fn group_up_as(account: Identity, now: Instant, mute: bool) -> (Calls, CallId) {
+    let mut calls = Calls::new(account);
     calls.set_push_url(PUSH).unwrap();
     let placement = Placement::Chat {
         callees: vec![Mri::new(B), Mri::new(C)],
@@ -216,4 +221,45 @@ fn the_meeting_options_are_the_organizers_of_the_call_in_its_chat() {
     // a 1:1 call has none
     let (one_to_one, call) = connected_call(now);
     assert_eq!(one_to_one.options_of(call), None);
+}
+
+#[test]
+fn why_no_options_are_named_is_told_in_a_few_words_and_a_tenant_read_later_names_them() {
+    let now = Instant::now();
+    let tenantless = Identity {
+        tenant_id: String::new(),
+        ..identity(A)
+    };
+    let (mut calls, call) = group_up_as(tenantless, now, true);
+    assert!(!calls.knows_tenant());
+    assert_eq!(calls.options_missing(CallId(99)), "the call isn't up");
+    assert_eq!(
+        calls.options_missing(call),
+        "the roster doesn't name the account its organizer"
+    );
+    organize(&mut calls, now);
+    assert_eq!(calls.options_of(call), None);
+    assert_eq!(calls.options_missing(call), "the account's tenant isn't known yet");
+    calls.set_tenant(String::new());
+    assert!(!calls.knows_tenant(), "an empty tenant changes nothing");
+    calls.set_tenant("00000000-0000-4000-8000-0000000000d0".to_owned());
+    assert!(calls.knows_tenant());
+    assert!(calls.options_of(call).is_some(), "{}", calls.options_missing(call));
+    assert_eq!(calls.me(), &Mri::new(A));
+}
+
+#[test]
+fn a_call_without_a_chat_or_in_a_one_to_one_chat_names_no_options_and_says_why() {
+    let now = Instant::now();
+    let (mut test_call, call, _) = connected_test_call(now);
+    organize(&mut test_call, now);
+    assert_eq!(test_call.options_of(call), None);
+    assert_eq!(test_call.options_missing(call), "the call names no chat");
+    let (mut one_to_one, call) = connected_call(now);
+    organize(&mut one_to_one, now);
+    assert_eq!(one_to_one.options_of(call), None);
+    assert_eq!(
+        one_to_one.options_missing(call),
+        "its tenant, organizer or chat isn't of the options' form"
+    );
 }

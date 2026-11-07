@@ -4,6 +4,9 @@ use std::future::{self, Future};
 use std::sync::{Arc, Mutex};
 use teams_proto::{CallState as _, FrameSink, FrameText, FrameWriter, Request, RespondError, Response};
 
+#[path = "tracked_links.rs"]
+mod tracked_links;
+
 #[derive(Clone, Default)]
 struct Socket(Arc<Mutex<Vec<String>>>);
 
@@ -95,6 +98,11 @@ struct Connected {
 
 impl Connected {
     async fn new() -> Self {
+        Self::with_links(&[]).await
+    }
+
+    /// As [`Self::new`], the acceptance handing out `links` (name, link) beside its own.
+    async fn with_links(links: &[(&str, String)]) -> Self {
         let now = Instant::now();
         let mut calls = Calls::new(identity(A));
         calls.set_push_url(PUSH).unwrap();
@@ -131,13 +139,16 @@ impl Connected {
             start,
             now,
         };
-        setup.accept().await;
+        setup.accept(links).await;
         setup
     }
 
-    async fn accept(&mut self) {
+    async fn accept(&mut self, links: &[(&str, String)]) {
         let mut body = acceptance();
         body["callAcceptance"]["links"]["mediaRenegotiation"] = json!(cc("active", "renegotiate"));
+        for (name, link) in links {
+            body["callAcceptance"]["links"][*name] = json!(link);
+        }
         let incoming = delivery(&acceptance_path(&self.calls), &body);
         let batch = self.deliver(&incoming, Observed::Acceptance);
         assert!(batch.events.contains(&CallEvent::State {
