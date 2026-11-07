@@ -28,7 +28,10 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-state="${XDG_STATE_HOME:-$HOME/.local/state}/ngteams-read-only"
+# A relative XDG_STATE_HOME counts as unset, as in run-lab.sh (and where teams-ctl looks for the socket).
+state_home="${XDG_STATE_HOME:-}"
+[[ "$state_home" == /* ]] || state_home="$HOME/.local/state"
+state="$state_home/ngteams-read-only"
 run="$state/run"
 pidfile="$run/holder.pid"
 runner="$root/target/lab/debug/ui-sandbox-run"

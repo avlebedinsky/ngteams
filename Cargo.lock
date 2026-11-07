@@ -11122,6 +11122,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "teams-ctl"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "teams-log"
 version = "0.1.0"
 dependencies = [

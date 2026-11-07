@@ -157,12 +157,13 @@
 - `teams_ctl::Request`: a `#[serde(tag = "cmd")]` enum.
   - Reads and UI: `Hello`, `Status`, `Accounts`, `Chats { unread_only, limit }`, `Messages { chat, limit, before }`,
     `Unread`, `Search { query, limit }`, `Members { chat }`, `Window { op }`, `Open { target }` (chat, channel,
-    calendar, settings page, search), `SwitchAccount`, `UiState`, `Action { name }`, `ActionList`,
+    calendar, settings page, search), `SwitchAccount { to }`, `UiState`, `Action { name }`, `ActionList`,
     `Subscribe { filter }`, `Activate`.
   - Writes: `Send { chat, text }`, `Edit`, `Delete`, `React`, `Unreact`, `MarkRead`, `NewChat { people }`, `Resend`,
-    `SetStatus { status }`, `Sync`.
+    `GetStatus`, `SetStatus { status }`, `Sync`.
   - Calls and calendar: `Calls`, `Call { chat }`, `Answer`, `Decline`, `HangUp`, `Mute { op }`, `Camera { op }`,
-    `Join { chat }`, `Calendar { from, to }`, `CalendarEvent { id }`, `JoinMeeting { event, now }`.
+    `Join { chat }`, `Calendar { from, to }`, `CalendarEvent { event }` (not `id`, which the
+    line's own request id already names), `JoinMeeting { event, now }`.
   - Links: `OpenLink { url }`.
 - `teams_ctl::Response` payloads are plain serde structs (`ChatRow`, `MessageRow` with plain text, `AccountRow`,
   `UiState`, `OutboxRow`, `CallRow`, `EventRow`, …). They are mapped from the store and engine types in the server,
@@ -236,15 +237,15 @@
 - Create: `crates/teams-ctl/tests/protocol.rs`, `tests/path.rs`, `tests/codec.rs`, `tests/client.rs`
 - Modify: `Cargo.toml` (members, default-members), `coverage.toml` (baseline)
 
-- [ ] create the crate (`[lints] workspace = true`, workspace deps only)
-- [ ] `Request`/`Response`/`ErrorCode`/`CtlEvent`/`EventFilter` types with serde, and `PROTOCOL_VERSION`
-- [ ] `socket_path(Mode)` for personal, lab alias and read-only, the `NGTEAMS_CTL_SOCKET` override, and `prepare_dir`
+- [x] create the crate (`[lints] workspace = true`, workspace deps only)
+- [x] `Request`/`Response`/`ErrorCode`/`CtlEvent`/`EventFilter` types with serde, and `PROTOCOL_VERSION`
+- [x] `socket_path(Mode)` for personal, lab alias and read-only, the `NGTEAMS_CTL_SOCKET` override, and `prepare_dir`
       (`0700`)
-- [ ] JSON-lines codec (one line, a size cap, id pairing) and the client (connect with timeouts, `hello`,
+- [x] JSON-lines codec (one line, a size cap, id pairing) and the client (connect with timeouts, `hello`,
       request/response, a streaming `subscribe`)
-- [ ] tests: round trip of every request, response and event kind, unknown `cmd` → `bad_request`, path per mode and
+- [x] tests: round trip of every request, response and event kind, unknown `cmd` → `bad_request`, path per mode and
       override, oversize line, a client against an in-test server, connect timeout
-- [ ] run `cargo test -p teams-ctl`, which must pass before the next task
+- [x] run `cargo test -p teams-ctl`, which must pass before the next task
 
 ### Task 2: the server in the app: `Launch.ctl`, listener, foreground dispatch, `hello`/`status`
 

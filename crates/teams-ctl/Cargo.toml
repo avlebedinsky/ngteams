@@ -1,0 +1,21 @@
+[package]
+name = "teams-ctl"
+description = "The control socket of the running ngteams: its JSON-lines protocol, socket paths, line codec and client, for ngteamsctl and the app's server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# a connect bounded in time: a non-blocking Unix socket, tried again while the listener's backlog is full
+rustix = { workspace = true, features = ["net"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# each test's sockets and directories, in a directory of its own
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -8,6 +8,7 @@ members = [
     "crates/teams-auth",
     "crates/teams-call",
     "crates/teams-core",
+    "crates/teams-ctl",
     "crates/teams-log",
     "crates/teams-media",
     "crates/teams-mock",
@@ -32,6 +33,7 @@ default-members = [
     "crates/teams-auth",
     "crates/teams-call",
     "crates/teams-core",
+    "crates/teams-ctl",
     "crates/teams-log",
     "crates/teams-media",
     "crates/teams-mock",
@@ -65,6 +67,8 @@ teams-auth = { path = "crates/teams-auth" }
 # a call's signaling state machine (sans-IO): builds the sealed call writes, sends nothing itself
 teams-call = { path = "crates/teams-call" }
 teams-core = { path = "crates/teams-core" }
+# the control socket's protocol, paths, codec and client (`ngteamsctl`); the app's server is in crates/ngteams
+teams-ctl = { path = "crates/teams-ctl" }
 # the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`
 teams-log = { path = "crates/teams-log" }
 # a call's media: Teams' SDP dialect (sdp-ngc-1.0), the relayed libwebrtc peer and its session, the mixer's control
