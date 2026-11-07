@@ -22,7 +22,7 @@ teams-proto = { lines = 94, functions = 93, regions = 92 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
 teams-wpe = { lines = 92, functions = 92, regions = 92 }
 ngteams = { lines = 92, functions = 91, regions = 90 }
-teams-core = { lines = 91, functions = 92, regions = 89 }
+teams-core = { lines = 92, functions = 93, regions = 90 }
 teams-media = { lines = 81, functions = 81, regions = 81 }
 teams-mock = { lines = 54, functions = 52, regions = 55 }
 teams-signin = { lines = 92, functions = 93, regions = 91 }
