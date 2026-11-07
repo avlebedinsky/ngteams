@@ -156,6 +156,70 @@ fn a_malformed_line_is_a_bad_request_and_the_connection_goes_on() {
     quit(&cx);
 }
 
+/// The answer line the server writes next on `reader`.
+fn answer_on(reader: &mut BufReader<UnixStream>) -> ResponseLine {
+    let mut answer = String::new();
+    reader.read_line(&mut answer).unwrap();
+    serde_json::from_str(&answer).unwrap()
+}
+
+/// A line that isn't UTF-8 is answered as a bad request and the connection goes on; one over the size cap is answered
+/// so too, and ends the connection (the stream is mid-line). Nothing reaches the app: each is refused by the listener.
+#[test]
+fn a_line_not_utf8_or_over_the_cap_is_a_bad_request_from_the_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = socket_in(&dir);
+    let (jobs, asked) = async_channel::unbounded::<Job>();
+    let mut listener = ngteams::ctl::bind(&socket).unwrap().serve(jobs).unwrap();
+    assert_eq!(listener.path(), socket);
+    let mut client = UnixStream::connect(&socket).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+
+    client.write_all(b"{\"id\":1,\"cmd\":\"status\xff\"}\n").unwrap();
+    let not_utf8 = answer_on(&mut reader);
+    assert_eq!(not_utf8.id, 0);
+    assert!(
+        matches!(&not_utf8.outcome, Outcome::Error(error) if error.code == ErrorCode::BadRequest),
+        "{not_utf8:?}"
+    );
+
+    // written from a thread of its own: the server stops reading at its cap, and the rest may never be taken
+    let mut writer = client.try_clone().unwrap();
+    let writing = thread::spawn(move || {
+        let _ = writer.write_all(&vec![b'a'; codec::MAX_LINE + 1]);
+        let _ = writer.write_all(b"\n");
+    });
+    let too_long = answer_on(&mut reader);
+    assert!(
+        matches!(&too_long.outcome, Outcome::Error(error) if error.code == ErrorCode::BadRequest
+            && error.message.contains(&codec::MAX_LINE.to_string())),
+        "{too_long:?}"
+    );
+    let mut rest = String::new();
+    assert!(
+        matches!(reader.read_line(&mut rest), Ok(0) | Err(_)),
+        "the connection ends: {rest:?}"
+    );
+    writing.join().unwrap();
+    assert!(asked.try_recv().is_err(), "nothing reached the app");
+    listener.stop();
+}
+
+/// A socket whose directory can't be made (a file stands where it would be) is an I/O error naming its path.
+#[test]
+fn a_socket_whose_directory_cant_be_made_isnt_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("plain");
+    fs::write(&file, b"the user's").unwrap();
+    let socket = file.join("ctl.sock");
+    match ngteams::ctl::bind(&socket) {
+        Err(BindError::Io { path, .. }) => assert_eq!(path, socket),
+        other => panic!("bound under a file: {other:?}"),
+    }
+    assert_eq!(fs::read(&file).unwrap(), b"the user's");
+}
+
 #[test]
 fn a_stale_socket_is_replaced_and_a_live_one_refused() {
     let dir = tempfile::tempdir().unwrap();

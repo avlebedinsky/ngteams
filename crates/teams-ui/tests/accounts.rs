@@ -25,9 +25,10 @@ use teams_proto::Mri;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::accounts::AccountParts;
 use teams_ui::calls::Ask;
-use teams_ui::desktop::{Desktop, DesktopEvent, DesktopParts};
+use teams_ui::desktop::{Desktop, DesktopEvent, DesktopParts, WindowShown};
 use teams_ui::notify::{GATHER, NotificationServer};
 use teams_ui::settings::Settings;
+use teams_ui::settings_view::Page;
 use teams_ui::shell::Main;
 use teams_ui::tray::COUNT_DELAY;
 use teams_ui::window::{self, KitRoot};
@@ -321,6 +322,62 @@ fn the_tray_sums_the_accounts_and_an_account_removed_leaves_the_sum_and_the_wind
     let left = d.rig.cx.read(|cx| d.desktop.read(cx).accounts().read(cx).tiles().len());
     assert_eq!(left, 1);
     assert!(d.second.core.asked().contains(&"conversations"));
+}
+
+/// What the control socket opens is opened on the account it names, switched to first: the calendar, the settings
+/// (their first page or one named), a search's results; `ui_state` tells the account, the view and the window as they
+/// stand, and each account's own presence and unread chats are its own.
+#[test]
+fn the_views_opened_for_an_account_show_it_first_and_the_ui_state_tells_them() {
+    let d = TwoAccounts::start();
+    let window = d.open();
+    let state = |d: &TwoAccounts| d.rig.cx.read(|cx| d.desktop.read(cx).ui_state(cx));
+    let first = state(&d);
+    assert_eq!(first.account.as_deref(), Some(LAB_A));
+    assert_eq!(first.window, WindowShown::Shown);
+    assert!(!first.call_window);
+
+    let on = |d: &TwoAccounts, open: &dyn Fn(&mut Desktop, &mut gpui::Context<Desktop>)| {
+        d.rig
+            .cx
+            .update(|cx| d.desktop.update(cx, |desktop, cx| open(desktop, cx)));
+        d.rig.cx.run_until_parked();
+    };
+    on(&d, &|desktop, cx| desktop.show_calendar_of(LAB_B, cx));
+    assert_eq!(d.shown(window), (LAB_B.to_owned(), Main::Calendar));
+    let calendar = state(&d);
+    assert_eq!(calendar.account.as_deref(), Some(LAB_B));
+    assert_eq!(calendar.main, Some(Main::Calendar));
+    assert_eq!(calendar.title, None);
+
+    on(&d, &|desktop, cx| desktop.open_settings_of(LAB_A, None, cx));
+    assert_eq!(d.shown(window), (LAB_A.to_owned(), Main::Settings));
+    on(&d, &|desktop, cx| {
+        desktop.open_settings_of(LAB_B, Some(Page::Calls), cx);
+    });
+    assert_eq!(d.shown(window), (LAB_B.to_owned(), Main::Settings));
+    on(&d, &|desktop, cx| desktop.search_of(LAB_A, "hello", cx));
+    assert_eq!(d.shown(window), (LAB_A.to_owned(), Main::Search));
+
+    d.rig.cx.read(|cx| {
+        let desktop = d.desktop.read(cx);
+        assert!(desktop.own_presence_of(LAB_A).is_some());
+        assert!(desktop.own_presence_of(LAB_B).is_some());
+        assert!(desktop.own_presence_of(LAB_C).is_none(), "no account is c");
+    });
+    d.rig.cx.executor().advance_clock(COUNT_DELAY);
+    d.rig.cx.run_until_parked();
+    let unread = |key: &str| {
+        d.rig.cx.read(|cx| {
+            let accounts = d.desktop.read(cx).accounts().read(cx);
+            let tray = accounts.tile(key).unwrap().tray.read(cx);
+            tray.unread_chats()
+                .map(|(chat, count)| (chat.to_owned(), count))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(unread(LAB_A), [(AC.to_owned(), 2)]);
+    assert_eq!(unread(LAB_B), [(BC.to_owned(), 3)]);
 }
 
 #[test]

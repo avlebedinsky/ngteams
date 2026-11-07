@@ -150,3 +150,7 @@ fn prejoin(target: &Target, to_join: MeetingToJoin, cx: &mut App) -> Result<(), 
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/ctl_links.rs"]
+mod tests;

@@ -71,7 +71,7 @@ sha256 = "7bdd5ebbbf07a8daf3659fc52c93eb5866aa515311ff1a0b1b3e31fe7d38b9ee"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/lib.rs"]
-sha256 = "f8e6adfeb342a482bc896d03e001c82dc2f44eaef0e3d3b0599eea94f380f635"
+sha256 = "8814aecb4e9dcc4b39acfe6ac46223ef4f6e19bc46b66231e180a02762181d9e"
 reason = "module declarations, re-exports, documentation and a string constant only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/bundles.rs"]
@@ -95,7 +95,7 @@ sha256 = "791b1a682ea3701df3d9862e4b8834f415976eb96f2ef9e4e188bc56f0adf7bd"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "9cc93e5945ae128f7ecabadca9edbc103148b1c7afe52cb01a8024b315f9d414"
+sha256 = "a7a0245609aab00f17a18f4242739fed6f193ce287c89e8947740b50bae874ac"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe/src/event.rs"]

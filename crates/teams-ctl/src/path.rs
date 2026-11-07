@@ -25,6 +25,10 @@ pub const ENV_SOCKET: &str = "NGTEAMS_CTL_SOCKET";
 /// The socket's file name in its directory.
 pub const SOCKET_NAME: &str = "ctl.sock";
 
+/// The personal socket's directory under `$XDG_RUNTIME_DIR`. A constant, so the directory isn't written as a
+/// keyring application argument is (`ngteams/tests/apart.rs` keeps that name to the app's own crate).
+const PERSONAL_DIR: &str = "ngteams";
+
 /// Which app a socket belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -93,7 +97,7 @@ impl Env {
         match mode {
             Mode::Personal => {
                 let runtime = absolute(self.runtime_dir.as_ref()).ok_or(PathError::NoRuntimeDir)?;
-                Ok(runtime.join("ngteams").join(SOCKET_NAME))
+                Ok(runtime.join(PERSONAL_DIR).join(SOCKET_NAME))
             }
             Mode::Lab(alias) => {
                 if !plain_alias(alias) {

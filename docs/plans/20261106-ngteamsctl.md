@@ -518,14 +518,25 @@
 - [x] run `cargo test -p teams-ctl`, which must pass before the next task
 
 ### Task 15: Verify acceptance criteria
-- [ ] every command in Overview works on the personal build's code path with no setting or prompt in the way
-- [ ] the outbox is the only write path, no ctl code builds a request, calls go through `calls::ask`, and status goes
-      through the settings and `OwnPresence`
-- [ ] `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `scripts/lint-report.sh`
-- [ ] `cargo test -p teams-ctl`, `cargo test -p ngteams`, `cargo test -p teams-ui`, `cargo test -p fixture-guard`,
-      `python3 -B -m unittest discover -s scripts -p test_run_lab.py`
-- [ ] `scripts/coverage.sh --require-target` for `teams-ctl`, `ngteams` and `teams-ui`, with the new baseline in
-      `coverage.toml`
+- [x] every command in Overview works on the personal build's code path with no setting or prompt in the way (read:
+      the personal desktop branch always serves `--ctl-socket` or `$XDG_RUNTIME_DIR/ngteams/ctl.sock`; every `Request`
+      variant is served; the only refusals are the read-only mode's and an app without calls; the CLI prompts for
+      nothing; the ctl tests launch with default settings and `read_only: false`)
+- [x] the outbox is the only write path, no ctl code builds a request, calls go through `calls::ask`, and status goes
+      through the settings and `OwnPresence` (read: writes are `Core::write(Action)`/`Core::resend`; no transport or
+      HTTP in `ctl/` or `teams-ctl`, held by `reach.rs`'s `views_never_construct_or_send_protocol_requests`; calls are
+      `calls::ask_then` (`ask`'s body) and the pre-join's `join_now_then`; status is `OwnPresence::choose` plus
+      `set_manual_status`, as `Shell::choose_status`). ➕ `reach.rs` now names `ctl/writes.rs` beside the two views
+      that may create a chat (`ngteamsctl new-chat`), checked to go through `core.write(action)` and refuse read-only
+- [x] `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `scripts/lint-report.sh`
+- [x] `cargo test -p teams-ctl`, `cargo test -p ngteams`, `cargo test -p teams-ui`, `cargo test -p fixture-guard`,
+      `python3 -B -m unittest discover -s scripts -p test_run_lab.py` (fixed on the way: `apart.rs`'s personal-keyring
+      check matched `teams-ctl/src/path.rs`'s `"ngteams")` directory name, now a constant; `reach.rs` as above; and
+      `accounts_window.rs` still expected notifications to name their account, which main's 522f6d54 dropped)
+- [x] `scripts/coverage.sh --require-target` for `teams-ctl`, `ngteams` and `teams-ui`, with the new baseline in
+      `coverage.toml`: teams-ctl 99.47/100/98.30 and ngteams 92.08/91.16/90.92 pass, floors kept; ⚠️ teams-ui
+      90.55/87.98/89.80 fails functions and regions as main's tree does (90.54/87.96/89.78, below its own floors
+      too), so its floor is left as it is; the two reviewed `lib.rs` hashes updated
 
 ### Task 16: [Final] Update documentation
 - [ ] README: `teams-ctl` in Layout, and an `ngteamsctl` section under `ngteams` covering the sockets, commands,

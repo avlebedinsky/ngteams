@@ -667,24 +667,15 @@ const CREATES_A_CHAT: [&str; 5] = [
     "CreateChat {",
 ];
 
-/// Only an explicit people-search activation, or New message's first message, offers a new chat, through the engine's
-/// persistent outbox. Other views cannot create one incidentally.
+/// Only an explicit people-search activation, New message's first message, or `ngteamsctl new-chat` creates a new chat,
+/// through the engine's persistent outbox. Other views cannot create one incidentally.
 #[test]
 fn only_people_search_and_new_message_offer_creating_a_chat_through_the_engine() {
     let mut read = 0;
     for package in APP_CRATES {
         for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
             read += 1;
-            if path.ends_with("teams-ui/src/global_search.rs") {
-                assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
-                assert!(text.contains("if self.core.read_only()"));
-                continue;
-            }
-            if path.ends_with("teams-ui/src/new_chat.rs") {
-                // made only from the box's first message, never in the read-only mode
-                assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
-                assert!(text.contains("self.core.read_only()"));
-                assert!(text.contains("ComposeEvent::Start"));
+            if creates_a_chat_as_offered(&path, &text) {
                 continue;
             }
             for builds in CREATES_A_CHAT {
@@ -696,6 +687,31 @@ fn only_people_search_and_new_message_offer_creating_a_chat_through_the_engine()
     // compose writes through the engine's actions: a post, an edit
     let compose = fs::read_to_string(workspace_root().join("crates/teams-ui/src/compose.rs")).expect("UTF-8");
     assert!(compose.contains("self.core.write(action)"));
+}
+
+/// Whether `path` is one of the sources offering a new chat, checked to create it only as offered.
+fn creates_a_chat_as_offered(path: &Path, text: &str) -> bool {
+    if path.ends_with("teams-ui/src/global_search.rs") {
+        assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
+        assert!(text.contains("if self.core.read_only()"));
+        return true;
+    }
+    if path.ends_with("teams-ui/src/new_chat.rs") {
+        // made only from the box's first message, never in the read-only mode
+        assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
+        assert!(text.contains("self.core.read_only()"));
+        assert!(text.contains("ComposeEvent::Start"));
+        return true;
+    }
+    if path.ends_with("ngteams/src/ctl/writes.rs") {
+        // `ngteamsctl new-chat`, the user's own explicit command: the action handed to the engine's write, never in
+        // the read-only mode
+        assert_eq!(text.matches("Action::CreateChat").count(), 1);
+        assert!(text.contains("core.write(action)"));
+        assert!(text.contains("if core.read_only()"));
+        return true;
+    }
+    false
 }
 
 /// The crates the native client's requests are sent from or kept in, besides the app crates and `teams-proto` (where

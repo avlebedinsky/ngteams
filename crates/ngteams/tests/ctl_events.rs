@@ -536,6 +536,25 @@ fn told_as(call: &str) -> Vec<CtlEvent> {
     ]
 }
 
+/// A ring's end without its phrase is told by its code, and without either as `ended`.
+#[test]
+fn a_ring_end_without_its_phrase_is_told_by_its_code_else_as_ended() {
+    let call = CallId::for_tests(4);
+    let told = |end: RemoteEnd| events::map(&Event::RingEnded { call, end }, ME, 0, None);
+    let how = |how: &str| {
+        Some(CtlEvent::RingEnded {
+            call: call.get().to_string(),
+            how: how.to_owned(),
+        })
+    };
+    let coded = RemoteEnd {
+        code: Some(487),
+        ..RemoteEnd::default()
+    };
+    assert_eq!(told(coded), how("487"));
+    assert_eq!(told(RemoteEnd::default()), how("ended"));
+}
+
 #[test]
 fn each_engine_event_is_told_as_its_kind() {
     let app = App::start();

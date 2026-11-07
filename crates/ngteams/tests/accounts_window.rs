@@ -7,8 +7,8 @@
 //! hands its own ([`ngteams::app::launch`]). The parent reads the view trace: both accounts on the rail, a shown and
 //! connected; screenshots the window (the rail's avatars above Settings; kept under `target/ui-shots/`); switches to b
 //! with the sandbox's virtual keyboard (Ctrl+Alt+Down) and screenshots it again; then c posts on the mock to a's chat
-//! with c while b is shown: a's notification reaches the sandbox's fake server naming a, and activating it shows a
-//! again with that chat open. The tray's "Quit" quits the app, both engines' threads joined.
+//! with c while b is shown: a's notification reaches the sandbox's fake server naming no account, and activating it
+//! shows a again with that chat open. The tray's "Quit" quits the app, both engines' threads joined.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -203,7 +203,7 @@ fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
         .map_err(|error| running.fail(&error.to_string()))?;
     shot(sandbox, "ngteams-accounts-b.png")?;
 
-    a_s_message_notifies_naming_a_and_shows_a(sandbox, &mut trace, &running)?;
+    a_s_message_notifies_and_shows_a(sandbox, &mut trace, &running)?;
     shot(sandbox, "ngteams-accounts-notified.png")?;
     quit(sandbox, &mut trace, &running)?;
     running
@@ -216,13 +216,9 @@ fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
     Ok(())
 }
 
-/// c posts to a's chat with c while b is shown: a's notification names a (`<summary> · <a's name>`), and activating
-/// it shows a with the chat open.
-fn a_s_message_notifies_naming_a_and_shows_a(
-    sandbox: &Sandbox,
-    trace: &mut TraceReader,
-    running: &Running,
-) -> SandboxResult {
+/// c posts to a's chat with c while b is shown: a's notification is titled with the chat alone, naming no account,
+/// and activating it shows a with the chat open.
+fn a_s_message_notifies_and_shows_a(sandbox: &Sandbox, trace: &mut TraceReader, running: &Running) -> SandboxResult {
     let staged = sandbox.path("post-as-c.staged");
     fs::write(&staged, AC_CHAT)?;
     fs::rename(&staged, sandbox.path(POST_TRIGGER))?;
@@ -237,9 +233,9 @@ fn a_s_message_notifies_naming_a_and_shows_a(
         .iter()
         .find(|notification| notification.body == C_SAYS)
         .ok_or_else(|| format!("no notification of c's message: {notifications:?}"))?;
-    // a's name: "Lab A", or what its profile on the mock says once read
-    if !notification.summary.contains(" · ") {
-        return Err(format!("the notification doesn't name a: {notification:?}").into());
+    // the chat's title alone: notifications never name their account
+    if notification.summary.contains(" · ") {
+        return Err(format!("the notification names an account: {notification:?}").into());
     }
     sandbox.bus().invoke_action(notification.id, "default")?;
     trace.next_where("switched to a", |line| about(line, "account", "switched", LAB_A))?;
