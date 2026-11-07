@@ -9,11 +9,14 @@
 //!   the private directory it is bound in.
 //! - [`codec`]: one JSON value per line, each line capped in size, a response paired with its request by id.
 //! - [`client`]: a connect and reads bounded in time, the `hello` handshake, requests, and a `subscribe` stream.
+//! - [`cli`] and [`render`]: the `ngteamsctl` binary's command line, its exit codes and its human-readable output.
 
+pub mod cli;
 pub mod client;
 pub mod codec;
 pub mod path;
 pub mod protocol;
+pub mod render;
 
 pub use client::{Client, ClientError, Events, Timeouts, connect_stream};
 pub use codec::{CodecError, LineReader, MAX_LINE};

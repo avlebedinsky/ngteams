@@ -29,7 +29,7 @@ teams-signin = { lines = 90, functions = 92, regions = 90 }
 teams-ui = { lines = 91, functions = 89, regions = 91 }
 ui-sandbox = { lines = 94, functions = 91, regions = 90 }
 proto-lab = { lines = 94, functions = 93, regions = 90 }
-teams-ctl = { lines = 98, functions = 100, regions = 94 }
+teams-ctl = { lines = 99, functions = 100, regions = 98 }
 
 # Individually inspected sources LLVM does not map. Any content change invalidates the review.
 # These entries never suppress coverage counts when LLVM supplies a mapping for the file.
@@ -38,7 +38,7 @@ sha256 = "3ddd9f60071e796622a5fc4d5faa6bc432c207a89e014eac21b5d8b4aaa4ea1a"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-ctl/src/lib.rs"]
-sha256 = "841d829ebd2b296e7a5dbc7291f86540522f0ae176cc71fed27a95e3267263ba"
+sha256 = "ee70e2982c0c821acf624df7501c8702bc2227d5bc65a7338d86820b21860223"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]

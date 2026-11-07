@@ -154,6 +154,38 @@ fn an_error_line_is_handed_back_as_it_came() {
 }
 
 #[test]
+fn a_refused_subscription_is_a_server_error_or_its_line() {
+    let refusing = || {
+        with_hello(PROTOCOL_VERSION, |request| {
+            (vec![err(request.id, ErrorCode::UnknownChat, "no chat is Nope")], false)
+        })
+    };
+    let refused = CtlError::new(ErrorCode::UnknownChat, "no chat is Nope");
+
+    let server = refusing();
+    let client = Client::connect(&server.path, quick()).unwrap();
+    match client.subscribe(None, EventFilter::default()) {
+        Err(ClientError::Server(error)) => assert_eq!(error, refused),
+        other => panic!("{other:?}"),
+    }
+    server.thread.join().unwrap();
+
+    let server = refusing();
+    let client = Client::connect(&server.path, quick()).unwrap();
+    let Ok(Err(refusal)) = client.try_subscribe(None, EventFilter::default()) else {
+        panic!("not refused");
+    };
+    assert_eq!(
+        ResponseLine::from(refusal),
+        ResponseLine {
+            id: 2,
+            outcome: Outcome::Error(refused),
+        }
+    );
+    server.thread.join().unwrap();
+}
+
+#[test]
 fn a_server_of_another_version_is_refused() {
     let server = with_hello(PROTOCOL_VERSION + 1, |_| (Vec::new(), false));
     match Client::connect(&server.path, quick()) {

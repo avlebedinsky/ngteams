@@ -7,6 +7,12 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# ngteamsctl's times (an event's, a message's) in the local time zone
+chrono.workspace = true
+# ngteamsctl's command line
+clap.workspace = true
+# `ngteamsctl wait --match`: the event line a wait ends on (no logging of its own: nothing reaches the log cap)
+regex.workspace = true
 # a connect bounded in time: a non-blocking Unix socket, tried again while the listener's backlog is full
 rustix = { workspace = true, features = ["net"] }
 serde.workspace = true

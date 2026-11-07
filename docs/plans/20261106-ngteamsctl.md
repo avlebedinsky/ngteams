@@ -388,15 +388,18 @@
 **Files:**
 - Create: `crates/teams-ctl/src/bin/ngteamsctl.rs`, `src/cli.rs`, `src/render.rs`
 - Create: `crates/teams-ctl/tests/cli.rs` (the binary against an in-test fake server on a temp socket)
+- ➕ Create: `crates/teams-ctl/tests/render.rs` (the human output of every answer and event kind, including the
+  answers of Tasks 9–12, which `render` already covers)
 
-- [ ] clap subcommands for Tasks 2–7, `--account`, `--lab <alias>`, `--read-only`, `--socket`, `--json`
-- [ ] human output (tables for chats and messages, one line per event) and the exit codes
-- [ ] `events [--follow] [--kind …] [--account …] [--chat …] [--from …] [--mentions] [--detail] [--lead <min>…]`,
-      `events kinds`
-- [ ] `wait <kind> [same filters] [--match <regex>] [--timeout]`: prints the first matching event and exits 0
-- [ ] tests: each subcommand against the fake server, `--json` passthrough, `--lab`/`--read-only` socket choice, no
+- [x] clap subcommands for Tasks 2–7, `--account`, `--lab <alias>`, `--read-only`, `--socket`, `--json`
+- [x] human output (tables for chats and messages, one line per event) and the exit codes
+- [x] `events [--follow] [--kind …] [--account …] [--chat …] [--from …] [--mentions] [--detail] [--lead <min>…]`,
+      `events kinds`. Without `--follow`, `events` prints the first event and exits; `--account` is the global one.
+- [x] `wait <kind> [same filters] [--match <regex>] [--timeout]`: prints the first matching event and exits 0
+      (`--match` is tried on the event's JSON line; `--timeout` in seconds, fractions allowed)
+- [x] tests: each subcommand against the fake server, `--json` passthrough, `--lab`/`--read-only` socket choice, no
       app → exit 2, `wait` timeout → exit 3, `wait` matching
-- [ ] run `cargo test -p teams-ctl`, which must pass before the next task
+- [x] run `cargo test -p teams-ctl`, which must pass before the next task
 
 ### Task 9: message writes
 

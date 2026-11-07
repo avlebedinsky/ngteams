@@ -161,14 +161,38 @@ impl Client {
     ///
     /// # Errors
     /// As [`Client::request`].
-    pub fn subscribe(mut self, account: Option<&str>, filter: EventFilter) -> Result<Events, ClientError> {
+    pub fn subscribe(self, account: Option<&str>, filter: EventFilter) -> Result<Events, ClientError> {
+        self.try_subscribe(account, filter)?
+            .map_err(|refused| ClientError::Server(refused.error))
+    }
+
+    /// Subscribe as [`Client::subscribe`], but hand back an error answer with its request's id (what `--json` prints)
+    /// rather than as [`ClientError::Server`].
+    ///
+    /// # Errors
+    /// As [`Client::subscribe`], except that an error answer is `Ok(Err(refused))`.
+    pub fn try_subscribe(
+        mut self,
+        account: Option<&str>,
+        filter: EventFilter,
+    ) -> Result<Result<Events, Refused>, ClientError> {
         let id = self.send(account, Request::Subscribe { filter })?;
-        match self.answer(id)? {
-            Response::Subscribed => {}
-            other => return Err(ClientError::Protocol(format!("{other:?} for subscribe"))),
+        match self.read_answer(id)?.outcome {
+            Outcome::Ok(Response::Subscribed) => {}
+            Outcome::Ok(other) => return Err(ClientError::Protocol(format!("{other:?} for subscribe"))),
+            Outcome::Error(error) => return Ok(Err(Refused { id, error })),
         }
         self.writer.set_read_timeout(None)?;
-        Ok(Events { reader: self.reader })
+        Ok(Ok(Events { reader: self.reader }))
+    }
+
+    /// Bound the wait for each next answer, in place of the [`Timeouts`] the client connected with.
+    ///
+    /// # Errors
+    /// The socket's own error (a zero `timeout` is refused).
+    pub fn set_read_timeout(&self, timeout: Duration) -> Result<(), ClientError> {
+        self.writer.set_read_timeout(Some(timeout))?;
+        Ok(())
     }
 
     fn send(&mut self, account: Option<&str>, request: Request) -> Result<u64, ClientError> {
@@ -204,6 +228,23 @@ impl Client {
         match self.read_answer(id)?.outcome {
             Outcome::Ok(response) => Ok(response),
             Outcome::Error(error) => Err(ClientError::Server(error)),
+        }
+    }
+}
+
+/// A subscription the app refused: the request's id and the error answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refused {
+    pub id: u64,
+    pub error: CtlError,
+}
+
+impl From<Refused> for ResponseLine {
+    /// The error answer's line, as the app sent it.
+    fn from(refused: Refused) -> Self {
+        Self {
+            id: refused.id,
+            outcome: Outcome::Error(refused.error),
         }
     }
 }

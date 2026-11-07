@@ -1,0 +1,648 @@
+//! `ngteamsctl`'s command line: its arguments, the socket they choose, the request each command asks, and the exit
+//! code it ends with.
+//!
+//! - **The socket**: `--socket <path>`, otherwise `$NGTEAMS_CTL_SOCKET`, otherwise the mode's own path: a lab alias's
+//!   (`--lab <alias>`), the read-only runner's (`--read-only`), or the personal app's ([`crate::path`]).
+//! - **Output**: human-readable ([`crate::render`]): tables for chats and messages, one line per event. `--json`
+//!   prints each response or event line as JSON instead.
+//! - **Exit codes** ([`Exit`]): 0 on success, 1 on an error answer (or a stream that ended badly), 2 when no app runs
+//!   on the socket or on a usage error, 3 when `wait` times out.
+//! - **Events**: `events --follow` prints every event the filters let through until the app closes the stream;
+//!   without `--follow`, `events` prints the first one and exits. `wait <kind>` prints the first event of that kind
+//!   whose JSON line matches `--match`, within `--timeout` (which the connect and the subscribe spend too). A kind
+//!   that names no event kind is a usage error. A refused subscription is an error answer like any other.
+
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use regex::Regex;
+
+use crate::client::{Client, ClientError, Events, Refused, Timeouts};
+use crate::path::{Env, Mode};
+use crate::protocol::{CtlEvent, EventFilter, EventLine, OpenTarget, Outcome, Request, ResponseLine, WindowOp};
+use crate::render;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ngteamsctl",
+    version,
+    about = "Drive the running ngteams: read chats and messages, open views, and follow what happens."
+)]
+pub struct Cli {
+    /// The account addressed, by UPN, MRI or index (`ngteamsctl accounts`); the account the window shows by default.
+    /// `events` and `wait`: only this account's events.
+    #[arg(long, global = true, value_name = "UPN|MRI|INDEX")]
+    pub account: Option<String>,
+    /// Talk to the app of this lab alias (`scripts/run-lab.sh`).
+    #[arg(long, global = true, value_name = "ALIAS", conflicts_with = "read_only")]
+    pub lab: Option<String>,
+    /// Talk to the read-only app (`scripts/run-personal-read-only.sh`).
+    #[arg(long, global = true)]
+    pub read_only: bool,
+    /// The control socket to talk to, whatever the mode; `$NGTEAMS_CTL_SOCKET` when not given.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+    /// Print each response or event line as JSON, as the app sent it.
+    #[arg(long, global = true)]
+    pub json: bool,
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// The app's version, its accounts with their state, the window and the call up.
+    Status,
+    /// The app's accounts.
+    Accounts,
+    /// The account's chats, the most recent first.
+    Chats {
+        /// Only the chats with unread messages.
+        #[arg(long)]
+        unread: bool,
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+    },
+    /// A chat's messages, the newest first.
+    Messages {
+        /// The chat's id or title.
+        chat: String,
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+        /// Only the messages before this message id.
+        #[arg(long, value_name = "MESSAGE")]
+        before: Option<String>,
+    },
+    /// The unread counts the badge shows: per chat and the total.
+    Unread,
+    /// The account's messages that match a query.
+    Search {
+        /// The words searched for.
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+    },
+    /// A chat's members.
+    Members {
+        /// The chat's id or title.
+        chat: String,
+    },
+    /// Show, hide (to the tray), toggle or focus the main window.
+    Window {
+        #[arg(value_enum)]
+        op: WindowArg,
+    },
+    /// Open a view in the window.
+    Open {
+        #[command(subcommand)]
+        target: OpenArg,
+    },
+    /// The accounts the window shows.
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
+    /// What the window shows.
+    Ui {
+        #[command(subcommand)]
+        command: UiCommand,
+    },
+    /// Dispatch one of the app's actions to its main window by its full or unique short name; `action list` lists
+    /// them.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Action {
+        #[command(subcommand)]
+        command: Option<ActionCommand>,
+        /// The action's name (`teams_ui::ShowCalendar`, or `ShowCalendar` when only one action has it).
+        #[arg(required = true)]
+        name: Option<String>,
+    },
+    /// Bring the window to the front.
+    Activate,
+    /// Print what happens in the app: with `--follow` every event the filters let through, otherwise the first one.
+    /// `events kinds` lists the kinds.
+    #[command(args_conflicts_with_subcommands = true)]
+    Events {
+        #[command(subcommand)]
+        command: Option<EventsCommand>,
+        /// Go on until the app closes the stream.
+        #[arg(long)]
+        follow: bool,
+        /// Only events of these kinds; `message*` names every kind it starts.
+        #[arg(long = "kind", value_name = "KIND", value_delimiter = ',', value_parser = kind)]
+        kinds: Vec<String>,
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+    /// Wait for the first event of a kind (and matching `--match`), print it and exit 0; exit 3 past `--timeout`.
+    Wait {
+        /// The event's kind; `message*` names every kind it starts.
+        #[arg(value_parser = kind)]
+        kind: String,
+        /// A regular expression the event's JSON line must match.
+        #[arg(long = "match", value_name = "REGEX")]
+        pattern: Option<Regex>,
+        /// Give up after this many seconds (fractions allowed).
+        #[arg(long, value_name = "SECONDS", value_parser = seconds)]
+        timeout: Option<Duration>,
+        #[command(flatten)]
+        filter: FilterArgs,
+    },
+}
+
+/// The filters `events` and `wait` share, beside the kind and `--account`.
+#[derive(Debug, Args)]
+pub struct FilterArgs {
+    /// Only this chat's events (its id or title).
+    #[arg(long, value_name = "CHAT")]
+    pub chat: Option<String>,
+    /// Only messages and typing from this person: an MRI, a display name, or one of the app's accounts by UPN.
+    #[arg(long, value_name = "WHO")]
+    pub from: Option<String>,
+    /// Only messages that mention the account.
+    #[arg(long)]
+    pub mentions: bool,
+    /// A `reaction` event carries the message's current reactions.
+    #[arg(long)]
+    pub detail: bool,
+    /// The minutes before a meeting's start at which `meeting_starting` fires (5 and 0 when not given).
+    #[arg(long = "lead", value_name = "MINUTES", value_delimiter = ',')]
+    pub leads: Vec<u32>,
+}
+
+impl FilterArgs {
+    fn filter(&self, kinds: Vec<String>) -> EventFilter {
+        EventFilter {
+            kinds,
+            account: None,
+            chat: self.chat.clone(),
+            from: self.from.clone(),
+            mentions_me: self.mentions,
+            detail: self.detail,
+            leads: self.leads.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum WindowArg {
+    Show,
+    /// To the tray; refused without a tray item, since closing would quit the app.
+    Hide,
+    Toggle,
+    Focus,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OpenArg {
+    /// A chat, by id or title.
+    Chat { chat: String },
+    /// A channel, by id or name.
+    Channel { channel: String },
+    /// The calendar.
+    Calendar,
+    /// The settings, at a page of them.
+    Settings { page: Option<String> },
+    /// The search results of a query.
+    Search {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Show this account (UPN, MRI or index) in the window.
+    Switch { to: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UiCommand {
+    /// The account shown, the view, the chat open, and the windows.
+    State,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ActionCommand {
+    /// The actions the app has.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EventsCommand {
+    /// The event kinds.
+    Kinds,
+}
+
+/// How `ngteamsctl` ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    Ok = 0,
+    /// The app answered with an error, or a stream ended badly.
+    Error = 1,
+    /// No app runs on the socket, or the command line didn't read.
+    NoApp = 2,
+    /// `wait` saw no matching event in time.
+    Timeout = 3,
+}
+
+impl From<Exit> for ExitCode {
+    fn from(exit: Exit) -> Self {
+        Self::from(exit as u8)
+    }
+}
+
+/// The socket `cli` talks to (see the module docs).
+///
+/// # Errors
+/// The mode has no path in `env` (no runtime dir, no state home, an alias that isn't a plain name).
+pub fn socket(cli: &Cli, env: &Env) -> Result<PathBuf, crate::path::PathError> {
+    if let Some(socket) = &cli.socket {
+        return Ok(socket.clone());
+    }
+    let mode = match (&cli.lab, cli.read_only) {
+        (Some(alias), _) => Mode::Lab(alias.clone()),
+        (None, true) => Mode::ReadOnly,
+        (None, false) => Mode::Personal,
+    };
+    env.socket_path(&mode)
+}
+
+/// What the `ngteamsctl` binary runs: the process's arguments and environment, stdout and stderr.
+#[must_use]
+pub fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            // clap prints help and version on stdout (exit 0) and usage errors on stderr (exit 2)
+            let _ = error.print();
+            return ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(2));
+        }
+    };
+    run(
+        &cli,
+        &Env::from_process(),
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    )
+    .into()
+}
+
+/// Run `cli` against the socket `env` gives it, printing to `out` and telling errors on `err`.
+pub fn run(cli: &Cli, env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    if let Command::Events {
+        command: Some(EventsCommand::Kinds),
+        ..
+    } = cli.command
+    {
+        return written(render::kinds(out));
+    }
+    let path = match socket(cli, env) {
+        Ok(path) => path,
+        Err(error) => return told(err, Exit::NoApp, &format!("no socket to talk to: {error}")),
+    };
+    // `wait --timeout` counts from here: the connect, the hello and the subscribe spend it as the events do
+    let deadline = match &cli.command {
+        Command::Wait {
+            timeout: Some(timeout), ..
+        } => Some(Instant::now() + *timeout),
+        _ => None,
+    };
+    let client = match connect(&path, deadline) {
+        Ok(client) => client,
+        Err(error) => return setup_failed(err, &error, deadline),
+    };
+    match (request(&cli.command), &cli.command) {
+        (Request::Subscribe { filter }, Command::Wait { pattern, .. }) => {
+            let until = Until::Match {
+                pattern: pattern.as_ref(),
+                deadline,
+            };
+            stream(cli, client, filter, &until, out, err)
+        }
+        (Request::Subscribe { filter }, Command::Events { follow, .. }) => {
+            stream(cli, client, filter, &Until::Events { follow: *follow }, out, err)
+        }
+        (request, _) => ask(cli, client, request, out, err),
+    }
+}
+
+/// Connect to the app at `path`, each wait no longer than what is left before `deadline`.
+fn connect(path: &Path, deadline: Option<Instant>) -> Result<Client, ClientError> {
+    let mut timeouts = Timeouts::default();
+    if let Some(deadline) = deadline {
+        let left = left(deadline).ok_or(ClientError::Timeout)?;
+        timeouts = Timeouts {
+            connect: timeouts.connect.min(left),
+            read: timeouts.read.min(left),
+            write: timeouts.write.min(left),
+        };
+    }
+    Client::connect(path, timeouts)
+}
+
+/// The time left before `deadline`; none once it passed.
+fn left(deadline: Instant) -> Option<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    (!left.is_zero()).then_some(left)
+}
+
+/// How early a socket's timeout may fire before the deadline it was set to (the kernel counts in scheduler ticks),
+/// and still be the deadline's.
+const TICK: Duration = Duration::from_millis(20);
+
+/// The exit a client error before the first event ends with: a timeout at `wait`'s deadline is the deadline's (3),
+/// any other as [`failed`].
+fn setup_failed(err: &mut dyn Write, error: &ClientError, deadline: Option<Instant>) -> Exit {
+    let at_deadline = deadline.is_some_and(|deadline| deadline.saturating_duration_since(Instant::now()) <= TICK);
+    if matches!(error, ClientError::Timeout) && at_deadline {
+        return timed_out(err);
+    }
+    failed(err, error)
+}
+
+fn timed_out(err: &mut dyn Write) -> Exit {
+    told(err, Exit::Timeout, "no matching event came in time")
+}
+
+/// An event kind `events --kind` and `wait` take: one of [`CtlEvent::KINDS`] (the stream's own `lagged` left out),
+/// or a prefix ending in `*` that names at least one.
+fn kind(value: &str) -> Result<String, String> {
+    let mut kinds = CtlEvent::KINDS.iter().filter(|kind| **kind != "lagged");
+    let known = match value.strip_suffix('*') {
+        Some(prefix) => kinds.any(|kind| kind.starts_with(prefix)),
+        None => kinds.any(|kind| *kind == value),
+    };
+    if known {
+        Ok(value.to_owned())
+    } else {
+        Err(format!(
+            "{value:?} isn't an event kind (`ngteamsctl events kinds` lists them)"
+        ))
+    }
+}
+
+/// The request a command asks: `events` and `wait` subscribe.
+fn request(command: &Command) -> Request {
+    match command {
+        Command::Status => Request::Status,
+        Command::Accounts => Request::Accounts,
+        Command::Chats { unread, limit } => Request::Chats {
+            unread_only: *unread,
+            limit: *limit,
+        },
+        Command::Messages { chat, limit, before } => Request::Messages {
+            chat: chat.clone(),
+            limit: *limit,
+            before: before.clone(),
+        },
+        Command::Unread => Request::Unread,
+        Command::Search { query, limit } => Request::Search {
+            query: query.join(" "),
+            limit: *limit,
+        },
+        Command::Members { chat } => Request::Members { chat: chat.clone() },
+        Command::Window { op } => Request::Window { op: window_op(*op) },
+        Command::Open { target } => Request::Open {
+            target: open_target(target),
+        },
+        Command::Account {
+            command: AccountCommand::Switch { to },
+        } => Request::SwitchAccount { to: to.clone() },
+        Command::Ui {
+            command: UiCommand::State,
+        } => Request::UiState,
+        Command::Action {
+            command: Some(ActionCommand::List),
+            ..
+        } => Request::ActionList,
+        Command::Action { name, .. } => Request::Action {
+            name: name.clone().unwrap_or_default(),
+        },
+        Command::Activate => Request::Activate,
+        Command::Events { kinds, filter, .. } => Request::Subscribe {
+            filter: filter.filter(kinds.clone()),
+        },
+        Command::Wait { kind, filter, .. } => Request::Subscribe {
+            filter: filter.filter(vec![kind.clone()]),
+        },
+    }
+}
+
+fn window_op(op: WindowArg) -> WindowOp {
+    match op {
+        WindowArg::Show => WindowOp::Show,
+        WindowArg::Hide => WindowOp::Hide,
+        WindowArg::Toggle => WindowOp::Toggle,
+        WindowArg::Focus => WindowOp::Focus,
+    }
+}
+
+fn open_target(target: &OpenArg) -> OpenTarget {
+    match target {
+        OpenArg::Chat { chat } => OpenTarget::Chat { chat: chat.clone() },
+        OpenArg::Channel { channel } => OpenTarget::Channel {
+            channel: channel.clone(),
+        },
+        OpenArg::Calendar => OpenTarget::Calendar,
+        OpenArg::Settings { page } => OpenTarget::Settings { page: page.clone() },
+        OpenArg::Search { query } => OpenTarget::Search { query: query.join(" ") },
+    }
+}
+
+/// Ask `request` and print its answer.
+fn ask(cli: &Cli, mut client: Client, request: Request, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    match client.request_line(cli.account.as_deref(), request) {
+        Ok(line) => answered(cli, line, out, err),
+        Err(error) => failed(err, &error),
+    }
+}
+
+/// Print an answer's line: its response on `out`, its error on `err` (both on `out` with `--json`).
+fn answered(cli: &Cli, line: ResponseLine, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    if cli.json {
+        let printed = written(json_line(out, &line));
+        return match line.outcome {
+            Outcome::Ok(_) => printed,
+            Outcome::Error(_) => Exit::Error,
+        };
+    }
+    match line.outcome {
+        Outcome::Ok(response) => written(render::response(out, &response)),
+        Outcome::Error(error) => {
+            let _ = render::error(err, &error);
+            Exit::Error
+        }
+    }
+}
+
+fn json_line(out: &mut dyn Write, line: &ResponseLine) -> io::Result<()> {
+    serde_json::to_writer(&mut *out, line)?;
+    writeln!(out)
+}
+
+/// When a stream's command ends.
+enum Until<'a> {
+    /// `events`: at the first event, or when the stream ends with `follow`.
+    Events { follow: bool },
+    /// `wait`: at the first event that matches, or past the deadline.
+    Match {
+        pattern: Option<&'a Regex>,
+        deadline: Option<Instant>,
+    },
+}
+
+/// Subscribe with `filter` and print events until `until` says the command is done.
+fn stream(
+    cli: &Cli,
+    client: Client,
+    filter: EventFilter,
+    until: &Until<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let deadline = match until {
+        Until::Match { deadline, .. } => *deadline,
+        Until::Events { .. } => None,
+    };
+    let mut events = match subscribe(cli, client, filter, deadline) {
+        Ok(Ok(events)) => events,
+        Ok(Err(refused)) => return answered(cli, refused.into(), out, err),
+        Err(error) => return setup_failed(err, &error, deadline),
+    };
+    loop {
+        let event = match next(&mut events, until) {
+            Ok(Some(event)) => event,
+            Ok(None) => return ended(err, until),
+            Err(Next::TimedOut) => return timed_out(err),
+            Err(Next::Failed(error)) => return failed(err, &error),
+        };
+        if matches!(event.event, CtlEvent::Lagged) {
+            let _ = print_event(cli, out, &event);
+            return told(
+                err,
+                Exit::Error,
+                "fell behind the app's events: the app ended the stream",
+            );
+        }
+        if !wanted(&event, until) {
+            continue;
+        }
+        if let Err(error) = print_event(cli, out, &event) {
+            return written(Err(error));
+        }
+        if !matches!(until, Until::Events { follow: true }) {
+            return Exit::Ok;
+        }
+    }
+}
+
+/// Subscribe with `filter`, the answer waited for no longer than what is left before `deadline`.
+fn subscribe(
+    cli: &Cli,
+    client: Client,
+    filter: EventFilter,
+    deadline: Option<Instant>,
+) -> Result<Result<Events, Refused>, ClientError> {
+    if let Some(deadline) = deadline {
+        let left = left(deadline).ok_or(ClientError::Timeout)?;
+        client.set_read_timeout(left.min(Timeouts::default().read))?;
+    }
+    client.try_subscribe(cli.account.as_deref(), filter)
+}
+
+enum Next {
+    TimedOut,
+    Failed(ClientError),
+}
+
+/// The next event, waiting no longer than the deadline.
+fn next(events: &mut Events, until: &Until<'_>) -> Result<Option<EventLine>, Next> {
+    let deadline = match until {
+        Until::Match {
+            deadline: Some(deadline),
+            ..
+        } => Some(*deadline),
+        _ => None,
+    };
+    loop {
+        if let Some(deadline) = deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Next::TimedOut);
+            }
+            events.set_read_timeout(Some(left)).map_err(Next::Failed)?;
+        }
+        match events.next_event() {
+            Err(ClientError::Timeout) if deadline.is_some() => {}
+            other => return other.map_err(Next::Failed),
+        }
+    }
+}
+
+/// Whether `event` ends a `wait` (every event counts for `events`).
+fn wanted(event: &EventLine, until: &Until<'_>) -> bool {
+    match until {
+        Until::Match {
+            pattern: Some(pattern), ..
+        } => serde_json::to_string(event).is_ok_and(|line| pattern.is_match(&line)),
+        _ => true,
+    }
+}
+
+fn print_event(cli: &Cli, out: &mut dyn Write, event: &EventLine) -> io::Result<()> {
+    if cli.json {
+        serde_json::to_writer(&mut *out, event)?;
+        writeln!(out)?;
+    } else {
+        writeln!(out, "{}", render::event(event))?;
+    }
+    out.flush()
+}
+
+/// The app closed the stream: the end of `events --follow`, early for the others.
+fn ended(err: &mut dyn Write, until: &Until<'_>) -> Exit {
+    match until {
+        Until::Events { follow: true } => Exit::Ok,
+        _ => told(err, Exit::Error, "the app closed the stream"),
+    }
+}
+
+/// The exit a client error ends with, told on `err`.
+fn failed(err: &mut dyn Write, error: &ClientError) -> Exit {
+    match error {
+        ClientError::NotRunning { .. } => told(err, Exit::NoApp, &error.to_string()),
+        ClientError::Server(error) => {
+            let _ = render::error(err, error);
+            Exit::Error
+        }
+        error => told(err, Exit::Error, &error.to_string()),
+    }
+}
+
+fn told(err: &mut dyn Write, exit: Exit, message: &str) -> Exit {
+    let _ = writeln!(err, "ngteamsctl: {message}");
+    exit
+}
+
+/// The exit after printing: a reader that went away (`| head -1`) ends it quietly, any other write error is an
+/// error.
+fn written(result: io::Result<()>) -> Exit {
+    match result {
+        Ok(()) => Exit::Ok,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Exit::Ok,
+        Err(_) => Exit::Error,
+    }
+}
+
+/// `--timeout`'s seconds, fractions allowed.
+fn seconds(value: &str) -> Result<Duration, String> {
+    let seconds: f64 = value
+        .parse()
+        .map_err(|_| format!("{value:?} isn't a number of seconds"))?;
+    Duration::try_from_secs_f64(seconds).map_err(|_| format!("{value:?} isn't a number of seconds"))
+}

@@ -11127,6 +11127,9 @@ dependencies = [
 name = "teams-ctl"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "clap",
+ "regex",
  "rustix 1.1.5",
  "serde",
  "serde_json",
