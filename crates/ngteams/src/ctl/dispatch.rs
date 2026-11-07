@@ -8,6 +8,7 @@
 //! - the reads ([`reads`]): through the account the request addresses ([`address`]), awaited on the foreground as
 //!   the views await the engine's replies.
 //! - the UI commands ([`ui`]): the window, the views it opens, the account it shows and the actions dispatched to it.
+//! - the message writes ([`writes`]): through the account addressed, its outbox.
 //! - `subscribe` ([`events`]): answered `subscribed` with the stream the connection writes from then on.
 //!
 //! A request the app doesn't serve yet is a [`ErrorCode::BadRequest`]; once the app is going, every request is
@@ -23,7 +24,7 @@ use teams_ui::{Account, Bridge, Calls, Desktop, Engine, Link, Status};
 
 use super::address::{self, Addressed};
 use super::listener::Answer;
-use super::{events, reads, ui};
+use super::{events, reads, ui, writes};
 use crate::app::Running;
 
 /// The app's version, as `hello` and `status` tell it.
@@ -55,6 +56,8 @@ enum Step {
     Answered(Result<Response, CtlError>),
     /// A read of the account addressed, awaited.
     Read(Addressed),
+    /// A write of the account addressed, awaited.
+    Write(Addressed),
 }
 
 async fn ask(
@@ -80,6 +83,7 @@ async fn ask(
             | Request::Unread
             | Request::Search { .. }
             | Request::Members { .. } => Step::Read(address::account(running, account, cx)?),
+            _ if writes::serves(request) => Step::Write(address::account(running, account, cx)?),
             _ => Step::Answered(Err(CtlError::new(
                 ErrorCode::BadRequest,
                 "this app doesn't serve that command yet",
@@ -89,6 +93,7 @@ async fn ask(
     match step {
         Step::Answered(answer) => answer,
         Step::Read(addressed) => reads::answer(request, &addressed, cx).await,
+        Step::Write(addressed) => writes::answer(request, &addressed, cx).await,
     }
 }
 

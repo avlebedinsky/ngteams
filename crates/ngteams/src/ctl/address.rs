@@ -15,7 +15,7 @@ use gpui::{App, Entity};
 use teams_ctl::protocol::{ChatRef, CtlError, ErrorCode};
 use teams_store::Conversation;
 use teams_ui::chat_list::{self, ALL_CHATS};
-use teams_ui::{Account, Core, Engine, Tray};
+use teams_ui::{Account, Chats, Core, Engine, Tray};
 
 use crate::app::Running;
 
@@ -26,6 +26,8 @@ pub struct Addressed {
     pub core: Arc<dyn Core>,
     /// The badge's unread counts of the account (none while the window holds no tile of it).
     pub tray: Option<Entity<Tray>>,
+    /// The account's chats as the engine told them: its outbox rows as last told among them.
+    pub chats: Entity<Chats>,
 }
 
 /// The account `wanted` names, or the one the window shows without it (see the module docs).
@@ -52,6 +54,7 @@ pub fn account(running: &Running, wanted: Option<&str>, cx: &App) -> Result<Addr
         mri: mri.clone(),
         core: bridge.core(),
         tray,
+        chats: bridge.models().chats.clone(),
     })
 }
 

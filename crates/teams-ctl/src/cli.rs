@@ -5,8 +5,14 @@
 //!   (`--lab <alias>`), the read-only runner's (`--read-only`), or the personal app's ([`crate::path`]).
 //! - **Output**: human-readable ([`crate::render`]): tables for chats and messages, one line per event. `--json`
 //!   prints each response or event line as JSON instead.
-//! - **Exit codes** ([`Exit`]): 0 on success, 1 on an error answer (or a stream that ended badly), 2 when no app runs
-//!   on the socket or on a usage error, 3 when `wait` times out.
+//! - **Exit codes** ([`Exit`]): 0 on success, 1 on an error answer (or a stream that ended badly, or a write whose
+//!   outbox row failed; with `--wait`, one not sent), 2 when no app runs on the socket or on a usage error, 3 when
+//!   `wait` times out.
+//! - **Writes** answer with their outbox row as its first attempt left it (the app answers within [`WRITE_ANSWER`]);
+//!   `--wait` waits for it to settle: sent, failed, or `unknown` (it may have arrived), [`WRITE_WAIT`] more at most.
+//!   `read` with nothing to mark answers done. The client waits a little past the app's bounds ([`answer_time`]);
+//!   a write still unanswered then, or that the app timed out, may still go out, and the error says where to look.
+//!   `send` and `edit` read their text from stdin when it is `-`.
 //! - **Events**: `events --follow` prints every event the filters let through until the app closes the stream;
 //!   without `--follow`, `events` prints the first one and exits. `wait <kind>` prints the first event of that kind
 //!   whose JSON line matches `--match`, within `--timeout` (which the connect and the subscribe spend too). A kind
@@ -22,7 +28,10 @@ use regex::Regex;
 
 use crate::client::{Client, ClientError, Events, Refused, Timeouts};
 use crate::path::{Env, Mode};
-use crate::protocol::{CtlEvent, EventFilter, EventLine, OpenTarget, Outcome, Request, ResponseLine, WindowOp};
+use crate::protocol::{
+    CtlEvent, EventFilter, EventLine, OpenTarget, OutboxState, Outcome, Request, Response, ResponseLine,
+    UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT, WindowOp,
+};
 use crate::render;
 
 #[derive(Debug, Parser)]
@@ -123,6 +132,8 @@ pub enum Command {
     },
     /// Bring the window to the front.
     Activate,
+    #[command(flatten)]
+    Write(WriteCommand),
     /// Print what happens in the app: with `--follow` every event the filters let through, otherwise the first one.
     /// `events kinds` lists the kinds.
     #[command(args_conflicts_with_subcommands = true)]
@@ -152,6 +163,111 @@ pub enum Command {
         #[command(flatten)]
         filter: FilterArgs,
     },
+}
+
+/// The writes: each answers with its outbox row (exit 1 when it failed; with `--wait`, unless it was sent), `read`
+/// with nothing to mark with done.
+#[derive(Debug, Subcommand)]
+pub enum WriteCommand {
+    /// Send plain text to a chat, each line a paragraph.
+    Send {
+        /// The chat's id or title.
+        chat: String,
+        /// The text; `-` reads it from stdin.
+        text: String,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+    /// Replace the text of one of the account's messages (its quote of another message kept).
+    Edit {
+        /// The chat's id or title.
+        chat: String,
+        /// The message's id.
+        message: String,
+        /// The new text; `-` reads it from stdin.
+        text: String,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+    /// Delete one of the account's messages.
+    Delete {
+        /// The chat's id or title.
+        chat: String,
+        /// The message's id.
+        message: String,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+    /// React to a message.
+    React {
+        /// The chat's id or title.
+        chat: String,
+        /// The message's id.
+        message: String,
+        /// The reaction's key: like, heart, laugh, surprised, sad, angry, …
+        reaction: String,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+    /// Take the account's reaction off a message.
+    Unreact {
+        /// The chat's id or title.
+        chat: String,
+        /// The message's id.
+        message: String,
+        /// The reaction's key.
+        reaction: String,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+    /// Mark a chat read up to its latest message.
+    Read {
+        /// The chat's id or title.
+        chat: String,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+    /// Start a chat: the 1:1 chat with one person, a new group chat with more.
+    NewChat {
+        /// The people, by MRI or UPN.
+        #[arg(required = true, num_args = 1..)]
+        people: Vec<String>,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+    /// Send an outbox row again (a write that failed).
+    Resend {
+        /// The row's id, as a write's answer or an `outbox` event names it.
+        row: i64,
+        #[command(flatten)]
+        wait: WaitArg,
+    },
+}
+
+impl WriteCommand {
+    /// Whether it waits for its row to settle.
+    #[must_use]
+    pub fn waits(&self) -> bool {
+        match self {
+            Self::Send { wait, .. }
+            | Self::Edit { wait, .. }
+            | Self::Delete { wait, .. }
+            | Self::React { wait, .. }
+            | Self::Unreact { wait, .. }
+            | Self::Read { wait, .. }
+            | Self::NewChat { wait, .. }
+            | Self::Resend { wait, .. } => wait.wait,
+        }
+    }
+}
+
+/// A write's `--wait`.
+#[derive(Clone, Copy, Debug, Args)]
+pub struct WaitArg {
+    /// Answer once the write was sent, failed for good, or is unknown (it may have arrived; only `resend` sends it
+    /// again), a minute at most, not as its first attempt left it.
+    #[arg(long)]
+    pub wait: bool,
 }
 
 /// The filters `events` and `wait` share, beside the kind and `--account`.
@@ -301,6 +417,10 @@ pub fn run(cli: &Cli, env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Ex
     {
         return written(render::kinds(out));
     }
+    let request = match request(&cli.command, &mut || io::read_to_string(io::stdin())) {
+        Ok(request) => request,
+        Err(error) => return told(err, Exit::NoApp, &format!("stdin couldn't be read: {error}")),
+    };
     let path = match socket(cli, env) {
         Ok(path) => path,
         Err(error) => return told(err, Exit::NoApp, &format!("no socket to talk to: {error}")),
@@ -316,7 +436,7 @@ pub fn run(cli: &Cli, env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Ex
         Ok(client) => client,
         Err(error) => return setup_failed(err, &error, deadline),
     };
-    match (request(&cli.command), &cli.command) {
+    match (request, &cli.command) {
         (Request::Subscribe { filter }, Command::Wait { pattern, .. }) => {
             let until = Until::Match {
                 pattern: pattern.as_ref(),
@@ -386,9 +506,10 @@ fn kind(value: &str) -> Result<String, String> {
     }
 }
 
-/// The request a command asks: `events` and `wait` subscribe.
-fn request(command: &Command) -> Request {
-    match command {
+/// The request a command asks: `events` and `wait` subscribe; a write's text `-` is what `stdin` reads.
+fn request(command: &Command, stdin: &mut dyn FnMut() -> io::Result<String>) -> io::Result<Request> {
+    Ok(match command {
+        Command::Write(write) => write_request(write, stdin)?,
         Command::Status => Request::Status,
         Command::Accounts => Request::Accounts,
         Command::Chats { unread, limit } => Request::Chats {
@@ -430,7 +551,69 @@ fn request(command: &Command) -> Request {
         Command::Wait { kind, filter, .. } => Request::Subscribe {
             filter: filter.filter(vec![kind.clone()]),
         },
-    }
+    })
+}
+
+/// The request a write asks.
+fn write_request(write: &WriteCommand, stdin: &mut dyn FnMut() -> io::Result<String>) -> io::Result<Request> {
+    let wait = write.waits();
+    let text = |text: &str, stdin: &mut dyn FnMut() -> io::Result<String>| {
+        if text == "-" { stdin() } else { Ok(text.to_owned()) }
+    };
+    Ok(match write {
+        WriteCommand::Send { chat, text: given, .. } => Request::Send {
+            chat: chat.clone(),
+            text: text(given, stdin)?,
+            wait,
+        },
+        WriteCommand::Edit {
+            chat,
+            message,
+            text: given,
+            ..
+        } => Request::Edit {
+            chat: chat.clone(),
+            message: message.clone(),
+            text: text(given, stdin)?,
+            wait,
+        },
+        WriteCommand::Delete { chat, message, .. } => Request::Delete {
+            chat: chat.clone(),
+            message: message.clone(),
+            wait,
+        },
+        WriteCommand::React {
+            chat,
+            message,
+            reaction,
+            ..
+        } => Request::React {
+            chat: chat.clone(),
+            message: message.clone(),
+            reaction: reaction.clone(),
+            wait,
+        },
+        WriteCommand::Unreact {
+            chat,
+            message,
+            reaction,
+            ..
+        } => Request::Unreact {
+            chat: chat.clone(),
+            message: message.clone(),
+            reaction: reaction.clone(),
+            wait,
+        },
+        WriteCommand::Read { chat, .. } => Request::MarkRead {
+            chat: chat.clone(),
+            wait,
+        },
+        WriteCommand::NewChat { people, .. } => Request::NewChat {
+            people: people.clone(),
+            wait,
+        },
+        WriteCommand::Resend { row, .. } => Request::Resend { row: *row, wait },
+    })
 }
 
 fn window_op(op: WindowArg) -> WindowOp {
@@ -454,29 +637,81 @@ fn open_target(target: &OpenArg) -> OpenTarget {
     }
 }
 
-/// Ask `request` and print its answer.
+/// Ask `request` and print its answer, waiting for it as long as [`answer_time`] says.
 fn ask(cli: &Cli, mut client: Client, request: Request, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
-    match client.request_line(cli.account.as_deref(), request) {
+    let write = matches!(cli.command, Command::Write(_));
+    let timed = if write {
+        client.set_read_timeout(answer_time(&cli.command))
+    } else {
+        Ok(())
+    };
+    match timed.and_then(|()| client.request_line(cli.account.as_deref(), request)) {
         Ok(line) => answered(cli, line, out, err),
-        Err(error) => failed(err, &error),
+        Err(error) => ask_failed(err, &error, write),
     }
 }
 
-/// Print an answer's line: its response on `out`, its error on `err` (both on `out` with `--json`).
+/// How long `command`'s answer is waited for: a write's past the app's own bound on it ([`WRITE_ANSWER`], and
+/// [`WRITE_WAIT`] more with `--wait`), so the app's answer (its own timeout too) comes first; any other's the client's
+/// default.
+#[must_use]
+pub fn answer_time(command: &Command) -> Duration {
+    let slack = Timeouts::default().read;
+    match command {
+        Command::Write(write) if write.waits() => WRITE_ANSWER + WRITE_WAIT + slack,
+        Command::Write(_) => WRITE_ANSWER + slack,
+        _ => slack,
+    }
+}
+
+/// The exit a request that got no answer ends with, told on `err` as [`failed`] tells it; a `write` whose answer
+/// didn't come in time is told it may still go out, which an exit of 1 alone wouldn't tell.
+pub fn ask_failed(err: &mut dyn Write, error: &ClientError, write: bool) -> Exit {
+    if write && matches!(error, ClientError::Timeout) {
+        return told(
+            err,
+            Exit::Error,
+            &format!("the app didn't answer the write in time: it may still go out. {UNANSWERED_WRITE}"),
+        );
+    }
+    failed(err, error)
+}
+
+fn waits(command: &Command) -> bool {
+    matches!(command, Command::Write(write) if write.waits())
+}
+
+/// Print an answer's line: its response on `out`, its error on `err` (both on `out` with `--json`). A write's row
+/// that failed ends it with an error, as one that waited and wasn't sent.
 fn answered(cli: &Cli, line: ResponseLine, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
+    let exit = |printed: Exit, response: &Response| {
+        if printed == Exit::Ok && unsent(response, waits(&cli.command)) {
+            Exit::Error
+        } else {
+            printed
+        }
+    };
     if cli.json {
         let printed = written(json_line(out, &line));
-        return match line.outcome {
-            Outcome::Ok(_) => printed,
+        return match &line.outcome {
+            Outcome::Ok(response) => exit(printed, response),
             Outcome::Error(_) => Exit::Error,
         };
     }
     match line.outcome {
-        Outcome::Ok(response) => written(render::response(out, &response)),
+        Outcome::Ok(response) => exit(written(render::response(out, &response)), &response),
         Outcome::Error(error) => {
             let _ = render::error(err, &error);
             Exit::Error
         }
+    }
+}
+
+/// Whether `response` is a write's row that failed, or with `waited` one not sent.
+fn unsent(response: &Response, waited: bool) -> bool {
+    match response {
+        Response::Outbox(row) => row.state == OutboxState::Failed || (waited && row.state != OutboxState::Sent),
+        _ => false,
     }
 }
 

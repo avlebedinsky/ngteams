@@ -103,6 +103,7 @@ fn a_value_is_written_as_one_line() {
         request: Request::Send {
             chat: "19:x@thread.v2".to_owned(),
             text: "one\ntwo".to_owned(),
+            wait: true,
         },
     };
     let mut out = Vec::new();

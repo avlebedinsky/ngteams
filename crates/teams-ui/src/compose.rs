@@ -81,7 +81,7 @@ use teams_store::Message;
 
 pub use crate::editor::Editor;
 use crate::editor::convert::{self, CantLoad};
-use crate::editor::doc::{Doc, Kind};
+use crate::editor::doc::{Block, Doc, Kind};
 use crate::editor::toolbar::{FormatBar, FormatBarEvent, unavailable};
 use crate::editor::{self, EditorEvent, EnterMode};
 
@@ -192,6 +192,24 @@ pub fn message_of_with(
         mentioned,
     )
     .map(Some)
+}
+
+/// Plain text as the editor's document: each line a paragraph (`\n` or `\r\n` ending it), as typed with Shift+Enter
+/// between them. Nothing in it is read as a format or a mention.
+#[must_use]
+pub fn plain_doc(text: &str) -> Doc {
+    Doc::new(text.lines().map(Block::paragraph).collect())
+}
+
+/// A message's top-level quotes of another message (a reply's, a forward's): what an edit keeps as it was and sends
+/// again before the edited text.
+#[must_use]
+pub fn quotes_of(text: &RichText) -> Vec<Node> {
+    text.nodes.iter().filter(|node| is_kept_quote(node)).cloned().collect()
+}
+
+fn is_kept_quote(node: &Node) -> bool {
+    matches!(node, Node::Quote(quote) if quote.message_id.is_some() || quote.forward)
 }
 
 /// A text run with no marks.
@@ -350,11 +368,7 @@ pub fn load<S: BuildHasher>(text: &RichText, mentioned: &HashMap<String, String,
     if text.truncated {
         return Err(CantLoad::Truncated);
     }
-    let (quotes, rest): (Vec<Node>, Vec<Node>) = text
-        .nodes
-        .iter()
-        .cloned()
-        .partition(|node| matches!(node, Node::Quote(quote) if quote.message_id.is_some() || quote.forward));
+    let (quotes, rest): (Vec<Node>, Vec<Node>) = text.nodes.iter().cloned().partition(is_kept_quote);
     Ok(Loaded {
         doc: convert::from_nodes(&rest, mentioned, convert::Load::Edit)?,
         quotes,

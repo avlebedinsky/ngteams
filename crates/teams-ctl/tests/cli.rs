@@ -17,13 +17,15 @@ use std::time::{Duration, Instant};
 
 use clap::Parser as _;
 use serde_json::json;
-use teams_ctl::cli::{Cli, Exit, run, socket};
+use teams_ctl::ClientError;
+use teams_ctl::cli::{Cli, Exit, answer_time, ask_failed, run, socket};
+use teams_ctl::client::Timeouts;
 use teams_ctl::codec::{LineReader, decode_request};
 use teams_ctl::path::Env;
 use teams_ctl::protocol::{
     AccountRow, AppStatus, ChatRef, ChatRow, CtlError, CtlEvent, ErrorCode, EventFilter, EventLine, Hello, MemberRow,
-    MessageRow, MessageSource, OpenTarget, Outcome, PROTOCOL_VERSION, Request, RequestLine, Response, ResponseLine,
-    UiState, Unread, UnreadRow, View, WindowOp, WindowState,
+    MessageRow, MessageSource, OpenTarget, OutboxRow, OutboxState, Outcome, PROTOCOL_VERSION, Request, RequestLine,
+    Response, ResponseLine, UiState, Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT, WindowOp, WindowState,
 };
 
 /// What the fake server does with a request after the `hello`: lines to send back, then whether to read on.
@@ -123,6 +125,11 @@ struct Run {
 /// Run `ngteamsctl args` against the socket at `socket`, everything else of its environment in `home`; killed past
 /// ten seconds.
 fn ctl(home: &Path, socket: &Path, args: &[&str]) -> Run {
+    ctl_fed(home, socket, args, None)
+}
+
+/// [`ctl`], `input` (when given) on its stdin.
+fn ctl_fed(home: &Path, socket: &Path, args: &[&str], input: Option<&str>) -> Run {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ngteamsctl"))
         .env_clear()
         // a coverage run counts the binary's runs too
@@ -133,11 +140,15 @@ fn ctl(home: &Path, socket: &Path, args: &[&str]) -> Run {
         .env("HOME", home)
         .env("TZ", "UTC")
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    if let Some(input) = input {
+        // dropped once written: its end of file
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -398,9 +409,213 @@ fn ui_cases() -> Vec<Case> {
     ]
 }
 
+const LAB_CHAT: &str = "19:lab@thread.v2";
+
+fn outbox(id: i64, write: &str, state: OutboxState) -> Response {
+    Response::Outbox(OutboxRow {
+        id,
+        write: s(write),
+        chat: Some(s(LAB_CHAT)),
+        state,
+        message: Some(s("1700000000000")),
+        error: None,
+    })
+}
+
+fn message_write_cases() -> Vec<Case> {
+    let chat = || s("Lab chat");
+    let message = || s("1700000000000");
+    vec![
+        Case {
+            args: &["send", "Lab chat", "one\ntwo"],
+            account: None,
+            request: Request::Send {
+                chat: chat(),
+                text: s("one\ntwo"),
+                wait: false,
+            },
+            response: outbox(3, "send", OutboxState::Sent),
+            shows: &["#3 send 19:lab@thread.v2 sent 1700000000000"],
+        },
+        Case {
+            args: &["--account", "1", "edit", "Lab chat", "1700000000000", "fixed", "--wait"],
+            account: Some("1"),
+            request: Request::Edit {
+                chat: chat(),
+                message: message(),
+                text: s("fixed"),
+                wait: true,
+            },
+            response: outbox(4, "edit", OutboxState::Sent),
+            shows: &["#4 edit 19:lab@thread.v2 sent 1700000000000"],
+        },
+        Case {
+            args: &["delete", "Lab chat", "1700000000000"],
+            account: None,
+            request: Request::Delete {
+                chat: chat(),
+                message: message(),
+                wait: false,
+            },
+            response: outbox(5, "delete", OutboxState::Queued),
+            shows: &["#5 delete 19:lab@thread.v2 queued 1700000000000"],
+        },
+        Case {
+            args: &["react", "Lab chat", "1700000000000", "like"],
+            account: None,
+            request: Request::React {
+                chat: chat(),
+                message: message(),
+                reaction: s("like"),
+                wait: false,
+            },
+            response: outbox(6, "add_reaction", OutboxState::Unknown),
+            shows: &["#6 add_reaction 19:lab@thread.v2 unknown 1700000000000"],
+        },
+        Case {
+            args: &["unreact", "Lab chat", "1700000000000", "like", "--wait"],
+            account: None,
+            request: Request::Unreact {
+                chat: chat(),
+                message: message(),
+                reaction: s("like"),
+                wait: true,
+            },
+            response: outbox(7, "remove_reaction", OutboxState::Sent),
+            shows: &["#7 remove_reaction 19:lab@thread.v2 sent 1700000000000"],
+        },
+    ]
+}
+
+fn chat_write_cases() -> Vec<Case> {
+    vec![
+        Case {
+            args: &["read", "Lab chat"],
+            account: None,
+            request: Request::MarkRead {
+                chat: s("Lab chat"),
+                wait: false,
+            },
+            response: Response::Done,
+            shows: &[],
+        },
+        Case {
+            args: &["new-chat", "b@lab.invalid", "8:orgid:c"],
+            account: None,
+            request: Request::NewChat {
+                people: vec![s("b@lab.invalid"), s("8:orgid:c")],
+                wait: false,
+            },
+            response: outbox(8, "create_chat", OutboxState::Sent),
+            shows: &["#8 create_chat 19:lab@thread.v2 sent 1700000000000"],
+        },
+        Case {
+            args: &["resend", "8", "--wait"],
+            account: None,
+            request: Request::Resend { row: 8, wait: true },
+            response: outbox(8, "send", OutboxState::Sent),
+            shows: &["#8 send 19:lab@thread.v2 sent 1700000000000"],
+        },
+    ]
+}
+
+#[test]
+fn send_reads_its_text_from_stdin_with_a_dash() {
+    let server = Server::answering(outbox(3, "send", OutboxState::Sent));
+    let run = ctl_fed(
+        server.dir.path(),
+        &server.path,
+        &["send", "Lab chat", "-"],
+        Some("piped\nlines\n"),
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let requests = server.requests();
+    assert_eq!(
+        requests.iter().map(|line| &line.request).collect::<Vec<_>>(),
+        [&Request::Send {
+            chat: s("Lab chat"),
+            text: s("piped\nlines\n"),
+            wait: false,
+        }]
+    );
+}
+
+#[test]
+fn a_write_whose_row_failed_or_waited_unsent_exits_1() {
+    for (args, state, code) in [
+        (&["send", "Lab chat", "hi"][..], OutboxState::Failed, 1),
+        (&["send", "Lab chat", "hi", "--json"][..], OutboxState::Failed, 1),
+        (&["send", "Lab chat", "hi"][..], OutboxState::Queued, 0),
+        (&["send", "Lab chat", "hi", "--wait"][..], OutboxState::Unknown, 1),
+        (
+            &["send", "Lab chat", "hi", "--wait", "--json"][..],
+            OutboxState::Unknown,
+            1,
+        ),
+        (&["send", "Lab chat", "hi", "--wait"][..], OutboxState::Sent, 0),
+    ] {
+        let (run, _) = run_one(Server::answering(outbox(3, "send", state)), args);
+        assert_eq!(run.code, code, "{args:?} {state:?}: {}", run.stderr);
+        assert!(run.stdout.contains("send"), "the row is printed: {}", run.stdout);
+    }
+}
+
+#[test]
+fn a_write_s_answer_is_waited_for_past_the_app_s_own_bound_on_it() {
+    let parsed = |args: &[&str]| Cli::try_parse_from([&["ngteamsctl"][..], args].concat()).unwrap();
+    let default = Timeouts::default().read;
+    for args in [
+        &["send", "Lab chat", "hi"][..],
+        &["edit", "Lab chat", "1", "hi"],
+        &["read", "Lab chat"],
+        &["new-chat", "8:orgid:b"],
+        &["resend", "3"],
+    ] {
+        let waited = answer_time(&parsed(args).command);
+        assert!(waited > WRITE_ANSWER, "{args:?}: {waited:?}");
+        assert!(waited <= WRITE_ANSWER + default, "{args:?}: {waited:?}");
+        let with_wait = answer_time(&parsed(&[args, &["--wait"]].concat()).command);
+        assert!(with_wait > WRITE_ANSWER + WRITE_WAIT, "{args:?}: {with_wait:?}");
+    }
+    assert_eq!(answer_time(&parsed(&["chats"]).command), default);
+}
+
+#[test]
+fn a_write_left_unanswered_says_it_may_still_go_out_and_where_to_look() {
+    let told = |error: &ClientError, write: bool| {
+        let mut err = Vec::new();
+        let exit = ask_failed(&mut err, error, write);
+        (exit, String::from_utf8(err).unwrap())
+    };
+    let (exit, write) = told(&ClientError::Timeout, true);
+    assert_eq!(exit, Exit::Error);
+    assert!(write.contains("may still go out"), "{write}");
+    assert!(write.contains("--kind outbox"), "{write}");
+    // a read that timed out wrote nothing; a write the app closed on or refused is told as any other
+    for (error, write) in [
+        (ClientError::Timeout, false),
+        (ClientError::Closed, true),
+        (
+            ClientError::Server(CtlError::new(ErrorCode::Engine, "the engine stopped")),
+            true,
+        ),
+    ] {
+        let (exit, said) = told(&error, write);
+        assert_eq!(exit, Exit::Error);
+        assert!(said.contains(&error.to_string()), "{said}");
+        assert!(!said.contains("may still go out"), "{said}");
+    }
+}
+
 #[test]
 fn each_command_asks_its_request_and_prints_its_answer() {
-    for case in read_cases().into_iter().chain(list_cases()).chain(ui_cases()) {
+    for case in read_cases()
+        .into_iter()
+        .chain(list_cases())
+        .chain(ui_cases())
+        .chain(message_write_cases())
+        .chain(chat_write_cases())
+    {
         let (run, request) = run_one(Server::answering(case.response), case.args);
         assert_eq!(run.code, 0, "{:?}: {}", case.args, run.stderr);
         assert_eq!(request.request, case.request, "{:?}", case.args);

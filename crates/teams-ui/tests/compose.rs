@@ -38,7 +38,7 @@ use teams_ui::chat_view::{
 };
 use teams_ui::compose::{
     Candidate, Compose, EVERYONE_MAX_MEMBERS, Mode, PREVIEW_MAX, Quoted, READ_ONLY_APP, READ_ONLY_NOTES, TYPING_EVERY,
-    TypingThrottle, load, matching, mention_query, message_of, offered,
+    TypingThrottle, load, matching, mention_query, message_of, offered, plain_doc, quotes_of,
 };
 use teams_ui::editor::CantLoad;
 use teams_ui::editor::doc::{Attrs, Block, Doc, Kind, Run};
@@ -366,6 +366,53 @@ fn each_line_is_a_paragraph_and_blank_lines_at_either_end_are_dropped() {
         message_text(" \n\t\n ", &[], &[]).unwrap().is_none(),
         "whitespace sends nothing"
     );
+}
+
+#[test]
+fn plain_text_is_a_paragraph_per_line_and_reads_no_format() {
+    let doc = plain_doc("one\r\ntwo\n\n**three** @b <i>\n");
+    let lines: Vec<String> = doc.blocks.iter().map(Block::text).collect();
+    assert_eq!(lines, ["one", "two", "", "**three** @b <i>"]);
+    assert!(doc.blocks.iter().all(|block| block.kind == Kind::Paragraph));
+    assert!(
+        doc.blocks
+            .iter()
+            .flat_map(|block| &block.runs)
+            .all(|run| run.attrs == Attrs::default()),
+        "no format, no mention"
+    );
+    let html = message_of(&doc, &[]).unwrap().unwrap().html().to_owned();
+    assert_eq!(html, "<p>one</p><p>two</p><p>&nbsp;</p><p>**three** @b &lt;i&gt;</p>");
+    assert_eq!(plain_doc(""), Doc::default());
+    assert!(message_of(&plain_doc("\n \n"), &[]).unwrap().is_none());
+    assert_eq!(
+        message_of(&plain_doc(&"long ".repeat(40_000)), &[]),
+        Err(ComposeError::TooLong)
+    );
+}
+
+#[test]
+fn an_edit_keeps_a_reply_s_or_a_forward_s_quote_only() {
+    let quote = |message_id: Option<&str>, forward: bool| {
+        Node::Quote(teams_proto::chat::Quote {
+            message_id: message_id.map(str::to_owned),
+            forward,
+            ..teams_proto::chat::Quote::default()
+        })
+    };
+    let text = RichText {
+        nodes: vec![
+            quote(Some("1"), false),
+            quote(None, false),
+            quote(None, true),
+            Node::Text {
+                text: "hi".to_owned(),
+                marks: teams_proto::chat::Marks::NONE,
+            },
+        ],
+        truncated: false,
+    };
+    assert_eq!(quotes_of(&text), [quote(Some("1"), false), quote(None, true)]);
 }
 
 /// `lines.json` (synthetic-from-capture): the chat-shapes capture's message of three lines, the last holding a link.

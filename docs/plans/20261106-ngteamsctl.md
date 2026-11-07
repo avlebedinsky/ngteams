@@ -408,15 +408,18 @@
 - Modify: `crates/teams-ui/src/compose.rs` (a `Doc` from plain text, if the editor has no such constructor),
   `crates/ngteams/src/ctl/dispatch.rs`, `crates/teams-ctl/src/cli.rs`
 - Create: `crates/ngteams/tests/ctl_writes.rs`; modify `crates/teams-ui/tests/compose.rs`
+- ➕ Modify: `crates/teams-ctl/src/protocol.rs` (each write request's `wait` flag and `WRITE_WAIT`),
+  `crates/ngteams/src/ctl/address.rs` (the account's `Chats`, where a wait watches its row)
 
-- [ ] plain text (with line breaks) → `Doc` → `compose::message_of(&doc, &[])`
-- [ ] `send <chat> <text|->` (stdin with `-`), `edit <chat> <msg> <text>`, `delete <chat> <msg>`,
+- [x] plain text (with line breaks) → `Doc` → `compose::message_of(&doc, &[])` (`compose::plain_doc`; an edit keeps
+      the message's quote through `compose::quotes_of`)
+- [x] `send <chat> <text|->` (stdin with `-`), `edit <chat> <msg> <text>`, `delete <chat> <msg>`,
       `react|unreact <chat> <msg> <reaction>`, `read <chat>` (up to the latest message), `new-chat <people…>`, all
       through `Core::write(Action)`
-- [ ] `--wait` follows the outbox row to its final state; `resend <row>` through `Core::resend`
-- [ ] tests: each write produces the right `Action` and outbox row on the mock engine, read-only →
+- [x] `--wait` follows the outbox row to its final state; `resend <row>` through `Core::resend`
+- [x] tests: each write produces the right `Action` and outbox row on the mock engine, read-only →
       `refused_read_only`, too long text → the compose error, empty text refused, line breaks kept
-- [ ] run `cargo test -p ngteams --test ctl_writes` and `cargo test -p teams-ui --test compose`, which must pass
+- [x] run `cargo test -p ngteams --test ctl_writes` and `cargo test -p teams-ui --test compose`, which must pass
       before the next task
 
 ### Task 10: own status and sync

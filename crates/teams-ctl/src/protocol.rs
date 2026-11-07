@@ -20,6 +20,30 @@ use serde::{Deserialize, Serialize};
 /// The protocol's version: a `hello` from a client of another version is refused.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// How long a write asked to `wait` waits for its outbox row to settle before it answers [`ErrorCode::Timeout`]: past
+/// the outbox's own retries of a send that keeps failing for a while.
+pub const WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the app takes at most to answer a write before it waits for the row ([`WRITE_WAIT`] more with `wait`): the
+/// row's first attempt and the chat's sync after it, each request bounded by the transport's 30 s, behind whatever the
+/// engine was doing first. Past it the app answers [`ErrorCode::Timeout`], and the write may still go out
+/// ([`UNANSWERED_WRITE`]).
+pub const WRITE_ANSWER: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// What to do about a write whose answer didn't come in time: it may still go out, so it is looked for before it is
+/// written again.
+pub const UNANSWERED_WRITE: &str = "`ngteamsctl events --follow --kind outbox` shows its row as it changes, and \
+                                    `ngteamsctl messages <chat>` what the chat holds: look there before writing it \
+                                    again";
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's `skip_serializing_if` passes a reference"
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// A request with its id and the account it addresses: one line from the client.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestLine {
@@ -89,33 +113,66 @@ pub enum Request {
     /// Bring the window to the front (a second launch hands off with it).
     Activate,
     /// Send plain text (line breaks kept) to a chat.
-    Send { chat: String, text: String },
+    ///
+    /// Each write answers with its outbox row as its first attempt left it ([`WRITE_ANSWER`] at most), or with `wait`
+    /// once the row settled: sent, failed, or `unknown` (it may have arrived, and only a `resend` sends it again);
+    /// [`WRITE_WAIT`] more at most. A `mark_read` with nothing to mark answers `done`. Past either bound the answer
+    /// is [`ErrorCode::Timeout`], and the write may still go out ([`UNANSWERED_WRITE`]).
+    Send {
+        chat: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
+    },
     /// Replace the text of one of the account's messages.
     Edit {
         chat: String,
         message: String,
         text: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
     },
     /// Delete one of the account's messages.
-    Delete { chat: String, message: String },
+    Delete {
+        chat: String,
+        message: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
+    },
     /// Add a reaction to a message.
     React {
         chat: String,
         message: String,
         reaction: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
     },
     /// Take the account's reaction off a message.
     Unreact {
         chat: String,
         message: String,
         reaction: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
     },
     /// Mark a chat read up to its latest message.
-    MarkRead { chat: String },
+    MarkRead {
+        chat: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
+    },
     /// Start a chat with these people (UPNs or MRIs).
-    NewChat { people: Vec<String> },
+    NewChat {
+        people: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
+    },
     /// Send an outbox row again.
-    Resend { row: i64 },
+    Resend {
+        row: i64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        wait: bool,
+    },
     /// The account's reported status and its manual choice.
     GetStatus,
     /// Choose the account's status, as its status menu does.
