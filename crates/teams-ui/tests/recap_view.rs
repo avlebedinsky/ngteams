@@ -20,7 +20,8 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 use teams_ui::ViewTrace;
 use teams_ui::recap_view::RecapView;
 use teams_ui::settings::{Settings, SettingsModel};
-use teams_ui::shell::{ChatTab, Shell, ShellParts};
+use teams_ui::shell::{ChatTab, Main, Shell, ShellParts, ShowCalendar};
+use teams_ui::window::KitRoot;
 
 fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -45,23 +46,100 @@ fn rig(unread: bool) -> Rig {
     rig
 }
 
-fn shell_window(rig: &Rig, chat: &str) -> (Entity<Shell>, &'static mut VisualTestContext) {
+/// The shell's parts, `chat` the chat kept selected (opened as the shell is made).
+fn parts(rig: &Rig, chat: &str) -> ShellParts {
     let settings = Settings {
         selected_chat: Some(chat.to_owned()),
         ..Settings::default()
     };
-    let parts = ShellParts {
+    rig.cx.update(teams_ui::window::init);
+    ShellParts {
         core: rig.cx.read(|cx| rig.bridge.read(cx).core()),
         models: rig.models.clone(),
         settings: rig.cx.update(|cx| cx.new(|_| SettingsModel::in_memory(settings))),
         trace: Arc::new(ViewTrace::off()),
-    };
-    rig.cx.update(teams_ui::window::init);
+    }
+}
+
+fn shell_window(rig: &Rig, chat: &str) -> (Entity<Shell>, &'static mut VisualTestContext) {
+    let parts = parts(rig, chat);
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
     let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
     cx.simulate_resize(size(px(1600.0), px(1000.0)));
     draw(cx);
     (shell, cx)
+}
+
+/// The shell in the kit's root, as the app opens it: an action dispatched while the focus is on nothing drawn starts
+/// from that root, which handles none of the shell's.
+fn kit_window(rig: &Rig, chat: &str) -> (Entity<Shell>, &'static mut VisualTestContext) {
+    let parts = parts(rig, chat);
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (root, cx) = app.add_window_view(|window, cx| {
+        let shell = cx.new(|cx| Shell::new(parts, window, cx));
+        KitRoot::new(shell, window, cx)
+    });
+    cx.simulate_resize(size(px(1600.0), px(1000.0)));
+    draw(cx);
+    let shell = cx.update(|_, cx| root.read(cx).view().clone().downcast::<Shell>().unwrap());
+    (shell, cx)
+}
+
+/// `ShowCalendar` dispatched as Ctrl+4 or `ngteamsctl action` sends it (to the focus as last drawn) shows the calendar.
+fn an_action_runs(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    draw(cx);
+    cx.dispatch_action(ShowCalendar);
+    draw(cx);
+    assert!(
+        cx.update(|_, cx| *shell.read(cx).main() == Main::Calendar),
+        "the action reached the shell"
+    );
+}
+
+/// Whether the meeting chat's compose box has the keyboard.
+fn compose_focused(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        let chat = shell.read(cx).chat().unwrap().read(cx);
+        chat.compose().read(cx).focused(window, cx)
+    })
+}
+
+/// A meeting chat's Recap and Shared tabs replace its chat, compose box and all: the keyboard moves off the box as one
+/// shows, comes back to it on Chat, and is given to the shell (not the box) on the chat opened again on such a tab or
+/// handed the keyboard on an account switched back to. An action sent then runs, not lost on a box not drawn.
+#[test]
+fn the_keyboard_is_never_left_on_a_compose_box_a_meeting_tab_replaces() {
+    let rig = rig(false);
+    let (shell, cx) = kit_window(&rig, fixtures::MEETING);
+    assert!(compose_focused(&shell, cx), "a meeting chat opens on Chat, typed into");
+    click(cx, "chat-tab-shared");
+    assert!(!compose_focused(&shell, cx));
+    an_action_runs(&shell, cx);
+    // opened again, on the Shared tab it was left on
+    let open = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.open_chat(fixtures::MEETING.to_owned(), window, cx);
+            });
+        });
+        draw(cx);
+        assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Shared);
+    };
+    open(cx);
+    an_action_runs(&shell, cx);
+    // the keyboard handed to the shell (an account switched back to) while the box had it
+    open(cx);
+    cx.update(|window, cx| {
+        let chat = shell.read(cx).chat().unwrap().read(cx).compose().clone();
+        chat.update(cx, |compose, cx| compose.focus(window, cx));
+        shell.update(cx, |shell, cx| shell.take_focus(window, cx));
+    });
+    assert!(!compose_focused(&shell, cx));
+    an_action_runs(&shell, cx);
+    // back on Chat: typed into again
+    open(cx);
+    click(cx, "chat-tab-chat");
+    assert!(compose_focused(&shell, cx));
 }
 
 fn draw(cx: &mut VisualTestContext) {

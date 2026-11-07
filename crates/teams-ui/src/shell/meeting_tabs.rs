@@ -152,9 +152,15 @@ impl Shell {
             let core = Arc::clone(&self.core);
             self.meeting_tabs.shared = Some(cx.new(|cx| SharedView::new(core, id.clone(), window, cx)));
         }
+        let changed = self.meeting_tabs.shown != tab;
         self.meeting_tabs.shown = tab;
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.set_shown(tab == ChatTab::Chat, cx));
+        }
+        // the keyboard moves with the tab: the chat's compose box back on Chat, else the shell (the compose box the
+        // other tab replaces is no longer drawn, and a focus left there would reach no action's handler)
+        if changed {
+            self.take_focus(window, cx);
         }
         cx.notify();
     }

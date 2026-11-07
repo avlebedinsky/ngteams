@@ -564,6 +564,45 @@ fn an_action_after_an_account_switch_runs_in_that_account() {
     quit(&app.cx);
 }
 
+/// An account switched back to on a chat its panes don't draw (here signed out, as the session finding its refresh
+/// token gone makes it) gives the keyboard to its shell, not the chat's compose box: an action sent then runs, not lost
+/// on a box not drawn.
+#[test]
+fn an_action_after_switching_back_to_a_signed_out_chat_runs() {
+    let app = App::start();
+    app.list_loaded(PROJECT);
+    let chat = app.open(
+        None,
+        OpenTarget::Chat {
+            chat: "project".to_owned(),
+        },
+    );
+    assert_eq!(chat.view, View::Chat);
+    app.cx.update(|cx| {
+        let window = app.desktop.read(cx).window().unwrap();
+        let root = window
+            .read(cx)
+            .unwrap()
+            .view()
+            .clone()
+            .downcast::<teams_ui::Root>()
+            .unwrap();
+        let status = root.read(cx).shell_in(cx).unwrap().read(cx).models().status.clone();
+        status.update(cx, |status, cx| {
+            status.account = teams_ui::Account::SignedOut { hint: "made up".into() };
+            cx.notify();
+        });
+    });
+    let other = app.done(None, Request::SwitchAccount { to: OTHER.to_owned() });
+    assert_eq!(other.shown.as_deref(), Some(OTHER_UPN));
+    let first = app.done(None, Request::SwitchAccount { to: "0".to_owned() });
+    assert_eq!((first.shown.as_deref(), first.view), (Some(UPN), View::Chat));
+    app.action_shows_the_calendar();
+    let after = app.state();
+    assert_eq!((after.shown.as_deref(), after.view), (Some(UPN), View::Calendar));
+    quit(&app.cx);
+}
+
 #[test]
 fn a_short_name_two_actions_share_is_refused() {
     let names = ["teams_ui::Close".to_owned(), "teams_ui::viewer::Close".to_owned()];

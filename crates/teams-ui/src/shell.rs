@@ -904,15 +904,33 @@ impl Shell {
         cx.notify();
     }
 
-    /// Takes the window's keyboard: the chat's compose box when a chat is shown, else the shell (an account switched to).
+    /// Takes the window's keyboard: the chat's compose box when it is drawn ([`Shell::compose_drawn`]), else the shell
+    /// (an account switched to). A focus left on something not drawn reaches no action's handler: GPUI dispatches
+    /// from the window's root instead.
     pub fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match (&self.main, &self.chat) {
-            (Main::Chat(_), Some(chat)) => {
-                let compose = chat.read(cx).compose().clone();
-                compose.update(cx, |compose, cx| compose.focus(window, cx));
-            }
-            _ => self.focus.focus(window, cx),
+        match self.compose_drawn(cx) {
+            Some(compose) => compose.update(cx, |compose, cx| compose.focus(window, cx)),
+            None => self.focus.focus(window, cx),
         }
+    }
+
+    /// The compose box of the chat the conversation pane shows, when it is drawn and takes text: not on a meeting's
+    /// Recap or Shared tab (they replace the chat), not while the account is signed out (its panes give way to the
+    /// status), not the read-only notes' box.
+    fn compose_drawn(&self, cx: &App) -> Option<Entity<crate::compose::Compose>> {
+        let Main::Chat(id) = &self.main else { return None };
+        let chat = self
+            .chat
+            .as_ref()
+            .filter(|chat| chat.read(cx).conversation() == id.as_str())?;
+        let compose = chat.read(cx).compose();
+        let drawn = self.chat_tab_shown() && !self.signed_out_shown(cx) && !compose.read(cx).is_read_only();
+        drawn.then(|| compose.clone())
+    }
+
+    /// Whether the account's panes give way to its signed-out status ([`Shell::panes_or_signed_out`]).
+    fn signed_out_shown(&self, cx: &App) -> bool {
+        self.accounts.is_some() && matches!(self.models.status.read(cx).account, Account::SignedOut { .. })
     }
 
     /// Shows the next account of the app (`forward`) or the one before, round: Ctrl+Alt+Down and Ctrl+Alt+Up.
@@ -2078,15 +2096,13 @@ impl Shell {
         self.close_switcher(window, cx);
         self.close_search(cx);
         // the chat opened takes what is typed next, and is shown (read receipts may go); a meeting chat opened again on
-        // its Recap or Shared tab keeps that tab, its chat neither shown nor typed into
+        // its Recap or Shared tab keeps that tab, its chat neither shown nor typed into: the shell takes the keyboard
+        // (what had it, the calendar or another view, is no longer drawn)
         if let Some(chat) = &self.chat {
             let shown = self.chat_tab_shown();
             chat.update(cx, |chat, cx| chat.set_shown(shown, cx));
-            if shown {
-                let compose = chat.read(cx).compose().clone();
-                compose.update(cx, |compose, cx| compose.focus(window, cx));
-            }
         }
+        self.take_focus(window, cx);
         cx.notify();
     }
 
@@ -3157,10 +3173,10 @@ impl Shell {
     }
 
     fn panes_or_signed_out(&self, panes: impl IntoElement, palette: Palette, cx: &App) -> AnyElement {
-        let status = self.models.status.read(cx);
-        if self.accounts.is_none() || !matches!(status.account, Account::SignedOut { .. }) {
+        if !self.signed_out_shown(cx) {
             return div().size_full().child(panes).into_any_element();
         }
+        let status = self.models.status.read(cx);
         div()
             .debug_selector(|| "account-signed-out".to_owned())
             .size_full()
