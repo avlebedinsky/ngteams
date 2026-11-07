@@ -319,6 +319,10 @@ async fn picture_object<T: Transport<Error = HttpError>>(
     if picture.bytes.len() > MAX_SENT_PICTURE {
         return Err(failed("This picture is too large to send. Send it as a file instead."));
     }
+    // checked before the object is made: an empty paste would otherwise leave an empty object behind
+    if picture.bytes.is_empty() {
+        return Err(failed("This picture can't be sent."));
+    }
     let create =
         CreatePicture::new(conversation, picture.format).ok_or_else(|| failed("This picture can't be sent here."))?;
     let answer = send_picture(outbox, create).await?;

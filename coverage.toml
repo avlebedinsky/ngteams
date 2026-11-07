@@ -12,21 +12,21 @@ wpe-webkit-sys = "generated gir bindings"
 # Only measured crates belong here. Missing baselines fail the local gate.
 # Floors are measured with one `-p <crate>` alone; combined runs also count dependent crates' tests.
 [baselines]
-teams-store = { lines = 93, functions = 94, regions = 90 }
-teams-log = { lines = 90, functions = 90, regions = 90 }
+teams-store = { lines = 98, functions = 100, regions = 90 }
+teams-log = { lines = 94, functions = 94, regions = 93 }
 fixture-guard = { lines = 95, functions = 91, regions = 92 }
 teams-trouter = { lines = 92, functions = 95, regions = 91 }
-teams-call = { lines = 93, functions = 95, regions = 90 }
-teams-auth = { lines = 95, functions = 95, regions = 93 }
-teams-proto = { lines = 93, functions = 91, regions = 91 }
+teams-call = { lines = 95, functions = 96, regions = 91 }
+teams-auth = { lines = 96, functions = 96, regions = 94 }
+teams-proto = { lines = 94, functions = 93, regions = 92 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
-teams-wpe = { lines = 91, functions = 92, regions = 91 }
+teams-wpe = { lines = 92, functions = 92, regions = 92 }
 ngteams = { lines = 92, functions = 91, regions = 90 }
 teams-core = { lines = 91, functions = 92, regions = 89 }
-teams-media = { lines = 78, functions = 79, regions = 78 }
+teams-media = { lines = 81, functions = 81, regions = 81 }
 teams-mock = { lines = 54, functions = 52, regions = 55 }
-teams-signin = { lines = 90, functions = 92, regions = 90 }
-teams-ui = { lines = 91, functions = 89, regions = 91 }
+teams-signin = { lines = 92, functions = 93, regions = 91 }
+teams-ui = { lines = 92, functions = 90, regions = 91 }
 ui-sandbox = { lines = 94, functions = 91, regions = 90 }
 proto-lab = { lines = 94, functions = 93, regions = 90 }
 teams-ctl = { lines = 99, functions = 100, regions = 98 }
@@ -42,27 +42,27 @@ sha256 = "ee70e2982c0c821acf624df7501c8702bc2227d5bc65a7338d86820b21860223"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]
-sha256 = "4a134f96edff58035d54f463692f4a3df8a5aca0edfced394cb9ce595cdfa3bf"
+sha256 = "20d23fa882c92b9b4989068f42e0c3b5b9b15fc6c53a21acc11e35a9031ca0c2"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/machine/tests.rs"]
-sha256 = "a4301a58fa467fc509dcc9110e92fd4a71305b49041d3d52bd63afe12f26f181"
+sha256 = "72f513feb942ec22e14029802b54d22cae32da59efe86b1063db381fc19b7aa8"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/machine.rs" = "8342c90736fa2c5a9630163386971d638b40e2f28ae1fe24f6d2ec264fa4ba25" }
+context = { "crates/teams-call/src/machine.rs" = "b2ca781be161d7634a9a28c7443591c2b55912246b661687a7bb8d03aeb17624" }
 
 [unmapped_sources."crates/teams-call/src/track/tests.rs"]
-sha256 = "b0ef4a0a1423a609747ffbb888f45a411ec0aad365709f9b4ff34f11c53a9b1f"
+sha256 = "5d4f7395cac539fe36fe06873a7b55575d84653672dbe56b11a4ca498ebf023c"
 reason = "unit-test module included only by track.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/track.rs" = "87f10a490f6c71e826709eca83b1ecc7df1c3d02c9fef068c55d7edee6d2149a" }
+context = { "crates/teams-call/src/track.rs" = "86ad639121b355dfd39f840cb5a41d410cfdd1ac69bf31d9f19e10b26ba1ae89" }
 
 [unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
-sha256 = "f67bd56fdf5683e1b7bd150f306db4e7b7714039d13ce592a602b755d24a4ffb"
+sha256 = "cb1ce19ec37268fed2b9c4e2472156b7a71691003811ca451d8a6144722e5370"
 reason = "unit-test module included only by effects.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-media/src/video/effects.rs" = "8750279e6eb40593be4f2a107fcbf05892259a47824dbe753c8d6d149ce85305" }
+context = { "crates/teams-media/src/video/effects.rs" = "787856448e591791db31587af3f5763f8c20b33d87758bf4d12da6f248635848" }
 
 
 [unmapped_sources."crates/teams-proto/src/chat/mod.rs"]
-sha256 = "afe16a18058cefe53ea0245f87fa5b17c9a807d7f4158d04ace3e1032bab9f5f"
+sha256 = "baaa6ee1fe23952c36b4c78c33b8beecfaf020c5301dfcd56e939abf9c968a0d"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 
@@ -83,15 +83,15 @@ sha256 = "2eecebd31a3e9cbf23ddb16701b634f807043dbdd91aec1d52c77079bcc00d2f"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "e70822682cb579b64250db9b8fff4380a8659953bf491d35b6dfc48afdcbd184"
+sha256 = "c79cc5b9a48a7063864c27589061ae7fd49cad8ff8a4d1b40af129e5f2b817b3"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
-sha256 = "2a4c4e5f535d7144342b48df37216811beaaf38b805e526b1b1f981332748366"
+sha256 = "544c7f4e631f60f95a61a71be7bcffcd459bd9b3124055c7d89e422ebb7fcedf"
 reason = "module declarations and derived error type only; no authored executable bodies"
 
 [unmapped_sources."crates/teams-media/src/video.rs"]
-sha256 = "791b1a682ea3701df3d9862e4b8834f415976eb96f2ef9e4e188bc56f0adf7bd"
+sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
@@ -110,14 +110,14 @@ reason = "trait declarations and documentation only; no default methods or execu
 [unmapped_sources."crates/proto-lab/src/action_targets/tests.rs"]
 sha256 = "df7bda12a7f0d1af686c5ddb95c1b968917f9b170d2cbf1bc6237d50b3eb925f"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/proto-lab/src/action_targets.rs" = "8627c0b66dfd2e24ea5126e7c7e8aa79679e4cdcc20fdec6f55739a8eec7068e" }
+context = { "crates/proto-lab/src/action_targets.rs" = "91c1449f912a12df45289bb1356b30350a841e933bfbf324972e978a8f215145" }
 
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "909df35e897a2669555420ad24f34094b1c62b2efe007ea18651d547be12b144"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "1a6bce1b9cd459c83d8acc4fa5ba31164a3caf749439c2d17fd936329e73db83" }
+context = { "crates/teams-proto/src/http.rs" = "e731a43008ea456b2d167ec1dfe8c6689acf39bf4b6849b512d784db0875bcc3" }
 
 [unmapped_sources."crates/teams-core/src/attachments_tests.rs"]
-sha256 = "b6a50932ced5a42e957f3b64f97351b7e7fbfe0592f5988d2522288696b581f4"
+sha256 = "9dd845ed73f53a7a32137d505c45018d56bf8529060c3cfdee1ebe7059968e96"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-core/src/attachments.rs" = "590fe41d74234db7d267eb59cdc7a59c365fff00be89b5e92db55bb1d3771ebe" }
+context = { "crates/teams-core/src/attachments.rs" = "f5ddc5cec701324240acc8fd2743e1d5c8e548e99798a2776dee21735a4f3dca" }
