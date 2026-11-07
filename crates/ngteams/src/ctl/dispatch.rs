@@ -7,6 +7,7 @@
 //! - `accounts`: the accounts as `status` lists them.
 //! - the reads ([`reads`]): through the account the request addresses ([`address`]), awaited on the foreground as
 //!   the views await the engine's replies.
+//! - `subscribe` ([`events`]): answered `subscribed` with the stream the connection writes from then on.
 //!
 //! A request the app doesn't serve yet is a [`ErrorCode::BadRequest`]; once the app is going, every request is
 //! [`ErrorCode::Stopped`].
@@ -20,20 +21,31 @@ use teams_ctl::protocol::{
 use teams_ui::{Account, Bridge, Calls, Desktop, Engine, Link, Status};
 
 use super::address::{self, Addressed};
-use super::reads;
+use super::listener::Answer;
+use super::{events, reads};
 use crate::app::Running;
 
 /// The app's version, as `hello` and `status` tell it.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `line` answered (see the module docs).
-pub async fn answer(running: &WeakEntity<Running>, line: RequestLine, cx: &mut AsyncApp) -> ResponseLine {
+pub async fn answer(running: &WeakEntity<Running>, line: RequestLine, cx: &mut AsyncApp) -> Answer {
     let RequestLine { id, account, request } = line;
+    let line = |outcome| ResponseLine { id, outcome };
+    if let Request::Subscribe { filter } = request {
+        return match events::subscribe(running, account.as_deref(), filter, cx).await {
+            Ok(events) => Answer {
+                line: line(Outcome::Ok(Response::Subscribed)),
+                events: Some(events),
+            },
+            Err(error) => line(Outcome::Error(error)).into(),
+        };
+    }
     let outcome = match ask(running, account.as_deref(), &request, cx).await {
         Ok(response) => Outcome::Ok(response),
         Err(error) => Outcome::Error(error),
     };
-    ResponseLine { id, outcome }
+    line(outcome).into()
 }
 
 /// What a request needs once the app's state was read on the foreground.
@@ -77,7 +89,7 @@ async fn ask(
 }
 
 /// The app's accounts, unless it is gone or quitting.
-fn alive(running: &WeakEntity<Running>, cx: &App) -> Result<Entity<Running>, CtlError> {
+pub(super) fn alive(running: &WeakEntity<Running>, cx: &App) -> Result<Entity<Running>, CtlError> {
     let quitting = || CtlError::new(ErrorCode::Stopped, "the app is quitting");
     let running = running.upgrade().ok_or_else(quitting)?;
     if running.read(cx).quitting() {

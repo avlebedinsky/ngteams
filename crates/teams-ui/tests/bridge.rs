@@ -1,10 +1,18 @@
-//! The signed-out account's placeholder refuses chat, media, presence and call operations without a running engine.
+//! The signed-out account's placeholder refuses chat, media, presence and call operations without a running engine;
+//! the bridge's tap sees each engine event just before the models apply it.
 
 #![cfg(test)]
 
+#[expect(dead_code, reason = "the shared stand-ins hold more than this test uses")]
+mod common;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use common::{LAB_B, Rig};
 use futures_util::FutureExt as _;
-use teams_core::{Action, CallAction, CallId, EngineError, OwnStatus, Reply, Transient};
-use teams_ui::{Core as _, StoppedCore};
+use teams_core::{Action, Availability, CallAction, CallId, EngineError, Event, OwnStatus, Reply, Transient};
+use teams_ui::{Core as _, StoppedCore, Tap};
 
 fn stopped<T>(reply: Reply<T>) {
     assert!(matches!(reply.now_or_never(), Some(Err(EngineError::Stopped))));
@@ -58,4 +66,63 @@ fn a_signed_out_account_rejects_chat_presence_media_and_call_operations() {
         call: CallId::for_tests(1),
         muted: true,
     }));
+}
+
+fn presence(availability: Availability) -> Event {
+    Event::Presence {
+        mri: LAB_B.to_owned(),
+        availability,
+    }
+}
+
+/// What a tap saw of each presence event: its availability, and the one the models showed then.
+type Seen = Rc<RefCell<Vec<(Availability, Availability)>>>;
+
+fn recording(seen: &Seen, rig: &Rig) -> Tap {
+    let (seen, presences) = (Rc::clone(seen), rig.models.presence.clone());
+    Rc::new(move |event, cx| {
+        if let Event::Presence { availability, .. } = event {
+            let shown = presences.read(cx).of(LAB_B);
+            seen.borrow_mut().push((availability.clone(), shown));
+        }
+    })
+}
+
+fn shown(rig: &Rig) -> Availability {
+    rig.cx.read(|cx| rig.models.presence.read(cx).of(LAB_B))
+}
+
+#[test]
+fn the_tap_sees_each_event_before_the_models_apply_it_until_it_is_taken_off() {
+    let rig = Rig::start();
+    // no tap: the models apply it all the same
+    rig.send(presence(Availability::Busy));
+    assert_eq!(shown(&rig), Availability::Busy);
+
+    let seen = Seen::default();
+    let tap = recording(&seen, &rig);
+    rig.cx.read(|cx| rig.bridge.read(cx).set_tap(Some(tap)));
+    rig.send(presence(Availability::Away));
+    assert_eq!(
+        *seen.borrow(),
+        vec![(Availability::Away, Availability::Busy)],
+        "the tap saw it while the models still showed the one before"
+    );
+    assert_eq!(shown(&rig), Availability::Away);
+
+    // what a test tells the bridge goes the drain's way: the tap, then the models
+    rig.cx.update(|cx| {
+        rig.bridge
+            .update(cx, |bridge, cx| bridge.tell(presence(Availability::DoNotDisturb), cx));
+    });
+    assert_eq!(
+        seen.borrow().last(),
+        Some(&(Availability::DoNotDisturb, Availability::Away))
+    );
+    assert_eq!(shown(&rig), Availability::DoNotDisturb);
+
+    rig.cx.read(|cx| rig.bridge.read(cx).set_tap(None));
+    rig.send(presence(Availability::Available));
+    assert_eq!(seen.borrow().len(), 2, "a tap taken off sees nothing more");
+    assert_eq!(shown(&rig), Availability::Available);
 }

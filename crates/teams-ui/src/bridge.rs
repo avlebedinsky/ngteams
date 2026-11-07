@@ -12,16 +12,21 @@
 //! task. From then on every request answers `Stopped`: nothing more goes out. [`Bridge::sign_out`] does the same once
 //! the account's session can't renew its tokens, and shows the account signed out.
 //!
+//! A **tap** ([`Bridge::set_tap`]) sees each event just before the models apply it, the app's control socket's events
+//! (`ngteams::ctl::events`): the models stay the views' only state, and the tap only looks.
+//!
 //! The diagnostic log (M2 Task 24a) has the shutdown, the sign-out and an engine that stopped on its own; a view's
 //! failed request is logged by its kind where its [`Reply`] is read (`teams-core`), and the engine's own failures as
 //! it tells them.
 
+use std::cell::RefCell;
 use std::pin::pin;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use futures_util::FutureExt as _;
 use futures_util::future::{Either, Shared, select};
-use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
+use gpui::{App, AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallHealth, CallId, ChannelDraft, ChannelMade, ChatListing,
@@ -1079,12 +1084,19 @@ enum Held {
     Stopped,
 }
 
+/// What sees each engine event just before the models apply it ([`Bridge::set_tap`]).
+pub type Tap = Rc<dyn Fn(&Event, &mut App)>;
+
+/// The tap the drain tells, shared by the bridge (which sets it) and its drain.
+type Tapped = Rc<RefCell<Option<Tap>>>;
+
 /// The engine as the UI holds it (see the module docs). A GPUI entity: [`Bridge::start`] builds it in a
 /// `cx.new(...)`.
 pub struct Bridge {
     core: Arc<dyn Core>,
     models: Models,
     held: Held,
+    tap: Tapped,
 }
 
 impl Bridge {
@@ -1093,15 +1105,29 @@ impl Bridge {
     pub fn start<E: EventSource>(events: E, core: Arc<dyn Core>, models: Models, cx: &mut Context<Self>) -> Self {
         let (stop, stopped) = oneshot::channel();
         let drained = models.clone();
+        let tap: Tapped = Rc::default();
+        let tapped = Rc::clone(&tap);
         let task = cx.spawn(async move |_, cx: &mut AsyncApp| {
-            let events = drain(events, stopped, &drained, cx).await;
+            let events = drain(events, stopped, &drained, &tapped, cx).await;
             Box::new(move || events.shutdown()) as Shutdown
         });
         Self {
             core,
             models,
             held: Held::Draining(Draining { stop, task }),
+            tap,
         }
+    }
+
+    /// From now on `tap` (none: no tap) sees each engine event just before the models apply it, on GPUI's foreground.
+    pub fn set_tap(&self, tap: Option<Tap>) {
+        *self.tap.borrow_mut() = tap;
+    }
+
+    /// `event` handled as the drain handles one the engine told: the tap shown it, then the models apply it. A test
+    /// stands in for the engine with it.
+    pub fn tell(&mut self, event: Event, cx: &mut Context<Self>) {
+        told(&self.tap, &self.models, event, cx);
     }
 
     /// The request side, for a view to keep.
@@ -1169,6 +1195,7 @@ async fn drain<E: EventSource>(
     mut events: E,
     mut stop: oneshot::Receiver<()>,
     models: &Models,
+    tap: &Tapped,
     cx: &mut AsyncApp,
 ) -> E {
     loop {
@@ -1183,7 +1210,7 @@ async fn drain<E: EventSource>(
             }
         };
         match next {
-            Some(Some(event)) => cx.update(|cx| models.apply(event, cx)),
+            Some(Some(event)) => cx.update(|cx| told(tap, models, event, cx)),
             Some(None) => {
                 log::warn!("the engine stopped on its own");
                 cx.update(|cx| models.engine_stopped(cx));
@@ -1193,4 +1220,13 @@ async fn drain<E: EventSource>(
         }
     }
     events
+}
+
+/// `event` shown to the tap, if one is set, then applied to `models`. The tap is taken out first: it may set another.
+fn told(tap: &Tapped, models: &Models, event: Event, cx: &mut App) {
+    let tap = tap.borrow().clone();
+    if let Some(tap) = tap {
+        tap(&event, cx);
+    }
+    models.apply(event, cx);
 }

@@ -645,7 +645,8 @@ pub struct EventFilter {
     /// Only this chat's events (id or title).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<String>,
-    /// Only messages from this person (MRI, UPN or name).
+    /// Only a message or a typing from this person: by MRI, by display name in any case, or one of the app's accounts
+    /// by UPN (anyone else's UPN is refused as a bad request).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// Only messages that mention the account.

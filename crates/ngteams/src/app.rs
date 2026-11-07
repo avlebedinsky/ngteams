@@ -137,6 +137,8 @@ pub struct Running {
     read_only: bool,
     /// The control socket served, until the quit ([`Launch::ctl`]).
     ctl: Option<crate::ctl::Listener>,
+    /// Its event streams, fed by each account's bridge tap ([`crate::ctl::events`]).
+    hub: Rc<crate::ctl::events::Hub>,
 }
 
 /// What [`launch`] started.
@@ -216,8 +218,10 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         quitting: false,
         read_only,
         ctl: None,
+        hub: Rc::default(),
     });
     running.update(cx, |running, cx| {
+        running.tap_first(cx);
         for started in others {
             running.add_started(started, cx);
         }
@@ -343,6 +347,18 @@ impl Running {
         self.quitting
     }
 
+    /// The control socket's event streams.
+    pub(crate) fn hub(&self) -> &Rc<crate::ctl::events::Hub> {
+        &self.hub
+    }
+
+    /// The first account's bridge tapped for the event streams (the others are as they start).
+    fn tap_first(&self, cx: &App) {
+        if let Some((_, upn, bridge)) = self.bridges.first() {
+            crate::ctl::events::tap(&self.hub, upn, bridge, cx);
+        }
+    }
+
     /// Read-only views cannot add accounts, and each lab alias has its own single-account broker.
     fn can_add_account(&self) -> bool {
         !self.read_only && self.runner.setup.secrets().application() != crate::lab::LAB_KEYRING_APPLICATION
@@ -360,6 +376,7 @@ impl Running {
             .detach();
         }
         let (models, bridge) = bridge(engine.handle, calls.as_ref(), cx);
+        crate::ctl::events::tap(&self.hub, &account.upn, &bridge, cx);
         let hint = if self.read_only {
             READ_ONLY_SIGNED_OUT_HINT
         } else {
@@ -516,7 +533,8 @@ impl Running {
             return;
         }
         log::info!("the app quits: every account's engine shuts down first");
-        // nothing more is asked over the control socket: its connections closed, its file removed
+        // nothing more is asked over the control socket: its event streams and connections closed, its file removed
+        self.hub.close();
         if let Some(mut ctl) = self.ctl.take() {
             ctl.stop();
         }
@@ -593,6 +611,26 @@ pub fn watch_sign_out_saying(
         cx.update(|cx| again(cx));
     })
     .detach();
+}
+
+/// Each account's bridge as the app runs it, in the rail's order; none before the launch.
+#[must_use]
+pub fn bridges(cx: &App) -> Vec<Entity<Bridge>> {
+    cx.try_global::<Held>().map_or_else(Vec::new, |held| {
+        held.running
+            .read(cx)
+            .bridges
+            .iter()
+            .map(|(_, _, bridge)| bridge.clone())
+            .collect()
+    })
+}
+
+/// Whether a control socket client follows the events ([`crate::ctl::events::Hub::listening`]); none before the launch.
+#[must_use]
+pub fn ctl_listening(cx: &App) -> bool {
+    cx.try_global::<Held>()
+        .is_some_and(|held| held.running.read(cx).hub.listening())
 }
 
 /// Quits the app: every account's engine shut down first ([`Running`]'s quit), then the app; before the app was

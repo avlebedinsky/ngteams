@@ -162,7 +162,7 @@ pub mod workflows_app;
 pub use account_prompt::{AccountPrompt, AccountPromptEvent};
 pub use accounts::{AccountParts, AccountTile, Accounts, AccountsEvent};
 pub use assets::AppAssets;
-pub use bridge::{Bridge, Core, EventSource, StoppedCore};
+pub use bridge::{Bridge, Core, EventSource, StoppedCore, Tap};
 pub use call_alert::{CallAlert, CallAlertEvent};
 pub use call_view::CallBar;
 pub use calls::{ActiveCall, Ask, CallKind, Calls};

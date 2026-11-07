@@ -311,21 +311,24 @@
 - Modify: `crates/ngteams/src/ctl/dispatch.rs` (`subscribe`), `crates/ngteams/src/app.rs` (set the tap per bridge,
   for accounts added later too)
 - Modify: `crates/teams-ui/tests/bridge.rs`; create `crates/ngteams/tests/ctl_events.rs`
+- ➕ Modify: `crates/ngteams/src/ctl/listener.rs` (a `subscribe`'s answer carries its stream, which the connection's
+  thread writes), `crates/ngteams/tests/ctl_support/mod.rs` (more accounts, each store seeded). `Bridge::tell` (an
+  event handled as the drain handles it) and `app::bridges` let the tests stand in for an account's engine.
 
-- [ ] `Bridge::set_tap`: an `Rc<RefCell<Option<…>>>` the drain closure captures, called with `&Event` before the
+- [x] `Bridge::set_tap`: an `Rc<RefCell<Option<…>>>` the drain closure captures, called with `&Event` before the
       apply; `Bridge::start`'s callers unchanged
-- [ ] the hub: a bounded broadcast; a subscriber that falls behind gets `lagged` and is dropped; with no subscriber
+- [x] the hub: a bounded broadcast; a subscriber that falls behind gets `lagged` and is dropped; with no subscriber
       the tap returns at once
-- [ ] the engine kinds of the catalogue, from the tap: message (New + Inserted only, no History, the notifier's
+- [x] the engine kinds of the catalogue, from the tap: message (New + Inserted only, no History, the notifier's
       catch-up cutoff, `source`, `from_me`, `mentions_me`), edited, deleted, reaction, typing, read, chat_changed,
       teams_changed, presence, outbox, incoming_call, ring_ended, call, call_participants (diff against
       `models.calls` before the apply), lobby, voicemail, connection, caught_up, catch_up_failed, engine_failed
-- [ ] `subscribe { filter }` with the kind / account / chat / from / mentions_me filters, and `--detail` for
+- [x] `subscribe { filter }` with the kind / account / chat / from / mentions_me filters, and `--detail` for
       reactions
-- [ ] tests: mapping per kind, a replayed or history message not sent, `mentions_me` and `from_me`, a slow subscriber
+- [x] tests: mapping per kind, a replayed or history message not sent, `mentions_me` and `from_me`, a slow subscriber
       dropped with `lagged` while the drain keeps going, each filter, two subscribers with different filters, the
       tap of an account added after start
-- [ ] run `cargo test -p teams-ui --test bridge` and `cargo test -p ngteams --test ctl_events`, which must pass
+- [x] run `cargo test -p teams-ui --test bridge` and `cargo test -p ngteams --test ctl_events`, which must pass
       before the next task
 
 ### Task 6: events: unread, own status, UI, app and calendar kinds

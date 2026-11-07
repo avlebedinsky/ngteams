@@ -22,7 +22,11 @@ use std::time::{Duration, Instant};
 use ctl_support::{UPN, WAIT, connect, launched, launched_with, pump_until_done, pumped, quit, socket_in};
 use gpui::TestAppContext;
 use ngteams::ctl::BindError;
-use teams_ctl::protocol::{ErrorCode, Outcome, Request, Response, ResponseLine, WindowState};
+use ngteams::ctl::listener::{Answer, Job};
+use teams_ctl::codec;
+use teams_ctl::protocol::{
+    ErrorCode, EventFilter, EventLine, Outcome, Request, RequestLine, Response, ResponseLine, WindowState,
+};
 use teams_ctl::{Client, ClientError, PROTOCOL_VERSION};
 
 /// The status, asked by a client of its own.
@@ -232,4 +236,52 @@ fn quit_closes_the_connections_and_removes_the_socket() {
     let path = socket.clone();
     let again = pumped(&cx, move || connect(&path).map(|_| ()));
     assert!(matches!(again, Err(ClientError::NotRunning { .. })), "{again:?}");
+}
+
+#[test]
+fn a_subscriber_s_connection_ends_when_its_client_hangs_up_though_no_event_comes() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = socket_in(&dir);
+    let (jobs, asked) = async_channel::unbounded::<Job>();
+    let mut listener = ngteams::ctl::bind(&socket).unwrap().serve(jobs).unwrap();
+    let mut client = UnixStream::connect(&socket).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let subscribe = RequestLine {
+        id: 1,
+        account: None,
+        request: Request::Subscribe {
+            filter: EventFilter::default(),
+        },
+    };
+    codec::write_line(&mut client, &subscribe).unwrap();
+    // the stream answered by hand: no event is ever sent on it
+    let job = asked.recv_blocking().unwrap();
+    let (events, stream) = async_channel::bounded::<EventLine>(1);
+    let answer = Answer {
+        line: ResponseLine {
+            id: job.line.id,
+            outcome: Outcome::Ok(Response::Subscribed),
+        },
+        events: Some(stream),
+    };
+    assert!(job.reply.send(answer).is_ok());
+    let mut subscribed = String::new();
+    BufReader::new(&client).read_line(&mut subscribed).unwrap();
+    let subscribed: ResponseLine = serde_json::from_str(&subscribed).unwrap();
+    assert!(
+        matches!(subscribed.outcome, Outcome::Ok(Response::Subscribed)),
+        "{subscribed:?}"
+    );
+    // the connection's thread waits on the stream
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(events.receiver_count(), 1, "the stream is written from");
+
+    drop(client);
+    let start = Instant::now();
+    while events.receiver_count() > 0 {
+        assert!(start.elapsed() < WAIT, "the connection's thread didn't end");
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(events.is_closed(), "the stream is closed");
+    listener.stop();
 }

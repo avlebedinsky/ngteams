@@ -9,14 +9,17 @@
 //! - [`dispatch`]: each request answered on GPUI's foreground, over the app's accounts as they run.
 //! - [`address`]: the account and the chat a request names.
 //! - [`reads`]: the read commands, through the account's `Core`.
+//! - [`events`]: the event stream a `subscribe` turns a connection into, fed by each account's bridge tap.
 //!
 //! The requests cross from the connections' threads to the foreground through a channel, where one task takes them in
-//! turn and answers each in a task of its own; each answer goes back through a oneshot to the thread that asked. The
+//! turn and answers each in a task of its own; each answer goes back through a oneshot to the thread that asked (a
+//! `subscribe`'s with its stream, which that thread writes from then on). The
 //! server serves from the app's launch (`Launch::ctl`) until its quit, which closes every connection and removes the
 //! socket file.
 
 pub mod address;
 pub mod dispatch;
+pub mod events;
 pub mod listener;
 pub mod reads;
 

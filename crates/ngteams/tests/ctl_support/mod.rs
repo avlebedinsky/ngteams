@@ -34,12 +34,13 @@ pub const ME: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
 pub fn signed_in_setup(dir: &Path) -> (Setup, PersonalAccount) {
     let paths = PersonalPaths::new(dir.join("config/ngteams"), dir.join("share/ngteams"));
     let setup = Setup::new(paths).unwrap();
-    let account = PersonalAccount::new(
-        UPN,
-        "00000000-0000-4000-8000-0000000000ff",
-        "00000000-0000-4000-8000-000000000001",
-    )
-    .unwrap();
+    let account = signed_in(&setup, UPN, "00000000-0000-4000-8000-0000000000ff");
+    (setup, account)
+}
+
+/// The account `upn` (object id `oid`) signed in once under `setup`: saved with its region, no refresh token.
+pub fn signed_in(setup: &Setup, upn: &str, oid: &str) -> PersonalAccount {
+    let account = PersonalAccount::new(upn, oid, "00000000-0000-4000-8000-000000000001").unwrap();
     account.save(&setup.paths).unwrap();
     setup.paths.make_dirs().unwrap();
     let region = setup.paths.region_file(&account).unwrap();
@@ -51,7 +52,7 @@ pub fn signed_in_setup(dir: &Path) -> (Setup, PersonalAccount) {
         ),
     )
     .unwrap();
-    (setup, account)
+    account
 }
 
 /// The app launched under `dir`, serving its control socket at `socket`.
@@ -66,30 +67,32 @@ pub fn launched_with(
     dir: &Path,
     socket: &Path,
     asked: &Rc<Cell<u32>>,
-    seed: impl FnOnce(&mut Store),
+    seed: impl Fn(&mut Store),
+) -> (Launched, EngineRequests) {
+    launched_with_others(cx, dir, socket, asked, seed, &[])
+}
+
+/// [`launched_with`], with more accounts after the first, each `(upn, object id)`, started as the app starts them;
+/// each account's store filled by `seed` first.
+pub fn launched_with_others(
+    cx: &TestAppContext,
+    dir: &Path,
+    socket: &Path,
+    asked: &Rc<Cell<u32>>,
+    seed: impl Fn(&mut Store),
+    others: &[(&str, &str)],
 ) -> (Launched, EngineRequests) {
     let (setup, account) = signed_in_setup(dir);
-    let store_file = setup.paths.store_file(&account).unwrap();
-    fs::create_dir_all(store_file.parent().unwrap()).unwrap();
-    seed(&mut Store::open(&store_file).unwrap());
-    let engine = ngteams::engine::start(
-        &setup.paths,
-        &account,
-        CallFloor::new(),
-        MemorySecretStore::new(),
-        false,
-        None,
-    )
-    .unwrap();
-    let requests = engine.handle.requests();
+    let first = started(&setup, account, &seed);
+    let requests = first.engine.handle.requests();
+    let others = others
+        .iter()
+        .map(|(upn, oid)| started(&setup, signed_in(&setup, upn, oid), &seed))
+        .collect();
     let asked = Rc::clone(asked);
     let launch = Launch {
-        first: Started {
-            account,
-            engine,
-            calls: None,
-        },
-        others: Vec::new(),
+        first,
+        others,
         settings: app::settings(SettingsFile::new(dir.join("settings.toml")), None),
         bus: Err(BusError::NotGiven),
         sign_in_again: Rc::new(move |_| {
@@ -110,6 +113,27 @@ pub fn launched_with(
     };
     cx.run_until_parked();
     (launched, requests)
+}
+
+/// `account`'s engine started over a store `seed` filled, without a push channel or calling.
+fn started(setup: &Setup, account: PersonalAccount, seed: &impl Fn(&mut Store)) -> Started<MemorySecretStore> {
+    let store_file = setup.paths.store_file(&account).unwrap();
+    fs::create_dir_all(store_file.parent().unwrap()).unwrap();
+    seed(&mut Store::open(&store_file).unwrap());
+    let engine = ngteams::engine::start(
+        &setup.paths,
+        &account,
+        CallFloor::new(),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )
+    .unwrap();
+    Started {
+        account,
+        engine,
+        calls: None,
+    }
 }
 
 /// `work` run on a thread of its own while the test thread steps GPUI, which answers its requests.

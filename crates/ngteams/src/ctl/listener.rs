@@ -22,7 +22,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use teams_ctl::codec::{self, CodecError, LineReader};
-use teams_ctl::protocol::{CtlError, ErrorCode, Outcome, RequestLine, ResponseLine};
+use teams_ctl::protocol::{CtlError, CtlEvent, ErrorCode, EventLine, Outcome, RequestLine, ResponseLine};
 use teams_ctl::{ClientError, connect_stream};
 use tokio::sync::oneshot;
 
@@ -35,7 +35,19 @@ const WRITE: Duration = Duration::from_secs(10);
 /// A request for GPUI's foreground, and where its answer goes.
 pub struct Job {
     pub line: RequestLine,
-    pub reply: oneshot::Sender<ResponseLine>,
+    pub reply: oneshot::Sender<Answer>,
+}
+
+/// A request's answer: its line, and for a `subscribe` taken the events the connection writes from then on.
+pub struct Answer {
+    pub line: ResponseLine,
+    pub events: Option<async_channel::Receiver<EventLine>>,
+}
+
+impl From<ResponseLine> for Answer {
+    fn from(line: ResponseLine) -> Self {
+        Self { line, events: None }
+    }
 }
 
 /// Why the socket wasn't bound.
@@ -262,7 +274,8 @@ fn register(connections: &Mutex<Connections>, stream: &UnixStream) -> io::Result
 }
 
 /// One connection: each request line answered in turn, until the client closes it, the app stops serving, or a line
-/// can't be read on from (one over the size cap leaves the stream mid-line).
+/// can't be read on from (one over the size cap leaves the stream mid-line). A `subscribe` taken turns it into its
+/// event stream ([`write_events`]).
 fn serve(stream: UnixStream, jobs: &async_channel::Sender<Job>) {
     let _ = stream.set_write_timeout(Some(WRITE));
     let Ok(read) = stream.try_clone() else { return };
@@ -276,21 +289,76 @@ fn serve(stream: UnixStream, jobs: &async_channel::Sender<Job>) {
                     // the app is going: nobody answers any more
                     None => return,
                 },
-                Err(bad) => (refused(bad.id, bad.error), true),
+                Err(bad) => (refused(bad.id, bad.error).into(), true),
             },
-            Err(CodecError::Utf8) => (bad_request("a line isn't UTF-8"), true),
-            Err(CodecError::TooLong { limit }) => (bad_request(&format!("a line is over {limit} bytes")), false),
+            Err(CodecError::Utf8) => (bad_request("a line isn't UTF-8").into(), true),
+            Err(CodecError::TooLong { limit }) => (bad_request(&format!("a line is over {limit} bytes")).into(), false),
             // the client closed it, or it can't be read on from
             Ok(None) | Err(_) => return,
         };
-        if codec::write_line(&mut writer, &answer).is_err() || !go_on {
+        if codec::write_line(&mut writer, &answer.line).is_err() || !go_on {
+            return;
+        }
+        if let Some(events) = answer.events {
+            write_events(&events, &writer);
             return;
         }
     }
 }
 
+/// A subscriber's events written as they come, until its stream closes (the quit, or the client gone), a write fails,
+/// or after its `lagged` line.
+///
+/// The thread waits on the stream, not the socket, so a thread of its own watches the socket for the client's hang-up
+/// and closes the stream then: a client gone with a filter no event passes would otherwise hold this thread, its
+/// descriptors and its place in the hub for good. Once the writes end the socket is shut down, which ends the watch.
+fn write_events(events: &async_channel::Receiver<EventLine>, writer: &UnixStream) {
+    thread::scope(|scope| {
+        let watching = thread::Builder::new()
+            .name("ctl-hang-up".to_owned())
+            .spawn_scoped(scope, || {
+                if hung_up(writer) {
+                    events.close();
+                }
+            });
+        if let Err(error) = watching {
+            log::warn!("a subscriber's hang-up isn't watched: its stream ends at its next event: {error}");
+        }
+        let mut writer = writer;
+        while let Ok(line) = events.recv_blocking() {
+            let last = line.event == CtlEvent::Lagged;
+            if codec::write_line(&mut writer, &line).is_err() || last {
+                break;
+            }
+        }
+        // wakes the watch: a socket shut down both ways is hung up
+        let _ = writer.shutdown(std::net::Shutdown::Both);
+    });
+}
+
+/// Waits until `stream` is hung up (`true`): the client closed it (or shut it down both ways), or it was shut down
+/// here. A client that only stops writing hasn't hung up, and what it writes is never read. `false`: the watch failed,
+/// and the stream ends at its next event, as without one.
+fn hung_up(stream: &UnixStream) -> bool {
+    use rustix::event::{PollFd, PollFlags, poll};
+
+    // no event asked for: a poll still wakes for a hang-up or an error, and only for those
+    let mut watched = [PollFd::new(stream, PollFlags::empty())];
+    loop {
+        match poll(&mut watched, None) {
+            Ok(_) if watched[0].revents().is_empty() => {}
+            Ok(_) => return true,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => {
+                log::warn!("a subscriber's hang-up isn't watched: its stream ends at its next event: {error}");
+                return false;
+            }
+        }
+    }
+}
+
 /// `line` answered on GPUI's foreground; `None` when the app no longer takes requests.
-fn ask(jobs: &async_channel::Sender<Job>, line: RequestLine) -> Option<ResponseLine> {
+fn ask(jobs: &async_channel::Sender<Job>, line: RequestLine) -> Option<Answer> {
     let (reply, answer) = oneshot::channel();
     jobs.send_blocking(Job { line, reply }).ok()?;
     answer.blocking_recv().ok()
