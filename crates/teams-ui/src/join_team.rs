@@ -259,7 +259,12 @@ impl Render for JoinTeam {
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child("Join a team with a code"),
                 )
-                .child(div().w_full().child(Input::new(&self.code)))
+                .child(
+                    div()
+                        .debug_selector(|| "join-code".to_owned())
+                        .w_full()
+                        .child(Input::new(&self.code)),
+                )
                 .child(div().flex_1())
                 .child(selected_by(
                     "join-code-add",

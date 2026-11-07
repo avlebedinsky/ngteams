@@ -364,6 +364,99 @@ fn undrawn_answer(request: &WorkflowRequest) -> WorkflowResponse {
     }
 }
 
+/// As [`message_answer`], the workflow asking for a choice, several days, people from the directory and a time.
+fn choices_answer(request: &WorkflowRequest) -> WorkflowResponse {
+    match request {
+        WorkflowRequest::Get { .. } => Ok(message_fixtures::message_flow(
+            message_fixtures::FOLLOW_FLOW,
+            "Follow up on a message",
+            &json!({"type":"AdaptiveCard","version":"1.3","body":[
+                {"type":"Input.ChoiceSet","id":"colour","label":"Colour","isRequired":true,
+                 "errorMessage":"Pick a colour","choices":[
+                    {"title":"Red","value":"red"},{"title":"Blue","value":"blue"}]},
+                {"type":"Input.ChoiceSet","id":"days","isMultiSelect":true,"value":"mon","choices":[
+                    {"title":"Mon","value":"mon"},{"title":"Tue","value":"tue"},{"title":"Wed","value":"wed"}]},
+                {"type":"Input.ChoiceSet","id":"who","label":"Who","isMultiSelect":true,"choices":[],
+                 "choices.data":{"type":"Data.Query","dataset":"graph.microsoft.com/users"}},
+                {"type":"Input.Time","id":"at"}
+            ]}),
+        )),
+        other => message_answer(other),
+    }
+}
+
+fn person(mri: &str, name: &str) -> teams_proto::TeamPerson {
+    teams_proto::TeamPerson {
+        mri: mri.to_owned(),
+        name: name.to_owned(),
+        email: Some(format!("{}@example.invalid", name.to_lowercase().replace(' ', "."))),
+        job_title: None,
+    }
+}
+
+#[test]
+fn a_cards_choices_people_and_listed_times_answer_as_teams_sends_them() {
+    const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
+    let rig = common::Rig::start();
+    *rig.core.addable.lock().unwrap() = vec![
+        person(LAB_B, "Lab Bee"),
+        person(LAB_C, "Lab Cee"),
+        person(LAB_A, "Other"),
+    ];
+    let (_view, _events, cx) = run_window(&rig, choices_answer);
+    // a required choice left unpicked is marked with the card's own words
+    click(cx, "workflow-run-submit");
+    assert!(bounds(cx, "workflow-run-missing-colour").is_some());
+    // one of a single choice: the last picked
+    click(cx, "workflow-run-input-colour-blue");
+    click(cx, "workflow-run-input-colour-red");
+    assert!(
+        bounds(cx, "workflow-run-missing-colour").is_none(),
+        "picking clears the mark"
+    );
+    // several: each pick flips its own, the card's own value picked to start with
+    click(cx, "workflow-run-input-days-wed");
+    click(cx, "workflow-run-input-days-mon");
+    click(cx, "workflow-run-input-days-tue");
+    // people: the directory searched, the found picked (once each), one removed again
+    type_in(cx, "workflow-run-input-who", "lab");
+    assert!(bounds(cx, &format!("workflow-run-input-who-found-{LAB_B}")).is_some());
+    assert!(
+        bounds(cx, &format!("workflow-run-input-who-found-{LAB_A}")).is_none(),
+        "only those whose name or address starts with the words"
+    );
+    click(cx, &format!("workflow-run-input-who-found-{LAB_B}"));
+    assert!(
+        bounds(cx, &format!("workflow-run-input-who-found-{LAB_C}")).is_none(),
+        "a pick clears the search"
+    );
+    type_in(cx, "workflow-run-input-who", "lab c");
+    click(cx, &format!("workflow-run-input-who-found-{LAB_C}"));
+    type_in(cx, "workflow-run-input-who", "lab");
+    click(cx, &format!("workflow-run-input-who-found-{LAB_C}"));
+    click(cx, &format!("workflow-run-input-who-remove-{LAB_B}"));
+    assert!(bounds(cx, &format!("workflow-run-input-who-remove-{LAB_B}")).is_none());
+    // a search cleared finds nobody
+    type_in(cx, "workflow-run-input-who", "x");
+    cx.simulate_keystrokes("backspace");
+    draw(cx);
+    assert!(bounds(cx, &format!("workflow-run-input-who-found-{LAB_B}")).is_none());
+    // a time from the list under the chevron
+    click(cx, "workflow-run-input-at-times");
+    click(cx, "workflow-run-time-1230AM");
+    click(cx, "workflow-run-submit");
+    let (answers, _) = sent_run(&rig);
+    assert_eq!(
+        Value::Object(answers),
+        json!({
+            "colour": "red",
+            "days": "wed,tue",
+            "who": "00000000-0000-4000-8000-00000000000c",
+            "at": "00:30"
+        })
+    );
+}
+
 #[test]
 fn a_cards_nested_questions_are_asked_and_answered() {
     let rig = common::Rig::start();

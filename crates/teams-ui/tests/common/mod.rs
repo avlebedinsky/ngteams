@@ -193,6 +193,17 @@ pub struct FakeCore {
     pub team_found: Mutex<Vec<teams_proto::TeamPerson>>,
     /// Who the organization's people box finds (Add member).
     pub addable: Mutex<Vec<teams_proto::TeamPerson>>,
+    /// Every team's numbers, as "See all your teams"' Analytics tab reads them, and each period asked for, in order.
+    pub all_analytics: Mutex<Vec<teams_proto::TeamAnalytics>>,
+    pub all_analytics_asked: Mutex<Vec<teams_proto::AnalyticsPeriod>>,
+    /// How many Microsoft 365 groups the account owns, as "From group" reads it; `None`: the read answers none.
+    pub owned_groups: Mutex<Option<usize>>,
+    /// The shared channels' invitations waiting.
+    pub invites: Mutex<Vec<teams_proto::PendingInvite>>,
+    /// The public teams "Join a team" suggests; a search finds those whose name holds its words.
+    pub joinable: Mutex<Vec<teams_proto::JoinableTeam>>,
+    /// Every suggestion read asked for, its words, in order.
+    pub joinable_asked: Mutex<Vec<Option<String>>>,
     /// The favourite chats and the conversations the service calls empty, as `chat_listing` answers them.
     pub listing: Mutex<ChatListing>,
     /// Per channel, the post each stored message belongs to.
@@ -548,6 +559,30 @@ impl Core for FakeCore {
                 .clone()
                 .ok_or(EngineError::TeamNotChanged { code: None }),
         )
+    }
+
+    fn all_teams_analytics(&self, period: teams_proto::AnalyticsPeriod) -> Reply<Vec<teams_proto::TeamAnalytics>> {
+        locked(&self.all_analytics_asked).push(period);
+        Reply::ready(Ok(locked(&self.all_analytics).clone()))
+    }
+
+    fn owned_groups(&self) -> Reply<Option<usize>> {
+        Reply::ready(Ok(*locked(&self.owned_groups)))
+    }
+
+    fn pending_invites(&self) -> Reply<Vec<teams_proto::PendingInvite>> {
+        Reply::ready(Ok(locked(&self.invites).clone()))
+    }
+
+    fn joinable_teams(&self, keywords: Option<String>) -> Reply<Vec<teams_proto::JoinableTeam>> {
+        locked(&self.joinable_asked).push(keywords.clone());
+        let words = keywords.unwrap_or_default().to_lowercase();
+        let found = locked(&self.joinable)
+            .iter()
+            .filter(|team| team.name.to_lowercase().contains(&words))
+            .cloned()
+            .collect();
+        Reply::ready(Ok(found))
     }
 
     fn own_team_view(

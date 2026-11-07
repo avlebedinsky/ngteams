@@ -499,7 +499,8 @@ fn time_field(state: &Entity<InputState>, selector: &str, busy: bool, cx: &Conte
     let weak = cx.entity().downgrade();
     selected_by(
         selector.to_owned(),
-        TextInput::new(state).disabled(busy).suffix(
+        TextInput::new(state).disabled(busy).suffix(selected_by(
+            format!("{selector}-times"),
             icon_button(
                 gpui::SharedString::from(format!("{selector}-times")),
                 Glyph::CHEVRON_DOWN,
@@ -525,7 +526,7 @@ fn time_field(state: &Entity<InputState>, selector: &str, busy: bool, cx: &Conte
                 }
                 menu.scrollable(true).max_h(px(240.0))
             }),
-        ),
+        )),
     )
     .into_any_element()
 }
@@ -557,7 +558,8 @@ fn people_field(
                     .bg(rgb(palette.hover))
                     .text_sm()
                     .child(person.name.clone())
-                    .child(
+                    .child(selected_by(
+                        format!("{selector}-remove-{}", person.mri),
                         icon_button(
                             gpui::SharedString::from(format!("{selector}-remove-{}", person.mri)),
                             Glyph::X,
@@ -567,7 +569,7 @@ fn people_field(
                         .xsmall()
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| this.unpick_person(index, &mri, cx))),
-                    )
+                    ))
             })))
         })
         .child(selected_by(selector.to_owned(), TextInput::new(search).disabled(busy)))
@@ -581,8 +583,10 @@ fn people_field(
                     .border_color(rgb(palette.border))
                     .children(found.iter().take(8).map(|person| {
                         let picked = person.clone();
+                        let key = format!("{selector}-found-{}", person.mri);
                         div()
-                            .id(gpui::SharedString::from(format!("{selector}-found-{}", person.mri)))
+                            .id(gpui::SharedString::from(key.clone()))
+                            .debug_selector(move || key.clone())
                             .px_3()
                             .py_1p5()
                             .cursor_pointer()

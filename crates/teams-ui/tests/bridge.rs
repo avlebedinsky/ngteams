@@ -51,6 +51,7 @@ fn a_signed_out_account_rejects_chat_presence_media_and_call_operations() {
     stopped(core.sync_conversation(chat.into()));
     stopped(core.reply_roots(chat.into()));
     stopped(core.calendar(0, 1));
+    stopped(core.stored_calendar(0, 1));
     stopped(core.sync());
     stopped(core.load_older(chat.into()));
     stopped(core.write(Action::Delete {
@@ -120,6 +121,15 @@ fn the_tap_sees_each_event_before_the_models_apply_it_until_it_is_taken_off() {
         Some(&(Availability::DoNotDisturb, Availability::Away))
     );
     assert_eq!(shown(&rig), Availability::DoNotDisturb);
+
+    let held = rig
+        .cx
+        .read(|cx| rig.bridge.read(cx).models().presence.read(cx).of(LAB_B));
+    assert_eq!(
+        held,
+        Availability::DoNotDisturb,
+        "the bridge's models are the ones the views read"
+    );
 
     rig.cx.read(|cx| rig.bridge.read(cx).set_tap(None));
     rig.send(presence(Availability::Available));

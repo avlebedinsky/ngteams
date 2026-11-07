@@ -913,3 +913,86 @@ fn tag_permissions_write_independently_of_the_team_settings_snapshot() {
         }
     ));
 }
+
+fn numbers(name: &str, active_users: u64) -> teams_proto::TeamAnalytics {
+    teams_proto::TeamAnalytics {
+        team: format!("19:{name}@thread.tacv2"),
+        name: name.to_owned(),
+        active_users,
+        posts: 4,
+        replies: 2,
+        ..teams_proto::TeamAnalytics::default()
+    }
+}
+
+#[test]
+fn the_analytics_tab_reads_every_team_s_numbers_for_the_period_picked() {
+    use teams_proto::AnalyticsPeriod;
+    let rig = Rig::start();
+    *rig.core.all_analytics.lock().unwrap() = vec![numbers("Alpha", 3), numbers("Beta", 1)];
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    open_page(&shell, cx);
+    click(cx, "teams-tab-analytics");
+    assert_eq!(
+        *rig.core.all_analytics_asked.lock().unwrap(),
+        [AnalyticsPeriod::LastSevenDays],
+        "the last seven days first, as Teams has them"
+    );
+    assert!(bounds(cx, "teams-analytics").is_some());
+    click(cx, "teams-period");
+    click(cx, "teams-period-last-ninety-days");
+    assert_eq!(
+        rig.core.all_analytics_asked.lock().unwrap().last(),
+        Some(&AnalyticsPeriod::LastNinetyDays)
+    );
+    assert!(
+        bounds(cx, "teams-period-last-ninety-days").is_none(),
+        "the menu closes on its pick"
+    );
+    // a period without numbers: the tab says so
+    rig.core.all_analytics.lock().unwrap().clear();
+    click(cx, "teams-period");
+    click(cx, "teams-period-last-thirty-days");
+    assert_eq!(rig.core.all_analytics_asked.lock().unwrap().len(), 3);
+    // the period's menu closes on a click outside it
+    click(cx, "teams-period");
+    assert!(bounds(cx, "teams-period-last-seven-days").is_some());
+    click(cx, "teams-analytics");
+    assert!(bounds(cx, "teams-period-last-seven-days").is_none());
+}
+
+#[test]
+fn the_pending_invites_tab_lists_each_invitation_waiting() {
+    let rig = Rig::start();
+    *rig.core.invites.lock().unwrap() = vec![teams_proto::PendingInvite {
+        id: "invite-1".to_owned(),
+        channel: "Made-up shared".to_owned(),
+        team: "Gamma".to_owned(),
+        from: "Lab Bee".to_owned(),
+    }];
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    open_page(&shell, cx);
+    assert!(bounds(cx, "teams-invites").is_none());
+    click(cx, "teams-tab-pending-invites");
+    assert!(bounds(cx, "teams-invites").is_some(), "the invitation's table");
+}
+
+#[test]
+fn create_team_s_dropdown_offers_create_and_join() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    open_page(&shell, cx);
+    click(cx, "teams-create-more");
+    assert!(bounds(cx, "teams-create-menu-join").is_some());
+    click(cx, "teams-create-menu-join");
+    assert!(bounds(cx, "teams-create-menu-join").is_none(), "the dropdown closes");
+    assert!(bounds(cx, "join-team").is_some(), "Join a team opens");
+    click(cx, "join-back");
+    open_page(&shell, cx);
+    click(cx, "teams-create-more");
+    click(cx, "teams-create-menu-create");
+    let dialog = cx
+        .update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<CreateTeamDialog>().ok());
+    assert!(dialog.is_some(), "Create team's dialog opens");
+}
