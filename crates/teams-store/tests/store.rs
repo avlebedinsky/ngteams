@@ -2225,3 +2225,40 @@ fn the_sync_and_read_state_gone_answers_an_error_never_a_panic() -> Result<(), S
 fn refused(failed: bool) {
     assert!(failed, "the store answers an error");
 }
+
+#[test]
+fn the_members_and_forgotten_threads_gone_answer_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    store.upsert_conversation(&Conversation {
+        id: GROUP.to_owned(),
+        kind: ConversationKind::Group,
+        topic: None,
+        version: 1,
+        last_activity: None,
+    })?;
+    drop(store);
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch("DROP TABLE members; DROP TABLE forgotten_conversations;")
+        .expect("drop the tables");
+    drop(raw);
+
+    // opened afresh, so nothing is read from a statement prepared before
+    let mut store = Store::open(&store_path(&dir))?;
+    let sqlite = |error: &StoreError| matches!(error, StoreError::Sqlite(_));
+    let members = [Member::new(ME, None), Member::new(PEER, None)];
+    refused(
+        store
+            .replace_members(GROUP, 2, &members)
+            .is_err_and(|error| sqlite(&error)),
+    );
+    refused(store.members(GROUP).is_err_and(|error| sqlite(&error)));
+    refused(
+        store
+            .group_chat_with(&[ME.to_owned(), PEER.to_owned()])
+            .is_err_and(|error| sqlite(&error)),
+    );
+    refused(store.forget_conversation(GROUP).is_err_and(|error| sqlite(&error)));
+    refused(store.forgotten_thread(GROUP).is_err_and(|error| sqlite(&error)));
+    Ok(())
+}

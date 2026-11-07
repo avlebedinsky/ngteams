@@ -190,3 +190,20 @@ fn a_newer_builds_cache_is_left_alone() {
         .expect("count");
     assert_eq!(rows, 1, "its pictures left as they were");
 }
+
+#[test]
+fn the_pictures_gone_answer_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = cache_path(&dir);
+    drop(PictureCache::open(&path, 1 << 20)?);
+    let raw = rusqlite::Connection::open(&path).expect("open directly");
+    raw.execute_batch("DROP TABLE pictures;").expect("drop the table");
+    drop(raw);
+
+    // opened afresh: its schema is current, so the table isn't made again
+    let mut cache = PictureCache::open(&path, 1 << 20)?;
+    assert!(matches!(cache.get(KEY, None), Err(StoreError::Sqlite(_))));
+    assert!(matches!(put(&mut cache, KEY, &picture(4)), Err(StoreError::Sqlite(_))));
+    assert!(matches!(cache.bytes(), Err(StoreError::Sqlite(_))));
+    Ok(())
+}
