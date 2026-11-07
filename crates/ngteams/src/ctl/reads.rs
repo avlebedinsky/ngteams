@@ -4,8 +4,11 @@
 //!   is ([`chat_list::build_row`]); `unread_only` keeps those with anything unread.
 //! - `messages`: a chat's messages, the newest first, as plain text: the text messages and the lines Teams says in a
 //!   chat ("Meeting started", …) as the chat list's preview reads them ([`system_message::preview`]); the rest
-//!   (a thread's events, a call's records) left out. `before` pages back from a message.
-//! - `search`: the store's own search over the listed chats, as the window's search box searches.
+//!   (a thread's events, a call's records) left out. `before` pages back from a message. The answer stops before a
+//!   message that would take its line over the wire's cap ([`MAX_LINE`]): fewer than asked, the client pages on from
+//!   the last one.
+//! - `search`: the store's own search over the listed chats, as the window's search box searches; its hits also stop
+//!   where the line is full.
 //! - `members`: a chat's stored members with their names.
 //! - `unread`: the badge's own counts, from the account's [`teams_ui::Tray`]: each unread chat's count of unread
 //!   messages, and the total of unread chats the badge shows. Before the badge's first count (a moment after the tile
@@ -18,7 +21,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::{AsyncApp, Entity};
-use teams_ctl::protocol::{ChatRow, CtlError, ErrorCode, MemberRow, MessageRow, Request, Response, Unread, UnreadRow};
+use teams_ctl::codec::{self, MAX_LINE};
+use teams_ctl::protocol::{
+    ChatRow, CtlError, ErrorCode, MemberRow, MessageRow, Outcome, Request, Response, ResponseLine, Unread, UnreadRow,
+};
 use teams_proto::chat::parse_html;
 use teams_store::{Conversation, Message, PageCursor};
 use teams_ui::card_view::SENT_A_CARD;
@@ -91,15 +97,20 @@ async fn messages(core: &dyn Core, chat: &str, limit: Option<u32>, before: Optio
         None => None,
     };
     let mut names = Names::default();
-    let mut messages = Vec::new();
-    while messages.len() < limit {
+    let mut messages = Fitting::new(Response::Messages { messages: Vec::new() });
+    'pages: while messages.rows.len() < limit {
         let page = core
             .messages(chat.id.clone(), cursor, limit)
             .await
             .map_err(|error| engine_error(&error))?;
         for message in &page.messages {
-            if let Some(text) = text_of(message) {
-                messages.push(names.row(core, message, text).await);
+            if messages.rows.len() == limit {
+                break 'pages;
+            }
+            if let Some(text) = text_of(message)
+                && !messages.push(names.row(core, message, text).await)
+            {
+                break 'pages;
             }
         }
         cursor = page.next;
@@ -107,8 +118,44 @@ async fn messages(core: &dyn Core, chat: &str, limit: Option<u32>, before: Optio
             break;
         }
     }
-    messages.truncate(limit);
-    Ok(Response::Messages { messages })
+    Ok(Response::Messages {
+        messages: messages.rows,
+    })
+}
+
+/// An answer's rows, kept while they fit on its line: the codec refuses a line over [`MAX_LINE`], and an answer that
+/// can't be written leaves the client without one.
+struct Fitting {
+    rows: Vec<MessageRow>,
+    /// The bytes still free on the line.
+    room: usize,
+}
+
+impl Fitting {
+    /// No rows yet, the room on the line of `empty` (the answer without any) less its frame, its id at the longest.
+    fn new(empty: Response) -> Self {
+        let frame = ResponseLine {
+            id: u64::MAX,
+            outcome: Outcome::Ok(empty),
+        };
+        let taken = codec::encode(&frame).map_or(MAX_LINE, |line| line.len());
+        Self {
+            rows: Vec::new(),
+            room: MAX_LINE.saturating_sub(taken),
+        }
+    }
+
+    /// Keeps `row` when it fits, with the comma before it; `false`, keeping nothing, when it doesn't.
+    fn push(&mut self, row: MessageRow) -> bool {
+        // its own line's break stands for the comma
+        let size = codec::encode(&row).map_or(usize::MAX, |line| line.len());
+        if size > self.room {
+            return false;
+        }
+        self.room -= size;
+        self.rows.push(row);
+        true
+    }
 }
 
 /// Where the page before message `id` of `chat` starts.
@@ -166,7 +213,7 @@ async fn found(core: &dyn Core, query: &str, limit: Option<u32>) -> Result<Respo
         .await
         .map_err(|error| engine_error(&error))?;
     let mut names = Names::default();
-    let mut messages = Vec::new();
+    let mut messages = Fitting::new(Response::Search { messages: Vec::new() });
     for hit in hits {
         let message = core
             .message(hit.conversation_id.clone(), hit.message_id.clone())
@@ -175,11 +222,14 @@ async fn found(core: &dyn Core, query: &str, limit: Option<u32>) -> Result<Respo
         // a hit is a stored message: one gone since is left out
         if let Some(message) = message
             && let Some(text) = text_of(&message)
+            && !messages.push(names.row(core, &message, text).await)
         {
-            messages.push(names.row(core, &message, text).await);
+            break;
         }
     }
-    Ok(Response::Search { messages })
+    Ok(Response::Search {
+        messages: messages.rows,
+    })
 }
 
 async fn members(core: &dyn Core, chat: &str) -> Result<Response, CtlError> {

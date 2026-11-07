@@ -127,6 +127,38 @@ fn seed(store: &mut Store) {
     message(store, TRIO_TWO, ME, 300, "<p>Trio two</p>");
 }
 
+/// A group chat whose messages are long: [`LONG_COUNT`] plain-text messages of [`LONG_BYTES`] each, far more than
+/// one line of the wire holds, each holding the word "padding".
+const LONG: &str = "19:0000000000000000000000000000long1@thread.v2";
+const LONG_COUNT: i64 = 160;
+const LONG_BYTES: usize = 64 * 1024;
+
+fn seed_long(store: &mut Store) {
+    seed(store);
+    conversation(store, LONG, ConversationKind::Group, Some("Long"), &[ME, BEE]);
+    for at in 10_000..10_000 + LONG_COUNT {
+        let text = format!("padding {at} {}", "x".repeat(LONG_BYTES));
+        let message = Message {
+            conversation_id: LONG.to_owned(),
+            id: at.to_string(),
+            version: at,
+            client_message_id: None,
+            sender: Some(BEE.to_owned()),
+            sender_name: None,
+            message_type: "Text".to_owned(),
+            content: text,
+            properties: None,
+            arrival_time: at,
+            compose_time: Some(at),
+            edit_time: None,
+            delete_time: None,
+        };
+        store
+            .upsert_message_indexed(&message, None, |message| message.content.clone())
+            .unwrap();
+    }
+}
+
 struct App {
     cx: TestAppContext,
     socket: std::path::PathBuf,
@@ -138,6 +170,10 @@ struct App {
 
 impl App {
     fn start() -> Self {
+        Self::seeded(seed)
+    }
+
+    fn seeded(seed: fn(&mut Store)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let socket = socket_in(&dir);
         let cx = TestAppContext::single();
@@ -317,6 +353,57 @@ fn messages_come_newest_first_as_plain_text_from_a_chat_named_by_the_other_perso
         },
     );
     assert_eq!(missing.code, ErrorCode::BadRequest);
+    app.quit();
+}
+
+/// `messages`' answer as the wire carries it: one line, within the codec's cap.
+fn fits_on_a_line(response: Response) -> Response {
+    let line = teams_ctl::protocol::ResponseLine {
+        id: u64::MAX,
+        outcome: teams_ctl::protocol::Outcome::Ok(response.clone()),
+    };
+    let encoded = teams_ctl::codec::encode(&line).expect("the answer fits on one line");
+    assert!(encoded.len() <= teams_ctl::MAX_LINE + 1);
+    response
+}
+
+#[test]
+fn a_page_of_messages_too_long_for_a_line_stops_short_and_pages_on() {
+    let app = App::seeded(seed_long);
+    let mut seen: Vec<i64> = Vec::new();
+    let mut before: Option<String> = None;
+    let mut pages = 0;
+    while seen.len() < usize::try_from(LONG_COUNT).unwrap() {
+        let request = Request::Messages {
+            chat: LONG.to_owned(),
+            limit: Some(1000),
+            before: before.clone(),
+        };
+        let Ok(Response::Messages { messages }) = app.ask(None, request).map(fits_on_a_line) else {
+            panic!("no answer");
+        };
+        assert!(!messages.is_empty(), "each page holds some");
+        assert!(
+            messages.len() < usize::try_from(LONG_COUNT).unwrap(),
+            "fewer than asked: the line is full"
+        );
+        seen.extend(messages.iter().map(|message| message.at));
+        before = messages.last().map(|message| message.id.clone());
+        pages += 1;
+    }
+    assert!(pages >= 2);
+    let every: Vec<i64> = (10_000..10_000 + LONG_COUNT).rev().collect();
+    assert_eq!(seen, every, "every message once, the newest first, across the pages");
+
+    // the search's hits stop where the line is full too
+    let request = Request::Search {
+        query: "padding".to_owned(),
+        limit: Some(1000),
+    };
+    let Ok(Response::Search { messages }) = app.ask(None, request).map(fits_on_a_line) else {
+        panic!("no hits");
+    };
+    assert!(!messages.is_empty() && messages.len() < usize::try_from(LONG_COUNT).unwrap());
     app.quit();
 }
 
