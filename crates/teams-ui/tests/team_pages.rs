@@ -962,6 +962,41 @@ fn the_analytics_tab_reads_every_team_s_numbers_for_the_period_picked() {
 }
 
 #[test]
+fn a_menus_own_button_closes_it_and_leaves_it_closed() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    open_page(&shell, cx);
+    click(cx, "teams-tab-analytics");
+    let open = |cx: &mut VisualTestContext| bounds(cx, "teams-period-last-seven-days").is_some();
+    click(cx, "teams-period");
+    assert!(open(cx), "the button opens its closed menu");
+    click(cx, "teams-period");
+    assert!(
+        !open(cx),
+        "the button of the open menu closes it, not closing and opening it again"
+    );
+    click(cx, "teams-period");
+    assert!(open(cx), "and opens it again after");
+    click(cx, "teams-analytics");
+    assert!(!open(cx), "a click elsewhere still closes it");
+    // beside the button, in the row its menu hangs from, is elsewhere too
+    click(cx, "teams-period");
+    let button = bounds(cx, "teams-period").expect("the period's button");
+    let beside = gpui::point(button.right() + gpui::px(40.0), button.center().y);
+    cx.simulate_click(beside, Modifiers::none());
+    assert!(!open(cx), "a click beside the button closes it");
+    // the same in Manage team, whose menus keep their own state
+    manage(&shell, ManageTab::Analytics, cx);
+    let open = |cx: &mut VisualTestContext| bounds(cx, "manage-period-last-seven-days").is_some();
+    click(cx, "manage-period");
+    assert!(open(cx));
+    click(cx, "manage-period");
+    assert!(!open(cx), "Manage team's period button closes its open menu");
+    click(cx, "manage-period");
+    assert!(open(cx));
+}
+
+#[test]
 fn the_pending_invites_tab_lists_each_invitation_waiting() {
     let rig = Rig::start();
     *rig.core.invites.lock().unwrap() = vec![teams_proto::PendingInvite {

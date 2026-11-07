@@ -35,7 +35,7 @@ use crate::channel_dialog::name_problem;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard::{self, Handles, PopupFocus};
 use crate::shell::menu_row;
-use crate::teams_page::popup_menu;
+use crate::teams_page::{popup_menu, with_popup};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -544,24 +544,23 @@ impl CreateTeamDialog {
                 "create-team-first-channel",
                 Input::new(&self.first_channel),
             )))
-            .child(
-                div()
-                    .child(selected_by(
-                        "create-team-more-naming",
-                        icon_button("create-team-more-naming", Glyph::ELLIPSIS, "More naming options").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.general_menu = !this.general_menu;
-                                if this.general_menu {
-                                    this.general_popup.opened(window, cx);
-                                } else {
-                                    this.general_popup.closed(window, cx);
-                                }
-                                cx.notify();
-                            }),
-                        ),
-                    ))
-                    .children(general_menu),
-            )
+            .child(with_popup(
+                selected_by(
+                    "create-team-more-naming",
+                    icon_button("create-team-more-naming", Glyph::ELLIPSIS, "More naming options").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.general_menu = !this.general_menu;
+                            if this.general_menu {
+                                this.general_popup.opened(window, cx);
+                            } else {
+                                this.general_popup.closed(window, cx);
+                            }
+                            cx.notify();
+                        }),
+                    ),
+                ),
+                general_menu,
+            ))
     }
 
     /// "What kind of team will this be?": a card per kind, Up and Down moving between them, Enter picking one.
@@ -997,8 +996,8 @@ impl AddMembersDialog {
             TeamRole::Owner => "Owner",
         };
         let role = (!self.sends_request()).then(|| {
-            div()
-                .child(selected_by(
+            with_popup(
+                selected_by(
                     format!("add-members-role-{at}"),
                     Button::new(SharedString::from(format!("add-members-role-{at}")))
                         .ghost()
@@ -1014,8 +1013,9 @@ impl AddMembersDialog {
                             }
                             cx.notify();
                         })),
-                ))
-                .children(menu)
+                ),
+                menu,
+            )
         });
         div()
             .debug_selector(move || format!("add-members-picked-{at}"))
@@ -1398,39 +1398,38 @@ impl EditTeamDialog {
                 palette,
             )
         });
-        div()
-            .child(
-                keyboard::stop(
-                    "edit-team-privacy",
-                    div()
-                        .id("edit-team-privacy")
-                        .debug_selector(|| "edit-team-privacy".to_owned())
-                        .px_3()
-                        .py_1p5()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(palette.border))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.privacy_open = !this.privacy_open;
-                            if this.privacy_open {
-                                this.privacy_popup.opened(window, cx);
-                            } else {
-                                this.privacy_popup.closed(window, cx);
-                            }
-                            cx.notify();
-                        }))
-                        .child(if self.public { PUBLIC } else { PRIVATE })
-                        .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
-                    palette,
-                )
-                .edge(),
+        with_popup(
+            keyboard::stop(
+                "edit-team-privacy",
+                div()
+                    .id("edit-team-privacy")
+                    .debug_selector(|| "edit-team-privacy".to_owned())
+                    .px_3()
+                    .py_1p5()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(palette.border))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.privacy_open = !this.privacy_open;
+                        if this.privacy_open {
+                            this.privacy_popup.opened(window, cx);
+                        } else {
+                            this.privacy_popup.closed(window, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .child(if self.public { PUBLIC } else { PRIVATE })
+                    .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                palette,
             )
-            .children(menu)
-            .into_any_element()
+            .edge(),
+            menu,
+        )
+        .into_any_element()
     }
 }
 

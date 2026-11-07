@@ -11,12 +11,14 @@
 //! ([`Core::pending_invites`], [`Core::all_teams_analytics`]). Nothing here sends anything but through [`Core`], and the
 //! menu's choices are the shell's to act on. Traced: `teams-page opened`, `tab` with its key; never a name.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, AsyncApp, Context, ElementId, Entity, EventEmitter, FocusHandle,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    AnyElement, AppContext as _, AsyncApp, Bounds, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::Sizable as _;
@@ -527,18 +529,17 @@ impl TeamsPage {
                     .child("Create team"),
                 palette,
             ))
-            .child(
-                div()
-                    .child(selected_by(
-                        "teams-create-more",
-                        icon_button("teams-create-more", Glyph::CHEVRON_DOWN, "More create team options")
-                            .xsmall()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_popup(Popup::CreateMenu, window, cx);
-                            })),
-                    ))
-                    .children(menu),
-            )
+            .child(with_popup(
+                selected_by(
+                    "teams-create-more",
+                    icon_button("teams-create-more", Glyph::CHEVRON_DOWN, "More create team options")
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_popup(Popup::CreateMenu, window, cx);
+                        })),
+                ),
+                menu,
+            ))
             .into_any_element()
     }
 
@@ -610,25 +611,24 @@ impl TeamsPage {
             }
             menu
         });
-        div()
-            .child(
-                keyboard::stop(
-                    "teams-filter-more",
-                    chip_base("teams-filter-more".to_owned(), false, palette)
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(format!("{} more", left.len()))
-                        .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_popup(Popup::MoreFilters, window, cx);
-                        })),
-                    palette,
-                )
-                .edge(),
+        with_popup(
+            keyboard::stop(
+                "teams-filter-more",
+                chip_base("teams-filter-more".to_owned(), false, palette)
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(format!("{} more", left.len()))
+                    .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_popup(Popup::MoreFilters, window, cx);
+                    })),
+                palette,
             )
-            .children(menu)
-            .into_any_element()
+            .edge(),
+            menu,
+        )
+        .into_any_element()
     }
 
     fn sort_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -653,8 +653,8 @@ impl TeamsPage {
             }
             menu
         });
-        div()
-            .child(keyboard::stop(
+        with_popup(
+            keyboard::stop(
                 "teams-sort",
                 div()
                     .id("teams-sort")
@@ -672,9 +672,10 @@ impl TeamsPage {
                     .child(format!("Sort: {}", current.label()))
                     .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
                 palette,
-            ))
-            .children(menu)
-            .into_any_element()
+            ),
+            menu,
+        )
+        .into_any_element()
     }
 
     /// The Teams tab's rows.
@@ -1034,35 +1035,30 @@ impl TeamsPage {
             .flex_col()
             .gap_1()
             .child(div().text_sm().child("Time period"))
-            .child(
-                div()
-                    .child(
-                        keyboard::stop(
-                            "teams-period",
-                            div()
-                                .id("teams-period")
-                                .debug_selector(|| "teams-period".to_owned())
-                                .w(px(240.0))
-                                .px_3()
-                                .py_1p5()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(rgb(palette.border))
-                                .cursor_pointer()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.toggle_popup(Popup::Period, window, cx)),
-                                )
-                                .child(current.label())
-                                .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
-                            palette,
-                        )
-                        .edge(),
-                    )
-                    .children(menu),
-            )
+            .child(with_popup(
+                keyboard::stop(
+                    "teams-period",
+                    div()
+                        .id("teams-period")
+                        .debug_selector(|| "teams-period".to_owned())
+                        .w(px(240.0))
+                        .px_3()
+                        .py_1p5()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_popup(Popup::Period, window, cx)))
+                        .child(current.label())
+                        .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                    palette,
+                )
+                .edge(),
+                menu,
+            ))
             .into_any_element()
     }
 }
@@ -1126,7 +1122,11 @@ pub(crate) fn chip_base(id: String, chosen: bool, palette: Palette) -> gpui::Sta
 }
 
 /// A popup of menu rows under what opened it, over everything.
-pub(crate) struct PopupMenu(gpui::Div);
+pub(crate) struct PopupMenu {
+    menu: gpui::Div,
+    /// Where [`with_popup`] last laid out the button that opened it.
+    button: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
 
 impl PopupMenu {
     /// Takes the keyboard on `root` with `keys` ([`keyboard::menu_keys`]).
@@ -1135,12 +1135,20 @@ impl PopupMenu {
         root: &FocusHandle,
         keys: impl Fn(&KeyDownEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> Self {
-        Self(self.0.track_focus(root).on_key_down(keys))
+        Self {
+            menu: self.menu.track_focus(root).on_key_down(keys),
+            ..self
+        }
     }
 
     /// A row the keyboard moves to, `key` unique in the menu.
     pub(crate) fn row(self, key: impl Into<SharedString>, row: gpui::Stateful<gpui::Div>, palette: Palette) -> Self {
-        Self(self.0.child(keyboard::stop(ElementId::Name(key.into()), row, palette)))
+        Self {
+            menu: self
+                .menu
+                .child(keyboard::stop(ElementId::Name(key.into()), row, palette)),
+            ..self
+        }
     }
 }
 
@@ -1148,17 +1156,19 @@ impl IntoElement for PopupMenu {
     type Element = gpui::Deferred;
 
     fn into_element(self) -> Self::Element {
-        gpui::deferred(gpui::anchored().snap_to_window_with_margin(px(8.0)).child(self.0)).with_priority(1)
+        gpui::deferred(gpui::anchored().snap_to_window_with_margin(px(8.0)).child(self.menu)).with_priority(1)
     }
 }
 
-/// A [`PopupMenu`]: `close` is told a click outside.
+/// A [`PopupMenu`]: `close` is told a click outside it and outside the button that opened it ([`with_popup`]).
 pub(crate) fn popup_menu(
     palette: Palette,
     close: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> PopupMenu {
-    PopupMenu(
-        div()
+    let button: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
+    let pressed = button.clone();
+    PopupMenu {
+        menu: div()
             .occlude()
             .min_w(px(200.0))
             .mt_1()
@@ -1171,8 +1181,29 @@ pub(crate) fn popup_menu(
             .bg(rgb(palette.surface))
             .shadow_lg()
             .text_color(rgb(palette.foreground))
-            .on_mouse_down_out(close),
-    )
+            .on_mouse_down_out(move |event, window, cx| {
+                // a press on its own button is that button's, whose click closes the menu: closed here as well, the
+                // menu would be open again by the time that click toggles it
+                if !pressed.get().is_some_and(|button| button.contains(&event.position)) {
+                    close(event, window, cx);
+                }
+            }),
+        button,
+    }
+}
+
+/// `button` with its menu under it while open, as Teams has a dropdown: pressed while its menu is open, the button
+/// closes it and leaves it closed.
+pub(crate) fn with_popup(button: impl IntoElement, menu: Option<PopupMenu>) -> gpui::Div {
+    let held = div();
+    let held = match &menu {
+        Some(menu) => {
+            let laid_out = menu.button.clone();
+            held.on_children_prepainted(move |children, _, _| laid_out.set(children.first().copied()))
+        }
+        None => held,
+    };
+    held.child(button).children(menu)
 }
 
 /// A team's line of facts: Private, N people, N channels, its description, split by hairlines.

@@ -43,7 +43,7 @@ use crate::keyboard::{self, Handles, PopupFocus};
 use crate::shell::menu_row;
 use crate::team_menu::TeamChoice;
 use crate::teams_list::TeamsList;
-use crate::teams_page::{centered, chip_base, popup_menu, tab_button};
+use crate::teams_page::{centered, chip_base, popup_menu, tab_button, with_popup};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -944,28 +944,25 @@ impl ManageTeam {
             .items_center()
             .gap_3()
             .children(chips)
-            .child(
-                div()
-                    .child(
-                        keyboard::stop(
-                            "manage-channels-more",
-                            chip_base("manage-channels-more".to_owned(), false, palette)
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(more_words)
-                                .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.channel_more = !this.channel_more;
-                                    this.popup_toggled(this.channel_more, window, cx);
-                                    cx.notify();
-                                })),
-                            palette,
-                        )
-                        .edge(),
-                    )
-                    .children(more_menu),
-            )
+            .child(with_popup(
+                keyboard::stop(
+                    "manage-channels-more",
+                    chip_base("manage-channels-more".to_owned(), false, palette)
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(more_words)
+                        .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.channel_more = !this.channel_more;
+                            this.popup_toggled(this.channel_more, window, cx);
+                            cx.notify();
+                        })),
+                    palette,
+                )
+                .edge(),
+                more_menu,
+            ))
             .child(self.channel_sort(palette, cx))
             .child(div().flex_1())
             .when(!read_only && team.can_add_channel, |bar| {
@@ -1328,8 +1325,8 @@ impl ManageTeam {
             )
         });
         if can_change && !member.guest {
-            div()
-                .child(selected_by(
+            with_popup(
+                selected_by(
                     format!("manage-role-{mri}"),
                     Button::new(SharedString::from(format!("manage-role-{mri}")))
                         .ghost()
@@ -1345,9 +1342,10 @@ impl ManageTeam {
                             this.popup_toggled(this.role_menu.is_some(), window, cx);
                             cx.notify();
                         })),
-                ))
-                .children(menu)
-                .into_any_element()
+                ),
+                menu,
+            )
+            .into_any_element()
         } else {
             div().child(role_words).into_any_element()
         }
@@ -1846,37 +1844,34 @@ impl ManageTeam {
             .flex_col()
             .gap_1()
             .child(div().text_sm().child("Time period"))
-            .child(
-                div()
-                    .child(
-                        keyboard::stop(
-                            "manage-period",
-                            div()
-                                .id("manage-period")
-                                .debug_selector(|| "manage-period".to_owned())
-                                .w(px(240.0))
-                                .px_3()
-                                .py_1p5()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(rgb(palette.border))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.period_open = !this.period_open;
-                                    this.popup_toggled(this.period_open, window, cx);
-                                    cx.notify();
-                                }))
-                                .child(current.label())
-                                .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
-                            palette,
-                        )
-                        .edge(),
-                    )
-                    .children(menu),
-            );
+            .child(with_popup(
+                keyboard::stop(
+                    "manage-period",
+                    div()
+                        .id("manage-period")
+                        .debug_selector(|| "manage-period".to_owned())
+                        .w(px(240.0))
+                        .px_3()
+                        .py_1p5()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.period_open = !this.period_open;
+                            this.popup_toggled(this.period_open, window, cx);
+                            cx.notify();
+                        }))
+                        .child(current.label())
+                        .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                    palette,
+                )
+                .edge(),
+                menu,
+            ));
         let picker = div().flex().gap_3().child(channels).child(period);
         let content: AnyElement = match &self.analytics {
             _ if !self.analytics_read => centered("Loading…", palette),

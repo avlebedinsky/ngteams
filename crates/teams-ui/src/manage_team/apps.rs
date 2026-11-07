@@ -24,7 +24,7 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard;
 use crate::shell::menu_row;
 use crate::teams_list::initials;
-use crate::teams_page::{centered, popup_menu};
+use crate::teams_page::{centered, popup_menu, with_popup};
 use crate::theme::Palette;
 
 /// The Giphy ratings Teams offers, by their `giphyRating`, as the web client's page named and sent them.
@@ -229,26 +229,25 @@ impl ManageTeam {
                     ),
             )
             .when(can_write, |row| {
-                row.child(
-                    div()
-                        .child(selected_by(
-                            format!("manage-app-more-{at}"),
-                            icon_button(
-                                SharedString::from(format!("manage-app-more-{at}")),
-                                Glyph::MORE,
-                                "More options",
-                            )
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let open = this.app_menu.as_deref() != Some(id.as_str());
-                                this.app_menu = open.then(|| id.clone());
-                                this.popup_toggled(open, window, cx);
-                                cx.notify();
-                            })),
-                        ))
-                        .children(menu),
-                )
+                row.child(with_popup(
+                    selected_by(
+                        format!("manage-app-more-{at}"),
+                        icon_button(
+                            SharedString::from(format!("manage-app-more-{at}")),
+                            Glyph::MORE,
+                            "More options",
+                        )
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let open = this.app_menu.as_deref() != Some(id.as_str());
+                            this.app_menu = open.then(|| id.clone());
+                            this.popup_toggled(open, window, cx);
+                            cx.notify();
+                        })),
+                    ),
+                    menu,
+                ))
             })
             .into_any_element()
     }
@@ -401,24 +400,21 @@ impl ManageTeam {
                         .text_sm()
                         .child("Filter out inappropriate content using one of the settings below:"),
                 )
-                .child(
-                    div()
-                        .child(
-                            keyboard::stop(
-                                "giphy-rating",
-                                picker_face("giphy-rating", words, can_write, palette).on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.giphy_open = !this.giphy_open;
-                                        this.popup_toggled(this.giphy_open, window, cx);
-                                        cx.notify();
-                                    },
-                                )),
-                                palette,
-                            )
-                            .edge(),
-                        )
-                        .children(menu),
-                )
+                .child(with_popup(
+                    keyboard::stop(
+                        "giphy-rating",
+                        picker_face("giphy-rating", words, can_write, palette).on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.giphy_open = !this.giphy_open;
+                                this.popup_toggled(this.giphy_open, window, cx);
+                                cx.notify();
+                            },
+                        )),
+                        palette,
+                    )
+                    .edge(),
+                    menu,
+                ))
         });
         div()
             .flex()
@@ -538,24 +534,21 @@ impl ManageTeam {
             .flex_col()
             .gap_1()
             .child(div().text_sm().child("Select a channel"))
-            .child(
-                div()
-                    .child(
-                        keyboard::stop(
-                            "manage-analytics-channel",
-                            picker_face("manage-analytics-channel", words, true, palette).on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.channel_menu_open = !this.channel_menu_open;
-                                    this.popup_toggled(this.channel_menu_open, window, cx);
-                                    cx.notify();
-                                },
-                            )),
-                            palette,
-                        )
-                        .edge(),
-                    )
-                    .children(menu),
-            )
+            .child(with_popup(
+                keyboard::stop(
+                    "manage-analytics-channel",
+                    picker_face("manage-analytics-channel", words, true, palette).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.channel_menu_open = !this.channel_menu_open;
+                            this.popup_toggled(this.channel_menu_open, window, cx);
+                            cx.notify();
+                        },
+                    )),
+                    palette,
+                )
+                .edge(),
+                menu,
+            ))
     }
 }
 
