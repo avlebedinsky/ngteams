@@ -7,9 +7,12 @@
 #   build links it and the installed binary runs its helper processes, so without it the script stops before building.
 # - Builds `ngteams` with `cargo build --release -p ngteams`, its target dir apart from every other build
 #   (`target/personal`), so no `test-support` or lab build is unified in. The sign-in window lives in it: it opens
-#   that window itself and runs itself again as the window's page engine.
+#   that window itself and runs itself again as the window's page engine. Then `ngteamsctl` (`crates/teams-ctl`), which
+#   drives the running app over its control socket, in a build of its own into the same target dir.
 # - Installs it and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the app finds the extension
-#   beside itself), `ngteams` linked from ~/.local/bin/, and `packaging/com.nickalie.ngteams.desktop` into
+#   beside itself), `ngteams` linked from ~/.local/bin/, `ngteamsctl` beside it, linked from ~/.local/bin/ too, with
+#   its bash, fish and zsh completions under ~/.local/share/ (zsh reads `site-functions` only when it is on `fpath`),
+#   and `packaging/com.nickalie.ngteams.desktop` into
 #   ~/.local/share/applications/ with its `Exec` pointing at the installed binary (it handles `msteams:` links,
 #   handed to the app running: `crates/ngteams/src/handoff.rs`), and the app icon (`packaging/icons/`) into
 #   ~/.local/share/icons/hicolor/. What an older install left that no longer exists goes
@@ -31,6 +34,7 @@ if ! pkg-config --atleast-version=2.54 wpe-webkit-2.0 wpe-web-process-extension-
   exit 1
 fi
 TEAMS_PERSONAL_INSTALL=1 cargo build --release -p ngteams --target-dir "$target"
+cargo build --release -p teams-ctl --bin ngteamsctl --target-dir "$target"
 
 lib="$prefix/lib/ngteams"
 bin="$prefix/bin"
@@ -41,6 +45,19 @@ extension="$target/release/libteams_signin_extension.so"
 [[ -f "$extension" ]] || extension="$target/release/deps/libteams_signin_extension.so"
 install -m 0644 "$extension" "$lib/libteams_signin_extension.so"
 ln -sfn "$lib/ngteams" "$bin/ngteams"
+install -m 0755 "$target/release/ngteamsctl" "$lib/ngteamsctl"
+ln -sfn "$lib/ngteamsctl" "$bin/ngteamsctl"
+# Where each shell looks in the user's data dir (bash-completion's and fish's own; zsh's once on `fpath`). Writing a
+# script runs only `ngteamsctl completions`, which asks no app.
+share="$prefix/share"
+for completion in "bash bash-completion/completions/ngteamsctl" "fish fish/vendor_completions.d/ngteamsctl.fish" \
+  "zsh zsh/site-functions/_ngteamsctl"; do
+  shell="${completion%% *}"
+  file="$share/${completion#* }"
+  install -d -m 0755 "$(dirname "$file")"
+  "$lib/ngteamsctl" completions "$shell" > "$file"
+  chmod 0644 "$file"
+done
 desktop="com.nickalie.ngteams.desktop"
 sed "s|^Exec=ngteams %u$|Exec=$lib/ngteams %u|" "$root/packaging/$desktop" > "$apps/$desktop"
 chmod 0644 "$apps/$desktop"
@@ -64,4 +81,5 @@ if [[ -f "$icons/icon-theme.cache" ]]; then
 fi
 
 echo "installed: $lib/ngteams (linked from $bin/ngteams), $apps/$desktop and its icon under $icons"
+echo "           $lib/ngteamsctl (linked from $bin/ngteamsctl) and its completions under $share"
 echo "first run: start Teams and enter your work account   (then review the first-run screen before anything is sent on its own)"

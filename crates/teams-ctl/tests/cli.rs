@@ -8,7 +8,7 @@
 #![cfg(test)]
 
 use std::ffi::OsString;
-use std::io::{BufReader, Read as _, Write as _};
+use std::io::{BufReader, Read, Write as _};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use clap::Parser as _;
 use serde_json::json;
 use teams_ctl::ClientError;
-use teams_ctl::cli::{Cli, Exit, answer_time, ask_failed, run, socket};
+use teams_ctl::cli::{Cli, Exit, ShellArg, answer_time, ask_failed, completions, run, socket};
 use teams_ctl::client::Timeouts;
 use teams_ctl::codec::{LineReader, decode_request};
 use teams_ctl::path::Env;
@@ -151,6 +151,9 @@ fn ctl_fed(home: &Path, socket: &Path, args: &[&str], input: Option<&str>) -> Ru
         // dropped once written: its end of file
         child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
     }
+    // read as it comes, so an output past the pipe's buffer (a completion script) doesn't hold the binary up
+    let stdout = drain(child.stdout.take().unwrap());
+    let stderr = drain(child.stderr.take().unwrap());
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -162,15 +165,20 @@ fn ctl_fed(home: &Path, socket: &Path, args: &[&str], input: Option<&str>) -> Ru
         }
         thread::sleep(Duration::from_millis(10));
     };
-    let mut stdout = String::new();
-    child.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
-    let mut stderr = String::new();
-    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
     Run {
         code: status.code().unwrap(),
-        stdout,
-        stderr,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
     }
+}
+
+/// Read `pipe` to its end on a thread of its own.
+fn drain(mut pipe: impl Read + Send + 'static) -> JoinHandle<String> {
+    thread::spawn(move || {
+        let mut text = String::new();
+        pipe.read_to_string(&mut text).unwrap();
+        text
+    })
 }
 
 /// Run `args` against `server` and hand back the run and the one request it asked.
@@ -1125,6 +1133,57 @@ fn events_kinds_lists_every_kind_without_asking_the_app() {
         .filter(|kind| *kind != "lagged")
         .collect();
     assert_eq!(kinds, expected);
+}
+
+#[test]
+fn completions_print_each_shell_s_script_naming_the_subcommands_without_asking_the_app() {
+    let home = tempfile::tempdir().unwrap();
+    let nobody = home.path().join("nobody.sock");
+    for (shell, marker) in [
+        ("bash", "complete -F _ngteamsctl"),
+        ("fish", "complete -c ngteamsctl"),
+        ("zsh", "#compdef ngteamsctl"),
+    ] {
+        let run = ctl(home.path(), &nobody, &["completions", shell]);
+        assert_eq!(run.code, 0, "{shell}: {}", run.stderr);
+        assert!(run.stdout.contains(marker), "{shell}: {}", run.stdout);
+        for subcommand in [
+            "status",
+            "chats",
+            "messages",
+            "send",
+            "new-chat",
+            "call",
+            "hangup",
+            "calendar",
+            "events",
+            "wait",
+            "completions",
+        ] {
+            assert!(run.stdout.contains(subcommand), "{shell} lacks {subcommand}");
+        }
+    }
+    assert!(!nobody.exists());
+    let run = ctl(home.path(), &nobody, &["completions", "tcsh"]);
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.starts_with("error:"), "{}", run.stderr);
+}
+
+#[test]
+fn completions_into_a_writer_that_fails_is_an_error() {
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    assert!(completions(ShellArg::Zsh, &mut Broken).is_err());
+    let mut script = Vec::new();
+    completions(ShellArg::Fish, &mut script).unwrap();
+    assert!(String::from_utf8(script).unwrap().contains("complete -c ngteamsctl"));
 }
 
 fn typing(on: bool) -> CtlEvent {

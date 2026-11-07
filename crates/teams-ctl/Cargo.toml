@@ -11,6 +11,8 @@ publish.workspace = true
 chrono.workspace = true
 # ngteamsctl's command line
 clap.workspace = true
+# `ngteamsctl completions`: bash, fish and zsh completion scripts (no logging of its own: nothing reaches the log cap)
+clap_complete.workspace = true
 # `ngteamsctl wait --match`: the event line a wait ends on (no logging of its own: nothing reaches the log cap)
 regex.workspace = true
 # a connect bounded in time: a non-blocking Unix socket, tried again while the listener's backlog is full

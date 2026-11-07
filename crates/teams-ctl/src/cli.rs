@@ -26,13 +26,16 @@
 //!   without `--follow`, `events` prints the first one and exits. `wait <kind>` prints the first event of that kind
 //!   whose JSON line matches `--match`, within `--timeout` (which the connect and the subscribe spend too). A kind
 //!   that names no event kind is a usage error. A refused subscription is an error answer like any other.
+//! - **Completions**: `completions bash|fish|zsh` prints that shell's completion script, and `events kinds` the event
+//!   kinds, without asking the app.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory as _, Parser, Subcommand, ValueEnum};
+use clap_complete::Generator as _;
 use regex::Regex;
 
 use crate::client::{Client, ClientError, Events, Refused, Timeouts};
@@ -197,6 +200,19 @@ pub enum Command {
         #[command(flatten)]
         filter: FilterArgs,
     },
+    /// Print the shell's completion script for `ngteamsctl`, to source or put where the shell looks for it.
+    Completions {
+        #[arg(value_enum)]
+        shell: ShellArg,
+    },
+}
+
+/// The shells `completions` writes a script for.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ShellArg {
+    Bash,
+    Fish,
+    Zsh,
 }
 
 /// The writes: each answers with its outbox row (exit 1 when it failed; with `--wait`, unless it was sent), `read`
@@ -535,15 +551,9 @@ pub fn main() -> ExitCode {
 
 /// Run `cli` against the socket `env` gives it, printing to `out` and telling errors on `err`.
 pub fn run(cli: &Cli, env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
-    if let Command::Events {
-        command: Some(EventsCommand::Kinds),
-        ..
-    } = cli.command
-    {
-        return written(render::kinds(out));
-    }
     let request = match request(&cli.command, &mut || io::read_to_string(io::stdin())) {
-        Ok(request) => request,
+        Ok(Some(request)) => request,
+        Ok(None) => return local(&cli.command, out),
         Err(error) => return told(err, Exit::NoApp, &format!("stdin couldn't be read: {error}")),
     };
     let path = match socket(cli, env) {
@@ -574,6 +584,31 @@ pub fn run(cli: &Cli, env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Ex
         }
         (request, _) => ask(cli, client, request, out, err),
     }
+}
+
+/// Run a command that asks the app nothing: `completions` and `events kinds`.
+fn local(command: &Command, out: &mut dyn Write) -> Exit {
+    match command {
+        Command::Completions { shell } => written(completions(*shell, out)),
+        _ => written(render::kinds(out)),
+    }
+}
+
+/// Write `shell`'s completion script for `ngteamsctl` on `out`.
+///
+/// # Errors
+/// `out` couldn't be written.
+pub fn completions(shell: ShellArg, out: &mut dyn Write) -> io::Result<()> {
+    let mut command = Cli::command();
+    command.set_bin_name("ngteamsctl");
+    command.build();
+    let shell = match shell {
+        ShellArg::Bash => clap_complete::Shell::Bash,
+        ShellArg::Fish => clap_complete::Shell::Fish,
+        ShellArg::Zsh => clap_complete::Shell::Zsh,
+    };
+    shell.try_generate(&command, out)?;
+    out.flush()
 }
 
 /// Connect to the app at `path`, each wait no longer than what is left before `deadline`.
@@ -631,9 +666,15 @@ fn kind(value: &str) -> Result<String, String> {
     }
 }
 
-/// The request a command asks: `events` and `wait` subscribe; a write's text `-` is what `stdin` reads.
-fn request(command: &Command, stdin: &mut dyn FnMut() -> io::Result<String>) -> io::Result<Request> {
-    Ok(match command {
+/// The request a command asks: `events` and `wait` subscribe; a write's text `-` is what `stdin` reads. None for a
+/// command that asks the app nothing ([`local`]).
+fn request(command: &Command, stdin: &mut dyn FnMut() -> io::Result<String>) -> io::Result<Option<Request>> {
+    Ok(Some(match command {
+        Command::Completions { .. }
+        | Command::Events {
+            command: Some(EventsCommand::Kinds),
+            ..
+        } => return Ok(None),
         Command::Write(write) => write_request(write, stdin)?,
         Command::Call(call) => call_request(call),
         Command::Status { command: None } => Request::Status,
@@ -694,7 +735,7 @@ fn request(command: &Command, stdin: &mut dyn FnMut() -> io::Result<String>) -> 
         Command::Wait { kind, filter, .. } => Request::Subscribe {
             filter: filter.filter(vec![kind.clone()]),
         },
-    })
+    }))
 }
 
 /// The request a write asks.

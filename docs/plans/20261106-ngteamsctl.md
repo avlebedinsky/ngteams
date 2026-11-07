@@ -510,10 +510,12 @@
   `crates/teams-ctl/src/cli.rs`, `scripts/install-personal.sh`
 - Modify: `crates/teams-ctl/tests/cli.rs`
 
-- [ ] `ngteamsctl completions bash|fish|zsh` (`clap_complete`, checked against the log cap)
-- [ ] the installer builds `ngteamsctl` and installs it beside `ngteams`, linked from `~/.local/bin/`
-- [ ] tests: completions output per shell names the subcommands
-- [ ] run `cargo test -p teams-ctl`, which must pass before the next task
+- [x] `ngteamsctl completions bash|fish|zsh` (`clap_complete`, checked against the log cap)
+- [x] the installer builds `ngteamsctl` and installs it beside `ngteams`, linked from `~/.local/bin/`
+- ➕ [x] the installer writes the bash, fish and zsh completions under `~/.local/share/` (bash-completion's, fish's
+      `vendor_completions.d`, zsh's `site-functions`)
+- [x] tests: completions output per shell names the subcommands
+- [x] run `cargo test -p teams-ctl`, which must pass before the next task
 
 ### Task 15: Verify acceptance criteria
 - [ ] every command in Overview works on the personal build's code path with no setting or prompt in the way
