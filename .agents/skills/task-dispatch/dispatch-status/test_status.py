@@ -204,6 +204,12 @@ class BoardTests(Files):
         self.assertIsNone(result['tasks'][0]['after'])
         self.assertEqual(result['slots_max'], 2)
 
+    def test_runtime_is_shown_and_malformed_runtime_is_blank(self):
+        self.board([{'num': 1, 'runtime': 'codex', 'state': 'running'},
+                    {'num': 2, 'runtime': ['x'], 'state': 'queued'}])
+        rows = Status(self.ledger).snapshot()['tasks']
+        self.assertEqual([row['runtime'] for row in rows], ['codex', ''])
+
     def test_portable_board_without_claude_metadata_and_last_good_copy(self):
         self.event('investigate')
         self.event('implement', 'TOKEN=synthetic-secret', 1)

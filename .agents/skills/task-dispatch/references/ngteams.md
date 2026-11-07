@@ -9,16 +9,17 @@ project rules; this reference does not duplicate them.
   permitted captures, reads, and lab runs. Disabled controls and placeholder messages count as unfinished work.
 - A task's quick checks include `cargo fmt --all`, `cargo check -p <touched-crate> --all-targets`, relevant focused
   tests, and the UI skill's screenshots where applicable. The landing helper also checks workspace compilation.
-  Task workers never run revmux or another multi-agent review of their own change; only the review pass does.
-- For code that needs it, the review pass runs the available revmux skill once, as one task directory over the whole
-  frozen range (every task landed since the last successful pass), not once per task or commit. Run the checks that
-  range needs: for example clippy, `scripts/lint-report.sh`, affected tests, and `fixture-guard` for documentation or
-  fixtures. Follow repository rules when deciding whether a failure is a flake. Stop and report a run that
-  reaches someone outside the allowed lab contacts; never dismiss it as a flake.
-  Fix every major finding, including immaterial and pre-existing ones. The only other revmux round re-reviews the
-  pass's own fixes, when their size warrants it.
-- Don't stop for rule questions: `AGENTS.md` states what needs sign-off. Use background-command notifications or
-  session handles, never `pgrep -f` wait loops that can match their own command line.
+  Task companions never run revmux or another multi-agent review of their own change; their review follows landing.
+- Each landed task's review runs the revmux skill once per round over that task's own range, in the mode the
+  dispatcher picked from the task. Prompt-, Markdown-, or comment-only tasks need no review (`none`); anything
+  touching the lab fence, the outbox or another write path, calls or media, auth, tokens or the sign-in guard, the
+  store's migrations, or a shared API earns `comprehensive`. The fix companion runs the checks its fixes and the task
+  need: for example clippy, `scripts/lint-report.sh`, affected tests, and `fixture-guard` for documentation or
+  fixtures. Follow repository rules when deciding whether a failure is a flake. Stop and report a run that reaches
+  someone outside the allowed lab contacts; never dismiss it as a flake. Fix every major finding, including
+  immaterial and pre-existing ones.
+- Don't stop for rule questions: `AGENTS.md` states what needs sign-off. Use background-command notifications,
+  session handles, or `companion-wait.py`, never `pgrep -f` wait loops that can match their own command line.
 - If an existing CPU cap applies, propagate its quota into cargo jobs and test threads. Inspect the cap using its
   available tool/skill; do not require a missing `~/.claude/skills/cpu-cap` installation.
 - Commit with a conventional message and no AI attribution or Co-Authored-By line.

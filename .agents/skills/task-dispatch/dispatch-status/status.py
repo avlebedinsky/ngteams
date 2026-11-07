@@ -137,6 +137,7 @@ class Status:
                 ('title', 120), ('agent', 40), ('state', 60), ('note', 240),
             )}
             row['state'] = row['state'] or 'queued'
+            row['runtime'] = task.get('runtime') if task.get('runtime') in ('claude', 'codex') else ''
             row['num'] = task['num']
             row['after'] = task.get('after') if type(task.get('after')) is int else None
             row['group'] = group(row['state'])

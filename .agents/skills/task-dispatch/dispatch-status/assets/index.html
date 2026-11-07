@@ -160,7 +160,7 @@ function build(t) {
   c.el.append(row);
 
   const meta = el("div", "meta");
-  meta.append(el("span", "agent", t.agent || "no agent yet"));
+  meta.append(el("span", "agent", (t.runtime ? t.runtime + " · " : "") + (t.agent || "no agent yet")));
   if (t.started_ms != null) {
     const span = el("span");
     meta.append(el("span", null, "·"), span);
