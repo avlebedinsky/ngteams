@@ -56,7 +56,22 @@ async fn a_running_call_s_health_is_its_media_s_own_statistics() {
             .is_some_and(|received| received.packets > audio.received.as_ref().map_or(0, |before| before.packets)),
         "{second:?}"
     );
-    assert!(second.network.round_trip_ms.is_some(), "{second:?}");
+    // the selected pair's round trip comes with a consent check's answer, a few seconds apart once the connection
+    // settled (and a loopback one under 1 ms reads as none): read until one came
+    let mut network = second.network;
+    for _ in 0..20 {
+        if network.round_trip_ms.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        network = requests
+            .call_health(call)
+            .await
+            .unwrap()
+            .expect("the call's media runs")
+            .network;
+    }
+    assert!(network.round_trip_ms.is_some(), "{network:?}");
     assert_eq!(lab.sent_by(LAB_A), sent_before, "reading the health sends nothing");
 
     requests.call(CallAction::HangUp { call }).await.unwrap();
