@@ -115,8 +115,19 @@ pub fn open_accounts(
         let (models, trace) = (first.0.models.clone(), std::sync::Arc::clone(&first.0.trace));
         let first = shell_of(first, cx);
         let rest: Vec<Entity<Shell>> = rest.into_iter().map(|parts| shell_of(parts, cx)).collect();
-        // each shell took the keyboard as it was made: the one shown takes it back
-        first.update(cx, |shell, cx| shell.take_focus(window, cx));
+        // each shell took the keyboard as it was made: the one shown (the account the accounts show, which a window
+        // opened again from the tray needn't be the first's) takes it back; the root starts on that account, so its
+        // switch observer won't move it
+        let active = accounts.read(cx).active_key().map(str::to_owned);
+        let shown = active
+            .and_then(|key| {
+                std::iter::once(&first)
+                    .chain(&rest)
+                    .find(|shell| shell.read(cx).account() == key)
+            })
+            .unwrap_or(&first)
+            .clone();
+        shown.update(cx, |shell, cx| shell.take_focus(window, cx));
         let view = cx.new(|cx| {
             let mut root = Root::new(models, trace, cx)
                 .with_shell(first)

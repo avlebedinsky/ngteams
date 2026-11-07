@@ -506,6 +506,26 @@ fn an_action_after_settings_opened_without_a_page_runs() {
     quit(&app.cx);
 }
 
+/// The window shown again from the tray gives the keyboard to the account it shows, not the first one: an action sent
+/// then runs in that account.
+#[test]
+fn an_action_after_the_window_shown_again_runs_in_the_account_shown() {
+    let app = App::start();
+    app.set_in_tray(true);
+    let other = app.done(None, Request::SwitchAccount { to: OTHER.to_owned() });
+    assert_eq!(other.shown.as_deref(), Some(OTHER_UPN));
+    app.window(WindowOp::Hide).unwrap();
+    let shown = app.window(WindowOp::Show).unwrap();
+    assert!(
+        matches!(&shown, Response::UiState(state) if state.shown.as_deref() == Some(OTHER_UPN)),
+        "{shown:?}"
+    );
+    app.action_shows_the_calendar();
+    let after = app.state();
+    assert_eq!((after.shown.as_deref(), after.view), (Some(OTHER_UPN), View::Calendar));
+    quit(&app.cx);
+}
+
 /// An action sent right after an account switch runs in the account switched to (the window is drawn before the
 /// dispatch). The test app draws a dirty window as each request's effects end, so the stale frame the draw guards
 /// against in the app isn't reached here: this holds the outcome.
