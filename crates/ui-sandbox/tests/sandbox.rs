@@ -685,6 +685,12 @@ fn drive_probe(sandbox: &Sandbox, lines: &mut Lines, url: &str) -> SandboxResult
     lines.wait_for(ECHO, |line| line == "down x=400 y=300 button=Left")?;
     input.click(400, 300, keys::BTN_RIGHT)?;
     lines.wait_for(ECHO, |line| line == "down x=400 y=300 button=Right")?;
+    // a button held (a drag's start) is a press where the pointer is, and its release lets it go
+    input.button_down(keys::BTN_LEFT)?;
+    lines.wait_for(ECHO, |line| line == "down x=400 y=300 button=Left")?;
+    input.button_up(keys::BTN_LEFT)?;
+    input.click(400, 300, keys::BTN_RIGHT)?;
+    lines.wait_for(ECHO, |line| line == "down x=400 y=300 button=Right")?;
     assert!(input.type_text("☃").is_err());
     let logs = sandbox.logs();
     assert!(logs.contains("weston.log") && logs.contains("niri.log"));

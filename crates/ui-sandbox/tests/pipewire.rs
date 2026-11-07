@@ -159,6 +159,12 @@ fn the_private_pipewire_hears_a_tone_records_the_speaker_shows_a_camera_and_loop
             std::panic::resume_unwind(panic);
         }
     }
+    // a failure's message carries both servers' logs
+    let logs = private.pipewire.logs();
+    assert!(
+        logs.contains("--- pipewire.log\n") && logs.contains("--- wireplumber.log\n"),
+        "{logs}"
+    );
     let pids = private.pipewire.pids();
     drop(private);
     for pid in pids {

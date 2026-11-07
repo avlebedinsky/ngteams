@@ -429,6 +429,24 @@ fn a_shared_screen_comes_through_the_sandbox_s_screen_cast_portal() {
         ]
     );
     assert!(calls.iter().all(|call| call.sender == calls[0].sender), "one caller");
+    // what the portal says it offers, as xdg-desktop-portal's does: a monitor or a window, every cursor mode
+    let client = sandbox.bus().connect().unwrap();
+    let cast = zbus::blocking::Proxy::new(
+        &client,
+        ui_sandbox::bus::PORTAL_NAME,
+        ui_sandbox::bus::PORTAL_PATH,
+        "org.freedesktop.portal.ScreenCast",
+    )
+    .unwrap();
+    let property = |name: &str| cast.get_property::<u32>(name).unwrap();
+    assert_eq!(
+        (
+            property("AvailableSourceTypes"),
+            property("AvailableCursorModes"),
+            property("version")
+        ),
+        (3, 7, 4)
+    );
 
     // a bus outside the sandbox (a canary) is refused before anything is asked of it
     let outside = TempDir::new().unwrap();
