@@ -33,6 +33,10 @@ async fn commands_dispatch_keys_typing_navigation_and_observation() {
         ("type #synthetic text with spaces", "typed"),
         ("type #synthetic", "typed"),
         ("insert text with spaces", "inserted"),
+        ("xy 12 34", "clicked"),
+        ("xy", "clicked"),
+        ("wheel 56 78 90", "scrolled"),
+        ("wheel many", "scrolled"),
         ("what", "unknown step what"),
     ] {
         assert_eq!(
@@ -59,6 +63,58 @@ async fn commands_dispatch_keys_typing_navigation_and_observation() {
             .iter()
             .any(|command| command["params"]["text"] == "text with spaces")
     );
+    // a point's missing or unreadable numbers are 0
+    let mouse = |kind: &str, x: f64, y: f64| {
+        commands.iter().any(|command| {
+            command["method"] == "Input.dispatchMouseEvent"
+                && command["params"]["type"] == kind
+                && command["params"]["x"] == x
+                && command["params"]["y"] == y
+        })
+    };
+    assert!(mouse("mousePressed", 12.0, 34.0) && mouse("mouseReleased", 12.0, 34.0));
+    assert!(mouse("mousePressed", 0.0, 0.0));
+    assert!(commands.iter().any(|command| {
+        command["params"]["type"] == "mouseWheel"
+            && command["params"]["x"] == 56.0
+            && command["params"]["deltaY"] == 90.0
+    }));
+    assert!(commands.iter().any(|command| {
+        command["params"]["type"] == "mouseWheel" && command["params"]["x"] == 0.0 && command["params"]["deltaY"] == 0.0
+    }));
+}
+
+#[test]
+fn the_held_back_team_writes_are_every_method_but_a_read_on_team_urls() {
+    let rules = team_rules().unwrap();
+    assert_eq!(rules.len(), WRITE_METHODS.len());
+    assert!(rules.iter().all(|rule| rule.label() == Some(TEAM_WRITE)));
+    let request = |method: &str, url: &str| crate::capture_hold::PausedRequest {
+        request_id: "synthetic".to_owned(),
+        method: method.to_owned(),
+        url: url.to_owned(),
+        body: None,
+        network_id: None,
+    };
+    let held = |request: &crate::capture_hold::PausedRequest| rules.iter().any(|rule| rule.matches(request));
+    for method in WRITE_METHODS {
+        assert!(held(&request(
+            method,
+            "https://teams.cloud.microsoft/api/mt/part/amer-02/beta/teams/"
+        )));
+        assert!(held(&request(
+            method,
+            "https://teams.cloud.microsoft/api/csa/amer/api/v1/teams/channels"
+        )));
+    }
+    assert!(!held(&request(
+        "GET",
+        "https://teams.cloud.microsoft/api/mt/part/amer-02/beta/teams/"
+    )));
+    assert!(!held(&request(
+        "POST",
+        "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations"
+    )));
 }
 
 #[tokio::test]

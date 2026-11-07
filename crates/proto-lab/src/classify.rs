@@ -86,3 +86,49 @@ impl<'de> Visitor<'de> for Strict {
         Ok(Value::Object(object))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::de::DeserializeSeed as _;
+    use serde::de::value::{BytesDeserializer, Error, StringDeserializer};
+    use serde_json::json;
+
+    use super::{Strict, strict_json};
+
+    #[test]
+    fn every_json_value_kind_reads_as_itself() {
+        let body = br#"{"t":true,"f":false,"n":null,"i":-1,"u":1,"x":1.5,"s":"a\"b","a":[{"k":"v"}]}"#;
+        assert_eq!(
+            strict_json(body),
+            Some(json!({"t":true,"f":false,"n":null,"i":-1,"u":1,"x":1.5,"s":"a\"b","a":[{"k":"v"}]}))
+        );
+    }
+
+    #[test]
+    fn keys_alike_in_any_case_or_trailing_text_refuse_the_body() {
+        for body in [
+            &br#"{"key":1,"KEY":2}"#[..],
+            br#"{"outer":{"\u017f":1,"s":2}}"#,
+            br#"[{"k":1,"\u212a":2}]"#,
+            br#"{"key":1} {"key":2}"#,
+            b"",
+        ] {
+            assert_eq!(strict_json(body), None, "{}", String::from_utf8_lossy(body));
+        }
+    }
+
+    #[test]
+    fn an_owned_string_reads_as_a_string_and_bytes_are_refused_by_name() {
+        let owned = Strict.deserialize(StringDeserializer::<Error>::new("synthetic".to_owned()));
+        assert_eq!(owned.unwrap(), json!("synthetic"));
+        let refused = Strict
+            .deserialize(BytesDeserializer::<Error>::new(b"synthetic"))
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("JSON whose objects have no two keys alike in any case"),
+            "{refused}"
+        );
+    }
+}

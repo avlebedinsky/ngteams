@@ -113,6 +113,34 @@ fn literals_decode_escapes_and_scan_template_expressions() {
 }
 
 #[test]
+fn literals_decode_every_escape_javascript_has() {
+    let texts = |source: &str| -> Vec<String> { literals(source).into_iter().map(|literal| literal.text).collect() };
+    assert_eq!(
+        texts(r#"x="n\nt\tr\rb\bf\fv\v0\0q\q\"";"#),
+        ["n\nt\tr\rb\u{8}f\u{c}v\u{b}0\0qq\""]
+    );
+    // a line continuation adds nothing
+    assert_eq!(texts("x=\"one \\\ntwo\";"), ["one two"]);
+    // a braced code point, and malformed escapes that keep their letter
+    assert_eq!(
+        texts(r#"a="\u{1F600}";b="\u{110000}!";c="\u{12";d="\xZZ";e="\x4";"#),
+        ["\u{1F600}", "u!", "u{12", "xZZ", "x4"]
+    );
+    // an escape at the very end of the input ends the string unterminated
+    assert!(texts(r#"x="open\"#).is_empty());
+}
+
+#[test]
+fn literals_follow_braces_inside_template_expressions_and_regex_classes() {
+    let texts = |source: &str| -> Vec<String> { literals(source).into_iter().map(|literal| literal.text).collect() };
+    assert_eq!(texts(r#"t=`a\`${ {k:"in"} }b`;"#), ["in", "a`{}b"]);
+    // a quote and a slash inside a regular expression's class are the expression's
+    assert_eq!(texts(r#"r=/[/"]x/g;s="ok";"#), ["ok"]);
+    // a slash that meets a line break before closing wasn't a regular expression
+    assert_eq!(texts("r=/x\n\"after\";"), ["after"]);
+}
+
+#[test]
 fn literals_survive_unterminated_input() {
     for source in ["\"open", "`open ${", "a=/open", "x='line\nbreak'", "/* open"] {
         let _ = literals(source);

@@ -229,6 +229,12 @@ async fn missing_config_child() {
         assert!(error.contains("lab.toml"), "{args:?}: {error}");
     }
     run(command(&["chrome", "path"])).await.unwrap();
+    // the bundle index needs only the lab directories too: with nothing imported, a search says what to run first
+    let error = run(command(&["bundles", "search", "synthetic"]))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("bundles import"), "{error}");
     valid_config_child().await;
 }
 
@@ -422,6 +428,12 @@ async fn valid_config_refusals() {
         vec!["auth", "a"],
         vec!["probe", "profile", "b"],
         vec!["probe", "teams", "c"],
+        vec!["probe", "chat", "a"],
+        vec!["probe", "chat", "c", "--save", "synthetic/chat"],
+        vec!["probe", "thread", "b"],
+        vec!["probe", "thread", "a", "--save", "synthetic/thread"],
+        vec!["probe", "object", "c", "synthetic"],
+        vec!["probe", "object", "b", "synthetic", "--save", "synthetic/object"],
     ] {
         let error = run(command(&args)).await.unwrap_err().to_string();
         assert!(

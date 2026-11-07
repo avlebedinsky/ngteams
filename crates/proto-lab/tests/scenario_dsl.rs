@@ -1536,3 +1536,140 @@ async fn chat_shapes_records_when_the_typing_indicator_shows_and_goes() -> TestR
     })
     .await
 }
+
+/// A page that reports where it was clicked and how far the wheel turned over it, and whose send button names the
+/// conversation it is in.
+const POINTER_PAGE: &str = r#"<!doctype html><html><body style="margin:0">
+<div id="pad" style="width: 400px; height: 400px; overflow: scroll"><div style="height: 4000px"></div></div>
+<div id="out"></div>
+<button data-tid="sendMessageCommands-send" data-track-thread-id="19:synthetic-shown@thread.v2">send</button>
+<script>
+const out = document.getElementById('out');
+document.getElementById('pad').addEventListener('click', (event) => {
+  out.textContent = 'clicked ' + Math.round(event.clientX) + ',' + Math.round(event.clientY);
+});
+document.getElementById('pad').addEventListener('wheel', (event) => {
+  out.textContent = 'wheel ' + Math.round(event.deltaY);
+});
+</script></body></html>"#;
+
+#[tokio::test]
+async fn a_viewport_point_is_clicked_and_wheeled_as_a_pointer_would() -> TestResult {
+    with_html(POINTER_PAGE, async |run| {
+        run.driver.pointer_click_at("click the pad", 120.0, 80.0).await?;
+        run.driver
+            .wait_for_text("the click", "clicked 120,80", Duration::from_secs(5))
+            .await?;
+        run.driver.wheel_at("turn the wheel", 120.0, 80.0, 240.0).await?;
+        run.driver
+            .wait_for_text("the wheel", "wheel 240", Duration::from_secs(5))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_chat_preflight_refuses_another_selected_conversation_before_reading_recipients() -> TestResult {
+    with_html(POINTER_PAGE, async |run| {
+        let error = run
+            .driver
+            .preflight_chat("the call's chat", "19:synthetic-intended@thread.v2")
+            .await
+            .err()
+            .ok_or("a different selected conversation passed")?;
+        assert_eq!(error.step(), "the call's chat");
+        assert!(
+            error
+                .to_string()
+                .contains("selected conversation differs from the intended lab target"),
+            "{error}"
+        );
+        // the shown conversation passes the selection check, and with no lab action targets the recipients can't
+        // be read
+        let error = run
+            .driver
+            .preflight_chat("the shown chat", "19:synthetic-shown@thread.v2")
+            .await
+            .err()
+            .ok_or("a chat passed without its recipients")?;
+        assert!(
+            error.to_string().contains("no explicit lab action target context"),
+            "{error}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_chat_preflight_needs_exactly_one_selected_conversation() -> TestResult {
+    with_page(async |run| {
+        let error = run
+            .driver
+            .preflight_chat("no chat open", "19:synthetic-intended@thread.v2")
+            .await
+            .err()
+            .ok_or("a page without a selected conversation passed")?;
+        assert!(matches!(error, StepError::Failed { .. }), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("no unambiguous selected conversation identity"),
+            "{error}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_driver_navigation_the_browser_never_answers_is_a_timeout_of_its_step() -> TestResult {
+    let (_events, watch) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = Driver::new(silent_cdp().await?, SessionId::new("S-page"), watch);
+    driver.set_call_timeout(Duration::from_millis(300));
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        driver.navigate("open the chat", "http://127.0.0.1/page?synthetic-secret=1"),
+    )
+    .await
+    .map_err(|_| "an unanswered navigation outlived its bound")?
+    .err()
+    .ok_or("an unanswered navigation succeeded")?;
+    assert!(matches!(error, StepError::Timeout { .. }), "{error:?}");
+    assert_eq!(error.step(), "open the chat");
+    let text = error.to_string();
+    assert!(text.contains("Page.navigate to http://127.0.0.1/page"), "{text}");
+    assert!(!text.contains("synthetic-secret"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn every_step_error_names_its_step() {
+    let errors = [
+        StepError::Timeout {
+            step: "waited".to_owned(),
+            waited: Duration::from_secs(1),
+            waiting_for: "something".to_owned(),
+        },
+        StepError::Cdp {
+            step: "asked".to_owned(),
+            source: CdpError::Closed,
+        },
+        StepError::Closed {
+            step: "gone".to_owned(),
+        },
+        StepError::Failed {
+            step: "refused".to_owned(),
+            reason: "a reason".to_owned(),
+        },
+    ];
+    let steps: Vec<&str> = errors.iter().map(StepError::step).collect();
+    assert_eq!(steps, ["waited", "asked", "gone", "refused"]);
+    for error in &errors {
+        assert!(
+            error.to_string().starts_with(&format!("step `{}`", error.step())),
+            "{error}"
+        );
+    }
+}
