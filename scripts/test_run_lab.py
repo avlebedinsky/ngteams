@@ -57,7 +57,7 @@ with socket.socket(socket.AF_UNIX) as server:
             words = json.loads(line)
             with (root / 'events.jsonl').open('a') as events:
                 events.write(json.dumps(words) + '\n')
-            peer.sendall(b'ok synthetic\n')
+            peer.sendall(b'Window ID 1\n' if words[0] == 'windows' else b'ok synthetic\n')
             if words[0] == 'stop' and not os.environ.get('SYNTHETIC_IGNORE_STOP'):
                 active = False
 endpoint.unlink(missing_ok=True)
@@ -164,7 +164,9 @@ class Launcher(unittest.TestCase):
             self.assertEqual(values("--app-arg"), [f"XDG_DATA_HOME={self.env['XDG_DATA_HOME']}",
                                                    f"XDG_CONFIG_HOME={self.env['XDG_CONFIG_HOME']}",
                                                    str(self.bin / "ngteams"), "--lab", alias, "--secrets-fd", "{secrets-fd}",
-                                                   "--trace-fd", "{trace-fd}"])
+                                                   "--trace-fd", "{trace-fd}",
+                                                   # where teams_ctl::socket_path(Mode::Lab(alias)) looks for it
+                                                   "--ctl-socket", str(self.run_dir(alias) / "ctl.sock")])
             self.assertIn("running\n", self.invoke(alias, "--status").stdout)
         controls = [
             ("--shot", "synthetic"), ("--screen", "synthetic_screen"), ("--key", "ctrl+k"),
@@ -310,6 +312,76 @@ class Launcher(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
                 process.communicate(timeout=3)
+
+
+class ReadOnlyLauncher(unittest.TestCase):
+    """scripts/run-personal-read-only.sh over a synthetic installed binary and sandbox runner."""
+
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="ngr-")
+        self.root = Path(self.scratch.name)
+        self.script = self.root / "scripts/run-personal-read-only.sh"
+        self.script.parent.mkdir()
+        shutil.copyfile(Path(__file__).with_name("run-personal-read-only.sh"), self.script)
+        self.script.chmod(0o700)
+        bin_dir = self.root / "target/lab/debug"
+        bin_dir.mkdir(parents=True)
+        Launcher.executable(bin_dir / "ui-sandbox-run", RUNNER)
+        tools = self.root / "tools"
+        tools.mkdir()
+        Launcher.executable(tools / "cargo", CARGO)
+        self.env = os.environ.copy()
+        self.env.update(
+            PATH=f"{tools}:{self.env['PATH']}",
+            XDG_STATE_HOME=str(self.root / "state"),
+            HOME=str(self.root / "home"),
+            SYNTHETIC_CARGO_LOG=str(self.root / "cargo.jsonl"),
+        )
+        self.run_dir = self.root / "state/ngteams-read-only/run"
+
+    def tearDown(self):
+        self.invoke("--stop", check=False)
+        self.scratch.cleanup()
+
+    def installed(self, flags):
+        # the strings the runner probes for, as a build's own flags would carry them
+        teams = self.root / "installed/ngteams"
+        teams.parent.mkdir(exist_ok=True)
+        Launcher.executable(teams, f'#!/bin/sh\n# {flags}\n[ "$1" = snapshot ] && mkdir -p "$3" && exit 0\nexit 99\n')
+        return teams
+
+    def invoke(self, *args, check=True, teams=None):
+        result = subprocess.run(
+            [str(self.script), *args],
+            env=self.env | ({"TEAMS_BIN": str(teams)} if teams else {}),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return result
+
+    def app_args(self):
+        args = json.loads((self.run_dir / "serve.json").read_text())
+        return [args[index + 1] for index, value in enumerate(args) if value == "--app-arg"]
+
+    def test_the_app_is_told_its_control_socket_in_the_run_dir(self):
+        teams = self.installed("TEAMS_READ_ONLY ctl-socket")
+        started = self.invoke("synthetic@example.test", teams=teams)
+        self.assertIn(f"ctl socket:   {self.run_dir / 'ctl.sock'}", started.stdout)
+        args = self.app_args()
+        # where teams_ctl::socket_path(Mode::ReadOnly) looks for it
+        self.assertEqual(args[-2:], ["--ctl-socket", str(self.run_dir / "ctl.sock")])
+        self.assertEqual(args[:2], ["--read-only", "--account"])
+        self.invoke("--stop")
+        self.assertFalse(self.run_dir.exists())
+
+    def test_an_installed_build_without_the_socket_is_given_none(self):
+        teams = self.installed("TEAMS_READ_ONLY")
+        started = self.invoke("synthetic@example.test", teams=teams)
+        self.assertIn("serves no control socket", started.stderr)
+        self.assertNotIn("--ctl-socket", self.app_args())
 
 
 if __name__ == "__main__":

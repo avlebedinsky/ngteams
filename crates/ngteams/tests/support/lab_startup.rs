@@ -19,6 +19,7 @@ const TID: &str = "00000000-0000-4000-8000-000000000001";
 fn lab_startup_and_broker_use_alias_files_and_preserve_restart_descriptors() {
     for case in [
         "ready",
+        "ready-ctl",
         "pending",
         "pending-closed",
         "pending-failed",
@@ -119,14 +120,35 @@ fn lab_child() {
     if case == "wrong-account" {
         args.extend(["--account".into(), "other@example.test".into()]);
     }
+    // where its runner puts it: the alias's state dir
+    let ctl = std::path::Path::new(&std::env::var_os("HOME").unwrap()).join(".local/state/ngteams-lab/a/ctl.sock");
+    if case == "ready-ctl" {
+        args.extend(["--ctl-socket".into(), ctl.display().to_string()]);
+    }
     let cli = Cli::try_parse_from(args).unwrap();
     let mode = cli.lab_mode().unwrap().unwrap();
     if case == "no-sandbox" {
         // SAFETY: this isolated subprocess has not started any runtime/thread or GUI backend yet.
         unsafe { std::env::set_var("DISPLAY", ":synthetic-forbidden") };
     }
-    match (case.as_str(), run_lab(&cli, &mode)) {
-        ("ready", Ok(Outcome::Quit)) => assert!(paths.store_file(&account).unwrap().exists()),
+    let outcome = run_lab(&cli, &mode);
+    let served: Vec<String> = crate::startup_tests::calls()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.starts_with("ctl-"))
+        .cloned()
+        .collect();
+    // only where the runner said; none (and never the personal one) without it
+    let expected = if case == "ready-ctl" {
+        vec![format!("ctl-bound:{}", ctl.display())]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(served, expected, "{case}");
+    assert!(!ctl.exists(), "{case}: the quit removes the socket");
+    match (case.as_str(), outcome) {
+        ("ready" | "ready-ctl", Ok(Outcome::Quit)) => assert!(paths.store_file(&account).unwrap().exists()),
         ("pending", Ok(Outcome::LabRestart(descriptors))) => assert!(descriptors.socket().is_ok()),
         ("wrong-account", Err(error)) => assert!(error.contains("configured for")),
         ("no-sandbox", Err(error)) => assert!(error.contains("DISPLAY")),

@@ -277,11 +277,11 @@
   `--ctl-socket`)
 - Modify: `scripts/test_run_lab.py`, `crates/ngteams/tests/lab_mode.rs` / `tests/read_only.rs`
 
-- [ ] the runners pass `--ctl-socket <state dir>/ctl.sock`, the same path `teams_ctl::socket_path(Lab(alias))` /
+- [x] the runners pass `--ctl-socket <state dir>/ctl.sock`, the same path `teams_ctl::socket_path(Lab(alias))` /
       `socket_path(ReadOnly)` resolves
-- [ ] lab and read-only apps serve on the path given and never on the personal path
-- [ ] tests: the path the lab runner passes (`test_run_lab.py`), the read-only and lab modes binding where told
-- [ ] run `python3 -B -m unittest discover -s scripts -p test_run_lab.py` and the touched ngteams tests, which must
+- [x] lab and read-only apps serve on the path given and never on the personal path
+- [x] tests: the path the lab runner passes (`test_run_lab.py`), the read-only and lab modes binding where told
+- [x] run `python3 -B -m unittest discover -s scripts -p test_run_lab.py` and the touched ngteams tests, which must
       pass before the next task
 
 ### Task 4: account addressing and read commands

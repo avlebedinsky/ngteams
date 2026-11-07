@@ -278,8 +278,8 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
             return Err(format!("lab alias {} is configured for {}", mode.alias, account.upn));
         }
     }
-    // no control socket until its runner hands one in; never the personal one
-    match run_setup(cli, Reach::Sandbox, setup, trace, None)? {
+    // the control socket only where its runner says (its state dir), never the personal one
+    match run_setup(cli, Reach::Sandbox, setup, trace, mode.ctl_socket.clone())? {
         Outcome::Restart => Ok(Outcome::LabRestart(descriptors)),
         outcome => Ok(outcome),
     }
@@ -346,6 +346,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     };
     let failed = Rc::new(Cell::new(false));
     let failed_in_app = Rc::clone(&failed);
+    let ctl = mode.ctl_socket.clone();
     let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         let launch = Launch {
@@ -359,8 +360,8 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
             runner: window_runner(runner),
             read_only: true,
             trace: Arc::new(trace),
-            // no control socket until its runner hands one in; never the personal one
-            ctl: None,
+            // the control socket only where its runner says (its state dir), never the personal one
+            ctl,
         };
         if let Err(failure) = app::launch(cx, launch) {
             eprintln!("teams: the window can't be opened: {}", failure.error);

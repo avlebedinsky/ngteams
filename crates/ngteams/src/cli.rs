@@ -11,7 +11,9 @@
 //! `get` only, run outside the sandbox).
 //! Lab mode is `ngteams --lab <alias> --secrets-fd <n> [--trace-fd <n>]`, with writable lab credentials served by
 //! `ngteams secrets --lab <alias> --fd <n>` outside its UI sandbox.
-//! `--ctl-socket <path>` names where `ngteamsctl`'s control socket is served (`crate::ctl`).
+//! `--ctl-socket <path>` names where `ngteamsctl`'s control socket is served (`crate::ctl`). The personal app falls
+//! back to `$XDG_RUNTIME_DIR/ngteams/ctl.sock`; a lab or read-only app serves only where its runner tells it (its
+//! state dir, `teams_ctl::Mode`), and none without it.
 
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -40,7 +42,8 @@ pub struct Cli {
     pub forget: Option<String>,
     #[command(flatten)]
     pub read_only: ReadOnlyArgs,
-    /// Where `ngteamsctl`'s control socket is served; `$XDG_RUNTIME_DIR/ngteams/ctl.sock` by default.
+    /// Where `ngteamsctl`'s control socket is served; `$XDG_RUNTIME_DIR/ngteams/ctl.sock` by default. A lab or
+    /// read-only app serves one only where this names, as its runner gives it.
     #[arg(long, value_name = "PATH")]
     pub ctl_socket: Option<PathBuf>,
 }
@@ -96,6 +99,8 @@ pub struct ReadOnlyMode {
     pub data: PathBuf,
     pub secrets_fd: RawFd,
     pub trace_fd: Option<RawFd>,
+    /// Where its control socket is served (`--ctl-socket`); none when its runner gives none.
+    pub ctl_socket: Option<PathBuf>,
 }
 
 /// A lab alias's sending-mode window over its fixed paths and writable credential broker.
@@ -104,6 +109,8 @@ pub struct LabMode {
     pub alias: String,
     pub secrets_fd: RawFd,
     pub trace_fd: Option<RawFd>,
+    /// Where its control socket is served (`--ctl-socket`); none when its runner gives none.
+    pub ctl_socket: Option<PathBuf>,
 }
 
 impl Cli {
@@ -131,6 +138,7 @@ impl Cli {
             alias: alias.clone(),
             secrets_fd,
             trace_fd: args.trace_fd,
+            ctl_socket: self.ctl_socket.clone(),
         }))
     }
 
@@ -166,6 +174,7 @@ impl Cli {
             data,
             secrets_fd,
             trace_fd: args.trace_fd,
+            ctl_socket: self.ctl_socket.clone(),
         }))
     }
 }

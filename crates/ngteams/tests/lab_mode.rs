@@ -117,8 +117,22 @@ fn the_lab_cli_requires_its_broker_and_rejects_snapshot_and_read_only_modes() {
         Some(LabMode {
             alias: "a".into(),
             secrets_fd: 3,
-            trace_fd: Some(4)
+            trace_fd: Some(4),
+            ctl_socket: None,
         })
+    );
+    // the control socket only where its runner names it
+    let told = parse(&[
+        "--lab",
+        "a",
+        "--secrets-fd",
+        "3",
+        "--ctl-socket",
+        "/state/ngteams-lab/a/ctl.sock",
+    ]);
+    assert_eq!(
+        told.lab_mode().unwrap().unwrap().ctl_socket,
+        Some("/state/ngteams-lab/a/ctl.sock".into())
     );
     assert_eq!(cli.read_only_mode(None).unwrap(), None);
     assert!(cli.read_only_mode(Some(OsStr::new("1"))).is_err());

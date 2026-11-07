@@ -77,6 +77,7 @@ view trace:   $run/trace.jsonl
 app log:      $data_home/ngteams-lab/$alias/logs/  and  $run/app.log
 broker log:   $run/broker.log
 holder log:   $run/holder.log
+ctl socket:   $run/ctl.sock  (ngteamsctl --lab $alias)
 EOF
 }
 
@@ -137,6 +138,8 @@ start() {
     local media=()
     [[ "$pipewire" != yes ]] || media+=(--pipewire)
     # timeout signals only serve, whose pass_only boundary closes lock FDs in broker/app; cleanup retains locks.
+    # The sandbox clears the app's environment, so it is told where its control socket is: the run dir, where
+    # teams_ctl::socket_path(Mode::Lab) looks for it.
     setsid timeout --foreground --signal=TERM "$seconds" "$runner" serve --dir "$run" "${media[@]}" \
         --broker "$teams" \
         --broker-arg secrets --broker-arg --lab --broker-arg "$alias" --broker-arg --fd --broker-arg '{broker-fd}' \
@@ -144,6 +147,7 @@ start() {
         --app-arg "XDG_DATA_HOME=$data_home" --app-arg "XDG_CONFIG_HOME=$config_home" --app-arg "$teams" \
         --app-arg --lab --app-arg "$alias" \
         --app-arg --secrets-fd --app-arg '{secrets-fd}' --app-arg --trace-fd --app-arg '{trace-fd}' \
+        --app-arg --ctl-socket --app-arg "$run/ctl.sock" \
         >"$run/holder.log" 2>&1 </dev/null &
     launched=$!
     trap interrupt_start INT TERM

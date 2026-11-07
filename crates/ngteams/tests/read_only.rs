@@ -347,7 +347,24 @@ fn the_command_line_asks_for_everything_the_read_only_mode_needs() {
             data: PathBuf::from("/tmp/s"),
             secrets_fd: 3,
             trace_fd: None,
+            ctl_socket: None,
         })
+    );
+    // the control socket only where its runner names it
+    let told = parse(&[
+        "--read-only",
+        "--account",
+        "a@example.test",
+        "--data",
+        "/tmp/s",
+        "--secrets-fd",
+        "3",
+        "--ctl-socket",
+        "/state/ngteams-read-only/run/ctl.sock",
+    ]);
+    assert_eq!(
+        told.read_only_mode(None).unwrap().unwrap().ctl_socket,
+        Some("/state/ngteams-read-only/run/ctl.sock".into())
     );
     // the environment asks for it too; `0` and empty don't
     let by_env = parse(&["--account", "a@example.test", "--data", "/tmp/s", "--secrets-fd", "3"]);

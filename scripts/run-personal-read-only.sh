@@ -53,6 +53,7 @@ screenshots:  $run/shots/            ($0 --shot <name>)
 view trace:   $run/trace.jsonl
 app log:      $run/snapshot/data/logs/  and  $run/app.log  (refused sends: "refused_read_only")
 broker log:   $run/broker.log
+ctl socket:   $run/ctl.sock          (ngteamsctl --read-only)
 snapshot:     $run/snapshot/             (a copy of your chats: --stop deletes it)
 EOF
 }
@@ -99,6 +100,15 @@ start() {
     echo "building ui-sandbox-run (target/lab)..."
     (cd "$root" && cargo build -q -p ui-sandbox --bin ui-sandbox-run --target-dir "$root/target/lab")
 
+    # The sandbox clears the app's environment, so it is told where its control socket is: the run dir, where
+    # teams_ctl::socket_path(Mode::ReadOnly) looks for it. An installed build from before the socket serves none.
+    local ctl=()
+    if grep -qa "ctl-socket" "$teams"; then
+        ctl=(--app-arg --ctl-socket --app-arg "$run/ctl.sock")
+    else
+        echo "run-personal-read-only: $teams serves no control socket (it predates it): no ngteamsctl" >&2
+    fi
+
     rm -rf "$run"
     install -d -m 0700 "$state" "$run"
     "$teams" snapshot --to "$run/snapshot" >/dev/null
@@ -108,6 +118,7 @@ start() {
         --app "$teams" \
         --app-arg --read-only --app-arg --account --app-arg "$upn" --app-arg --data --app-arg "$run/snapshot" \
         --app-arg --secrets-fd --app-arg '{secrets-fd}' --app-arg --trace-fd --app-arg '{trace-fd}' \
+        "${ctl[@]}" \
         >"$run/holder.log" 2>&1 </dev/null &
     for _ in $(seq 1 600); do
         [[ -S "$run/control.sock" ]] && grep -q '^ready' "$run/holder.log" && break

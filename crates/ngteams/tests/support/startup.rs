@@ -17,7 +17,7 @@ mod startup_controls;
 const CASE: &str = "NGTEAMS_STARTUP_TEST_CASE";
 const TID: &str = "00000000-0000-4000-8000-000000000001";
 
-fn calls() -> &'static Mutex<Vec<String>> {
+pub(crate) fn calls() -> &'static Mutex<Vec<String>> {
     static CALLS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
     CALLS.get_or_init(Mutex::default)
 }
@@ -136,7 +136,18 @@ pub(super) mod app {
                 stopped,
             });
         }
-        ngteams::app::launch(cx, launch)
+        let ctl = launch.ctl.clone();
+        let launched = ngteams::app::launch(cx, launch)?;
+        // where the control socket was bound, if one was asked for, while the app runs
+        if let Some(path) = ctl {
+            use std::os::unix::fs::FileTypeExt as _;
+            let bound = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_socket());
+            super::record(
+                if bound { "ctl-bound" } else { "ctl-unbound" },
+                &path.display().to_string(),
+            );
+        }
+        Ok(launched)
     }
 }
 
@@ -407,7 +418,18 @@ fn child() {
         | "prompt-window-error" => assert!(outcome.is_err()),
         _ => assert!(matches!(outcome, Ok(Outcome::Quit))),
     }
+    seen_after(&case);
+}
+
+/// What a case's run did besides its outcome.
+fn seen_after(case: &str) {
     let seen = calls().lock().unwrap();
+    if case == "ready" {
+        // the personal app's default: the runtime dir's socket
+        let personal = std::path::Path::new(&std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("ngteams/ctl.sock");
+        assert!(seen.contains(&format!("ctl-bound:{}", personal.display())), "{seen:?}");
+        assert!(!personal.exists(), "the quit removes the socket");
+    }
     if case == "many" {
         assert!(
             seen.iter().any(|call| call == "start:ready-other@example.test"),

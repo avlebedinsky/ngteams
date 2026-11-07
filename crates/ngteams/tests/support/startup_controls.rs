@@ -82,6 +82,7 @@ fn mode(_setup: &Setup, socket: UnixStream) -> ReadOnlyMode {
         data: std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("missing-snapshot"),
         secrets_fd: socket.into_raw_fd(),
         trace_fd: None,
+        ctl_socket: None,
     }
 }
 
@@ -139,7 +140,16 @@ fn read_window(setup: &Setup) {
     request.data = root.path().to_owned();
     let trace = std::fs::File::create(root.path().join("trace.jsonl")).unwrap();
     request.trace_fd = Some(trace.into_raw_fd());
+    let ctl = root.path().join("ctl.sock");
+    request.ctl_socket = Some(ctl.clone());
     assert!(matches!(run_read_only(&request), Ok(Outcome::Quit)));
+    // the control socket served where its runner said, and only there
+    let seen = super::calls().lock().unwrap().clone();
+    assert_eq!(
+        seen.iter().filter(|call| call.starts_with("ctl-")).collect::<Vec<_>>(),
+        [&format!("ctl-bound:{}", ctl.display())]
+    );
+    assert!(!ctl.exists(), "the quit removes the socket");
     serving.join().unwrap();
     let account = ngteams::accounts_file::PersonalAccount::find(&paths, "signed@example.test")
         .unwrap()
@@ -221,6 +231,7 @@ pub(super) fn invalid_environment() {
         data: "/synthetic/not-created".into(),
         secrets_fd: socket.into_raw_fd(),
         trace_fd: None,
+        ctl_socket: None,
     };
     let error = run_read_only(&request).err().unwrap();
     assert!(error.contains("HOME"), "{error}");
