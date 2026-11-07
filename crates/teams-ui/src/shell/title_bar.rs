@@ -154,11 +154,7 @@ impl Shell {
         match to {
             Main::Chat(id) => self.open_chat(id, window, cx),
             Main::Channel(id) => self.open_channel_id(id, window, cx),
-            Main::Settings => {
-                self.hide_calendar(window, cx);
-                self.show_settings(cx);
-                self.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
-            }
+            Main::Settings => self.open_settings(window, cx),
             Main::Calendar => self.show_calendar(window, cx),
             Main::Search => self.show_search_results(window, cx),
             Main::TeamsPage => self.open_teams_page(window, cx),

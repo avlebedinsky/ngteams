@@ -366,19 +366,22 @@
 - Modify: `crates/teams-ui/src/desktop.rs` (per-account public wrappers over `in_shell` for calendar, settings and
   search), `crates/ngteams/src/ctl/dispatch.rs`
 - Create: `crates/ngteams/tests/ctl_ui.rs`
+- ➕ Modify: `crates/teams-ui/src/shell.rs` (`Shell::search_for`: a query typed and entered), `crates/ngteams/src/ctl/
+  address.rs` (`address::known`: an account named whether or not its engine runs, for the UI commands), and
+  `crates/ngteams/src/ctl/mod.rs`. `activate` is served too, as `window show`.
 
-- [ ] `window show|hide|toggle|focus`. `hide` sends the window to the tray, and is refused with `no_tray` when
+- [x] `window show|hide|toggle|focus`. `hide` sends the window to the tray, and is refused with `no_tray` when
       there's no tray item, since closing would quit the app.
-- [ ] `open chat|channel <id|title>`, `open calendar`, `open settings [page]`, `open search <q>`,
+- [x] `open chat|channel <id|title>`, `open calendar`, `open settings [page]`, `open search <q>`,
       `account switch <account>`
-- [ ] `ui state`: shown account, current view (chat/channel/calendar/settings/teams/search), open chat id and title,
+- [x] `ui state`: shown account, current view (chat/channel/calendar/settings/teams/search), open chat id and title,
       window shown, call window open
-- [ ] `action list` (the `teams_ui::` actions) and `action <name>` (full or unique short name) dispatched to the main
+- [x] `action list` (the `teams_ui::` actions) and `action <name>` (full or unique short name) dispatched to the main
       window. The reply says it was dispatched (GPUI defers it). `no_window` while the window is closed, `unknown_action`
       for an unknown name.
-- [ ] tests: each open moves `ui state`, hide and show with a tray, hide refused without one, an unknown action, a
+- [x] tests: each open moves `ui state`, hide and show with a tray, hide refused without one, an unknown action, a
       short name, `ShowCalendar` changes the view
-- [ ] run `cargo test -p ngteams --test ctl_ui`, which must pass before the next task
+- [x] run `cargo test -p ngteams --test ctl_ui`, which must pass before the next task
 
 ### Task 8: the `ngteamsctl` binary: reads, UI and events
 

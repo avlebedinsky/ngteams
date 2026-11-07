@@ -9,6 +9,7 @@
 //! - [`dispatch`]: each request answered on GPUI's foreground, over the app's accounts as they run.
 //! - [`address`]: the account and the chat a request names.
 //! - [`reads`]: the read commands, through the account's `Core`.
+//! - [`ui`]: the UI commands (the window, the views it opens, the account it shows) and the actions dispatched to it.
 //! - [`events`]: the event stream a `subscribe` turns a connection into, fed by each account's bridge tap,
 //! - [`watch`]: by the app's own state where it changes (unread, own status, sign-out, notifications, the window),
 //! - and [`ticker`]: by each account's calendar, for the meetings about to start.
@@ -25,6 +26,7 @@ pub mod events;
 pub mod listener;
 pub mod reads;
 pub mod ticker;
+pub mod ui;
 pub mod watch;
 
 use std::path::Path;

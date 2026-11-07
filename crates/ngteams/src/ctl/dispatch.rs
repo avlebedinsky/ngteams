@@ -7,6 +7,7 @@
 //! - `accounts`: the accounts as `status` lists them.
 //! - the reads ([`reads`]): through the account the request addresses ([`address`]), awaited on the foreground as
 //!   the views await the engine's replies.
+//! - the UI commands ([`ui`]): the window, the views it opens, the account it shows and the actions dispatched to it.
 //! - `subscribe` ([`events`]): answered `subscribed` with the stream the connection writes from then on.
 //!
 //! A request the app doesn't serve yet is a [`ErrorCode::BadRequest`]; once the app is going, every request is
@@ -22,7 +23,7 @@ use teams_ui::{Account, Bridge, Calls, Desktop, Engine, Link, Status};
 
 use super::address::{self, Addressed};
 use super::listener::Answer;
-use super::{events, reads};
+use super::{events, reads, ui};
 use crate::app::Running;
 
 /// The app's version, as `hello` and `status` tell it.
@@ -62,6 +63,9 @@ async fn ask(
     request: &Request,
     cx: &mut AsyncApp,
 ) -> Result<Response, CtlError> {
+    if ui::serves(request) {
+        return ui::answer(running, account, request, cx).await;
+    }
     let step = cx.update(|cx| {
         let running = alive(running, cx)?;
         let running = running.read(cx);

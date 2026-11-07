@@ -34,24 +34,7 @@ pub struct Addressed {
 /// [`ErrorCode::UnknownAccount`] when no account is the one named (or there is none), [`ErrorCode::Stopped`] when its
 /// engine stopped.
 pub fn account(running: &Running, wanted: Option<&str>, cx: &App) -> Result<Addressed, CtlError> {
-    let bridges = running.bridges();
-    let index = if let Some(wanted) = wanted.map(str::trim) {
-        named(bridges, wanted)
-    } else {
-        let rail = running.desktop().read(cx).accounts().read(cx);
-        rail.active_key()
-            .and_then(|shown| bridges.iter().position(|(mri, _, _)| mri == shown))
-            .or_else(|| (!bridges.is_empty()).then_some(0))
-    };
-    let Some((mri, upn, bridge)) = index.and_then(|index| bridges.get(index)) else {
-        return Err(CtlError::new(
-            ErrorCode::UnknownAccount,
-            match wanted {
-                Some(wanted) => format!("no account is {wanted}: `ngteamsctl accounts` lists them"),
-                None => "the app runs no account".to_owned(),
-            },
-        ));
-    };
+    let (mri, upn, bridge) = known(running, wanted, cx)?;
     let bridge = bridge.read(cx);
     let status = bridge.models().status.read(cx);
     if !bridge.running() || status.engine == Engine::Stopped || matches!(status.account, Account::SignedOut { .. }) {
@@ -70,6 +53,37 @@ pub fn account(running: &Running, wanted: Option<&str>, cx: &App) -> Result<Addr
         core: bridge.core(),
         tray,
     })
+}
+
+/// The account `wanted` names, or the one the window shows without it, as `(MRI, UPN, bridge)`, whether or not its
+/// engine runs (the window shows a signed-out account too).
+///
+/// # Errors
+/// [`ErrorCode::UnknownAccount`] when no account is the one named (or there is none).
+pub fn known<'a>(
+    running: &'a Running,
+    wanted: Option<&str>,
+    cx: &App,
+) -> Result<(&'a String, &'a String, &'a Entity<teams_ui::Bridge>), CtlError> {
+    let bridges = running.bridges();
+    let index = if let Some(wanted) = wanted.map(str::trim) {
+        named(bridges, wanted)
+    } else {
+        let rail = running.desktop().read(cx).accounts().read(cx);
+        rail.active_key()
+            .and_then(|shown| bridges.iter().position(|(mri, _, _)| mri == shown))
+            .or_else(|| (!bridges.is_empty()).then_some(0))
+    };
+    let Some((mri, upn, bridge)) = index.and_then(|index| bridges.get(index)) else {
+        return Err(CtlError::new(
+            ErrorCode::UnknownAccount,
+            match wanted {
+                Some(wanted) => format!("no account is {wanted}: `ngteamsctl accounts` lists them"),
+                None => "the app runs no account".to_owned(),
+            },
+        ));
+    };
+    Ok((mri, upn, bridge))
 }
 
 /// The index of the account `wanted` names: its MRI, its UPN in any case, or its index.

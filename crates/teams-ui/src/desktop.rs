@@ -620,6 +620,29 @@ impl Desktop {
         self.in_shell(cx, |shell, window, cx| shell.open_channel_id(id, window, cx));
     }
 
+    /// Shows account `key`'s calendar in the window, that account shown, as the rail's Calendar does.
+    pub fn show_calendar_of(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.switch(key, cx);
+        self.in_shell(cx, Shell::show_calendar);
+    }
+
+    /// Shows account `key`'s settings in the window on `page`, or where they were left without one, that account shown,
+    /// the keyboard on their page column as the rail's Settings puts it.
+    pub fn open_settings_of(&mut self, key: &str, page: Option<Page>, cx: &mut Context<Self>) {
+        self.switch(key, cx);
+        self.in_shell(cx, |shell, window, cx| match page {
+            Some(page) => shell.open_settings_page(page, window, cx),
+            None => shell.open_settings(window, cx),
+        });
+    }
+
+    /// Shows the search results of `query` for account `key` in the window, that account shown, as the title bar's
+    /// search shows them once typed and entered.
+    pub fn search_of(&mut self, key: &str, query: &str, cx: &mut Context<Self>) {
+        self.switch(key, cx);
+        self.in_shell(cx, |shell, window, cx| shell.search_for(query, window, cx));
+    }
+
     /// Shows the window and does `then` in the shell it shows.
     fn in_shell(&mut self, cx: &mut Context<Self>, then: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>)) {
         self.show(cx);

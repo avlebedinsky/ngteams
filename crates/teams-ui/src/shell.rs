@@ -680,6 +680,14 @@ impl Shell {
     /// Shows the settings on `page`, the keyboard on their page column, as the rail's Settings does.
     pub fn open_settings_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_view.update(cx, |view, cx| view.show_page(page, cx));
+        self.open_settings(window, cx);
+    }
+
+    /// The rail's Settings: the settings on the page they were left on, the calendar left, the keyboard on their page
+    /// column. The keyboard moves with them: what had it (a compose box, the calendar) leaves the window's tree, and a
+    /// focus left there would reach no action's handler.
+    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_calendar(window, cx);
         self.show_settings(cx);
         self.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
     }
@@ -1999,6 +2007,17 @@ impl Shell {
         cx.notify();
     }
 
+    /// `query` typed in the title bar's search and entered: its results shown ([`Shell::show_search_results`]). An
+    /// empty query changes nothing.
+    pub fn search_for(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_switcher(window, cx);
+        self.search_box.update(cx, |search, cx| {
+            search.set_query(query, window, cx);
+            search.show_results(global_search::Tab::All, cx);
+        });
+        self.show_search_results(window, cx);
+    }
+
     /// Escape on the results: back where the user was.
     pub fn leave_search_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.main != Main::Search {
@@ -2481,11 +2500,7 @@ impl Shell {
                 self.main == Main::Settings,
                 palette,
                 cx,
-                |this, window, cx| {
-                    this.hide_calendar(window, cx);
-                    this.show_settings(cx);
-                    this.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
-                },
+                Self::open_settings,
             ))
     }
 
