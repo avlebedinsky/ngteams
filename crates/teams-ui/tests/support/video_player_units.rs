@@ -463,16 +463,43 @@ fn starting_a_second_movie_pauses_the_first() {
     let mut app = gpui::TestAppContext::single();
     app.update(crate::window::init);
     let source = PictureSource::of(Arc::new(Files::default()));
-    let (first, cx) =
-        app.add_window_view(|_, cx| VideoPlayer::new("first".to_owned(), movie_file(), source.clone(), cx));
-    draw(cx);
-    click(cx, "video-play-first");
-    wait_state(&first, cx, State::Playing);
-    let second = cx.update(|_, cx| cx.new(|cx| VideoPlayer::new("second".to_owned(), movie_file(), source, cx)));
-    cx.update(|_, cx| second.update(cx, VideoPlayer::toggle));
-    wait_state(&first, cx, State::Paused);
-    assert!(cx.update(|_, cx| second.read(cx).player.is_some()));
-    assert_eq!(cx.update(|_, cx| players(cx).len()), 2);
+    // the movie is 3 s long: on a slow machine the first can run out before the second starts, and a movie that
+    // ended has nothing left to pause; then it is tried again
+    for _ in 0..3 {
+        let (first, cx) =
+            app.add_window_view(|_, cx| VideoPlayer::new("first".to_owned(), movie_file(), source.clone(), cx));
+        draw(cx);
+        click(cx, "video-play-first");
+        wait_state(&first, cx, State::Playing);
+        let second =
+            cx.update(|_, cx| cx.new(|cx| VideoPlayer::new("second".to_owned(), movie_file(), source.clone(), cx)));
+        cx.update(|_, cx| second.update(cx, VideoPlayer::toggle));
+        if wait_either(&first, cx, State::Paused, State::Ended) == State::Ended {
+            continue;
+        }
+        assert!(cx.update(|_, cx| second.read(cx).player.is_some()));
+        let live = cx.update(|_, cx| players(cx));
+        assert!(live.contains(&first) && live.contains(&second), "both players stay");
+        return;
+    }
+    panic!("the first movie ran out before the second started, every time");
+}
+
+/// Waits until `view` is `one` or `other`, and says which.
+fn wait_either(view: &Entity<VideoPlayer>, cx: &mut gpui::VisualTestContext, one: State, other: State) -> State {
+    let until = Instant::now() + WAIT;
+    loop {
+        draw(cx);
+        let state = cx.update(|_, cx| view.read(cx).state());
+        if let Some(state) = state.filter(|state| *state == one || *state == other) {
+            return state;
+        }
+        assert!(
+            Instant::now() < until,
+            "wanted {one:?} or {other:?}, last state {state:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
