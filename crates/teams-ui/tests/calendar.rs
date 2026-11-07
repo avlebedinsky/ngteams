@@ -1300,3 +1300,99 @@ fn a_meeting_meet_now_couldn_t_make_says_so_and_the_dialog_stays() {
     assert!(cx.debug_bounds("calendar-meet-now-dialog").is_none());
     assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
 }
+
+#[test]
+fn a_day_starts_at_its_local_midnight_or_where_the_clock_jumps_past_it() {
+    use chrono_tz::America::Santiago;
+    use teams_ui::calendar::midnight_in;
+    let day = |month, day| NaiveDate::from_ymd_opt(2026, month, day).unwrap();
+    // an ordinary day: its midnight at Santiago's -4
+    assert_eq!(midnight_in(&Santiago, day(9, 5)), 1_788_580_800_000);
+    // Chile's clocks skip 00:00–01:00 on 2026-09-06: the day starts at the jump (04:00 UTC, 01:00 at -3), not at
+    // midnight UTC (20:00 the evening before there)
+    assert_eq!(midnight_in(&Santiago, day(9, 6)), 1_788_667_200_000);
+    // and the next day's at -3
+    assert_eq!(midnight_in(&Santiago, day(9, 7)), 1_788_750_000_000);
+    // where midnight comes twice (Havana's clocks fall back from 01:00 to 00:00 on 2026-11-01), the day starts at the
+    // first (04:00 UTC, at -4)
+    assert_eq!(midnight_in(&chrono_tz::America::Havana, day(11, 1)), 1_793_505_600_000);
+}
+
+fn kept(account: &str, address: &str, name: &str) -> teams_ui::settings::PersonCalendar {
+    teams_ui::settings::PersonCalendar {
+        account: account.to_owned(),
+        address: address.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
+#[test]
+fn a_person_s_calendar_shows_alone_or_goes_and_the_account_s_list_is_kept_in_the_settings() {
+    use teams_ui::settings::{Settings, SettingsModel};
+    let rig = Rig::start();
+    let me = teams_ui::Core::me(&*rig.core).to_owned();
+    let (view, cx, _written) = window(&rig);
+    let other = kept("8:orgid:other-account", "quinn@example.com", "Quinn");
+    let settings = cx.update(|_, cx| {
+        cx.new(|_| {
+            SettingsModel::in_memory(Settings {
+                people_calendars: vec![kept(&me, "avery@example.com", "Avery"), other.clone()],
+                ..Settings::default()
+            })
+        })
+    });
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_settings(settings.clone(), cx)));
+    let addresses = |cx: &mut VisualTestContext| -> Vec<(String, bool)> {
+        cx.update(|_, cx| {
+            view.read(cx)
+                .people()
+                .iter()
+                .map(|person| (person.address.clone(), person.ticked))
+                .collect()
+        })
+    };
+    assert_eq!(
+        addresses(cx),
+        [("avery@example.com".to_owned(), true)],
+        "only the account's own"
+    );
+    let added = cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.add_person(&person("riley@example.com", "Riley"), cx)
+        })
+    });
+    assert!(added);
+    let again = cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.add_person(&person("RILEY@example.com", "Riley"), cx)
+        })
+    });
+    assert!(!again, "a calendar listed already isn't added twice");
+    let stored = cx.update(|_, cx| settings.read(cx).settings().people_calendars.clone());
+    assert_eq!(
+        stored,
+        [
+            other.clone(),
+            kept(&me, "avery@example.com", "Avery"),
+            kept(&me, "riley@example.com", "Riley")
+        ]
+    );
+
+    // Riley's "…": Show this only
+    draw(cx);
+    click(cx, "calendar-person-more-1");
+    click(cx, "calendar-person-only-1");
+    assert_eq!(
+        addresses(cx),
+        [
+            ("avery@example.com".to_owned(), false),
+            ("riley@example.com".to_owned(), true)
+        ]
+    );
+    // Avery's "…": Remove, kept so in the settings, the other account's entry as it was
+    click(cx, "calendar-person-more-0");
+    click(cx, "calendar-person-remove-0");
+    assert_eq!(addresses(cx), [("riley@example.com".to_owned(), true)]);
+    let stored = cx.update(|_, cx| settings.read(cx).settings().people_calendars.clone());
+    assert_eq!(stored, [other, kept(&me, "riley@example.com", "Riley")]);
+}

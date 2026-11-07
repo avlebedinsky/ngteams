@@ -8,7 +8,8 @@
 use std::rc::Rc;
 
 use chrono::{
-    DateTime, Datelike as _, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike as _, Weekday,
+    DateTime, Datelike as _, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Offset as _, TimeZone,
+    Timelike as _, Weekday,
 };
 use teams_core::{CalendarEvent, EventResponse, EventTime, ShowAs};
 
@@ -196,13 +197,28 @@ pub fn event_title(event: &CalendarEvent) -> String {
     }
 }
 
-/// Local midnight of `date` in ms since the epoch (the first instant of the day where a change of clock skips it).
+/// Local midnight of `date` in ms since the epoch ([`midnight_in`] the local time zone).
 fn midnight_ms(date: NaiveDate) -> i64 {
+    midnight_in(&Local, date)
+}
+
+/// The first instant of `date` in `zone`, in ms since the epoch: its midnight, the earlier one where a change of clock
+/// repeats it. Where the clock skips midnight (a zone whose summer time starts at 00:00) the day starts when it jumps,
+/// the first time on the clock that date has: midnight on the clock before the change.
+#[must_use]
+pub fn midnight_in<Tz: TimeZone>(zone: &Tz, date: NaiveDate) -> i64 {
     let midnight = date.and_time(NaiveTime::MIN);
-    Local
-        .from_local_datetime(&midnight)
-        .earliest()
-        .map_or_else(|| midnight.and_utc().timestamp_millis(), |time| time.timestamp_millis())
+    if let Some(time) = zone.from_local_datetime(&midnight).earliest() {
+        return time.timestamp_millis();
+    }
+    // the clock jumps at midnight: read it with the offset of the evening before, which the change ends
+    let as_utc = midnight.and_utc().timestamp_millis();
+    midnight
+        .checked_sub_signed(Duration::hours(12))
+        .map_or(as_utc, |evening| {
+            let before = zone.offset_from_utc_datetime(&evening).fix();
+            as_utc - i64::from(before.local_minus_utc()) * 1000
+        })
 }
 
 /// An event's start or end in local time.
