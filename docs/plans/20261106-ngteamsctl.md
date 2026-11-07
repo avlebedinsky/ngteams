@@ -539,12 +539,12 @@
       too), so its floor is left as it is; the two reviewed `lib.rs` hashes updated
 
 ### Task 16: [Final] Update documentation
-- [ ] README: `teams-ctl` in Layout, and an `ngteamsctl` section under `ngteams` covering the sockets, commands,
+- [x] README: `teams-ctl` in Layout, and an `ngteamsctl` section under `ngteams` covering the sockets, commands,
       `--json`, the event catalogue, exit codes and hand-off
-- [ ] `docs/personal-build.md`: ngteamsctl on the installed build. In "What agents may do": agents use `ngteamsctl`
+- [x] `docs/personal-build.md`: ngteamsctl on the installed build. In "What agents may do": agents use `ngteamsctl`
       only against lab aliases (`--lab`, within the lab rule) and the read-only runner's socket (`--read-only`), never
       against the installed instance's personal socket.
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/` (left in place: the plan-exec harness moves it once every phase is done)
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

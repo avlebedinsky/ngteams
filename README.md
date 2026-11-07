@@ -47,6 +47,7 @@ notification waits at most a few seconds for its translation); the language menu
 | `crates/teams-core` | account engines, sync, outbox and retries, calendar/team operations and the cross-account call floor |
 | `crates/teams-media` | libwebrtc, Teams' SDP dialect, relay-only ICE, audio processing, video effects, file/PipeWire devices and GStreamer playback |
 | `crates/teams-ui` | GPUI views/models over `Core`, rich-text editor/rendering, accounts, calendar, notifications and call windows |
+| `crates/teams-ctl` | `ngteamsctl` and the control socket's protocol, socket paths, line codec and client (no GPUI); the app's server is `crates/ngteams/src/ctl/` |
 | `crates/teams-log` | private rotated diagnostic files, full debug HTTP/frame records and logger-owned credential redaction |
 | `crates/teams-signin`, `crates/teams-signin-extension` | in-process host-gated WPE sign-in window and its web-process request guard |
 | `crates/teams-wpe`, `crates/wpe-*-sys` | system WPE WebKit integration and generated bindings |
@@ -317,6 +318,123 @@ stored token is changed. Transports refuse writes, registrations and call replie
 channel, calls, PipeWire or camera, catches up by reads every minute and never opens sign-in. The UI offers no
 writes, add/remove account or tray item. It does not disturb the user's running instance. The script builds only
 `ui-sandbox-run`; it requires an installed binary with read-only support (`TEAMS_BIN` can select its path).
+
+### `ngteamsctl`
+
+`ngteamsctl` drives the running app over its control socket: reads, the window and its views, writes, own status,
+calls, the calendar, and a stream of what happens. Nothing in the app has to be turned on, and it asks no
+confirmation: the socket is `0600` in a `0700` directory, so only the user's own processes reach it. The server is
+one more caller of what the window calls (`Core`, the outbox, the call buttons' path, the status menu's), so it
+builds no request of its own. `scripts/install-personal.sh` installs it beside `ngteams` with bash, fish and zsh
+completions; `ngteamsctl completions <shell>` prints one.
+
+Each app serves one socket, and `ngteamsctl` picks it by mode. `--socket <path>`, else `$NGTEAMS_CTL_SOCKET`,
+overrides any of them:
+
+| app | socket | `ngteamsctl` |
+|---|---|---|
+| installed `ngteams` | `$XDG_RUNTIME_DIR/ngteams/ctl.sock`, or the app's `--ctl-socket <path>` | (default) |
+| lab alias | `$XDG_STATE_HOME/ngteams-lab/<alias>/ctl.sock`, handed in by `scripts/run-lab.sh` | `--lab <alias>` |
+| read-only | `$XDG_STATE_HOME/ngteams-read-only/run/ctl.sock`, handed in by `scripts/run-personal-read-only.sh` | `--read-only` |
+
+`XDG_STATE_HOME` defaults to `~/.local/state`. The sandbox clears a lab or read-only app's environment, so it
+serves only where its runner's `--ctl-socket` says. On bind, a socket file left by an app that didn't quit is
+replaced and one with a live app behind it is refused. The read-only app refuses every write, `status set` and
+joins with `refused_read_only`. A lab alias's writes and calls are live lab runs, under the lab-contact check.
+
+```sh
+ngteamsctl status                           # version, accounts and their engines, the window, the call up
+ngteamsctl accounts
+ngteamsctl chats [--unread] [--limit N]
+ngteamsctl messages <chat> [--limit N] [--before <message-id>]
+ngteamsctl unread                           # the badge's counts, per chat and total
+ngteamsctl search <words…> [--limit N]
+ngteamsctl members <chat>
+ngteamsctl calendar [--today | --from YYYY-MM-DD [--to YYYY-MM-DD]]
+ngteamsctl calendar show <event-id>
+
+ngteamsctl window show|hide|toggle|focus    # hide needs a tray item (no_tray)
+ngteamsctl activate
+ngteamsctl open chat <chat> | channel <channel> | calendar | settings [page] | search <words…>
+ngteamsctl account switch <account>
+ngteamsctl ui state
+ngteamsctl action list
+ngteamsctl action ShowCalendar              # any registered teams_ui:: action, full or unique short name
+
+ngteamsctl send <chat> '<text>' [--wait]    # '-' reads the text from stdin; each line a paragraph
+ngteamsctl edit <chat> <message-id> '<text>' [--wait]
+ngteamsctl delete <chat> <message-id> [--wait]
+ngteamsctl react|unreact <chat> <message-id> like|heart|laugh|surprised|sad|angry [--wait]
+ngteamsctl read <chat> [--wait]             # mark read up to the newest message
+ngteamsctl new-chat <mri|upn>… [--wait]     # a 1:1 chat for one person, a group chat for more
+ngteamsctl resend <row> [--wait]
+ngteamsctl status get
+ngteamsctl status set available|busy|dnd|away|reset
+ngteamsctl sync
+
+ngteamsctl calls
+ngteamsctl call <chat>
+ngteamsctl answer | decline | hangup
+ngteamsctl join <chat>
+ngteamsctl join meeting <event-id> [--now]
+ngteamsctl mute on|off|toggle
+ngteamsctl camera on|off|toggle
+
+ngteamsctl events [--follow] [--kind K,…] [--chat C] [--from WHO] [--mentions] [--detail] [--lead MIN,…]
+ngteamsctl events kinds
+ngteamsctl wait <kind> [--match REGEX] [--timeout SECONDS] [--chat C] [--from WHO] [--mentions]
+```
+
+- **Addressing**: `--account <upn|mri|index>` (index as `accounts` numbers them, from 0); by default the account the
+  window shows, and for call commands the account ringing or in the call. A chat is its id or its title as the chat
+  list shows it (the topic, otherwise the other members' names), in any case; a title several chats share is
+  `ambiguous_chat`, listing their ids. A channel is its id, name or `<team>/<channel>`; a settings page its key or
+  title.
+- **Writes** go through the outbox as the window's do. Each answers with its outbox row as its first attempt left it;
+  `--wait` waits up to a minute more for it to settle (`sent`, `failed`, or `unknown`: it may have arrived, and only
+  `resend` sends it again). A write the app didn't answer in time may still go out: check
+  `events --follow --kind outbox` or `messages <chat>` before writing it again. `send` takes plain text; markdown and
+  mentions aren't parsed. `status set` chooses as the status menu does, kept in the settings; `reset` hands the
+  status back to the app.
+- **Calls** are asked as the call buttons ask them (the one-call rule, the call window and devices apply) and answer
+  with the call's row once the engine took it. `mute` and `camera` with `on`/`off` change only what differs.
+  `join meeting` opens the pre-join as the calendar's Join does; `--now` joins at once (microphone on, camera off).
+- **Output** is tables and one line per event; `--json` prints each response, error or event as the JSON line the
+  app sent. The wire is a JSON line per request (`{"id":N,"cmd":"…","account":"…"}`), answered
+  `{"id":N,"ok":{"kind":"…",…}}` or `{"id":N,"error":{"code":"…","message":"…"}}`, after a `hello` that checks the
+  protocol version; the types are in `crates/teams-ctl/src/protocol.rs`. Error codes: `unknown_account`,
+  `unknown_chat`, `ambiguous_chat`, `busy`, `no_calling`, `no_call`, `not_ringing`, `no_video`, `no_meeting`,
+  `no_tray`, `no_window`, `unknown_action`, `refused_read_only`, `stopped`, `timeout`, `bad_request`,
+  `version_mismatch`, `engine`.
+- **Exit codes**: 0 success; 1 an error answer, a write whose row failed (with `--wait`, one not sent), or a stream
+  that ended early or lagged; 2 no app on the socket, no socket path, or a usage error; 3 `wait` timed out.
+
+**Events.** `events --follow` prints every event the filters let through until the app closes the stream; without
+`--follow` it prints the first one. `wait <kind>` prints the first event of that kind whose JSON line matches
+`--match` and exits 0, or 3 past `--timeout` (which the connect counts towards; without it, it waits on). `--kind`
+and `wait` take `message*`-style prefixes. A subscriber that falls behind gets a last `lagged` line and the stream
+ends. Each line is `{"event":"<kind>","account":"<upn>","at":<ms>,…}` and carries only what its source holds:
+
+| group | kinds |
+|---|---|
+| messages | `message` (chat, message, sender, plain text, `from_me`, `mentions_me`, `source`: push, catch_up or replay; new messages only, never older history), `message_edited`, `message_deleted`, `reaction` (with `--detail`, the message's current reactions), `typing`, `read` (the account's read horizon moved) |
+| chats | `chat_changed`, `teams_changed`, `unread` (a chat's count and the account's total, as the badge counts) |
+| people | `presence` (MRI, availability), `own_status` (the account's reported status, whoever changed it) |
+| outbox | `outbox` (row id, write, chat, state: queued, sent, failed, unknown) |
+| calls | `incoming_call`, `ring_ended`, `call` (state, and the reason once ended), `call_participants` (joined, left), `lobby`, `voicemail`, `call_window` (open or closed) |
+| calendar | `meeting_starting` (event id, subject, start, minutes to it, whether it is joinable), at each `--lead` (default 5 and 0 minutes) |
+| app | `connection` (connected, disconnected, stopped), `caught_up`, `catch_up_failed`, `engine_failed`, `signed_out`, `account_added`, `account_removed`, `notification` (a desktop notification shown: title, chat), `ui` (the shown account, view, chat or window changed) |
+
+**Hand-off.** A second `ngteams` on the personal build, with no flags or with one Teams link, doesn't start a second
+app: before taking any lock it asks the app on its socket (`--ctl-socket` when given, else the personal one) to
+`activate`, or to open the link, and exits 0. A meeting join link (`msteams:/l/meetup-join/…` or
+`https://teams.microsoft.com/l/meetup-join/…`) opens that meeting's pre-join; any other link shows the window and
+says it wasn't opened. With nobody behind the socket (no file, or a stale one) the launch starts the app, which
+opens a given link once up. An app that takes the connection but doesn't answer in time (a second to connect, five
+to answer, a link's up to 95), or answers an error, is said and the launch exits 1 without starting another app;
+one still starting (holding its accounts before it serves) is asked again for 15 seconds. `--forget`, `--account`,
+the lab and the read-only mode never hand off. The installed desktop entry runs `ngteams %u` and handles
+`x-scheme-handler/msteams`, so a meeting link clicked in the browser comes here.
 
 ### UI and diagnostics
 

@@ -100,6 +100,17 @@ An agent may freely drive lab accounts in their sandbox after the per-run check,
 echo service and the user's own account. The user's own account may participate when the user drives it; the agent
 still does not sign in or drive that personal account in sending mode. Follow [the lab rule](lab-rules.md).
 
+## `ngteamsctl`
+
+The installer puts `ngteamsctl` beside `ngteams` (`~/.local/lib/ngteams/`, linked from `~/.local/bin/`) with its
+shell completions. It is the user's own scripting of their Teams, like a keyboard shortcut: every command works on
+the installed app with no setting to turn on and no confirmation. The app serves it on
+`$XDG_RUNTIME_DIR/ngteams/ctl.sock` (`0600` in a `0700` directory, so only the user's own processes reach it). Its
+writes, own status and calls take the same paths as the window's (the outbox, the status menu, the call buttons), so
+the outbox, transport and call rules above hold for them. A second launch, or a meeting link from the desktop entry,
+hands off to the running app over the same socket. Commands, events and exit codes:
+[README](../README.md#ngteamsctl).
+
 ## Its sign-in
 
 `ngteams` opens a WPE WebKit sign-in window in its own app. The page engine is the executable re-run as an internal
@@ -151,6 +162,9 @@ These are actions for the user, never an agent's personal-account test:
 - Read the user's personal config/data directories, including stores, settings and diagnostic logs, at any time.
 - On the agent's own initiative, run the installed personal app only through `scripts/run-personal-read-only.sh`.
   Navigate, screenshot and inspect that snapshot-based window without driving the user's live instance.
+- Use `ngteamsctl` only against a lab alias (`--lab <alias>`, within the lab rule) and the read-only runner's socket
+  (`--read-only`), never against the installed instance's personal socket: not by default, `--socket` or
+  `$NGTEAMS_CTL_SOCKET`. Nor launch `ngteams` in a way that hands off to the running app.
 - Only on the user's explicit request each time, install the release or start the installed app detached for the
   user, then leave it alone.
 - Never sign in the user's account, drive/test/capture its sending mode, touch its `ngteams` keyring items, receive
