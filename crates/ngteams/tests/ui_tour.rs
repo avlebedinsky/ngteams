@@ -3893,6 +3893,7 @@ fn child_window() -> SandboxResult {
                 first,
                 others: Vec::new(),
                 trace: Arc::new(trace),
+                ctl: None,
                 settings: teams_ui::SettingsModel::load(settings),
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),

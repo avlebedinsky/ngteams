@@ -7,12 +7,14 @@
 //! [`refusal`] rejects test-support and unmarked builds before opening anything; lab-marked builds only run lab mode.
 //! [`read_only`] runs snapshots in the UI sandbox with a get-only credential broker, no writes, calls or push.
 //! [`lab`] runs one lab alias in the sandbox with writable broker credentials and sandbox media.
+//! [`ctl`] serves `ngteamsctl`'s control socket over the running app.
 
 pub mod accounts;
 pub mod accounts_file;
 pub mod app;
 pub mod calling;
 pub mod cli;
+pub mod ctl;
 pub mod descriptors;
 pub mod engine;
 pub mod forget;

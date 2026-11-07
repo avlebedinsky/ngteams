@@ -7317,6 +7317,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 name = "ngteams"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "base64 0.23.1",
  "clap",
  "gpui-pre",
@@ -7330,6 +7331,7 @@ dependencies = [
  "teams-auth",
  "teams-call",
  "teams-core",
+ "teams-ctl",
  "teams-log",
  "teams-media",
  "teams-mock",

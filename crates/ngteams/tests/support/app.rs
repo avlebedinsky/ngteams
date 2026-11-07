@@ -65,6 +65,7 @@ fn open(cx: &TestAppContext, setup: &Setup, account: PersonalAccount) -> Entity<
         },
         read_only: false,
         trace: Arc::new(ViewTrace::off()),
+        ctl: None,
     };
     assert!(cx.update(|cx| super::launch(cx, launch)).is_ok());
     cx.run_until_parked();

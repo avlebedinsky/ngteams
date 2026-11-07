@@ -97,7 +97,7 @@ impl Client {
     /// `hello` takes too long, [`ClientError::VersionMismatch`] or [`ClientError::Server`] when the app refuses the
     /// client's version, or the connection's own error.
     pub fn connect(path: &Path, timeouts: Timeouts) -> Result<Self, ClientError> {
-        let stream = connect_within(path, timeouts.connect)?;
+        let stream = connect_stream(path, timeouts.connect)?;
         stream.set_read_timeout(Some(timeouts.read))?;
         stream.set_write_timeout(Some(timeouts.write))?;
         let reader = LineReader::new(BufReader::new(stream.try_clone()?));
@@ -242,9 +242,14 @@ impl Iterator for Events {
     }
 }
 
-/// Connect within `timeout`. A Unix connect doesn't wait on a non-blocking socket: it fails with `EAGAIN` while the
-/// listener's backlog is full, so it is tried again until the time is up.
-fn connect_within(path: &Path, timeout: Duration) -> Result<UnixStream, ClientError> {
+/// Connect to the socket at `path` within `timeout`, saying nothing on it: what the app's server asks of a socket file
+/// it finds before binding (is anyone behind it?). A Unix connect doesn't wait on a non-blocking socket: it fails with
+/// `EAGAIN` while the listener's backlog is full, so it is tried again until the time is up.
+///
+/// # Errors
+/// [`ClientError::NotRunning`] when nothing listens there (its `source` says why: refused, no such file, …),
+/// [`ClientError::Timeout`] when the backlog stays full, or the socket's own error.
+pub fn connect_stream(path: &Path, timeout: Duration) -> Result<UnixStream, ClientError> {
     let not_running = |source: io::Error| ClientError::NotRunning {
         path: path.to_owned(),
         source,

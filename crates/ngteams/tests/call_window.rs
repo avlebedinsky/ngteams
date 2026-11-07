@@ -909,6 +909,7 @@ fn child(alias: Alias) -> SandboxResult {
                 },
                 others: Vec::new(),
                 trace: Arc::new(trace),
+                ctl: None,
                 settings: teams_ui::SettingsModel::load(settings),
                 bus: teams_ui::bus::address_from_env(),
                 sign_in_again: std::rc::Rc::new(|_| std::rc::Rc::new(|_| {})),

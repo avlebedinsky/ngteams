@@ -277,6 +277,7 @@ fn the_rail_s_plus_asks_for_an_account_and_says_one_the_app_runs_already() {
         },
         read_only: false,
         trace: Arc::new(ViewTrace::off()),
+        ctl: None,
     };
     let Ok(launched) = cx.update(|cx| app::launch(cx, launch)) else {
         panic!("the window opens");
@@ -347,6 +348,7 @@ fn the_read_only_mode_adds_removes_and_signs_in_no_account_and_says_signed_out_o
         },
         read_only: true,
         trace: Arc::new(ViewTrace::off()),
+        ctl: None,
     };
     let Ok(launched) = cx.update(|cx| app::launch(cx, launch)) else {
         panic!("the window opens");

@@ -258,16 +258,16 @@
   `tests/accounts_window.rs`, `tests/call_window.rs`, `tests/ui_tour.rs`
 - Create: `crates/ngteams/tests/ctl.rs`
 
-- [ ] listener thread: prepare the dir and bind `0600`. If the path exists and a connect succeeds, refuse ("already
+- [x] listener thread: prepare the dir and bind `0600`. If the path exists and a connect succeeds, refuse ("already
       running"). If the connect is refused, remove the stale file and bind.
-- [ ] a thread per connection, requests to the foreground through `async_channel`, replies through a `oneshot`. A
+- [x] a thread per connection, requests to the foreground through `async_channel`, replies through a `oneshot`. A
       malformed line gets `bad_request`.
-- [ ] foreground dispatch over `WeakEntity<Running>`: `hello`, and `status` (accounts with their engine state,
+- [x] foreground dispatch over `WeakEntity<Running>`: `hello`, and `status` (accounts with their engine state,
       the window shown or in the tray, the call up)
-- [ ] remove the socket file on quit
-- [ ] tests (client thread + pumping test thread): hello and version mismatch, status, stale socket replaced, a
+- [x] remove the socket file on quit
+- [x] tests (client thread + pumping test thread): hello and version mismatch, status, stale socket replaced, a
       second server refused, two clients at once, quit closes connections and removes the file
-- [ ] run `cargo test -p ngteams --test ctl`, which must pass before the next task
+- [x] run `cargo test -p ngteams --test ctl`, which must pass before the next task
 
 ### Task 3: lab and read-only sockets through their runners
 

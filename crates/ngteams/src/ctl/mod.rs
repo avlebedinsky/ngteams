@@ -1,0 +1,47 @@
+//! The control socket's server: what `ngteamsctl` talks to (`docs/plans/20261106-ngteamsctl.md`; the protocol is
+//! `teams-ctl`'s).
+//!
+//! It is one more caller of what the window calls: the accounts' `Core`, the desktop and the settings. Nothing in it
+//! builds a request, and it opens no store.
+//!
+//! - [`listener`]: the socket (`0600` in a `0700` directory, a stale one replaced, a live one refused), a thread
+//!   accepting connections and a thread per connection reading its lines.
+//! - [`dispatch`]: each request answered on GPUI's foreground, over the app's accounts as they run.
+//!
+//! The requests cross from the connections' threads to the foreground through a channel, where one task takes them in
+//! turn; each answer goes back through a oneshot to the thread that asked. The server serves from the app's launch
+//! (`Launch::ctl`) until its quit, which closes every connection and removes the socket file.
+
+pub mod dispatch;
+pub mod listener;
+
+use std::path::Path;
+
+use gpui::{App, AsyncApp, WeakEntity};
+
+use crate::app::Running;
+pub use listener::{BindError, Listener, bind};
+
+/// Serve the control socket at `path` over the app's accounts (`running`) until [`Listener::stop`].
+///
+/// # Errors
+/// The socket wasn't bound ([`BindError`]: another app serves there, say) or its thread wasn't started.
+pub fn serve(path: &Path, running: WeakEntity<Running>, cx: &mut App) -> Result<Listener, BindError> {
+    let bound = bind(path)?;
+    let (jobs, asked) = async_channel::unbounded::<listener::Job>();
+    let listener = bound.serve(jobs).map_err(|source| BindError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    // ends once every connection's thread and the listener's are gone (the stop), each having dropped its sender
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Ok(job) = asked.recv().await {
+            let answer = cx.update(|cx| dispatch::answer(&running, job.line, cx));
+            // the connection may be gone meanwhile: nobody to tell
+            let _ = job.reply.send(answer);
+        }
+    })
+    .detach();
+    log::info!("the control socket is served");
+    Ok(listener)
+}

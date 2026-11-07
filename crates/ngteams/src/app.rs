@@ -17,6 +17,9 @@
 //! [`SIGNED_OUT_HINT`], its engine is shut down (nothing more is sent for it: every request answers that it stopped),
 //! and the sign-in window opens again for it ([`SignInAgain`]). A sign-in that goes through starts the app afresh
 //! (`main`: the process runs itself again), so a new engine starts only once it is signed in again.
+//!
+//! **The control socket** ([`crate::ctl`], [`Launch::ctl`]): served from the launch, once the window opened, until the
+//! quit, which closes it first. A socket another app serves already is said, and the app runs without one.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -76,6 +79,8 @@ pub struct Launch<S = AppSecrets> {
     pub read_only: bool,
     /// Where the view trace goes (`--trace-fd`, the read-only mode's runner reads it); off otherwise.
     pub trace: Arc<ViewTrace>,
+    /// Where the control socket is served (`ngteamsctl`, [`crate::ctl`]); `None` serves none.
+    pub ctl: Option<PathBuf>,
 }
 
 /// The settings in `file` (`~/.local/share/ngteams/settings.toml`) with the first run's screen asked for: none of
@@ -130,6 +135,8 @@ pub struct Running {
     quitting: bool,
     /// The read-only mode: nothing is added, removed or signed in ([`Launch::read_only`]).
     read_only: bool,
+    /// The control socket served, until the quit ([`Launch::ctl`]).
+    ctl: Option<crate::ctl::Listener>,
 }
 
 /// What [`launch`] started.
@@ -159,6 +166,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         runner,
         read_only,
         trace,
+        ctl,
     } = launch;
     let (hint, sign_in_again) = signing_out(read_only, sign_in_again);
     play_videos_on(runner.devices.as_ref(), cx);
@@ -207,6 +215,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         adding: None,
         quitting: false,
         read_only,
+        ctl: None,
     });
     running.update(cx, |running, cx| {
         for started in others {
@@ -223,12 +232,32 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
             });
         }
     };
-    cx.set_global(Held {
-        running: running.clone(),
-    });
+    hold(&running, ctl.as_deref(), cx);
     follow_desktop(&desktop, running, cx);
     connect(&desktop, bus, cx);
     Ok(Launched { window, desktop })
+}
+
+/// `running` held for the app's life, and the control socket at `ctl` served over it until its quit.
+fn hold(running: &Entity<Running>, ctl: Option<&std::path::Path>, cx: &mut App) {
+    cx.set_global(Held {
+        running: running.clone(),
+    });
+    if let Some(path) = ctl {
+        serve_ctl(path, running, cx);
+    }
+}
+
+/// The control socket at `path`, held by `running` until its quit; one that can't be served is said, and the app runs
+/// without it.
+fn serve_ctl(path: &std::path::Path, running: &Entity<Running>, cx: &mut App) {
+    match crate::ctl::serve(path, running.downgrade(), cx) {
+        Ok(listener) => running.update(cx, |running, _| running.ctl = Some(listener)),
+        Err(error) => {
+            eprintln!("teams: no control socket: {error}");
+            log::warn!("no control socket: {error}");
+        }
+    }
 }
 
 /// A lab alias can forget its current account, but its single-account broker cannot add another one.
@@ -299,6 +328,21 @@ fn follow_desktop(desktop: &Entity<Desktop>, running: Entity<Running>, cx: &mut 
 }
 
 impl Running {
+    /// The desktop: the window, the rail, the tray.
+    pub(crate) fn desktop(&self) -> &Entity<Desktop> {
+        &self.desktop
+    }
+
+    /// Each account as it runs, in the rail's order: its MRI, its UPN and its bridge.
+    pub(crate) fn bridges(&self) -> &[(String, String, Entity<Bridge>)] {
+        &self.bridges
+    }
+
+    /// Whether the app is quitting: its engines shutting down.
+    pub(crate) fn quitting(&self) -> bool {
+        self.quitting
+    }
+
     /// Read-only views cannot add accounts, and each lab alias has its own single-account broker.
     fn can_add_account(&self) -> bool {
         !self.read_only && self.runner.setup.secrets().application() != crate::lab::LAB_KEYRING_APPLICATION
@@ -472,6 +516,10 @@ impl Running {
             return;
         }
         log::info!("the app quits: every account's engine shuts down first");
+        // nothing more is asked over the control socket: its connections closed, its file removed
+        if let Some(mut ctl) = self.ctl.take() {
+            ctl.stop();
+        }
         let stopped = self.shutdown(cx);
         quit_after(stopped, cx);
     }

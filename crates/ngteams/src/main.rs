@@ -4,7 +4,7 @@
 use std::cell::Cell;
 use std::os::fd::RawFd;
 use std::os::unix::process::CommandExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -110,10 +110,25 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
-    run_setup(cli, reach, setup, ViewTrace::off())
+    run_setup(cli, reach, setup, ViewTrace::off(), personal_ctl(cli))
 }
 
-fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace) -> Result<Outcome, String> {
+/// Where the personal app serves its control socket: `--ctl-socket`, else `$XDG_RUNTIME_DIR/ngteams/ctl.sock`
+/// (`$NGTEAMS_CTL_SOCKET` is a client's, not the app's); none without a runtime dir.
+fn personal_ctl(cli: &Cli) -> Option<PathBuf> {
+    if let Some(path) = &cli.ctl_socket {
+        return Some(path.clone());
+    }
+    match teams_ctl::Env::from_process().mode_path(&teams_ctl::Mode::Personal) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("teams: no control socket: {error}");
+            None
+        }
+    }
+}
+
+fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Option<PathBuf>) -> Result<Outcome, String> {
     if let Some(upn) = cli.forget.as_deref() {
         forget(&setup, upn)?;
         return Ok(Outcome::Quit);
@@ -168,6 +183,7 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace) -> Result<
             runner: window_runner(runner),
             read_only: false,
             trace: Arc::new(trace),
+            ctl,
         };
         if let Err(failure) = app::launch(cx, launch) {
             eprintln!("teams: the window can't be opened: {}", failure.error);
@@ -262,7 +278,8 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
             return Err(format!("lab alias {} is configured for {}", mode.alias, account.upn));
         }
     }
-    match run_setup(cli, Reach::Sandbox, setup, trace)? {
+    // no control socket until its runner hands one in; never the personal one
+    match run_setup(cli, Reach::Sandbox, setup, trace, None)? {
         Outcome::Restart => Ok(Outcome::LabRestart(descriptors)),
         outcome => Ok(outcome),
     }
@@ -342,6 +359,8 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
             runner: window_runner(runner),
             read_only: true,
             trace: Arc::new(trace),
+            // no control socket until its runner hands one in; never the personal one
+            ctl: None,
         };
         if let Err(failure) = app::launch(cx, launch) {
             eprintln!("teams: the window can't be opened: {}", failure.error);

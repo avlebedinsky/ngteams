@@ -11,6 +11,7 @@
 //! `get` only, run outside the sandbox).
 //! Lab mode is `ngteams --lab <alias> --secrets-fd <n> [--trace-fd <n>]`, with writable lab credentials served by
 //! `ngteams secrets --lab <alias> --fd <n>` outside its UI sandbox.
+//! `--ctl-socket <path>` names where `ngteamsctl`'s control socket is served (`crate::ctl`).
 
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -39,6 +40,9 @@ pub struct Cli {
     pub forget: Option<String>,
     #[command(flatten)]
     pub read_only: ReadOnlyArgs,
+    /// Where `ngteamsctl`'s control socket is served; `$XDG_RUNTIME_DIR/ngteams/ctl.sock` by default.
+    #[arg(long, value_name = "PATH")]
+    pub ctl_socket: Option<PathBuf>,
 }
 
 /// The read-only mode's arguments.

@@ -13,6 +13,8 @@ name = "ngteams"
 path = "src/main.rs"
 
 [dependencies]
+# the control socket's requests, from its connections' threads to GPUI's foreground
+async-channel.workspace = true
 clap.workspace = true
 # the app's window: GPUI's Linux platform, Wayland only
 gpui-pre.workspace = true
@@ -41,6 +43,8 @@ teams-wpe.workspace = true
 teams-store.workspace = true
 # the views and the bridge over the engine
 teams-ui.workspace = true
+# `ngteamsctl`'s control socket: its protocol, socket paths and line codec, served by `ngteams::ctl`
+teams-ctl.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 thiserror.workspace = true

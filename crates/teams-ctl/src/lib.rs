@@ -15,7 +15,7 @@ pub mod codec;
 pub mod path;
 pub mod protocol;
 
-pub use client::{Client, ClientError, Events, Timeouts};
+pub use client::{Client, ClientError, Events, Timeouts, connect_stream};
 pub use codec::{CodecError, LineReader, MAX_LINE};
 pub use path::{Env, Mode, PathError, prepare_dir, socket_path};
 pub use protocol::{
