@@ -10,6 +10,8 @@
 //! - the UI commands ([`ui`]): the window, the views it opens, the account it shows and the actions dispatched to it.
 //! - the message writes ([`writes`]): through the account addressed, its outbox; its own status as its status menu
 //!   chooses it, and `sync`, its catch-up now.
+//! - the call commands ([`calls`]): through the account addressed, or the one ringing or in the call, asked as the call
+//!   buttons ask.
 //! - `subscribe` ([`events`]): answered `subscribed` with the stream the connection writes from then on.
 //!
 //! A request the app doesn't serve yet is a [`ErrorCode::BadRequest`]; once the app is going, every request is
@@ -21,11 +23,11 @@ use teams_ctl::protocol::{
     AccountRow, AppStatus, CallRow, CtlError, ErrorCode, Hello, Outcome, Request, RequestLine, Response, ResponseLine,
     WindowState,
 };
-use teams_ui::{Account, Bridge, Calls, Desktop, Engine, Link, Status};
+use teams_ui::{Account, Bridge, Desktop, Engine, Link, Status};
 
 use super::address::{self, Addressed};
 use super::listener::Answer;
-use super::{events, reads, ui, writes};
+use super::{calls, events, reads, ui, writes};
 use crate::app::Running;
 
 /// The app's version, as `hello` and `status` tell it.
@@ -71,6 +73,9 @@ async fn ask(
 ) -> Result<Response, CtlError> {
     if ui::serves(request) {
         return ui::answer(running, account, request, cx).await;
+    }
+    if calls::serves(request) {
+        return calls::answer(running, account, request, cx).await;
     }
     if writes::serves_status(request) {
         return cx.update(|cx| writes::own_status(&alive(running, cx)?, account, request, cx));
@@ -195,27 +200,5 @@ fn window_state(desktop: &Desktop) -> WindowState {
 
 /// The call up on account `upn`, or else the invitation that rings there.
 pub fn call_row(upn: &str, bridge: &Bridge, cx: &App) -> Option<CallRow> {
-    let calls: &Calls = bridge.models().calls.read(cx);
-    if let Some(call) = calls.call() {
-        return Some(CallRow {
-            id: call.id.get().to_string(),
-            account: upn.to_owned(),
-            chat: call.chat.clone(),
-            state: teams_ui::calls::status_name(&call.status).to_owned(),
-            ringing: false,
-            caller: call.caller.as_ref().map(|caller| caller.as_str().to_owned()),
-            muted: call.muted,
-            camera: call.camera,
-        });
-    }
-    calls.ringing().map(|ringing| CallRow {
-        id: ringing.call.get().to_string(),
-        account: upn.to_owned(),
-        chat: ringing.group_chat.clone(),
-        state: "ringing".to_owned(),
-        ringing: true,
-        caller: Some(ringing.caller.as_str().to_owned()),
-        muted: false,
-        camera: false,
-    })
+    calls::rows(upn, bridge.models().calls.read(cx)).into_iter().next()
 }

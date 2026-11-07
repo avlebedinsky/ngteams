@@ -126,7 +126,7 @@ pub async fn within_answer<T>(
 }
 
 /// `work`'s answer, unless it takes longer than `bound`: then [`ErrorCode::Timeout`] saying `late`. The work goes on.
-async fn within<T>(
+pub(super) async fn within<T>(
     bound: std::time::Duration,
     late: &str,
     work: impl Future<Output = Result<T, CtlError>>,

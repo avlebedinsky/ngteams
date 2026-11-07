@@ -23,10 +23,10 @@ use teams_ctl::client::Timeouts;
 use teams_ctl::codec::{LineReader, decode_request};
 use teams_ctl::path::Env;
 use teams_ctl::protocol::{
-    AccountRow, AppStatus, ChatRef, ChatRow, CtlError, CtlEvent, ErrorCode, EventFilter, EventLine, Hello,
-    ManualStatus, MemberRow, MessageRow, MessageSource, OpenTarget, OutboxRow, OutboxState, Outcome, OwnStatus,
-    PROTOCOL_VERSION, Request, RequestLine, Response, ResponseLine, SYNC_ANSWER, StatusChoice, SyncReport, UiState,
-    Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT, WindowOp, WindowState,
+    AccountRow, AppStatus, CALL_ANSWER, CallRow, ChatRef, ChatRow, CtlError, CtlEvent, ErrorCode, EventFilter,
+    EventLine, Hello, ManualStatus, MemberRow, MessageRow, MessageSource, OpenTarget, OutboxRow, OutboxState, Outcome,
+    OwnStatus, PROTOCOL_VERSION, Request, RequestLine, Response, ResponseLine, SYNC_ANSWER, StatusChoice, SyncReport,
+    Toggle, UiState, Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT, WindowOp, WindowState,
 };
 
 /// What the fake server does with a request after the `hello`: lines to send back, then whether to read on.
@@ -588,6 +588,137 @@ fn status_cases() -> Vec<Case> {
     ]
 }
 
+fn call_row(state: &str, ringing: bool, muted: bool, camera: bool) -> CallRow {
+    CallRow {
+        id: s("7"),
+        account: s("a@lab.invalid"),
+        chat: Some(s(LAB_CHAT)),
+        state: s(state),
+        ringing,
+        caller: ringing.then(|| s("8:orgid:b")),
+        muted,
+        camera,
+    }
+}
+
+fn call_cases() -> Vec<Case> {
+    let call = |state, muted, camera| Response::Call(call_row(state, false, muted, camera));
+    vec![
+        Case {
+            args: &["calls"],
+            account: None,
+            request: Request::Calls,
+            response: Response::Calls {
+                calls: vec![call_row("ringing", true, false, false)],
+            },
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  ringing (ringing from 8:orgid:b)"],
+        },
+        Case {
+            args: &["call", "Lab chat"],
+            account: None,
+            request: Request::Call { chat: s("Lab chat") },
+            response: call("placing", false, false),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  placing"],
+        },
+        Case {
+            args: &["--account", "1", "answer"],
+            account: Some("1"),
+            request: Request::Answer,
+            response: call("connecting", false, false),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  connecting"],
+        },
+        Case {
+            args: &["decline"],
+            account: None,
+            request: Request::Decline,
+            response: call("ended", false, false),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  ended"],
+        },
+        Case {
+            args: &["hangup"],
+            account: None,
+            request: Request::HangUp,
+            response: Response::Done,
+            shows: &[],
+        },
+        Case {
+            args: &["join", "Lab group"],
+            account: None,
+            request: Request::Join { chat: s("Lab group") },
+            response: call("joining", false, false),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  joining"],
+        },
+        Case {
+            args: &["mute", "on"],
+            account: None,
+            request: Request::Mute { op: Toggle::On },
+            response: call("connected", true, false),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  connected muted"],
+        },
+        Case {
+            args: &["mute", "toggle"],
+            account: None,
+            request: Request::Mute { op: Toggle::Toggle },
+            response: call("connected", false, false),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  connected"],
+        },
+        Case {
+            args: &["camera", "off"],
+            account: None,
+            request: Request::Camera { op: Toggle::Off },
+            response: call("connected", false, false),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  connected"],
+        },
+        Case {
+            args: &["camera", "on"],
+            account: None,
+            request: Request::Camera { op: Toggle::On },
+            response: call("connected", false, true),
+            shows: &["7   a@lab.invalid  19:lab@thread.v2  connected camera"],
+        },
+    ]
+}
+
+#[test]
+fn a_switch_other_than_on_off_or_toggle_is_a_usage_error() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [&["mute", "loud"][..], &["camera"]] {
+        let run = ctl(home.path(), &home.path().join("nobody.sock"), args);
+        assert_eq!(run.code, 2, "{args:?}: {}", run.stderr);
+    }
+}
+
+#[test]
+fn a_call_command_s_answer_is_waited_for_past_the_app_s_own_bound_on_it() {
+    let parsed = |args: &[&str]| Cli::try_parse_from([&["ngteamsctl"][..], args].concat()).unwrap();
+    let default = Timeouts::default().read;
+    for args in [
+        &["call", "Lab chat"][..],
+        &["answer"],
+        &["decline"],
+        &["hangup"],
+        &["join", "Lab group"],
+        &["mute", "on"],
+        &["camera", "toggle"],
+    ] {
+        assert_eq!(answer_time(&parsed(args).command), CALL_ANSWER + default, "{args:?}");
+    }
+    assert_eq!(answer_time(&parsed(&["calls"]).command), default);
+}
+
+#[test]
+fn a_refused_call_command_exits_1_with_its_code() {
+    let server = Server::new(Box::new(|request: &RequestLine| {
+        (
+            vec![error_line(request.id, ErrorCode::NotRinging, "no call rings")],
+            true,
+        )
+    }));
+    let run = ctl(server.dir.path(), &server.path, &["answer"]);
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(run.stderr.contains("not_ringing: no call rings"), "{}", run.stderr);
+}
+
 #[test]
 fn a_status_choice_the_menu_doesn_t_have_is_a_usage_error() {
     let home = tempfile::tempdir().unwrap();
@@ -699,6 +830,7 @@ fn each_command_asks_its_request_and_prints_its_answer() {
         .chain(message_write_cases())
         .chain(chat_write_cases())
         .chain(status_cases())
+        .chain(call_cases())
     {
         let (run, request) = run_one(Server::answering(case.response), case.args);
         assert_eq!(run.code, 0, "{:?}: {}", case.args, run.stderr);

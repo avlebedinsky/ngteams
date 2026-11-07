@@ -139,6 +139,8 @@ pub struct Running {
     ctl: Option<crate::ctl::Listener>,
     /// Its event streams, fed by each account's bridge tap ([`crate::ctl::events`]).
     hub: Rc<crate::ctl::events::Hub>,
+    /// The view trace every account's views record to ([`Launch::trace`]): the control socket's call asks too.
+    trace: Arc<ViewTrace>,
 }
 
 /// What [`launch`] started.
@@ -190,7 +192,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         core,
         models,
         settings: settings.clone(),
-        trace,
+        trace: Arc::clone(&trace),
     };
     let desktop = cx.new(|cx| {
         Desktop::new(
@@ -219,6 +221,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         read_only,
         ctl: None,
         hub: Rc::default(),
+        trace,
     });
     start_others(&running, others, cx);
     let window = match desktop.update(cx, Desktop::open_window) {
@@ -361,6 +364,11 @@ impl Running {
     /// The control socket's event streams.
     pub(crate) fn hub(&self) -> &Rc<crate::ctl::events::Hub> {
         &self.hub
+    }
+
+    /// The view trace the accounts' views record to.
+    pub(crate) fn trace(&self) -> &Arc<ViewTrace> {
+        &self.trace
     }
 
     /// The first account watched for the event streams (the others are as they start).

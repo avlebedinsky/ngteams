@@ -16,6 +16,9 @@
 //! - **Own status**: `status` alone is the app's; `status get` tells the account's reported status and the one
 //!   chosen, `status set` chooses one as the status menu does. `sync` answers with what its catch-up did, the app
 //!   answering within [`SYNC_ANSWER`].
+//! - **Calls**: `calls` lists the call up and the invitation that rings; `call`, `join`, `answer`, `decline`,
+//!   `hangup`, `mute` and `camera` answer with the call's row as the app shows it once the engine took the ask, the
+//!   app answering within [`CALL_ANSWER`]. They default to the account ringing or in the call.
 //! - **Events**: `events --follow` prints every event the filters let through until the app closes the stream;
 //!   without `--follow`, `events` prints the first one and exits. `wait <kind>` prints the first event of that kind
 //!   whose JSON line matches `--match`, within `--timeout` (which the connect and the subscribe spend too). A kind
@@ -32,8 +35,8 @@ use regex::Regex;
 use crate::client::{Client, ClientError, Events, Refused, Timeouts};
 use crate::path::{Env, Mode};
 use crate::protocol::{
-    CtlEvent, EventFilter, EventLine, OpenTarget, OutboxState, Outcome, Request, Response, ResponseLine, SYNC_ANSWER,
-    StatusChoice, UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT, WindowOp,
+    CALL_ANSWER, CtlEvent, EventFilter, EventLine, OpenTarget, OutboxState, Outcome, Request, Response, ResponseLine,
+    SYNC_ANSWER, StatusChoice, Toggle, UNANSWERED_WRITE, WRITE_ANSWER, WRITE_WAIT, WindowOp,
 };
 use crate::render;
 
@@ -143,6 +146,8 @@ pub enum Command {
     Activate,
     #[command(flatten)]
     Write(WriteCommand),
+    #[command(flatten)]
+    Call(CallCommand),
     /// Print what happens in the app: with `--follow` every event the filters let through, otherwise the first one.
     /// `events kinds` lists the kinds.
     #[command(args_conflicts_with_subcommands = true)]
@@ -268,6 +273,48 @@ impl WriteCommand {
             | Self::Resend { wait, .. } => wait.wait,
         }
     }
+}
+
+/// The call commands: each asked as the call buttons ask it, of the account `--account` names, otherwise the one
+/// ringing or in the call, otherwise the one the window shows; each but `calls` answers with the call's row.
+#[derive(Debug, Subcommand)]
+pub enum CallCommand {
+    /// The call up and the invitation that rings, of every account (only `--account`'s with it).
+    Calls,
+    /// Call a chat: a 1:1 chat's other member, a group chat's members.
+    Call {
+        /// The chat's id or title.
+        chat: String,
+    },
+    /// Answer the invitation that rings.
+    Answer,
+    /// Decline the invitation that rings.
+    Decline,
+    /// Leave the call up (or cancel it while it rings at its callees).
+    Hangup,
+    /// Join the running call of a group chat.
+    Join {
+        /// The chat's id or title.
+        chat: String,
+    },
+    /// Mute the microphone in the call up (`on`), unmute it (`off`), or the other way round (`toggle`).
+    Mute {
+        #[arg(value_enum)]
+        op: ToggleArg,
+    },
+    /// Turn the camera on or off in the call up, or the other way round (`toggle`).
+    Camera {
+        #[arg(value_enum)]
+        op: ToggleArg,
+    },
+}
+
+/// A switch set on, off, or to the other state.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ToggleArg {
+    On,
+    Off,
+    Toggle,
 }
 
 /// A write's `--wait`.
@@ -543,6 +590,7 @@ fn kind(value: &str) -> Result<String, String> {
 fn request(command: &Command, stdin: &mut dyn FnMut() -> io::Result<String>) -> io::Result<Request> {
     Ok(match command {
         Command::Write(write) => write_request(write, stdin)?,
+        Command::Call(call) => call_request(call),
         Command::Status { command: None } => Request::Status,
         Command::Status {
             command: Some(StatusCommand::Get),
@@ -658,6 +706,28 @@ fn write_request(write: &WriteCommand, stdin: &mut dyn FnMut() -> io::Result<Str
     })
 }
 
+/// The request a call command asks.
+fn call_request(call: &CallCommand) -> Request {
+    match call {
+        CallCommand::Calls => Request::Calls,
+        CallCommand::Call { chat } => Request::Call { chat: chat.clone() },
+        CallCommand::Answer => Request::Answer,
+        CallCommand::Decline => Request::Decline,
+        CallCommand::Hangup => Request::HangUp,
+        CallCommand::Join { chat } => Request::Join { chat: chat.clone() },
+        CallCommand::Mute { op } => Request::Mute { op: toggle(*op) },
+        CallCommand::Camera { op } => Request::Camera { op: toggle(*op) },
+    }
+}
+
+fn toggle(op: ToggleArg) -> Toggle {
+    match op {
+        ToggleArg::On => Toggle::On,
+        ToggleArg::Off => Toggle::Off,
+        ToggleArg::Toggle => Toggle::Toggle,
+    }
+}
+
 fn window_op(op: WindowArg) -> WindowOp {
     match op {
         WindowArg::Show => WindowOp::Show,
@@ -702,8 +772,8 @@ fn ask(cli: &Cli, mut client: Client, request: Request, out: &mut dyn Write, err
 }
 
 /// How long `command`'s answer is waited for: a write's past the app's own bound on it ([`WRITE_ANSWER`], and
-/// [`WRITE_WAIT`] more with `--wait`), a `sync`'s past [`SYNC_ANSWER`], so the app's answer (its own timeout too) comes
-/// first; any other's the client's default.
+/// [`WRITE_WAIT`] more with `--wait`), a `sync`'s past [`SYNC_ANSWER`], a call command's past [`CALL_ANSWER`], so the
+/// app's answer (its own timeout too) comes first; any other's the client's default.
 #[must_use]
 pub fn answer_time(command: &Command) -> Duration {
     let slack = Timeouts::default().read;
@@ -711,6 +781,8 @@ pub fn answer_time(command: &Command) -> Duration {
         Command::Write(write) if write.waits() => WRITE_ANSWER + WRITE_WAIT + slack,
         Command::Write(_) => WRITE_ANSWER + slack,
         Command::Sync => SYNC_ANSWER + slack,
+        Command::Call(CallCommand::Calls) => slack,
+        Command::Call(_) => CALL_ANSWER + slack,
         _ => slack,
     }
 }

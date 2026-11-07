@@ -35,6 +35,12 @@ pub const WRITE_ANSWER: std::time::Duration = std::time::Duration::from_secs(90)
 /// on.
 pub const SYNC_ANSWER: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// How long the app takes at most to answer a call command: the engine's answer to its call action (a start is taken
+/// within the engine's 15 s or refused, a leave's request bounded by the transport's 30 s) and the call as the app
+/// then shows it. Past it the app answers [`ErrorCode::Timeout`], and the action goes on (`ngteamsctl calls` shows
+/// where the call stands).
+pub const CALL_ANSWER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// What to do about a write whose answer didn't come in time: it may still go out, so it is looked for before it is
 /// written again.
 pub const UNANSWERED_WRITE: &str = "`ngteamsctl events --follow --kind outbox` shows its row as it changes, and \

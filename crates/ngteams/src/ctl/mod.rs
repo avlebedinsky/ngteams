@@ -11,6 +11,7 @@
 //! - [`reads`]: the read commands, through the account's `Core`.
 //! - [`ui`]: the UI commands (the window, the views it opens, the account it shows) and the actions dispatched to it.
 //! - [`writes`]: the message writes, through the account's `Core::write`, its outbox.
+//! - [`calls`]: the call commands, asked of the account's calls as the call buttons ask them.
 //! - [`events`]: the event stream a `subscribe` turns a connection into, fed by each account's bridge tap,
 //! - [`watch`]: by the app's own state where it changes (unread, own status, sign-out, notifications, the window),
 //! - and [`ticker`]: by each account's calendar, for the meetings about to start.
@@ -22,6 +23,7 @@
 //! socket file.
 
 pub mod address;
+pub mod calls;
 pub mod dispatch;
 pub mod events;
 pub mod listener;

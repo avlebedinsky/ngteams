@@ -445,16 +445,20 @@
 - Create: `crates/ngteams/src/ctl/calls.rs`
 - Modify: `crates/ngteams/src/ctl/dispatch.rs`, `crates/teams-ctl/src/cli.rs`
 - Create: `crates/ngteams/tests/ctl_calls.rs`
+- ➕ Modify: `crates/teams-ctl/src/protocol.rs` (`CALL_ANSWER`, the app's bound on a call command),
+  `crates/ngteams/src/app.rs` (`Running` keeps the view trace the asks record to), `crates/ngteams/src/ctl/writes.rs`
+  (its bounded wait shared), `crates/teams-ctl/tests/cli.rs`
 
-- [ ] `calls` (the ringing invitation and the call up: id, account, chat, state, muted, camera)
-- [ ] `call <chat>`, `answer`, `decline`, `hangup`, `join <chat>` through `teams_ui::calls::ask`, defaulting to the
+- [x] `calls` (the ringing invitation and the call up: id, account, chat, state, muted, camera)
+- [x] `call <chat>`, `answer`, `decline`, `hangup`, `join <chat>` through `teams_ui::calls::ask`, defaulting to the
       account that is ringing or in the call, with replies as in Technical Details (`no_calling`, the local
-      refusals, a bounded wait for the engine's answer)
-- [ ] `mute on|off|toggle` and `camera on|off|toggle` through `Ask::ToggleMute` / `Ask::ToggleCamera`, acting only
+      refusals, a bounded wait for the engine's answer: `calls::ask_then` tells whether the engine took it, then the
+      call as the model shows it is waited for, all within `CALL_ANSWER`)
+- [x] `mute on|off|toggle` and `camera on|off|toggle` through `Ask::ToggleMute` / `Ask::ToggleCamera`, acting only
       when the state differs
-- [ ] tests over the mock engine with calling: answer and decline an incoming call, start and hang up, busy, no
+- [x] tests over the mock engine with calling: answer and decline an incoming call, start and hang up, busy, no
       calling, not ringing, mute and camera on/off idempotent, the call window closed while the call runs
-- [ ] run `cargo test -p ngteams --test ctl_calls`, which must pass before the next task
+- [x] run `cargo test -p ngteams --test ctl_calls`, which must pass before the next task
 
 ### Task 12: calendar and joining meetings
 
