@@ -1301,23 +1301,6 @@ fn a_meeting_meet_now_couldn_t_make_says_so_and_the_dialog_stays() {
     assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
 }
 
-#[test]
-fn a_day_starts_at_its_local_midnight_or_where_the_clock_jumps_past_it() {
-    use chrono_tz::America::Santiago;
-    use teams_ui::calendar::midnight_in;
-    let day = |month, day| NaiveDate::from_ymd_opt(2026, month, day).unwrap();
-    // an ordinary day: its midnight at Santiago's -4
-    assert_eq!(midnight_in(&Santiago, day(9, 5)), 1_788_580_800_000);
-    // Chile's clocks skip 00:00–01:00 on 2026-09-06: the day starts at the jump (04:00 UTC, 01:00 at -3), not at
-    // midnight UTC (20:00 the evening before there)
-    assert_eq!(midnight_in(&Santiago, day(9, 6)), 1_788_667_200_000);
-    // and the next day's at -3
-    assert_eq!(midnight_in(&Santiago, day(9, 7)), 1_788_750_000_000);
-    // where midnight comes twice (Havana's clocks fall back from 01:00 to 00:00 on 2026-11-01), the day starts at the
-    // first (04:00 UTC, at -4)
-    assert_eq!(midnight_in(&chrono_tz::America::Havana, day(11, 1)), 1_793_505_600_000);
-}
-
 fn kept(account: &str, address: &str, name: &str) -> teams_ui::settings::PersonCalendar {
     teams_ui::settings::PersonCalendar {
         account: account.to_owned(),

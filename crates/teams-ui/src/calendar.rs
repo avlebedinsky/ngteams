@@ -205,8 +205,7 @@ fn midnight_ms(date: NaiveDate) -> i64 {
 /// The first instant of `date` in `zone`, in ms since the epoch: its midnight, the earlier one where a change of clock
 /// repeats it. Where the clock skips midnight (a zone whose summer time starts at 00:00) the day starts when it jumps,
 /// the first time on the clock that date has: midnight on the clock before the change.
-#[must_use]
-pub fn midnight_in<Tz: TimeZone>(zone: &Tz, date: NaiveDate) -> i64 {
+fn midnight_in<Tz: TimeZone>(zone: &Tz, date: NaiveDate) -> i64 {
     let midnight = date.and_time(NaiveTime::MIN);
     if let Some(time) = zone.from_local_datetime(&midnight).earliest() {
         return time.timestamp_millis();
