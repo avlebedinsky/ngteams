@@ -10,8 +10,9 @@
 #   that window itself and runs itself again as the window's page engine.
 # - Installs it and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the app finds the extension
 #   beside itself), `ngteams` linked from ~/.local/bin/, and `packaging/com.nickalie.ngteams.desktop` into
-#   ~/.local/share/applications/ with its `Exec` pointing at the installed binary, and the app icon
-#   (`packaging/icons/`) into ~/.local/share/icons/hicolor/. What an older install left that no longer exists goes
+#   ~/.local/share/applications/ with its `Exec` pointing at the installed binary (it handles `msteams:` links,
+#   handed to the app running: `crates/ngteams/src/handoff.rs`), and the app icon (`packaging/icons/`) into
+#   ~/.local/share/icons/hicolor/. What an older install left that no longer exists goes
 #   (`ngteams.desktop`, the separate sign-in window's `ngteams-signin` and its desktop entry).
 # - Starts nothing. The first run is the user's: `ngteams`, which asks for the account (docs/personal-build.md,
 #   "The first run").
@@ -41,8 +42,13 @@ extension="$target/release/libteams_signin_extension.so"
 install -m 0644 "$extension" "$lib/libteams_signin_extension.so"
 ln -sfn "$lib/ngteams" "$bin/ngteams"
 desktop="com.nickalie.ngteams.desktop"
-sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/$desktop" > "$apps/$desktop"
+sed "s|^Exec=ngteams %u$|Exec=$lib/ngteams %u|" "$root/packaging/$desktop" > "$apps/$desktop"
 chmod 0644 "$apps/$desktop"
+# The entry handles `msteams:` links (a meeting's join link from the browser): the desktop's handler cache learns it
+# where the tool is there; without it, desktops read the entries themselves.
+if command -v update-desktop-database > /dev/null; then
+  update-desktop-database -q "$apps" || true
+fi
 # What older installs left: the entry's name before the app id became `com.nickalie.ngteams`, and the sign-in
 # window's binary and hidden entry from before the window moved into the app.
 rm -f "$apps/ngteams.desktop" "$apps/com.nickalie.ngteams.signin.desktop" "$lib/ngteams-signin"

@@ -8,6 +8,7 @@
 //! [`read_only`] runs snapshots in the UI sandbox with a get-only credential broker, no writes, calls or push.
 //! [`lab`] runs one lab alias in the sandbox with writable broker credentials and sandbox media.
 //! [`ctl`] serves `ngteamsctl`'s control socket over the running app.
+//! [`handoff`] hands a second launch, or a Teams link, to the app already running over that socket.
 
 pub mod accounts;
 pub mod accounts_file;
@@ -18,6 +19,7 @@ pub mod ctl;
 pub mod descriptors;
 pub mod engine;
 pub mod forget;
+pub mod handoff;
 pub mod lab;
 pub mod read_only;
 pub mod refusal;

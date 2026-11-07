@@ -2,17 +2,19 @@
 //! mode is checked after the internal sign-in page worker has had its chance to serve.
 
 use std::cell::Cell;
+use std::ffi::OsString;
 use std::os::fd::RawFd;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clap::Parser as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity, WindowingModes};
 #[cfg(not(test))]
-use ngteams::accounts::{self, Runner, Started};
+use ngteams::accounts::{self, Runner, StartFailed, Started};
 use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 #[cfg(not(test))]
 use ngteams::app;
@@ -21,6 +23,7 @@ use ngteams::calling::CallDevices;
 use ngteams::cli::{Cli, Command as Subcommand, LabMode, ReadOnlyMode};
 use ngteams::descriptors::{adopt_socket, adopt_trace};
 use ngteams::forget::Forgot;
+use ngteams::handoff::{self, HandOff};
 use ngteams::setup::Setup;
 use ngteams::{KEYRING_APPLICATION, lab, read_only, secrets, snapshot};
 use teams_auth::secrets::LazyKeyring;
@@ -39,7 +42,7 @@ mod lab_startup_tests;
 #[path = "../tests/support/startup.rs"]
 mod startup_tests;
 #[cfg(test)]
-use startup_tests::accounts::{self, Runner, Started};
+use startup_tests::accounts::{self, Runner, StartFailed, Started};
 #[cfg(test)]
 use startup_tests::{app, platform as gpui_platform, prompt as account_prompt, window_runner};
 
@@ -51,8 +54,11 @@ fn window_runner(runner: Runner) -> Runner {
 /// How the app ended.
 enum Outcome {
     Quit,
-    /// Signed in again after a sign-out: the process runs itself again, so a new engine starts.
-    Restart,
+    /// Signed in again after a sign-out: the process runs itself again, so a new engine starts. `opened` is the link
+    /// this run started with and opened already, left out of the next run's arguments so its pre-join isn't shown again.
+    Restart {
+        opened: Option<String>,
+    },
     /// Lab sign-in keeps the broker and trace available for this same process's next image.
     LabRestart(ngteams::restart::RestartDescriptors),
 }
@@ -91,15 +97,13 @@ fn main() -> ExitCode {
     };
     match outcome {
         Ok(Outcome::Quit) => ExitCode::SUCCESS,
-        Ok(outcome @ (Outcome::Restart | Outcome::LabRestart(_))) => {
-            let mut command = Command::new(std::env::current_exe().unwrap_or_else(|_| "ngteams".into()));
-            command.args(std::env::args_os().skip(1));
-            let error = match outcome {
-                Outcome::LabRestart(descriptors) => descriptors.exec(&mut command),
-                _ => command.exec(),
-            };
-            eprintln!("teams: signed in again, but it can't start again ({error}): start it again yourself");
-            ExitCode::FAILURE
+        Ok(Outcome::Restart { opened }) => restarted(&mut |command| {
+            command
+                .args(restart_args(std::env::args_os().skip(1), opened.as_deref()))
+                .exec()
+        }),
+        Ok(Outcome::LabRestart(descriptors)) => {
+            restarted(&mut |command| descriptors.exec(command.args(std::env::args_os().skip(1))))
         }
         Err(error) => {
             eprintln!("teams: {error}");
@@ -108,9 +112,70 @@ fn main() -> ExitCode {
     }
 }
 
+/// This process run again by `exec` (which returns only when it couldn't).
+fn restarted(exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
+    let mut command = Command::new(std::env::current_exe().unwrap_or_else(|_| "ngteams".into()));
+    let error = exec(&mut command);
+    eprintln!("teams: signed in again, but it can't start again ({error}): start it again yourself");
+    ExitCode::FAILURE
+}
+
+/// The arguments a restart runs with: this run's (`args`), the link it `opened` left out.
+fn restart_args(args: impl Iterator<Item = OsString>, opened: Option<&str>) -> Vec<OsString> {
+    args.filter(|arg| opened.is_none_or(|link| arg.as_os_str() != link))
+        .collect()
+}
+
+/// How long a launch whose accounts another app holds waits for that app's control socket, and how often it asks:
+/// an app locks its accounts before it serves its socket, so one still starting holds them without answering yet.
+const STARTING_WAIT: Duration = Duration::from_secs(15);
+const STARTING_POLL: Duration = Duration::from_millis(250);
+
 fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
+    let ctl = personal_ctl(cli);
+    // before anything is opened or locked: an app already running takes this launch over
+    if let (Some(socket), Some(request)) = (ctl.as_deref(), cli.hand_off())
+        && let Some(handed) = handed(handoff::hand_off(socket, request, handoff::TIMEOUTS))
+    {
+        return handed;
+    }
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
-    run_setup(cli, reach, setup, ViewTrace::off(), personal_ctl(cli))
+    run_setup(cli, reach, setup, ViewTrace::off(), ctl)
+}
+
+/// How this launch ends once handed off: `None` when nobody took it, so it starts the app.
+fn handed(hand_off: HandOff) -> Option<Result<Outcome, String>> {
+    match hand_off {
+        HandOff::Done { note } => {
+            if let Some(note) = note {
+                eprintln!("teams: {note}");
+            }
+            Some(Ok(Outcome::Quit))
+        }
+        HandOff::NotRunning => None,
+        HandOff::Failed(why) => Some(Err(why)),
+    }
+}
+
+/// The first account couldn't start (`failed`): when another app holds it and this launch hands off (the personal
+/// app's), that app may still be starting, so the hand-off is asked again until its socket answers, for
+/// [`STARTING_WAIT`]; otherwise, or past that, the launch ends with why.
+fn hand_off_to_starting(cli: &Cli, ctl: Option<&Path>, failed: StartFailed) -> Result<Outcome, String> {
+    let (Some(socket), Some(request), true) = (ctl, cli.hand_off(), failed.running) else {
+        return Err(failed.into());
+    };
+    let deadline = Instant::now() + STARTING_WAIT;
+    while Instant::now() < deadline {
+        std::thread::sleep(STARTING_POLL);
+        if let Some(handed) = handed(handoff::hand_off(socket, request.clone(), handoff::TIMEOUTS)) {
+            return handed;
+        }
+    }
+    Err(format!(
+        "{failed}: Teams is still starting, or runs without its control socket {}; start it again once its window \
+         shows",
+        socket.display()
+    ))
 }
 
 /// Where the personal app serves its control socket: `--ctl-socket`, else `$XDG_RUNTIME_DIR/ngteams/ctl.sock`
@@ -164,10 +229,15 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Optio
         floor: CallFloor::new(),
         devices,
     };
-    let (first, others) = start_accounts(&runner, &ready)?;
+    let (first, others) = match start_accounts(&runner, &ready) {
+        Ok(started) => started,
+        Err(failed) => return hand_off_to_starting(cli, ctl.as_deref(), failed),
+    };
     let restart = Rc::new(Cell::new(false));
     let failed = Rc::new(Cell::new(false));
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
+    // a link this launch was given with no app to hand it to (only the personal app takes one: `Cli`)
+    let link = cli.url.clone();
     let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         let (again_setup, again_restart) = (setup.clone(), Rc::clone(&restart_in_app));
@@ -191,6 +261,9 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Optio
             app::quit_after(failure.stopped, cx);
             return;
         }
+        if let Some(url) = link {
+            app::open_link(url, cx);
+        }
         // an account a sign-in named that can't start without one: its sign-in window, once the others run
         if let Some(account) = unready.into_iter().next() {
             sign_in_again(setup, account, restart_in_app)(cx);
@@ -199,7 +272,13 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Optio
     if failed.get() {
         return Err("the window couldn't be opened".to_owned());
     }
-    Ok(if restart.get() { Outcome::Restart } else { Outcome::Quit })
+    // the link was opened in this run: a sign-in's restart doesn't show its pre-join again
+    let opened = cli.url.clone();
+    Ok(if restart.get() {
+        Outcome::Restart { opened }
+    } else {
+        Outcome::Quit
+    })
 }
 
 /// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
@@ -280,7 +359,7 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
     }
     // the control socket only where its runner says (its state dir), never the personal one
     match run_setup(cli, Reach::Sandbox, setup, trace, mode.ctl_socket.clone())? {
-        Outcome::Restart => Ok(Outcome::LabRestart(descriptors)),
+        Outcome::Restart { .. } => Ok(Outcome::LabRestart(descriptors)),
         outcome => Ok(outcome),
     }
 }
@@ -375,10 +454,13 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     Ok(Outcome::Quit)
 }
 
-/// Every account's engine: the first one's must start (another `ngteams` running on it, say, ends the app); a later
-/// one that can't is said and left out.
-fn start_accounts(runner: &Runner, ready: &[PersonalAccount]) -> Result<(Started, Vec<Started>), String> {
-    let (first, rest) = ready.split_first().ok_or("no account is signed in")?;
+/// Every account's engine: the first one's must start (another `ngteams` running on it, say, ends this launch, after
+/// its hand-off: [`hand_off_to_starting`]); a later one that can't is said and left out.
+fn start_accounts(runner: &Runner, ready: &[PersonalAccount]) -> Result<(Started, Vec<Started>), StartFailed> {
+    let (first, rest) = ready.split_first().ok_or_else(|| StartFailed {
+        message: "no account is signed in".to_owned(),
+        running: false,
+    })?;
     let first = runner.start(first)?;
     let mut others = Vec::new();
     for account in rest {
@@ -441,7 +523,11 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
     if failed.get() {
         return Err("the window couldn't be opened".to_owned());
     }
-    Ok(if restart.get() { Outcome::Restart } else { Outcome::Quit })
+    Ok(if restart.get() {
+        Outcome::Restart { opened: None }
+    } else {
+        Outcome::Quit
+    })
 }
 
 /// Signs `upn` in from the first sign-in screen, off GPUI's foreground ([`accounts::add`]). One that goes through
@@ -503,7 +589,11 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
     if let Some(error) = failure.borrow_mut().take() {
         return Err(error);
     }
-    Ok(if restart.get() { Outcome::Restart } else { Outcome::Quit })
+    Ok(if restart.get() {
+        Outcome::Restart { opened: None }
+    } else {
+        Outcome::Quit
+    })
 }
 
 /// Once an account is signed out: its sign-in window again, off GPUI's foreground; a sign-in that goes through quits

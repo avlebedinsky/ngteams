@@ -65,7 +65,7 @@ fn check_wrappers(root: &Path) {
     };
     let pending = setup.ask_for("pending@synthetic.example").unwrap();
     assert!(!accounts::ready(&setup, &pending).unwrap());
-    let error = runner.start(&pending).unwrap_err();
+    let error = String::from(runner.start(&pending).unwrap_err());
     assert!(error.contains(&pending.upn));
     assert_eq!(
         accounts::forget(&setup, "missing@synthetic.example").unwrap(),
@@ -76,12 +76,12 @@ fn check_wrappers(root: &Path) {
     signed.save(&setup.paths).unwrap();
     // With no region file ready returns before reading its lazy secret store.
     assert!(!accounts::ready(&setup, &signed).unwrap());
-    let error = runner.start(&signed).unwrap_err();
+    let error = String::from(runner.start(&signed).unwrap_err());
     assert!(error.contains(UPN) && error.contains("region"), "{error}");
     let region = setup.paths.region_file(&signed).unwrap();
     std::fs::create_dir_all(region.parent().unwrap()).unwrap();
     std::fs::write(region, b"not a region").unwrap();
-    let error = runner.start(&signed).unwrap_err();
+    let error = String::from(runner.start(&signed).unwrap_err());
     assert!(error.contains(UPN) && error.contains("region"), "{error}");
 
     let store = setup.paths.store_file(&signed).unwrap();

@@ -482,7 +482,7 @@ impl Running {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let signed = signing.await;
             let _ = this.update(cx, |running, cx| {
-                match signed.and_then(|account| running.runner.start(&account)) {
+                match signed.and_then(|account| running.runner.start(&account).map_err(String::from)) {
                     Ok(started) => running.added(started, cx),
                     Err(error) => {
                         log::warn!("an account wasn't added");
@@ -675,6 +675,23 @@ pub fn ctl_listening(cx: &App) -> bool {
 pub fn ctl_ticking(cx: &App) -> bool {
     cx.try_global::<Held>()
         .is_some_and(|held| held.running.read(cx).hub.ticking())
+}
+
+/// Opens the Teams link `url` the app was started with (`ngteams <link>` with no app running to hand it to,
+/// [`crate::handoff`]) as `open-link` opens it ([`crate::ctl::links`]); what keeps it from opening is said on stderr.
+/// Nothing before the launch.
+pub fn open_link(url: String, cx: &mut App) {
+    let Some(running) = cx.try_global::<Held>().map(|held| held.running.downgrade()) else {
+        return;
+    };
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let request = teams_ctl::protocol::Request::OpenLink { url };
+        if let Err(error) = crate::ctl::links::answer(&running, None, &request, cx).await {
+            eprintln!("teams: the link isn't opened: {}", error.message);
+            log::warn!("the link the app started with isn't opened ({:?})", error.code);
+        }
+    })
+    .detach();
 }
 
 /// Quits the app: every account's engine shut down first ([`Running`]'s quit), then the app; before the app was

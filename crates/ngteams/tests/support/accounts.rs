@@ -17,9 +17,10 @@ fn the_runner_holds_one_engine_per_account_and_releases_it_on_shutdown() {
     assert!(started.calls.as_ref().unwrap().video.is_some());
     let error = runner.start_on(&account, MemorySecretStore::new()).unwrap_err();
     assert!(
-        error.contains(&account.upn) && error.contains("another engine runs"),
+        error.message.contains(&account.upn) && error.message.contains("another engine runs"),
         "{error}"
     );
+    assert!(error.running, "another engine holds the account");
     started.engine.handle.shutdown();
     runner
         .start_on(&account, MemorySecretStore::new())

@@ -14,6 +14,10 @@
 //! `--ctl-socket <path>` names where `ngteamsctl`'s control socket is served (`crate::ctl`). The personal app falls
 //! back to `$XDG_RUNTIME_DIR/ngteams/ctl.sock`; a lab or read-only app serves only where its runner tells it (its
 //! state dir, `teams_ctl::Mode`), and none without it.
+//!
+//! A second `ngteams`, or `ngteams <link>` (a Teams meeting's join link, as the desktop entry hands it), hands off to
+//! the personal app already running (`crate::handoff`) and ends; a link the app doesn't run for yet opens once it
+//! starts. Only the personal desktop app takes a link.
 
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -46,6 +50,10 @@ pub struct Cli {
     /// read-only app serves one only where this names, as its runner gives it.
     #[arg(long, value_name = "PATH")]
     pub ctl_socket: Option<PathBuf>,
+    /// A Teams link to open (a meeting's join link, `msteams:` or `https://teams.microsoft.com/l/meetup-join/…`):
+    /// handed to the app already running, or opened once it starts.
+    #[arg(value_name = "URL", conflicts_with = "forget")]
+    pub url: Option<String>,
 }
 
 /// The read-only mode's arguments.
@@ -114,6 +122,19 @@ pub struct LabMode {
 }
 
 impl Cli {
+    /// What this launch of the personal desktop app hands the app already running ([`crate::handoff`]): the link
+    /// given, otherwise `activate`; nothing for `--forget`, `--account` (which keep their own way), a subcommand or the
+    /// lab.
+    #[must_use]
+    pub fn hand_off(&self) -> Option<teams_ctl::protocol::Request> {
+        if self.command.is_some() || self.forget.is_some() || self.account.is_some() || self.lab.is_some() {
+            return None;
+        }
+        Some(self.url.clone().map_or(teams_ctl::protocol::Request::Activate, |url| {
+            teams_ctl::protocol::Request::OpenLink { url }
+        }))
+    }
+
     /// Whether either the app or the credential-broker subcommand explicitly selects lab mode.
     #[must_use]
     pub fn lab_requested(&self) -> bool {
@@ -131,6 +152,9 @@ impl Cli {
         let args = &self.read_only;
         if args.read_only || args.data.is_some() {
             return Err("--lab uses its own sending mode and fixed paths; do not give --read-only or --data".into());
+        }
+        if self.url.is_some() {
+            return Err("--lab opens no link given on its command line".into());
         }
         let secrets_fd = args.secrets_fd.ok_or("the lab mode needs --secrets-fd <n>")?;
         check_descriptors(secrets_fd, args.trace_fd)?;
@@ -163,6 +187,9 @@ impl Cli {
         }
         if self.forget.is_some() {
             return Err("the read-only mode forgets no account".into());
+        }
+        if self.url.is_some() {
+            return Err("the read-only mode opens no link given on its command line".into());
         }
         let missing = |what: &str| format!("the read-only mode needs {what}");
         let account = self.account.clone().ok_or_else(|| missing("--account <UPN>"))?;

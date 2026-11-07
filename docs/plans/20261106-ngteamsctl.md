@@ -487,16 +487,21 @@
   `packaging/com.nickalie.ngteams.desktop` (`Exec=ngteams %u`, `MimeType=x-scheme-handler/msteams;`),
   `scripts/install-personal.sh` (its `Exec` rewrite matches the new line; `update-desktop-database` if present)
 - Create: `crates/ngteams/tests/handoff.rs`
+- ➕ Modify: `crates/ngteams/src/app.rs` (`app::open_link`), `crates/ngteams/src/ctl/{mod,dispatch}.rs`,
+  `crates/ngteams/src/lib.rs`, `crates/ngteams/tests/support/startup.rs` (the hand-off through `main`'s `run`)
 
-- [ ] in `main`, on the personal desktop branch only, after parsing and before any lock: connect to the personal
+- [x] in `main`, on the personal desktop branch only, after parsing and before any lock: connect to the personal
       socket with connect and read timeouts. If an instance answers, send `activate` or `open-link <url>` and exit 0.
       `--forget` and `--account` keep today's behaviour.
-- [ ] `open-link` in the server: meeting join links (`msteams:` and `https://teams.microsoft.com/l/meetup-join/…`)
+- [x] `open-link` in the server: meeting join links (`msteams:` and `https://teams.microsoft.com/l/meetup-join/…`)
       parsed with `teams_proto::calendar::join_url_chat` / `join_url_meeting` and opened in the prejoin. Any other link
       shows the window and is logged as unrecognised (only its shape, no payload).
-- [ ] tests: second launch hands off and exits 0, a hung instance times out and the second launch says so, a stale
+- ➕ [x] a link given with no app running opens once the app starts (`app::open_link`, the same path); the lab and
+      read-only modes take no link. The personal socket is `--ctl-socket` when given, as the app would serve it. A
+      hung app (or an error answer) is said and the launch exits 1 without starting a second app.
+- [x] tests: second launch hands off and exits 0, a hung instance times out and the second launch says so, a stale
       socket → normal start, `--forget` not handed off, a meetup-join link in both forms, an unknown link
-- [ ] run `cargo test -p ngteams --test handoff`, which must pass before the next task
+- [x] run `cargo test -p ngteams --test handoff`, which must pass before the next task
 
 ### Task 14: installing `ngteamsctl` and shell completions
 

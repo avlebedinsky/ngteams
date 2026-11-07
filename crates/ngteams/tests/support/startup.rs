@@ -40,6 +40,7 @@ pub(super) mod accounts {
     use teams_signin::window::Windows;
 
     pub type Started<S = MemorySecretStore> = ngteams::accounts::Started<S>;
+    pub use ngteams::accounts::StartFailed;
 
     pub struct Runner {
         pub setup: Setup,
@@ -48,7 +49,7 @@ pub(super) mod accounts {
     }
 
     impl Runner {
-        pub fn start(&self, account: &PersonalAccount) -> Result<Started, String> {
+        pub fn start(&self, account: &PersonalAccount) -> Result<Started, StartFailed> {
             record("start", &account.upn);
 
             let engine = ngteams::engine::start(
@@ -59,7 +60,7 @@ pub(super) mod accounts {
                 false,
                 None,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ngteams::accounts::StartFailed::of(account, &error))?;
             Ok(Started {
                 account: account.clone(),
                 engine,
@@ -119,7 +120,7 @@ pub(super) mod accounts {
 
 pub(super) mod app {
     use gpui::AppContext as _;
-    pub(crate) use ngteams::app::{TITLE, install_log, quit, quit_after, settings};
+    pub(crate) use ngteams::app::{TITLE, install_log, open_link, quit, quit_after, settings};
 
     pub(crate) fn launch<S: teams_auth::secrets::SecretStore + 'static>(
         cx: &mut gpui::App,
@@ -302,6 +303,10 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
         "forget-pending",
         "forget-stored",
         "forget-error",
+        "handoff",
+        "handoff-link",
+        "handoff-stale",
+        "handoff-starting",
     ] {
         let root = tempfile::tempdir().unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap());
@@ -359,6 +364,10 @@ fn child() {
         startup_controls::run(&case, &setup);
         return;
     }
+    if case.starts_with("handoff") {
+        handoff::run(&case, &setup);
+        return;
+    }
     let mut args = vec!["ngteams".to_owned()];
     match case.as_str() {
         "pending" | "prompt-success" | "prompt-error" => {
@@ -408,7 +417,8 @@ fn child() {
     }
     match case.as_str() {
         "prompt-success" | "first-success" | "first-unready-success" | "again-success" => {
-            assert!(matches!(outcome, Ok(Outcome::Restart)));
+            // no link was given: the restart leaves nothing out
+            assert!(matches!(outcome, Ok(Outcome::Restart { opened: None })));
         }
         "first-error"
         | "first-start-fails"
@@ -419,6 +429,23 @@ fn child() {
         _ => assert!(matches!(outcome, Ok(Outcome::Quit))),
     }
     seen_after(&case);
+}
+
+#[test]
+fn a_restart_leaves_out_only_the_link_it_opened() {
+    let args = || {
+        [
+            "--ctl-socket",
+            "/run/synthetic.sock",
+            "msteams:/l/meetup-join/synthetic",
+        ]
+        .map(std::ffi::OsString::from)
+    };
+    assert_eq!(super::restart_args(args().into_iter(), None), args());
+    assert_eq!(
+        super::restart_args(args().into_iter(), Some("msteams:/l/meetup-join/synthetic")),
+        ["--ctl-socket", "/run/synthetic.sock"].map(std::ffi::OsString::from)
+    );
 }
 
 /// What a case's run did besides its outcome.
@@ -435,5 +462,108 @@ fn seen_after(case: &str) {
             seen.iter().any(|call| call == "start:ready-other@example.test"),
             "a later account still starts"
         );
+    }
+}
+
+/// A second launch: handed to the app the runtime dir's socket names, or started as usual when nobody is behind it.
+mod handoff {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixListener;
+    use std::path::{Path, PathBuf};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    use clap::Parser as _;
+    use teams_ctl::protocol::{Hello, Outcome as Answered, PROTOCOL_VERSION, Request, Response, ResponseLine};
+    use teams_ctl::{LineReader, RequestLine, codec};
+
+    use super::{Outcome, Setup, calls, signed};
+
+    /// A synthetic meeting join link (a made-up thread).
+    const LINK: &str = "msteams:/l/meetup-join/19%3ameeting_SyntheticHandoff%40thread.v2/0";
+
+    pub fn run(case: &str, setup: &Setup) {
+        // an account that starts at once: a launch not handed off shows in `calls` as its start
+        signed(setup, "ready@example.test", 2, true);
+        let socket = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("ngteams/ctl.sock");
+        teams_ctl::prepare_dir(&socket).unwrap();
+        let mut args = vec!["ngteams".to_owned()];
+        let server = match case {
+            "handoff" => Some(serve_once(&socket)),
+            "handoff-link" => {
+                args.push(LINK.to_owned());
+                Some(serve_once(&socket))
+            }
+            // an app still starting: its account locked, its socket served only a moment later
+            "handoff-starting" => {
+                args.push(LINK.to_owned());
+                let account = setup.signed_in_accounts().unwrap().pop().unwrap();
+                let held = teams_store::EngineLock::hold(&setup.paths.store_file(&account).unwrap()).unwrap();
+                let socket = socket.clone();
+                Some(thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(600));
+                    let asked = serve_once(&socket).join().unwrap();
+                    drop(held);
+                    asked
+                }))
+            }
+            // the socket file an app that ended left: nobody behind it
+            _ => {
+                drop(UnixListener::bind(&socket).unwrap());
+                None
+            }
+        };
+        let cli = ngteams::cli::Cli::try_parse_from(args).unwrap();
+        let outcome = super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox);
+        assert!(matches!(outcome, Ok(Outcome::Quit)), "{case}: {:?}", outcome.err());
+        let started = calls().lock().unwrap().iter().any(|call| call.starts_with("start:"));
+        if let Some(server) = server {
+            let wanted = if case == "handoff" {
+                Request::Activate
+            } else {
+                Request::OpenLink { url: LINK.to_owned() }
+            };
+            assert_eq!(server.join().unwrap(), wanted);
+            // the starting app's account is tried (and refused by its lock) before the hand-off is asked again
+            assert_eq!(
+                started,
+                case == "handoff-starting",
+                "a launch handed off starts no account"
+            );
+        } else {
+            assert!(started, "nobody behind the socket: the app starts");
+            let seen = calls().lock().unwrap();
+            assert!(seen.contains(&format!("ctl-bound:{}", socket.display())), "{seen:?}");
+        }
+    }
+
+    /// A running app's socket at `path` for one client: its `hello` answered, then what it asks next answered and
+    /// handed back.
+    fn serve_once(path: &Path) -> JoinHandle<Request> {
+        let listener = UnixListener::bind(path).unwrap();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = LineReader::new(BufReader::new(stream.try_clone().unwrap()));
+            let mut writer = stream;
+            let mut answer = |id: u64, response| {
+                let line = ResponseLine {
+                    id,
+                    outcome: Answered::Ok(response),
+                };
+                codec::write_line(&mut writer, &line).unwrap();
+            };
+            let hello: RequestLine = reader.read().unwrap().unwrap();
+            assert!(matches!(hello.request, Request::Hello { .. }), "{hello:?}");
+            answer(
+                hello.id,
+                Response::Hello(Hello {
+                    protocol: PROTOCOL_VERSION,
+                    app: "synthetic".to_owned(),
+                }),
+            );
+            let asked: RequestLine = reader.read().unwrap().unwrap();
+            answer(asked.id, Response::Done);
+            asked.request
+        })
     }
 }

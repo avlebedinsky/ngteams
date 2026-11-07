@@ -39,16 +39,60 @@ pub struct Runner {
     pub devices: Option<CallDevices>,
 }
 
+/// Why an account's engine didn't start: `message` says it for the user; `running` when another engine holds the
+/// account (another `ngteams`, which may still be starting: it locks its accounts before it serves its control socket).
+#[derive(Debug)]
+pub struct StartFailed {
+    pub message: String,
+    pub running: bool,
+}
+
+impl StartFailed {
+    /// `account`'s start refused with `error`.
+    #[must_use]
+    pub fn of(account: &PersonalAccount, error: &engine::StartError) -> Self {
+        use teams_core::account::AccountError;
+        use teams_core::engine::EngineError;
+        let running = matches!(
+            error,
+            engine::StartError::Account(
+                AccountError::Engine(EngineError::AlreadyRunning { .. })
+                    | AccountError::Store(teams_store::StoreError::EngineRunning { .. })
+            )
+        );
+        Self {
+            message: format!("{}: {error}", account.upn),
+            running,
+        }
+    }
+}
+
+impl std::fmt::Display for StartFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<StartFailed> for String {
+    fn from(failed: StartFailed) -> Self {
+        failed.message
+    }
+}
+
 impl Runner {
     /// Starts `account`'s engine on the shared call floor and devices, with its push channel.
     ///
     /// # Errors
     /// Why it couldn't start, said for the user (another `ngteams` runs on the account, its region can't be read).
-    pub fn start(&self, account: &PersonalAccount) -> Result<Started, String> {
+    pub fn start(&self, account: &PersonalAccount) -> Result<Started, StartFailed> {
         self.start_on(account, self.setup.secrets())
     }
 
-    fn start_on<S: SecretStore + 'static>(&self, account: &PersonalAccount, secrets: S) -> Result<Started<S>, String> {
+    fn start_on<S: SecretStore + 'static>(
+        &self,
+        account: &PersonalAccount,
+        secrets: S,
+    ) -> Result<Started<S>, StartFailed> {
         let (engine_calls, calls) = self
             .devices
             .as_ref()
@@ -62,7 +106,7 @@ impl Runner {
             true,
             engine_calls,
         )
-        .map_err(|error| format!("{}: {error}", account.upn))?;
+        .map_err(|error| StartFailed::of(account, &error))?;
         Ok(Started {
             account: account.clone(),
             engine,

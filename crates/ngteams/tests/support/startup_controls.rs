@@ -176,6 +176,7 @@ fn corrupt_files(setup: &Setup) {
     assert!(
         super::super::start_accounts(&runner, &[])
             .unwrap_err()
+            .message
             .contains("no account is signed in")
     );
     setup.ask_for("pending@example.test").unwrap();
