@@ -2157,3 +2157,71 @@ fn the_engine_lock_is_refused_while_another_process_holds_it() {
     assert!(status.success(), "{status}");
     store.engine_lock().expect("free once its holder is gone");
 }
+
+#[test]
+fn the_sync_and_read_state_gone_answers_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    store.upsert_conversation(&Conversation {
+        id: CHAT.to_owned(),
+        kind: ConversationKind::OneToOne,
+        topic: None,
+        version: 1,
+        last_activity: None,
+    })?;
+    drop(store);
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch(
+        "DROP TABLE read_horizons; DROP TABLE app_read_horizon; DROP TABLE conversation_sync;
+         DROP TABLE conversation_list_sync; DROP TABLE unsynced_conversations;",
+    )
+    .expect("drop the tables");
+    drop(raw);
+
+    // opened afresh, so nothing is read from a statement prepared before
+    let mut store = Store::open(&store_path(&dir))?;
+    let sqlite = |error: &StoreError| matches!(error, StoreError::Sqlite(_));
+    let horizon = ReadHorizon {
+        conversation_id: CHAT.to_owned(),
+        user: ME.to_owned(),
+        last_read_arrival: 1,
+        updated: 1,
+        raw: None,
+    };
+    refused(store.set_read_horizon(&horizon).is_err_and(|error| sqlite(&error)));
+    refused(store.read_horizon(CHAT, ME).is_err_and(|error| sqlite(&error)));
+    refused(
+        store
+            .set_app_read_horizon(AppReadHorizon { chat: 1, channel: 1 })
+            .is_err_and(|error| sqlite(&error)),
+    );
+    refused(store.app_read_horizon().is_err_and(|error| sqlite(&error)));
+    let state = SyncState {
+        conversation_id: CHAT.to_owned(),
+        sync_link: None,
+        backward_link: None,
+        backward_oldest: None,
+        sync_until: None,
+        gap_link: None,
+        gap_until: None,
+        history_complete: false,
+        updated: 1,
+    };
+    refused(store.set_sync_state(&state).is_err_and(|error| sqlite(&error)));
+    refused(store.sync_state(CHAT).is_err_and(|error| sqlite(&error)));
+    refused(
+        store
+            .set_conversation_list_sync_link(Some("https://example.invalid/sync"), 1)
+            .is_err_and(|error| sqlite(&error)),
+    );
+    refused(store.conversation_list_sync_link().is_err_and(|error| sqlite(&error)));
+    refused(store.set_unsynced(CHAT).is_err_and(|error| sqlite(&error)));
+    refused(store.set_synced(CHAT).is_err_and(|error| sqlite(&error)));
+    refused(store.unsynced_conversations().is_err_and(|error| sqlite(&error)));
+    Ok(())
+}
+
+#[track_caller]
+fn refused(failed: bool) {
+    assert!(failed, "the store answers an error");
+}

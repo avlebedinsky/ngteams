@@ -204,3 +204,45 @@ fn the_translations_migration_starts_with_none() -> Result<(), StoreError> {
     assert!(store.sent_originals(CHAT, &["client-1".to_owned()])?.is_empty());
     Ok(())
 }
+
+#[test]
+fn the_translations_gone_answer_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    drop(with_chats(&dir)?);
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch("DROP TABLE message_translations; DROP TABLE sent_originals;")
+        .expect("drop the tables");
+    drop(raw);
+
+    // opened afresh, so nothing is read from a statement prepared before
+    let mut store = Store::open(&store_path(&dir))?;
+    let refused = |result: Result<(), StoreError>| matches!(result, Err(StoreError::Sqlite(_)));
+    assert!(matches!(
+        store.translations(CHAT, "de", &["1".to_owned()]),
+        Err(StoreError::Sqlite(_))
+    ));
+    let translation = StoredTranslation {
+        conversation_id: CHAT.to_owned(),
+        message_id: "1".to_owned(),
+        version: 1,
+        language: "de".to_owned(),
+        kind: TranslationKind::Same,
+        content: String::new(),
+        source_language: None,
+    };
+    assert!(refused(store.put_translations(&[translation])));
+    assert!(matches!(
+        store.sent_originals(CHAT, &["key".to_owned()]),
+        Err(StoreError::Sqlite(_))
+    ));
+    let original = SentOriginal {
+        conversation_id: CHAT.to_owned(),
+        key: "key".to_owned(),
+        language: "de".to_owned(),
+        content: "Hallo".to_owned(),
+        sent_text: "Hello".to_owned(),
+        created_at: 1,
+    };
+    assert!(refused(store.put_sent_original(&original)));
+    Ok(())
+}

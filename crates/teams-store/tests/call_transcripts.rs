@@ -124,3 +124,28 @@ fn the_call_transcripts_migration_starts_with_none() -> Result<(), StoreError> {
     assert!(store.call_transcripts(CHAT)?.is_empty());
     Ok(())
 }
+
+fn refused<T>(result: &Result<T, StoreError>) -> bool {
+    matches!(result, Err(StoreError::Sqlite(_)))
+}
+
+#[test]
+fn the_transcripts_gone_answer_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open(&store_path(&dir))?;
+    drop(store);
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch("DROP TABLE call_transcript_lines; DROP TABLE call_transcripts;")
+        .expect("drop the tables");
+    drop(raw);
+
+    // opened afresh, so nothing is read from a statement prepared before
+    let mut store = Store::open(&store_path(&dir))?;
+    assert!(refused(&store.open_call_transcript(CHAT, None, 1_000, REJOIN)));
+    assert!(refused(&store.put_transcript_lines(1, &[line("u1", 1_010, "First.")])));
+    assert!(refused(&store.end_call_transcript(1, 2_000)));
+    assert!(refused(&store.call_transcripts(CHAT)));
+    assert!(refused(&store.transcript_lines(1)));
+    assert!(refused(&store.delete_call_transcript(1)));
+    Ok(())
+}

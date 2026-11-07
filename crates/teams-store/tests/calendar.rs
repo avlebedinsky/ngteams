@@ -186,3 +186,26 @@ fn the_calendar_migration_starts_with_no_events() -> Result<(), StoreError> {
     assert_eq!(store.calendar_events(MONDAY, MONDAY + DAY)?, [one]);
     Ok(())
 }
+
+#[test]
+fn the_calendar_gone_answers_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    drop(Store::open(&store_path(&dir))?);
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch("DROP TABLE calendar_events;")
+        .expect("drop the table");
+    drop(raw);
+
+    // opened afresh, so nothing is read from a statement prepared before
+    let mut store = Store::open(&store_path(&dir))?;
+    let refused = |result: Result<(), StoreError>| matches!(result, Err(StoreError::Sqlite(_)));
+    assert!(matches!(
+        store.calendar_events(MONDAY, MONDAY + DAY),
+        Err(StoreError::Sqlite(_))
+    ));
+    let events = [event("e1", MONDAY, MONDAY + HOUR, "Synthetic")];
+    assert!(refused(store.replace_calendar_window(MONDAY, MONDAY + DAY, &events)));
+    assert!(refused(store.keep_calendar_events(&events)));
+    assert!(refused(store.forget_calendar_events(&["e1".to_owned()])));
+    Ok(())
+}
