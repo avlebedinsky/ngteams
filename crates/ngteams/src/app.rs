@@ -670,13 +670,6 @@ pub fn ctl_listening(cx: &App) -> bool {
         .is_some_and(|held| held.running.read(cx).hub.listening())
 }
 
-/// Whether the `meeting_starting` ticker runs ([`crate::ctl::events::Hub::ticking`]); not before the launch.
-#[must_use]
-pub fn ctl_ticking(cx: &App) -> bool {
-    cx.try_global::<Held>()
-        .is_some_and(|held| held.running.read(cx).hub.ticking())
-}
-
 /// Opens the Teams link `url` the app was started with (`ngteams <link>` with no app running to hand it to,
 /// [`crate::handoff`]) as `open-link` opens it ([`crate::ctl::links`]); what keeps it from opening is said on stderr.
 /// Nothing before the launch.

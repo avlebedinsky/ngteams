@@ -1251,13 +1251,37 @@ fn navigation_is_told_as_what_the_window_shows() {
 }
 
 #[test]
-fn a_subscriber_wanting_meetings_starts_the_ticker_and_another_does_not() {
+fn a_subscriber_wanting_meetings_starts_the_ticker_and_is_told_a_stored_meeting() {
     let app = App::start();
-    let ticking = || app.cx.read(ngteams::app::ctl_ticking);
+    let now = app.cx.read(ngteams::ctl::ticker::wall_ms);
+    let start = now + 5 * 60_000;
+    let at = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    let entry = json!({
+        "objectId": "stored-standup",
+        "subject": "Stored standup",
+        "startTime": at(start),
+        "endTime": at(start + 30 * 60_000),
+    });
+    app.store()
+        .keep_calendar_events(&[teams_store::StoredEvent {
+            id: "stored-standup".to_owned(),
+            start_ms: start,
+            end_ms: start + 30 * 60_000,
+            entry: entry.to_string(),
+        }])
+        .unwrap();
+    // a subscriber that wants no meeting starts no ticker: the next one does
     let typing = app.subscribe(None, kinds(&["typing"]), false).unwrap();
-    assert!(!ticking(), "nobody wants meetings");
     let meetings = app.subscribe(None, kinds(&["meeting_*"]), false).unwrap();
-    assert!(ticking(), "a subscriber wants meetings");
+    let read = app.read_until(&meetings, |line| matches!(line.event, CtlEvent::MeetingStarting { .. }));
+    let Some(CtlEvent::MeetingStarting { id, minutes, .. }) = read.last().map(|line| &line.event) else {
+        panic!("no meeting told: {read:?}");
+    };
+    assert_eq!((id.as_str(), *minutes), ("stored-standup", 5));
     drop((typing, meetings));
     quit(&app.cx);
 }
@@ -1460,10 +1484,11 @@ mod ticking {
         let accounts = accounts(&[(ME, &calendar)]);
         let hub = Rc::new(Hub::default());
 
-        // nobody wants meetings: the ticker stops at once, reading nothing
+        // nobody wants meetings: the ticker stops at once, reading nothing, and stays stopped
         cx.update(|cx| ticker::start(&hub, accounts.clone(), cx));
         cx.run_until_parked();
-        assert!(!hub.ticking());
+        cx.executor().advance_clock(TICK);
+        cx.run_until_parked();
         assert_eq!(calendar.reads(), 0);
 
         let defaults = hub.subscribe(wanting(&[]));
@@ -1472,9 +1497,11 @@ mod ticking {
         let ten = hub.subscribe(wanting(&[10]));
         cx.update(|cx| ticker::start(&hub, accounts.clone(), cx));
         cx.run_until_parked();
-        assert!(hub.ticking());
-        // a second start while it runs starts nothing more
+        assert_eq!(calendar.reads(), 1, "it runs: the calendar read at its start");
+        // a second start while it runs starts nothing more: its reads stay one ticker's
         cx.update(|cx| ticker::start(&hub, accounts.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(calendar.reads(), 1);
         for _ in 0..(10 * 60 / TICK.as_secs()) {
             cx.executor().advance_clock(TICK);
             cx.run_until_parked();
@@ -1493,11 +1520,19 @@ mod ticking {
         // read from the service at the start and every five minutes since
         assert_eq!(calendar.reads(), 3);
 
-        // everyone gone: the ticker stops at its next tick
+        // everyone gone: the ticker stops at its next tick, reading nothing more however long it is left
         drop((defaults, six, ten));
-        cx.executor().advance_clock(TICK);
+        for _ in 0..(10 * 60 / TICK.as_secs()) {
+            cx.executor().advance_clock(TICK);
+            cx.run_until_parked();
+        }
+        assert_eq!(calendar.reads(), 3);
+        // stopped, it starts again for the next subscriber that wants meetings
+        let again = hub.subscribe(wanting(&[]));
+        cx.update(|cx| ticker::start(&hub, accounts.clone(), cx));
         cx.run_until_parked();
-        assert!(!hub.ticking());
+        assert_eq!(calendar.reads(), 4);
+        drop(again);
     }
 
     /// The accounts the ticker reads: each MRI's calendar.

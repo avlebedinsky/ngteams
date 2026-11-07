@@ -62,6 +62,8 @@ teams-call = { workspace = true, features = ["test-support"] }
 # the calls on the mock relay through its loopback TURN server (`Relay::Fixed`)
 teams-core = { workspace = true, features = ["test-support"] }
 base64.workspace = true
+# a stored meeting's start written as the calendar service writes it (`tests/ctl_events.rs`)
+chrono.workspace = true
 gpui-pre = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
 tempfile.workspace = true

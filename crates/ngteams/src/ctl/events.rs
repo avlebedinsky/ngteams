@@ -245,12 +245,6 @@ impl Hub {
         self.ticking.set(false);
     }
 
-    /// Whether the ticker runs.
-    #[must_use]
-    pub fn ticking(&self) -> bool {
-        self.ticking.get()
-    }
-
     /// The `meetings` of `account` at `now` (ms since the epoch) to each subscriber whose lead for one came within the
     /// last [`super::ticker::GRACE_MS`], once per meeting and lead.
     pub fn meetings(&self, account: &Origin, meetings: &[Meeting], now: i64) {
