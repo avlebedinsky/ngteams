@@ -117,6 +117,18 @@ async fn an_unsigned_account_assembles_optional_services_and_the_engine_lock_pre
             account::AMS_GTM.into(),
             "https://amer-0.asyncgw.teams.microsoft.com".into(),
         ),
+        (
+            account::PROVISIONING_GTM.into(),
+            "https://teams.microsoft.com/fabric/amer/templates/api".into(),
+        ),
+        (
+            account::USER_PROFILE_GTM.into(),
+            "https://teams.microsoft.com/api/userprofilesvc/amer".into(),
+        ),
+        (
+            account::MCPS_GTM.into(),
+            "https://teams.microsoft.com/api/mcps/amer".into(),
+        ),
     ]);
     let engine = start(configured).unwrap();
     assert!(!engine.handle.requests().read_only());
@@ -151,6 +163,9 @@ async fn read_only_suppresses_requested_sockets_and_calling_and_invalid_optional
             account::CSA_GTM,
             account::PRESENCE_GTM,
             account::AMS_GTM,
+            account::PROVISIONING_GTM,
+            account::USER_PROFILE_GTM,
+            account::MCPS_GTM,
         ] {
             configured
                 .region

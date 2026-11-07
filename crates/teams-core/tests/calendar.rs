@@ -609,6 +609,21 @@ async fn invalid_changes_and_uncertain_or_refused_writes_are_never_resent() {
     rig.handle.shutdown();
 }
 
+#[tokio::test]
+async fn an_engine_without_the_middle_tier_saves_no_event_and_sends_nothing() {
+    let rig = running_engine(false).await;
+    let refused = rig.handle.write_event(EventWrite::Create(draft())).await;
+    assert!(
+        matches!(refused, Err(EngineError::EventNotSaved { kind: "creation", .. })),
+        "{refused:?}"
+    );
+    assert!(
+        rig.server.received_requests().await.unwrap().is_empty(),
+        "nothing went out"
+    );
+    rig.handle.shutdown();
+}
+
 /// The ids the store answers for `START`'s day once the engine kept what it read (the read's answer comes first):
 /// asked until they are `expected`, for a bounded while.
 async fn stored_settles(rig: &Rig, expected: &[&str]) {

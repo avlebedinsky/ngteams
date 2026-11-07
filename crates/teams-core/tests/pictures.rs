@@ -2,6 +2,8 @@
 //! against wiremock as AMS, Graph and SharePoint's media host (the transport's `test-support` mock origin): a
 //! message's picture and a file's thumbnail read by the first run are shown by the second without a read; a picture
 //! the service has none of isn't cached, so the next run reads it again; the cache is a private file beside the store.
+//! A GIF and a link preview's picture are cached by what they are of; asks that come while a read runs wait for it; a
+//! file Graph lists no thumbnail for has none; a cache that can't be opened leaves every run reading.
 //!
 //! Tokens, ids and links here are made up; the thumbnails' answer follows the synthetic fixture
 //! (`tests/fixtures/graph/thumbnails.json`).
@@ -177,4 +179,248 @@ async fn a_files_thumbnail_read_once_is_shown_from_the_cache_by_the_next_run() {
         1,
         "the picture read once"
     );
+}
+
+/// A sharing link of `name`, on SharePoint's host as [`SHARE`] is.
+fn share_of(name: &str) -> String {
+    SHARE.replace("MadeUpShareLink0001", name)
+}
+
+/// Graph's thumbnails of `share` answered with `response`.
+async fn thumbnails_answer(server: &MockServer, share: &str, response: ResponseTemplate) -> String {
+    let listed = format!(
+        "/v1.0/shares/{}/driveItem/thumbnails",
+        FileThumbnails::of(share).unwrap().share()
+    );
+    Mock::given(method("GET"))
+        .and(path(listed.as_str()))
+        .respond_with(response)
+        .mount(server)
+        .await;
+    listed
+}
+
+/// The fixture's thumbnails, the large one's link on the media host at `/transform/<picture>`.
+fn listing(picture: &str) -> String {
+    let mut answer: Value = serde_json::from_str::<Value>(THUMBNAILS).unwrap()["answer"].clone();
+    answer["value"][0]["large"]["url"] = Value::String(format!(
+        "https://westus1-mediap.svc.ms/transform/{picture}?provider=spo&cs=made-up&width=800"
+    ));
+    answer.to_string()
+}
+
+#[tokio::test]
+async fn a_file_without_a_thumbnail_to_show_has_none() {
+    let server = MockServer::start().await;
+    let refused = thumbnails_answer(&server, &share_of("Refused0001"), ResponseTemplate::new(404)).await;
+    let empty: Value = serde_json::from_str::<Value>(THUMBNAILS).unwrap()["empty"].clone();
+    thumbnails_answer(
+        &server,
+        &share_of("Empty0001"),
+        ResponseTemplate::new(200).set_body_raw(empty.to_string(), "application/json"),
+    )
+    .await;
+    thumbnails_answer(
+        &server,
+        &share_of("Gone0001"),
+        ResponseTemplate::new(200).set_body_raw(listing("gone"), "application/json"),
+    )
+    .await;
+    thumbnails_answer(
+        &server,
+        &share_of("NotAPicture0001"),
+        ResponseTemplate::new(200).set_body_raw(listing("text"), "application/json"),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/transform/gone"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/transform/text"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"made-up text".to_vec(), "text/plain"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let handle = engine(&server, &store_file(&dir));
+    let requests = handle.requests();
+
+    // a link no read can name is answered at once
+    assert!(
+        requests
+            .file_thumbnail("https://example.test/a-file")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    // Graph refuses, lists none, or hands out a picture the media host has none of, or that isn't a picture
+    for name in ["Refused0001", "Empty0001", "Gone0001", "NotAPicture0001"] {
+        let answer = requests.file_thumbnail(share_of(name)).await.unwrap();
+        assert!(answer.is_none(), "{name}");
+    }
+    // that there is none is kept for the run: no read again
+    assert!(
+        requests
+            .file_thumbnail(share_of("Refused0001"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    handle.shutdown();
+    assert_eq!(requests_to(&server, &refused).await, 1);
+    assert_eq!(requests_to(&server, "/transform/gone").await, 1);
+    assert_eq!(requests_to(&server, "/transform/text").await, 1);
+}
+
+#[tokio::test]
+async fn asks_for_a_thumbnail_while_it_is_read_all_wait_for_the_one_read() {
+    let server = MockServer::start().await;
+    let share = share_of("Slow0001");
+    let listed = thumbnails_answer(
+        &server,
+        &share,
+        ResponseTemplate::new(200)
+            .set_body_raw(listing("slow"), "application/json")
+            .set_delay(std::time::Duration::from_millis(300)),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/transform/slow"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(JPEG.to_vec(), "image/jpeg"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let handle = engine(&server, &store_file(&dir));
+    let requests = handle.requests();
+
+    let (first, second) = tokio::join!(requests.file_thumbnail(&share), requests.file_thumbnail(&share));
+    let (first, second) = (first.unwrap().unwrap(), second.unwrap().unwrap());
+    // once read, the same run answers from memory
+    let third = requests.file_thumbnail(&share).await.unwrap().unwrap();
+    handle.shutdown();
+
+    for picture in [&first, &second, &third] {
+        assert_eq!((picture.format, picture.bytes.as_slice()), (PastedFormat::Jpeg, JPEG));
+    }
+    assert_eq!(requests_to(&server, &listed).await, 1, "one read for every ask");
+    assert_eq!(requests_to(&server, "/transform/slow").await, 1);
+}
+
+#[tokio::test]
+async fn without_a_usable_cache_every_run_reads_the_picture_and_concurrent_asks_share_a_read() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(view_path("imgo")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(PNG.to_vec(), "image/png")
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let store_file = store_file(&dir);
+    // something that isn't a cache stands where the cache would be
+    let cache = PictureCache::file_beside(&store_file);
+    std::fs::create_dir_all(&cache).unwrap();
+
+    for run in 1..=2 {
+        let handle = engine(&server, &store_file);
+        let requests = handle.requests();
+        assert!(
+            requests
+                .message_picture("https://example.test/not-a-picture")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (first, second) = tokio::join!(
+            requests.message_picture(src("imgo")),
+            requests.message_picture(src("imgo"))
+        );
+        for picture in [first.unwrap().unwrap(), second.unwrap().unwrap()] {
+            assert_eq!((picture.format, picture.bytes.as_slice()), (PastedFormat::Png, PNG));
+        }
+        handle.shutdown();
+        assert_eq!(
+            requests_to(&server, &view_path("imgo")).await,
+            run,
+            "one read a run, none from a cache"
+        );
+    }
+    assert!(cache.is_dir(), "left as it was");
+}
+
+#[tokio::test]
+async fn a_gif_and_a_link_preview_s_picture_are_cached_by_what_they_are_of() {
+    const GIF: &[u8] = b"GIF89a made-up animation";
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/media/MadeUpGif01/giphy.gif"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(GIF.to_vec(), "image/gif"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/urlp/v1/url/image/Thumbnail"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(PNG.to_vec(), "image/png"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let store_file = store_file(&dir);
+    let gif = "https://media2.giphy.com/media/v1.MadeUpToken/MadeUpGif01/giphy.gif";
+    let preview = |site: &str| {
+        format!(
+            "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=https%3A%2F%2F{site}%2Fpicture.png"
+        )
+    };
+
+    let first = engine(&server, &store_file);
+    let read = first.requests().message_picture(gif).await.unwrap().unwrap();
+    assert_eq!((read.format, read.bytes.as_slice()), (PastedFormat::Gif, GIF));
+    let read = first
+        .requests()
+        .message_picture(preview("example.test"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((read.format, read.bytes.as_slice()), (PastedFormat::Png, PNG));
+    first.shutdown();
+
+    // the next run: the same GIF on another of Giphy's hosts, and the same page's picture, from the cache
+    let second = engine(&server, &store_file);
+    let other_shard = gif.replace("media2.", "media.");
+    assert_eq!(
+        second
+            .requests()
+            .message_picture(other_shard)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        GIF
+    );
+    assert_eq!(
+        second
+            .requests()
+            .message_picture(preview("example.test"))
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        PNG
+    );
+    // another page's picture is another read
+    assert!(
+        second
+            .requests()
+            .message_picture(preview("example.org"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    second.shutdown();
+    assert_eq!(requests_to(&server, "/media/MadeUpGif01/giphy.gif").await, 1);
+    assert_eq!(requests_to(&server, "/urlp/v1/url/image/Thumbnail").await, 2);
 }

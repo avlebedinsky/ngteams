@@ -235,6 +235,32 @@ async fn someone_added_to_a_one_to_one_call_makes_it_a_group_call_in_a_new_chat_
     }
 }
 
+/// The new chat of the three refused: nobody is added (no `add` goes), and the add is told failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn someone_added_whose_new_chat_is_refused_is_told_not_added() {
+    let lab = crate::support::Lab::start().await;
+    let (mut a, _b, call, _) = one_to_one(&lab).await;
+    lab.mock.refuse_next("POST", "/threads", 403).await;
+    a.handle
+        .requests()
+        .call(CallAction::Add {
+            call,
+            invitee: teams_proto::Mri::new(LAB_C),
+        })
+        .await
+        .unwrap();
+    let who = a
+        .next(|event| match event {
+            Event::CallAddFailed { call: of, who } if *of == call => Some(who.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(who.as_str(), LAB_C);
+    let added = lab.mock.calls().into_iter().flat_map(|call| call.added).count();
+    assert_eq!(added, 0, "no add went");
+    assert_eq!(lab.attempts("/threads").await, 1);
+}
+
 /// a's call to b in their 1:1 chat, answered: a, b, and the call as each has it.
 async fn one_to_one(lab: &Lab) -> (Account, Account, CallId, CallId) {
     let mut a = lab.account_without_video(LAB_A, A_TONE).await;

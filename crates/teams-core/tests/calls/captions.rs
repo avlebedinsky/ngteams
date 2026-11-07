@@ -285,3 +285,38 @@ async fn refused_caption_invitation_does_not_end_the_connected_voice_call() {
     assert_eq!(a.ended(call).await, End::HungUp);
     assert_eq!(lab.attempts("addParticipant").await, 1);
 }
+
+/// A busy caption service fails the invitation as busy; asked again, the invitation goes, but a start command the
+/// service fails (`500`) fails the captions with the connection's hint, and the voice call goes on either way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_invitation_and_a_failed_start_command_fail_captions_with_why() {
+    let (lab, mut a, call) = connected().await;
+    lab.mock.refuse_next("POST", "/addParticipant", 503).await;
+    let captions = |enabled| CallAction::Captions { call, enabled };
+    a.handle.requests().call(captions(true)).await.unwrap();
+    let failed = phase(&mut a, call, CaptionPhase::Failed).await;
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("The live caption service is busy. Try again.")
+    );
+
+    lab.mock.answer_next("POST", "/addParticipant", 200, &json!({})).await;
+    lab.mock.refuse_next("POST", COMMAND_END, 500).await;
+    a.handle.requests().call(captions(true)).await.unwrap();
+    phase(&mut a, call, CaptionPhase::Starting).await;
+    service(&lab, "Inactive", 1).await;
+    let failed = phase(&mut a, call, CaptionPhase::Failed).await;
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("Live captions could not start. Check your connection and try again.")
+    );
+    assert_eq!(lab.attempts("00000000-0000-4000-8000-000000000001").await, 1);
+
+    a.handle
+        .requests()
+        .call(CallAction::Mute { call, muted: true })
+        .await
+        .unwrap();
+    a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+}

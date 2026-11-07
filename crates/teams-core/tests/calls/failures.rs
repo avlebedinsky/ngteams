@@ -189,6 +189,36 @@ async fn an_answer_whose_media_fails_keeps_the_invitation_ringing_until_it_is_de
     assert_eq!(lab.sent_by(LAB_B), ["attach", "progress", "reject"]);
 }
 
+/// Hanging up an invitation whose answer still sets its media up: the answer never goes (it is refused as hung up
+/// before its media), and the invitation is declined instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_hung_up_while_its_media_is_set_up_declines_the_invitation() {
+    let lab = Lab::start().await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let _ = lab.mock.ring(LAB_C, LAB_B);
+    let incoming = b.incoming().await;
+    lab.mock
+        .refuse_next_after("GET", "/trap/tokens", 500, Duration::from_secs(2))
+        .await;
+    let requests = b.handle.requests();
+    let answer = tokio::spawn(requests.call(CallAction::Answer { call: incoming.call }));
+    // the answer waits on its media's relay credentials
+    lab.wait_attempts("/trap/tokens", 1).await;
+    assert_eq!(
+        requests.call(CallAction::HangUp { call: incoming.call }).await.unwrap(),
+        incoming.call
+    );
+    let answered = answer.await.unwrap();
+    assert!(
+        matches!(answered, Err(EngineError::Call(CallActionError::Media(_)))),
+        "{answered:?}"
+    );
+    assert_eq!(b.ended(incoming.call).await, End::Declined);
+    let sent = lab.sent_by(LAB_B);
+    assert!(sent.contains(&"reject".to_owned()), "{sent:?}");
+    assert!(!sent.contains(&"accept".to_owned()), "{sent:?}");
+}
+
 /// An explicitly rejected `attach` renews its token and retries against the same still-ringing invitation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attach_refused_with_a_401_goes_again_and_its_invitation_is_answered() {

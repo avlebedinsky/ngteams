@@ -260,3 +260,50 @@ async fn a_name_the_team_has_comes_back_as_teams_says_it() {
         "{refused}"
     );
 }
+
+/// A refusal naming no code is no particular problem, a busy service is tried once more, and a channel made whose
+/// showing to everyone was refused is made all the same, saying so.
+#[tokio::test]
+async fn a_refused_creation_is_not_made_and_a_refused_default_is_told() {
+    let mut rig = rig().await;
+    rig.settled().await;
+    rig.mock.refuse_next("POST", "/channels", 500).await;
+    let refused = rig
+        .create("Refused", NewChannelKind::Standard, ChannelLayout::Threads, false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            EngineError::ChannelNotCreated {
+                why: ChannelProblem::Other
+            }
+        ),
+        "{refused}"
+    );
+    assert!(rig.listed("Refused").await.is_none());
+
+    rig.mock.refuse_next("PUT", "/setDefaultChannel", 403).await;
+    let made = rig
+        .create("Shown to some", NewChannelKind::Standard, ChannelLayout::Threads, true)
+        .await
+        .unwrap();
+    assert!(made.not_shown_by_default, "the refused default is told");
+    let thread = made.thread.expect("its thread");
+    assert_eq!(rig.listed("Shown to some").await, Some((thread, ChannelKind::Standard)));
+}
+
+#[tokio::test]
+async fn a_creation_turned_away_for_its_token_goes_once_more() {
+    let mut rig = rig().await;
+    rig.settled().await;
+    rig.mock.refuse_next("POST", "/channels", 401).await;
+    let made = rig
+        .create("Second try", NewChannelKind::Standard, ChannelLayout::Threads, false)
+        .await
+        .unwrap();
+    let thread = made.thread.expect("its thread");
+    assert_eq!(rig.listed("Second try").await, Some((thread, ChannelKind::Standard)));
+    let creations = rig.mock.channel_writes().len();
+    assert_eq!(creations, 1, "the world saw the second attempt only");
+}

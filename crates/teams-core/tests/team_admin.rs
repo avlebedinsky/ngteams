@@ -1173,3 +1173,84 @@ async fn workflow_engine_delegates_reads_and_single_attempt_mutations_to_native_
     }
     assert_eq!(rig.sent(|path| path.ends_with("/triggers/manual/run")).await.len(), 3);
 }
+
+/// The team's general channel hidden for the account (its `favorite` off) on `rig`, the channel sections read as
+/// `sections` (refused when `None`); the answer.
+async fn hide_channel(rig: &Rig, sections: Option<&serde_json::Value>) -> Result<(), EngineError> {
+    let actor = json!({"id": LAB_A.strip_prefix("8:orgid:").unwrap()});
+    for _ in 0..2 {
+        rig.mock.answer_next("GET", "/v1.0/me", 200, &actor).await;
+    }
+    rig.mock.answer_next("PUT", "/properties", 200, &json!({})).await;
+    match sections {
+        Some(sections) => rig.mock.answer_next("GET", "conversationFolders", 200, sections).await,
+        None => rig.mock.refuse_next("GET", "conversationFolders", 403).await,
+    }
+    rig.mock
+        .answer_next("POST", "conversationFolders", 200, &json!({}))
+        .await;
+    rig.handle
+        .requests()
+        .own_team_view(
+            vec![OwnTeamView::ChannelFavorite {
+                channel: TEAM.to_owned(),
+                general: true,
+                shown: false,
+            }],
+            Some(TeamChange::ChannelShown {
+                team: TEAM.to_owned(),
+                channel: TEAM.to_owned(),
+                shown: false,
+            }),
+        )
+        .await
+}
+
+fn shown(team: &teams_store::Team) -> bool {
+    team.channels
+        .iter()
+        .find(|channel| channel.id == TEAM)
+        .expect("the general channel")
+        .shown
+}
+
+#[tokio::test]
+async fn a_channel_hidden_for_the_account_leaves_its_section_and_is_listed_hidden() {
+    let mut rig = setup().await;
+    rig.settled().await;
+    let mut sections = hierarchy();
+    sections["conversationFolders"][0]["conversationFolderItems"] = json!([{"conversationId": TEAM}]);
+    hide_channel(&rig, Some(&sections)).await.unwrap();
+    assert!(!shown(&rig.stored_team().await));
+    let sent = rig.mock.received_requests().await;
+    let written: Vec<_> = sent
+        .iter()
+        .filter(|request| request.method.as_str() == "POST" && request.url.path().ends_with("conversationFolders"))
+        .collect();
+    assert_eq!(written.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&written[0].body).unwrap();
+    assert_eq!(
+        body["actions"],
+        json!([{"action": "RemoveItem", "folderId": "favorites", "itemId": TEAM}])
+    );
+    assert_eq!(body["folderHierarchyVersion"], 42);
+}
+
+#[tokio::test]
+async fn a_channel_whose_sections_can_t_be_read_isn_t_listed_hidden() {
+    let mut rig = setup().await;
+    rig.settled().await;
+    let refused = hide_channel(&rig, None).await.unwrap_err();
+    assert!(
+        matches!(refused, EngineError::TeamNotChanged { code: None }),
+        "{refused:?}"
+    );
+    assert!(shown(&rig.stored_team().await), "nothing changed in the list");
+    let sent = rig.mock.received_requests().await;
+    assert!(
+        !sent
+            .iter()
+            .any(|request| request.method.as_str() == "POST" && request.url.path().ends_with("conversationFolders")),
+        "no section write without a fresh hierarchy"
+    );
+}

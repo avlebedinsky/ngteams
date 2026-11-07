@@ -2721,3 +2721,84 @@ async fn notes_never_written_are_none_not_a_failure() {
         "read again from the newest page next time"
     );
 }
+
+/// Answers the plain service's conversation list a page at a time: the first read (no `syncState` of
+/// `page-<n>`) its first page, each page's `forwardLink` naming the next, the last of `pages` naming none but a sync
+/// link. Every conversation's own reads are refused (`404`): only the list matters here.
+async fn mount_list_pages(server: &MockServer, pages: Vec<Vec<Value>>) {
+    let last = pages.len() - 1;
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/chatsvc/amer/v1/users/ME/conversations"))
+        .respond_with(move |request: &Request| {
+            let index = request
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "syncState")
+                .and_then(|(_, value)| value.strip_prefix("page-").and_then(|n| n.parse::<usize>().ok()))
+                .unwrap_or(0)
+                .min(last);
+            let metadata = if index == last {
+                json!({"syncState": list_link("l2")})
+            } else {
+                json!({"forwardLink": list_link(&format!("page-{}", index + 1))})
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"conversations": pages[index], "_metadata": metadata}))
+        })
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+async fn list_reads(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path().ends_with("/users/ME/conversations"))
+        .count()
+}
+
+#[tokio::test]
+async fn a_conversation_list_of_several_pages_is_read_to_its_last() {
+    let server = MockServer::start().await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    mount_list_pages(
+        &server,
+        vec![
+            vec![listed("48:made-up-first", 1)],
+            vec![listed("48:made-up-second", 1), json!({"not": "a conversation"})],
+            vec![listed("48:made-up-third", 1)],
+        ],
+    )
+    .await;
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert_eq!(report.conversations, 3, "{report:?}");
+    assert_eq!(report.skipped, 1, "the entry of another shape: {report:?}");
+    assert_eq!(list_reads(&server).await, 3);
+}
+
+#[tokio::test]
+async fn a_conversation_list_that_never_ends_stops_at_the_page_limit() {
+    let server = MockServer::start().await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    let pages = (0..=MAX_PAGES)
+        .map(|n| vec![listed(&format!("48:made-up-{n}"), 1)])
+        .collect();
+    mount_list_pages(&server, pages).await;
+    let error = a.catch_up.catch_up(&mut a.store).await.unwrap_err();
+    assert!(matches!(error, CatchUpError::TooManyPages), "{error:?}");
+    assert_eq!(list_reads(&server).await, MAX_PAGES);
+}
+
+#[tokio::test]
+async fn a_catch_up_s_debug_names_its_account_and_page_size_but_nothing_of_its_transport() {
+    let server = MockServer::start().await;
+    let a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    let shown = format!("{:?}", a.catch_up);
+    assert!(shown.starts_with("CatchUp"), "{shown}");
+    assert!(shown.contains(LAB_A), "{shown}");
+    assert!(shown.contains("page_size"), "{shown}");
+    assert!(!shown.contains("placeholder-token"), "{shown}");
+    assert!(!shown.contains(&server.uri()), "{shown}");
+}

@@ -3226,7 +3226,8 @@ async fn next_push(push: Option<&mut TrouterHandle>) -> Option<PushEvent> {
 #[cfg(test)]
 mod start_within {
     //! A start or a join that waited past [`START_WITHIN`](crate::calling::START_WITHIN) to be taken is refused, never
-    //! placed. The MRIs are synthetic.
+    //! placed; what an action that goes resolves to (whom a chat's call rings, where a meeting is joined). The MRIs
+    //! are synthetic.
 
     use super::*;
 
@@ -3257,6 +3258,68 @@ mod start_within {
         );
         let (went, answer) = handed(echo, Duration::ZERO);
         assert!(went && answer.is_none(), "a start in time goes: {answer:?}");
+    }
+
+    /// What `action` resolves to for `ME`, on an empty store.
+    fn resolved(action: CallAction) -> Result<Act, CallActionError> {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store.db")).unwrap();
+        call_act(&store, ME, action)
+    }
+
+    #[test]
+    fn a_meeting_runs_where_its_chat_says_and_a_channel_s_meeting_is_joined_in_its_channel() {
+        let channel = "19:0123456789abcdef0123456789abcdef@thread.tacv2".to_owned();
+        let meeting = teams_proto::MeetingInfo {
+            organizer_id: "00000000-0000-4000-8000-00000000000b".into(),
+            tenant_id: "00000000-0000-4000-8000-0000000000aa".into(),
+        };
+        let in_channel = resolved(CallAction::JoinMeeting {
+            chat: channel.clone(),
+            meeting: meeting.clone(),
+        });
+        assert!(matches!(in_channel, Ok(Act::JoinChannel(ref at, _)) if *at == channel));
+        let chat = "19:meeting_MadeUpMeeting01@thread.v2".to_owned();
+        let in_chat = resolved(CallAction::JoinMeeting {
+            chat: chat.clone(),
+            meeting: meeting.clone(),
+        });
+        assert!(
+            matches!(in_chat, Ok(Act::Place(Placement::Meeting { chat: ref at, meeting: ref of })) if *at == chat && *of == meeting)
+        );
+        let meet_now = resolved(CallAction::MeetNow {
+            channel: channel.clone(),
+        });
+        assert!(matches!(meet_now, Ok(Act::Place(Placement::Channel { channel: ref at })) if *at == channel));
+        let join = resolved(CallAction::JoinChannel {
+            channel: channel.clone(),
+        });
+        assert!(matches!(join, Ok(Act::JoinChannel(ref at, _)) if *at == channel));
+    }
+
+    #[test]
+    fn a_call_from_a_chat_rings_its_other_member_and_one_from_a_chat_without_members_is_refused() {
+        let other = "8:orgid:00000000-0000-4000-8000-00000000000b";
+        let one_to_one = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+        let call = resolved(CallAction::Call {
+            chat: one_to_one.into(),
+        });
+        assert!(
+            matches!(call, Ok(Act::Place(Placement::Chat { ref callees, group_chat: None })) if callees == &[Mri::new(other)])
+        );
+        let unknown = resolved(CallAction::Call {
+            chat: "19:made-up-group@thread.v2".into(),
+        });
+        assert!(matches!(unknown, Err(CallActionError::NotAChat)), "no members stored");
+        // the account second in the chat's id, and a 1:1 chat of two others (no members stored either)
+        let second = "19:00000000-0000-4000-8000-00000000000b_00000000-0000-4000-8000-00000000000a@unq.gbl.spaces";
+        let call = resolved(CallAction::Call { chat: second.into() });
+        assert!(
+            matches!(call, Ok(Act::Place(Placement::Chat { ref callees, group_chat: None })) if callees == &[Mri::new(other)])
+        );
+        let others = "19:00000000-0000-4000-8000-00000000000b_00000000-0000-4000-8000-00000000000c@unq.gbl.spaces";
+        let call = resolved(CallAction::Call { chat: others.into() });
+        assert!(matches!(call, Err(CallActionError::NotAChat)), "not the account's chat");
     }
 
     #[test]

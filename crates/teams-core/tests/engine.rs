@@ -892,6 +892,23 @@ async fn attachment_sharing_keeps_store_queries_and_seen_receipts_responsive() {
     assert_eq!(count.expect("file sharing must serve local requests").unwrap(), 0);
 }
 
+/// New message for some people opens the stored group chat of exactly them (the account among them); a 1:1 chat is
+/// no group chat, and a roster with anyone else isn't theirs.
+#[tokio::test]
+async fn new_message_finds_the_stored_group_chat_of_exactly_its_people() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    b.handle.sync().await.unwrap();
+    let people = |mris: &[&str]| mris.iter().map(|mri| (*mri).to_owned()).collect::<Vec<_>>();
+    let found = b.handle.group_chat_with(people(&[LAB_C, LAB_A, LAB_B])).await.unwrap();
+    let pair = b.handle.group_chat_with(people(&[LAB_A, LAB_B])).await.unwrap();
+    let nobody = b.handle.group_chat_with(Vec::new()).await.unwrap();
+    b.shutdown();
+    assert_eq!(found.as_deref(), Some(ABC_CHAT));
+    assert_eq!(pair, None, "the a-b chat is a 1:1 chat");
+    assert_eq!(nobody, None);
+}
+
 #[tokio::test]
 async fn a_seen_message_clears_unread_before_the_receipt_server_answers_and_keeps_newer_messages_unread() {
     let lab = Lab::start().await;
@@ -1444,6 +1461,17 @@ async fn the_store_is_read_while_a_catch_up_waits_on_the_service_and_other_reque
     teams
         .expect("the teams weren't answered while the catch-up waited")
         .unwrap();
+    // a receipt for a message the store doesn't hold is refused at once, while the catch-up still waits
+    let unknown = b.handle.write(Action::Read {
+        conversation: AB_CHAT.to_owned(),
+        message_id: "1000000000000".to_owned(),
+    });
+    let unknown = tokio::time::timeout(Duration::from_secs(5), unknown).await;
+    let unknown = unknown.expect("a receipt wasn't answered while the catch-up waited");
+    assert!(
+        matches!(unknown, Err(EngineError::UnknownMessage { .. })),
+        "{unknown:?}"
+    );
     // a request that isn't a query waits for the catch-up, and goes after it in the order it was made
     let older = tokio::spawn(older);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -2914,4 +2942,68 @@ async fn incomplete_original_identity_refuses_edits_and_read_receipts_before_an_
         assert!(account.handle.outbox_entry(1).await.unwrap().is_none());
         account.shutdown();
     }
+}
+
+/// A control message `kind` of `from` in `chat`, delivered as the messaging socket delivers a typing one.
+fn control_delivery(chat: &str, from: &str, kind: &str) -> Value {
+    let base = "https://notifications.skype.net/v1/users/ME";
+    json!({
+        "time": "2023-11-14T22:13:21.0000000Z",
+        "type": "EventMessage",
+        "resourceLink": format!("{base}/conversations/{chat}/messages/1700000000950"),
+        "resourceType": "NewMessage",
+        "resource": {
+            "clientmessageid": "1700000000900",
+            "content": "",
+            "from": format!("{base}/contacts/{from}"),
+            "id": "1700000000950",
+            "messagetype": kind,
+            "originalarrivaltime": "2023-11-14T22:13:21.0000000Z",
+            "version": "1700000000950",
+            "type": "Message",
+            "conversationLink": format!("{base}/conversations/{chat}"),
+            "to": chat,
+            "contenttype": "Application/Message",
+            "threadtype": "chat",
+        },
+    })
+}
+
+#[tokio::test]
+async fn typing_that_stops_is_told_stopped_and_nothing_of_it_is_stored() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    lab.trouter
+        .deliver_chat(LAB_B, &control_delivery(AB_CHAT, LAB_A, "Control/ClearTyping"));
+    let from = b
+        .event(|event| match event {
+            Event::Typing {
+                conversation,
+                from,
+                typing: false,
+            } if conversation == AB_CHAT => Some(from.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(from.as_deref(), Some(LAB_A));
+    assert!(b.handle.message(AB_CHAT, "1700000000950").await.unwrap().is_none());
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn a_read_horizon_of_a_conversation_the_store_doesn_t_know_comes_with_its_catch_up() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    let unknown = "19:00000000000000000000000000000bee@thread.v2";
+    lab.trouter.deliver_chat(
+        LAB_B,
+        &conversation_delivery(unknown, Some("9999999999999;9999999999999;synthetic")),
+    );
+    // a catch-up is made due rather than the horizon kept for a conversation that isn't there
+    b.event(|event| matches!(event, Event::CaughtUp { .. }).then_some(()))
+        .await;
+    assert!(b.handle.read_horizon(unknown).await.unwrap().is_none());
+    b.shutdown();
 }

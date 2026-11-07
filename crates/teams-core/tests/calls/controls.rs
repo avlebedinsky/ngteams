@@ -136,3 +136,33 @@ async fn controls_read_and_change_the_meeting_options_and_everyone_is_told() {
     );
     hang_up([(&mut a, call_a), (&mut b, call_b), (&mut c, call_c)]).await;
 }
+
+/// The middle tier refusing Controls: a read it refuses, or answers with something else than options, gives none; a
+/// change it refuses isn't made (`NotChanged`) and the options stay as they were.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn controls_refused_by_the_middle_tier_read_nothing_and_change_nothing() {
+    let lab = Lab::start_group_video().await;
+    let ((mut a, call_a), (mut b, call_b), (mut c, call_c)) = group_call(&lab).await;
+    lab.mock.refuse_next("GET", "/0/0", 403).await;
+    assert_eq!(a.handle.requests().call_meeting_options(call_a).await.unwrap(), None);
+
+    lab.mock.refuse_next("POST", "/0/0", 403).await;
+    let refused = a
+        .handle
+        .requests()
+        .call(CallAction::MeetingOption {
+            call: call_a,
+            option: MeetingOption::Present(false),
+        })
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(teams_core::EngineError::Call(teams_core::CallActionError::NotChanged))
+        ),
+        "{refused:?}"
+    );
+    let read = a.handle.requests().call_meeting_options(call_a).await.unwrap().unwrap();
+    assert_eq!(read.present, Some(true), "nobody was made an attendee");
+    hang_up([(&mut a, call_a), (&mut b, call_b), (&mut c, call_c)]).await;
+}

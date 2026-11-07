@@ -390,3 +390,55 @@ fn the_plain_events_name_ids_and_counts() {
         (Level::Debug, "typing true in synthetic-chat".to_owned())
     );
 }
+
+#[test]
+fn the_push_channel_and_its_catch_ups_are_told_by_their_kind_and_counts_alone() {
+    let down = Event::Disconnected {
+        down: teams_trouter::Down::Closed,
+        heard: None,
+    };
+    assert_eq!(
+        logged(&down, LevelFilter::Info),
+        Some((Level::Info, "push channel down: Closed".to_owned()))
+    );
+    let caught_up = Event::CaughtUp {
+        cause: crate::Cause::Retry,
+        report: crate::CatchUpReport {
+            conversations: 3,
+            ..crate::CatchUpReport::default()
+        },
+    };
+    assert_eq!(
+        logged(&caught_up, LevelFilter::Info),
+        Some((
+            Level::Info,
+            "caught up (Retry): 3 conversation(s), 0 message(s) changed, 0 failed".to_owned()
+        ))
+    );
+    let failed = Event::CatchUpFailed {
+        cause: crate::Cause::Retry,
+        error: crate::CatchUpError::TooManyPages,
+    };
+    let (level, line) = logged(&failed, LevelFilter::Warn).expect("a warning");
+    assert_eq!(level, Level::Warn);
+    assert!(line.starts_with("catch-up (Retry) failed: "), "{line}");
+    let calling = Event::CallingRegistration(teams_trouter::RegistrationReport::Registered);
+    assert_eq!(
+        logged(&calling, LevelFilter::Info),
+        Some((Level::Info, "calling registration: Registered".to_owned()))
+    );
+}
+
+#[test]
+fn a_transferred_call_is_told_without_who_transferred_it() {
+    let id = call_id();
+    let transferred = Event::CallTransferred {
+        call: id,
+        target: Mri::new(teams_mock::LAB_C),
+        by: Some(PRIVATE_NAME.to_owned()),
+        chat: None,
+    };
+    let (_, line) = logged(&transferred, LevelFilter::Info).expect("a line at info");
+    assert_eq!(line, format!("call {}: transferred by its far end", id.get()));
+    assert!(!line.contains(PRIVATE_NAME) && !line.contains(teams_mock::LAB_C));
+}

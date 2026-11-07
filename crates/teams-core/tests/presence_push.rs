@@ -76,9 +76,16 @@ struct Rig {
 /// without a subscription covering everyone and every `subscribed` with one. The mock's UPS answers every read
 /// `Offline` and takes every subscription but of those in `polling_only`.
 async fn rig(poll: Duration, subscribed: Duration, polling_only: &[&str]) -> Rig {
+    rig_of(poll, subscribed, Some(polling_only)).await
+}
+
+/// [`rig`], UPS taking no subscription at all (the mock's world answers none) when `polling_only` is `None`.
+async fn rig_of(poll: Duration, subscribed: Duration, polling_only: Option<&[&str]>) -> Rig {
     let mock = ChatServiceMock::start().await.unwrap();
     mock.serve_presence(&[]).await;
-    mock.serve_presence_subscriptions(polling_only).await;
+    if let Some(polling_only) = polling_only {
+        mock.serve_presence_subscriptions(polling_only).await;
+    }
     let trouter = mock.start_trouter().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let tokens = Arc::new(Tokens {
@@ -414,4 +421,29 @@ async fn the_reads_slow_while_the_subscription_covers_everyone_and_fall_back_to_
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(polled.reads().await >= before + 3, "read on at the minute's pace");
     polled.handle.shutdown();
+}
+
+#[tokio::test]
+async fn a_refused_subscription_isn_t_asked_again_before_its_wait_and_the_reads_go_on() {
+    let mut rig = rig_of(Duration::from_hours(1), Duration::from_hours(1), None).await;
+    rig.registered().await;
+    let people: Vec<String> = (1..=10_u32)
+        .map(|n| format!("8:orgid:{n:08x}-0000-4000-8000-000000000002"))
+        .collect();
+    for person in &people {
+        rig.handle.presence(person.clone()).await.unwrap();
+    }
+    // everyone's presence is still read
+    let mut told = Vec::new();
+    while told.len() < people.len() {
+        told.push(rig.next_presence().await);
+    }
+    // the subscription's first request was refused (the mock's UPS takes none): nothing more is asked before the
+    // retry's wait, the reads keep everyone's presence
+    let first = rig.subscriptions_at_least(1).await;
+    assert!(added(&first[0]).len() <= 8, "{}", first[0]);
+    assert_eq!(first[0]["shouldPurgePreviousSubscriptions"], true);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(rig.subscriptions().await.len(), 1, "nothing more sent");
+    rig.handle.shutdown();
 }
