@@ -346,7 +346,10 @@ fn check_timelines(pipewire: &PrivatePipeWire) -> SandboxResult {
     };
     let node = pipewire.add_looped_microphone(spec, Arc::from(samples))?;
     let heard = probe(&env, &["mic", "3", "990", "440"])?;
-    assert!(value::<f32>(&heard, "level_990") > 0.2, "{heard:?}");
+    // the 3 s heard hold one or two of the loop's seconds of tone, wherever the probe starts in it (its start shifts on
+    // a loaded machine): either is far above the silence heard at 440 Hz
+    assert!(value::<f32>(&heard, "level_990") > 0.1, "{heard:?}");
+    assert!(value::<f32>(&heard, "level_440") < 0.01, "{heard:?}");
     let marks = node.timeline().ok_or("no timeline")?.marks();
     let (first, last) = (marks[0], marks[marks.len() - 1]);
     assert_eq!(first.sample, 0, "{first:?}");
