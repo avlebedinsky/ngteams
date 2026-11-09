@@ -9,7 +9,6 @@
 //! between), made once more as a reader.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
@@ -41,7 +40,7 @@ pub fn snapshot(source: &Path, dest: &Path) -> Result<(), StoreError> {
             path: dest.to_path_buf(),
         });
     }
-    fs::set_permissions(dest, fs::Permissions::from_mode(0o600)).map_err(file_error)
+    teams_platform::private::restrict_file(dest).map_err(file_error)
 }
 
 /// `source`'s WAL file.
@@ -64,8 +63,21 @@ fn copy(source: &Path, dest: &Path, immutable: bool) -> Result<(), StoreError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(&uri, flags)?;
     conn.busy_timeout(crate::BUSY_TIMEOUT)?;
-    let dest = dest.to_str().ok_or(rusqlite::Error::InvalidPath(dest.to_path_buf()))?;
-    conn.execute("VACUUM INTO ?1", [dest])?;
+    let dest_name = dest.to_str().ok_or(rusqlite::Error::InvalidPath(dest.to_path_buf()))?;
+    // VACUUM INTO accepts an existing empty file. Reserve it privately before SQLite writes, rather than relying
+    // on the parent's ACL (or the process umask), and let create_new resolve concurrent snapshot creators.
+    let reserved =
+        teams_platform::private::open(dest, teams_platform::private::Open::NewReadWrite).map_err(|source| {
+            StoreError::File {
+                path: dest.to_path_buf(),
+                source,
+            }
+        })?;
+    drop(reserved);
+    if let Err(error) = conn.execute("VACUUM INTO ?1", [dest_name]) {
+        let _ = fs::remove_file(dest);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -81,6 +93,7 @@ fn uri_path(path: &str) -> String {
     let mut text = String::new();
     for character in path.chars() {
         match character {
+            '\\' if cfg!(windows) => text.push('/'),
             '%' => text.push_str("%25"),
             '?' => text.push_str("%3f"),
             '#' => text.push_str("%23"),
@@ -88,4 +101,18 @@ fn uri_path(path: &str) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uri_path;
+
+    #[test]
+    fn separators_and_reserved_characters_keep_their_platform_meaning() {
+        let escaped = uri_path(r"C:\data\literal%?#.sqlite");
+        #[cfg(unix)]
+        assert_eq!(escaped, r"C:\data\literal%25%3f%23.sqlite");
+        #[cfg(windows)]
+        assert_eq!(escaped, "C:/data/literal%25%3f%23.sqlite");
+    }
 }

@@ -4,7 +4,9 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::ffi::OsStringExt as _;
+#[path = "support/invalid_path.rs"]
+mod invalid_path;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +40,7 @@ fn side_file(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).expect("metadata").permissions().mode() & 0o777
 }
@@ -69,12 +72,15 @@ fn a_closed_store_is_copied_without_touching_its_file_or_creating_side_files() {
     drop(store(&source));
     assert_no_side_files(&source);
     // A read-only source must retain its mode; only the new destination is tightened.
+    #[cfg(unix)]
     fs::set_permissions(&source, fs::Permissions::from_mode(0o400)).expect("make source read-only");
     let before = fs::read(&source).expect("source bytes");
 
     snapshot(&source, &dest).expect("snapshot a closed store");
 
+    #[cfg(unix)]
     assert_eq!(mode(&dest), 0o600);
+    #[cfg(unix)]
     assert_eq!(mode(&source), 0o400);
     assert_eq!(fs::read(&source).expect("source after snapshot"), before);
     assert_no_side_files(&source);
@@ -103,7 +109,9 @@ fn a_running_stores_wal_commit_is_copied_and_later_writes_do_not_change_the_copy
     snapshot(&source, &dest).expect("snapshot the open store");
 
     assert_eq!(topic(&dest), "committed in WAL");
+    #[cfg(unix)]
     assert_eq!(mode(&dest), 0o600);
+    #[cfg(unix)]
     assert_eq!(mode(&source), 0o600);
     assert_eq!(fs::read(&source).expect("source after snapshot"), database_before);
     assert_eq!(fs::read(&wal).expect("WAL after snapshot"), wal_before);
@@ -157,8 +165,14 @@ fn an_uncommitted_write_is_not_included_and_the_writer_can_commit_after_the_snap
 #[test]
 fn uri_characters_in_the_source_name_are_literal_and_the_destination_is_bound_as_data() {
     let dir = tempfile::tempdir().expect("tempdir");
+    #[cfg(unix)]
     let source = dir.path().join("source %25?# ' ü.sqlite");
+    #[cfg(windows)]
+    let source = dir.path().join("source %25# ' ü.sqlite");
+    #[cfg(unix)]
     let dest = dir.path().join("copy ' ; -- %?#.sqlite");
+    #[cfg(windows)]
+    let dest = dir.path().join("copy ' ; -- %#.sqlite");
     drop(store(&source));
     let before = fs::read(&source).expect("source bytes");
 
@@ -167,6 +181,7 @@ fn uri_characters_in_the_source_name_are_literal_and_the_destination_is_bound_as
     assert_eq!(topic(&dest), "original");
     assert_eq!(fs::read(&source).expect("unchanged source"), before);
     assert_no_side_files(&source);
+    #[cfg(unix)]
     assert_eq!(mode(&dest), 0o600);
 }
 
@@ -177,6 +192,7 @@ fn an_existing_destination_is_refused_and_never_overwritten() {
     let dest = dir.path().join("existing.sqlite");
     for bytes in [b"existing data".as_slice(), b"".as_slice()] {
         fs::write(&dest, bytes).expect("create existing destination");
+        #[cfg(unix)]
         fs::set_permissions(&dest, fs::Permissions::from_mode(0o640)).expect("set existing mode");
 
         let error = snapshot(&source, &dest).expect_err("even an empty destination already exists");
@@ -185,6 +201,7 @@ fn an_existing_destination_is_refused_and_never_overwritten() {
             matches!(error, StoreError::File { path, source } if path == dest && source.kind() == ErrorKind::AlreadyExists)
         );
         assert_eq!(fs::read(&dest).expect("existing contents"), bytes);
+        #[cfg(unix)]
         assert_eq!(mode(&dest), 0o640);
         assert!(!source.exists(), "the missing source was not created");
     }
@@ -213,13 +230,14 @@ fn an_invalid_destination_returns_an_error_and_leaves_the_source_readable() {
     let source = dir.path().join("source.sqlite");
     drop(store(&source));
     let missing_parent = dir.path().join("missing").join("copy.sqlite");
-    assert!(matches!(snapshot(&source, &missing_parent), Err(StoreError::Sqlite(_))));
+    assert!(matches!(
+        snapshot(&source, &missing_parent),
+        Err(StoreError::File { path, .. }) if path == missing_parent
+    ));
     assert!(!missing_parent.parent().expect("parent").exists());
     assert_eq!(topic(&source), "original");
 
-    let dest = dir
-        .path()
-        .join(std::ffi::OsString::from_vec(b"invalid-\xff.sqlite".to_vec()));
+    let dest = dir.path().join(invalid_path::name("invalid-", ".sqlite"));
     let error = snapshot(&source, &dest).expect_err("SQLite requires a UTF-8 destination");
     assert!(matches!(error, StoreError::Sqlite(rusqlite::Error::InvalidPath(path)) if path == dest));
     assert!(!dest.exists());
@@ -231,9 +249,7 @@ fn a_non_utf8_source_never_reads_a_different_file_with_the_lossy_name() {
     let dir = tempfile::tempdir().expect("tempdir");
     let original = dir.path().join("original.sqlite");
     drop(store(&original));
-    let source = dir
-        .path()
-        .join(std::ffi::OsString::from_vec(b"source-\xff.sqlite".to_vec()));
+    let source = dir.path().join(invalid_path::name("source-", ".sqlite"));
     fs::rename(&original, &source).expect("move the source to a non-UTF-8 name");
     let lossy = PathBuf::from(source.to_string_lossy().into_owned());
     let mut decoy = store(&lossy);

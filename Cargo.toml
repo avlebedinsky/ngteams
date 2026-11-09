@@ -12,6 +12,7 @@ members = [
     "crates/teams-log",
     "crates/teams-media",
     "crates/teams-mock",
+    "crates/teams-platform",
     "crates/teams-proto",
     "crates/teams-signin",
     "crates/teams-signin-extension",
@@ -40,6 +41,7 @@ default-members = [
     "crates/teams-log",
     "crates/teams-media",
     "crates/teams-mock",
+    "crates/teams-platform",
     "crates/teams-proto",
     "crates/teams-signin",
     "crates/teams-signin-extension",
@@ -82,6 +84,7 @@ teams-log = { path = "crates/teams-log" }
 teams-media = { path = "crates/teams-media" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
+teams-platform = { path = "crates/teams-platform" }
 teams-proto = { path = "crates/teams-proto" }
 # the host-gated sign-in window library, used in-process by ngteams
 teams-signin = { path = "crates/teams-signin" }
@@ -244,6 +247,8 @@ wayland-client = "0.31.15"
 wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wiremock = "0.6.5"
+# Native Windows filesystem security, with no logging of its own.
+windows-sys = "0.61.2"
 # the virtual keyboard's keymap and its text-to-key table: the version GPUI already links, without its features
 xkbcommon = { version = "0.8.0", default-features = false }
 # D-Bus for the app's notifications and tray item (M2 Task 14), the personal build's camera portal (M3 Task 20) and the

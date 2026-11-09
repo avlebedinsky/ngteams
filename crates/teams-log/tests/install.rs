@@ -100,7 +100,10 @@ fn check_panic(text: &str) {
         .find(|line| line.contains("panic on thread panicker"))
         .unwrap_or_else(|| panic!("the panic is written: {text}"));
     assert!(panic.contains("ERROR teams_log:"), "{panic}");
-    assert!(panic.contains("tests/install.rs:"), "its location: {panic}");
+    assert!(
+        panic.replace('\\', "/").contains("tests/install.rs:"),
+        "its location: {panic}"
+    );
     assert!(panic.contains("a panic carrying [redacted]"), "{panic}");
     assert!(panic.contains("backtrace:"), "{panic}");
     assert!(!text.contains(&jwt()), "the token never reaches the file");

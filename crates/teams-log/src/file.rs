@@ -1,4 +1,4 @@
-//! The log's file: `0600` in a `0700` directory, rotated by size, written from a thread of its own.
+//! The log's file: private to the user, rotated by size, written from a thread of its own.
 //!
 //! - **Never waits on the file**: a line is handed to the writer thread through a bounded channel
 //!   ([`CHANNEL_LINES`]); when the channel is full the line is dropped and counted ([`Sink::dropped`]), and the
@@ -6,17 +6,18 @@
 //! - **Rotated by size** ([`Rotation`]): before a line would take the file past [`Rotation::max_bytes`], the file
 //!   becomes `<name>.1` (`.1` becomes `.2`, …), the oldest past [`Rotation::keep`] is dropped, and a new file is
 //!   started, each `0600`.
-//! - **Private**: the directory is made (or kept) `0700` and the files `0600`; a file found open to others is
-//!   tightened when it is opened.
+//! - **Private**: Unix directories are `0700` and files `0600`; Windows uses protected ACLs granting only the user
+//!   and SYSTEM access. A file found open to others is tightened when it is opened.
 
-use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::fs::{self, File};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::time::{Duration, SystemTime};
+
+use teams_platform::private::{self, Open};
 
 /// The files' mode.
 pub const FILE_MODE: u32 = 0o600;
@@ -182,14 +183,10 @@ impl Sink {
 
 /// The directory made (or kept) private, and the file opened for appending, private, with its size.
 fn open_private(dir: &Path, path: &Path) -> io::Result<(File, u64)> {
-    DirBuilder::new().recursive(true).mode(DIR_MODE).create(dir)?;
-    fs::set_permissions(dir, Permissions::from_mode(DIR_MODE))?;
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(FILE_MODE)
-        .open(path)?;
-    file.set_permissions(Permissions::from_mode(FILE_MODE))?;
+    private::create_dir_all(dir)?;
+    private::restrict_dir(dir)?;
+    let file = private::open(path, Open::Append)?;
+    private::restrict_file(path)?;
     let size = file.metadata()?.len();
     Ok((file, size))
 }
@@ -319,11 +316,7 @@ fn new_private(path: &Path) -> io::Result<File> {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    let file = OpenOptions::new()
-        .create_new(true)
-        .append(true)
-        .mode(FILE_MODE)
-        .open(path)?;
-    file.set_permissions(Permissions::from_mode(FILE_MODE))?;
+    let file = private::open(path, Open::NewAppend)?;
+    private::restrict_file(path)?;
     Ok(file)
 }

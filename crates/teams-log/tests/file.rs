@@ -6,15 +6,21 @@
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
-use std::fs::{self, OpenOptions, Permissions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::{OpenOptions, Permissions};
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use log::{Level as LogLevel, Log as _, Metadata, Record};
-use teams_log::file::{DIR_MODE, FILE_MODE, Sink};
+use teams_log::file::Sink;
+#[cfg(unix)]
+use teams_log::file::{DIR_MODE, FILE_MODE};
 use teams_log::{Config, FileLog, Level, Rotation, effective, format_line, ours};
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
@@ -50,10 +56,13 @@ fn the_file_is_private_in_a_private_directory() {
     record(&log, LogLevel::Info, "teams_core::engine", "started");
     read(&log);
     assert_eq!(log.path(), dir.path().join("logs/a/teams-app.log"));
+    #[cfg(unix)]
     assert_eq!(mode(log.path()), FILE_MODE);
+    #[cfg(unix)]
     assert_eq!(mode(&dir.path().join("logs/a")), DIR_MODE);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_file_open_to_others_is_tightened_and_appended_to() {
     let dir = tempfile::tempdir().unwrap();
@@ -76,7 +85,9 @@ fn a_file_open_to_others_is_tightened_and_appended_to() {
         text.starts_with("an earlier line\n") && text.contains("a later line"),
         "{text}"
     );
+    #[cfg(unix)]
     assert_eq!(mode(&path), FILE_MODE);
+    #[cfg(unix)]
     assert_eq!(mode(&logs), DIR_MODE);
 }
 
@@ -111,6 +122,7 @@ fn the_file_is_rotated_by_size_and_the_oldest_dropped() {
         format!("{:0>49}\n{:0>49}\n", 4, 5)
     );
     assert!(!file("teams-app.log.3").exists(), "two older files kept");
+    #[cfg(unix)]
     for name in ["teams-app.log", "teams-app.log.1", "teams-app.log.2"] {
         assert_eq!(mode(&file(name)), FILE_MODE, "{name}");
     }
@@ -170,6 +182,7 @@ fn a_rotation_that_can_t_make_its_new_file_moves_nothing_and_recovers() {
     assert_eq!(lines(&file("teams-app.log.1")).len(), 8);
     assert_eq!(lines(&file("teams-app.log.2")), ["", "1"]);
     assert!(!file("teams-app.log.new").exists());
+    #[cfg(unix)]
     assert_eq!(mode(&file("teams-app.log")), FILE_MODE);
 }
 
@@ -184,6 +197,7 @@ fn a_file_taken_away_is_made_again_without_moving_the_older_ones() {
     assert_eq!(lines(&file("teams-app.log.1")), ["", "1"], "the archive stays");
     assert!(!file("teams-app.log.2").exists(), "nothing shifted over it");
     assert_eq!(lines(&file("teams-app.log")), ["4"], "made again");
+    #[cfg(unix)]
     assert_eq!(mode(&file("teams-app.log")), FILE_MODE);
     // and rotated as before
     for number in 5..7 {

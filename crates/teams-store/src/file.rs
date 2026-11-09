@@ -1,6 +1,6 @@
 //! The store file is the account's chat history: private to the user from the moment it exists. SQLite gives its
-//! `-wal` and `-shm` files the main file's mode when it creates them, so making the main file `0600` before SQLite
-//! opens it covers them; ones left over from before are tightened too.
+//! `-wal` and `-shm` files the main file's mode on Unix. On Windows they inherit the directory's private ACL; both
+//! the directory and the database are restricted before SQLite opens them. Existing side files are tightened too.
 //!
 //! None of these files is ever opened here once it exists: SQLite's locks are POSIX locks, which belong to the process,
 //! and closing any descriptor of a file drops all of them, so a check that opened and closed the file would take the
@@ -9,15 +9,12 @@
 //! it open anywhere.
 
 use std::ffi::OsString;
-use std::fs::{DirBuilder, OpenOptions, Permissions};
 use std::io::ErrorKind;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::StoreError;
+use teams_platform::private::{self, Open};
 
-const FILE_MODE: u32 = 0o600;
-const DIR_MODE: u32 = 0o700;
 /// The files SQLite keeps next to the database.
 pub(crate) const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
@@ -31,11 +28,8 @@ pub(crate) fn private_dir(dir: &Path) -> Result<(), StoreError> {
     if dir.as_os_str().is_empty() {
         return Ok(());
     }
-    DirBuilder::new()
-        .recursive(true)
-        .mode(DIR_MODE)
-        .create(dir)
-        .map_err(failed(dir))
+    private::create_dir_all(dir).map_err(failed(dir))?;
+    private::restrict_dir(dir).map_err(failed(dir))
 }
 
 /// Creates the store's directory (`0700`) and file (`0600`) when missing, and tightens an existing file (or side file)
@@ -44,12 +38,7 @@ pub(crate) fn prepare(path: &Path) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         private_dir(parent)?;
     }
-    let created = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(FILE_MODE)
-        .open(path);
+    let created = private::open(path, Open::NewReadWrite);
     match created {
         // a new file: no connection has it open yet, so closing it here drops nobody's locks
         Ok(file) => drop(file),
@@ -70,18 +59,23 @@ pub(crate) fn prepare(path: &Path) -> Result<(), StoreError> {
 /// regular file there (a directory, or a link to one) is refused with its mode left as it was: `0600` on a directory
 /// would take away its owner's traversal, and SQLite can't use it as a store anyway.
 fn tighten(path: &Path) -> std::io::Result<()> {
-    let metadata = std::fs::metadata(path)?;
-    if !metadata.is_file() {
-        return Err(std::io::Error::new(ErrorKind::InvalidInput, "not a regular file"));
-    }
-    if metadata.permissions().mode() & 0o077 != 0 {
-        std::fs::set_permissions(path, Permissions::from_mode(FILE_MODE))?;
-    }
-    Ok(())
+    private::restrict_file(path)
 }
 
 pub(crate) fn side_file(path: &Path, suffix: &str) -> PathBuf {
     let mut name = OsString::from(path.as_os_str());
     name.push(suffix);
     PathBuf::from(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_invalid_file_name_is_refused_before_sqlite_opens_it() {
+        let path = Path::new("invalid\0store.sqlite");
+        let error = prepare(path).unwrap_err();
+        assert!(matches!(error, StoreError::File { path: failed, .. } if failed == path));
+    }
 }

@@ -3,7 +3,8 @@
 #![cfg(test)]
 
 use std::fs;
-use std::os::unix::ffi::OsStringExt as _;
+#[path = "support/invalid_path.rs"]
+mod invalid_path;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -541,7 +542,7 @@ fn lock_cleanup_preserves_files_that_do_not_name_a_run() {
         "not-a-run.lock".into(),
         ".lock".into(),
         "123".into(),
-        std::ffi::OsString::from_vec(b"invalid-\xff.lock".to_vec()),
+        invalid_path::name("invalid-", ".lock"),
     ];
     for name in &names {
         fs::write(runs.join(name), b"synthetic unrelated data").expect("unrelated file");

@@ -11156,6 +11156,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "serde_json",
+ "teams-platform",
  "tempfile",
  "tracing",
 ]
@@ -11211,6 +11212,14 @@ dependencies = [
  "tokio-tungstenite",
  "toml 1.1.8+spec-1.1.0",
  "wiremock",
+]
+
+[[package]]
+name = "teams-platform"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11296,6 +11305,7 @@ dependencies = [
  "log",
  "rusqlite",
  "sha2 0.11.1",
+ "teams-platform",
  "tempfile",
  "thiserror 2.0.21",
 ]

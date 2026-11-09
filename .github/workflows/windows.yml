@@ -1,0 +1,50 @@
+# Grow this selection as the native port reaches the remaining platform boundaries.
+name: Windows portability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  storage:
+    name: Private files and storage (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the repository toolchain
+        run: rustup show active-toolchain
+      - name: Format
+        run: cargo fmt -p teams-platform -p teams-log -p teams-store -- --check
+      - name: Check every target
+        run: cargo check --locked -p teams-platform -p teams-log -p teams-store --all-targets
+      - name: Lints
+        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store --all-targets -- -D warnings
+      - name: Offline filesystem, SQLite and log tests
+        run: cargo test --locked -p teams-platform -p teams-log -p teams-store
+      - name: Windows coverage tools
+        if: runner.os == 'Windows'
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - name: Require 90% native Windows filesystem coverage
+        if: runner.os == 'Windows'
+        run: cargo llvm-cov --locked -p teams-platform --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90

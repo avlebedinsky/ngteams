@@ -12,6 +12,7 @@ wpe-webkit-sys = "generated gir bindings"
 # Only measured crates belong here. Missing baselines fail the local gate.
 # Floors are measured with one `-p <crate>` alone; combined runs also count dependent crates' tests.
 [baselines]
+teams-platform = { lines = 90, functions = 90, regions = 90 }
 teams-store = { lines = 98, functions = 100, regions = 90 }
 teams-log = { lines = 94, functions = 94, regions = 93 }
 fixture-guard = { lines = 95, functions = 91, regions = 92 }
@@ -132,3 +133,11 @@ context = { "crates/teams-proto/src/http.rs" = "e731a43008ea456b2d167ec1dfe8c668
 sha256 = "9dd845ed73f53a7a32137d505c45018d56bf8529060c3cfdee1ebe7059968e96"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
 context = { "crates/teams-core/src/attachments.rs" = "f5ddc5cec701324240acc8fd2743e1d5c8e548e99798a2776dee21735a4f3dca" }
+
+[unmapped_sources."crates/teams-platform/src/lib.rs"]
+sha256 = "153bbafc813e95b1a9d8c580156543b9744c4da047cb5d0456eb35409d14091e"
+reason = "module declaration and documentation only; no executable items"
+
+[unmapped_sources."crates/teams-platform/src/private/windows.rs"]
+sha256 = "fcdc9ee01827c1f62f558ecd680c156c9a94f6ddb32b958adcd751f3450f481b"
+reason = "Windows-only native ACL and creation APIs: absent from the Linux LLVM export; exercised by native private-file, log-rotation, SQLite and snapshot tests in the Windows VM and Windows portability workflow"

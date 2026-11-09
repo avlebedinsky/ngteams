@@ -51,6 +51,7 @@ notification waits at most a few seconds for its translation); the language menu
 | `crates/teams-ui` | GPUI views/models over `Core`, rich-text editor/rendering, accounts, calendar, notifications and call windows |
 | `crates/teams-ctl` | `ngteamsctl` and the control socket's protocol, socket paths, line codec and client (no GPUI); the app's server is `crates/ngteams/src/ctl/` |
 | `crates/teams-log` | private rotated diagnostic files, full debug HTTP/frame records and logger-owned credential redaction |
+| `crates/teams-platform` | native private-file creation and permissions: Unix modes and Windows protected ACLs |
 | `crates/teams-signin`, `crates/teams-signin-extension` | in-process host-gated WPE sign-in window and its web-process request guard |
 | `crates/teams-wpe`, `crates/wpe-*-sys` | the WPE WebKit engine, its `ngteams-web` worker and generated bindings |
 | `crates/teams-wpe-client`, `crates/teams-web-engine` | the app's side of that worker (no WebKit linked) and the choice or download of the engine |
@@ -176,6 +177,20 @@ file failure can occur after tokens are stored; its error is reported. `--no-sky
 its region. Passwords are handled by `proto-lab login`, never typed through the runner's control socket.
 
 ## Building
+
+The Windows port currently covers private files, logs and SQLite storage; app startup, sign-in, devices and release
+packaging still require their platform integrations. The [Windows portability checks](ci.md#windows-portability)
+run these libraries on Linux and Windows. In a Windows checkout with the repository's Rust toolchain and MSVC C++
+build tools:
+
+```powershell
+cargo check --locked -p teams-platform -p teams-log -p teams-store --all-targets
+cargo test --locked -p teams-platform -p teams-log -p teams-store
+```
+
+For native Windows debugging, the dedicated `win11` VM's console is the Windows UI sandbox, as authorized for the
+port; lab/test GUIs must stay there, with isolated lab identities and the Windows lab runner once ported. No Windows
+app runner is available at this stage. The Linux app continues to build and run through the runners below.
 
 Agents build runnable `ngteams` only through the lab runner:
 

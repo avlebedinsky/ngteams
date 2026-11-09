@@ -6,6 +6,7 @@
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,6 +28,7 @@ fn put(cache: &mut PictureCache, key: &str, picture: &[u8]) -> Result<(), StoreE
     cache.put(key, picture)
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777
 }
@@ -59,7 +61,9 @@ fn a_picture_is_kept_across_a_reopen_and_found_by_its_key_alone() {
     assert_eq!(cache.bytes().expect("bytes"), 10);
     drop(cache);
 
+    #[cfg(unix)]
     assert_eq!(mode(&path), 0o600);
+    #[cfg(unix)]
     assert_eq!(mode(path.parent().expect("dir")), 0o700);
     let written = std::fs::read(&path).expect("read");
     assert!(

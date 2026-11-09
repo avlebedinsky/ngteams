@@ -1,8 +1,9 @@
-//! Which runs are still open. Each run holds an exclusive `flock` on its own file, `<store>-runs/<run_id>.lock`, for as
+//! Which runs are still open. Each run holds an exclusive kernel file lock on `<store>-runs/<run_id>.lock` for as
 //! long as its [`Store`](crate::Store) is open; the kernel drops the lock when the process dies, however it dies. A run
 //! whose lock can be taken has ended: only its rows can be adopted by another run ([`Store::resend`](crate::Store::resend)).
 //!
-//! `flock` locks belong to an open file, not a process, so two stores open in one process see each other as open too.
+//! These locks (`flock` on Unix, `LockFileEx` on Windows, through `std::fs::File`) belong to an open file, not a
+//! process, so two stores open in one process see each other as open too.
 //! A run takes its lock, and lock files of ended runs are removed, only inside the `BEGIN IMMEDIATE` transaction that
 //! adds the run: the store's write lock serializes them with each other and with a resend's check, so no check finds a
 //! file removed under a run that is taking it.
@@ -21,12 +22,11 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::StoreError;
+use teams_platform::private::{self, Open};
 
-const FILE_MODE: u32 = 0o600;
 const SUFFIX: &str = ".lock";
 /// The open lock's file name: no run id, so [`sweep`] leaves it.
 const OPEN_LOCK: &str = "open.lock";
@@ -58,14 +58,7 @@ fn lock_file(dir: &Path, run_id: i64) -> PathBuf {
 fn lock_file_in(dir: &Path, name: &str) -> Result<(File, PathBuf), StoreError> {
     crate::file::private_dir(dir)?;
     let path = dir.join(name);
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(FILE_MODE)
-        .open(&path)
-        .map_err(failed(&path))?;
+    let file = private::open(&path, Open::ReadWrite).map_err(failed(&path))?;
     Ok((file, path))
 }
 

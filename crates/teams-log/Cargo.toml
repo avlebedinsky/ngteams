@@ -12,6 +12,7 @@ publish.workspace = true
 log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 # bodies and frames read as JSON, so their token fields are redacted by name
 serde_json.workspace = true
+teams-platform.workspace = true
 
 [dev-dependencies]
 # the log's directory and files, in a directory of its own per test

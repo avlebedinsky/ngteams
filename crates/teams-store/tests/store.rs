@@ -1,6 +1,7 @@
 //! The store on a real file in a temporary directory: migrations, versioned upserts, reactions, read horizons, sync
 //! state, the outbox and the queries the core reads with. Every id and MRI here is made up.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +60,7 @@ fn with_chat(dir: &tempfile::TempDir) -> Result<Store, StoreError> {
     Ok(store)
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> std::io::Result<u32> {
     Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
 }
@@ -155,6 +157,7 @@ fn opening_an_existing_store_at_once_all_open_it() {
 /// so locks other tests in the process (or other processes) take and drop meanwhile can't change the count.
 /// `/proc/locks` can't serve here: it lists every lock on the system and comes in several reads, each a fresh walk
 /// of the list by position, so a lock added or dropped between two reads repeats or skips a line.
+#[cfg(target_os = "linux")]
 fn posix_locks_held_on(path: &Path) -> std::io::Result<usize> {
     use std::os::unix::fs::MetadataExt;
     let file = std::fs::metadata(path)?;
@@ -175,6 +178,7 @@ fn posix_locks_held_on(path: &Path) -> std::io::Result<usize> {
 
 /// The POSIX locks taken through the descriptor `fd`, without their line numbers (a descriptor shared by a `dup`
 /// lists the same locks), or none when `fd` is no longer open on `inode`.
+#[cfg(target_os = "linux")]
 fn posix_locks_through(fd: &std::ffi::OsStr, inode: u64) -> Vec<String> {
     let Ok(info) = std::fs::read_to_string(Path::new("/proc/self/fdinfo").join(fd)) else {
         return Vec::new();
@@ -190,6 +194,7 @@ fn posix_locks_through(fd: &std::ffi::OsStr, inode: u64) -> Vec<String> {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn opening_a_second_store_in_the_process_leaves_the_first_ones_sqlite_locks() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(&dir);
@@ -285,6 +290,7 @@ fn a_store_from_a_newer_build_is_refused() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_store_file_and_its_wal_are_private_to_the_user() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -303,6 +309,7 @@ fn the_store_file_and_its_wal_are_private_to_the_user() {
     drop(store);
 }
 
+#[cfg(unix)]
 #[test]
 fn an_existing_file_readable_by_others_is_tightened() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -313,6 +320,7 @@ fn an_existing_file_readable_by_others_is_tightened() {
     assert_eq!(mode(&path).expect("mode"), 0o600);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_directory_at_the_store_path_is_refused_and_keeps_its_mode() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -324,6 +332,7 @@ fn a_directory_at_the_store_path_is_refused_and_keeps_its_mode() {
     assert_eq!(mode(&path).expect("mode"), 0o755);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_link_to_a_directory_at_the_store_path_is_refused_and_its_target_keeps_its_mode() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1662,7 +1671,9 @@ fn each_open_store_holds_a_private_run_lock_and_ended_runs_locks_are_removed() {
     let lock = |store: &Store| runs.join(format!("{}.lock", store.run_id()));
     let first = open(&dir).expect("open the store");
     let first_lock = lock(&first);
+    #[cfg(unix)]
     assert_eq!(mode(&runs).expect("mode"), 0o700);
+    #[cfg(unix)]
     assert_eq!(mode(&first_lock).expect("mode"), 0o600);
     let second = open(&dir).expect("open the store again");
     assert!(first_lock.exists(), "an open run's lock is kept");
@@ -2071,6 +2082,7 @@ fn a_second_engine_lock_in_the_process_is_refused_at_once_and_free_once_dropped(
     let lock = first.engine_lock().expect("the first engine lock");
     let runs = PathBuf::from(format!("{}-runs", store_path(&dir).display()));
     assert_eq!(lock.path(), runs.join("engine.lock"));
+    #[cfg(unix)]
     assert_eq!(mode(lock.path()).expect("mode"), 0o600);
 
     // the same store, and another store on the same file: both refused, neither waits
