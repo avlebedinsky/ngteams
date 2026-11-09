@@ -2,7 +2,7 @@
 Type=Application
 Name=ngteams
 GenericName=Chat
-Comment=Microsoft Teams chats for your own account, under the personal build's fence
+Comment=Chats, channels, calendar, calls and meetings for Microsoft Teams
 Exec=ngteams %u
 Icon=com.nickalie.ngteams
 Terminal=false

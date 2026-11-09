@@ -1,0 +1,10 @@
+# The fixed install path of the native Linux release packages. Ubuntu 23.10 and later
+# (kernel.apparmor_restrict_unprivileged_userns=1) give an unprivileged user namespace only to a program whose profile
+# carries `userns`; WebKit's sandbox (bubblewrap) needs one. Its worker runs under the same label.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile ngteams-release /opt/ngteams/usr/bin/{ngteams,ngteams-web} flags=(unconfined) {
+  userns,
+  include if exists <local/ngteams-release>
+}

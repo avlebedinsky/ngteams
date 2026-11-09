@@ -60,3 +60,44 @@ actual size depends on the selected sources and dependencies.
 
 To block merges on coverage failures, make `Coverage ≥90%` a required status check in branch rules; the hosted
 reporter tests alone are not a coverage measurement.
+
+## Releases
+
+The [release workflow](../.github/workflows/release.yml) runs on every push to `main` and on manual dispatch. Each
+run makes a GitHub release tagged `v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version`
+and `github.run_number`, monotonic for package upgrades), marked latest, targeting the pushed commit, from Linux
+x86_64 builds on `ubuntu-24.04`: `.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage`, a portable `.tar.gz` and
+`SHA256SUMS`, with GitHub build-provenance attestations over every asset, including the runtime below.
+
+Packages carry no web engine: `ngteams-web` picks the system's WPE WebKit (2.54 or newer) or a downloaded runtime when
+it starts. Only `ngteams-web` and the sign-in extension link the engine; `scripts/check-linux-package.py` fails a tree
+where `ngteams` or `ngteamsctl` needs one of its libraries or a host library not on its list, any shipped file has an
+RPATH or RUNPATH, or the tree holds a library at all. The Arch package depends on the system's engine, deb and rpm
+recommend it, and the runtime is the fallback, so the `.deb` and `.rpm` work where the distribution has none.
+
+The runtime is `ngteams-web-engine-<key>-linux-x86_64.tar.zst` (MANIFEST with `key`, `arch` and `wpe_version`,
+`lib/`, `lib/wpe-webkit-2.0/`, `lib/gio/modules`, `lib/gstreamer-1.0`, `libexec/gstreamer-1.0/gst-plugin-scanner`).
+It is built from ngterm's portable WPE prefix (`scripts/release-wpe-pull.sh`: pulled from GHCR by digest with pinned,
+checksum-verified ORAS, unpacked only after `gh attestation verify` ties it to ngterm's `release-wpe-cache.yml` on
+`main`; WPE is never built here) plus Ubuntu's GStreamer plugins, GIO modules and library closure (`scripts/web-engine-closure.py`).
+Its key hashes the pinned digest, the exact Ubuntu package versions copied and the packaging inputs
+(`packaging/linux/gstreamer-plugins.txt`, `runtime-libraries.txt`, and the packaging scripts). It is published once,
+on its own `web-engine-<key>` prerelease (never latest), and reused while the key is unchanged: a release compiles
+that exact file's URL, size and SHA-256 into the app, so a published archive is never replaced.
+
+`build` runs the tests of the packaging scripts, builds, packages and smoke-tests: the build identity in the archive,
+the AppImage and the installed `.deb`, `--install-web-engine` into a private `XDG_DATA_HOME`, `ngteams-web --probe`
+on that installed runtime with the build's WPE prefix moved away, and `apt` installing the `.deb`. It holds only a
+read token; artifacts move to `publish`, which alone may write.
+
+### Updating the pinned WPE prefix
+
+ngterm's cache workflow publishes a new prefix when its WPE build inputs change. To move to it, take its tag:
+`ubuntu-24.04-` followed by the output of `scripts/build-release-wpe.sh --print-key` in ngterm. Resolve its manifest
+digest (the tag's anonymous registry answer's `Docker-Content-Digest`), and put the tag and digest in [`pins.env`](../packaging/release/pins.env), keeping
+`RELEASE_WPE_PREFIX` as the path it was built at. The runtime's key changes with it, so the next release publishes a new runtime.
+
+### Local checks
+
+`scripts/test_web_engine_closure.py` and `scripts/test_check_linux_package.py` run under
+`python3 -B -m unittest discover -s scripts -p 'test_*.py'`; they need `cc`, `ldd`, `patchelf` and `zstd`.

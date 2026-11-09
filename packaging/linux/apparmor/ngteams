@@ -1,0 +1,11 @@
+# The profile for a portable install (AppImage extracted to a permanent directory, or the unpacked archive).
+# Allows everything; it exists to give the app a name and the `userns` permission WebKit's sandbox needs on hosts that
+# restrict unprivileged user namespaces. Replace @NGTEAMS_BIN@ with the absolute path of usr/bin/ngteams. A site may
+# add more in <local/ngteams>.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile ngteams @NGTEAMS_BIN@ flags=(unconfined) {
+  userns,
+  include if exists <local/ngteams>
+}

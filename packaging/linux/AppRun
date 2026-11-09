@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# The AppImage's and the unpacked archive's entry. The app finds its worker and sign-in extension beside its real path;
+# it ships no libraries, so nothing here touches the loader's path.
+root="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec "$root/usr/bin/ngteams" "$@"

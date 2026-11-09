@@ -87,26 +87,44 @@ Translation and summaries use your own [Claude Code](https://claude.com/product/
 - A desktop keyring, such as GNOME Keyring, to hold your sign-in
 - PipeWire for calls, which most current desktops already use
 
-There are no prebuilt packages yet, so ngteams is installed from source. On **Arch Linux**, the system it's developed on:
+Every release is on the [releases page](https://github.com/nickalie/ngteams/releases/latest). Linux x86_64 only.
+
+| On | Download | Install with |
+|---|---|---|
+| Debian 13+, Ubuntu 24.04+ | `ngteams_*_amd64.deb` | `sudo apt install ./ngteams_*_amd64.deb` |
+| Fedora, RHEL-likes | `ngteams-*.x86_64.rpm` | `sudo dnf install ./ngteams-*.x86_64.rpm` |
+| openSUSE | `ngteams-*.x86_64.rpm` | `sudo zypper install --allow-unsigned-rpm ./ngteams-*.x86_64.rpm` |
+| Arch Linux | `ngteams-*-x86_64.pkg.tar.zst` | `sudo pacman -U ./ngteams-*-x86_64.pkg.tar.zst` |
+| Anything with glibc 2.39 or newer | `ngteams-*-linux-x86_64.AppImage` | `chmod +x` it and run it |
+| | `ngteams-*-linux-x86_64.tar.gz` | unpack it and run `ngteams/AppRun` |
+
+To update, install the newer package the same way.
+
+**The sign-in window** runs on WPE WebKit 2.54 or newer. If your system has it (the Arch package installs it, Debian testing and openSUSE Tumbleweed have it), ngteams uses it. Otherwise it downloads a verified copy of about 120 MB once, the first time you sign in.
+
+**On Ubuntu 24.04 and later, prefer the `.deb`.** Those systems restrict the sandbox the sign-in window needs, and the `.deb` installs the AppArmor profile that allows it. To run an AppImage there, extract it to a permanent place and install the profile it carries:
+
+```sh
+mkdir -p ~/.local/opt
+./ngteams-*-linux-x86_64.AppImage --appimage-extract && mv squashfs-root ~/.local/opt/ngteams
+sed "s|@NGTEAMS_BIN@|$HOME/.local/opt/ngteams/usr/bin/ngteams|" ~/.local/opt/ngteams/usr/share/doc/ngteams/apparmor.profile.in \
+    | sudo tee /etc/apparmor.d/ngteams > /dev/null
+sudo apparmor_parser -r /etc/apparmor.d/ngteams
+~/.local/opt/ngteams/AppRun
+```
+
+For the tarball, do the same with its `ngteams` folder.
+
+**From source** on Arch, the system it's developed on:
 
 ```sh
 sudo pacman -S --needed base-devel git rustup clang cmake wayland libxkbcommon fontconfig freetype2 \
     pipewire wpewebkit gstreamer gst-plugins-base gst-plugins-good gst-libav
-
-git clone https://github.com/nickalie/ngteams.git
-cd ngteams
+git clone https://github.com/nickalie/ngteams.git && cd ngteams
 scripts/install-personal.sh
 ```
 
-The first build takes a while and downloads about 150 MB of call components. The app installs into `~/.local`, so no root access is needed for that step.
-
-Other distributions need the equivalent packages, including WPE WebKit 2.54 or newer, and aren't tested yet.
-
-**To update**, run this from the same folder:
-
-```sh
-git pull && scripts/install-personal.sh
-```
+The app installs into `~/.local`; the first build downloads about 150 MB of call components. Other distributions need the equivalent packages, including WPE WebKit 2.54 or newer. To update, run `git pull && scripts/install-personal.sh` in that folder.
 
 ## Getting started
 
