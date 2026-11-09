@@ -1,29 +1,32 @@
-//! Lab descriptors retained for the app's explicit self-exec after sign-in.
+//! Lab broker/trace originals retained across the explicit restart after sign-in.
 //!
-//! The originals keep their command-line descriptor numbers while the app uses close-on-exec clones. They stay
-//! close-on-exec during normal operation, including sign-in page-worker launches; only the final self-exec inherits
-//! them. A failed exec restores their original flags before returning.
+//! Unix keeps their descriptor numbers and close-on-exec flags, clearing the flags only for self-exec and restoring
+//! them on failure. Windows leaves originals noninheritable, transfers fresh duplicates with an exact handle list,
+//! and rewrites the successor's descriptor arguments. Ordinary children, including sign-in workers, get neither.
 
 use std::fs::File;
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{AsFd as _, BorrowedFd};
-use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::process::Command;
+use teams_auth::broker::BrokerStream;
 
+#[cfg(unix)]
 use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
 
 /// The adopted broker/trace originals, held until the app either quits or executes itself again.
 #[derive(Debug)]
 pub struct RestartDescriptors {
-    socket: UnixStream,
+    socket: BrokerStream,
     trace: Option<File>,
 }
 
 impl RestartDescriptors {
     /// Keeps originals already made close-on-exec by [`crate::descriptors`].
     #[must_use]
-    pub fn new(socket: UnixStream, trace: Option<File>) -> Self {
+    pub fn new(socket: BrokerStream, trace: Option<File>) -> Self {
         Self { socket, trace }
     }
 
@@ -31,7 +34,9 @@ impl RestartDescriptors {
     ///
     /// # Errors
     /// The socket cannot be duplicated.
-    pub fn socket(&self) -> io::Result<UnixStream> {
+    pub fn socket(&self) -> io::Result<BrokerStream> {
+        #[cfg(windows)]
+        use interprocess::TryClone as _;
         self.socket.try_clone()
     }
 
@@ -46,6 +51,7 @@ impl RestartDescriptors {
     /// Executes the app again, inheriting these originals under their existing descriptor numbers.
     ///
     /// Does not return on success. The returned error leaves both descriptors' original flags restored.
+    #[cfg(unix)]
     pub fn exec(&self, command: &mut Command) -> io::Error {
         let inherited = match Inherited::new(self) {
             Ok(inherited) => inherited,
@@ -58,10 +64,12 @@ impl RestartDescriptors {
 }
 
 /// Restores even a partly prepared descriptor set if a later flag operation fails.
+#[cfg(unix)]
 struct Inherited<'a> {
     flags: Vec<(BorrowedFd<'a>, FdFlags)>,
 }
 
+#[cfg(unix)]
 impl<'a> Inherited<'a> {
     fn new(descriptors: &'a RestartDescriptors) -> io::Result<Self> {
         let mut inherited = Self {
@@ -76,11 +84,30 @@ impl<'a> Inherited<'a> {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Inherited<'_> {
     fn drop(&mut self) {
         for (fd, flags) in &self.flags {
             // The owning RestartDescriptors remains borrowed through restoration, so these descriptors stay open.
             let _ = fcntl_setfd(fd, *flags);
         }
+    }
+}
+
+#[cfg(windows)]
+#[path = "restart/windows.rs"]
+mod windows;
+
+/// Replace this process after its UI and engines have stopped. Windows starts the successor in the same runner
+/// job before exiting; Unix exec replaces the image. No lab handles are transferred by this personal restart.
+/// Returns only a launch error.
+pub fn exec(command: &mut Command) -> io::Error {
+    #[cfg(unix)]
+    {
+        command.exec()
+    }
+    #[cfg(windows)]
+    {
+        windows::exec(command, &teams_platform::windows_process::Transfer::new(&[]))
     }
 }

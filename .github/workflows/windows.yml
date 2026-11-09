@@ -41,7 +41,7 @@ jobs:
         run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets
       - name: Lints
         run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets -- -D warnings
-      - name: Offline filesystem, authentication, broker and native app listener tests
+      - name: Offline filesystem, authentication, broker and native startup tests
         run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -- --test-threads=1
       - name: Windows coverage tools
         if: runner.os == 'Windows'
@@ -50,14 +50,21 @@ jobs:
           cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Require 90% native Windows filesystem coverage
         if: runner.os == 'Windows'
-        run: cargo llvm-cov --locked -p teams-platform --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90
+        run: |
+          cargo llvm-cov clean --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo llvm-cov --locked -p teams-platform --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90
       - name: Require the authentication crate's native coverage floors
         if: runner.os == 'Windows'
         run: |
+          cargo llvm-cov clean --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $floors = python -c "import json, tomllib; print(json.dumps(tomllib.load(open('coverage.toml', 'rb'))['baselines']['teams-auth']))" | ConvertFrom-Json
           cargo llvm-cov --locked -p teams-auth --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions
       - name: Require the control crate's native coverage floors
         if: runner.os == 'Windows'
         run: |
+          cargo llvm-cov clean --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $floors = python -c "import json, tomllib; print(json.dumps(tomllib.load(open('coverage.toml', 'rb'))['baselines']['teams-ctl']))" | ConvertFrom-Json
           cargo llvm-cov --locked -p teams-ctl --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions -- --test-threads=1

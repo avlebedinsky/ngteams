@@ -55,7 +55,7 @@ notification waits at most a few seconds for its translation); the language menu
 | `crates/teams-ui` | GPUI views/models over `Core`, rich-text editor/rendering, accounts, calendar, notifications and call windows |
 | `crates/teams-ctl` | `ngteamsctl` and the control socket's protocol, socket paths, line codec and client (no GPUI); the app's server is `crates/ngteams/src/ctl/` |
 | `crates/teams-log` | private rotated diagnostic files, full debug HTTP/frame records and logger-owned credential redaction |
-| `crates/teams-platform` | native private-file creation and permissions: Unix modes and Windows protected ACLs |
+| `crates/teams-platform` | native private-file creation/permissions, Windows identity, selective process-handle transfer and VM-console guard |
 | `crates/teams-signin`, `crates/teams-signin-extension` | in-process host-gated WPE sign-in window and its web-process request guard |
 | `crates/teams-wpe`, `crates/wpe-*-sys` | the WPE WebKit engine, its `ngteams-web` worker and generated bindings |
 | `crates/teams-wpe-client`, `crates/teams-web-engine` | the app's side of that worker (no WebKit linked) and the choice or download of the engine |
@@ -182,15 +182,16 @@ its region. Passwords are handled by `proto-lab login`, never typed through the 
 
 ## Building
 
-The Windows port currently covers private files, logs, SQLite storage and the authentication libraries (including
-credential storage and broker streams); app startup, interactive sign-in, devices and release
+The Windows port currently covers private files, logs, SQLite storage, authentication (including credential storage
+and private broker pairs), and control IPC. Offline tests also compile the app's actual native account paths,
+descriptor adoption and broker/trace restart transfer. Whole-app startup, interactive sign-in, devices and release
 packaging still require their platform integrations. The [Windows portability checks](ci.md#windows-portability)
 run these libraries on Linux and Windows. In a Windows checkout with the repository's Rust toolchain and MSVC C++
 build tools:
 
 ```powershell
-cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth --all-targets
-cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth
+cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets
+cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl
 ```
 
 For native Windows debugging, the dedicated `win11` VM's console is the Windows UI sandbox, as authorized for the

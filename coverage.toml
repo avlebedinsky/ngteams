@@ -135,7 +135,7 @@ reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-
 context = { "crates/teams-core/src/attachments.rs" = "f5ddc5cec701324240acc8fd2743e1d5c8e548e99798a2776dee21735a4f3dca" }
 
 [unmapped_sources."crates/teams-platform/src/lib.rs"]
-sha256 = "485ee2068f92da717e213d3dbfd16d93c23e3fc86953fb0cc7edb05826a472c5"
+sha256 = "6860ff6285faab0c8d8dcaa8208b86fd185bece3cf50948227da1a675d0a6bd3"
 reason = "module declaration and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-platform/src/private/windows.rs"]
@@ -159,9 +159,33 @@ sha256 = "3155eb53b18737b7aae957824ebbeba63a4338e18b3c793c040bef6654d587b0"
 reason = "Windows-only native control pipe transport; measured natively by the Windows portability gate, including ACLs, timeouts, shutdown, CLI and the actual app listener"
 
 [unmapped_sources."crates/teams-platform/src/windows_security.rs"]
-sha256 = "c2478782aaed61fb79fe56d879db1ab5ce1b03d24d25024e0765df985681d94e"
+sha256 = "a8a3b92c3ce8528b4608a403df28b7a97990084106a3780937387aa4befab5fa"
 reason = "Windows-only token identity and private pipe descriptor; exercised by native identity, live pipe ACL and application listener tests in the Windows gate"
 
 [unmapped_sources."crates/ngteams/src/ctl/socket/windows.rs"]
 sha256 = "e2d8868d9c820bb4f17e6786d91f3b251df014786b1bc3a436a0d1c1b1d589bc"
 reason = "Windows-only app listener binding and cleanup; compiled and exercised by teams-ctl app_listener tests on Windows without the remaining GUI/media dependencies"
+
+[unmapped_sources."crates/teams-platform/src/windows_process.rs"]
+sha256 = "4cea334548ab23c463d3451052653d84aa670ff8a3cd5f74c17455ac7339b643"
+reason = "Windows-only selective native process/handle transfer; exercised with real synthetic subprocesses and measured by the Windows portability gate."
+
+[unmapped_sources."crates/teams-platform/src/windows_sandbox.rs"]
+sha256 = "fed28dd7415b96e654de1ffea769aae32fce21463505bff46877f383610b2971"
+reason = "Windows-only authorized VM console guard; native session queries and refusal contracts are measured by the Windows portability gate without opening a GUI."
+
+[unmapped_sources."crates/teams-auth/src/broker/windows_pair.rs"]
+sha256 = "301963ea9385e48b6556edfc23912ab51598fe35a895ebbdedfb93dbba05b5c0"
+reason = "Windows-only private runtime broker pair factory; native broker/session and app handle-adoption tests use this factory and its source is measured in the Windows portability gate."
+
+[unmapped_sources."crates/ngteams/src/descriptors.rs"]
+sha256 = "ff2f75402e8094bbe216d8a47b9137b1bddc0a524f7347802b1d7e7ed9a6bc12"
+reason = "cfg-selected native descriptor module declarations and re-exports only; no executable items"
+
+[unmapped_sources."crates/ngteams/src/descriptors/windows.rs"]
+sha256 = "f7e8b81fda33315167057f79f1b2be06184bae240c5862032de75850be77ad75"
+reason = "Windows-only app handle adoption, peer verification and writable-trace validation; the actual module is compiled and exercised by native app_descriptors tests, pending whole-app Windows integration."
+
+[unmapped_sources."crates/ngteams/src/restart/windows.rs"]
+sha256 = "51653625254c5a1ca9cf0dfea444201b3d52840d927e38c694570e98c41a4395"
+reason = "Windows-only app restart with explicit handle transfer and rewritten descriptor arguments; actual app_descriptors subprocess tests exercise success and failure on Windows, pending whole-app integration."

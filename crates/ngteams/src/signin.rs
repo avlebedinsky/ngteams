@@ -25,9 +25,8 @@
 //! that host to the entry's `idp_hosts` by hand and sign in again, which takes the entry up. Nothing adds a host by
 //! itself, and an entry no sign-in named never starts an engine.
 
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -287,14 +286,9 @@ fn save_region(path: &Path, region: &Region) -> Result<(), SignInError> {
     let staging = PathBuf::from(staging);
     let written = (|| {
         if let Some(dir) = path.parent() {
-            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+            teams_platform::private::create_dir_all(dir)?;
         }
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&staging)?;
+        let mut file = teams_platform::private::open(&staging, teams_platform::private::Open::NewReadWrite)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         fs::rename(&staging, path)

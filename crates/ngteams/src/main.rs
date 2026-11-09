@@ -3,8 +3,6 @@
 
 use std::cell::Cell;
 use std::ffi::OsString;
-use std::os::fd::RawFd;
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::rc::Rc;
@@ -21,7 +19,7 @@ use ngteams::app;
 use ngteams::app::{Launch, SignInAgain};
 use ngteams::calling::CallDevices;
 use ngteams::cli::{Cli, Command as Subcommand, LabMode, ReadOnlyMode};
-use ngteams::descriptors::{adopt_socket, adopt_trace};
+use ngteams::descriptors::{RawDescriptor, adopt_socket, adopt_trace};
 use ngteams::forget::Forgot;
 use ngteams::handoff::{self, HandOff};
 use ngteams::setup::Setup;
@@ -113,9 +111,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(Outcome::Quit) => ExitCode::SUCCESS,
         Ok(Outcome::Restart { opened }) => restarted(&mut |command| {
-            command
-                .args(restart_args(std::env::args_os().skip(1), opened.as_deref()))
-                .exec()
+            ngteams::restart::exec(command.args(restart_args(std::env::args_os().skip(1), opened.as_deref())))
         }),
         Ok(Outcome::Update { executable, opened }) => updated(&executable, &mut |command| {
             command
@@ -391,7 +387,7 @@ fn start_updates(
 /// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
 /// socket taken over first, before anything opens a descriptor of its own; `get` only, of an account
 /// `accounts.toml` holds.
-fn broker(upn: &str, fd: RawFd) -> ExitCode {
+fn broker(upn: &str, fd: RawDescriptor) -> ExitCode {
     let socket = match adopt_socket(fd) {
         Ok(socket) => socket,
         Err(error) => return failed("secrets", &error),
@@ -473,7 +469,7 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
 
 /// The alias's one account in its lab namespace. It may still be pending: the broker must be available for its first
 /// sign-in as well as token refresh and forget.
-fn lab_broker(alias: &str, fd: RawFd) -> ExitCode {
+fn lab_broker(alias: &str, fd: RawDescriptor) -> ExitCode {
     let socket = match adopt_socket(fd) {
         Ok(socket) => socket,
         Err(error) => return failed("secrets", &error),

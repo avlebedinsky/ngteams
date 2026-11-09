@@ -19,7 +19,7 @@
 //! the personal app already running (`crate::handoff`) and ends; a link the app doesn't run for yet opens once it
 //! starts. Only the personal desktop app takes a link.
 
-use std::os::fd::RawFd;
+use crate::descriptors::RawDescriptor;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -76,11 +76,11 @@ pub struct ReadOnlyArgs {
     /// The credential broker's socket (`ngteams secrets`, the other end of a socket pair), handed to this process at
     /// its start (3 or above): read-only and lab modes use it for the account's tokens.
     #[arg(long, value_name = "N")]
-    pub secrets_fd: Option<RawFd>,
+    pub secrets_fd: Option<RawDescriptor>,
     /// Where the view trace goes in read-only or lab mode: a descriptor open for writing, handed to this process at its
     /// start (3 or above).
     #[arg(long, value_name = "N")]
-    pub trace_fd: Option<RawFd>,
+    pub trace_fd: Option<RawDescriptor>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -103,7 +103,7 @@ pub enum Command {
         lab: Option<String>,
         /// The socket's descriptor, handed to this process at its start (3 or above).
         #[arg(long, value_name = "N")]
-        fd: RawFd,
+        fd: RawDescriptor,
     },
 }
 
@@ -112,8 +112,8 @@ pub enum Command {
 pub struct ReadOnlyMode {
     pub account: String,
     pub data: PathBuf,
-    pub secrets_fd: RawFd,
-    pub trace_fd: Option<RawFd>,
+    pub secrets_fd: RawDescriptor,
+    pub trace_fd: Option<RawDescriptor>,
     /// Where its control socket is served (`--ctl-socket`); none when its runner gives none.
     pub ctl_socket: Option<PathBuf>,
 }
@@ -122,8 +122,8 @@ pub struct ReadOnlyMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LabMode {
     pub alias: String,
-    pub secrets_fd: RawFd,
-    pub trace_fd: Option<RawFd>,
+    pub secrets_fd: RawDescriptor,
+    pub trace_fd: Option<RawDescriptor>,
     /// Where its control socket is served (`--ctl-socket`); none when its runner gives none.
     pub ctl_socket: Option<PathBuf>,
 }
@@ -213,7 +213,7 @@ impl Cli {
     }
 }
 
-fn check_descriptors(secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<(), String> {
+fn check_descriptors(secrets_fd: RawDescriptor, trace_fd: Option<RawDescriptor>) -> Result<(), String> {
     if trace_fd == Some(secrets_fd) {
         return Err(format!(
             "descriptor {secrets_fd} is named for both --secrets-fd and --trace-fd"

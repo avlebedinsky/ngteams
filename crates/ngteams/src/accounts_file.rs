@@ -450,7 +450,7 @@ fn write_accounts(paths: &PersonalPaths, accounts: &[PersonalAccount]) -> Result
 /// Why the account files could not be used.
 #[derive(Debug, thiserror::Error)]
 pub enum PersonalError {
-    #[error("HOME is unset or relative, so the personal build's directories can't be found")]
+    #[error("the personal build's directories cannot be resolved from the native home/data environment")]
     NoHome,
     #[error("can't read {}: {source}", path.display())]
     Read { path: PathBuf, source: io::Error },

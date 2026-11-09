@@ -126,6 +126,25 @@ writes are capped to the queried outgoing pipe quota so an oversized NOWAIT writ
 The native Windows gate also enforces the control crate's unchanged floors from `coverage.toml` (99% lines,
 100% functions, 98% regions). Platform-only sources use the same hash-checked Linux inventory mechanism above.
 
+
+The native offline gate also compiles the app's actual descriptor adoption and restart modules through
+`teams-auth/tests/app_descriptors.rs`, and its actual location/overlap module through
+`teams-platform/tests/app_paths.rs`. Broker pairs use protected, local-only byte pipes whose temporary listener is
+removed before a child launches. The pair verifies both peers are the creating process. A native transfer set owns
+fresh inheritable duplicates and passes an explicit handle whitelist to `CreateProcessW`; originals and working
+clones remain noninheritable. Synthetic subprocesses exercise quoted arguments, unwanted-handle exclusion, writable
+trace validation, failed restarts and successful broker/trace transfer across a restart. Windows restarts create the
+successor before exiting, so the future runner must track the entire app job, not only its first PID.
+
+Windows account locations resolve under `LOCALAPPDATA/ngteams/{config,data}` with an absolute
+`USERPROFILE/AppData/Local` fallback; lab aliases use the sibling `LOCALAPPDATA/ngteams-lab/<alias>` root. Snapshot
+separation compares Windows components with native ordinal case-insensitivity, recognizes ordinary/verbatim drive
+and UNC spellings, and conservatively treats trailing dots/spaces as aliases. Relative paths resolve from the current
+working directory before interpreting `..`; an unresolved Windows drive-relative path cannot prove separation.
+The existing native coverage floors remain unchanged. Windows-only sources use the hash-checked Linux inventory.
+The explicit VM-console guard also checks the active interactive session; its tests open no window. These boundaries
+do not yet supply the Windows runner, WebView2, media integration or a runnable GUI/release package.
+
 ## Releases
 
 The [release workflow](../.github/workflows/release.yml) runs on a push to `main` that changes what ends up in a

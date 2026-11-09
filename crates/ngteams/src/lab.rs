@@ -1,5 +1,6 @@
 //! Lab startup locations and sandbox reach. The agent checks account traffic before each live run.
 
+#[cfg(unix)]
 use std::ffi::OsStr;
 
 use crate::accounts_file::{PersonalAccount, PersonalLocations, PersonalPaths, overlapping};
@@ -32,6 +33,8 @@ pub fn paths_for(value: &str, mine: &PersonalLocations) -> Result<PersonalPaths,
         .data_dir
         .parent()
         .ok_or("lab: the XDG data home cannot be resolved")?;
+    #[cfg(windows)]
+    let data_home = data_home.parent().ok_or("lab: Local AppData cannot be resolved")?;
     let root = data_home.join(LAB_KEYRING_APPLICATION).join(alias);
     let paths = PersonalPaths::new(root.clone(), root);
     check_apart(
@@ -85,6 +88,7 @@ pub fn check_apart(lab: &PersonalPaths, mine: &PersonalPaths) -> Result<(), Stri
 ///
 /// # Errors
 /// The same sandbox reach requirements as the read-only mode.
+#[cfg(unix)]
 pub fn window_allowed(wayland: Option<&OsStr>, sandbox: Option<&OsStr>, display: Option<&OsStr>) -> Result<(), String> {
     crate::read_only::window_allowed(wayland, sandbox, display).map_err(|error| {
         error
@@ -93,11 +97,17 @@ pub fn window_allowed(wayland: Option<&OsStr>, sandbox: Option<&OsStr>, display:
     })
 }
 
-/// [`window_allowed`] for the current process.
+/// Verifies the current process's platform-specific UI sandbox.
 ///
 /// # Errors
 /// A desktop display or missing sandbox compositor.
 pub fn window_allowed_here() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        teams_platform::windows_sandbox::window_allowed_here()
+            .map_err(|error| format!("lab: {error}; run scripts/run-lab.ps1"))
+    }
+    #[cfg(unix)]
     window_allowed(
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         std::env::var_os(ui_sandbox::SANDBOX_ENV).as_deref(),

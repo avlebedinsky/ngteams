@@ -13,7 +13,7 @@
 //! - **No socket on the account**: no push channel (the user's own `ngteams` keeps its one Trouter connection and its
 //!   endpoint's presence; this one catches up by reads, `teams_core::account::READ_ONLY_POLL`) and no calling (no
 //!   PipeWire, camera or portal is opened, no calling endpoint registered, no call shown).
-//! - **Only in the UI sandbox** ([`window_allowed`]): no window on the desktop, `DISPLAY` unset; no tray item, and the
+//! - **Only in the UI sandbox** ([`window_allowed_here`]): no window on the desktop, `DISPLAY` unset; no tray item, and the
 //!   notifications go to the bus it is given (the sandbox's).
 //! - **On a snapshot** ([`crate::snapshot`]): its files are a copy (`--data <dir>`, laid out as
 //!   [`crate::snapshot::layout`]), refused when they overlap the user's own ([`check_apart`]), so it never opens the
@@ -26,13 +26,14 @@
 
 use std::ffi::OsStr;
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
+use teams_auth::broker::BrokerStream;
 
 use crate::accounts_file::PersonalPaths;
 use crate::accounts_file::overlapping;
 use teams_auth::broker::{BrokerScope, BrokerSecretStore, Note, Outcome, ServeError, serve};
 use teams_auth::secrets::{OverlaySecretStore, SecretStore};
+#[cfg(unix)]
 use ui_sandbox::{SANDBOX_ENV, in_sandbox, names_wayland_display};
 
 use crate::KEYRING_APPLICATION;
@@ -55,6 +56,7 @@ pub fn asked(flag: bool, env: Option<&OsStr>) -> bool {
 ///
 /// # Errors
 /// Why not, as the message to print.
+#[cfg(unix)]
 pub fn window_allowed(wayland: Option<&OsStr>, sandbox: Option<&OsStr>, display: Option<&OsStr>) -> Result<(), String> {
     if display.is_some_and(|display| !display.is_empty()) {
         return Err(
@@ -78,6 +80,12 @@ pub fn window_allowed(wayland: Option<&OsStr>, sandbox: Option<&OsStr>, display:
 /// # Errors
 /// Why not.
 pub fn window_allowed_here() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        teams_platform::windows_sandbox::window_allowed_here()
+            .map_err(|error| format!("read-only: {error}; run scripts/run-personal-read-only.ps1"))
+    }
+    #[cfg(unix)]
     window_allowed(
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         std::env::var_os(SANDBOX_ENV).as_deref(),
@@ -134,7 +142,7 @@ pub fn broker_scope(upn: &str) -> BrokerScope {
 ///
 /// # Errors
 /// The socket's mode can't be set.
-pub fn secrets(socket: UnixStream) -> std::io::Result<ReadOnlySecrets> {
+pub fn secrets(socket: BrokerStream) -> std::io::Result<ReadOnlySecrets> {
     Ok(OverlaySecretStore::new(BrokerSecretStore::new(
         socket,
         KEYRING_APPLICATION,
@@ -147,13 +155,12 @@ pub fn secrets(socket: UnixStream) -> std::io::Result<ReadOnlySecrets> {
 /// # Errors
 /// The socket can't be used, or a frame was malformed or oversized (the socket is closed then).
 pub async fn serve_broker<S: SecretStore>(
-    socket: UnixStream,
+    socket: BrokerStream,
     scope: &BrokerScope,
     store: &S,
     log: &mut impl Write,
 ) -> Result<(), ServeError> {
-    socket.set_nonblocking(true)?;
-    let socket = tokio::net::UnixStream::from_std(socket)?;
+    let socket = teams_auth::broker::into_async(socket)?;
     serve(socket, store, scope, |note: &Note<'_>| {
         if matches!(
             note.outcome,

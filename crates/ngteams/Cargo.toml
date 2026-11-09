@@ -58,7 +58,12 @@ thiserror.workspace = true
 # the sign-in's and the engine's runtimes; the session's sign-out watch; the read-only mode's broker socket (`net`)
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
 # the read-only mode opens its window only on the UI sandbox's compositor (`ui_sandbox::in_sandbox`)
+[target.'cfg(unix)'.dependencies]
 ui-sandbox.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+interprocess.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Wdk_Foundation", "Win32_System_WindowsProgramming"] }
 
 [dev-dependencies]
 # The retained sandbox window tests read screenshots and serve mock tray items.

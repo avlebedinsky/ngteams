@@ -24,7 +24,7 @@ use std::io::{self, Read as _, Write as _};
 #[path = "broker/transport.rs"]
 mod transport;
 use std::sync::{Arc, Mutex, PoisonError};
-pub use transport::Stream as BrokerStream;
+pub use transport::{AsyncStream as AsyncBrokerStream, Stream as BrokerStream, into_async};
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use zeroize::Zeroizing;
@@ -586,3 +586,9 @@ impl SecretStore for BrokerSecretStore {
         Ok(())
     }
 }
+
+#[cfg(windows)]
+#[path = "broker/windows_pair.rs"]
+mod windows_pair;
+#[cfg(windows)]
+pub use windows_pair::private_pair;

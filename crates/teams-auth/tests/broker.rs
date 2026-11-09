@@ -550,3 +550,47 @@ async fn no_value_reaches_a_debug_an_error_or_a_note() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_get_only_broker_reads_but_never_changes_its_backing_store() -> TestResult {
+    let backing = Arc::new(MemorySecretStore::new());
+    let key = key(ACCOUNT, SPACES);
+    backing.put(&key, &Secret::new(PLANTED)).await?;
+    let policy = scope().get_only();
+    assert_eq!(policy.application(), APPLICATION);
+    assert_eq!(policy.account(), ACCOUNT);
+    assert!(policy.is_get_only());
+    let (server, socket) = socket_pair()?;
+    let client = BrokerSecretStore::new(socket, APPLICATION)?;
+    assert_eq!(client.application(), APPLICATION);
+    let served_store = Arc::clone(&backing);
+    let notes = Arc::new(Mutex::new(Vec::new()));
+    let kept_notes = Arc::clone(&notes);
+    let task = tokio::spawn(async move {
+        serve(server, &*served_store, &policy, |note| {
+            kept_notes.lock().unwrap().push(note.to_string());
+        })
+        .await
+    });
+    assert_eq!(client.get(&key).await?.unwrap().expose(), PLANTED);
+    assert!(refused(&client.put(&key, &Secret::new("replacement")).await));
+    assert!(refused(&client.delete(&key).await));
+    assert_eq!(backing.get(&key).await?.unwrap().expose(), PLANTED);
+    drop(client);
+    task.await??;
+    let notes = notes.lock().unwrap();
+    assert_eq!(notes.len(), 3);
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|note| note.contains("refused (this broker serves get only)"))
+            .count(),
+        2
+    );
+    assert!(
+        notes
+            .iter()
+            .all(|note| !note.contains(PLANTED) && !note.contains("replacement"))
+    );
+    Ok(())
+}

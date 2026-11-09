@@ -1,6 +1,6 @@
 //! Current-user identity and pipe protection. Private pipes reject lower-integrity processes and their clients
 //! verify the serving process before sending data: a derived pipe name alone never authenticates its owner.
-//! Identity checks follow ngterm's MIT-licensed pipe_security.rs (copyright 2026 Nick Gluschenko); see LICENSE.ngterm.
+//! Identity checks follow ngterm's MIT-licensed `pipe_security.rs` (copyright 2026 Nick Gluschenko); see LICENSE.ngterm.
 use std::io;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 

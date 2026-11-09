@@ -22,7 +22,7 @@ teams-log.workspace = true
 # the session: one refresh per audience however many callers wait on it, and its renewal notifications; the broker:
 # its server reads and writes any async stream (`io-util`) and watches it close while a store call waits (`macros`),
 # its client's blocking socket runs on the blocking pool (`rt`)
-tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync"] }
 # form encoding of the token requests and of the authorize URL's query
 url.workspace = true
 zeroize.workspace = true
@@ -33,7 +33,16 @@ oo7.workspace = true
 [target.'cfg(windows)'.dependencies]
 interprocess = { workspace = true, features = ["tokio"] }
 keyring-core.workspace = true
+teams-platform.workspace = true
+widestring.workspace = true
 windows-native-keyring-store.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Wdk_Foundation", "Win32_System_WindowsProgramming"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+rustix = { workspace = true, features = ["fs", "net"] }
 
 [dev-dependencies]
 # the region record read back from a file
