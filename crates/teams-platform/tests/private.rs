@@ -94,6 +94,7 @@ fn windows_restriction_removes_an_explicit_everyone_grant() {
     let path = root.path().join("earlier.log");
     std::fs::write(&path, b"earlier bytes").unwrap();
     let loosened = std::process::Command::new("powershell.exe")
+        .env_remove("PSModulePath")
         .args([
             "-NoProfile",
             "-NonInteractive",

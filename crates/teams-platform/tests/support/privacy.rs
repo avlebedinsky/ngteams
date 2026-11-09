@@ -18,6 +18,8 @@ pub fn assert_private(path: &Path, allow_default_owner: bool) {
     // Inspect the OS's effective descriptor, including inherited ACEs on SQLite's side files. Only the current
     // user and SYSTEM may be granted access; chmod's read-only bit cannot establish this on Windows.
     let result = std::process::Command::new("powershell.exe")
+        // A PowerShell 7 parent (Actions) exports its incompatible Security module path to Windows PowerShell.
+        .env_remove("PSModulePath")
         .args([
             "-NoProfile",
             "-NonInteractive",
