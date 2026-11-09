@@ -14,6 +14,7 @@ use super::super::{Outcome, broker, run_read_only, take_snapshot};
 pub(super) fn run(case: &str, setup: &Setup) {
     match case {
         "command-broker" => broker_boundaries(setup),
+        "command-bootstrap-failures" => bootstrap_failures(setup),
         "command-invalid-account" => {
             let cli =
                 <ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams", "--account", "invalid-upn"]).unwrap();
@@ -237,4 +238,36 @@ pub(super) fn invalid_environment() {
     let error = run_read_only(&request).err().unwrap();
     assert!(error.contains("HOME"), "{error}");
     drop(peer);
+}
+
+// Exercise the real startup gates with fixture paths. A test-support build must refuse before parsing libtest's
+// command line, and a failed restart/runtime install must not reach a credential backend or change account files.
+fn bootstrap_failures(setup: &Setup) {
+    use super::super::{install_web_engine, main, restarted};
+    assert!(ngteams::refusal().is_some());
+    assert_eq!(main(), ExitCode::FAILURE);
+    let config = setup.paths.accounts_file();
+    let before = std::fs::read(&config).ok();
+    let archive = setup.paths.data_dir().join("synthetic-missing-runtime.tar.zst");
+    assert_eq!(install_web_engine(&archive), ExitCode::FAILURE);
+    assert!(!archive.exists());
+    assert_eq!(std::fs::read(&config).ok(), before);
+    let mut invoked = false;
+    assert_eq!(
+        restarted(&mut |command| {
+            invoked = true;
+            assert_eq!(
+                std::path::Path::new(command.get_program()),
+                std::env::current_exe().unwrap()
+            );
+            assert_eq!(command.get_args().count(), 0);
+            std::io::Error::new(std::io::ErrorKind::NotFound, "synthetic restart refusal")
+        }),
+        ExitCode::FAILURE
+    );
+    assert!(invoked);
+    let error = ngteams::restart::exec(&mut std::process::Command::new(
+        "/ngteams-synthetic-missing-personal-restart",
+    ));
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }

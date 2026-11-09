@@ -282,6 +282,7 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
         "prompt-window-error",
         "command-broker",
         "command-snapshot",
+        "command-bootstrap-failures",
         "command-read-refusal",
         "command-read-missing",
         "command-read-window",

@@ -241,3 +241,37 @@ fn a_sign_in_s_display_name_is_kept_in_accounts_toml() -> TestResult {
     assert_eq!(paths.store_file(&pending), None);
     Ok(())
 }
+
+#[test]
+fn an_unwritable_config_reports_the_target_and_preserves_published_accounts() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(&dir);
+    PersonalAccount::pending("first@example.test")?.save(&paths)?;
+    let before = fs::read(paths.accounts_file())?;
+    let mode = fs::metadata(paths.config_dir())?.permissions();
+    fs::set_permissions(paths.config_dir(), fs::Permissions::from_mode(0o555))?;
+    let result = PersonalAccount::pending("second@example.test")?.save(&paths);
+    let after = fs::read(paths.accounts_file());
+    // Restore before assertions, including on the expected refusal, so the private fixture cleans up normally.
+    fs::set_permissions(paths.config_dir(), mode)?;
+    assert!(matches!(result, Err(PersonalError::Write { path, .. }) if path == paths.accounts_file()));
+    assert_eq!(after?, before);
+    assert_eq!(upns(&paths)?, ["first@example.test"]);
+    Ok(())
+}
+
+#[test]
+fn account_file_obstructions_are_read_errors_instead_of_empty_account_lists() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(&dir);
+    fs::create_dir_all(paths.accounts_file())?;
+    assert!(
+        matches!(PersonalAccount::load_all(&paths), Err(PersonalError::Read { path, .. }) if path == paths.accounts_file())
+    );
+    fs::remove_dir(paths.accounts_file())?;
+    fs::create_dir(paths.legacy_account_file())?;
+    assert!(
+        matches!(PersonalAccount::load_all(&paths), Err(PersonalError::Read { path, .. }) if path == paths.legacy_account_file())
+    );
+    Ok(())
+}

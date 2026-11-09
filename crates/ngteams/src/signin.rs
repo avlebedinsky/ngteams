@@ -284,11 +284,13 @@ fn save_region(path: &Path, region: &Region) -> Result<(), SignInError> {
     let mut staging = path.as_os_str().to_owned();
     staging.push(format!(".{}.new", std::process::id()));
     let staging = PathBuf::from(staging);
+    if let Some(dir) = path.parent() {
+        teams_platform::private::create_dir_all(dir).map_err(failed)?;
+    }
+    // Cleanup belongs only to a file this call created. A colliding staging file is somebody else's data.
+    let mut file =
+        teams_platform::private::open(&staging, teams_platform::private::Open::NewReadWrite).map_err(failed)?;
     let written = (|| {
-        if let Some(dir) = path.parent() {
-            teams_platform::private::create_dir_all(dir)?;
-        }
-        let mut file = teams_platform::private::open(&staging, teams_platform::private::Open::NewReadWrite)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         fs::rename(&staging, path)
