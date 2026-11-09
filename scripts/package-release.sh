@@ -65,12 +65,34 @@ download() {
 }
 
 export PACKAGE_ROOT="$root" PACKAGE_VERSION="$version" PACKAGE_ARCH=amd64
-python3 - "$repo/packaging/linux/nfpm.yaml" "$work/nfpm.yaml" <<'PY'
+(cd "$repo" && python3 - "$repo/packaging/linux/nfpm.yaml" "$work/nfpm.yaml") <<'PY'
 import os
 import pathlib
+import re
 import sys
 
-pathlib.Path(sys.argv[2]).write_text(os.path.expandvars(pathlib.Path(sys.argv[1]).read_text()))
+# nfpm stores a `type: tree` directory's mode with Go's directory flag still set, and pacman then warns "directory
+# permissions differ" about every one already on the system. A directory listed on its own gets a plain 0755, and is
+# still owned by the package, as a tree's is.
+def plain_entries(tree: re.Match) -> str:
+    source, destination = pathlib.Path(tree[1]), pathlib.PurePosixPath(tree[2])
+    entries = [f"  - dst: {destination}\n    type: dir\n"]
+    for path in sorted(source.rglob("*")):
+        target = destination / path.relative_to(source)
+        if path.is_symlink():
+            sys.exit(f"error: a packaged tree holds a symlink, which this listing does not carry: {path}")
+        if path.is_dir():
+            entries.append(f"  - dst: {target}\n    type: dir\n")
+        else:
+            entries.append(f"  - src: {path}\n    dst: {target}\n")
+    return "".join(entries)
+
+
+config = os.path.expandvars(pathlib.Path(sys.argv[1]).read_text())
+config = re.sub(r"^  - src: (.+)/\n    dst: (.+)\n    type: tree\n", plain_entries, config, flags=re.MULTILINE)
+if "type: tree" in config:
+    sys.exit("error: an nfpm tree entry was left unexpanded")
+pathlib.Path(sys.argv[2]).write_text(config)
 PY
 download "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
   "$work/nfpm.tar.gz" "$NFPM_X86_64_SHA256"
