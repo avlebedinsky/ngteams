@@ -213,7 +213,7 @@ function build(t) {
     const dot = el("span", "dot"), what = el("span", "what"), ago = el("span", "ago");
     line.append(dot, what, ago);
     c.el.append(line);
-    const active = t.group === "running";
+    const active = t.group === "running" || t.group === "review";
     if (t.waiting_for && active) {
       dot.className = "dot waiting";
       what.textContent = "Waiting for: " + t.waiting_for.text;
@@ -231,7 +231,7 @@ function build(t) {
       c.times.push(() => { ago.textContent = dur(now() - (t.doing.finished_ms ?? t.doing.started_ms)) + " ago"; });
     }
   }
-  if (t.group === "running" && t.background && t.background.length) {
+  if ((t.group === "running" || t.group === "review") && t.background && t.background.length) {
     const list = el("ul", "bg");
     for (const b of t.background) {
       const item = el("li", null, "In the background: " + b.text + " · ");
@@ -250,7 +250,7 @@ function build(t) {
     c.times.push(() => { age.textContent = dur(now() - t.said.ms) + " ago"; });
   }
   if (t.note) c.el.append(el("div", "note", t.note));
-  if (t.group === "running") {
+  if (t.group === "running" || t.group === "review") {
     const quiet = el("div", "quiet");
     c.el.append(quiet);
     c.times.push(() => {

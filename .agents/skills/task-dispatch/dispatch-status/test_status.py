@@ -12,7 +12,7 @@ import time
 import unittest
 from pathlib import Path
 
-from status import Server, Status, progress
+from status import PHASES, Server, Status, progress
 from transcript import Transcript, command_signals, redact, shown, tool_activity
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -271,7 +271,8 @@ class SlotTests(Files):
         self.assertEqual(board['slots_used'], 1)
         self.assertEqual(rows[2]['group'], 'review')
         self.assertEqual(rows[2]['review'], 'focused · round 2 · fixing')
-        self.assertEqual(rows[3]['group'], 'running')
+        self.assertEqual(set(rows), {1, 2, 5})
+        self.assertEqual(rows[2]['stage'], 'fixing')
         self.assertEqual(rows[5]['queue']['start_ms'], 0)
 
     def test_a_prerequisite_in_review_still_holds_its_dependent(self):
@@ -289,12 +290,16 @@ class SlotTests(Files):
         self.assertIsNone(rows[1]['queue']['start_ms'])
         self.assertEqual(rows[2]['queue']['start_ms'], rows[0]['eta_ms'])
 
-    def test_a_task_in_review_shows_its_phases_finished(self):
+    def test_a_task_in_review_keeps_review_unfinished_after_its_edit_phases(self):
         self.event('investigate')
         self.event('commit', minute=1)
         self.board([{'num': 1, 'state': 'in review abc', 'flow': 'edit', 'transcript': str(self.events)}])
         row = Status(self.ledger).snapshot()['tasks'][0]
-        self.assertTrue(row['done'])
+        self.assertFalse(row['done'])
+        self.assertEqual(row['group'], 'review')
+        self.assertEqual(row['phases'][row['phase']], 'review')
+        self.assertEqual(row['phases'][:row['phase']], ['investigate', 'implement', 'check', 'commit'])
+        self.assertIsNone(row['ended_ms'])
         self.assertIsNone(row['eta_ms'])
 
     def test_canceled_tasks_take_no_slot_and_are_the_last_section(self):
@@ -398,7 +403,7 @@ class OneCardTests(Files):
             ('landed abc', 'queued', 'running', 'review queued'),
             ('landed abc', 'fixing', 'running', 'fixing'),
             ('landed abc', 'blocked', 'failed', 'review blocked'),
-            ('in review abc', 'reviewed', 'running', 'merging'),
+            ('in review abc', 'reviewed', 'review', 'merging'),
             ('committed abc, under review', 'skipped', 'running', 'merging'),
             ('landing abc', 'reviewed', 'running', 'merging'),
         ):
@@ -406,6 +411,63 @@ class OneCardTests(Files):
                 row = self.snapshot([self.card(state, {'state': review}), done])['tasks'][0]
                 self.assertEqual((row['group'], row['state']), (group, shown_state))
                 self.assertIsNone(row['doing'])
+
+    def test_in_review_parent_folds_each_companion_and_keeps_dependents_blocked(self):
+        path = self.transcript('review.jsonl', 'Reading the diff')
+        for role, stage in (('revmux', 'reviewing'), ('fix', 'fixing')):
+            for state, display_group in (('running', 'review'), ('waiting on user', 'waiting')):
+                with self.subTest(role=role, state=state):
+                    board = self.snapshot([
+                        self.card('in review abc'), self.child(state='done'),
+                        self.child(3, role, state, transcript=path),
+                        {'num': 4, 'state': 'queued', 'after': 1}, {'num': 5, 'state': 'queued'},
+                    ], slots=1)
+                    self.assertEqual([row['num'] for row in board['tasks']], [1, 4, 5])
+                    row, dependent, independent = board['tasks']
+                    self.assertEqual((row['group'], row['stage']), (display_group, stage))
+                    self.assertEqual(row['doing']['text'], 'Reading the diff')
+                    self.assertEqual(row['agent'], f'{role}-3')
+                    self.assertFalse(row['done'])
+                    self.assertIsNone(row['eta_ms'])
+                    self.assertEqual(board['slots_used'], 0)
+                    self.assertIsNone(dependent['queue']['start_ms'])
+                    self.assertEqual(independent['queue']['start_ms'], 0)
+
+    def test_in_review_parent_without_live_companions_never_reads_as_finished(self):
+        for children in ([], [self.child(state='done'), self.child(3, 'fix', 'canceled')]):
+            for state, stage, display_group in (
+                ('reviewing', 'reviewing', 'review'), ('fixing', 'fixing', 'review'),
+                ('queued', 'review queued', 'review'), ('blocked', 'review blocked', 'failed'),
+                ('reviewed', 'merging', 'review'), ('skipped', 'merging', 'review'),
+            ):
+                with self.subTest(state=state, children=bool(children)):
+                    board = self.snapshot([self.card('in review abc', {'state': state}), *children])
+                    self.assertEqual(len(board['tasks']), 1)
+                    row = board['tasks'][0]
+                    self.assertEqual((row['group'], row['stage']), (display_group, stage))
+                    self.assertFalse(row['done'])
+                    self.assertIsNone(row['ended_ms'])
+                    self.assertIsNone(row['eta_ms'])
+                    self.assertEqual(board['slots_used'], 0)
+        row = self.snapshot([{'num': 1, 'state': 'in review abc'}])['tasks'][0]
+        self.assertEqual((row['group'], row['stage'], row['done']), ('review', 'reviewing', False))
+
+    def test_dispatcher_merges_after_the_gate_without_a_companion_land_phase(self):
+        self.assertNotIn('land', PHASES['review'])
+        for state in ('reviewed', 'skipped'):
+            with self.subTest(state=state):
+                board = self.snapshot([self.card('in review abc', {'state': state}),
+                                       self.child(state='done'), self.child(3, 'fix', 'done')])
+                row = board['tasks'][0]
+                self.assertEqual((row['group'], row['stage']), ('review', 'merging'))
+                self.assertEqual(row['phases'][row['phase']], 'merging')
+                self.assertFalse(row['done'])
+                self.assertEqual(board['slots_used'], 0)
+                landed = self.snapshot([self.card('landed abc', {'state': state}), self.child(state='done'),
+                                        {'num': 4, 'state': 'queued', 'after': 1}])
+                self.assertEqual(landed['tasks'][0]['group'], 'completed')
+                self.assertNotIn('stage', landed['tasks'][0])
+                self.assertEqual(landed['tasks'][1]['queue']['start_ms'], 0)
 
     def test_a_settled_review_leaves_a_finished_card(self):
         for state, review in (('landed abc', 'reviewed'), ('landed abc', 'skipped')):
@@ -439,8 +501,9 @@ class OneCardTests(Files):
     def test_a_board_without_children_is_unchanged(self):
         row = self.snapshot([self.card()])['tasks'][0]
         self.assertEqual((row['group'], row['state']), ('completed', 'landed abc'))
-        for field in ('stage', 'review', 'role'):
-            self.assertNotIn(field, row)
+        self.assertNotIn('stage', row)
+        self.assertEqual(row['role'], 'task')
+        self.assertEqual(row['review'], 'comprehensive · round 1 · reviewing')
 
 
 class HttpTests(Files):

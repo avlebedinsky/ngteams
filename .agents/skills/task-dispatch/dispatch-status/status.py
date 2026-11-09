@@ -39,12 +39,9 @@ def holds_slot(row):
 
 
 def companion_stage(child):
-    # What a review or fix companion is doing, or None if it isn't live. `canceled` is matched here because it can
-    # still group as running.
+    # Companions review or fix; the dispatcher owns merging after the review gate.
     if child['group'] not in ('running', 'waiting') or child['state'].lower().startswith('cancel'):
         return None
-    if child.get('phase') is not None and child['phases'][child['phase']] == 'land':
-        return 'merging'
     return 'fixing' if child['role'] == 'fix' else 'reviewing'
 
 
@@ -52,21 +49,22 @@ def review_stage(row, review_state, working):
     # Where a task is in its review life cycle, or None when its card should read as usual. A companion still
     # implementing keeps its own card, even with a review of an earlier stage running beside it.
     state = row['state'].lower()
-    if row['group'] not in ('running', 'completed') or state.startswith('cancel'):
+    if row['group'] not in ('running', 'review', 'completed') or state.startswith('cancel'):
         return None
     if state.startswith('running') and not (working and row.get('done')):
         return None
-    if working:
-        return companion_stage(working)
     if state.startswith(('merging', 'landing')):
         return 'merging'
+    if review_state in ('reviewed', 'skipped') and state.startswith(('in review', 'committed')):
+        return 'merging'
+    if working:
+        return companion_stage(working)
     if review_state in ('reviewing', 'fixing'):
         return review_state
     if review_state in ('queued', 'blocked'):
         return 'review ' + review_state
-    if review_state in ('reviewed', 'skipped') and state.startswith(('in review', 'committed')):
-        return 'merging'
-    return None
+    # Handback frees the slot even before the dispatcher has started its review companion.
+    return 'reviewing' if row['group'] == 'review' else None
 
 
 def review_line(review, stage):
@@ -235,8 +233,7 @@ class Status:
                     row['eta_ms'] = max(current - elapsed, current // 5) + sum(typical[phase + 1:])
                     row['long'] = elapsed > current
             row.pop('_entered', None)
-        if children:
-            self.lifecycle(rows, children, reviews)
+        self.lifecycle(rows, children, reviews)
         slots = self.board.get('slots', 2)
         slots = slots if type(slots) is int and slots >= 1 else 2
         self.queues(rows, slots)
@@ -258,6 +255,9 @@ class Status:
     def lifecycle(rows, children, reviews):
         # A task's review and fix companions have no card: its one card carries their progress.
         for row in rows:
+            # Legacy completed tasks without companion bookkeeping keep their settled card.
+            if row['group'] == 'completed' and row['num'] not in children:
+                continue
             review = reviews.get(row['num'])
             review_state = review.get('state') if isinstance(review, dict) else None
             live = [child for child in children.get(row['num'], ()) if companion_stage(child)]
@@ -269,9 +269,14 @@ class Status:
             kept = [name for name in row['phases'] if name not in ('review', 'gate', 'land', 'done')]
             phases = [*kept, 'review', 'fixing', 'merging', 'done']
             current = 'review' if stage.startswith('review') else stage
+            display_group = 'review' if row['group'] == 'review' else 'running'
+            if working and working['group'] == 'waiting':
+                display_group = 'waiting'
+            if stage == 'review blocked':
+                display_group = 'failed'
             row.update(stage=stage, state=stage, phases=phases, phase=phases.index(current), done=False,
                        eta_ms=None, long=False, ended_ms=None, phase_typical_ms=None,
-                       _group='failed' if stage == 'review blocked' else working['group'] if working else 'running')
+                       _group=display_group)
             source = working or {}
             row.update({key: source.get(key) for key in ACTIVITY})
             if working:
