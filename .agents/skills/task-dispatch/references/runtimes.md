@@ -11,7 +11,8 @@ actual tools and schemas the session exposes. Never invent a tool, and don't use
   so a turn may end while companions work. Handle every event line it printed, record the seen markers on the board,
   then start a new waiter. Exit 124 is only the fallback: restart it. Keep exactly one waiter, and stop it with
   `TaskStop` at mode end.
-- User messages arrive while the waiter runs; answer them, then leave it running.
+- User messages arrive while the waiter runs; answer them, then leave it running. So does companion mail, after a tool
+  call or by waking the idle session.
 - Use `run_in_background` for other long commands and `TaskStop` for owned ones; keep their IDs on the board.
 - The owner PID is `$CLAUDE_PID` and session ID is `$CLAUDE_CODE_SESSION_ID` when provided. Verify the owner exists.
   Do not use the PID of a short-lived tool shell.
@@ -20,7 +21,8 @@ actual tools and schemas the session exposes. Never invent a tool, and don't use
 
 - Run the waiter in a shell session with `--timeout 60` and keep the turn active: handle its events, update the board,
   and run it again. A 124 exit is a timeout, not a completion: start newly eligible work and wait again without a
-  heartbeat message. Handle user steering in commentary between waits. If the turn must end, run
+  heartbeat message. Handle user steering in commentary between waits. Companion mail arrives after a tool call, so
+  at the latest when the waiter returns. If the turn must end, run
   `companion-wait.py --once` first and report that monitoring resumes on the next turn; companions keep working.
 - Use shell sessions and their returned handles for long commands; poll/resume only the matching handle. Terminate
   owned processes with the shell/session facility or their recorded PIDs.
@@ -33,6 +35,8 @@ actual tools and schemas the session exposes. Never invent a tool, and don't use
 - `companion.sh start --runtime claude` runs `claude --permission-mode auto` with a fixed session UUID and the
   brief's path as the first prompt. Its transcript is the JSONL the helper prints; record it as `transcript` so the
   status page follows it. It loads `CLAUDE.md`/`AGENTS.md` and `.claude/skills` from its working directory.
+- Mail reaches it after its next tool call and wakes it when idle; `companion.sh send` types instead when an idle one
+  hasn't taken the mail within seconds.
 - A worktree under the repository is trusted with it. Starting one outside a trusted folder stops it on Claude's
   trust prompt (a `completed` or `blocked` event with no report; read its screen).
 
@@ -41,6 +45,9 @@ actual tools and schemas the session exposes. Never invent a tool, and don't use
 - `companion.sh start --runtime codex` runs `codex --no-daemon -C <dir>` with the user's configured model, approval,
   and sandbox settings. `--no-daemon` keeps the TUI and its hooks in the companion's own process: on Codex's shared
   daemon, hooks run with the environment of whichever pane started it and the status lands there.
+- Mail reaches it after its next tool call or at the end of a turn, but doesn't wake an idle one, so `companion.sh send`
+  types to a Codex that has stopped. It tells that from Codex's screen, because Codex's hooks report `blocked` for a
+  turn that ended on a question and stay `active` after an interrupt.
 - Codex's session ID isn't known at start, so the pane's relaunch command is pinned to a plain shell: after an ngterm
   relaunch the pane is open without an agent. An unshown pane first reports `asleep`; once woken (or shown) its shell
   is readable and the waiter reports `exited`; continue the task in a new companion.
