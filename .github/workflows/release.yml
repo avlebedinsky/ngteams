@@ -103,8 +103,14 @@ jobs:
             echo "key=$key"
             echo "archive=$name"
           } >> "$GITHUB_OUTPUT"
+      - name: Clang
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "CLANG_BIN=$(scripts/release-clang.sh "$RUNNER_TEMP")" >> "$GITHUB_ENV"
       - name: Release binaries
         env:
+          CC: ${{ env.CLANG_BIN }}/clang
+          CXX: ${{ env.CLANG_BIN }}/clang++
           PKG_CONFIG_PATH: ${{ env.NGTEAMS_RELEASE_WPE }}/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ env.NGTEAMS_RELEASE_WPE }}/lib
           TEAMS_PERSONAL_INSTALL: "1"
