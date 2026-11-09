@@ -12,6 +12,22 @@ name: release
 on:
   push:
     branches: [main]
+    # Only what ends up in a package: a push of docs, skills or CI settings builds nothing, and leaves a running release
+    # alone. (GitHub also refuses this job's token a new release on a commit that changes a workflow file.)
+    paths:
+      - crates/**
+      - '!crates/**/*.md'
+      - vendor/**
+      - '!vendor/**/*.md'
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - packaging/**
+      - scripts/release-*
+      - scripts/package-*
+      - scripts/web-engine-closure.py
+      - scripts/check-linux-package.py
+      - scripts/lib/fetch-tool.sh
   workflow_dispatch:
 
 permissions:
