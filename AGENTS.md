@@ -13,8 +13,8 @@ These protect real people, the user's account and the user's data. They hold for
   Before every live run, list the chats, calls and people it reaches and confirm that all are in that set
   ([docs/lab-rules.md](docs/lab-rules.md)). Check the people on each target and anyone the run adds; if that cannot be
   established, do not run it. Apps and bots aren't people. This is the agent's check, not an application policy.
-- **Agents build `ngteams` only through `scripts/run-lab.sh`**, including its `--build-only` mode. Drive lab accounts
-  freely in that runner's UI sandbox, within the lab-contact rule. The personal installer is used only on an explicit
+- **Agents build `ngteams` only through `scripts/run-lab.sh` (Windows: `scripts/run-lab.ps1`)**, including their
+  build-only modes. Drive lab accounts freely in that runner's UI sandbox, within the lab-contact rule. The personal installer is used only on an explicit
   user request, as below.
 - **No live write ever comes from a `cargo test` process**: live tests spawn the normally built lab client.
 - **Captures, tokens and debug logs never enter the repo**, not even sanitized. Committed fixtures are synthetic and
@@ -25,13 +25,14 @@ These protect real people, the user's account and the user's data. They hold for
   to a non-Microsoft service (a third-party bot, an app's backend).
 - **Agents run the user's own account only read-only, and install it only when the user asks**
   ([details](docs/personal-build.md#what-agents-may-do-with-the-personal-build)):
-  - start it only through `scripts/run-personal-read-only.sh`; its data dirs (`~/.local/share/ngteams/`,
-    `~/.config/ngteams/`) are readable any time;
+  - start it only through `scripts/run-personal-read-only.sh` (Windows: `scripts/run-personal-read-only.ps1`);
+    its data dirs (`~/.local/share/ngteams/`, `~/.config/ngteams/`) are readable any time;
   - run `scripts/install.sh` only on the user's explicit request, each time; afterwards start the installed
     `ngteams` detached if asked, and leave it alone;
   - never sign it in, drive, test or capture with it in sending mode, touch its keyring items or receive the user's
     tokens.
-- **Every lab or test GUI runs in `crates/ui-sandbox`**, never on the user's display, bus or PipeWire.
+- **Every lab or test GUI runs in `crates/ui-sandbox`**, never on the user's display, bus or PipeWire. On Windows,
+  the explicitly authorized `win11` VM's interactive console is the sandbox, through the PowerShell runners.
 - **Protocol notes are written in our own words** in `docs/protocol/`; Microsoft JS never enters the repo.
 
 ## The client builds

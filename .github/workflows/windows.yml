@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   storage:
-    name: Files, authentication and control IPC (${{ matrix.os }})
+    name: Files, authentication, control IPC and runner (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -36,13 +36,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring
       - name: Format
-        run: cargo fmt -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -- --check
+        run: cargo fmt -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -- --check
       - name: Check every target
-        run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets
+        run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner --all-targets
       - name: Lints
-        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets -- -D warnings
+        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner --all-targets -- -D warnings
       - name: Offline filesystem, authentication, broker and native startup tests
-        run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -- --test-threads=1
+        run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -- --test-threads=1
       - name: Windows coverage tools
         if: runner.os == 'Windows'
         run: |
@@ -68,3 +68,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $floors = python -c "import json, tomllib; print(json.dumps(tomllib.load(open('coverage.toml', 'rb'))['baselines']['teams-ctl']))" | ConvertFrom-Json
           cargo llvm-cov --locked -p teams-ctl --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions -- --test-threads=1
+      - name: Require native runner coverage without a GUI or live client
+        if: runner.os == 'Windows'
+        run: |
+          $env:CARGO_LLVM_COV_TARGET_DIR = "$pwd/target/llvm-cov-target"
+          cargo llvm-cov clean --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo llvm-cov --locked -p teams-runner --no-report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo llvm-cov run --locked -p teams-runner --no-report -- prepare --directory "$env:RUNNER_TEMP/ngteams-runner-prepare"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:LLVM_PROFILE_FILE = "$pwd/target/llvm-cov-target/runner-cli-%p-%m.profraw"
+          ./scripts/test-windows-runner.ps1 -Runner "$pwd/target/llvm-cov-target/debug/teams-runner.exe" -SkipConsole
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo llvm-cov report --locked -p teams-runner --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90

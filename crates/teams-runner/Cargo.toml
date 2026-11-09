@@ -1,0 +1,20 @@
+[package]
+name = "teams-runner"
+autotests = false
+description = "Windows VM lab and read-only process supervisor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+clap.workspace = true
+teams-platform.workspace = true
+teams-auth.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -172,7 +172,7 @@ pub(super) mod prompt {
 pub(super) mod platform {
     use std::time::{Duration, Instant};
 
-    use gpui::{App, TestAppContext, WindowingModes};
+    use gpui::{App, TestAppContext};
     use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
     use teams_ui::window::KitRoot;
 
@@ -180,7 +180,7 @@ pub(super) mod platform {
         cx: TestAppContext,
     }
 
-    pub fn linux(_: WindowingModes) -> Platform {
+    pub fn application() -> Platform {
         Platform {
             cx: TestAppContext::single(),
         }

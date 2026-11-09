@@ -16,8 +16,8 @@ use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_IN
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 /// A transfer set. Build the child's arguments with [`Self::value`], since duplicates have their own handle values.
@@ -66,6 +66,18 @@ impl Transfer {
     /// # Errors
     /// Invalid executable/arguments, attribute-list allocation, or process creation failure.
     pub fn spawn(&self, program: &Path, args: &[OsString]) -> io::Result<Child> {
+        self.spawn_with_job(program, args, None)
+    }
+
+    /// Launch with atomic job assignment, before the child's first instruction. The job handle is never inherited.
+    ///
+    /// # Errors
+    /// Invalid executable/arguments, attribute-list allocation, job assignment or process creation failure.
+    pub fn spawn_in_job(&self, program: &Path, args: &[OsString], job: &super::windows_job::Job) -> io::Result<Child> {
+        self.spawn_with_job(program, args, Some(job.handle()))
+    }
+
+    fn spawn_with_job(&self, program: &Path, args: &[OsString], job: Option<BorrowedHandle<'_>>) -> io::Result<Child> {
         if !program.is_absolute()
             || !program
                 .extension()
@@ -84,7 +96,8 @@ impl Transfer {
             .chain(&self.standard)
             .map(AsRawHandle::as_raw_handle)
             .collect();
-        let attributes = Attributes::new(&handles)?;
+        let job_handles: Vec<HANDLE> = job.iter().map(AsRawHandle::as_raw_handle).collect();
+        let attributes = Attributes::new(&handles, &job_handles)?;
         let mut startup = STARTUPINFOEXW::default();
         startup.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>()).map_err(io::Error::other)?;
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -143,31 +156,40 @@ struct Attributes {
     pointer: LPPROC_THREAD_ATTRIBUTE_LIST,
 }
 impl Attributes {
-    fn new(handles: &[HANDLE]) -> io::Result<Self> {
+    fn new(handles: &[HANDLE], jobs: &[HANDLE]) -> io::Result<Self> {
+        let count = 1 + u32::from(!jobs.is_empty());
         let mut size = 0;
         // SAFETY: this first sizing query deliberately supplies a null list, with size as its output.
-        unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &raw mut size) };
+        unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &raw mut size) };
         if size == 0 {
             return Err(io::Error::last_os_error());
         }
         let mut buffer = vec![0_usize; size.div_ceil(size_of::<usize>())];
         let pointer = buffer.as_mut_ptr().cast();
         // SAFETY: buffer is aligned and has at least size bytes; it stays allocated through Attributes' lifetime.
-        if unsafe { InitializeProcThreadAttributeList(pointer, 1, 0, &raw mut size) } == 0 {
+        if unsafe { InitializeProcThreadAttributeList(pointer, count, 0, &raw mut size) } == 0 {
             return Err(io::Error::last_os_error());
         }
         let attributes = Self {
             _buffer: buffer,
             pointer,
         };
-        // SAFETY: handles is a live array and remains alive until the child has been created; no prior value is read.
+        attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, handles)?;
+        if !jobs.is_empty() {
+            attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST as usize, jobs)?;
+        }
+        Ok(attributes)
+    }
+
+    fn set(&self, kind: usize, values: &[HANDLE]) -> io::Result<()> {
+        // SAFETY: values remains alive until CreateProcessW returns. The initialized list has room for this kind.
         if unsafe {
             UpdateProcThreadAttribute(
-                pointer,
+                self.pointer,
                 0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                handles.as_ptr().cast(),
-                size_of_val(handles),
+                kind,
+                values.as_ptr().cast(),
+                size_of_val(values),
                 null_mut(),
                 null(),
             )
@@ -175,7 +197,7 @@ impl Attributes {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(attributes)
+        Ok(())
     }
 }
 impl Drop for Attributes {

@@ -116,11 +116,62 @@ fn invalid_launches_fail_before_creating_a_child() {
 }
 
 #[test]
+fn job_retains_restart_descendants_and_drop_kills_them() {
+    for explicit_stop in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let job = teams_platform::windows_job::Job::new().unwrap();
+        assert_eq!(job.active_processes().unwrap(), 0);
+        let transfer = Transfer::new(&[]).unwrap();
+        let mut args = arguments("restart");
+        args.push(ready.clone().into_os_string());
+        let child = transfer
+            .spawn_in_job(&std::env::current_exe().unwrap(), &args, &job)
+            .unwrap();
+        assert_eq!(child.wait(Duration::from_secs(20)).unwrap(), Some(0));
+        // The process handle can signal before job accounting removes that exiting image. Wait for accounting to
+        // settle; its successor must remain supervised after the original is gone.
+        let accounting_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while job.active_processes().unwrap() != 1 {
+            assert!(std::time::Instant::now() < accounting_deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = std::fs::read_to_string(&ready).unwrap().parse::<u32>().unwrap();
+        // SAFETY: opens an observation-only handle to this synthetic child's reported PID.
+        let process = unsafe { windows_sys::Win32::System::Threading::OpenProcess(0x0010_0000, 0, pid) };
+        assert!(!process.is_null());
+        // SAFETY: OpenProcess returned a fresh unique handle, used only for a bounded exit wait.
+        let process = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(process) };
+        if explicit_stop {
+            job.terminate(124).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while job.active_processes().unwrap() != 0 {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        drop(job); // Also works when the runner exits without an explicit stop.
+        // SAFETY: the process observation handle is valid through this bounded wait.
+        let waited =
+            unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(process.as_raw_handle(), 10000) };
+        assert_eq!(waited, 0);
+    }
+}
+
+#[test]
 fn transfer_child() {
     let args: Vec<OsString> = std::env::args_os().collect();
     let Some(start) = args.iter().position(|value| value == MARKER) else {
         return;
     };
+    if args[start + 1] == "restart" {
+        let child = Transfer::new(&[])
+            .unwrap()
+            .spawn(&std::env::current_exe().unwrap(), &arguments("sleep"))
+            .unwrap();
+        std::fs::write(&args[start + 2], child.id().to_string()).unwrap();
+        return;
+    }
     if args[start + 1] == "sleep" {
         std::thread::sleep(Duration::from_secs(30));
         return;

@@ -12,6 +12,7 @@ wpe-webkit-sys = "generated gir bindings"
 # Only measured crates belong here. Missing baselines fail the local gate.
 # Floors are measured with one `-p <crate>` alone; combined runs also count dependent crates' tests.
 [baselines]
+teams-runner = { lines = 90, functions = 90, regions = 90 }
 teams-platform = { lines = 90, functions = 90, regions = 90 }
 teams-store = { lines = 98, functions = 100, regions = 90 }
 teams-log = { lines = 94, functions = 94, regions = 93 }
@@ -135,7 +136,7 @@ reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-
 context = { "crates/teams-core/src/attachments.rs" = "f5ddc5cec701324240acc8fd2743e1d5c8e548e99798a2776dee21735a4f3dca" }
 
 [unmapped_sources."crates/teams-platform/src/lib.rs"]
-sha256 = "6860ff6285faab0c8d8dcaa8208b86fd185bece3cf50948227da1a675d0a6bd3"
+sha256 = "3b9547e5a1b622541d0fb4819f5dcdab6a347f2861c5d46c0daaf52da9adf859"
 reason = "module declaration and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-platform/src/private/windows.rs"]
@@ -167,7 +168,7 @@ sha256 = "e2d8868d9c820bb4f17e6786d91f3b251df014786b1bc3a436a0d1c1b1d589bc"
 reason = "Windows-only app listener binding and cleanup; compiled and exercised by teams-ctl app_listener tests on Windows without the remaining GUI/media dependencies"
 
 [unmapped_sources."crates/teams-platform/src/windows_process.rs"]
-sha256 = "4cea334548ab23c463d3451052653d84aa670ff8a3cd5f74c17455ac7339b643"
+sha256 = "a424ec0d758bfa49a5304d40ddca1f9d9a562a7888c573b2eecc8897eb86689b"
 reason = "Windows-only selective native process/handle transfer; exercised with real synthetic subprocesses and measured by the Windows portability gate."
 
 [unmapped_sources."crates/teams-platform/src/windows_sandbox.rs"]
@@ -189,3 +190,19 @@ reason = "Windows-only app handle adoption, peer verification and writable-trace
 [unmapped_sources."crates/ngteams/src/restart/windows.rs"]
 sha256 = "51653625254c5a1ca9cf0dfea444201b3d52840d927e38c694570e98c41a4395"
 reason = "Windows-only app restart with explicit handle transfer and rewritten descriptor arguments; actual app_descriptors subprocess tests exercise success and failure on Windows, pending whole-app integration."
+
+[unmapped_sources."crates/teams-platform/src/windows_job.rs"]
+sha256 = "a2cd8de50eb53c0a437fa5d5824ab9a736ba6e3fd3620ec7f6418c0eb8df9ea5"
+reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
+
+[unmapped_sources."crates/teams-runner/src/windows.rs"]
+sha256 = "2de86c71f96fb8aa7764dfd022e0efe6186e0dc0573a7f44b4c1f47bd5349f6d"
+reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
+
+[unmapped_sources."crates/teams-runner/src/windows/locks.rs"]
+sha256 = "292d8cd94c121d31739ef170056f2a5fdf9013d0b0697d296d2b9701b1679073"
+reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
+
+[unmapped_sources."crates/teams-runner/src/windows/supervisor.rs"]
+sha256 = "67bd365ed59bf77cbadb266a4f825ffe1f1e3c2517f3e987fe7f60ac77c2a0d1"
+reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."

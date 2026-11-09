@@ -195,8 +195,8 @@ cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth 
 ```
 
 For native Windows debugging, the dedicated `win11` VM's console is the Windows UI sandbox, as authorized for the
-port; lab/test GUIs must stay there, with isolated lab identities and the Windows lab runner once ported. No Windows
-app runner is available at this stage. The Linux app continues to build and run through the runners below.
+port; lab/test GUIs must stay there, with isolated lab identities and the [Windows runner](#windows-vm-runner).
+The runner is available; the app still needs its remaining platform integrations. The Linux app continues to build and run through the runners below.
 
 Agents build runnable `ngteams` only through the lab runner:
 
@@ -675,3 +675,36 @@ page or network service is used. Coverage explicitly requires browser and sandbo
 
 Chrome startup and `browser::a_browser_that_exits_early_is_reported` can fail on timing under load. Rerun the failed
 test alone to establish its cause; do not treat a lab-contact violation as a timing flake.
+
+
+### Windows VM runner
+
+Windows lab builds use `pwsh -NoProfile -File scripts/run-lab.ps1 -BuildOnly`; a normal build always sets only the
+lab marker, never the personal install marker. This ports the runner, not the remaining sign-in/media dependencies.
+The Windows app/release port is still in progress. Prerequisites are the repository Rust toolchain, MSVC C++/Windows
+SDK and the native media development libraries. The display-free `teams-runner` helper has its own bounded build
+in `target/runner`; the normally built app goes to `target/lab`.
+
+The only Windows UI sandbox authorized for agents is the **win11 VM's interactive console**. After the lab-contact
+check, `scripts/run-lab.ps1 a` builds then schedules a Limited InteractiveToken action for the already logged-in
+user, without a password. The native console guard refuses an SSH/session-zero window. Provision exactly one lab
+account in `%LOCALAPPDATA%/ngteams-lab/a/accounts.toml` first, as on Linux. `-Status` and `-Stop` inspect/stop that
+alias; `-TimeoutSeconds 1800` sets its deadline. The VM's normal screenshot/input tools operate its console; never
+enter credentials with a typing helper. Use only the authorized VM, never a physical Windows desktop.
+
+The runner retains a kernel sharing lock per alias and a shared `%LOCALAPPDATA%/teams-lab/live.lock` for its entire
+lifetime and cleanup. Windows capture tools must open the latter with read/write access and no sharing for their
+exclusive lock; Linux `flock` and Windows file-sharing locks are separate OS domains. Global alias paths make
+worktrees contend for the same lock. It creates the broker pair itself, transfers only the required endpoint and
+trace into each child, and keeps its original endpoints alive across restarts. App and broker have private unnamed
+kill-on-close Job Objects. Job assignment is atomic with process creation; app restart images and WebView workers
+remain in the app job. Cleanup waits until its jobs contain no processes before releasing locks. `holder.log` and
+`trace.jsonl` are private and retained; they are never repository artifacts.
+
+For an **already installed** personal Windows executable, `scripts/run-personal-read-only.ps1 <upn> -App C:/path/to/ngteams.exe` uses the same VM console, the app's consistent snapshot and its get-only broker. It does
+not build, install or sign in the personal client. Snapshot data is under `%LOCALAPPDATA%/ngteams-read-only/run/`,
+removed after orderly completion or `-Stop`; a failed/crashed run retains diagnostic evidence until stopped.
+
+Offline lifecycle tests use a tiny synthetic native executable, no GUI, network or credentials:
+`cargo test -p teams-runner` and `scripts/test-windows-runner.ps1 -Runner <absolute-helper.exe>`. The latter adds
+actual CLI dispatch and console scheduling in the VM; `-SkipConsole` checks only the display-free paths on hosted CI.

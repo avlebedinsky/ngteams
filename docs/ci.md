@@ -65,8 +65,8 @@ reporter tests alone are not a coverage measurement.
 ## Windows portability
 
 The [Windows portability workflow](../.github/workflows/windows.yml) checks, lints and runs the offline tests of
-`teams-platform`, `teams-log`, `teams-store`, `teams-auth` and `teams-ctl` on Windows Server 2025 (`windows-2025`) and Linux; local verification
-also runs on the Windows 11 VM.
+`teams-platform`, `teams-log`, `teams-store`, `teams-auth`, `teams-ctl` and `teams-runner` on Windows Server 2025
+(`windows-2025`) and Linux; local verification also runs on the Windows 11 VM.
 These are foundational stages of the native Windows port; the app and its release packages still require the remaining
 platform integrations. These jobs do not build or launch `ngteams` or access a tenant.
 
@@ -94,9 +94,9 @@ not values; the app logger ignores this third-party target. Interprocess is used
 receive diagnostic is unused and prints a mode number only).
 
 Broker scope, get-only behavior, framing, closure and session contracts run unchanged over Unix sockets or Windows
-named pipes. The caller supplies the established stream and is responsible for endpoint permissions. The app's
-Windows broker launch/handle inheritance and isolated runner are still pending; this library support does not make
-Windows application startup available yet. Named pipes have no half-close, so malformed-request tests close the
+named pipes. The caller supplies the established stream and is responsible for endpoint permissions.
+The Windows runner now supervises broker handles and the complete app process tree; the remaining GUI dependencies
+still prevent a runnable Windows client. Named pipes have no half-close, so malformed-request tests close the
 complete synthetic peer when testing truncation.
 
 The VM's SSH token cannot access Credential Manager (Windows error 1312); native credential tests and coverage run
@@ -143,7 +143,15 @@ and UNC spellings, and conservatively treats trailing dots/spaces as aliases. Re
 working directory before interpreting `..`; an unresolved Windows drive-relative path cannot prove separation.
 The existing native coverage floors remain unchanged. Windows-only sources use the hash-checked Linux inventory.
 The explicit VM-console guard also checks the active interactive session; its tests open no window. These boundaries
-do not yet supply the Windows runner, WebView2, media integration or a runnable GUI/release package.
+now supply the Windows runner; WebView2, media integration and a runnable GUI/release package remain unfinished.
+
+
+The native runner gate measures its Windows CLI, locks, snapshot cleanup, deadlines, broker/app failures and restart
+supervision with synthetic executables. Its non-console smoke opens no GUI or live client. The additional console
+scheduling smoke runs in the authorized win11 VM, also with a synthetic executable. `teams-platform` tests prove
+atomic job assignment, descendant retention after the original process exits, explicit termination and kill-on-close.
+Windows-only runner/job sources have hash-checked Linux inventory entries and are measured by the native gate.
+
 
 ## Releases
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser as _;
-use gpui::{App, AppContext as _, AsyncApp, Entity, WindowingModes};
+use gpui::{App, AppContext as _, AsyncApp, Entity};
 #[cfg(not(test))]
 use ngteams::accounts::{self, Runner, StartFailed, Started};
 use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
@@ -42,7 +42,22 @@ mod startup_tests;
 #[cfg(test)]
 use startup_tests::accounts::{self, Runner, StartFailed, Started};
 #[cfg(test)]
-use startup_tests::{app, platform as gpui_platform, prompt as account_prompt, window_runner};
+use startup_tests::{app, platform, prompt as account_prompt, window_runner};
+
+// Keep the native backend choice at startup; lab/read-only sandbox checks run before constructing it.
+#[cfg(not(test))]
+mod platform {
+    pub fn application() -> gpui::Application {
+        #[cfg(windows)]
+        {
+            gpui_platform::application()
+        }
+        #[cfg(unix)]
+        {
+            gpui_platform::linux(gpui::WindowingModes::WAYLAND)
+        }
+    }
+}
 
 #[cfg(not(test))]
 fn window_runner(runner: Runner) -> Runner {
@@ -299,7 +314,7 @@ fn run_setup(
     let update_in_app = Rc::clone(&update);
     // a link this launch was given with no app to hand it to (only the personal app takes one: `Cli`)
     let link = cli.url.clone();
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         let (again_setup, again_restart) = (setup.clone(), Rc::clone(&restart_in_app));
         let launch = Launch {
@@ -529,7 +544,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     let failed = Rc::new(Cell::new(false));
     let failed_in_app = Rc::clone(&failed);
     let ctl = mode.ctl_socket.clone();
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         let launch = Launch {
             first,
@@ -607,7 +622,7 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
     let restart = Rc::new(Cell::new(false));
     let failed = Rc::new(Cell::new(false));
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         match account_prompt::open(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref()) {
             Ok((_, prompt)) => cx
@@ -665,7 +680,7 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
     let restart = Rc::new(Cell::new(false));
     let failure = Rc::new(std::cell::RefCell::new(None));
     let (restart_in_app, failure_in_app) = (Rc::clone(&restart), Rc::clone(&failure));
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         // the sign-in window is the only one: closing it mustn't quit before the sign-in is done
         cx.set_quit_mode(gpui::QuitMode::Explicit);

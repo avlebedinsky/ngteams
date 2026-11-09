@@ -10,3 +10,6 @@ pub mod windows_process;
 
 #[cfg(windows)]
 pub mod windows_sandbox;
+
+#[cfg(windows)]
+pub mod windows_job;
