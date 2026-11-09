@@ -297,6 +297,112 @@ class BoardTests(Files):
                 self.assertEqual(rows[2]['queue'], {'place': 2, 'start_ms': None})
 
 
+class OneCardTests(Files):
+    NOW = 1_794_000_000_000
+    MODES = {'mode': 'comprehensive', 'round': 1}
+
+    def transcript(self, name, text):
+        path = self.root / name
+        entry = {'type': 'dispatch', 'timestamp': STAMP, 'phase': 'review', 'text': text}
+        path.write_text(json.dumps(entry) + '\n')
+        return str(path)
+
+    def snapshot(self, tasks, **fields):
+        self.board(tasks, **fields)
+        return Status(self.ledger).snapshot(self.NOW)
+
+    def card(self, state='landed abc', review=None):
+        return {'num': 1, 'title': 'Work', 'agent': 'work', 'runtime': 'codex', 'role': 'task', 'state': state,
+                'flow': 'edit', 'review': {**self.MODES, 'state': 'reviewing', **(review or {})}}
+
+    @staticmethod
+    def child(num=2, role='revmux', state='running', **fields):
+        return {'num': num, 'title': 'Review #1', 'agent': f'{role}-{num}', 'runtime': 'claude', 'role': role, 'of': 1,
+                'state': state, 'flow': 'review', **fields}
+
+    def test_children_have_no_card_and_no_place_in_the_counts(self):
+        board = self.snapshot([self.card(), self.child(), self.child(3, 'fix'),
+                               {'num': 4, 'title': 'Next', 'state': 'queued'}], slots=1)
+        self.assertEqual([row['num'] for row in board['tasks']], [1, 4])
+        self.assertEqual(board['slots_used'], 0)
+        self.assertEqual(board['queue_len'], 1)
+        self.assertEqual(board['tasks'][1]['queue'], {'place': 1, 'start_ms': 0})
+
+    def test_a_landed_task_under_review_reads_as_running_and_follows_its_companion(self):
+        path = self.transcript('review.jsonl', 'Reading the diff')
+        row = self.snapshot([self.card(), self.child(transcript=path, note='Round one')])['tasks'][0]
+        self.assertEqual((row['group'], row['state'], row['stage']), ('running', 'reviewing', 'reviewing'))
+        self.assertEqual(row['review'], 'comprehensive · round 1 · reviewing')
+        self.assertEqual((row['agent'], row['runtime'], row['note']), ('revmux-2', 'claude', 'Round one'))
+        self.assertEqual(row['doing']['text'], 'Reading the diff')
+        self.assertFalse(row['done'])
+        self.assertIsNone(row['ended_ms'])
+        self.assertIsNone(row['eta_ms'])
+        self.assertEqual(row['phases'][row['phase']], 'review')
+
+    def test_the_newest_live_companion_names_the_stage(self):
+        path = self.transcript('fix.jsonl', 'Fixing')
+        row = self.snapshot([self.card(), self.child(state='done'), self.child(3, 'fix', transcript=path)])['tasks'][0]
+        self.assertEqual((row['state'], row['agent']), ('fixing', 'fix-3'))
+        self.assertEqual(row['phases'][row['phase']], 'fixing')
+        self.assertEqual(row['review'], 'comprehensive · round 1 · fixing')
+
+    def test_a_canceled_companion_is_not_working(self):
+        row = self.snapshot([self.card(review={'state': 'reviewed'}), self.child(state='canceled')])['tasks'][0]
+        self.assertEqual((row['group'], row['state']), ('completed', 'landed abc'))
+        self.assertNotIn('stage', row)
+
+    def test_stage_from_the_review_object_without_a_live_companion(self):
+        done = self.child(state='done')
+        for state, review, group, shown_state in (
+            ('landed abc', 'queued', 'running', 'review queued'),
+            ('landed abc', 'fixing', 'running', 'fixing'),
+            ('landed abc', 'blocked', 'failed', 'review blocked'),
+            ('in review abc', 'reviewed', 'running', 'merging'),
+            ('committed abc, under review', 'skipped', 'running', 'merging'),
+            ('landing abc', 'reviewed', 'running', 'merging'),
+        ):
+            with self.subTest(state=state, review=review):
+                row = self.snapshot([self.card(state, {'state': review}), done])['tasks'][0]
+                self.assertEqual((row['group'], row['state']), (group, shown_state))
+                self.assertIsNone(row['doing'])
+
+    def test_a_settled_review_leaves_a_finished_card(self):
+        for state, review in (('landed abc', 'reviewed'), ('landed abc', 'skipped')):
+            with self.subTest(review=review):
+                row = self.snapshot([self.card(state, {'state': review}), self.child(state='done')])['tasks'][0]
+                self.assertEqual((row['group'], row['state']), ('completed', state))
+
+    def test_a_waiting_companion_puts_the_card_in_waiting(self):
+        child = self.child(state='waiting on user', note='Which option?')
+        row = self.snapshot([self.card(), child])['tasks'][0]
+        self.assertEqual((row['group'], row['note']), ('waiting', 'Which option?'))
+
+    def test_a_companion_still_implementing_keeps_its_card_and_slot(self):
+        board = self.snapshot([self.card('running'), self.child()])
+        row = board['tasks'][0]
+        self.assertEqual((row['group'], row['state'], row['agent']), ('running', 'running', 'work'))
+        self.assertEqual(row['review'], 'comprehensive · round 1 · reviewing')
+        self.assertEqual(board['slots_used'], 1)
+
+    def test_a_task_waiting_on_a_landed_parent_is_not_held_up_by_its_review(self):
+        board = self.snapshot([self.card(), self.child(), {'num': 4, 'state': 'queued', 'after': 1}], slots=1)
+        self.assertEqual(board['tasks'][1]['queue']['start_ms'], 0)
+
+    def test_a_finished_or_canceled_parent_is_left_alone(self):
+        for state in ('canceled', 'waiting on user', 'failed: no'):
+            with self.subTest(state=state):
+                row = self.snapshot([self.card(state), self.child()])['tasks'][0]
+                self.assertEqual(row['state'], state)
+                self.assertNotIn('stage', row)
+
+    def test_a_board_without_children_is_unchanged(self):
+        row = self.snapshot([self.card()])['tasks'][0]
+        self.assertEqual((row['group'], row['state']), ('completed', 'landed abc'))
+        for field in ('stage', 'review', 'role'):
+            self.assertNotIn(field, row)
+
+
 class HttpTests(Files):
     def test_real_owner_exit_and_explicit_ownership(self):
         environment = dict(os.environ, CLAUDE_PID='0', DISPATCH_OWNER_PID='0')

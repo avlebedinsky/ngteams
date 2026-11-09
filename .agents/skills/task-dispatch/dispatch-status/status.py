@@ -19,6 +19,8 @@ PHASES = {
 }
 DEFAULTS = {'edit': [10, 30, 4, 1, 6], 'review': [45, 30, 8], 'scratch': [5, 20, 10]}
 HEAD_MAX = 16 * 1024
+# A review or fix companion's card fields that follow whichever companion is working.
+ACTIVITY = ('doing', 'said', 'background', 'waiting_for', 'written_ms', 'transcript_error')
 
 
 def group(state):
@@ -29,6 +31,51 @@ def group(state):
         if state.startswith(prefix):
             return name
     return 'running'
+
+
+def holds_slot(row):
+    return row['group'] == 'running' and not row.get('stage')
+
+
+def companion_stage(child):
+    # What a review or fix companion is doing, or None if it isn't live. `canceled` is matched here because it can
+    # still group as running.
+    if child['group'] not in ('running', 'waiting') or child['state'].lower().startswith('cancel'):
+        return None
+    if child.get('phase') is not None and child['phases'][child['phase']] == 'land':
+        return 'merging'
+    return 'fixing' if child['role'] == 'fix' else 'reviewing'
+
+
+def review_stage(row, review_state, working):
+    # Where a task is in its review life cycle, or None when its card should read as usual. A companion still
+    # implementing keeps its own card, even with a review of an earlier stage running beside it.
+    state = row['state'].lower()
+    if row['group'] not in ('running', 'completed') or state.startswith('cancel'):
+        return None
+    if state.startswith('running') and not (working and row.get('done')):
+        return None
+    if working:
+        return companion_stage(working)
+    if state.startswith(('merging', 'landing')):
+        return 'merging'
+    if review_state in ('reviewing', 'fixing'):
+        return review_state
+    if review_state in ('queued', 'blocked'):
+        return 'review ' + review_state
+    if review_state in ('reviewed', 'skipped') and state.startswith(('in review', 'committed')):
+        return 'merging'
+    return None
+
+
+def review_line(review, stage):
+    review = review if isinstance(review, dict) else {}
+    if review.get('mode') == 'none':
+        return ''
+    round_text = f"round {review['round']}" if type(review.get('round')) is int else None
+    now = stage.removeprefix('review ') if stage else review.get('state')
+    parts = [review.get('mode'), round_text, now]
+    return ' · '.join(shown(part, 40) for part in parts if isinstance(part, str) and part)
 
 
 def progress(flow, log, completed=False, waiting=False):
@@ -130,6 +177,8 @@ class Status:
         self.refresh()
         names = self.names()
         rows = []
+        children = {}
+        reviews = {}
         used_logs = set()
         for task in self.board['tasks']:
             if not isinstance(task, dict) or type(task.get('num')) is not int:
@@ -168,7 +217,12 @@ class Status:
                 pending = log.doing and log.doing.get('finished_ms') is None
                 if log.background and not pending and now - (log.written or now) >= 30_000:
                     row['waiting_for'] = list(log.background.values())[-1]
-            rows.append(row)
+            if type(task.get('of')) is int:
+                row['role'] = task.get('role')
+                children.setdefault(task['of'], []).append(row)
+            else:
+                reviews[row['num']] = task.get('review')
+                rows.append(row)
         self.logs = {path: log for path, log in self.logs.items() if path in used_logs}
         lengths = self.typical(rows)
         for row in rows:
@@ -182,18 +236,47 @@ class Status:
                     row['eta_ms'] = max(current - elapsed, current // 5) + sum(typical[phase + 1:])
                     row['long'] = elapsed > current
             row.pop('_entered', None)
+        if children:
+            self.lifecycle(rows, children, reviews)
         slots = self.board.get('slots', 2)
         slots = slots if type(slots) is int and slots >= 1 else 2
         self.queues(rows, slots)
+        for row in rows:
+            # After the queue: a task waiting for #N to land isn't held up by #N's review once #N has landed.
+            if row.get('stage'):
+                row['group'] = row.pop('_group')
         return {
             'now_ms': now, 'slots_max': slots,
-            'slots_used': sum(row['group'] == 'running' for row in rows),
+            'slots_used': sum(holds_slot(row) for row in rows),
             'queue_len': sum(row['group'] == 'queued' for row in rows),
             'ledger_error': self.error, 'tasks': rows,
             'heuristic': 'An estimate, not a promise: remaining phase times use medians from completed tasks, '
                          'or defaults until samples exist. Phases shorter than 30 seconds are excluded. '
                          'A long phase retains at least a fifth of its typical time, plus later phases.',
         }
+
+    @staticmethod
+    def lifecycle(rows, children, reviews):
+        # A task's review and fix companions have no card: its one card carries their progress.
+        for row in rows:
+            review = reviews.get(row['num'])
+            review_state = review.get('state') if isinstance(review, dict) else None
+            live = [child for child in children.get(row['num'], ()) if companion_stage(child)]
+            working = max(live, key=lambda child: child['num'], default=None)
+            stage = review_stage(row, review_state, working)
+            row['review'] = review_line(review, stage or (companion_stage(working) if working else None))
+            if not stage:
+                continue
+            kept = [name for name in row['phases'] if name not in ('review', 'gate', 'land', 'done')]
+            phases = [*kept, 'review', 'fixing', 'merging', 'done']
+            current = 'review' if stage.startswith('review') else stage
+            row.update(stage=stage, state=stage, phases=phases, phase=phases.index(current), done=False,
+                       eta_ms=None, long=False, ended_ms=None, phase_typical_ms=None,
+                       _group='failed' if stage == 'review blocked' else working['group'] if working else 'running')
+            source = working or {}
+            row.update({key: source.get(key) for key in ACTIVITY})
+            if working:
+                row.update(agent=working['agent'], runtime=working['runtime'], note=working['note'] or row['note'])
 
     @staticmethod
     def typical(rows):
@@ -215,7 +298,7 @@ class Status:
 
     @staticmethod
     def queues(rows, slots):
-        free = max(0, slots - sum(row['group'] == 'running' for row in rows))
+        free = max(0, slots - sum(holds_slot(row) for row in rows))
         queued = sorted((row for row in rows if row['group'] == 'queued'), key=lambda row: row['num'])
         reserved = {row['after'] for row in queued}
         etas = sorted(row['eta_ms'] for row in rows if row['num'] not in reserved and row['eta_ms'] is not None)

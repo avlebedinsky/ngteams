@@ -169,6 +169,7 @@ function build(t) {
                                             : "running " + dur(now() - t.started_ms);
     });
   }
+  if (t.review) meta.append(el("span", null, "·"), el("span", null, "review: " + t.review));
   if (t.group === "running" && c.t.eta_ms != null) {
     const eta = el("span", "eta"), long = el("span", "long");
     eta.title = "An estimate from the phases' typical lengths: see 'How the estimate is made' below.";
