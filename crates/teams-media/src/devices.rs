@@ -2,7 +2,7 @@
 //!
 //! A call's media session talks to [`Devices`] only: a microphone and a speaker of 10 ms mono frames at 48 kHz
 //! ([`AudioFrame`]), a camera of frames ([`VideoFrame`]), and somewhere received frames go ([`VideoSink`]). Two
-//! backends stand behind it:
+//! production backends and a file backend stand behind it:
 //!
 //! - [`file`]: no audio server at all. A tone or a WAV file in, a WAV recording out, a generated test pattern as the
 //!   camera ([`pattern`]), received frames counted. Tests and mock calls use it.
@@ -10,6 +10,8 @@
 //!   ([`pipewire::Reach`]): the UI sandbox's private one, or the desktop's, whose camera comes through the desktop's
 //!   camera portal ([`portal`]: a PipeWire remote showing only the cameras). It lists the devices there are and
 //!   follows the user's choice of each kind ([`catalog`]).
+//! - Windows: native WASAPI audio and Media Foundation cameras through `GStreamer`, with live device switching and
+//!   the system's Windows Graphics Capture picker for screen/window sharing.
 //!
 //! Every device hands frames over on threads of its own: a source is read with a timeout and a sink takes a frame and
 //! returns at once, so the caller's thread never waits on an audio server.
@@ -19,9 +21,29 @@ use std::time::Duration;
 
 pub mod catalog;
 pub mod file;
+#[cfg(any(windows, test))]
+mod native;
 pub mod pattern;
+#[cfg(target_os = "linux")]
 pub mod pipewire;
+#[cfg(target_os = "linux")]
 pub mod portal;
+#[cfg(windows)]
+pub use native::WindowsDevices;
+
+#[cfg(windows)]
+pub use native::WindowsDevices as SystemDevices;
+/// The native device backend selected at compile time; call sites share the same reach and device contracts.
+#[cfg(target_os = "linux")]
+pub use pipewire::{PipeWireDevices as SystemDevices, Reach};
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Only the explicitly authorized VM console.
+    Sandbox,
+    /// The current user's desktop.
+    Desktop,
+}
 pub mod wav;
 
 /// The sample rate of every audio frame, in Hz.
@@ -129,6 +151,9 @@ pub enum DeviceError {
     /// A sound file that can't be read ([`crate::sound_file`]).
     #[error("sound file: {0}")]
     SoundFile(String),
+    /// A native capture/playback pipeline failed.
+    #[error("media device: {0}")]
+    Native(String),
     #[error("PipeWire: {0}")]
     PipeWire(String),
     /// The desktop's camera portal (or the bus it is on) failed or didn't answer.

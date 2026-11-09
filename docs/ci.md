@@ -203,3 +203,22 @@ digest (the tag's anonymous registry answer's `Docker-Content-Digest`), and put 
 
 `scripts/test_web_engine_closure.py` and `scripts/test_check_linux_package.py` run under
 `python3 -B -m unittest discover -s scripts -p 'test_*.py'`; they need `cc`, `ldd`, `patchelf` and `zstd`.
+
+
+The Windows media backend uses GStreamer's WASAPI2 and Media Foundation providers and `windows-capture`'s system
+picker for Windows Graphics Capture. Synthetic GStreamer sources exercise capture, playback queues, catalog
+changes, fallback and restoration without opening hardware or reaching a tenant. Hardware runs still need the
+explicit VM console sandbox; the Windows picker/D3D capture source cannot execute on Linux. Linux retains PipeWire
+and portal capture. This media boundary does not by itself complete the Windows application or release package.
+
+The pinned Windows libwebrtc archive uses the static MSVC runtime (`/MT`). `.cargo/config.toml` selects
+`target-feature=+crt-static` for Windows x64 so Rust and cc-rs' C++ bridge use that same ABI; mixing `/MD` bridge
+objects with the archive fails the linker's runtime checks. An explicit replacement `RUSTFLAGS` must retain that
+setting. GStreamer continues using its DLLs and their own allocation/free APIs.
+
+
+Windows' native file-device relay contracts cover audio, camera video and screen sharing without a tenant. The
+`test-support` TURN fixture retains its loopback server; a Windows-only UDP adapter accepts only traffic from its
+own host address because Winsock rejects libwebrtc's interface-bound socket sending directly to 127/8 (10049).
+No production transport or ICE policy changes. The system-picker hardware contract is run explicitly in the
+win11 console against the runner's own dark-blue fixture window; it verifies BGRA contents and idle capture cleanup.

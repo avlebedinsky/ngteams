@@ -110,6 +110,7 @@ fn factory() -> &'static PeerConnectionFactory {
         .factory
 }
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     /// libwebrtc's `webrtc::InitializePipeWire()`: loads libpipewire into the stubs of its functions the prebuilt
     /// carries (once; later calls answer the first's result).
@@ -121,6 +122,7 @@ unsafe extern "C" {
 /// weak stubs of `pw_init`, `pw_stream_new` and the rest for its screen capture, which stand in for libpipewire's own
 /// in a binary linking both (the device seam's PipeWire binding then calls the stubs) and call through null pointers
 /// until libwebrtc loads the library. Whether it loaded.
+#[cfg(target_os = "linux")]
 #[must_use]
 pub fn load_pipewire() -> bool {
     // SAFETY: a C++ function of no arguments returning `bool`, which the Itanium C++ ABI passes as C does; it only

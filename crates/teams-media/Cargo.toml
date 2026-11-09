@@ -1,6 +1,6 @@
 [package]
 name = "teams-media"
-description = "A call's media: Teams' SDP dialect (sdp-ngc-1.0) to and from libwebrtc's SDP, the relayed libwebrtc peer and its session (the microphone through the audio processing to libwebrtc, libwebrtc's audio to the speaker, the camera and the received video), a group call's control plane, the device seam (file and PipeWire backends), and the player of a video a message carries (GStreamer's playbin fed by the engine)"
+description = "A call's media: Teams' SDP dialect (sdp-ngc-1.0) to and from libwebrtc's SDP, the relayed libwebrtc peer and its session (the microphone through the audio processing to libwebrtc, libwebrtc's audio to the speaker, the camera and the received video), a group call's control plane, the device seam (file, PipeWire and native Windows backends), and the player of a video a message carries (GStreamer's playbin fed by the engine)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,8 +24,6 @@ futures-executor.workspace = true
 futures-util.workspace = true
 # STUN transaction ids (the test TURN server) and the data line's SSRC
 getrandom.workspace = true
-# the PipeWire backend checks its socket belongs to this user (`getuid`)
-libc.workspace = true
 # the camera's background effects: a picture (the app's own JPEGs, or the user's JPEG or PNG) decoded and scaled, and
 # a user's picture written as a JPEG: the version and decoders GPUI already links
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
@@ -37,8 +35,6 @@ gstreamer-app.workspace = true
 # bandwidth estimation, A/V sync), the audio processing module, the data channel
 libwebrtc.workspace = true
 log.workspace = true
-# the device seam's PipeWire backend: microphone, speaker and camera streams on the PipeWire the caller selects
-pipewire.workspace = true
 # a group call's control plane: its messages are JSON (`mcp`)
 serde_json.workspace = true
 thiserror.workspace = true
@@ -52,6 +48,15 @@ cubecl.workspace = true
 # libwebrtc's video source keeps its track alive on a tokio task until the camera's first frame, and the media's
 # threads wait for libwebrtc's streams with a timeout: the media's own runtime runs both
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+teams-platform.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-capture.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+pipewire.workspace = true
 # the personal build's camera: the desktop's camera portal, asked on the bus the backend is given (blocking calls, on
 # the blocking pool a device opens on; the async-io flavour the app's notifications use, so one zbus in the tree)
 zbus.workspace = true

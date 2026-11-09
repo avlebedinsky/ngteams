@@ -259,6 +259,8 @@ wiremock = "0.6.5"
 # Native Windows filesystem security, with no logging of its own.
 widestring = "1.2.1"
 windows-sys = "0.61.2"
+# Native screen/window picker and Windows Graphics Capture; MIT, no logging dependency.
+windows-capture = "=2.0.1"
 # Windows broker byte streams through maintained local named-pipe bindings.
 interprocess = { version = "2.4.6", default-features = false }
 # Native Windows Credential Manager, selected explicitly without a process-wide default keyring.

@@ -26,7 +26,7 @@ use ngteams::setup::Setup;
 use ngteams::{KEYRING_APPLICATION, lab, read_only, secrets, snapshot};
 use teams_auth::secrets::LazyKeyring;
 use teams_core::CallFloor;
-use teams_media::devices::pipewire::Reach;
+use teams_media::devices::Reach;
 #[cfg(not(test))]
 use teams_ui::account_prompt;
 use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
@@ -289,7 +289,7 @@ fn run_setup(
     }
     let file = SettingsFile::new(setup.paths.settings_file());
     let diagnostics = app::install_log(setup.paths.log_dir(), file.load().settings.log_level);
-    // the selected PipeWire, shared by every account; without it the app runs without calls
+    // the native devices, shared by every account; without them the app runs without calls
     let devices = match CallDevices::open(reach) {
         Ok(devices) => Some(devices),
         Err(error) => {

@@ -13,8 +13,8 @@
 //!   decoded video to the caller's sinks ([`video`]: the camera's bounds and the frames' conversions).
 //! - [`health`]: the call's health as libwebrtc's own statistics tell it (Teams' Call health), read when asked.
 //! - [`devices`]: the device seam (a microphone, a speaker, a camera): a file backend that opens no audio server, and
-//!   a PipeWire backend whose caller selects its server at run time (the UI sandbox's, or the desktop's for the
-//!   personal build). [`tone`] makes and measures the test tone.
+//!   PipeWire on Linux (the caller selects the sandbox's or desktop's server), or WASAPI/Media Foundation and
+//!   Windows Graphics Capture on Windows. [`tone`] makes and measures the test tone.
 //! - [`mcp`]: a group call's media control plane, the messages the client and the call's mixer exchange over the
 //!   group call's data channel: whose video the mixer sends on each receiving video line, who speaks.
 //! - [`player`]: a video a message carries, played in its card by `GStreamer`'s `playbin`, its bytes from the engine

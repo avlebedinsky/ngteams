@@ -92,7 +92,7 @@ sha256 = "1aa217edee9d5728e2cffbb31d221bb819c3817673ba699bea053b69436efcb1"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
-sha256 = "89658cf4ef99ddf5c8fe1421dc8a85ebdf216842cf241e19d6d9362a2f272f8c"
+sha256 = "9c9c6cf673eaa941f3c88cd7f4b48eac44b827eedbdc7ebe58e09f06cc86dc86"
 reason = "module declarations and derived error type only; no authored executable bodies"
 
 [unmapped_sources."crates/teams-media/src/video.rs"]
@@ -206,3 +206,16 @@ reason = "Windows-only native runner/job implementation; measured by the Windows
 [unmapped_sources."crates/teams-runner/src/windows/supervisor.rs"]
 sha256 = "67bd365ed59bf77cbadb266a4f825ffe1f1e3c2517f3e987fe7f60ac77c2a0d1"
 reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
+
+[unmapped_sources."crates/teams-media/src/devices/native/screen.rs"]
+sha256 = "299a4bec8ffeef7583f8f289c3a772674efa8e650c434944165afbb04061a4d5"
+reason = "Windows-only system picker and Windows Graphics Capture adapter; exercised by the explicit VM console hardware contract on a synthetic window; absent from Linux compilation"
+
+[unmapped_sources."crates/teams-media/src/devices/native/tests.rs"]
+sha256 = "c7b1d443fd4a4824058099b65eed8ba9a3adfc72069019e54003f233dd85c4a4"
+reason = "unit-test module included only by native.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
+context = { "crates/teams-media/src/devices/native.rs" = "5ad43e89abb76b2a91cef7e1d092f8136aaec921bf38f14480cfdb271cb76c81" }
+
+[unmapped_sources."crates/teams-media/src/test_turn/windows.rs"]
+sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"
+reason = "Windows-only host-local adapter for the test-support TURN fixture; exercised by native audio, video and screen-share relay contracts; absent from Linux compilation and production builds"

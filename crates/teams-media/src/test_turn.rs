@@ -3,9 +3,16 @@
 //! `tests/calls`). It can impair the media it relays ([`Impairment`]): drop RTP packets and send some after the one
 //! that followed them, as a lossy network would.
 //!
+//! On Windows, an adapter exposes a host-local interface address to libwebrtc, which ignores loopback interfaces:
+//! Winsock rejects its interface-bound UDP socket sending to 127/8. The adapter accepts only this host's source
+//! address and forwards into the unchanged loopback server; no packet is forwarded off-host.
+//!
 //! The server is ours, built on the crate's own STUN codec, so it can share a misreading of the RFC with the client;
 //! the codec is checked separately against the RFC 5769 test vectors (`tests/turn.rs`), and `tests/relay.rs` can also
 //! run against an external server (coturn) given in the environment.
+
+#[cfg(windows)]
+mod windows;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, ErrorKind, Read as _, Write as _};
@@ -71,6 +78,8 @@ pub struct TurnServer {
     pub counters: Arc<Counters>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    #[cfg(windows)]
+    _udp_proxy: windows::Proxy,
 }
 
 impl TurnServer {
@@ -92,6 +101,10 @@ impl TurnServer {
         let tcp = TcpListener::bind("127.0.0.1:0")?;
         tcp.set_nonblocking(true)?;
         let (udp_addr, tcp_addr) = (udp.local_addr()?, tcp.local_addr()?);
+        #[cfg(windows)]
+        let proxy = windows::Proxy::start(udp_addr)?;
+        #[cfg(windows)]
+        let udp_addr = proxy.address;
         let counters = Arc::new(Counters::default());
         let stop = Arc::new(AtomicBool::new(false));
         let mut state = State {
@@ -119,6 +132,8 @@ impl TurnServer {
             counters,
             stop,
             thread: Some(thread),
+            #[cfg(windows)]
+            _udp_proxy: proxy,
         })
     }
 }

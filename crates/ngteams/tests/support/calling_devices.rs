@@ -4,9 +4,9 @@ use std::cell::Cell;
 use std::process::Command;
 use std::sync::Arc;
 
+use teams_media::devices::Reach;
 use teams_media::devices::catalog::{DeviceKind, DeviceList, DeviceWatcher, FixedDirectory};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
-use teams_media::devices::pipewire::Reach;
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
 
 thread_local! {
@@ -14,12 +14,12 @@ thread_local! {
     static LAST_REACH: Cell<Option<Reach>> = const { Cell::new(None) };
 }
 
-pub(super) struct PipeWireDevices {
+pub(super) struct SystemDevices {
     files: FileDevices,
     directory: FixedDirectory,
 }
 
-impl PipeWireDevices {
+impl SystemDevices {
     pub(super) fn connect(reach: Reach) -> Result<Self, DeviceError> {
         LAST_REACH.set(Some(reach));
         if REFUSE.get() {
@@ -37,7 +37,7 @@ impl PipeWireDevices {
     }
 }
 
-impl Devices for PipeWireDevices {
+impl Devices for SystemDevices {
     fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
         self.files.microphone()
     }
@@ -49,7 +49,7 @@ impl Devices for PipeWireDevices {
     }
 }
 
-impl teams_media::devices::catalog::DeviceDirectory for PipeWireDevices {
+impl teams_media::devices::catalog::DeviceDirectory for SystemDevices {
     fn devices(&self) -> DeviceList {
         self.directory.devices()
     }
@@ -128,7 +128,7 @@ fn real_guard_child() {
     if std::env::var_os("NGTEAMS_CALL_DEVICE_GUARD").is_none() {
         return;
     }
-    let actual = teams_media::devices::pipewire::PipeWireDevices::connect(Reach::Sandbox);
+    let actual = teams_media::devices::SystemDevices::connect(Reach::Sandbox);
     assert!(
         matches!(actual, Err(DeviceError::Refused(_))),
         "sandbox reach never opens the desktop device backend"

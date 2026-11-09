@@ -4,7 +4,7 @@ function Get-NgteamsRunner([string]$Root) {
     Push-Location $Root
     try {
         # The helper has no GUI and is never an install-marked client. Bound its build, including compiler children.
-        $build = Start-Process (Get-Command cargo -CommandType Application).Source `
+        $build = Start-Process (Get-Command cargo -CommandType Application | Select-Object -First 1).Source `
             -ArgumentList @('build', '--locked', '-p', 'teams-runner', '--target-dir', 'target/runner') `
             -NoNewWindow -PassThru
         if (!$build.WaitForExit(1800000)) { $build.Kill($true); throw 'Runner build deadline expired.' }
@@ -38,7 +38,7 @@ function Build-NgteamsLab([string]$Root, [int]$TimeoutSeconds) {
         $env:TEAMS_LAB_BUILD = '1'
         Set-NgteamsMediaEnvironment $Root
         Remove-Item Env:TEAMS_PERSONAL_INSTALL -ErrorAction SilentlyContinue
-        & $runner build --cargo (Get-Command cargo -CommandType Application).Source --timeout $TimeoutSeconds
+        & $runner build --cargo (Get-Command cargo -CommandType Application | Select-Object -First 1).Source --timeout $TimeoutSeconds
     } finally {
         $env:TEAMS_LAB_BUILD = $previousLab
         $env:TEAMS_PERSONAL_INSTALL = $previousInstall
