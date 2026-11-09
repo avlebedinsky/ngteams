@@ -68,10 +68,19 @@ fn main() -> ExitCode {
         eprintln!("teams: {refusal}");
         return ExitCode::FAILURE;
     }
-    // run again as the sign-in window's page engine (`teams_wpe::worker`), it serves that and ends here
-    // SAFETY: before anything else but the refusal (which starts no thread), while the process has one thread.
-    unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
+    // the sign-in window's engine worker, held from here so an update replacing the files can't swap it under this run
+    if let Err(error) = teams_wpe_client::worker::pin_worker() {
+        eprintln!("teams: {error}");
+    }
     let cli = Cli::parse();
+    if cli.build_identity {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        println!("{}", option_env!("NGTEAMS_BUILD_COMMIT").unwrap_or(""));
+        return ExitCode::SUCCESS;
+    }
+    if let Some(archive) = &cli.install_web_engine {
+        return install_web_engine(archive);
+    }
     if let Some(refusal) = ngteams::refusal::refusal_for(cli.lab_requested()) {
         return failed("startup", &refusal);
     }
@@ -109,6 +118,25 @@ fn main() -> ExitCode {
             eprintln!("teams: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Installs a sign-in engine runtime from a file, under the same checks a download gets.
+fn install_web_engine(archive: &std::path::Path) -> ExitCode {
+    let installed = (|| {
+        let pins = teams_web_engine::Pins::compiled()
+            .map_err(|error| error.to_string())?
+            .ok_or("this build has no pinned web engine: install your distribution's wpewebkit package")?;
+        let locations = ngteams::accounts_file::PersonalPaths::from_env().map_err(|error| error.to_string())?;
+        pins.install(locations.data_dir(), archive)
+            .map_err(|error| error.to_string())
+    })();
+    match installed {
+        Ok(directory) => {
+            println!("web engine installed in {}", directory.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => failed("install-web-engine", &error),
     }
 }
 

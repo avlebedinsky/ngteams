@@ -23,6 +23,7 @@ use crate::event::{
     Event, LoadError, LoadErrorKind, LoadEvent, NavigationType, PageState, PolicyKind, ScriptMessage, Termination,
 };
 use crate::host::{Evaluation, Load, ViewCommand};
+use crate::input::PointerEventType as _;
 use crate::input::{Input, Key, Pointer, PointerKind, Scroll};
 use crate::platform_sys as platform;
 use crate::spec::{Geometry, MessageHandler, Rgba, ViewId, ViewSpec};

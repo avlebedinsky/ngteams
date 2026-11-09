@@ -7,8 +7,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [[bin]]
-# the app, its sign-in window included (teams-signin's window bound to Entra's and the identity provider's hosts),
-# and, run again by itself, that window's page engine (`teams_wpe::worker`)
+# the app, its sign-in window included (teams-signin's window bound to Entra's and the identity provider's hosts); that
+# window's page engine is the sibling `ngteams-web` worker
 name = "ngteams"
 path = "src/main.rs"
 
@@ -37,8 +37,10 @@ teams-media.workspace = true
 teams-proto.workspace = true
 # the host-gated sign-in window, used in-process
 teams-signin.workspace = true
-# the sign-in window's page engine: this binary serves it as its worker (`teams_wpe::worker::serve_if_asked`)
-teams-wpe.workspace = true
+# the sign-in window's page engine, in the sibling `ngteams-web` worker; no WebKit is linked here
+teams-wpe-client.workspace = true
+# `--install-web-engine`
+teams-web-engine.workspace = true
 # `ngteams --forget` takes the account's engine lock before it deletes anything
 teams-store.workspace = true
 # the views and the bridge over the engine

@@ -1,7 +1,7 @@
 //! The sign-in window's view: the page's frames drawn and the window's input handed to the engine (the element of
 //! ngterm's HTML overlay, cut down to what a sign-in page needs), the page's questions answered by its [`Page`].
 //!
-//! - Frames come as damaged rectangles of shared memory ([`teams_wpe::FrameContent::Shm`]): they are copied into the
+//! - Frames come as damaged rectangles of shared memory ([`teams_wpe_client::FrameContent::Shm`]): they are copied into the
 //!   page's whole picture, drawn through GPUI's external surface, and the engine is told the frame was shown once the
 //!   renderer is done with it (whatever its outcome), so it renders the next one.
 //! - The content's size and the window's scale go to the engine whenever they change; it renders at their product.
@@ -22,7 +22,7 @@ use gpui::{
     Styled as _, Window, canvas, div, rgb,
 };
 use teams_auth::signin::SignInAnswer;
-use teams_wpe::{
+use teams_wpe_client::{
     Event, Frame, FrameContent, Geometry, Host, Input, Key, LoadErrorKind, LoadEvent, Modifiers, Pointer, PointerKind,
     PolicyKind, PolicyRequest, Scroll, ViewId,
 };
@@ -435,7 +435,7 @@ fn pixel_bytes(width: u32, height: u32) -> usize {
 }
 
 /// Copies `region`'s rows into `picture`, clipped to it.
-fn copy_region(picture: &mut Picture, region: &teams_wpe::ShmRegion) {
+fn copy_region(picture: &mut Picture, region: &teams_wpe_client::ShmRegion) {
     let rect = region.rect;
     let (Ok(x), Ok(y), Ok(width), Ok(height), Ok(stride)) = (
         usize::try_from(rect.x),

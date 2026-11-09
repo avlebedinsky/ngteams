@@ -8,11 +8,12 @@ publish.workspace = true
 build = "build.rs"
 
 [lib]
-# `cdylib`: the module WebKit loads into every web process; `rlib`: the guard's wire protocol, shared with
-# `teams-signin`, which depends on this crate so a build of it builds the module too
+# `cdylib`: the module WebKit loads into every web process; `rlib`: for `teams-wpe`, whose worker build builds the
+# module too, and the tests
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+teams-signin-protocol.workspace = true
 # `g_variant_*` (the initialization data) and `g_signal_connect_data` (`page-created`, `send-request`): hand FFI on
 # the -sys crates, since no Rust binding has WebKit's web process extension API
 glib-sys.workspace = true
@@ -31,6 +32,7 @@ teams-auth.workspace = true
 teams-log.workspace = true
 teams-signin = { workspace = true, features = ["test-support"] }
 teams-wpe.workspace = true
+teams-wpe-client.workspace = true
 tempfile.workspace = true
 ui-sandbox.workspace = true
 

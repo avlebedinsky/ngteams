@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::protocol::{ALLOW, LINE_LIMIT, OK, Query};
+use teams_signin_protocol::protocol::{ALLOW, LINE_LIMIT, OK, Query};
 
 /// How long one answer may take before the request is dropped.
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);

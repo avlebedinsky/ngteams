@@ -25,11 +25,12 @@
 //! - The `WebKit` surface the overlay uses: browser stores ([`SessionSpec`]: in memory, or on disk for saved logins;
 //!   downloads refused), [`Settings`], user scripts and script message handlers, navigation and response policy, URI
 //!   schemes, and what a page may not do (new windows, dialogs, file choosers, permissions, full screen) refused.
-//! - [`worker`]: the engine in a process of its own, which [`Host::start_worker`] asks for: a consumer that starts
-//!   engines one after another, or keeps `WebKit`'s main thread out of its own process. Every program that may start
-//!   one calls [`worker::serve_if_asked`] first thing in its `main`.
-//! - WPE `WebKit` is the system's (`wpewebkit`, found through pkg-config by the -sys crates): its library and its
-//!   helper processes (`/usr/lib/wpe-webkit-2.0/`) where the distribution put them.
+//! - [`worker`]: the engine in a process of its own, this crate's `ngteams-web` binary. The app runs only that: it uses
+//!   `teams-wpe-client` and never links these engine libraries. `ngteams-web --probe` prints the version it loaded (a
+//!   loader failure means no system engine).
+//! - Where the engine comes from: the system's (`wpewebkit`, its library and helper processes where the distribution
+//!   put them), or a downloaded runtime whose relocated library finds its helpers beside itself
+//!   (`teams-wpe-client`'s `EngineSource`, `teams-web-engine`).
 //!
 //! - What `WebKitGTK` draws itself and an offscreen page cannot (module `engine::interaction`): the clipboard
 //!   (`WPEPlatform`'s is the engine's own: a page's copy is reported, the desktop's text is handed in before a paste),
@@ -39,54 +40,24 @@
 //!
 //! Not here: accessibility (an offscreen page has no AT-SPI bridge into the consumer's tree).
 
-/// `from_raw` and `raw` on the engine's id types: a consumer's stand-in for the engine in its own tests makes ids
-/// with them, and logs read them; the engine itself never takes an id it did not hand out.
-macro_rules! raw_ids {
-    ($($id:ident),+) => {
-        $(
-            impl $id {
-                /// The id numbered `raw` (crate docs: for a consumer's stand-in engine).
-                #[must_use]
-                pub const fn from_raw(raw: u64) -> Self {
-                    Self(raw)
-                }
-
-                /// The id's number.
-                #[must_use]
-                pub const fn raw(self) -> u64 {
-                    self.0
-                }
-            }
-        )+
-    };
-}
-pub(crate) use raw_ids;
-
-mod config;
 mod engine;
-mod event;
-mod frames;
 mod host;
 mod input;
-mod spec;
 pub mod worker;
+
+pub use teams_wpe_client::{config, event, frames, spec};
 
 use wpe_javascriptcore_sys as jsc_sys;
 use wpe_platform_sys as platform_sys;
 use wpe_webkit_sys as webkit_sys;
 
-pub use config::{
-    BufferFormat, ConfigError, DmaBufTarget, FrameMode, HostConfig, MODIFIER_INVALID, MODIFIER_LINEAR,
-    WebProcessExtensions, fourcc,
-};
-pub use event::{
-    Area, ContextMenu, EditingCommand, Event, LoadError, LoadErrorKind, LoadEvent, MenuToken, NavigationType,
-    OptionItem, OptionKind, OptionMenu, PageState, PolicyKind, PolicyRequest, PolicyToken, ReplyToken, SchemeError,
-    SchemeRequest, SchemeResponse, SchemeToken, ScriptMessage, Termination,
-};
-pub use frames::{BufferId, DmaBuf, Frame, FrameContent, Plane, Rect, ShmRegion};
 pub use host::{Backend, Evaluation, Host, Load, StartError, exit_process};
 pub use input::{Button, Input, Key, Modifiers, Pointer, PointerKind, Scroll};
-pub use spec::{
-    Geometry, InjectionTime, MessageHandler, Rgba, SessionId, SessionSpec, Settings, UserScript, ViewId, ViewSpec,
+pub use teams_wpe_client::{
+    Area, BufferFormat, BufferId, ConfigError, ContextMenu, DmaBuf, DmaBufTarget, EditingCommand, EngineSource, Event,
+    Frame, FrameContent, FrameMode, Geometry, HostConfig, InjectionTime, LoadError, LoadErrorKind, LoadEvent,
+    MODIFIER_INVALID, MODIFIER_LINEAR, MenuToken, MessageHandler, NavigationType, OptionItem, OptionKind, OptionMenu,
+    PageState, Plane, PolicyKind, PolicyRequest, PolicyToken, Rect, ReplyToken, Rgba, SchemeError, SchemeRequest,
+    SchemeResponse, SchemeToken, ScriptMessage, SessionId, SessionSpec, Settings, ShmRegion, Termination, UserScript,
+    ViewId, ViewSpec, WebProcessExtensions, fourcc,
 };

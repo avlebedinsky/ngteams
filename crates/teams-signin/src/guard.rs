@@ -12,7 +12,7 @@ use std::thread;
 use crate::diagnostics::{self, Outcome as RequestOutcome};
 use teams_auth::redirect::RedirectUri;
 use teams_auth::secrets::Secret;
-use teams_signin_extension::protocol::{ALLOW, DENY, LINE_LIMIT, OK, Query};
+use teams_signin_protocol::protocol::{ALLOW, DENY, LINE_LIMIT, OK, Query};
 
 use crate::classify::{Classification, Classifier};
 #[cfg(feature = "test-support")]

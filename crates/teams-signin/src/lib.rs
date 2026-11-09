@@ -10,6 +10,7 @@
 pub mod classify;
 mod diagnostics;
 pub mod egress;
+pub mod engine;
 pub mod guard;
 pub mod hosts;
 pub mod input;

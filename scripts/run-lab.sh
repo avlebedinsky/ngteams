@@ -42,7 +42,7 @@ usage() { sed -n '2,19s/^# \{0,1\}//p' "$0"; }
 build() {
     echo "building ngteams and ui-sandbox-run (target/lab)..."
     (exec 8>&- 9>&-; cd "$root" && timeout 1800 env -u TEAMS_PERSONAL_INSTALL TEAMS_LAB_BUILD=1 \
-        cargo build --locked -p ngteams -p ui-sandbox --bin ngteams --bin ui-sandbox-run --target-dir "$root/target/lab")
+        cargo build --locked -p ngteams -p teams-wpe -p ui-sandbox --bin ngteams --bin ngteams-web --bin ui-sandbox-run --target-dir "$root/target/lab")
 }
 
 holder_pid() {

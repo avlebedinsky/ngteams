@@ -64,6 +64,13 @@ fn main() -> ExitCode {
     // the page's engine is this executable run again as its worker
     // SAFETY: first thing in `main`, while the process has one thread.
     unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
+    if let Err(error) = std::env::current_exe()
+        .map_err(|error| error.to_string())
+        .and_then(|exe| teams_wpe_client::worker::pin_worker_path(&exe))
+    {
+        eprintln!("window test: {error}");
+        return ExitCode::FAILURE;
+    }
     let outcome = match std::env::var(MODE_ENV).as_deref() {
         Ok(scenario @ ("channels" | "service" | "close" | "gaps" | "remote" | "crash")) => child(scenario),
         Ok(other) => Err(format!("unknown mode {other}").into()),
@@ -114,6 +121,7 @@ fn child(scenario: &str) -> SandboxResult {
         other => other,
     };
     let config = WindowConfig {
+        engine: teams_wpe_client::EngineSource::System,
         bound: window::Bound::Loopback,
         request: SignInRequest {
             authorize: format!("{origin}/authorize?scenario={page_scenario}&state={STATE}"),

@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 
 /// A browser store's id, chosen by [`crate::Host::create_session`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SessionId(pub(crate) u64);
+pub struct SessionId(pub u64);
 
 /// A page's id, chosen by [`crate::Host::create_view`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ViewId(pub(crate) u64);
+pub struct ViewId(pub u64);
 
 crate::raw_ids!(SessionId, ViewId);
 

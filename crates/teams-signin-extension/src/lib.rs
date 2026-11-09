@@ -16,7 +16,7 @@
 //! below and two signals are used; they live in `libWPEWebKit-2.0`, which `build.rs` links.
 
 pub mod client;
-pub mod protocol;
+pub use teams_signin_protocol::{ENTRY_POINT, protocol};
 
 #[cfg(test)]
 #[path = "../tests/support/ffi.rs"]
@@ -30,9 +30,6 @@ use glib_sys::{GVariant, gboolean, gpointer};
 use gobject_sys::{GCallback, GObject};
 
 use crate::client::GuardClient;
-
-/// The name the module exports for `WebKit`: `teams-signin` checks the file it hands `WebKit` carries it.
-pub const ENTRY_POINT: &str = "webkit_web_process_extension_initialize_with_user_data";
 
 /// `WebKitWebProcessExtension`, `WebKitWebPage`, `WebKitURIRequest`, `WebKitURIResponse`: opaque here.
 #[repr(C)]

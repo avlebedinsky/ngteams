@@ -46,6 +46,13 @@ pub struct Cli {
     pub forget: Option<String>,
     #[command(flatten)]
     pub read_only: ReadOnlyArgs,
+    /// Print this build's version and commit, then exit.
+    #[arg(long, hide = true)]
+    pub build_identity: bool,
+    /// Install the sign-in window's web engine from a downloaded archive (the release's
+    /// `ngteams-web-engine-*.tar.zst`), for a computer that can't download it; the same checks apply.
+    #[arg(long, value_name = "ARCHIVE", conflicts_with_all = ["forget", "url"])]
+    pub install_web_engine: Option<PathBuf>,
     /// Where `ngteamsctl`'s control socket is served; `$XDG_RUNTIME_DIR/ngteams/ctl.sock` by default. A lab or
     /// read-only app serves one only where this names, as its runner gives it.
     #[arg(long, value_name = "PATH")]

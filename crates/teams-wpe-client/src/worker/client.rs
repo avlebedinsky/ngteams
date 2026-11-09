@@ -365,7 +365,7 @@ impl Worker {
 }
 
 /// The app's handle on a running worker.
-pub(crate) struct Client {
+pub struct Client {
     outgoing: Outgoing,
     socket: Arc<OwnedFd>,
     evaluations: Arc<Mutex<Evaluations>>,
@@ -386,28 +386,149 @@ impl std::fmt::Debug for Client {
     }
 }
 
-/// This process's own image, open for the worker to run: the image the app runs even if its file was replaced since.
-fn own_image() -> Result<OwnedFd, StartError> {
+/// The worker image, opened once and held across a package replacing it.
+static IMAGE: std::sync::OnceLock<Result<OwnedFd, String>> = std::sync::OnceLock::new();
+
+fn sibling_worker() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    Ok(executable.with_file_name(super::WORKER_BINARY))
+}
+
+fn open_worker(path: &std::path::Path) -> Result<OwnedFd, String> {
     use std::os::unix::fs::OpenOptionsExt as _;
     std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_PATH)
-        .open("/proc/self/exe")
+        .open(path)
         .map(OwnedFd::from)
-        .map_err(|err| StartError::Worker(format!("this program cannot open its own image: {err}")))
+        .map_err(|error| format!("cannot open the worker {}: {error}", path.display()))
 }
 
-/// What the worker runs: the image `image` names (inherited as that descriptor).
-fn worker_command(image: i32) -> Command {
-    Command::new(PathBuf::from(format!("/proc/self/fd/{image}")))
+/// Pins the worker beside this executable. A missing worker stays an error of the engine's start.
+///
+/// # Errors
+///
+/// When the worker can't be opened.
+pub fn pin_worker() -> Result<(), String> {
+    IMAGE
+        .get_or_init(|| sibling_worker().and_then(|path| open_worker(&path)))
+        .as_ref()
+        .map(|_| ())
+        .map_err(Clone::clone)
+}
+
+/// Pins a given worker image, for a test program serving as its own worker: before any engine starts.
+///
+/// # Errors
+///
+/// When the image can't be opened or one was pinned already.
+pub fn pin_worker_path(path: &std::path::Path) -> Result<(), String> {
+    let image = open_worker(path)?;
+    IMAGE
+        .set(Ok(image))
+        .map_err(|_| "the worker image is already pinned".to_owned())
+}
+
+/// The version of the system's engine the pinned worker loads. A loader failure or a timeout means none; the caller
+/// checks the version.
+#[must_use]
+pub fn probe_system() -> Option<String> {
+    if let Err(error) = pin_worker() {
+        log::warn!("the system's web engine can't be probed: {error}");
+        return None;
+    }
+    let image = IMAGE.get()?.as_ref().ok()?;
+    match run_probe(probe_command(image.as_raw_fd()), PROBE_TIMEOUT) {
+        Ok(version) => Some(version),
+        Err(error) => {
+            log::info!("no usable system web engine: {error}");
+            None
+        }
+    }
+}
+
+/// How long the worker's `--probe` may take.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn probe_command(image: i32) -> Command {
+    let mut command = Command::new(format!("/proc/self/fd/{image}"));
+    command
+        .arg("--probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("LD_LIBRARY_PATH")
+        .env_remove(WORKER_FD_ENV)
+        .env_remove(WORKER_IMAGE_ENV);
+    let keep_open = move || {
+        // SAFETY: fcntl changes only the child's copy of its inherited image descriptor.
+        if unsafe { libc::fcntl(image, libc::F_SETFD, 0) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+    // SAFETY: keep_open calls only the async-signal-safe fcntl in the forked child.
+    unsafe { command.pre_exec(keep_open) };
+    command
+}
+
+fn run_probe(mut command: Command, timeout: Duration) -> Result<String, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot start the probe: {error}"))?;
+    let waited = wait_for_probe(&mut child, timeout);
+    if waited.is_err() {
+        let _ = child.kill();
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("cannot read the probe's output: {error}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    waited.map_err(|error| format!("{error}; stderr: {stderr}"))?;
+    if !output.status.success() {
+        return Err(format!("the probe ended with {}; stderr: {stderr}", output.status));
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_owned())
+        .map_err(|error| format!("an invalid probe version: {error}; stderr: {stderr}"))
+}
+
+fn wait_for_probe(child: &mut Child, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => return Err(format!("the probe timed out after {timeout:?}")),
+            Err(error) => return Err(format!("cannot wait for the probe: {error}")),
+        }
+    }
+}
+
+/// What the worker runs: the image `image` names (inherited as that descriptor), on `source`.
+fn worker_command(image: i32, source: &crate::EngineSource) -> Result<Command, StartError> {
+    let mut command = Command::new(PathBuf::from(format!("/proc/self/fd/{image}")));
+    source.configure(&mut command);
+    source
+        .lock_runtime(&mut command)
+        .map_err(|error| StartError::Worker(format!("the web engine runtime can't be locked: {error}")))?;
+    Ok(command)
 }
 
 impl Client {
     /// Starts the worker and its engine with `config` (module docs of `worker`).
-    pub(crate) fn start(config: &HostConfig) -> Result<(Self, Receiver<Event>), StartError> {
-        let image = own_image()?;
-        let (child, socket) = spawn(worker_command(image.as_raw_fd()), Some(image.as_raw_fd()))?;
-        drop(image);
+    ///
+    /// # Errors
+    ///
+    /// A worker that can't be started, breaks the protocol or whose engine doesn't start.
+    pub fn start(config: &HostConfig, source: &crate::EngineSource) -> Result<(Self, Receiver<Event>), StartError> {
+        pin_worker().map_err(StartError::Worker)?;
+        let image = IMAGE
+            .get()
+            .and_then(|image| image.as_ref().ok())
+            .ok_or_else(|| StartError::Worker("the worker image is unavailable".to_owned()))?;
+        let (child, socket) = spawn(worker_command(image.as_raw_fd(), source)?, Some(image.as_raw_fd()))?;
         let worker = Arc::new(Worker {
             group: i32::try_from(child.id()).unwrap_or(i32::MAX),
             child: Mutex::new(Some(child)),
@@ -476,7 +597,7 @@ impl Client {
     }
 
     /// The worker's pid.
-    pub(crate) fn pid(&self) -> u32 {
+    pub fn pid(&self) -> u32 {
         self.pid
     }
 
@@ -524,14 +645,14 @@ impl Client {
     }
 
     /// Queues `command` for the worker.
-    pub(crate) fn send(&self, command: EngineCommand) {
+    pub fn send(&self, command: EngineCommand) {
         lock(&self.pages).track(&command);
         let (message, blob) = ToWorker::command(command);
         self.queue(&message, blob);
     }
 
     /// Runs `script` in the worker's page `view`; the answer arrives on the returned channel.
-    pub(crate) fn evaluate(&self, view: ViewId, script: String, world: Option<String>) -> Receiver<Evaluation> {
+    pub fn evaluate(&self, view: ViewId, script: String, world: Option<String>) -> Receiver<Evaluation> {
         let (reply, result) = async_channel::bounded(1);
         let id = {
             let mut evaluations = self.evaluations.lock().unwrap_or_else(PoisonError::into_inner);
@@ -558,7 +679,7 @@ impl Client {
 
     /// Quits the worker's engine and waits for it (a bounded time), then closes the socket and reaps the worker.
     /// Once: a second call returns at once.
-    pub(crate) fn shutdown(&self) {
+    pub fn shutdown(&self) {
         let taken = self.stopped.lock().unwrap_or_else(PoisonError::into_inner).take();
         let Some(stopped) = taken else { return };
         // nobody reads the events past here: a reader held by a full queue goes on to the worker's last word
@@ -649,12 +770,14 @@ fn handshake(socket: BorrowedFd<'_>, config: &HostConfig, timeout: Duration) -> 
     let broken = |err: WireError| StartError::Worker(err.to_string());
     let hello = recv_before(socket, deadline, timeout)?;
     let pid = match message::body::<FromWorker>(&hello).map_err(broken)? {
-        FromWorker::Hello { protocol, pid, .. } if protocol == PROTOCOL => pid,
+        FromWorker::Hello { protocol, pid, version } if protocol == PROTOCOL && version == super::build_identity() => {
+            pid
+        }
         FromWorker::Hello { protocol, version, .. } => {
             return Err(StartError::Worker(format!(
-                "the worker speaks protocol {protocol} ({version}), this build {PROTOCOL} ({}): the executable was \
-                 replaced while the app ran; restart it",
-                env!("CARGO_PKG_VERSION")
+                "the worker speaks protocol {protocol} ({version}), this build {PROTOCOL} ({}): the worker isn't this \
+                 build's; reinstall or restart the app",
+                super::build_identity()
             )));
         }
         other => return Err(StartError::Worker(format!("the worker said {other:?} before hello"))),

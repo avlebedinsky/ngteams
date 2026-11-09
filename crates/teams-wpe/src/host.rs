@@ -7,97 +7,14 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
-use serde::{Deserialize, Serialize};
 
-use crate::config::{ConfigError, HostConfig};
+use crate::config::HostConfig;
 use crate::engine;
-use crate::event::{EditingCommand, Event, MenuToken, PolicyToken, ReplyToken, SchemeResponse, SchemeToken};
-use crate::frames::BufferId;
-use crate::input::Input;
-use crate::spec::{Geometry, Rgba, SessionId, SessionSpec, UserScript, ViewId, ViewSpec};
+use crate::event::Event;
+use crate::spec::ViewId;
 use crate::worker::Client;
 
-/// What a page loads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Load {
-    Uri(String),
-    /// A document from text, resolved against `base_uri` (`about:blank` when `None`).
-    Html {
-        html: String,
-        base_uri: Option<String>,
-    },
-}
-
-/// The result of [`Host::evaluate`]: the script's value as JSON (`None` for `undefined` or a value JSON cannot
-/// express), or the exception's message.
-pub type Evaluation = Result<Option<String>, String>;
-
-/// A command for the engine thread.
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum Command {
-    CreateSession(SessionId, SessionSpec),
-    DropSession(SessionId),
-    ClearSession(SessionId),
-    CreateView(ViewId, Box<ViewSpec>),
-    CloseView(ViewId),
-    View(ViewId, ViewCommand),
-    Policy(PolicyToken, bool),
-    Reply(ReplyToken, Result<String, String>),
-    Scheme(SchemeToken, SchemeResponse),
-    Clipboard(String),
-    OptionMenu(MenuToken, Option<u32>),
-    Quit,
-}
-
-/// A command for one page.
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum ViewCommand {
-    Load(Load),
-    Reload,
-    Stop,
-    GoBack,
-    GoForward,
-    Zoom(f64),
-    Scripts(Vec<UserScript>),
-    Background(Option<Rgba>),
-    Geometry(Geometry),
-    Visible(bool),
-    Focused(bool),
-    Input(Input),
-    Presented(BufferId),
-    FallBackToShm,
-    Editing(EditingCommand),
-    ImePreedit {
-        text: String,
-        cursor: u32,
-    },
-    ImeCommit(String),
-    /// Never sent to a worker as is: its reply channel stays in this process (crate `worker`).
-    #[serde(skip)]
-    Evaluate {
-        script: String,
-        world: Option<String>,
-        reply: Sender<Evaluation>,
-    },
-}
-
-/// Why the engine did not start.
-#[derive(Debug, thiserror::Error)]
-pub enum StartError {
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error("the WPE engine runs once per process: WebKit binds its main run loop to the first thread that uses it")]
-    AlreadyStarted,
-    #[error("the WPE engine thread did not start: {0}")]
-    Thread(#[source] std::io::Error),
-    #[error("the WPE display did not connect: {0}")]
-    Display(String),
-    #[error("the WPE engine thread ended while starting")]
-    Ended,
-    /// The worker process (crate `worker`) did not start, answer or keep to its protocol.
-    #[error("the WPE worker failed: {0}")]
-    Worker(String),
-}
+pub use teams_wpe_client::host::{Command, Evaluation, Load, StartError, ViewCommand};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -223,8 +140,8 @@ impl Host {
         Self::start_in(config, Backend::InProcess)
     }
 
-    /// Starts the engine in a worker process of its own (crate `worker`): this program run again, so a process may
-    /// start one after another.
+    /// Starts the engine in a worker process of its own (crate `worker`): the image `teams_wpe_client::worker::pin_worker`
+    /// pinned, so a process may start one after another.
     ///
     /// # Errors
     ///
@@ -245,7 +162,7 @@ impl Host {
                 (Engine::Local(local), events)
             }
             Backend::Worker => {
-                let (client, events) = Client::start(&config)?;
+                let (client, events) = Client::start(&config, &teams_wpe_client::EngineSource::System)?;
                 (Engine::Worker(client), events)
             }
         };
@@ -277,109 +194,6 @@ impl Host {
         }
     }
 
-    fn view(&self, view: ViewId, command: ViewCommand) {
-        self.send(Command::View(view, command));
-    }
-
-    /// Creates a browser store.
-    #[must_use]
-    pub fn create_session(&self, spec: SessionSpec) -> SessionId {
-        let id = SessionId(next_id());
-        self.send(Command::CreateSession(id, spec));
-        id
-    }
-
-    /// Drops the host's hold on a store; pages built on it keep it until they close.
-    pub fn drop_session(&self, session: SessionId) {
-        self.send(Command::DropSession(session));
-    }
-
-    /// Removes everything a store holds; [`Event::SessionCleared`] reports the outcome.
-    pub fn clear_session(&self, session: SessionId) {
-        self.send(Command::ClearSession(session));
-    }
-
-    /// Creates a page, mapped and visible, loading nothing yet.
-    #[must_use]
-    pub fn create_view(&self, spec: ViewSpec) -> ViewId {
-        let id = ViewId(next_id());
-        self.send(Command::CreateView(id, Box::new(spec)));
-        id
-    }
-
-    /// Closes a page: its load stops, the questions it left open are answered, its buffers go.
-    pub fn close_view(&self, view: ViewId) {
-        self.send(Command::CloseView(view));
-    }
-
-    pub fn load(&self, view: ViewId, load: Load) {
-        self.view(view, ViewCommand::Load(load));
-    }
-
-    pub fn reload(&self, view: ViewId) {
-        self.view(view, ViewCommand::Reload);
-    }
-
-    pub fn stop(&self, view: ViewId) {
-        self.view(view, ViewCommand::Stop);
-    }
-
-    pub fn go_back(&self, view: ViewId) {
-        self.view(view, ViewCommand::GoBack);
-    }
-
-    pub fn go_forward(&self, view: ViewId) {
-        self.view(view, ViewCommand::GoForward);
-    }
-
-    pub fn set_zoom(&self, view: ViewId, zoom: f64) {
-        self.view(view, ViewCommand::Zoom(zoom));
-    }
-
-    /// Replaces the page's user scripts; they run from its next load on.
-    pub fn set_scripts(&self, view: ViewId, scripts: Vec<UserScript>) {
-        self.view(view, ViewCommand::Scripts(scripts));
-    }
-
-    pub fn set_background(&self, view: ViewId, background: Option<Rgba>) {
-        self.view(view, ViewCommand::Background(background));
-    }
-
-    pub fn set_geometry(&self, view: ViewId, geometry: Geometry) {
-        self.view(view, ViewCommand::Geometry(geometry));
-    }
-
-    /// A hidden page renders nothing.
-    pub fn set_visible(&self, view: ViewId, visible: bool) {
-        self.view(view, ViewCommand::Visible(visible));
-    }
-
-    /// Gives the page the keyboard focus, or takes it away.
-    pub fn set_focused(&self, view: ViewId, focused: bool) {
-        self.view(view, ViewCommand::Focused(focused));
-    }
-
-    pub fn input(&self, view: ViewId, input: Input) {
-        self.view(view, ViewCommand::Input(input));
-    }
-
-    /// The frame in `buffer` is on screen: the page may render the next one, and the buffer shown before it goes
-    /// back (crate `frames`).
-    pub fn frame_presented(&self, view: ViewId, buffer: BufferId) {
-        self.view(view, ViewCommand::Presented(buffer));
-    }
-
-    /// Switches a running page to SHM frames, for good: the consumer could not import its dmabufs (a format outside
-    /// what it offered, a failed import). The page's web process is replaced and the page reloads what it shows
-    /// (its history stays; the document's script state does not, and a page loaded from text should be loaded
-    /// again); the frames that follow arrive as [`crate::FrameContent::Shm`], and the dmabuf shown last is released
-    /// once an SHM frame replaces it. The engine's own mode cannot change after the start (`WebKit` hands its web
-    /// processes the render node once per process, and a web process picks its buffers when it builds a page's
-    /// surface), so this is the per-page fall-back. A page in an SHM engine is left alone.
-    pub fn fall_back_to_shm(&self, view: ViewId) {
-        self.view(view, ViewCommand::FallBackToShm);
-    }
-
     /// Runs `script` in the page's main frame, in `world` (`None`: the page's own); the result arrives on the
     /// returned channel (an error when the engine ended first).
     #[must_use]
@@ -388,50 +202,6 @@ impl Host {
             Engine::Local(local) => local.evaluate(view, script, world),
             Engine::Worker(client) => client.evaluate(view, script, world),
         }
-    }
-
-    /// Answers a [`crate::PolicyRequest`]: go on with it, or ignore it.
-    pub fn decide_policy(&self, token: PolicyToken, allow: bool) {
-        self.send(Command::Policy(token, allow));
-    }
-
-    /// Answers a [`crate::ScriptMessage`]: the page's promise resolves with the JSON value, or rejects with the
-    /// message.
-    pub fn reply_script_message(&self, token: ReplyToken, reply: Result<String, String>) {
-        self.send(Command::Reply(token, reply));
-    }
-
-    /// Answers a [`crate::SchemeRequest`].
-    pub fn finish_scheme_request(&self, token: SchemeToken, response: SchemeResponse) {
-        self.send(Command::Scheme(token, response));
-    }
-
-    /// Puts `text` on the engine's clipboard, which every page pastes from: the consumer hands it the desktop's text
-    /// before a paste reaches a page. Only text: a page never gets files from the clipboard.
-    pub fn set_clipboard(&self, text: String) {
-        self.send(Command::Clipboard(text));
-    }
-
-    /// Answers a [`crate::OptionMenu`]: the row at `index` is chosen (the select changes, the popup closes), or with
-    /// `None` the popup closes unchanged.
-    pub fn choose_option(&self, token: MenuToken, index: Option<u32>) {
-        self.send(Command::OptionMenu(token, index));
-    }
-
-    /// Runs an editing command on the page's focused content (a context menu's Copy, Paste, Select All).
-    pub fn editing_command(&self, view: ViewId, command: EditingCommand) {
-        self.view(view, ViewCommand::Editing(command));
-    }
-
-    /// An input method's composition in the focused field: `text` (empty ends it) with the caret `cursor` characters
-    /// in.
-    pub fn ime_preedit(&self, view: ViewId, text: String, cursor: u32) {
-        self.view(view, ViewCommand::ImePreedit { text, cursor });
-    }
-
-    /// Text an input method committed, inserted into the focused field (ending a composition).
-    pub fn ime_commit(&self, view: ViewId, text: String) {
-        self.view(view, ViewCommand::ImeCommit(text));
     }
 
     /// Closes every page, ends every web process and stops the engine, waiting (a bounded time) until it has; a worker
@@ -444,6 +214,8 @@ impl Host {
         }
     }
 }
+
+teams_wpe_client::host_commands!(Host, next_id);
 
 impl Drop for Host {
     fn drop(&mut self) {

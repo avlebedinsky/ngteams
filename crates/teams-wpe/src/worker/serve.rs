@@ -30,7 +30,7 @@ pub(super) fn serve(socket: OwnedFd) -> i32 {
     let socket = Arc::new(socket);
     let hello = FromWorker::Hello {
         protocol: PROTOCOL,
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        version: teams_wpe_client::worker::build_identity(),
         pid: std::process::id(),
     };
     if send(&socket, &hello).is_err() {

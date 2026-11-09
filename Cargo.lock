@@ -7350,7 +7350,8 @@ dependencies = [
  "teams-store",
  "teams-trouter",
  "teams-ui",
- "teams-wpe",
+ "teams-web-engine",
+ "teams-wpe-client",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -11254,7 +11255,10 @@ dependencies = [
  "teams-proto",
  "teams-signin",
  "teams-signin-extension",
+ "teams-signin-protocol",
+ "teams-web-engine",
  "teams-wpe",
+ "teams-wpe-client",
  "tempfile",
  "thiserror 2.0.21",
  "ui-sandbox",
@@ -11274,10 +11278,16 @@ dependencies = [
  "teams-auth",
  "teams-log",
  "teams-signin",
+ "teams-signin-protocol",
  "teams-wpe",
+ "teams-wpe-client",
  "tempfile",
  "ui-sandbox",
 ]
+
+[[package]]
+name = "teams-signin-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "teams-store"
@@ -11355,13 +11365,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "teams-web-engine"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "semver",
+ "sha2 0.11.1",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq 3.5.1",
+ "zstd 0.14.3",
+]
+
+[[package]]
 name = "teams-wpe"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "bitflags 2.13.2",
  "gio",
  "glib",
+ "libc",
+ "log",
+ "rustix 1.1.5",
+ "serde_json",
+ "teams-signin-extension",
+ "teams-wpe-client",
+ "tempfile",
+ "ui-sandbox",
+ "wpe-javascriptcore-sys",
+ "wpe-platform-sys",
+ "wpe-webkit-sys",
+]
+
+[[package]]
+name = "teams-wpe-client"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "bitflags 2.13.2",
  "libc",
  "log",
  "rustix 1.1.5",
@@ -11369,10 +11411,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
- "ui-sandbox",
- "wpe-javascriptcore-sys",
- "wpe-platform-sys",
- "wpe-webkit-sys",
 ]
 
 [[package]]
@@ -14823,7 +14861,7 @@ dependencies = [
  "pbkdf2 0.11.0",
  "sha1 0.10.7",
  "time",
- "zstd",
+ "zstd 0.11.2+zstd.1.5.2",
 ]
 
 [[package]]
@@ -14871,7 +14909,16 @@ version = "0.11.2+zstd.1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20cc960326ece64f010d2d2107537f26dc589a6573a316bd5b1dba685fa5fde4"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 5.0.2+zstd.1.5.2",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+dependencies = [
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -14881,6 +14928,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d2a5585e04f9eea4b2a3d1eca508c4dee9592a89ef6f450c11719da0726f4db"
 dependencies = [
  "libc",
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "8.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+dependencies = [
  "zstd-sys",
 ]
 

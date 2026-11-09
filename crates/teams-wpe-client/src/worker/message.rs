@@ -23,26 +23,26 @@ use crate::frames::{BufferId, DmaBuf, Frame, FrameContent, Plane, Rect, ShmRegio
 use crate::host::{Command, Evaluation, StartError};
 use crate::spec::ViewId;
 
-/// The protocol's version: the app and its worker are one executable, so a mismatch means the file on disk was
-/// replaced by another build while the app ran.
-pub(crate) const PROTOCOL: u32 = 1;
+/// The protocol's version: the app and its worker come from one build, so a mismatch means they don't (the worker's
+/// file replaced by another build, or a package installed half-way).
+pub const PROTOCOL: u32 = 1;
 
 /// The longest side of a frame the app takes from a worker, in pixels: the largest 2D image today's desktop GPUs make
 /// (Vulkan's `maxImageDimension2D`).
-pub(crate) const MAX_FRAME_SIDE: u32 = 16_384;
+pub const MAX_FRAME_SIDE: u32 = 16_384;
 /// The most pixels a frame the app takes from a worker has: 8192x8192, past two 4K displays side by side at scale 2
 /// (15360x4320).
-pub(crate) const MAX_FRAME_PIXELS: u64 = 1 << 26;
+pub const MAX_FRAME_PIXELS: u64 = 1 << 26;
 /// The most bytes an SHM frame's pixels take, 4 a pixel.
-pub(crate) const MAX_FRAME_BYTES: u64 = MAX_FRAME_PIXELS * 4;
+pub const MAX_FRAME_BYTES: u64 = MAX_FRAME_PIXELS * 4;
 /// How far from a page's origin a coordinate the worker reports may lie, in logical pixels, and the largest size.
-pub(crate) const MAX_COORDINATE: i32 = 1 << 24;
+pub const MAX_COORDINATE: i32 = 1 << 24;
 /// `DMA_BUF_MAGIC` of `linux/magic.h`: the file system every dmabuf's descriptor names.
 const DMA_BUF_MAGIC: u64 = 0x444d_4142;
 
 /// From the app to the worker.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum ToWorker {
+pub enum ToWorker {
     /// The engine's configuration, once, after the worker's [`FromWorker::Hello`].
     Start(HostConfig),
     /// Any command but an evaluation and a scheme's bytes (`Command::Quit` included).
@@ -60,7 +60,7 @@ pub(crate) enum ToWorker {
 
 /// From the worker to the app.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum FromWorker {
+pub enum FromWorker {
     /// The worker is up: its protocol, its build and its pid (in the app's pid namespace).
     Hello {
         protocol: u32,
@@ -91,7 +91,7 @@ pub(crate) enum FromWorker {
 
 /// Why the worker's engine did not start, as [`StartError`] tells it.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum StartFailure {
+pub enum StartFailure {
     Display(String),
     Ended,
     Other(String),
@@ -119,7 +119,7 @@ impl From<StartFailure> for StartError {
 
 /// A frame without its content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct FrameHeader {
+pub struct FrameHeader {
     view: ViewId,
     buffer: BufferId,
     width: u32,
@@ -129,7 +129,7 @@ pub(crate) struct FrameHeader {
 
 /// A dmabuf without its descriptors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct DmaBufHeader {
+pub struct DmaBufHeader {
     width: u32,
     height: u32,
     fourcc: u32,
@@ -143,13 +143,14 @@ fn json(body: &impl Serialize) -> Result<Vec<u8>, WireError> {
 }
 
 /// A body read back from its packet's JSON.
-pub(crate) fn body<T: for<'de> Deserialize<'de>>(packet: &Packet) -> Result<T, WireError> {
+pub fn body<T: for<'de> Deserialize<'de>>(packet: &Packet) -> Result<T, WireError> {
     serde_json::from_slice(&packet.body).map_err(|err| WireError::Broken(format!("an unreadable body: {err}")))
 }
 
 impl ToWorker {
     /// `command` as the message that carries it, and the bytes that go with it.
-    pub(crate) fn command(command: Command) -> (Self, Option<Vec<u8>>) {
+    #[must_use]
+    pub fn command(command: Command) -> (Self, Option<Vec<u8>>) {
         match command {
             Command::Scheme(token, SchemeResponse::Bytes { data, mime }) => {
                 (Self::SchemeBytes { token, mime }, Some(data))
@@ -158,7 +159,7 @@ impl ToWorker {
         }
     }
 
-    pub(crate) fn packet(&self, blob: Option<Vec<u8>>) -> Result<Packet, WireError> {
+    pub fn packet(&self, blob: Option<Vec<u8>>) -> Result<Packet, WireError> {
         Ok(Packet {
             body: json(self)?,
             blob,
@@ -168,7 +169,7 @@ impl ToWorker {
 }
 
 impl FromWorker {
-    pub(crate) fn packet(&self) -> Result<Packet, WireError> {
+    pub fn packet(&self) -> Result<Packet, WireError> {
         Ok(Packet {
             body: json(self)?,
             blob: None,
@@ -177,7 +178,7 @@ impl FromWorker {
     }
 
     /// An event of the engine as its packet: a frame's content travels beside its body.
-    pub(crate) fn event_packet(event: Event) -> Result<Packet, WireError> {
+    pub fn event_packet(event: Event) -> Result<Packet, WireError> {
         let Event::Frame(frame) = event else {
             return Self::Event(event).packet();
         };
@@ -237,7 +238,7 @@ fn broken(what: impl Into<String>) -> WireError {
 /// The frame a [`FromWorker::DmaBufFrame`] packet carries, checked (module docs); `known` is the buffer's dmabuf as an
 /// earlier frame brought it (one `Arc` per buffer, as the engine hands them out), and the planes this packet brought
 /// again are closed.
-pub(crate) fn dmabuf_frame(
+pub fn dmabuf_frame(
     frame: FrameHeader,
     dmabuf: DmaBufHeader,
     fds: Vec<OwnedFd>,
@@ -315,7 +316,7 @@ fn check_plane(fd: &OwnedFd, index: usize, offset: u32, stride: u32, height: u32
 
 /// The frame a [`FromWorker::ShmFrame`] packet carries, checked (module docs), its regions cut from the blob (one
 /// region takes the blob as it is).
-pub(crate) fn shm_frame(frame: FrameHeader, regions: &[Rect], blob: Option<Vec<u8>>) -> Result<Frame, WireError> {
+pub fn shm_frame(frame: FrameHeader, regions: &[Rect], blob: Option<Vec<u8>>) -> Result<Frame, WireError> {
     let frame = frame.checked()?;
     let mut pixels = blob.unwrap_or_default();
     let mut lens = Vec::with_capacity(regions.len());
@@ -379,11 +380,13 @@ fn inside(rect: Rect, width: u32, height: u32) -> bool {
 }
 
 impl FrameHeader {
-    pub(crate) fn view(&self) -> ViewId {
+    #[must_use]
+    pub fn view(&self) -> ViewId {
         self.view
     }
 
-    pub(crate) fn buffer(&self) -> BufferId {
+    #[must_use]
+    pub fn buffer(&self) -> BufferId {
         self.buffer
     }
 
@@ -408,7 +411,8 @@ impl FrameHeader {
 
 /// `event` from the worker with the page coordinates it carries kept within [`MAX_COORDINATE`] and its sizes
 /// non-negative (module docs).
-pub(crate) fn checked_event(event: Event) -> Event {
+#[must_use]
+pub fn checked_event(event: Event) -> Event {
     match event {
         Event::ImeCursorArea { view, area } => Event::ImeCursorArea {
             view,

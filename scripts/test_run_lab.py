@@ -141,8 +141,8 @@ class Launcher(unittest.TestCase):
         self.assertIsNone(calls[0]["personal"])
         self.assertEqual(
             calls[0]["args"],
-            ["build", "--locked", "-p", "ngteams", "-p", "ui-sandbox", "--bin", "ngteams",
-             "--bin", "ui-sandbox-run", "--target-dir", str(self.root / "target/lab")],
+            ["build", "--locked", "-p", "ngteams", "-p", "teams-wpe", "-p", "ui-sandbox", "--bin", "ngteams",
+             "--bin", "ngteams-web", "--bin", "ui-sandbox-run", "--target-dir", str(self.root / "target/lab")],
         )
         self.assertFalse((self.root / "state").exists())
 

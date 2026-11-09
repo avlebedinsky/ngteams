@@ -4,8 +4,8 @@
 //! 1. the authorize request for the account `accounts.toml` holds (its UPN as `login_hint`; once known, its object id
 //!    and tenant required of the ID token), the native client `1fec8e78-…` with the `nativeclient` redirect, never
 //!    another client id or a borrowed device claim;
-//! 2. the sign-in window, a window of this app ([`window_for`]: `teams_signin::window`, its page's engine this binary
-//!    run again as its worker), bound to Entra's sign-in hosts and that account's identity provider hosts, which
+//! 2. the sign-in window, a window of this app ([`window_for`]: `teams_signin::window`, its page's engine the sibling
+//!    `ngteams-web` worker), bound to Entra's sign-in hosts and that account's identity provider hosts, which
 //!    answers the redirect (`teams_auth::signin`);
 //! 3. the code redeemed only for that account: the refresh token stored under the account's UPN in the store handed in
 //!    (the desktop's Secret Service under [`crate::KEYRING_APPLICATION`]); a sign-in that lands in another account or
@@ -140,10 +140,15 @@ fn bound_window(setup: &Setup, hosts: Arc<SignInHosts>, windows: &Windows, exten
         if let Err(error) = paths.make_dirs() {
             return SignInAnswer::Failed(format!("the personal data dir: {error}"));
         }
+        let engine = match windows.engine_source(paths.data_dir()) {
+            Ok(engine) => engine,
+            Err(answer) => return answer,
+        };
         windows.ask(WindowConfig {
             request,
             bound: Bound::Hosts(hosts),
             extension,
+            engine,
             setup: Box::new(|guard| guard),
         })
     })

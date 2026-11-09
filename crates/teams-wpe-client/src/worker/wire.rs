@@ -22,37 +22,38 @@ use rustix::net::{
 };
 
 /// The largest body sent inline; a larger one goes in a `memfd`.
-pub(crate) const INLINE_MAX: usize = 32 * 1024;
+pub const INLINE_MAX: usize = 32 * 1024;
 /// The most descriptors a body carries itself (a dmabuf has at most four memory planes).
-pub(crate) const MAX_BODY_FDS: usize = 4;
+pub const MAX_BODY_FDS: usize = 4;
 /// The largest body or blob a `memfd` may hold: far above an 8K frame's pixels, far below a size nobody means.
 const MEMFD_MAX: u64 = 1 << 30;
 
 /// The largest body and blob a receiver reads, in bytes: anything larger is a broken packet, refused before a byte of
 /// it is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Limits {
+pub struct Limits {
     pub body: u64,
     pub blob: u64,
 }
 
 impl Limits {
     /// What the worker reads from the app, which it trusts: a scheme answer's bytes may be large.
-    pub(crate) const FROM_APP: Self = Self {
+    pub const FROM_APP: Self = Self {
         body: MEMFD_MAX,
         blob: MEMFD_MAX,
     };
     /// What the app reads from the worker, which it does not trust: a body as large as a big clipboard or script
     /// message, and a blob (only an SHM frame's pixels) as large as the largest frame
     /// ([`super::message::MAX_FRAME_BYTES`]).
-    pub(crate) const FROM_WORKER: Self = Self {
+    pub const FROM_WORKER: Self = Self {
         body: 64 << 20,
         blob: super::message::MAX_FRAME_BYTES,
     };
 
     /// Whether a receiver within these limits reads `packet`: its body and blob no larger than they allow (a sender
     /// that sends a larger one breaks the transport).
-    pub(crate) fn admit(self, packet: &Packet) -> bool {
+    #[must_use]
+    pub fn admit(self, packet: &Packet) -> bool {
         let within = |len: usize, max: u64| u64::try_from(len).is_ok_and(|len| len <= max.min(MEMFD_MAX));
         within(packet.body.len(), self.body) && packet.blob.as_ref().is_none_or(|blob| within(blob.len(), self.blob))
     }
@@ -70,7 +71,7 @@ const SEALS: SealFlags = SealFlags::SHRINK.union(SealFlags::GROW).union(SealFlag
 
 /// One message: its body (JSON), its blob and the descriptors the body names.
 #[derive(Debug, Default)]
-pub(crate) struct Packet {
+pub struct Packet {
     pub body: Vec<u8>,
     pub blob: Option<Vec<u8>>,
     pub fds: Vec<OwnedFd>,
@@ -78,7 +79,7 @@ pub(crate) struct Packet {
 
 /// Why the transport broke.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WireError {
+pub enum WireError {
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("a broken packet: {0}")]
@@ -96,7 +97,7 @@ fn broken(what: impl Into<String>) -> WireError {
 }
 
 /// Sends `packet` on `socket`, blocking until the socket takes it.
-pub(crate) fn send(socket: BorrowedFd<'_>, packet: &Packet) -> Result<(), WireError> {
+pub fn send(socket: BorrowedFd<'_>, packet: &Packet) -> Result<(), WireError> {
     if packet.fds.len() > MAX_BODY_FDS {
         return Err(broken(format!("{} descriptors in one body", packet.fds.len())));
     }
@@ -134,7 +135,7 @@ pub(crate) fn send(socket: BorrowedFd<'_>, packet: &Packet) -> Result<(), WireEr
 }
 
 /// The next packet on `socket` within `limits`, blocking until one arrives; `None` once the peer is gone.
-pub(crate) fn recv(socket: BorrowedFd<'_>, limits: Limits) -> Result<Option<Packet>, WireError> {
+pub fn recv(socket: BorrowedFd<'_>, limits: Limits) -> Result<Option<Packet>, WireError> {
     let mut buffer = vec![0u8; HEADER + INLINE_MAX];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(2 + MAX_BODY_FDS))];
     let mut control = RecvAncillaryBuffer::new(&mut space);

@@ -1,0 +1,10 @@
+[package]
+name = "teams-signin-protocol"
+description = "The wire between the sign-in window's guard and its web process extension: apart from the extension, which links WebKit, so the app doesn't"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

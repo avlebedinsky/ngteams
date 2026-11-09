@@ -14,15 +14,15 @@ use serde::{Deserialize, Serialize};
 
 /// A policy question's token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PolicyToken(pub(crate) u64);
+pub struct PolicyToken(pub u64);
 
 /// A script message's token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ReplyToken(pub(crate) u64);
+pub struct ReplyToken(pub u64);
 
 /// A scheme request's token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SchemeToken(pub(crate) u64);
+pub struct SchemeToken(pub u64);
 
 crate::raw_ids!(PolicyToken, ReplyToken, SchemeToken);
 
@@ -251,7 +251,7 @@ pub struct Area {
 
 /// An option popup's token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MenuToken(pub(crate) u64);
+pub struct MenuToken(pub u64);
 
 crate::raw_ids!(MenuToken);
 

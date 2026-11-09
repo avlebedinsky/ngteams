@@ -113,10 +113,11 @@ hands off to the running app over the same socket. Commands, events and exit cod
 
 ## Its sign-in
 
-`ngteams` opens a WPE WebKit sign-in window in its own app. The page engine is the executable re-run as an internal
-worker; sign-in hands its typed answer back in-process to `teams-auth`. There is no separate sign-in client binary
-or JSON pipe protocol. Every production window uses `SignInHosts` and the egress host gate. The system's WPE WebKit
-package is required for building and running; the installer checks it.
+`ngteams` opens a WPE WebKit sign-in window in its own app. The page engine runs in the `ngteams-web` worker beside it;
+sign-in hands its typed answer back in-process to `teams-auth`. Every production window uses `SignInHosts` and the
+egress host gate, whichever engine it runs on: the system's WPE WebKit 2.54 or newer, or a release's pinned runtime,
+downloaded once and verified ([development guide](development.md#wpe-webkit)). Building from source needs the system's
+package; the installer checks it.
 
 ### Choice C: the host bound
 
@@ -172,7 +173,8 @@ These are actions for the user, never an agent's personal-account test:
 
 A plain root Cargo build excludes `ngteams` through `default-members`. Test-support builds refuse to run. An
 installed binary carries `TEAMS_PERSONAL_INSTALL`, set by `scripts/install-personal.sh`; lab builds carry
-`TEAMS_LAB_BUILD`, set by `scripts/run-lab.sh`, and run only with explicit lab mode. The install marker still gates
+`TEAMS_LAB_BUILD`, set by `scripts/run-lab.sh`, and run only with explicit lab mode. The release workflow sets
+`TEAMS_PERSONAL_INSTALL` too, for the packages it publishes. The install marker still gates
 other app/broker modes. These markers prevent accidental runnable builds; they do not authorize setting them by
 hand or bypassing the agent rules.
 

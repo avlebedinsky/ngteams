@@ -40,7 +40,8 @@ These protect real people, the user's account and the user's data. They hold for
   the Teams client lets its user do, to any target. Design its features as any desktop Teams client would; the lab
   rule is the agent's responsibility during lab runs.
 - The lab marker selects lab mode only: isolated alias directories, the `ngteams-lab` credential namespace and a UI
-  sandbox. The install marker gates other modes. A `test-support` build refuses to run.
+  sandbox. The install marker gates other modes; `.github/workflows/release.yml` builds with it too, on GitHub, never
+  an agent's machine. A `test-support` build refuses to run.
 - Mention a lab constraint only when the change touches lab code, in one sentence.
 
 ## Checks
@@ -105,9 +106,10 @@ Undoing one needs a new reason, not a cleanup; the why is in each path's module 
 - Message text is drawn only from sanitized `RichText`; the UI kit is held to `crates/teams-ui/tests/reach.rs`; no Zed
   code is copied (GPL).
 - Call media is libwebrtc's (`crates/teams-media/src/rtc.rs`): relay-only ICE, SDP only in Teams' dialect.
-- The sign-in window (`crates/teams-signin`) is Microsoft's page in a WPE WebKit view (`crates/teams-wpe`) on the
-  system's `wpewebkit`, never vendored; every page request is decided and logged by its guard, and its only way out
-  is the egress proxy.
+- The sign-in window (`crates/teams-signin`) is Microsoft's page in a WPE WebKit view in the `ngteams-web` worker
+  (`crates/teams-wpe`), on the system's `wpewebkit` or a release's pinned, hash-verified runtime
+  (`crates/teams-web-engine`); `ngteams` itself links no WebKit. Every page request is decided and logged by its guard,
+  and its only way out is the egress proxy.
 
 ## Where things live
 

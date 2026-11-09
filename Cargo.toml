@@ -15,10 +15,13 @@ members = [
     "crates/teams-proto",
     "crates/teams-signin",
     "crates/teams-signin-extension",
+    "crates/teams-signin-protocol",
     "crates/teams-store",
     "crates/teams-trouter",
+    "crates/teams-web-engine",
     "crates/teams-ui",
     "crates/teams-wpe",
+    "crates/teams-wpe-client",
     "crates/ui-sandbox",
     "crates/wpe-javascriptcore-sys",
     "crates/wpe-platform-sys",
@@ -40,10 +43,13 @@ default-members = [
     "crates/teams-proto",
     "crates/teams-signin",
     "crates/teams-signin-extension",
+    "crates/teams-signin-protocol",
     "crates/teams-store",
     "crates/teams-trouter",
+    "crates/teams-web-engine",
     "crates/teams-ui",
     "crates/teams-wpe",
+    "crates/teams-wpe-client",
     "crates/ui-sandbox",
     "crates/wpe-javascriptcore-sys",
     "crates/wpe-platform-sys",
@@ -81,6 +87,7 @@ teams-proto = { path = "crates/teams-proto" }
 teams-signin = { path = "crates/teams-signin" }
 # the sign-in window's web process extension; `teams-signin` depends on it, so its build builds the module
 teams-signin-extension = { path = "crates/teams-signin-extension" }
+teams-signin-protocol = { path = "crates/teams-signin-protocol" }
 teams-store = { path = "crates/teams-store" }
 teams-trouter = { path = "crates/teams-trouter" }
 # the GPUI views and models over the engine
@@ -88,6 +95,8 @@ teams-ui = { path = "crates/teams-ui" }
 # WPE WebKit offscreen (taken from ngterm's `ngterm-wpe`, MIT): the sign-in window's engine, in a worker process of
 # its own, its frames in shared memory and the window's input forwarded to it
 teams-wpe = { path = "crates/teams-wpe" }
+teams-web-engine = { path = "crates/teams-web-engine" }
+teams-wpe-client = { path = "crates/teams-wpe-client" }
 # the gir bindings `teams-wpe` is written over (taken from ngterm, MIT; generated, so they set their own lints)
 wpe-javascriptcore-sys = { path = "crates/wpe-javascriptcore-sys" }
 wpe-platform-sys = { path = "crates/wpe-platform-sys" }
@@ -195,6 +204,12 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
+# the sign-in engine's downloaded runtime (`teams-web-engine`): a blocking GET with no credentials, a tar.zst unpacked
+# by its own confined rules, and the system engine's version compared
+semver = "1.0.28"
+tar = "0.4.46"
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+zstd = "0.14.3"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 # the chat service's ISO times (a message's `composetime`, `originalarrivaltime`), read as RFC 3339

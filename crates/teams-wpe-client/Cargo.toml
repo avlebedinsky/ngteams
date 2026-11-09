@@ -1,0 +1,27 @@
+[package]
+name = "teams-wpe-client"
+description = "The app's side of the sign-in window's WPE WebKit worker (the `ngteams-web` process) and the types both sides share: no WebKit is linked here, so the app starts on a system without one"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "MIT"
+
+[dependencies]
+async-channel.workspace = true
+# `serde`: the worker's messages carry the input's modifiers and the pages' settings
+bitflags.workspace = true
+libc.workspace = true
+log.workspace = true
+# the worker's transport (`worker`): a SOCK_SEQPACKET pair, descriptors passed with SCM_RIGHTS, sealed memfds, polls
+rustix = { workspace = true, features = ["event", "fs", "net"] }
+# the worker's messages, as JSON
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

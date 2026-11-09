@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// A buffer of a page's current set; ids are never reused, so an id names one buffer for good.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct BufferId(pub(crate) u64);
+pub struct BufferId(pub u64);
 
 crate::raw_ids!(BufferId);
 
@@ -83,7 +83,7 @@ pub struct Frame {
 
 /// What the engine tells `WebKit` about a buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ack {
+pub enum Ack {
     /// The frame was shown: `WebKit` may render the next one.
     Rendered(BufferId),
     /// The consumer no longer reads the buffer: `WebKit` may render into it again.
@@ -92,7 +92,7 @@ pub(crate) enum Ack {
 
 /// What a frame's buffer is, which decides when it goes back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub enum Kind {
     /// Read by the consumer until a newer frame replaces it on screen.
     DmaBuf,
     /// Copied out on arrival, so given back at once.
@@ -102,7 +102,7 @@ pub(crate) enum Kind {
 /// One page's buffer set and the frame in flight. A page may change kinds while it runs (a fall-back to SHM), so the
 /// kind is the buffer's, not the page's.
 #[derive(Debug, Default)]
-pub(crate) struct FrameFlow {
+pub struct FrameFlow {
     set: Vec<BufferId>,
     /// Handed over, not presented yet.
     pending: Option<(BufferId, Kind)>,
@@ -112,13 +112,14 @@ pub(crate) struct FrameFlow {
 
 impl FrameFlow {
     /// Whether `buffer` is in the current set.
-    pub(crate) fn contains(&self, buffer: BufferId) -> bool {
+    #[must_use]
+    pub fn contains(&self, buffer: BufferId) -> bool {
         self.set.contains(&buffer)
     }
 
     /// `WebKit` replaced its buffer set with `set`; returns the buffers that left it, which nothing acknowledges any
     /// more.
-    pub(crate) fn buffers_changed(&mut self, set: Vec<BufferId>) -> Vec<BufferId> {
+    pub fn buffers_changed(&mut self, set: Vec<BufferId>) -> Vec<BufferId> {
         let removed: Vec<BufferId> = self.set.iter().copied().filter(|id| !set.contains(id)).collect();
         self.set = set;
         if self.pending.is_some_and(|(id, _)| !self.contains(id)) {
@@ -132,7 +133,7 @@ impl FrameFlow {
 
     /// `WebKit` handed over a frame in `buffer` of `kind`. A buffer not announced yet joins the set; a frame still
     /// pending is superseded and given back, since it will never be presented; an SHM buffer goes back at once.
-    pub(crate) fn rendered(&mut self, buffer: BufferId, kind: Kind) -> Vec<Ack> {
+    pub fn rendered(&mut self, buffer: BufferId, kind: Kind) -> Vec<Ack> {
         if !self.contains(buffer) {
             self.set.push(buffer);
         }
@@ -151,7 +152,7 @@ impl FrameFlow {
 
     /// The consumer presented the frame in `buffer`: it counts as rendered, and the dmabuf shown before it is
     /// released. A frame that is not the pending one (superseded, or from a buffer that left the set) is ignored.
-    pub(crate) fn presented(&mut self, buffer: BufferId) -> Vec<Ack> {
+    pub fn presented(&mut self, buffer: BufferId) -> Vec<Ack> {
         let Some((pending, kind)) = self.pending.filter(|&(id, _)| id == buffer) else {
             return Vec::new();
         };
@@ -169,7 +170,8 @@ impl FrameFlow {
 }
 
 /// Copies `rects` (the whole buffer when empty) out of SHM `data`, `stride` bytes per row, clipped to the buffer.
-pub(crate) fn copy_regions(data: &[u8], stride: usize, width: u32, height: u32, rects: &[Rect]) -> Vec<ShmRegion> {
+#[must_use]
+pub fn copy_regions(data: &[u8], stride: usize, width: u32, height: u32, rects: &[Rect]) -> Vec<ShmRegion> {
     let whole = [Rect {
         x: 0,
         y: 0,
@@ -185,7 +187,8 @@ pub(crate) fn copy_regions(data: &[u8], stride: usize, width: u32, height: u32, 
 }
 
 /// `rect` clipped to a `width` x `height` buffer; `None` when nothing of it is inside.
-pub(crate) fn clip(rect: Rect, width: u32, height: u32) -> Option<Rect> {
+#[must_use]
+pub fn clip(rect: Rect, width: u32, height: u32) -> Option<Rect> {
     let right = rect.x.saturating_add(rect.width).min(width);
     let bottom = rect.y.saturating_add(rect.height).min(height);
     (rect.x < right && rect.y < bottom).then(|| Rect {

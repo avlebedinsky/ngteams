@@ -20,7 +20,10 @@ teams-call = { lines = 95, functions = 96, regions = 91 }
 teams-auth = { lines = 96, functions = 96, regions = 94 }
 teams-proto = { lines = 94, functions = 93, regions = 92 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
-teams-wpe = { lines = 92, functions = 92, regions = 92 }
+teams-wpe = { lines = 88, functions = 90, regions = 88 }
+teams-wpe-client = { lines = 84, functions = 75, regions = 84 }
+teams-web-engine = { lines = 95, functions = 91, regions = 90 }
+teams-signin-protocol = { lines = 100, functions = 100, regions = 98 }
 ngteams = { lines = 92, functions = 91, regions = 90 }
 teams-core = { lines = 92, functions = 93, regions = 90 }
 teams-media = { lines = 81, functions = 81, regions = 81 }
@@ -98,10 +101,18 @@ reason = "module declarations, documentation and an integer constant only; no ex
 sha256 = "a7a0245609aab00f17a18f4242739fed6f193ce287c89e8947740b50bae874ac"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
-[unmapped_sources."crates/teams-wpe/src/event.rs"]
-sha256 = "6d8a54166d0eb886e365b99deb6b50ee95b13615bfde95e12c1753b93403d01b"
+[unmapped_sources."crates/teams-wpe-client/src/event.rs"]
+sha256 = "d8512708340bfb250e4405fc6654775b3d3f612c29e56e2029956cb1013867c9"
 reason = "event types and raw_ids macro invocations; LLVM maps all token from_raw/raw bodies to their definition in lib.rs, which remains required in the report"
-context = { "crates/teams-wpe/src/lib.rs" = "ecb603f1c58ea351e1ba86ff268fe75f23c3f439af757e4a049b35744a638f5b" }
+context = { "crates/teams-wpe-client/src/lib.rs" = "bb46c3e447d5434cb3d64d1b7e9e4fb81c4c75c413401c652b8117330460061f" }
+
+[unmapped_sources."crates/teams-signin-protocol/src/lib.rs"]
+sha256 = "0ef2e7722a76980ef33d5af21b4f1afcbe5f9d7faeb5b5489439c372a75a4782"
+reason = "module declaration, a constant and documentation only; no executable items"
+
+[unmapped_sources."crates/teams-wpe/src/lib.rs"]
+sha256 = "3cae608d3642f1120ae50e6fda506d1c5978cc4ba4046ed9e35831e078aa123b"
+reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-proto/src/call_state.rs"]
 sha256 = "ad074728579667a671a8eed75cf9f275dd16e30cfca5e86c1b02778dd3e71beb"

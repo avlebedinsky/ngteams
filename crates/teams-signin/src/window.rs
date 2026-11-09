@@ -18,9 +18,10 @@ use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOp
 use teams_auth::redirect::RedirectUri;
 use teams_auth::secrets::Secret;
 use teams_auth::signin::{SignInAnswer, SignInRequest};
-use teams_signin_extension::ENTRY_POINT;
-use teams_wpe::{
-    Event, FrameMode, Geometry, Host, HostConfig, Load, SessionSpec, Settings, ViewId, ViewSpec, WebProcessExtensions,
+use teams_signin_protocol::ENTRY_POINT;
+use teams_wpe_client::{
+    EngineSource, Event, FrameMode, Geometry, Host, HostConfig, Load, SessionSpec, Settings, ViewId, ViewSpec,
+    WebProcessExtensions,
 };
 
 #[cfg(feature = "test-support")]
@@ -113,6 +114,8 @@ pub struct WindowConfig {
     pub bound: Bound,
     /// The extension module (`libteams_signin_extension.so`).
     pub extension: PathBuf,
+    /// The engine the page runs on ([`crate::engine`]).
+    pub engine: EngineSource,
     pub setup: GuardSetup,
 }
 
@@ -126,8 +129,8 @@ pub fn extension_beside(exe: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Runs the offline test window as an app of its own until it answers. Must run on the main thread, in a program that serves the engine's
-/// worker first thing in its `main` (`teams_wpe::worker::serve_if_asked`).
+/// Runs the offline test window as an app of its own until it answers. Must run on the main thread, in a program whose
+/// engine worker is pinned (`teams_wpe_client::worker`).
 #[cfg(feature = "test-support")]
 #[must_use]
 pub fn run(config: WindowConfig) -> SignInAnswer {
@@ -193,29 +196,53 @@ pub fn open(config: WindowConfig, app_id: &str, cx: &mut App, done: impl FnOnce(
 /// runs on a background thread and blocks on the window's answer ([`Windows::ask`]).
 #[derive(Clone)]
 pub struct Windows {
-    asks: async_channel::Sender<(WindowConfig, mpsc::Sender<SignInAnswer>)>,
+    asks: async_channel::Sender<Ask>,
+}
+
+/// What [`Windows`] asks GPUI's foreground to open.
+enum Ask {
+    SignIn(WindowConfig, mpsc::Sender<SignInAnswer>),
+    EngineWait(crate::engine::WaitChannels),
 }
 
 impl Windows {
     /// Serves the asks in the running app, each a window under `app_id`, until every [`Windows`] is gone.
     #[must_use]
     pub fn serve(app_id: &str, cx: &mut App) -> Self {
-        let (asks, waiting) = async_channel::unbounded::<(WindowConfig, mpsc::Sender<SignInAnswer>)>();
+        let (asks, waiting) = async_channel::unbounded::<Ask>();
         let app_id = app_id.to_owned();
         cx.spawn(async move |cx| {
-            while let Ok((config, reply)) = waiting.recv().await {
-                cx.update(|cx| open_answering(config, &app_id, reply, cx));
+            while let Ok(ask) = waiting.recv().await {
+                cx.update(|cx| match ask {
+                    Ask::SignIn(config, reply) => open_answering(config, &app_id, reply, cx),
+                    Ask::EngineWait(channels) => crate::engine::open_wait(channels, &app_id, cx),
+                });
             }
         })
         .detach();
         Self { asks }
     }
 
+    /// The engine a sign-in under `data_dir` runs on, a window showing its download if one is needed (blocking: never
+    /// call it on GPUI's foreground).
+    ///
+    /// # Errors
+    ///
+    /// The answer to give the sign-in: no engine can be had, or the user closed the window.
+    pub fn engine_source(&self, data_dir: &Path) -> Result<EngineSource, SignInAnswer> {
+        crate::engine::source(data_dir, |channels| self.open_engine_wait(channels))
+    }
+
+    /// Whether the app took the ask for an engine wait window; once it's gone, nothing would ever answer the download.
+    fn open_engine_wait(&self, channels: crate::engine::WaitChannels) -> bool {
+        self.asks.send_blocking(Ask::EngineWait(channels)).is_ok()
+    }
+
     /// Opens a window for `config` and waits for its answer (blocking: never call it on GPUI's foreground).
     #[must_use]
     pub fn ask(&self, config: WindowConfig) -> SignInAnswer {
         let (reply, answer) = mpsc::channel();
-        if self.asks.send_blocking((config, reply)).is_err() {
+        if self.asks.send_blocking(Ask::SignIn(config, reply)).is_err() {
             return SignInAnswer::Failed("the app has no window for the sign-in any more".into());
         }
         answer
@@ -283,7 +310,7 @@ impl Page {
         let server = GuardServer::start(&socket, Arc::clone(&guard))
             .map_err(|error| format!("the guard's socket can't be bound: {error}"))?;
         let (proxy, bypass) = egress(&config.bound, &guard)?;
-        let (host, events) = Host::start_worker(HostConfig {
+        let engine = HostConfig {
             frames: FrameMode::Shm,
             schemes: Vec::new(),
             extensions: Some(WebProcessExtensions {
@@ -291,8 +318,9 @@ impl Page {
                 data: socket.to_string_lossy().into_owned(),
                 sandbox_paths: vec![dir.path().to_path_buf()],
             }),
-        })
-        .map_err(|error| format!("the page's engine can't start: {error}"))?;
+        };
+        let (host, events) = Host::start_worker(&engine, &config.engine)
+            .map_err(|error| format!("the page's engine can't start: {error}"))?;
         let session = host.create_session(SessionSpec::Guarded {
             proxy,
             ignore_hosts: bypass,

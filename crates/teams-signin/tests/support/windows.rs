@@ -11,6 +11,7 @@ use super::{Bound, WindowConfig, Windows};
 
 fn invalid_request() -> WindowConfig {
     WindowConfig {
+        engine: teams_wpe_client::EngineSource::System,
         request: SignInRequest {
             authorize: "http://127.0.0.1/synthetic".to_owned(),
             redirect_uri: "not-a-redirect-uri".to_owned(),
@@ -37,7 +38,9 @@ fn an_abandoned_ask_is_reported_as_failure() {
     let (asks, waiting) = async_channel::unbounded();
     let service = Windows { asks };
     let peer = thread::spawn(move || {
-        let (config, reply) = waiting.recv_blocking().unwrap();
+        let super::Ask::SignIn(config, reply) = waiting.recv_blocking().unwrap() else {
+            panic!("a sign-in was asked for")
+        };
         assert_eq!(config.request.authorize, "http://127.0.0.1/synthetic");
         drop(reply);
     });
@@ -114,4 +117,18 @@ fn extension_installation_is_private_selective_and_fail_closed() {
             .unwrap_err()
             .contains("no extensions directory")
     );
+}
+
+#[test]
+fn an_engine_wait_is_refused_once_the_app_is_gone() {
+    let channels = || {
+        let (_show_end, show) = async_channel::unbounded();
+        let (heard, _hearing) = std::sync::mpsc::channel();
+        crate::engine::WaitChannels { show, heard }
+    };
+    let (asks, waiting) = async_channel::unbounded();
+    let service = Windows { asks };
+    assert!(service.open_engine_wait(channels()));
+    drop(waiting);
+    assert!(!service.open_engine_wait(channels()));
 }

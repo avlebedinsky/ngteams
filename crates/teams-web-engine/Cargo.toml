@@ -1,0 +1,20 @@
+[package]
+name = "teams-web-engine"
+description = "Where the sign-in window's WPE WebKit comes from: the system's when it is new enough, else a pinned runtime downloaded once, verified and kept per user"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc.workspace = true
+semver.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+zstd.workspace = true
+
+[lints]
+workspace = true

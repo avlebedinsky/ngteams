@@ -3,7 +3,7 @@
 //! The initial [`refusal`] gate rejects test-support and unmarked binaries before even the WPE worker starts.
 //! [`refusal_for`] restricts a lab-marked build to explicitly selected lab mode once the CLI is parsed.
 
-/// The install marker, set only by `scripts/install-personal.sh` when it compiles this crate.
+/// The install marker, set only by `scripts/install-personal.sh` and the release workflow when they compile this crate.
 pub const INSTALLED: Option<&str> = option_env!("TEAMS_PERSONAL_INSTALL");
 
 /// The lab marker, set only by `scripts/run-lab.sh` when it compiles this crate.

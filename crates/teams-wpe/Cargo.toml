@@ -7,23 +7,26 @@ rust-version.workspace = true
 publish.workspace = true
 license = "MIT"
 
+[[bin]]
+# the only binary that links WebKit: the app runs it for the sign-in window's page
+name = "ngteams-web"
+path = "src/bin/ngteams-web.rs"
+
 [dependencies]
+teams-wpe-client.workspace = true
+# built with the worker: the module WebKit loads into the sign-in window's web processes
+teams-signin-extension.workspace = true
 wpe-webkit-sys.workspace = true
 wpe-platform-sys.workspace = true
 wpe-javascriptcore-sys.workspace = true
 async-channel.workspace = true
-# `serde`: the worker's messages carry the input's modifiers and the pages' settings
-bitflags.workspace = true
 gio.workspace = true
 glib.workspace = true
 libc.workspace = true
 log.workspace = true
 # the worker's transport (`worker`): a SOCK_SEQPACKET pair, descriptors passed with SCM_RIGHTS, sealed memfds, polls
 rustix = { workspace = true, features = ["event", "fs", "net"] }
-# the worker's messages, as JSON
-serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

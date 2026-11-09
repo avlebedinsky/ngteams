@@ -5,8 +5,12 @@
 mod harness;
 
 fn main() {
-    // SAFETY: first operation in main, while this process has one thread.
-    unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
+    // the real worker binary, as the app starts it
+    let pinned = teams_wpe_client::worker::pin_worker_path(std::path::Path::new(env!("CARGO_BIN_EXE_ngteams-web")));
+    if let Err(error) = pinned {
+        eprintln!("engine test: {error}");
+        std::process::exit(1);
+    }
     let code = match harness::entry() {
         Ok(()) => 0,
         Err(error) => {

@@ -2,12 +2,13 @@
 //!
 //! An in-process engine is once per process (`WebKit` binds its main run loop to a thread that never ends), so a
 //! program that opens pages again later (the app's sign-in window, once per account added) runs each engine in a
-//! worker. The app re-runs its own executable as the worker (the image it runs, opened from `/proc/self/exe` and passed
-//! down as a descriptor, so a file replaced since does not matter) and drives the engine through a [`crate::Host`]
-//! whose calls travel over a socket. The worker runs the ordinary in-process engine and nothing else.
+//! worker: the sibling `ngteams-web` binary, the only one that links `WebKit` (the image pinned by descriptor at the
+//! app's start, so a file replaced since does not matter). The app drives the engine through a
+//! `teams_wpe_client::Host` whose calls travel over a socket. The worker runs the ordinary in-process engine and nothing
+//! else.
 //!
-//! - Every program that may start an engine calls [`serve_if_asked`] first thing in its `main`: in the worker it serves
-//!   the engine and ends the process; anywhere else it returns at once.
+//! - The `ngteams-web` binary calls [`serve_if_asked`] first thing, as does a test program that serves as its own
+//!   worker: in the worker it serves the engine and ends the process; anywhere else it returns at once.
 //! - The transport (`wire`): an `AF_UNIX` `SOCK_SEQPACKET` socket pair, close-on-exec on both sides (the worker's end
 //!   is kept open across its exec alone and made close-on-exec again first thing), one JSON message per packet
 //!   (`message`), large bodies and blobs in sealed `memfd`s, a dmabuf's planes passed as descriptors. A call on the
@@ -26,19 +27,13 @@
 //!   ends unasked answers every evaluation still waiting with an error and closes the event channel: the consumer's
 //!   pages cannot come back in this process.
 
-mod client;
-mod message;
+pub use teams_wpe_client::worker::{message, wire};
 mod serve;
-mod wire;
 
 use std::os::fd::{FromRawFd as _, OwnedFd};
 
-pub(crate) use client::Client;
-
-/// The variable that makes a process the worker: the number of the socket descriptor it inherited.
-pub const WORKER_FD_ENV: &str = "TEAMS_WPE_WORKER_FD";
-/// The number of the descriptor of the image the worker was started from (`/proc/self/fd/<n>`), closed at once.
-pub const WORKER_IMAGE_ENV: &str = "TEAMS_WPE_WORKER_IMAGE_FD";
+pub(crate) use teams_wpe_client::worker::Client;
+pub use teams_wpe_client::worker::{WORKER_FD_ENV, WORKER_IMAGE_ENV};
 
 /// Serves the engine and ends the process when this process was started as the worker ([`WORKER_FD_ENV`]); returns
 /// at once otherwise. `setup` runs first in the worker (the app's logging, say).
@@ -73,9 +68,49 @@ pub unsafe fn serve_if_asked(setup: impl FnOnce()) {
     }
     // SAFETY: the descriptor is open (checked), inherited for this process alone, and owned by nothing else here.
     let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    // the runtime's shared lock stays with this process, and reaches nothing it starts
+    let lock_fd = std::env::var(teams_wpe_client::RUNTIME_LOCK_ENV).ok();
+    // SAFETY: the caller guarantees the process has one thread.
+    unsafe { std::env::remove_var(teams_wpe_client::RUNTIME_LOCK_ENV) };
+    let _runtime_lock = match lock_fd.map(|value| value.parse::<i32>().ok().and_then(|fd| retain_runtime_lock(fd).ok()))
+    {
+        Some(Some(lock)) => Some(lock),
+        None => None,
+        Some(None) => {
+            eprintln!("teams-wpe: an invalid inherited web engine runtime lock");
+            crate::exit_process(2);
+        }
+    };
     setup();
     let code = serve::serve(socket);
     crate::exit_process(code)
+}
+
+/// The WPE `WebKit` version this process loaded.
+#[must_use]
+pub fn engine_version() -> (u32, u32, u32) {
+    // SAFETY: these getters have no preconditions and initialize no engine.
+    let major = unsafe { crate::webkit_sys::webkit_get_major_version() };
+    // SAFETY: as above.
+    let minor = unsafe { crate::webkit_sys::webkit_get_minor_version() };
+    // SAFETY: as above.
+    let micro = unsafe { crate::webkit_sys::webkit_get_micro_version() };
+    (major, minor, micro)
+}
+
+/// Adopts the inherited, read-only runtime lock and stops it at this process's next exec.
+fn retain_runtime_lock(fd: i32) -> std::io::Result<OwnedFd> {
+    // SAFETY: fcntl inspects the given descriptor; an invalid one fails with EBADF.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_ACCMODE != libc::O_RDONLY {
+        return Err(std::io::Error::other("the runtime lock must be open read-only"));
+    }
+    // SAFETY: changes only this process's descriptor flags, before WebKit or its threads start.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor was inherited for the worker alone and checked above.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Whether descriptor `fd` is an open socket.
@@ -85,4 +120,43 @@ fn is_socket(fd: i32) -> bool {
     // SAFETY: as above; a closed descriptor fails with EBADF.
     let ok = unsafe { libc::fstat(fd, &raw mut stat) } == 0;
     ok && (stat.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::IntoRawFd as _;
+
+    use super::*;
+
+    #[test]
+    fn a_read_only_lock_is_kept_and_stops_at_the_next_exec() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let fd = std::fs::File::open(file.path()).unwrap().into_raw_fd();
+        let lock = retain_runtime_lock(fd).unwrap();
+        // SAFETY: only inspects a descriptor this test owns.
+        let flags = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::F_GETFD) };
+        assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+    }
+
+    #[test]
+    fn a_writable_or_closed_lock_is_refused() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let writable = std::fs::File::options().write(true).open(file.path()).unwrap();
+        assert!(retain_runtime_lock(std::os::fd::AsRawFd::as_raw_fd(&writable)).is_err());
+        assert!(retain_runtime_lock(-1).is_err());
+    }
+
+    #[test]
+    fn this_process_reports_the_engine_it_loaded() {
+        assert_eq!(engine_version().0, 2);
+    }
+
+    #[test]
+    fn only_a_socket_counts_as_the_workers_descriptor() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(is_socket(std::os::fd::AsRawFd::as_raw_fd(&socket)));
+        let file = tempfile::tempfile().unwrap();
+        assert!(!is_socket(std::os::fd::AsRawFd::as_raw_fd(&file)));
+        assert!(!is_socket(-1));
+    }
 }

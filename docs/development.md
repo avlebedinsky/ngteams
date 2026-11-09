@@ -52,7 +52,8 @@ notification waits at most a few seconds for its translation); the language menu
 | `crates/teams-ctl` | `ngteamsctl` and the control socket's protocol, socket paths, line codec and client (no GPUI); the app's server is `crates/ngteams/src/ctl/` |
 | `crates/teams-log` | private rotated diagnostic files, full debug HTTP/frame records and logger-owned credential redaction |
 | `crates/teams-signin`, `crates/teams-signin-extension` | in-process host-gated WPE sign-in window and its web-process request guard |
-| `crates/teams-wpe`, `crates/wpe-*-sys` | system WPE WebKit integration and generated bindings |
+| `crates/teams-wpe`, `crates/wpe-*-sys` | the WPE WebKit engine, its `ngteams-web` worker and generated bindings |
+| `crates/teams-wpe-client`, `crates/teams-web-engine` | the app's side of that worker (no WebKit linked) and the choice or download of the engine |
 | `crates/teams-mock` | synthetic HTTP/Trouter/calling/media services for tests, dev-dependencies only |
 | `crates/proto-lab` | lab config, persistent browser profiles, native token provisioning, captures/holds, scenarios, probes, export and bundle search |
 | `crates/ui-sandbox` | private headless Wayland compositor, bus, input, URI opener, optional PipeWire/camera portal and `ui-sandbox-run` controls |
@@ -70,16 +71,24 @@ cross-account floor are app behavior, independent of lab configuration.
 
 ### WPE WebKit
 
-The sign-in window renders Microsoft's page with the system's WPE WebKit, 2.54 or newer: the distribution's
-`wpewebkit` (`sudo pacman -S wpewebkit`), which every build of the WPE crates needs. The build finds it through the
+The sign-in window renders Microsoft's page with WPE WebKit 2.54 or newer. Building the WPE crates needs a development
+copy: the distribution's `wpewebkit` (`sudo pacman -S wpewebkit`) locally, ngterm's portable prefix in the release job. The build finds it through the
 system's pkg-config (`wpe-webkit-2.0`, `wpe-web-process-extension-2.0`), the binaries load `libWPEWebKit-2.0.so` from
 the loader's own path, and the engine starts the package's helper processes (`WPEWebProcess`, `WPENetworkProcess`,
 `WPEGPUProcess`) from `/usr/lib/wpe-webkit-2.0/`, where their path is compiled into the library; GStreamer loads its
-plugins at run time. None of it can be linked in statically, so the installed `ngteams` needs the package at run time
-too, and `scripts/install-personal.sh` refuses to build without it.
+plugins at run time. `scripts/install-personal.sh` refuses to build without it.
 
-The worker is the asking program's own executable run again: every `main` that opens a sign-in window
-(`ngteams` and the window tests) calls `teams_wpe::worker::serve_if_asked` early.
+Only the `ngteams-web` worker (`crates/teams-wpe`) links WebKit. `ngteams` uses `crates/teams-wpe-client`, so it starts
+without an engine and picks one before each sign-in (`crates/teams-signin/src/engine.rs`): the system's if `ngteams-web
+--probe` loads 2.54 or newer of the 2.x series, then a runtime already downloaded to `<data dir>/web-engine/<key>/`,
+then a download (`crates/teams-web-engine`). A release build compiles in the runtime's `NGTEAMS_WEB_ENGINE_KEY`, `_URL`,
+`_SIZE` and `_SHA256`, and a download is checked against those; setting `NGTEAMS_WEB_ENGINE_URL` when starting the app
+replaces the URL only. Builds without pins (development, lab) never download. `ngteams --install-web-engine <archive>`
+installs the runtime from a file, under the same checks. Only the worker's command gets a runtime's library, GIO,
+GStreamer and injected-bundle paths (`EngineSource`), so the app and what it starts never see them.
+
+A test program that opens a sign-in window serves as its own worker: it calls `teams_wpe::worker::serve_if_asked` first
+and pins itself with `teams_wpe_client::worker::pin_worker_path`.
 
 ## Third-party UI code
 

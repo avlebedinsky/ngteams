@@ -6,8 +6,8 @@
 # - Requires the system's `wpewebkit` (2.54 or newer, docs/development.md "WPE WebKit") for the sign-in window's page: the
 #   build links it and the installed binary runs its helper processes, so without it the script stops before building.
 # - Builds `ngteams` with `cargo build --release -p ngteams`, its target dir apart from every other build
-#   (`target/personal`), so no `test-support` or lab build is unified in. The sign-in window lives in it: it opens
-#   that window itself and runs itself again as the window's page engine. Then `ngteamsctl` (`crates/teams-ctl`), which
+#   (`target/personal`), so no `test-support` or lab build is unified in, and beside it `ngteams-web`, the sign-in
+#   window's page engine (the only program linking WebKit). Then `ngteamsctl` (`crates/teams-ctl`), which
 #   drives the running app over its control socket, in a build of its own into the same target dir.
 # - Installs it and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the app finds the extension
 #   beside itself), `ngteams` linked from ~/.local/bin/, `ngteamsctl` beside it, linked from ~/.local/bin/ too, with
@@ -33,7 +33,7 @@ if ! pkg-config --atleast-version=2.54 wpe-webkit-2.0 wpe-web-process-extension-
   echo "       which isn't installed or is older: sudo pacman -S wpewebkit, then run this again" >&2
   exit 1
 fi
-TEAMS_PERSONAL_INSTALL=1 cargo build --release -p ngteams --target-dir "$target"
+TEAMS_PERSONAL_INSTALL=1 cargo build --release -p ngteams -p teams-wpe --bin ngteams --bin ngteams-web --target-dir "$target"
 cargo build --release -p teams-ctl --bin ngteamsctl --target-dir "$target"
 
 lib="$prefix/lib/ngteams"
@@ -41,6 +41,7 @@ bin="$prefix/bin"
 apps="$prefix/share/applications"
 install -d -m 0755 "$lib" "$bin" "$apps"
 install -m 0755 "$target/release/ngteams" "$lib/ngteams"
+install -m 0755 "$target/release/ngteams-web" "$lib/ngteams-web"
 extension="$target/release/libteams_signin_extension.so"
 [[ -f "$extension" ]] || extension="$target/release/deps/libteams_signin_extension.so"
 install -m 0644 "$extension" "$lib/libteams_signin_extension.so"
