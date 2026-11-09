@@ -1,9 +1,8 @@
 //! Account files, identity metadata, paths and atomic persistence for ngteams.
 
 use std::fmt;
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -104,7 +103,7 @@ impl PersonalPaths {
             if old.is_file() {
                 let moved = region
                     .parent()
-                    .map_or(Ok(()), |dir| DirBuilder::new().recursive(true).mode(0o700).create(dir))
+                    .map_or(Ok(()), teams_platform::private::create_dir_all)
                     .and_then(|()| fs::rename(&old, &region));
                 moved.map_err(|source| PersonalError::Write { path: region, source })?;
             }
@@ -131,8 +130,8 @@ impl PersonalPaths {
     /// When they can't be made or made private.
     pub fn make_dirs(&self) -> io::Result<()> {
         for dir in [&self.data_dir, &self.config_dir] {
-            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+            teams_platform::private::create_dir_all(dir)?;
+            teams_platform::private::restrict_dir(dir)?;
         }
         Ok(())
     }
@@ -418,10 +417,7 @@ fn check_distinct(accounts: &[PersonalAccount]) -> Result<(), PersonalError> {
 fn write_accounts(paths: &PersonalPaths, accounts: &[PersonalAccount]) -> Result<(), PersonalError> {
     let path = paths.accounts_file();
     let write = || -> io::Result<()> {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(paths.config_dir())?;
+        teams_platform::private::create_dir_all(paths.config_dir())?;
         let mut text = String::from(
             "# The accounts the personal build signs in, in the order they were added (a first sign-in adds oid and\n\
              # tid). Never a token.\n",
@@ -435,11 +431,7 @@ fn write_accounts(paths: &PersonalPaths, accounts: &[PersonalAccount]) -> Result
         staging.push(format!(".{}.{serial}.new", std::process::id()));
         let staging = PathBuf::from(staging);
         let written = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&staging)?;
+            let mut file = teams_platform::private::open(&staging, teams_platform::private::Open::NewReadWrite)?;
             io::Write::write_all(&mut file, text.as_bytes())?;
             file.sync_all()?;
             fs::rename(&staging, &path)

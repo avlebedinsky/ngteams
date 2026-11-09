@@ -180,7 +180,7 @@ impl Drop for Descriptor {
 }
 
 /// The current process's user SID in its string form (`S-1-5-21-…`).
-fn current_user_sid() -> io::Result<String> {
+pub(crate) fn current_user_sid() -> io::Result<String> {
     // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no closing and is always valid.
     let process = unsafe { GetCurrentProcess() };
     let token = open_token(process)?;

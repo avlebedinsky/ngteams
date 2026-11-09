@@ -32,6 +32,8 @@ rustix = { workspace = true, features = ["event", "fs", "net"] }
 teams-core.workspace = true
 # the diagnostic log, installed once before the engine starts
 teams-log.workspace = true
+# Native private account files and snapshots.
+teams-platform.workspace = true
 # the calls' devices: the caller selects desktop or sandbox PipeWire at run time
 teams-media.workspace = true
 # the echo service's MRI the test call goes to (`TEAMS_ECHO_BOT_MRI`, from the web bundle)

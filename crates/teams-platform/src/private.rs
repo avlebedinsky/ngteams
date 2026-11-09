@@ -9,10 +9,10 @@ use std::path::Path;
 
 #[cfg(unix)]
 #[path = "private/unix.rs"]
-mod platform;
+pub(crate) mod platform;
 #[cfg(windows)]
 #[path = "private/windows.rs"]
-mod platform;
+pub(crate) mod platform;
 
 /// How to open a private file; none of these truncate an existing file.
 #[derive(Clone, Copy, Debug)]

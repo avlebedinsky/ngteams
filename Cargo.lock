@@ -7375,6 +7375,7 @@ dependencies = [
  "teams-log",
  "teams-media",
  "teams-mock",
+ "teams-platform",
  "teams-proto",
  "teams-signin",
  "teams-store",
@@ -11178,16 +11179,24 @@ dependencies = [
 name = "teams-ctl"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "chrono",
  "chrono-tz",
  "clap",
  "clap_complete",
+ "interprocess",
+ "log",
  "regex",
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
+ "teams-platform",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

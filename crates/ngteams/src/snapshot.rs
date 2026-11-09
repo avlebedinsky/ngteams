@@ -9,9 +9,8 @@
 //! written; `<dir>` must be new (or empty) and lie apart from the user's own directories, and is made `0700`, its
 //! files `0600`.
 
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use crate::accounts_file::PersonalPaths;
@@ -110,12 +109,8 @@ fn private_dir(dir: &Path) -> Result<(), SnapshotError> {
         path: dir.to_path_buf(),
         source,
     };
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(failed)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(failed)
+    teams_platform::private::create_dir_all(dir).map_err(failed)?;
+    teams_platform::private::restrict_dir(dir).map_err(failed)
 }
 
 /// Copies `from` to `to` (`0600`, a new file) when `from` exists; nothing when it doesn't.
@@ -130,11 +125,7 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), SnapshotError> {
             });
         }
     };
-    let written = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(to)
+    let written = teams_platform::private::open(to, teams_platform::private::Open::NewReadWrite)
         .and_then(|mut file| io::Write::write_all(&mut file, &bytes));
     written.map_err(|source| SnapshotError::Io {
         path: to.to_path_buf(),

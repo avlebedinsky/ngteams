@@ -4,11 +4,18 @@
 #![cfg(test)]
 
 use std::io::{BufReader, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use teams_ctl::transport::Listener as UnixListener;
+use teams_ctl::transport::Stream as UnixStream;
 
+#[cfg(unix)]
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 use teams_ctl::client::{Client, ClientError, Timeouts};
 use teams_ctl::codec::{self, LineReader, decode_request};
@@ -16,6 +23,21 @@ use teams_ctl::protocol::{
     CtlError, CtlEvent, ErrorCode, EventFilter, EventLine, Hello, Outcome, PROTOCOL_VERSION, Request, RequestLine,
     Response, ResponseLine,
 };
+
+fn accept(listener: &UnixListener) -> UnixStream {
+    #[cfg(unix)]
+    {
+        listener.accept().unwrap().0
+    }
+    #[cfg(windows)]
+    loop {
+        match listener.accept() {
+            Ok(stream) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
+            Err(error) => panic!("accept: {error}"),
+        }
+    }
+}
 
 fn quick() -> Timeouts {
     Timeouts {
@@ -66,7 +88,7 @@ fn server(mut handler: Box<Handler>) -> Server {
     let path = dir.path().join("ctl.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let thread = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let stream = accept(&listener);
         let mut writer = stream.try_clone().unwrap();
         let mut lines = LineReader::new(BufReader::new(stream));
         let mut seen = Vec::new();
@@ -320,21 +342,25 @@ fn nothing_listening_is_not_running() {
         Err(ClientError::NotRunning { path, .. }) => assert_eq!(path, missing),
         other => panic!("{other:?}"),
     }
-    // a stale socket file nobody listens on
-    drop(UnixListener::bind(&missing).unwrap());
-    assert!(missing.exists());
-    let error = Client::connect(&missing, quick()).unwrap_err();
-    assert!(matches!(error, ClientError::NotRunning { .. }), "{error:?}");
-    assert!(error.to_string().starts_with("no ngteams is running on "), "{error}");
-    // a path too long for a socket address
-    let long = dir.path().join("x".repeat(200));
-    assert!(matches!(
-        Client::connect(&long, quick()),
-        Err(ClientError::NotRunning { .. })
-    ));
+    #[cfg(unix)]
+    {
+        // a stale socket file nobody listens on
+        drop(UnixListener::bind(&missing).unwrap());
+        assert!(missing.exists());
+        let error = Client::connect(&missing, quick()).unwrap_err();
+        assert!(matches!(error, ClientError::NotRunning { .. }), "{error:?}");
+        assert!(error.to_string().starts_with("no ngteams is running on "), "{error}");
+        // a path too long for a socket address
+        let long = dir.path().join("x".repeat(200));
+        assert!(matches!(
+            Client::connect(&long, quick()),
+            Err(ClientError::NotRunning { .. })
+        ));
+    }
 }
 
 /// A listener with a backlog of nothing, which never accepts: the first connect fills its queue.
+#[cfg(unix)]
 fn full_listener(path: &Path) -> rustix::fd::OwnedFd {
     let socket = rustix::net::socket_with(AddressFamily::UNIX, SocketType::STREAM, SocketFlags::CLOEXEC, None).unwrap();
     rustix::net::bind(&socket, &SocketAddrUnix::new(path).unwrap()).unwrap();
@@ -342,6 +368,7 @@ fn full_listener(path: &Path) -> rustix::fd::OwnedFd {
     socket
 }
 
+#[cfg(unix)]
 #[test]
 fn a_connect_that_does_not_get_through_in_time_is_a_timeout() {
     let dir = tempfile::tempdir().unwrap();
@@ -395,7 +422,7 @@ fn a_subscription_waits_for_events_as_long_as_asked() {
     let listener = UnixListener::bind(&path).unwrap();
     let (go, gate) = std::sync::mpsc::channel::<()>();
     let thread = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let stream = accept(&listener);
         let mut writer = stream.try_clone().unwrap();
         let mut lines = LineReader::new(BufReader::new(stream));
         for answer in [hello(1, PROTOCOL_VERSION), ok(2, Response::Subscribed)] {
@@ -450,7 +477,45 @@ fn client_errors_read_plainly() {
         std::io::ErrorKind::TimedOut,
     )));
     assert!(matches!(timed_out, ClientError::Timeout));
+    assert!(matches!(
+        ClientError::from(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        ClientError::Timeout
+    ));
     let broken = ClientError::from(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
     assert!(matches!(broken, ClientError::Codec(_)));
     assert_eq!(Timeouts::default().connect, Duration::from_secs(1));
+}
+
+#[test]
+fn zero_io_timeouts_are_refused_before_hello_and_when_changed_later() {
+    for timeouts in [
+        Timeouts {
+            read: Duration::ZERO,
+            ..quick()
+        },
+        Timeouts {
+            write: Duration::ZERO,
+            ..quick()
+        },
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+        assert!(matches!(Client::connect(&path, timeouts), Err(ClientError::Codec(_))));
+    }
+    let server = with_hello(PROTOCOL_VERSION, |request| {
+        (vec![ok(request.id, Response::Subscribed)], true)
+    });
+    let client = Client::connect(&server.path, quick()).unwrap();
+    assert!(matches!(
+        client.set_read_timeout(Duration::ZERO),
+        Err(ClientError::Codec(_))
+    ));
+    let events = client.subscribe(None, EventFilter::default()).unwrap();
+    assert!(matches!(
+        events.set_read_timeout(Some(Duration::ZERO)),
+        Err(ClientError::Codec(_))
+    ));
+    drop(events);
+    server.thread.join().unwrap();
 }

@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   storage:
-    name: Files, storage and authentication (${{ matrix.os }})
+    name: Files, authentication and control IPC (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -36,13 +36,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring
       - name: Format
-        run: cargo fmt -p teams-platform -p teams-log -p teams-store -p teams-auth -- --check
+        run: cargo fmt -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -- --check
       - name: Check every target
-        run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth --all-targets
+        run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets
       - name: Lints
-        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth --all-targets -- -D warnings
-      - name: Offline filesystem, storage, authentication and broker tests
-        run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth
+        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets -- -D warnings
+      - name: Offline filesystem, authentication, broker and native app listener tests
+        run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -- --test-threads=1
       - name: Windows coverage tools
         if: runner.os == 'Windows'
         run: |
@@ -56,3 +56,8 @@ jobs:
         run: |
           $floors = python -c "import json, tomllib; print(json.dumps(tomllib.load(open('coverage.toml', 'rb'))['baselines']['teams-auth']))" | ConvertFrom-Json
           cargo llvm-cov --locked -p teams-auth --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions
+      - name: Require the control crate's native coverage floors
+        if: runner.os == 'Windows'
+        run: |
+          $floors = python -c "import json, tomllib; print(json.dumps(tomllib.load(open('coverage.toml', 'rb'))['baselines']['teams-ctl']))" | ConvertFrom-Json
+          cargo llvm-cov --locked -p teams-ctl --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions -- --test-threads=1

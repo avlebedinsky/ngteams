@@ -65,7 +65,7 @@ reporter tests alone are not a coverage measurement.
 ## Windows portability
 
 The [Windows portability workflow](../.github/workflows/windows.yml) checks, lints and runs the offline tests of
-`teams-platform`, `teams-log`, `teams-store` and `teams-auth` on Windows Server 2025 (`windows-2025`) and Linux; local verification
+`teams-platform`, `teams-log`, `teams-store`, `teams-auth` and `teams-ctl` on Windows Server 2025 (`windows-2025`) and Linux; local verification
 also runs on the Windows 11 VM.
 These are foundational stages of the native Windows port; the app and its release packages still require the remaining
 platform integrations. These jobs do not build or launch `ngteams` or access a tenant.
@@ -110,6 +110,21 @@ with `cargo-llvm-cov` 0.9.1 and requires 90% in lines, functions and regions, in
 It also measures `teams-auth` natively and enforces that crate's existing floors: 96% lines, 96% functions and
 94% regions, including the Windows credential backend.
 
+Control IPC uses Unix sockets or local-only byte pipes on Windows. Pipes are created with a protected DACL granting
+only the exact current user and SYSTEM full access; a mandatory label refuses lower-integrity access. Clients verify
+the server process's user before sending their first byte. Names hash the user's SID and the logical endpoint's
+UTF-16 path, preserving mode and profile separation without a lossy Unicode conversion. Windows client paths use
+`LOCALAPPDATA` for state/runtime and `USERPROFILE` for the home fallback; `NGTEAMS_CTL_SOCKET` still overrides the
+logical endpoint. The pipe name is never accepted from an untrusted remote hostname.
+
+Native tests inspect a live pipe's owner, grants and integrity label, exercise bounded connects/reads/writes,
+cloned shutdown, large transfers, protocol/CLI contracts and events. The GPUI-independent **actual app listener**
+is compiled directly by `teams-ctl/tests/app_listener.rs` and tested on both platforms, including subscription
+cleanup. This does not build or launch the GUI. Windows uses nonblocking byte operations and monotonic deadlines;
+writes are capped to the queried outgoing pipe quota so an oversized NOWAIT write cannot stall an empty pipe.
+`FlushFileBuffers` is never used in the control protocol, because it waits for the peer to read without a deadline.
+The native Windows gate also enforces the control crate's unchanged floors from `coverage.toml` (99% lines,
+100% functions, 98% regions). Platform-only sources use the same hash-checked Linux inventory mechanism above.
 
 ## Releases
 

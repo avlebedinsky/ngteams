@@ -12,11 +12,12 @@
 //!
 //! `XDG_STATE_HOME` falls back to `~/.local/state` when unset or relative, as both runners do; a relative
 //! `XDG_RUNTIME_DIR` or `HOME` counts as unset.
+//! On Windows these are logical endpoint identities: the native transport hashes each absolute path and the user
+//! SID into a local pipe name. `from_process` uses LOCALAPPDATA for state/runtime and USERPROFILE for the fallback
+//! home; no filesystem socket is created.
 
 use std::ffi::OsString;
-use std::fs::DirBuilder;
 use std::io;
-use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 /// The variable naming the socket a client connects to, whatever the mode.
@@ -56,23 +57,39 @@ pub enum PathError {
 pub struct Env {
     /// `$NGTEAMS_CTL_SOCKET`.
     pub socket: Option<OsString>,
-    /// `$XDG_RUNTIME_DIR`.
+    /// Unix `$XDG_RUNTIME_DIR`, or Windows local profile runtime directory.
     pub runtime_dir: Option<OsString>,
-    /// `$XDG_STATE_HOME`.
+    /// Unix `$XDG_STATE_HOME`, or Windows `$LOCALAPPDATA`.
     pub state_home: Option<OsString>,
-    /// `$HOME`.
+    /// Unix `$HOME`, or Windows `$USERPROFILE`.
     pub home: Option<OsString>,
 }
 
 impl Env {
     /// The process's own environment.
     #[must_use]
+    #[cfg(unix)]
     pub fn from_process() -> Self {
         Self {
             socket: std::env::var_os(ENV_SOCKET),
             runtime_dir: std::env::var_os("XDG_RUNTIME_DIR"),
             state_home: std::env::var_os("XDG_STATE_HOME"),
             home: std::env::var_os("HOME"),
+        }
+    }
+
+    /// Native Windows state is under the current user's local profile; no roaming account data or pipe name.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn from_process() -> Self {
+        let local = std::env::var_os("LOCALAPPDATA");
+        Self {
+            socket: std::env::var_os(ENV_SOCKET),
+            runtime_dir: local
+                .as_ref()
+                .map(|dir| PathBuf::from(dir).join("ngteams/runtime").into_os_string()),
+            state_home: local,
+            home: std::env::var_os("USERPROFILE"),
         }
     }
 
@@ -131,9 +148,9 @@ pub fn socket_path(mode: &Mode) -> Result<PathBuf, PathError> {
     Env::from_process().socket_path(mode)
 }
 
-/// Make the socket's directory: each directory missing on the way is made `0700`. A directory already there is left
-/// as it is (an override may name a socket in a directory of the user's, whose mode isn't ours to change); the socket
-/// itself is bound `0600` by the server.
+/// Make an endpoint's filesystem parent privately (Unix 0700, Windows protected ACL). Existing directories are left
+/// as they are: an override may name a directory of the user's. A Unix server binds its socket 0600; a Windows
+/// server creates a local pipe with its own ACL, independently of this logical path's parent.
 ///
 /// # Errors
 /// The directory couldn't be made, or the path's parent is there but isn't a directory.
@@ -142,8 +159,7 @@ pub fn prepare_dir(socket: &Path) -> io::Result<()> {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
     };
-    // A directory already there is Ok; anything else there is an error.
-    DirBuilder::new().recursive(true).mode(0o700).create(dir)
+    teams_platform::private::create_dir_all(dir)
 }
 
 fn absolute(value: Option<&OsString>) -> Option<PathBuf> {

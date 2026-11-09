@@ -16,13 +16,29 @@ clap.workspace = true
 clap_complete.workspace = true
 # `ngteamsctl wait --match`: the event line a wait ends on (no logging of its own: nothing reaches the log cap)
 regex.workspace = true
-# a connect bounded in time: a non-blocking Unix socket, tried again while the listener's backlog is full
-rustix = { workspace = true, features = ["net"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+# Native private directory creation shared with the store and logger.
+teams-platform.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Bounded Unix connects and subscription hang-up watches.
+rustix = { workspace = true, features = ["event", "net"] }
+
+[target.'cfg(windows)'.dependencies]
+# Byte-mode local pipes only: no message-mode diagnostic or credential logging.
+interprocess.workspace = true
+sha2.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
+widestring.workspace = true
+
 [dev-dependencies]
+# Compile and exercise the app's native listener without its UI/media dependencies.
+async-channel.workspace = true
+log.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 # time zones whose clocks skip a midnight, for the calendar's day boundaries
 chrono-tz.workspace = true
 # each test's sockets and directories, in a directory of its own

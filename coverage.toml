@@ -42,7 +42,7 @@ sha256 = "3ddd9f60071e796622a5fc4d5faa6bc432c207a89e014eac21b5d8b4aaa4ea1a"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-ctl/src/lib.rs"]
-sha256 = "ee70e2982c0c821acf624df7501c8702bc2227d5bc65a7338d86820b21860223"
+sha256 = "713e3237771cf1e69e5a92513c2efbd42d03fd36393d664e55061c69aa2c872e"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]
@@ -135,11 +135,11 @@ reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-
 context = { "crates/teams-core/src/attachments.rs" = "f5ddc5cec701324240acc8fd2743e1d5c8e548e99798a2776dee21735a4f3dca" }
 
 [unmapped_sources."crates/teams-platform/src/lib.rs"]
-sha256 = "153bbafc813e95b1a9d8c580156543b9744c4da047cb5d0456eb35409d14091e"
+sha256 = "485ee2068f92da717e213d3dbfd16d93c23e3fc86953fb0cc7edb05826a472c5"
 reason = "module declaration and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-platform/src/private/windows.rs"]
-sha256 = "fcdc9ee01827c1f62f558ecd680c156c9a94f6ddb32b958adcd751f3450f481b"
+sha256 = "6b05e0bef51023d11b0c344eee42ada04cd3f32f4ff842206d6fbe1c6353cc74"
 reason = "Windows-only native ACL and creation APIs: absent from the Linux LLVM export; exercised by native private-file, log-rotation, SQLite and snapshot tests in the Windows VM and Windows portability workflow"
 
 [unmapped_sources."crates/teams-auth/src/secrets/windows.rs"]
@@ -149,3 +149,19 @@ reason = "Windows-only Credential Manager adapter; no Linux LLVM mapping. Native
 [unmapped_sources."crates/teams-media/src/sound_file_samples.rs"]
 sha256 = "7d31215be18d4133dbaecf624a19001f48d68e2f3df899657879e419ce994081"
 reason = "test-only synthetic encoded audio constants; no executable items"
+
+[unmapped_sources."crates/teams-ctl/src/transport.rs"]
+sha256 = "b82f8babf1f6097107ebd061f21f4d48281a45b2ab89f62ad5c78c9b5303c562"
+reason = "cfg-selected module declarations and re-exports only; no executable items"
+
+[unmapped_sources."crates/teams-ctl/src/transport/windows.rs"]
+sha256 = "3155eb53b18737b7aae957824ebbeba63a4338e18b3c793c040bef6654d587b0"
+reason = "Windows-only native control pipe transport; measured natively by the Windows portability gate, including ACLs, timeouts, shutdown, CLI and the actual app listener"
+
+[unmapped_sources."crates/teams-platform/src/windows_security.rs"]
+sha256 = "c2478782aaed61fb79fe56d879db1ab5ce1b03d24d25024e0765df985681d94e"
+reason = "Windows-only token identity and private pipe descriptor; exercised by native identity, live pipe ACL and application listener tests in the Windows gate"
+
+[unmapped_sources."crates/ngteams/src/ctl/socket/windows.rs"]
+sha256 = "e2d8868d9c820bb4f17e6786d91f3b251df014786b1bc3a436a0d1c1b1d589bc"
+reason = "Windows-only app listener binding and cleanup; compiled and exercised by teams-ctl app_listener tests on Windows without the remaining GUI/media dependencies"
