@@ -232,9 +232,10 @@ jobs:
             exit 1
           fi
           # The previous app release, so generated notes never start at a `web-engine-<key>` release made at this commit.
+          # Before the first app release there is no latest one, and `gh` prints the API's error in place of a tag.
           previous="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2> /dev/null || true)"
           notes=()
-          [[ -z "$previous" ]] || notes=(--notes-start-tag "$previous")
+          [[ "$previous" != v[0-9]* ]] || notes=(--notes-start-tag "$previous")
           cd "$RUNNER_TEMP/dist"
           assets=()
           for file in *; do
