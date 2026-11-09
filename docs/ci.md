@@ -65,9 +65,9 @@ reporter tests alone are not a coverage measurement.
 ## Windows portability
 
 The [Windows portability workflow](../.github/workflows/windows.yml) checks, lints and runs the offline tests of
-`teams-platform`, `teams-log` and `teams-store` on Windows Server 2025 (`windows-2025`) and Linux; local verification
+`teams-platform`, `teams-log`, `teams-store` and `teams-auth` on Windows Server 2025 (`windows-2025`) and Linux; local verification
 also runs on the Windows 11 VM.
-This is the first stage of the native Windows port; the app and its release packages still require the remaining
+These are foundational stages of the native Windows port; the app and its release packages still require the remaining
 platform integrations. These jobs do not build or launch `ngteams` or access a tenant.
 
 `teams-platform::private` creates files and directories with Unix modes or native protected Windows ACLs.
@@ -85,8 +85,30 @@ explicitly name the current user as owner. See [Windows object ownership](https:
 The Linux coverage inventory records the Windows-only filesystem source with the existing hash-checked
 `unmapped_sources` mechanism: it has no Linux LLVM mapping. Native Windows tests exercise that source in the VM
 and hosted job; this entry neither removes mapped counts nor changes any existing coverage floor.
+Authentication uses Secret Service on Unix and Windows Credential Manager on Windows. The Windows backend selects
+its native store explicitly, persists only on this machine, and hashes length-delimited application/account/audience
+keys to avoid Credential Manager's case-insensitive-name collisions. Tests use unique synthetic namespaces and exact
+entry operations, never enumeration. Third-party credential errors can contain secret bytes, so the adapter reduces
+them to fixed error categories and zeroes secret buffers. The keyring-core debug records contain entry metadata,
+not values; the app logger ignores this third-party target. Interprocess is used only in byte mode (its message-mode
+receive diagnostic is unused and prints a mode number only).
+
+Broker scope, get-only behavior, framing, closure and session contracts run unchanged over Unix sockets or Windows
+named pipes. The caller supplies the established stream and is responsible for endpoint permissions. The app's
+Windows broker launch/handle inheritance and isolated runner are still pending; this library support does not make
+Windows application startup available yet. Named pipes have no half-close, so malformed-request tests close the
+complete synthetic peer when testing truncation.
+
+The VM's SSH token cannot access Credential Manager (Windows error 1312); native credential tests and coverage run
+through a temporary scheduled task in its existing interactive console session. No user credential is read or used.
+Hosted Windows tests likewise require the runner's interactive user profile. Linux uses a private D-Bus and temporary
+keyring, with the job installing the test daemon dependencies. The Windows-only credential adapter has a hash-checked
+unmapped-source entry for Linux measurement and is measured natively in Windows.
+
 The per-crate Linux gate includes `teams-platform` at 90%. The Windows job additionally measures that crate natively
 with `cargo-llvm-cov` 0.9.1 and requires 90% in lines, functions and regions, including its Win32 implementation.
+It also measures `teams-auth` natively and enforces that crate's existing floors: 96% lines, 96% functions and
+94% regions, including the Windows credential backend.
 
 
 ## Releases

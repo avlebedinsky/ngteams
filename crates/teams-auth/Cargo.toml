@@ -12,7 +12,6 @@ getrandom.workspace = true
 httpdate.workspace = true
 # session outcomes and credential-redacted HTTP exchanges in the app's diagnostic log
 log.workspace = true
-oo7.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -26,6 +25,14 @@ tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }
 # form encoding of the token requests and of the authorize URL's query
 url.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+oo7.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+interprocess = { workspace = true, features = ["tokio"] }
+keyring-core.workspace = true
+windows-native-keyring-store.workspace = true
 
 [dev-dependencies]
 # the region record read back from a file

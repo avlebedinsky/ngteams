@@ -5,7 +5,10 @@
 //! reaches a keyring or a bus.
 
 use std::io::{Read as _, Write as _};
-use std::os::unix::net::UnixStream;
+#[path = "support/broker_transport.rs"]
+mod transport;
+#[cfg(windows)]
+use interprocess::local_socket::traits::Stream as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use teams_auth::broker::{BrokerError, BrokerScope, BrokerSecretStore, MAX_FRAME, Note, ServeError, serve};
@@ -29,10 +32,8 @@ fn key(account: &str, audience: &str) -> SecretKey {
 }
 
 /// The broker's end of a socket pair, for tokio, and the client's, blocking.
-fn socket_pair() -> TestResult<(tokio::net::UnixStream, UnixStream)> {
-    let (server, client) = UnixStream::pair()?;
-    server.set_nonblocking(true)?;
-    Ok((tokio::net::UnixStream::from_std(server)?, client))
+fn socket_pair() -> TestResult<(transport::AsyncStream, teams_auth::broker::BrokerStream)> {
+    Ok(transport::pair()?)
 }
 
 /// A broker serving `store` on one end, its notes (as shown) kept.
@@ -42,7 +43,7 @@ struct Broker {
 }
 
 impl Broker {
-    fn start<S: SecretStore + 'static>(store: Arc<S>, server: tokio::net::UnixStream) -> Self {
+    fn start<S: SecretStore + 'static>(store: Arc<S>, server: transport::AsyncStream) -> Self {
         let notes = Arc::new(Mutex::new(Vec::new()));
         let kept = Arc::clone(&notes);
         let serving = tokio::spawn(async move {
@@ -284,15 +285,20 @@ async fn a_byte_from_the_peer_while_the_store_waits_is_malformed() -> TestResult
     let end = tokio::time::timeout(NOTICE, broker.end()).await??;
     assert!(matches!(end, Err(ServeError::Malformed)), "{end:?}");
     // the broker closed its end, unanswered
-    let mut back = Vec::new();
-    client.read_to_end(&mut back)?;
+    // A Windows pipe may finish closing on Tokio's worker pool. Keep that executor free while checking EOF.
+    let back = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        let mut back = Vec::new();
+        client.read_to_end(&mut back)?;
+        Ok(back)
+    })
+    .await??;
     assert!(back.is_empty(), "{back:?}");
     Ok(())
 }
 
 #[tokio::test]
 async fn a_non_blocking_end_is_put_in_blocking_mode() -> TestResult {
-    let (mut server, client) = UnixStream::pair()?;
+    let (mut server, client) = transport::pair_sync()?;
     client.set_nonblocking(true)?;
     let client = BrokerSecretStore::new(client, APPLICATION)?;
     // a broker slow to answer "missing": a non-blocking read would find nothing yet and fail the call
@@ -356,7 +362,15 @@ async fn send_raw(bytes: Vec<u8>, close_after: bool) -> TestResult<(Result<(), S
     let back = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
         client.write_all(&bytes)?;
         if close_after {
+            #[cfg(unix)]
             client.shutdown(std::net::Shutdown::Write)?;
+            #[cfg(windows)]
+            {
+                // Named pipes cannot half-close. These cases test EOF inside a truncated request and expect no
+                // answer, so closing the complete client is the native equivalent.
+                drop(client);
+                return Ok(Vec::new());
+            }
         }
         // a close with this end's bytes still unread shows here as a reset rather than an end
         let mut back = Vec::new();
@@ -440,7 +454,7 @@ async fn a_frame_length_out_of_range_or_an_end_inside_a_frame_closes_the_socket(
 /// A client whose broker answers every request with `answer` (raw bytes), then the broker's end of the socket held
 /// open until the returned handle finishes.
 fn client_answered_with(answer: Vec<u8>) -> TestResult<(BrokerSecretStore, std::thread::JoinHandle<()>)> {
-    let (mut server, client) = UnixStream::pair()?;
+    let (mut server, client) = transport::pair_sync()?;
     let answering = std::thread::spawn(move || {
         let mut buffer = [0; 1024];
         // one request in, the answer out, then read until the client closes
@@ -485,7 +499,7 @@ async fn a_malformed_answer_closes_the_connection_for_every_later_call() -> Test
 
 #[tokio::test]
 async fn a_broker_gone_fails_the_call_and_every_later_one() -> TestResult {
-    let (server, client) = UnixStream::pair()?;
+    let (server, client) = transport::pair_sync()?;
     drop(server);
     let client = BrokerSecretStore::new(client, APPLICATION)?;
 

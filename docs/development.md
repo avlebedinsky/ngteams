@@ -178,14 +178,15 @@ its region. Passwords are handled by `proto-lab login`, never typed through the 
 
 ## Building
 
-The Windows port currently covers private files, logs and SQLite storage; app startup, sign-in, devices and release
+The Windows port currently covers private files, logs, SQLite storage and the authentication libraries (including
+credential storage and broker streams); app startup, interactive sign-in, devices and release
 packaging still require their platform integrations. The [Windows portability checks](ci.md#windows-portability)
 run these libraries on Linux and Windows. In a Windows checkout with the repository's Rust toolchain and MSVC C++
 build tools:
 
 ```powershell
-cargo check --locked -p teams-platform -p teams-log -p teams-store --all-targets
-cargo test --locked -p teams-platform -p teams-log -p teams-store
+cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth --all-targets
+cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth
 ```
 
 For native Windows debugging, the dedicated `win11` VM's console is the Windows UI sandbox, as authorized for the

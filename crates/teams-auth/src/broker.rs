@@ -21,8 +21,10 @@
 
 use std::fmt;
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::net::UnixStream;
+#[path = "broker/transport.rs"]
+mod transport;
 use std::sync::{Arc, Mutex, PoisonError};
+pub use transport::Stream as BrokerStream;
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use zeroize::Zeroizing;
@@ -490,7 +492,7 @@ async fn answer<S: SecretStore>(store: &S, scope: &BrokerScope, request: &Reques
 /// every later call fails with [`BrokerError::Closed`].
 pub struct BrokerSecretStore {
     application: String,
-    connection: Arc<Mutex<Option<UnixStream>>>,
+    connection: Arc<Mutex<Option<BrokerStream>>>,
 }
 
 impl fmt::Debug for BrokerSecretStore {
@@ -514,8 +516,8 @@ impl BrokerSecretStore {
     ///
     /// # Errors
     /// The stream's mode can't be set.
-    pub fn new(stream: UnixStream, application: impl Into<String>) -> io::Result<Self> {
-        stream.set_nonblocking(false)?;
+    pub fn new(stream: BrokerStream, application: impl Into<String>) -> io::Result<Self> {
+        transport::blocking(&stream)?;
         Ok(Self {
             application: application.into(),
             connection: Arc::new(Mutex::new(Some(stream))),
@@ -543,7 +545,7 @@ impl BrokerSecretStore {
 }
 
 /// One request and its answer on the shared connection; any failure drops the connection.
-fn exchange(connection: &Mutex<Option<UnixStream>>, op: Op, request: &[u8]) -> Result<Answer, BrokerError> {
+fn exchange(connection: &Mutex<Option<BrokerStream>>, op: Op, request: &[u8]) -> Result<Answer, BrokerError> {
     let mut connection = lock(connection);
     let stream = connection.as_mut().ok_or(BrokerError::Closed)?;
     let answer = round_trip(stream, op, request);
@@ -553,7 +555,7 @@ fn exchange(connection: &Mutex<Option<UnixStream>>, op: Op, request: &[u8]) -> R
     answer
 }
 
-fn round_trip(stream: &mut UnixStream, op: Op, request: &[u8]) -> Result<Answer, BrokerError> {
+fn round_trip(stream: &mut BrokerStream, op: Op, request: &[u8]) -> Result<Answer, BrokerError> {
     stream.write_all(request)?;
     stream.flush()?;
     let mut header = [0; LENGTH];

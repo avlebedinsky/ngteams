@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   storage:
-    name: Private files and storage (${{ matrix.os }})
+    name: Files, storage and authentication (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -32,14 +32,17 @@ jobs:
           persist-credentials: false
       - name: Install the repository toolchain
         run: rustup show active-toolchain
+      - name: Private Linux credential-service test dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring
       - name: Format
-        run: cargo fmt -p teams-platform -p teams-log -p teams-store -- --check
+        run: cargo fmt -p teams-platform -p teams-log -p teams-store -p teams-auth -- --check
       - name: Check every target
-        run: cargo check --locked -p teams-platform -p teams-log -p teams-store --all-targets
+        run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth --all-targets
       - name: Lints
-        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store --all-targets -- -D warnings
-      - name: Offline filesystem, SQLite and log tests
-        run: cargo test --locked -p teams-platform -p teams-log -p teams-store
+        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth --all-targets -- -D warnings
+      - name: Offline filesystem, storage, authentication and broker tests
+        run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth
       - name: Windows coverage tools
         if: runner.os == 'Windows'
         run: |
@@ -48,3 +51,8 @@ jobs:
       - name: Require 90% native Windows filesystem coverage
         if: runner.os == 'Windows'
         run: cargo llvm-cov --locked -p teams-platform --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90
+      - name: Require the authentication crate's native coverage floors
+        if: runner.os == 'Windows'
+        run: |
+          $floors = python -c "import json, tomllib; print(json.dumps(tomllib.load(open('coverage.toml', 'rb'))['baselines']['teams-auth']))" | ConvertFrom-Json
+          cargo llvm-cov --locked -p teams-auth --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions

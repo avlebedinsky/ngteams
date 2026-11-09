@@ -251,6 +251,11 @@ wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wiremock = "0.6.5"
 # Native Windows filesystem security, with no logging of its own.
 windows-sys = "0.61.2"
+# Windows broker byte streams through maintained local named-pipe bindings.
+interprocess = { version = "2.4.6", default-features = false }
+# Native Windows Credential Manager, selected explicitly without a process-wide default keyring.
+keyring-core = "1.0.1"
+windows-native-keyring-store = { version = "1.1.0", default-features = false }
 # the virtual keyboard's keymap and its text-to-key table: the version GPUI already links, without its features
 xkbcommon = { version = "0.8.0", default-features = false }
 # D-Bus for the app's notifications and tray item (M2 Task 14), the personal build's camera portal (M3 Task 20) and the

@@ -3,7 +3,8 @@
 //! `MemorySecretStore` for the session's account), the way a sandboxed app's session reads and stores its tokens.
 
 use std::fmt;
-use std::os::unix::net::UnixStream;
+#[path = "support/broker_transport.rs"]
+mod transport;
 use std::sync::Arc;
 
 use teams_auth::broker::{BrokerScope, BrokerSecretStore, serve};
@@ -37,9 +38,7 @@ impl TestStore {
         Ok(match kind {
             Kind::Memory => Self::Memory(MemorySecretStore::new()),
             Kind::Broker => {
-                let (server, client) = UnixStream::pair()?;
-                server.set_nonblocking(true)?;
-                let server = tokio::net::UnixStream::from_std(server)?;
+                let (server, client) = transport::pair()?;
                 let behind = Arc::new(MemorySecretStore::new());
                 let store = Arc::clone(&behind);
                 let scope = BrokerScope::new("teams-lab", account);

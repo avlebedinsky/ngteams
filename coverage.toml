@@ -141,3 +141,7 @@ reason = "module declaration and documentation only; no executable items"
 [unmapped_sources."crates/teams-platform/src/private/windows.rs"]
 sha256 = "fcdc9ee01827c1f62f558ecd680c156c9a94f6ddb32b958adcd751f3450f481b"
 reason = "Windows-only native ACL and creation APIs: absent from the Linux LLVM export; exercised by native private-file, log-rotation, SQLite and snapshot tests in the Windows VM and Windows portability workflow"
+
+[unmapped_sources."crates/teams-auth/src/secrets/windows.rs"]
+sha256 = "2706705ef13e524c953b2e4013f09ea6b73c1c551dcadb6c520ad1ead142b8fb"
+reason = "Windows-only Credential Manager adapter; no Linux LLVM mapping. Native synthetic-credential tests and coverage run in the Windows VM interactive logon session and the Windows portability job; raw third-party secret-bearing errors are redacted by construction."

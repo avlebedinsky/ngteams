@@ -1,5 +1,6 @@
 //! Synthetic credentials in a private session bus and temporary keyring; no desktop services are inherited.
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use std::fs;
