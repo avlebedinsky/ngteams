@@ -13,11 +13,11 @@ from pathlib import Path
 from transcript import Transcript, shown
 
 PHASES = {
-    'edit': ['investigate', 'implement', 'check', 'commit', 'land', 'done'],
-    'review': ['review', 'gate', 'land', 'done'],
+    'edit': ['investigate', 'implement', 'check', 'commit', 'done'],
+    'review': ['review', 'gate', 'done'],
     'scratch': ['investigate', 'implement', 'verify', 'done'],
 }
-DEFAULTS = {'edit': [10, 30, 4, 1, 6], 'review': [45, 30, 8], 'scratch': [5, 20, 10]}
+DEFAULTS = {'edit': [10, 30, 4, 1], 'review': [45, 30], 'scratch': [5, 20, 10]}
 HEAD_MAX = 16 * 1024
 # A review or fix companion's card fields that follow whichever companion is working.
 ACTIVITY = ('doing', 'said', 'background', 'waiting_for', 'written_ms', 'transcript_error')
@@ -25,7 +25,7 @@ ACTIVITY = ('doing', 'said', 'background', 'waiting_for', 'written_ms', 'transcr
 
 def group(state):
     state = state.strip().lower()
-    for prefix, name in [('waiting', 'waiting'), ('fail', 'failed'), ('queued', 'queued'),
+    for prefix, name in [('waiting', 'waiting'), ('fail', 'failed'), ('queued', 'queued'), ('in review', 'review'),
                          ('landed', 'completed'), ('done', 'completed'),
                          ('canceled', 'canceled'), ('cancelled', 'canceled')]:
         if state.startswith(prefix):
@@ -34,7 +34,8 @@ def group(state):
 
 
 def holds_slot(row):
-    return row['group'] == 'running' and not row.get('stage')
+    # Only a running task companion counts; folded review and fix stages never hold slots.
+    return row['group'] == 'running' and row['role'] == 'task' and not row.get('stage')
 
 
 def companion_stage(child):
@@ -98,15 +99,11 @@ def progress(flow, log, completed=False, waiting=False):
                 if checking is not None:
                     entered[2] = checking
                 target = max(phase, 3)
-            elif signal == 'land':
-                target = 4
         elif flow == 'review':
             if signal == 'review':
                 reviewed = True
             elif signal == 'gate' or (signal == 'check' and reviewed):
                 target = max(phase, 1)
-            elif signal == 'land':
-                target = 2
         else:
             if signal in ('implement', 'scratch_implement'):
                 edited = True
@@ -188,6 +185,8 @@ class Status:
             )}
             row['state'] = row['state'] or 'queued'
             row['runtime'] = task.get('runtime') if task.get('runtime') in ('claude', 'codex') else ''
+            row['role'] = task.get('role') if task.get('role') in ('revmux', 'fix') else 'task'
+            row['review'] = review_line(task.get('review'), None)
             row['num'] = task['num']
             row['after'] = task.get('after') if type(task.get('after')) is int else None
             row['group'] = group(row['state'])
@@ -209,8 +208,8 @@ class Status:
                 row.update(transcript_error=log.error, started_ms=log.first, written_ms=log.written,
                            doing=log.doing, said=log.said, background=list(log.background.values()), waiting_for=None)
                 if log.first is not None:
-                    phase, entered = progress(flow, log, row['group'] == 'completed',
-                                              row['group'] in ('waiting', 'canceled'))
+                    finished = row['group'] in ('completed', 'review')
+                    phase, entered = progress(flow, log, finished, row['group'] in ('waiting', 'canceled'))
                     row.update(phase=phase, phase_since_ms=entered[phase], done=phase == len(PHASES[flow]) - 1,
                                ended_ms=entered[-1] if entered[-1] is not None else (
                                    log.last if row['group'] != 'running' else None), _entered=entered)
@@ -301,7 +300,8 @@ class Status:
         free = max(0, slots - sum(holds_slot(row) for row in rows))
         queued = sorted((row for row in rows if row['group'] == 'queued'), key=lambda row: row['num'])
         reserved = {row['after'] for row in queued}
-        etas = sorted(row['eta_ms'] for row in rows if row['num'] not in reserved and row['eta_ms'] is not None)
+        etas = sorted(row['eta_ms'] for row in rows
+                      if holds_slot(row) and row['num'] not in reserved and row['eta_ms'] is not None)
         ahead = 0
         for place, row in enumerate(queued, 1):
             blocker = next((other for other in rows if other['num'] == row['after']

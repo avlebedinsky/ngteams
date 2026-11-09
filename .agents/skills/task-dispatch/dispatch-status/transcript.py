@@ -111,9 +111,7 @@ def command_signals(command):
         if not words:
             continue
         program, args = Path(words[0]).name, words[1:]
-        if program == 'land.sh':
-            signals.append('land')
-        elif program == 'revmux':
+        if program == 'revmux':
             signals.append('review')
         elif program == 'curl':
             signals.append('probe')

@@ -60,8 +60,8 @@ actual tools and schemas the session exposes. Never invent a tool, and don't use
   <skill-dir>/scripts/task-event.py <event-path> check 'Running the targeted tests'
   ```
 
-  Emit when a phase or meaningful activity changes. Phases are `investigate`, `implement`, `check`, `commit`, `land`,
-  `done`; review and fix companions use `review`, `gate`, `land`, `done`; read-only companions may use `verify`.
+  Emit when a phase or meaningful activity changes. Phases are `investigate`, `implement`, `check`, `commit`,
+  `done`; review and fix companions use `review`, `gate`, `done`; read-only companions may use `verify`.
   `done` means a handback, not proof of landing: the dispatcher's ledger remains authoritative. Keep event text free
   of secrets, raw tool output, and captures. A new companion continuing the same task keeps its event log.
 
@@ -75,7 +75,7 @@ here and keep the board recoverable; do not silently perform queued tasks inline
 ### All-tasks-done desktop notice in ngterm
 
 Chat completion is required on every host. Also use ngterm's native notifier once the current drain's
-required tasks, reviews, checks, and cleanup are complete. Recheck newly received task events first;
+required tasks, reviews, merges, checks, and cleanup are complete. Recheck newly received task events first;
 a new task reopens the drain. Waiting, blocked, or failed work prevents this notice, including a failed landing or
 preserved unfinished work. Only tasks explicitly deferred or canceled by the user are exclusions; disclose them
 in the completion summary and notification body.

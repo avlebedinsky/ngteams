@@ -12,7 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
     parser.add_argument("phase", choices=(
-        "investigate", "implement", "check", "commit", "land", "done", "review", "gate", "verify",
+        "investigate", "implement", "check", "commit", "done", "review", "gate", "verify",
     ))
     parser.add_argument("text", help="Short activity summary without secrets or raw output")
     args = parser.parse_args()

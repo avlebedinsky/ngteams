@@ -6,7 +6,8 @@
 # Legacy Claude boards: agent-state.sh <agent name> <session id>...
 # Prints `transcript: <path>`, `worktree: <path>` and a `work:` line (or `no agent named …` with exit 1):
 #   landed <hash>      the branch moved and origin/main holds it: nothing left but cleanup.sh
-#   unlanded           commits, uncommitted edits or a rebase still in progress: continue it
+#   unlanded           commits, uncommitted edits or a rebase still in progress: continue it, or if the task handed
+#                      back, continue its review and land it
 #   none               no worktree, or nothing in it: start over from the brief
 set -euo pipefail
 

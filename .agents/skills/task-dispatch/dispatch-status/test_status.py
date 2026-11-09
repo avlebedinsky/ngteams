@@ -88,7 +88,7 @@ class SignalTests(unittest.TestCase):
             self.assertEqual(command_signals(command), [], command)
         for command, expected in (
             ('env X=y timeout 30 nice -n 5 cargo --locked test', ['check']),
-            ('flock -w 1 /tmp/lock /repo/scripts/land.sh', ['land']),
+            ('flock -w 1 /tmp/lock cargo test', ['check']),
             ('cargo check\ngit -C /repo commit -m x', ['build', 'commit']),
             ('cargo test 2>&1 | tee /tmp/log', ['check', 'scratch_implement']),
             ('revmux --task x', ['review']),
@@ -158,15 +158,15 @@ class TranscriptTests(Files):
 
     def test_portable_phases_and_rework(self):
         log = Transcript(self.events)
-        for minute, phase in enumerate(('investigate', 'implement', 'check', 'implement', 'check', 'commit', 'land', 'done')):
+        for minute, phase in enumerate(('investigate', 'implement', 'check', 'implement', 'check', 'commit', 'done')):
             self.event(phase, minute=minute)
             log.poll()
             current, _ = progress('edit', log)
-            self.assertEqual(current, {'investigate': 0, 'implement': 1, 'check': 2, 'commit': 3, 'land': 4, 'done': 5}[phase])
+            self.assertEqual(current, {'investigate': 0, 'implement': 1, 'check': 2, 'commit': 3, 'done': 4}[phase])
         self.assertEqual(log.doing['finished_ms'], log.handback)
 
     def test_review_and_scratch_phases(self):
-        for flow, phases in [('review', ('review', 'gate', 'land', 'done')),
+        for flow, phases in [('review', ('review', 'gate', 'done')),
                              ('scratch', ('investigate', 'implement', 'verify', 'done'))]:
             log = Transcript(self.events)
             for index, phase in enumerate(phases):
@@ -248,14 +248,44 @@ class BoardTests(Files):
         self.assertEqual(status.snapshot()['tasks'][0]['said']['text'], 'New')
 
     def test_sample_medians_and_waiting_handback(self):
-        for minute, phase in [(0, 'investigate'), (2, 'implement'), (5, 'check'), (6, 'commit'), (7, 'land'), (9, 'done')]:
+        for minute, phase in [(0, 'investigate'), (2, 'implement'), (5, 'check'), (6, 'commit'), (9, 'done')]:
             self.event(phase, minute=minute)
         self.board([{'num': 1, 'state': 'landed abc', 'flow': 'edit', 'transcript': str(self.events)},
                     {'num': 2, 'state': 'waiting on user', 'flow': 'edit', 'transcript': str(self.events)}])
         rows = Status(self.ledger).snapshot()['tasks']
         self.assertTrue(rows[0]['done'])
         self.assertFalse(rows[1]['done'])
-        self.assertEqual(rows[1]['phase_typical_ms'], 120_000)
+        self.assertEqual(rows[1]['phase_typical_ms'], 180_000)
+
+
+class SlotTests(Files):
+    def test_only_running_task_companions_hold_slots(self):
+        self.board([{'num': 1, 'state': 'running', 'role': 'task'},
+                    {'num': 2, 'state': 'in review abc', 'role': 'task',
+                     'review': {'mode': 'focused', 'round': 2, 'state': 'fixing'}},
+                    {'num': 3, 'state': 'running', 'role': 'revmux', 'of': 2, 'flow': 'review'},
+                    {'num': 4, 'state': 'running', 'role': 'fix', 'of': 2, 'flow': 'review'},
+                    {'num': 5, 'state': 'queued'}], slots=2)
+        board = Status(self.ledger).snapshot()
+        rows = {row['num']: row for row in board['tasks']}
+        self.assertEqual(board['slots_used'], 1)
+        self.assertEqual(rows[2]['group'], 'review')
+        self.assertEqual(rows[2]['review'], 'focused · round 2 · fixing')
+        self.assertEqual(rows[3]['group'], 'running')
+        self.assertEqual(rows[5]['queue']['start_ms'], 0)
+
+    def test_a_prerequisite_in_review_still_holds_its_dependent(self):
+        self.board([{'num': 1, 'state': 'in review abc'}, {'num': 2, 'state': 'queued', 'after': 1}], slots=2)
+        rows = Status(self.ledger).snapshot()['tasks']
+        self.assertIsNone(rows[1]['queue']['start_ms'])
+
+    def test_a_task_in_review_shows_its_phases_finished(self):
+        self.event('investigate')
+        self.event('commit', minute=1)
+        self.board([{'num': 1, 'state': 'in review abc', 'flow': 'edit', 'transcript': str(self.events)}])
+        row = Status(self.ledger).snapshot()['tasks'][0]
+        self.assertTrue(row['done'])
+        self.assertIsNone(row['eta_ms'])
 
     def test_canceled_tasks_take_no_slot_and_are_the_last_section(self):
         self.board([{'num': 1, 'state': 'canceled'}, {'num': 2, 'state': 'Cancelled by user'},
@@ -265,7 +295,7 @@ class BoardTests(Files):
         self.assertEqual(board['slots_used'], 1)
         page = (Path(__file__).with_name('assets') / 'index.html').read_text()
         order = re.findall(r'\["(\w+)", "[^"]+"\]', re.search(r'const GROUPS = (.*?);', page, re.S).group(1))
-        self.assertEqual(order, ['waiting', 'failed', 'running', 'queued', 'completed', 'canceled'])
+        self.assertEqual(order, ['waiting', 'failed', 'running', 'review', 'queued', 'completed', 'canceled'])
 
     def test_canceled_handback_keeps_the_last_work_phase(self):
         self.event('implement')

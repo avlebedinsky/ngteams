@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Lands the task worktree's branch on main and pushes it, one worktree at a time.
 #
-# Run from inside the task's worktree once the work is committed and compiles; the task's review comes after it lands,
-# over the printed RANGE (its fix companion lands its fixes with this script too). It
+# Usage: land.sh --reviewed <head> | --no-review
+# The dispatcher runs this from inside the task's worktree, and only once the branch may merge: --reviewed names the
+# head it accepted from a clean review, --no-review says the task's review mode is `none`. Companions never run it. It
 # rebases the branch onto origin/main and checks the whole workspace compiles, then, under a lock shared by every
 # worktree of the repo, rebases once more onto whatever landed meanwhile (checking again if that moved it), pushes the
 # branch as origin's main and fast-forwards the main checkout to it. Only the task's own commits are pushed: a main
@@ -14,7 +15,9 @@
 # (fix, commit, run again); 4 the main checkout can't take the change (it isn't on main, its main holds commits origin
 # doesn't, or its uncommitted files overlap the change): nothing was pushed, report it, and never stash, reset, force or
 # touch its files; 5 the fetch or the push failed: nothing changed locally, run again; 6 pushed, but the main checkout
-# couldn't be fast-forwarded: the change is on origin, report that the checkout is behind.
+# couldn't be fast-forwarded: the change is on origin, report that the checkout is behind; 7 the branch no longer makes
+# the changes --reviewed accepted (the rebase altered them, or commits came after the review): nothing was pushed,
+# re-review it and run this again with the new head.
 set -euo pipefail
 
 die() {
@@ -24,17 +27,31 @@ die() {
   exit "$code"
 }
 
+# What a range adds and removes, without the blob ids and hunk positions a rebase moves.
+changes() {
+  git diff --no-color --no-ext-diff --unified=0 "$1" "$2" | sed '/^index /d; /^@@ /d'
+}
+
 rebase_onto_origin() {
   if ! git rebase --quiet origin/main; then
     git rebase --abort
     die 2 "rebasing $branch onto origin/main conflicts"
   fi
+  [ -z "$reviewed" ] || [ "$(changes "$reviewed_base" "$reviewed")" = "$(changes origin/main HEAD)" ] ||
+    die 7 "$branch no longer makes the changes reviewed at ${reviewed:0:12}; nothing was pushed"
 }
 
 check_workspace() {
   echo "land: checking the workspace compiles" >&2
   cargo check --quiet --workspace --all-targets || die 3 "the workspace doesn't compile on $branch"
 }
+
+reviewed="" reviewed_base=""
+case "${1:-}:$#" in
+  --reviewed:2) reviewed=$(git rev-parse --verify --quiet "$2^{commit}") || die 1 "$2 isn't a commit" ;;
+  --no-review:1) ;;
+  *) die 1 "usage: land.sh --reviewed <head> | --no-review" ;;
+esac
 
 wt=$(git rev-parse --show-toplevel)
 common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
@@ -54,6 +71,7 @@ start=$(git reflog show --format=%H "refs/heads/$branch" | tail -1)
 [ -n "$start" ] || die 1 "$branch has no reflog to tell where it started"
 git merge-base --is-ancestor "$start" origin/main ||
   die 4 "$branch started from commits origin/main doesn't hold"
+[ -z "$reviewed" ] || reviewed_base=$(git merge-base "$reviewed" origin/main)
 rebase_onto_origin
 check_workspace
 
@@ -81,7 +99,7 @@ overlap=$(comm -12 \
 
 onto=$(git rev-parse origin/main)
 git push --quiet origin HEAD:main || die 5 "pushing $branch to origin/main failed"
-# Exactly the commits this landing pushed, for the task's own review.
+# Exactly the commits this landing pushed, for the task's record.
 echo "RANGE $onto..$(git rev-parse HEAD)"
 git -C "$main_wt" merge --quiet --ff-only "$branch" ||
   die 6 "pushed $(git rev-parse --short HEAD), but the main checkout couldn't fast-forward to it"
