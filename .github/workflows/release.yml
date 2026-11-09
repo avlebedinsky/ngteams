@@ -17,11 +17,10 @@ on:
 permissions:
   contents: read
 
-# `queue: max`: every push's run waits its turn. The default keeps one pending run and cancels the one it replaces, so a
-# push made while another release builds would never be published.
+# A new push cancels whatever release is building or waiting: only the newest commit is worth publishing.
 concurrency:
   group: release
-  queue: max
+  cancel-in-progress: true
 
 defaults:
   run:
