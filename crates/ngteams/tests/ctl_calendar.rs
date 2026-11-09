@@ -114,6 +114,7 @@ impl Lab {
         let cx = TestAppContext::single();
         let calls = calls.then(|| PersonalCalls {
             ringer: None,
+            sounds: None,
             echo: Mri::new(ECHO),
             video: None,
             camera: None,

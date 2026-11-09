@@ -119,7 +119,10 @@ impl CallAlert {
         }
         self.stop(cx);
         let Some(incoming) = ringing else { return };
-        let ringtone = self.ringer.as_ref().map(|ringer| {
+        let account = self.core.me().to_owned();
+        let in_call = self.calls.read(cx).call().is_some();
+        let audible = self.ringer.as_ref().filter(|ringer| ringer.audible(&account, in_call));
+        let ringtone = audible.map(|ringer| {
             self.trace
                 .record(&TraceLine::new("ringtone", "started").call(incoming.call.get()));
             ringer.start()

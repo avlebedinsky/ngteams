@@ -173,7 +173,7 @@ pub(super) fn tempo() -> Option<gst::Element> {
 }
 
 /// `GStreamer` started, with nothing plugged that it mustn't ([`nothing_that_fetches_or_probes`]).
-pub(super) fn start_gstreamer() -> Result<(), Failure> {
+pub(crate) fn start_gstreamer() -> Result<(), Failure> {
     gst::init().map_err(|_| Failure::NoCodec)?;
     nothing_that_fetches_or_probes();
     Ok(())

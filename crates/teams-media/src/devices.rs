@@ -126,6 +126,9 @@ pub enum DeviceError {
     /// A WAV file this backend can't read.
     #[error("WAV: {0}")]
     Wav(String),
+    /// A sound file that can't be read ([`crate::sound_file`]).
+    #[error("sound file: {0}")]
+    SoundFile(String),
     #[error("PipeWire: {0}")]
     PipeWire(String),
     /// The desktop's camera portal (or the bus it is on) failed or didn't answer.

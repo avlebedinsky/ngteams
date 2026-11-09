@@ -8,7 +8,7 @@
 //! - **Appearance**: the theme (following the system's light or dark mode with a theme for each, or one theme
 //!   whatever the system says), each a tile drawn in its own colours; the font size with its steps; the font family,
 //!   searchable among the system's.
-//! - **Notifications**: which messages notify.
+//! - **Notifications**: which messages notify, and the sounds ([`sounds`]): the pack, then each event's sound.
 //! - **Privacy**: sending typing and read receipts.
 //! - **Calls** (where the app has calls, or its calls have video): the calls' microphone, speaker and camera
 //!   ("Follow the system", naming the system's default, then every device there is, a device chosen that isn't there
@@ -30,7 +30,7 @@ use std::sync::Arc;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
     IntoElement, KeyDownEvent, ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::IndexPath;
 use gpui_component::button::Button;
@@ -54,6 +54,7 @@ use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, The
 use crate::trace::ViewTrace;
 
 pub mod ai_picker;
+pub mod sounds;
 
 /// The font picker's first row: the system's UI font (no family named).
 pub const SYSTEM_FONT_LABEL: &str = "System font";
@@ -334,6 +335,10 @@ pub struct SettingsView {
     correction_ai: Option<Entity<AiPicker>>,
     /// The page's scrolling.
     scroll: ScrollHandle,
+    /// A sound pack or file being added.
+    adding: Option<Task<()>>,
+    /// Why the last one couldn't be.
+    adding_problem: Option<SharedString>,
     _observing: Subscription,
 }
 
@@ -356,6 +361,8 @@ impl SettingsView {
             chat_ai: None,
             correction_ai: None,
             scroll: ScrollHandle::new(),
+            adding: None,
+            adding_problem: None,
             _observing: observing,
         }
     }
@@ -810,7 +817,7 @@ impl SettingsView {
         select
     }
 
-    fn notifications(&self, settings: &Settings, palette: Palette) -> Vec<AnyElement> {
+    fn notifications(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let choices = Notifications::ALL
             .into_iter()
             .map(|level| Pick {
@@ -821,7 +828,7 @@ impl SettingsView {
                 apply: self.changer(move |settings| settings.notifications = level),
             })
             .collect();
-        vec![group(
+        let mut boxes = vec![group(
             None,
             vec![row(
                 "Notify me about",
@@ -830,7 +837,9 @@ impl SettingsView {
                 palette,
             )],
             palette,
-        )]
+        )];
+        boxes.extend(self.sound_groups(settings, palette, cx));
+        boxes
     }
 
     fn privacy(&self, settings: &Settings, palette: Palette) -> Vec<AnyElement> {
@@ -873,6 +882,7 @@ impl SettingsView {
         if !rows.is_empty() {
             groups.push(group(Some("Devices"), rows, palette));
         }
+        groups.push(self.ringtone_group(settings, palette, cx));
         if self.video_switch {
             groups.push(group(
                 Some("Video"),
@@ -1161,7 +1171,7 @@ impl SettingsView {
                 boxes
             }
             Page::Appearance => self.appearance(&settings.appearance, palette, window, cx),
-            Page::Notifications => self.notifications(settings, palette),
+            Page::Notifications => self.notifications(settings, palette, cx),
             Page::Privacy => self.privacy(settings, palette),
             Page::Calls => self.calls(settings, palette, cx),
             Page::Diagnostics => {

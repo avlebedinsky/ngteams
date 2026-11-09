@@ -52,6 +52,7 @@ use zbus::Connection;
 use crate::accounts::{AccountParts, Accounts, AccountsEvent};
 use crate::bus::{self, BusError};
 use crate::call_alert::{CallAlert, CallAlertEvent};
+use crate::call_sounds::CallSounds;
 use crate::call_window::{AccountNamer, CallWindows, CallWindowsEvent};
 use crate::notify::{BusNotifications, DEFAULT_ACTION, NotificationServer, Notifier, NotifierEvent};
 use crate::own_presence::OwnPresence;
@@ -127,6 +128,8 @@ struct Slot {
     shell: ShellParts,
     notifier: Entity<Notifier>,
     call_alert: Entity<CallAlert>,
+    /// The sounds of its calls: held for as long as the account is.
+    _call_sounds: Entity<CallSounds>,
     own_presence: Entity<OwnPresence>,
     tray: Entity<Tray>,
     _subscriptions: [Subscription; 2],
@@ -333,11 +336,14 @@ impl Desktop {
             )
         });
         let tray = cx.new(|cx| Tray::new(Arc::clone(&shell.core), shell.models.clone(), trace, cx));
+        let call_sounds =
+            cx.new(|cx| CallSounds::new(key.clone(), shell.models.calls.clone(), shell.settings.clone(), cx));
         Slot {
             key,
             shell,
             notifier,
             call_alert,
+            _call_sounds: call_sounds,
             own_presence,
             tray,
             _subscriptions: [opening, alerted],

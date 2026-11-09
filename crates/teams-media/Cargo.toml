@@ -28,7 +28,8 @@ libc.workspace = true
 # the camera's background effects: a picture (the app's own JPEGs, or the user's JPEG or PNG) decoded and scaled, and
 # a user's picture written as a JPEG: the version and decoders GPUI already links
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
-# a shared video file played in its card: GStreamer's playbin, fed by an appsrc, its frames and sound to appsinks
+# a shared video file played in its card: GStreamer's playbin, fed by an appsrc, its frames and sound to appsinks;
+# a sound the user imports, MP3 or Ogg, decoded (`sound_file`)
 gstreamer.workspace = true
 gstreamer-app.workspace = true
 # the call's media: the peer connection (ICE through Teams' relay, DTLS-SRTP, Opus and H.264, the jitter buffer,

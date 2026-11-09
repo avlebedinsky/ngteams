@@ -329,6 +329,9 @@ fn shared_settings(settings: SettingsModel, calls: Option<&PersonalCalls>, cx: &
     if let Some(devices) = calls.and_then(|calls| calls.devices.clone()) {
         teams_ui::settings::attach_devices(&settings, devices, cx);
     }
+    if let Some(sounds) = calls.and_then(|calls| calls.sounds.clone()) {
+        teams_ui::settings::attach_sounds(&settings, sounds, cx);
+    }
     if let Some(camera) = calls.and_then(|calls| calls.camera.clone()) {
         // the video effects' preview, on the camera the settings choose
         teams_ui::settings::attach_camera_preview(&settings, teams_ui::CameraPreview::new(camera), cx);

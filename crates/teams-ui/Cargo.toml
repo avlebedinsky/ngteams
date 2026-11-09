@@ -52,6 +52,8 @@ rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["sync"] }
 # the settings file
 toml.workspace = true
+# a sound pack the user imports as an archive (deflate only; entries read by name, never unpacked by their paths)
+zip.workspace = true
 # the notifications and the tray item, on the bus the app is given (async-io, as GPUI's own)
 zbus.workspace = true
 

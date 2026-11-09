@@ -25,7 +25,8 @@ use teams_media::devices::pipewire::Reach;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::player::PlayerSetup;
 use teams_proto::Mri;
-use teams_ui::{DeviceRinger, Ringer, VideoFeed};
+use teams_ui::sounds::SoundBoard;
+use teams_ui::{Ringer, VideoFeed};
 
 #[cfg(test)]
 #[path = "../tests/support/calling_devices.rs"]
@@ -38,6 +39,8 @@ use tests::PipeWireDevices;
 pub struct PersonalCalls {
     /// What plays an incoming call's ringtone; `None` plays none.
     pub ringer: Option<Arc<dyn Ringer>>,
+    /// What plays the app's sounds, the ringtone among them, as the settings say; `None` plays none.
+    pub sounds: Option<Arc<SoundBoard>>,
     /// The echo service the test call goes to ([`echo`]).
     pub echo: Mri,
     /// Where a call's video is shown; `None`: the calls carry no video.
@@ -52,6 +55,7 @@ impl std::fmt::Debug for PersonalCalls {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PersonalCalls")
             .field("ringer", &self.ringer.is_some())
+            .field("sounds", &self.sounds.is_some())
             .field("video", &self.video.is_some())
             .field("camera", &self.camera.is_some())
             .field("devices", &self.devices.is_some())
@@ -68,7 +72,8 @@ pub fn echo() -> Mri {
 /// The engine's calling and the window's calls on `devices`, the calls taking video when `video` (none without).
 #[must_use]
 pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, video: bool) -> (AccountCalls, PersonalCalls) {
-    let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(Arc::clone(&devices)));
+    let sounds = Arc::new(SoundBoard::new(Arc::clone(&devices)));
+    let ringer: Arc<dyn Ringer> = sounds.clone();
     let feed = video.then(VideoFeed::new);
     let camera = video.then(|| Arc::clone(&devices));
     let video = feed.clone().map(|feed| call_video(Arc::new(feed)));
@@ -76,6 +81,7 @@ pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, video: bool) -> (Acco
         account_calls(devices, video),
         PersonalCalls {
             ringer: Some(ringer),
+            sounds: Some(sounds),
             echo: echo(),
             video: feed,
             camera,
@@ -89,6 +95,8 @@ pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, video: bool) -> (Acco
 #[derive(Clone)]
 pub struct CallDevices {
     devices: Arc<PipeWireDevices>,
+    /// The app's sounds, one board for every account: one setting, one ringtone at a time.
+    sounds: Arc<SoundBoard>,
 }
 
 impl std::fmt::Debug for CallDevices {
@@ -104,7 +112,9 @@ impl CallDevices {
     /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
     pub fn open(reach: Reach) -> Result<Self, DeviceError> {
         let devices = Arc::new(PipeWireDevices::connect(reach)?);
-        Ok(Self { devices })
+        let shared: Arc<dyn Devices + Send + Sync> = devices.clone();
+        let sounds = Arc::new(SoundBoard::new(shared));
+        Ok(Self { devices, sounds })
     }
 
     /// What a video a message carries is played with: its sound on these devices.
@@ -121,6 +131,9 @@ impl CallDevices {
         let devices: Arc<dyn Devices + Send + Sync> = self.devices.clone();
         let (engine, mut window) = on_devices(devices, true);
         window.devices = Some(self.devices.clone());
+        let ringer: Arc<dyn Ringer> = self.sounds.clone();
+        window.ringer = Some(ringer);
+        window.sounds = Some(self.sounds.clone());
         (engine, window)
     }
 }

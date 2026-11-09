@@ -11412,6 +11412,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "ui-sandbox",
  "zbus",
+ "zip 9.0.5",
 ]
 
 [[package]]

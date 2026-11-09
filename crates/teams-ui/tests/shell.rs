@@ -1421,3 +1421,100 @@ fn the_first_run_screen_shows_over_everything_until_it_is_confirmed() {
         !model.sends_typing() && model.sends_read_receipts() && model.sends_presence()
     }));
 }
+
+/// A settings model kept in a file of its own, so packs can be imported.
+fn filed_settings() -> (tempfile::TempDir, SettingsModel) {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let file = teams_ui::SettingsFile::new(dir.path().join("settings.toml"));
+    (dir, SettingsModel::load(file))
+}
+
+#[test]
+fn every_sound_can_be_turned_off_changed_and_made_quieter() {
+    use teams_ui::sounds::{SoundEvent, SoundSource};
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-notifications");
+    for event in SoundEvent::ALL {
+        assert!(bounds(cx, event.picker()).is_some(), "{event:?} has its row");
+    }
+    click(cx, "sound-on-message");
+    let sounds = |cx: &mut VisualTestContext| settings_of(&shell, cx).sounds;
+    assert!(!sounds(cx).event(SoundEvent::Message).on);
+    click(cx, "sound-volume-mention-down");
+    assert_eq!(sounds(cx).event(SoundEvent::Mention).volume, 90);
+    click(cx, "sound-volume-down");
+    assert_eq!(sounds(cx).volume, 90);
+    click(cx, "sound-message");
+    click(cx, "sound-message-chimes");
+    assert_eq!(
+        sounds(cx).event(SoundEvent::Message).sound,
+        Some(SoundSource::Builtin("chimes"))
+    );
+    click(cx, "sound-pack");
+    click(cx, "sound-pack-retro");
+    assert_eq!(sounds(cx).pack, SoundSource::Builtin("retro"));
+    click(cx, "sounds-while-busy");
+    assert!(!sounds(cx).while_busy);
+    assert!(
+        bounds(cx, "sound-pack-add-folder").is_none(),
+        "settings in memory import nothing"
+    );
+}
+
+#[test]
+fn an_imported_pack_is_chosen_listed_and_removed() {
+    use teams_ui::settings_view::sounds::Adding;
+    use teams_ui::sounds::{ImportKind, SoundEvent, SoundSource};
+    let rig = seeded();
+    let (_dir, model) = filed_settings();
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-notifications");
+    assert!(bounds(cx, "sound-pack-add-folder").is_some());
+    let view = cx.update(|_, cx| shell.read(cx).settings_view().clone());
+    let pack = tempfile::tempdir().expect("a temporary directory");
+    std::fs::write(
+        pack.path().join("pack.toml"),
+        "name = \"Lab pack\"\n[sounds]\nmessage = \"a.wav\"\n",
+    )
+    .expect("written");
+    let import = |cx: &mut VisualTestContext| {
+        let path = pack.path().to_owned();
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.import_now(&path, Adding::Pack(ImportKind::Folder), cx);
+            });
+        });
+        cx.run_until_parked();
+    };
+    import(cx);
+    assert!(
+        bounds(cx, "sound-pack-problem").is_some(),
+        "a pack without its sound says so"
+    );
+    // a quarter second of 48 kHz silence
+    let samples = vec![0.0_f32; 12_000];
+    let mut writer = teams_media::devices::wav::WavWriter::create(&pack.path().join("a.wav")).expect("made");
+    writer.write(&samples).expect("written");
+    writer.finish().expect("finished");
+    import(cx);
+    assert!(bounds(cx, "sound-pack-problem").is_none());
+    let source = SoundSource::Imported("lab-pack".to_owned());
+    assert_eq!(settings_of(&shell, cx).sounds.pack, source, "chosen as it is added");
+    assert!(bounds(cx, "sound-pack-remove-lab-pack").is_some());
+    click(cx, SoundEvent::Message.picker());
+    assert!(
+        bounds(cx, "sound-message-lab-pack").is_some(),
+        "it offers the sound it has"
+    );
+    cx.simulate_keystrokes("escape");
+    click(cx, SoundEvent::Mention.picker());
+    assert!(bounds(cx, "sound-mention-lab-pack").is_none(), "not one it hasn't");
+    cx.simulate_keystrokes("escape");
+    click(cx, "sound-pack-remove-lab-pack");
+    cx.run_until_parked();
+    assert_eq!(settings_of(&shell, cx).sounds.pack, SoundSource::default());
+    assert!(bounds(cx, "sound-pack-remove-lab-pack").is_none());
+}

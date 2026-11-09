@@ -16,6 +16,9 @@ pub mod common;
 mod health;
 #[path = "common/notices.rs"]
 mod notices;
+/// What a call sounds like as it goes along.
+#[path = "calls/sounds.rs"]
+mod sounds;
 /// A recording's notice that fits its card, and Controls' checks a lagging read doesn't flip back.
 #[path = "calls/stage_fit.rs"]
 mod stage_fit;

@@ -88,6 +88,7 @@ fn changed() -> Settings {
             chat: CHAT.to_owned(),
             language: "de",
         }],
+        sounds: teams_ui::sounds::SoundSettings::default(),
         chat_translator: AiChoice {
             tool: TranslatorChoice::Only(Backend::Codex),
             model: teams_ui::local_ai::Model::Named("my-team-model".to_owned()),

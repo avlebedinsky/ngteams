@@ -35,6 +35,7 @@ use std::time::Duration;
 
 use crate::devices::{Devices, VideoFrame};
 
+pub(crate) use run::start_gstreamer;
 pub use source::{Abandon, ByteSource, ByteStream, Cache, Pieces, SourceError};
 pub use stream::{Part, Presentation, SegmentSource, Span, Track, TrackKind};
 

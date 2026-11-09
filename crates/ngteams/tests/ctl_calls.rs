@@ -184,6 +184,7 @@ impl Lab {
         let cx = TestAppContext::single();
         let calls = PersonalCalls {
             ringer: None,
+            sounds: None,
             echo: Mri::new(ECHO),
             video: feed,
             camera: None,

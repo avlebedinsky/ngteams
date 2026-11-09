@@ -706,6 +706,8 @@ pub struct Calls {
     echo: Option<Mri>,
     registered: bool,
     ringing: Option<IncomingCall>,
+    /// The invitation that last stopped ringing without being answered here, and who ended it.
+    rang_out: Option<(CallId, Option<Mri>)>,
     call: Option<ActiveCall>,
     /// The kind and chat of a start or a join asked for, until its call is told (the engine tells every call it
     /// started, at the latest as it ends), it is refused or the engine stops.
@@ -833,6 +835,15 @@ impl Calls {
     #[must_use]
     pub fn ringing(&self) -> Option<&IncomingCall> {
         self.ringing.as_ref()
+    }
+
+    /// The invitation `me` last missed, if one: it stopped ringing and `me` didn't end it from another device.
+    #[must_use]
+    pub fn missed(&self, me: &str) -> Option<CallId> {
+        self.rang_out
+            .as_ref()
+            .filter(|(_, by)| !by.as_ref().is_some_and(|by| by.as_str().eq_ignore_ascii_case(me)))
+            .map(|(call, _)| *call)
     }
 
     /// The call up, or being set up.
@@ -1065,9 +1076,10 @@ impl Calls {
                 }
                 self.ringing = Some(incoming.clone());
             }
-            Event::RingEnded { call, .. } => {
+            Event::RingEnded { call, end } => {
                 if self.ringing.as_ref().is_some_and(|ringing| ringing.call == *call) {
                     self.ringing = None;
+                    self.rang_out = Some((*call, end.by.clone()));
                 }
             }
             Event::CallCaptions { call, captions } => {

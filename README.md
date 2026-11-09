@@ -35,6 +35,10 @@ built for the Linux desktop instead of a web page in a wrapper.
 - Channel posts and threads, favorites, notification preferences and channel management
 - Cards and Workflows, as they appear in Teams
 
+**Sounds**
+- A sound, a volume and an off switch for each of 23 events, far beyond Teams' three dropdowns: messages, mentions, channel posts, missed calls, ringing, people joining and leaving, recording, screen sharing, raised hands and more
+- Eight built-in sound packs, your own packs from a folder or a `.zip`, or any WAV, OGG or MP3 of yours for a single sound ([how to make a pack](docs/sound-packs.md))
+
 **Calls and meetings**
 - One-on-one and group audio and video calls, and scheduled or instant meetings
 - Screen sharing, background blur and virtual backgrounds

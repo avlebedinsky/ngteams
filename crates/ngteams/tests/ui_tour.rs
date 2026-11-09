@@ -107,6 +107,23 @@ impl PictureCamera {
     }
 }
 
+/// A speaker that never opens: the settings' previews are offered, and nothing plays.
+struct NoDevices;
+
+impl teams_media::devices::Devices for NoDevices {
+    fn microphone(&self) -> Result<Box<dyn teams_media::devices::AudioSource>, teams_media::devices::DeviceError> {
+        Err(teams_media::devices::DeviceError::Closed)
+    }
+
+    fn speaker(&self) -> Result<Box<dyn teams_media::devices::AudioSink>, teams_media::devices::DeviceError> {
+        Err(teams_media::devices::DeviceError::Closed)
+    }
+
+    fn camera(&self) -> Result<Box<dyn teams_media::devices::VideoSource>, teams_media::devices::DeviceError> {
+        Err(teams_media::devices::DeviceError::Closed)
+    }
+}
+
 impl teams_media::devices::Devices for PictureCamera {
     fn microphone(&self) -> Result<Box<dyn teams_media::devices::AudioSource>, teams_media::devices::DeviceError> {
         Err(teams_media::devices::DeviceError::Closed)
@@ -167,7 +184,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 247] = [
+const STEPS: [Step; 5 + 248] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -758,6 +775,16 @@ const STEPS: [Step; 5 + 247] = [
     }),
     ("settings-notifications", |shell, _, cx| {
         show_page(shell, Page::Notifications, cx);
+    }),
+    // the calls' sounds, scrolled to, each with its preview: a speaker that opens nothing is enough to offer them
+    ("settings-sounds", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        teams_ui::settings::attach_sounds(
+            &model,
+            Arc::new(teams_ui::sounds::SoundBoard::new(Arc::new(NoDevices))),
+            cx,
+        );
+        shell.read(cx).settings_view().read(cx).scroll_to_end();
     }),
     ("settings-privacy", |shell, _, cx| show_page(shell, Page::Privacy, cx)),
     ("settings-calls", |shell, _, cx| {

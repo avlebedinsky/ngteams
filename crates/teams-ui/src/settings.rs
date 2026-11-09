@@ -11,6 +11,8 @@
 //!   12-hour or 24-hour), and whether the first run's screen of the writes that happen on their
 //!   own was confirmed.
 //!   Tasks 13, 14 and 20 act on the ones Task 8 only kept.
+//! - **The sounds** ([`crate::sounds`], [`attach_sounds`]): which sound each event plays, how loud and the packs they
+//!   come from, the app's for every account; what plays them follows every change at once.
 //! - **The devices** (M3 Task 20, [`attach_devices`]): with the calls' devices attached, the model keeps the list of
 //!   devices there are (each change of it shown as it comes), hands the device directory the choice of each kind at
 //!   once and on every change, so a call that runs moves to the device chosen; the settings view lists them.
@@ -50,6 +52,7 @@ use toml::{Table, Value};
 
 use crate::effects::CameraPreview;
 use crate::local_ai::{AiChoice, Model, ToolChoice, Work};
+use crate::sounds::{self, PackInfo, SoundPlayer, SoundSettings, SoundSource};
 use crate::theme::{self, Appearance};
 use crate::translate;
 
@@ -71,6 +74,8 @@ pub const MAX_DEVICE_NAME: usize = 256;
 pub const MAX_PICTURE_NAME: usize = 64;
 /// The directory beside the settings file the user's background pictures are kept in.
 pub const BACKGROUNDS_DIR: &str = "backgrounds";
+/// The directory beside the settings file the sound packs the user imported are kept in.
+pub const SOUND_PACKS_DIR: &str = "sound-packs";
 
 /// The camera's background in calls ([`crate::effects`]), as Teams' video effects offer it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -377,6 +382,8 @@ pub struct Settings {
     pub chat_translator: AiChoice,
     /// Which tool, and model, proofreads a draft when the user asks ([`crate::message_correct`]).
     pub message_corrector: AiChoice,
+    /// Which sound plays for each event, how loud, and the pack they come from ([`crate::sounds`]).
+    pub sounds: SoundSettings,
 }
 
 /// The language an account reads a chat in, translated on this computer ([`crate::chat_translate`]).
@@ -593,6 +600,7 @@ impl Default for Settings {
             chat_languages: Vec::new(),
             chat_translator: AiChoice::default(),
             message_corrector: AiChoice::default(),
+            sounds: SoundSettings::default(),
         }
     }
 }
@@ -640,6 +648,12 @@ pub mod keys {
     pub const CHAT_LANGUAGES: &str = "chat_languages";
     pub const CHAT_TRANSLATOR: &str = "chat_translator";
     pub const MESSAGE_CORRECTOR: &str = "message_corrector";
+    /// The sound pack chosen as a whole (`builtin/<key>` or `added/<id>`), "Play sounds when I'm busy", every sound's
+    /// volume, and each event's sound: a table of tables, by the event's name.
+    pub const SOUND_PACK: &str = "sound_pack";
+    pub const SOUNDS_WHILE_BUSY: &str = "sounds_while_busy";
+    pub const SOUNDS_VOLUME: &str = "sounds_volume";
+    pub const SOUNDS: &str = "sounds";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -741,6 +755,9 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         }
         keys::CAPTION_TRANSLATE_TO | keys::CAPTION_TRANSLATOR | keys::RECAP_SUMMARIZER => {
             take_captions(settings, key, value)?;
+        }
+        keys::SOUND_PACK | keys::SOUNDS_WHILE_BUSY | keys::SOUNDS_VOLUME | keys::SOUNDS => {
+            sounds::take(&mut settings.sounds, key, value)?;
         }
         keys::ACCOUNTS => take_accounts(settings, value)?,
         keys::PEOPLE_CALENDARS => take_people_calendars(settings, value)?,
@@ -1084,6 +1101,18 @@ pub fn render(settings: &Settings) -> String {
         keys::RECAP_SUMMARIZER.to_owned(),
         ai_choice_value(&settings.recap_summarizer),
     );
+    render_accounts(settings, &mut table);
+    if let Some(first) = &settings.first_account {
+        table.insert(keys::FIRST_ACCOUNT.to_owned(), Value::String(first.clone()));
+    }
+    render_people(settings, &mut table);
+    render_chat_translation(settings, &mut table);
+    sounds::render(&settings.sounds, &mut table);
+    table.to_string()
+}
+
+/// The other accounts' own settings, into the file's table (when there are any).
+fn render_accounts(settings: &Settings, table: &mut Table) {
     let accounts: Table = settings
         .accounts
         .iter()
@@ -1102,12 +1131,6 @@ pub fn render(settings: &Settings) -> String {
     if !accounts.is_empty() {
         table.insert(keys::ACCOUNTS.to_owned(), Value::Table(accounts));
     }
-    if let Some(first) = &settings.first_account {
-        table.insert(keys::FIRST_ACCOUNT.to_owned(), Value::String(first.clone()));
-    }
-    render_people(settings, &mut table);
-    render_chat_translation(settings, &mut table);
-    table.to_string()
 }
 
 /// The people's calendars the accounts added, into the file's table (when there are any).
@@ -1282,9 +1305,14 @@ fn read_private(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
+/// Makes a directory `builder` creates private, where the platform has modes.
+pub(crate) fn private_dir_mode(builder: &mut DirBuilder) {
+    builder.mode(DIR_MODE);
+}
+
 /// Writes `bytes` to `path` whole: the directory made (or kept) `0700`, a temporary file beside it `0600`, then
 /// renamed over it.
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -1323,7 +1351,6 @@ pub struct Copied {
 /// The settings as the views share them: a GPUI entity. A change goes to the file at once ([`SettingsModel::change`]);
 /// a change of the log's level goes to the log at once too (`teams_log::apply_setting`). It also keeps where the
 /// "copy diagnostics" text comes from ([`SettingsModel::copy_diagnostics`]).
-#[derive(Debug)]
 pub struct SettingsModel {
     settings: Settings,
     file: Option<SettingsFile>,
@@ -1343,6 +1370,20 @@ pub struct SettingsModel {
     devices: Option<Devices>,
     /// The camera's preview of the video effects, once attached ([`attach_camera_preview`]).
     preview: Option<CameraPreview>,
+    /// What plays the app's sounds, once attached ([`attach_sounds`]).
+    sounds: Option<Arc<dyn SoundPlayer>>,
+    /// The sound packs the user imported, as last read ([`SettingsModel::reload_sound_packs`]).
+    sound_packs: Vec<PackInfo>,
+}
+
+impl std::fmt::Debug for SettingsModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsModel")
+            .field("settings", &self.settings)
+            .field("file", &self.file)
+            .field("problems", &self.problems)
+            .finish_non_exhaustive()
+    }
 }
 
 /// When the settings let typing, read receipts and presence go ([`SettingsModel::sends_typing`] and the others).
@@ -1390,6 +1431,8 @@ impl SettingsModel {
             video_switch: false,
             devices: None,
             preview: None,
+            sounds: None,
+            sound_packs: Vec::new(),
         }
     }
 
@@ -1408,6 +1451,8 @@ impl SettingsModel {
             video_switch: false,
             devices: None,
             preview: None,
+            sounds: None,
+            sound_packs: Vec::new(),
         }
     }
 
@@ -1444,6 +1489,67 @@ impl SettingsModel {
     pub fn summaries_dir(&self) -> Option<PathBuf> {
         let file = self.file.as_ref()?;
         Some(file.path().parent()?.join(crate::recap_summary::SUMMARY_DIR))
+    }
+
+    /// Where the sound packs the user imported are kept: [`SOUND_PACKS_DIR`] beside the settings file; `None` for
+    /// settings kept in memory (nothing can be imported).
+    #[must_use]
+    pub fn sound_packs_dir(&self) -> Option<PathBuf> {
+        let file = self.file.as_ref()?;
+        Some(file.path().parent()?.join(SOUND_PACKS_DIR))
+    }
+
+    /// What plays the app's sounds, once attached ([`attach_sounds`]); `None` without (no speaker).
+    #[must_use]
+    pub fn sound_player(&self) -> Option<&Arc<dyn SoundPlayer>> {
+        self.sounds.as_ref()
+    }
+
+    /// The sound packs the user imported, as last read.
+    #[must_use]
+    pub fn sound_packs(&self) -> &[PackInfo] {
+        &self.sound_packs
+    }
+
+    /// Reads the imported sound packs again, off the window's thread; the views are told.
+    pub fn reload_sound_packs(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.sound_packs_dir() else {
+            return;
+        };
+        let listing = cx.background_spawn(async move { sounds::pack::list(&dir) });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let packs = listing.await;
+            let _ = this.update(cx, |model, cx| {
+                model.sound_packs = packs;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Removes imported pack `id`: forgotten by the settings first, so nothing plays it, its files after.
+    pub fn remove_sound_pack(&mut self, id: &str, cx: &mut Context<Self>) {
+        let source = SoundSource::Imported(id.to_owned());
+        self.change(|settings| settings.sounds.forget_pack(&source), cx);
+        self.sound_packs.retain(|pack| pack.id != id);
+        cx.notify();
+        let Some(dir) = self.sound_packs_dir() else {
+            return;
+        };
+        let id = id.to_owned();
+        cx.background_spawn(async move {
+            if let Err(error) = sounds::pack::remove(&dir, &id) {
+                log::warn!("a sound pack can't be removed: {error}");
+            }
+        })
+        .detach();
+    }
+
+    /// Tells the sounds the settings as they are now.
+    fn apply_sounds(&self) {
+        if let Some(player) = &self.sounds {
+            player.apply(&self.settings, self.sound_packs_dir());
+        }
     }
 
     /// The background the camera is sent with, as the settings choose it ([`Settings::video_effect`]).
@@ -1634,6 +1740,7 @@ impl SettingsModel {
         {
             preview.set_background(self.background());
         }
+        self.apply_sounds();
         self.problems
             .retain(|problem| !matches!(problem, Problem::Unsaved { .. }));
         if let Some(file) = &self.file {
@@ -1661,6 +1768,31 @@ pub fn attach_camera_preview(model: &Entity<SettingsModel>, preview: CameraPrevi
         model.preview = Some(preview);
         cx.notify();
     });
+}
+
+/// Attaches what plays the app's sounds to the settings: it follows them now and on every change, and the views offer
+/// a preview, told when one ends.
+pub fn attach_sounds(model: &Entity<SettingsModel>, player: Arc<dyn SoundPlayer>, cx: &mut App) {
+    let (told, ended) = async_channel::unbounded::<()>();
+    player.watch_previewing(Box::new(move || {
+        // the settings gone: nobody to tell
+        let _ = told.try_send(());
+    }));
+    model.update(cx, |model, cx| {
+        model.sounds = Some(player);
+        model.apply_sounds();
+        model.reload_sound_packs(cx);
+        cx.notify();
+    });
+    let weak = model.downgrade();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while ended.recv().await.is_ok() {
+            if weak.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
 }
 
 /// Attaches the calls' devices to the settings (see the module docs): the list there is now, each change of it as it

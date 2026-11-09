@@ -58,6 +58,7 @@ use zbus::zvariant::Value;
 
 use crate::app_icon;
 use crate::bridge::Core;
+use crate::calls::Calls;
 use crate::chat_list::{self, LIST_LIMIT};
 use crate::chat_translate::Previews;
 use crate::chat_translate::previews::NOTIFY_BUDGET;
@@ -65,6 +66,7 @@ use crate::models::{FeedEvent, Models};
 use crate::people::Shown;
 use crate::rich_text::Mentions;
 use crate::settings::{Notifications, SettingsModel};
+use crate::sounds::SoundEvent;
 use crate::system_message;
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -201,6 +203,8 @@ pub struct Notifier {
     /// count when it last was.
     forgets: u64,
     forgotten: HashMap<String, u64>,
+    /// The account's calls: whether a sound counts as "in a call" ([`crate::sounds`]).
+    calls: Entity<Calls>,
     /// The account's translations: a translated chat's message is shown in its language when its translation comes
     /// within [`NOTIFY_BUDGET`].
     previews: Entity<Previews>,
@@ -266,6 +270,7 @@ impl Notifier {
             channels: HashSet::new(),
             forgets: 0,
             forgotten: HashMap::new(),
+            calls: models.calls.clone(),
             previews,
             _feed: feed,
         }
@@ -418,7 +423,22 @@ impl Notifier {
                 .conversation(conversation)
                 .kind(kind.name()),
         );
+        self.sound(notice, cx);
         Self::tell_shown(notice, cx);
+    }
+
+    /// Plays the sound of `notice`, a notification just shown.
+    fn sound(&self, notice: &Notice, cx: &App) {
+        let event = if notice.kind == NoticeKind::Mention {
+            SoundEvent::Mention
+        } else if self.channels.contains(&notice.conversation) {
+            SoundEvent::ChannelMessage
+        } else {
+            SoundEvent::Message
+        };
+        if let Some(player) = self.settings.read(cx).sound_player() {
+            player.play(event, self.core.me(), self.calls.read(cx).call().is_some());
+        }
     }
 
     /// Tells the observers `notice` was shown ([`NotifierEvent::Shown`]).
@@ -448,6 +468,7 @@ impl Notifier {
                 .conversation(conversation)
                 .kind(NoticeKind::Collapsed.name()),
         );
+        self.sound(notice, cx);
         Self::tell_shown(notice, cx);
     }
 }

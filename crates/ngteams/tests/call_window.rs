@@ -900,6 +900,7 @@ fn child(alias: Alias) -> SandboxResult {
                 first: ngteams::accounts::Started {
                     calls: Some(PersonalCalls {
                         ringer: Some(ringer),
+                        sounds: None,
                         echo: Mri::new(ECHO),
                         video: Some(feed),
                         camera: Some(pipewire.clone()),

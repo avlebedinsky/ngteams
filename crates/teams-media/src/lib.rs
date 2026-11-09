@@ -35,6 +35,7 @@ pub mod relay;
 pub mod rtc;
 pub mod sdp;
 pub mod session;
+pub mod sound_file;
 #[cfg(feature = "test-support")]
 pub mod stun;
 #[cfg(feature = "test-support")]

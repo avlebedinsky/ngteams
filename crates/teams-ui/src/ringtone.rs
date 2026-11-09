@@ -1,19 +1,18 @@
-//! The incoming call's ringtone (M3 Task 17): two tones and a pause, played on the default output while an invitation
-//! rings, through the device seam (`teams-media`'s [`Devices`]): the PipeWire opened with the reach selected at
-//! startup, desktop for the normal app and sandbox for lab and test runs.
+//! The incoming call's ringtone (M3 Task 17): by default two tones and a pause, played on the default output while an
+//! invitation rings, through the device seam (`teams-media`'s [`Devices`]): the PipeWire opened with the reach selected
+//! at startup, desktop for the normal app and sandbox for lab and test runs. Which sound it is, how loud and whether
+//! it plays are the settings' ([`crate::sounds`]).
 //!
 //! A [`Ringer`] starts it ([`Ringer::start`]) and the [`Ringtone`] it hands back stops it when dropped. The
-//! [`DeviceRinger`] plays on a thread of its own, opening the speaker there (an open can wait on the audio server),
-//! ahead of real time by at most [`LEAD`]; a speaker that can't be opened or goes away ends the ringtone quietly (the
-//! banner and the notification still show the call).
+//! [`DeviceRinger`] plays it through the [`SoundBoard`]; a speaker that can't be opened or goes away ends the ringtone
+//! quietly (the banner and the notification still show the call).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
 
-use teams_media::devices::{AudioFrame, Devices, FRAME_DURATION, FRAME_SAMPLES};
+use teams_media::devices::{AudioFrame, Devices, FRAME_SAMPLES};
 use teams_media::tone::{Tone, ToneGenerator};
+
+use crate::sounds::SoundBoard;
 
 /// The ringtone's two tones, one after the other.
 pub const RINGTONE: [Tone; 2] = [
@@ -30,8 +29,6 @@ pub const RINGTONE: [Tone; 2] = [
 pub const TONE_FRAMES: usize = 40;
 /// How many frames a whole ring lasts, the pause after the tones included (2 s).
 pub const RING_FRAMES: usize = 200;
-/// How far ahead of real time the ringtone is queued on the speaker.
-pub const LEAD: Duration = Duration::from_millis(100);
 
 /// The ringtone's frames, one after the other, ring after ring.
 #[derive(Clone, Debug)]
@@ -96,11 +93,17 @@ impl Drop for Ringtone {
 pub trait Ringer: Send + Sync + 'static {
     /// Starts the ringtone; it plays until the [`Ringtone`] is dropped.
     fn start(&self) -> Ringtone;
+
+    /// Whether a ringtone would be heard for `account` now (`in_call`: it is in a call), as the settings say.
+    fn audible(&self, _account: &str, _in_call: bool) -> bool {
+        true
+    }
 }
 
-/// The ringtone on the speaker of `devices` (see the module docs).
+/// The ringtone on the speaker of `devices` at the default settings (see the module docs); the app's ringtone is its
+/// [`SoundBoard`] itself, which follows the settings.
 pub struct DeviceRinger {
-    devices: Arc<dyn Devices + Send + Sync>,
+    board: SoundBoard,
 }
 
 impl std::fmt::Debug for DeviceRinger {
@@ -112,50 +115,26 @@ impl std::fmt::Debug for DeviceRinger {
 impl DeviceRinger {
     #[must_use]
     pub fn new(devices: Arc<dyn Devices + Send + Sync>) -> Self {
-        Self { devices }
+        Self {
+            board: SoundBoard::new(devices),
+        }
     }
 }
 
 impl Ringer for DeviceRinger {
     fn start(&self) -> Ringtone {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        let devices = Arc::clone(&self.devices);
-        let started = thread::Builder::new()
-            .name("teams-ui-ringtone".to_owned())
-            .spawn(move || play(&*devices, &stopped));
-        if let Err(error) = started {
-            log::warn!("the ringtone can't start: {error}");
-        }
-        Ringtone::new(move || stop.store(true, Ordering::Release))
+        self.board.start()
     }
-}
 
-/// Plays the ringtone on the speaker of `devices` until `stop` is set, in real time.
-fn play(devices: &(dyn Devices + Send + Sync), stop: &AtomicBool) {
-    let mut speaker = match devices.speaker() {
-        Ok(speaker) => speaker,
-        Err(error) => {
-            log::warn!("the ringtone's speaker can't be opened: {error}");
-            return;
-        }
-    };
-    let start = Instant::now();
-    for (played, frame) in RingtoneFrames::default().enumerate() {
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
-        if let Err(error) = speaker.play(&frame) {
-            log::warn!("the ringtone's speaker went away: {error}");
-            return;
-        }
-        let due = start + FRAME_DURATION * u32::try_from(played + 1).unwrap_or(u32::MAX);
-        thread::sleep(due.saturating_duration_since(Instant::now() + LEAD));
+    fn audible(&self, account: &str, in_call: bool) -> bool {
+        self.board.audible(account, in_call)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use teams_media::tone::amplitude_at;
 
     use super::*;
