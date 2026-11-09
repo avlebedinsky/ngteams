@@ -34,10 +34,9 @@
 //! read).
 
 use std::collections::BTreeMap;
-use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
 use std::ops::RangeInclusive;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1293,10 +1292,8 @@ fn read_private(path: &Path) -> Result<Option<String>, String> {
     if !metadata.is_file() {
         return Err("it isn't a file".to_owned());
     }
-    if metadata.permissions().mode() & 0o077 != 0 {
-        file.set_permissions(Permissions::from_mode(FILE_MODE))
-            .map_err(|error| format!("it is readable by others and can't be made private: {error}"))?;
-    }
+    teams_platform::private::restrict_file(path)
+        .map_err(|error| format!("the settings file can't be made private: {error}"))?;
     let mut text = String::new();
     file.take(MAX_FILE + 1)
         .read_to_string(&mut text)
@@ -1319,21 +1316,18 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the settings file has no directory"))?;
-    DirBuilder::new().recursive(true).mode(DIR_MODE).create(dir)?;
-    fs::set_permissions(dir, Permissions::from_mode(DIR_MODE))?;
+    teams_platform::private::create_dir_all(dir)?;
+    teams_platform::private::restrict_dir(dir)?;
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".{}.tmp", std::process::id()));
     let temporary = PathBuf::from(temporary);
     let written = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(FILE_MODE)
-            .open(&temporary)?;
-        file.set_permissions(Permissions::from_mode(FILE_MODE))?;
+        let mut file = teams_platform::private::open(&temporary, teams_platform::private::Open::ReadWrite)?;
+        teams_platform::private::restrict_file(&temporary)?;
+        file.set_len(0)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
         fs::rename(&temporary, path)
     })();
     if written.is_err() {

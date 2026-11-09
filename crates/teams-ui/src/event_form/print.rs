@@ -113,18 +113,19 @@ fn page_path() -> PathBuf {
 /// # Errors
 /// What the file system said, in plain words.
 pub fn write(page: &str) -> Result<String, String> {
-    use std::os::unix::fs::OpenOptionsExt as _;
     let path = page_path();
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
+    let mut file = teams_platform::private::open(&path, teams_platform::private::Open::ReadWrite)
+        .and_then(|file| {
+            teams_platform::private::restrict_file(&path)?;
+            file.set_len(0)?;
+            Ok(file)
+        })
         .map_err(|error| format!("the page to print couldn't be written: {error}"))?;
     file.write_all(page.as_bytes())
         .map_err(|error| format!("the page to print couldn't be written: {error}"))?;
-    Ok(format!("file://{}", path.display()))
+    url::Url::from_file_path(&path)
+        .map(String::from)
+        .map_err(|()| "the page to print has an invalid file path".to_owned())
 }
 
 #[cfg(test)]

@@ -31,15 +31,17 @@ declare -A VERSION=(
   [gpui-pre]="0.3.9"
   [gpui-pre-wgpu]="0.3.9"
   [gpui-pre-linux]="0.3.9"
+  [gpui-pre-windows]="0.3.9"
   [libwebrtc]="0.3.55"
 )
 declare -A SHA256=(
   [gpui-pre]="34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
   [gpui-pre-wgpu]="5b1cdb26c1503bf9662ee8fbc5ab0b44b2deeee4b5c12dc67491ba6fb5fc544b"
   [gpui-pre-linux]="e28213c3fde6f13e91ba0b74b90cbaadec9373e36a031eda98561d31059870f3"
+  [gpui-pre-windows]="513d4f0fc7d596d3bdef2a73a524ffb83dabc95bf484f2855a698e7f431290a9"
   [libwebrtc]="c0399e372f69d3bb3ad8d51f6354f3090c57317de4f61521aa2f5a542c06fe1f"
 )
-CRATES=(gpui-pre gpui-pre-wgpu gpui-pre-linux libwebrtc)
+CRATES=(gpui-pre gpui-pre-wgpu gpui-pre-linux gpui-pre-windows libwebrtc)
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 

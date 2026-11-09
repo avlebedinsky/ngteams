@@ -78,11 +78,20 @@ pub fn pin_worker() -> io::Result<()> {
 
 /// Sign-in is a native worker window; its STA/message loop never blocks GPUI's foreground.
 #[derive(Clone)]
-pub struct Windows;
+pub struct Windows {
+    app_id: String,
+}
 impl Windows {
     #[must_use]
-    pub fn serve(_app_id: &str, _cx: &mut App) -> Self {
-        Self
+    pub fn serve(app_id: &str, _cx: &mut App) -> Self {
+        Self::new(app_id)
+    }
+
+    #[must_use]
+    pub fn new(app_id: &str) -> Self {
+        Self {
+            app_id: app_id.to_owned(),
+        }
     }
 
     /// # Errors
@@ -95,7 +104,7 @@ impl Windows {
 
     #[must_use]
     pub fn ask(&self, config: WindowConfig) -> SignInAnswer {
-        ask(config).unwrap_or_else(|_| {
+        ask(config, &self.app_id).unwrap_or_else(|_| {
             SignInAnswer::Failed("The sign-in window could not finish. Close it and try again.".into())
         })
     }
@@ -110,7 +119,7 @@ struct Worker {
     directory: tempfile::TempDir,
 }
 impl Worker {
-    fn start(path: &Path, authorize: String, proxy: String) -> io::Result<Self> {
+    fn start(path: &Path, authorize: String, proxy: String, app_id: &str) -> io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix(&format!("ngteams-signin-{}-", std::process::id()))
             .tempdir()?;
@@ -133,6 +142,7 @@ impl Worker {
             &mut worker.input,
             &wire::Start {
                 identity: wire::identity(),
+                app_id: app_id.to_owned(),
                 authorize,
                 proxy,
                 directory: worker.directory.path().to_owned(),
@@ -168,7 +178,7 @@ impl Drop for Worker {
     }
 }
 
-fn ask(config: WindowConfig) -> io::Result<SignInAnswer> {
+fn ask(config: WindowConfig, app_id: &str) -> io::Result<SignInAnswer> {
     let Bound::Hosts(hosts) = config.bound;
     let redirect =
         RedirectUri::parse(&config.request.redirect_uri).map_err(|_| io::Error::other("invalid redirect"))?;
@@ -179,7 +189,7 @@ fn ask(config: WindowConfig) -> io::Result<SignInAnswer> {
     let guard = Arc::new((config.setup)(Guard::new(Arc::clone(&hosts), redirect.clone(), events)));
     guard.answer("armed 1 1");
     let proxy = crate::egress::HostGate::start(Arc::clone(&guard), Arc::clone(&hosts))?.uri();
-    let mut worker = Worker::start(&config.extension, config.request.authorize, proxy)?;
+    let mut worker = Worker::start(&config.extension, config.request.authorize, proxy, app_id)?;
     let mut refused = None;
     loop {
         let event: wire::Event = wire::read(&mut worker.output)?;

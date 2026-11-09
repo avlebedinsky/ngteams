@@ -13,3 +13,11 @@ pub mod windows_sandbox;
 
 #[cfg(windows)]
 pub mod windows_job;
+
+pub mod command;
+
+#[cfg(windows)]
+mod windows_command;
+
+#[cfg(windows)]
+pub mod windows_desktop;

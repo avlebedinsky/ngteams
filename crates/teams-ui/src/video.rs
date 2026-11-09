@@ -9,9 +9,9 @@
 //!   It also carries the settings' video switch ([`VideoFeed::set_enabled`]): while it is off, a call's media starts
 //!   no video and the codec isn't used; and the camera's background the settings choose ([`VideoFeed::set_background`],
 //!   applied by the media to each frame it sends). [`follow_settings`] keeps both as the settings say.
-//! - **The tiles** ([`Tiles`]) draw the newest frame of each through GPUI's external surface (a texture kept per
-//!   tile, written from the frame's pixels), and count each frame the renderer presented: the trace's `video-tile
-//!   presented` line names the tile (`remote`, `line-1` … `line-9`, `share`, `self`) and how many it presented so
+//! - **The tiles** ([`Tiles`]) draw the newest frame through the platform video adapter (persistent external
+//!   textures on Linux, bounded BGRA image uploads on Windows). The trace's `video-tile
+//!   presented` (Linux GPU completion) or `submitted` (Windows image paint) line names the tile (`remote`, `line-1` … `line-9`, `share`, `self`) and how many it presented so
 //!   far, at the first frame and every [`TRACE_EVERY`] after it; `video-tile shown`/`hidden` as a tile comes and
 //!   goes. A tile whose last frame is older than [`STALE`] is hidden (the far end's camera went off).
 
@@ -19,10 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use gpui::{
-    AnyElement, ExternalSurface, FrameCompletion, FrameOutcome, InteractiveElement as _, IntoElement,
-    ParentElement as _, PixelFrame, PixelRect, PixelSurface, Styled as _, canvas, div,
-};
+use crate::video_surface::{self, Frame as PixelFrame, Surface as PixelSurface};
+use gpui::{AnyElement, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, canvas, div};
 use teams_media::devices::{DeviceError, VideoFrame, VideoSink};
 use teams_media::session::SHARING_LINE;
 use teams_media::video::convert::i420_to_bgra;
@@ -359,34 +357,24 @@ fn frame_of(
     }
     let presented = Arc::clone(&state.presented);
     let trace = Arc::clone(trace);
-    let completion = FrameCompletion::new(move |outcome| {
-        if outcome != FrameOutcome::Presented {
-            return;
-        }
+    let completion = move |outcome: video_surface::Outcome| {
         let count = presented.fetch_add(1, Ordering::Relaxed) + 1;
         if count == 1 || count.is_multiple_of(TRACE_EVERY) {
             trace.record(
-                &TraceLine::new("video-tile", "presented")
+                &TraceLine::new("video-tile", outcome.change())
                     .kind(tile.name())
                     .call(call)
                     .frames(count),
             );
         }
-    });
-    let frame = Arc::new(PixelFrame {
-        surface: Arc::clone(&state.surface),
-        serial: picture.serial,
-        width: picture.width,
-        height: picture.height,
-        pixels: Arc::clone(&picture.bgra),
-        damage: vec![PixelRect {
-            x: 0,
-            y: 0,
-            width: picture.width,
-            height: picture.height,
-        }],
+    };
+    let frame = video_surface::frame(
+        &state.surface,
+        picture.serial,
+        (picture.width, picture.height),
+        &picture.bgra,
         completion,
-    });
+    );
     state.drawn = Some((picture.serial, Arc::clone(&frame)));
     frame
 }
@@ -401,8 +389,8 @@ fn fill_element(tile: Tile, picture: &Picture, frame: Arc<PixelFrame>) -> AnyEle
         .child(
             canvas(
                 |_, _, _| (),
-                move |bounds, (), window, _| {
-                    window.paint_external_surface(fitted(bounds, width, height), ExternalSurface::Pixels(frame));
+                move |bounds, (), window, cx| {
+                    video_surface::paint(&frame, fitted(bounds, width, height), window, cx);
                 },
             )
             .size_full(),

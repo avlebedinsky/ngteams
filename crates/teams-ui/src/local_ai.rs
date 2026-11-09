@@ -18,20 +18,22 @@
 //! signed out, too slow, or stopped in its own words. Nothing here logs what is asked or answered, or the tool's output.
 
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+use teams_platform::command::Tree;
 
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub mod catalog;
+#[cfg(windows)]
+mod windows_prompt;
 
 pub use catalog::{Catalog, Listed};
 
@@ -368,7 +370,7 @@ impl Tools {
             .into_iter()
             .filter_map(|backend| {
                 std::env::split_paths(&path)
-                    .map(|dir| dir.join(backend.program()))
+                    .flat_map(|dir| program_paths(&dir, backend.program()))
                     .find(|candidate| executable(candidate))
                     .map(|program| (backend, program))
             })
@@ -418,10 +420,34 @@ impl Tools {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+pub(crate) fn executable(path: &Path) -> bool {
+    path.is_file()
+        && path.extension().is_some_and(|extension| {
+            ["exe", "com", "cmd", "bat"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
+fn program_paths(dir: &Path, program: &str) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        vec![dir.join(program)]
+    }
+    #[cfg(windows)]
+    {
+        ["exe", "com", "cmd", "bat"]
+            .map(|extension| dir.join(format!("{program}.{extension}")))
+            .to_vec()
+    }
 }
 
 /// Why a tool's work ended.
@@ -486,7 +512,7 @@ pub struct Tool {
     work: Work,
     /// The model asked for, `None`: the tool's default.
     model: Option<String>,
-    child: Child,
+    child: Tree,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     stderr: Arc<Mutex<String>>,
@@ -498,6 +524,9 @@ pub struct Tool {
     chars: usize,
     /// It answered once: later answers may get a shorter wait.
     answered: bool,
+    // Dropped after the process tree: a tool may read its prompt after startup.
+    #[cfg(windows)]
+    _prompt: Option<tempfile::TempDir>,
 }
 
 impl Tool {
@@ -507,16 +536,18 @@ impl Tool {
     /// The tool couldn't start, refused, or took longer than [`Launch::first`].
     pub fn start(launch: &Launch, stop: &AtomicBool) -> Result<Self, Failure> {
         let backend = launch.backend;
+        let args = backend.args(launch.work, &launch.model, &launch.instructions);
+        #[cfg(windows)]
+        let (args, prompt) = windows_prompt::prepare(launch, args)
+            .map_err(|error| Failure::Stopped(backend, Some(error.to_string())))?;
         let mut command = Command::new(&launch.program);
         command
-            .args(backend.args(launch.work, &launch.model, &launch.instructions))
+            .args(args)
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // its own group, so whatever it starts ends with it
-            .process_group(0);
-        let mut child = command.spawn().map_err(|error| match error.kind() {
+            .stderr(Stdio::piped());
+        let mut child = Tree::spawn(&mut command).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => Failure::NotInstalled(Some(backend)),
             _ => Failure::Stopped(backend, Some(error.to_string())),
         })?;
@@ -547,6 +578,8 @@ impl Tool {
             turns: 0,
             chars: 0,
             answered: false,
+            #[cfg(windows)]
+            _prompt: prompt,
         };
         if backend == Backend::Codex
             && let Err(failure) = tool.codex_thread(&launch.instructions, launch.first, stop)
@@ -780,10 +813,7 @@ impl Tool {
         while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        let group = rustix::process::Pid::from_child(&self.child);
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.stop();
     }
 }
 

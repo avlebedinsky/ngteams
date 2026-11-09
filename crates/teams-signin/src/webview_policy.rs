@@ -27,7 +27,13 @@ pub(crate) fn response_parameters(event: &Value) -> Option<(&'static str, Value)
     headers.push(json!({"name":"Content-Security-Policy", "value":CSP}));
     headers.push(json!({"name":"X-DNS-Prefetch-Control", "value":"off"}));
     let mut reply = json!({"requestId":id, "responseCode":status, "responseHeaders":headers});
-    if let Some(phrase) = event.get("responseStatusText").and_then(Value::as_str) {
+    // Chromium routes continueResponse through FulfillRequest, which rejects an explicitly empty phrase.
+    // HTTP/2 carries none: omit it so Chromium supplies the status's standard phrase, preserving all headers.
+    if let Some(phrase) = event
+        .get("responseStatusText")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
         reply["responsePhrase"] = phrase.into();
     }
     Some(("Fetch.continueResponse", reply))
@@ -52,6 +58,22 @@ mod tests {
             assert_eq!(&headers[..3], source["responseHeaders"].as_array().unwrap());
             assert_eq!(headers[3]["value"], CSP);
             assert_eq!(headers[4]["value"], "off");
+        }
+    }
+
+    #[test]
+    fn an_empty_http2_phrase_uses_chromiums_default_and_preserves_status_and_headers() {
+        for phrase in [None, Some("")] {
+            let mut event = json!({"requestId":"synthetic-http2", "responseStatusCode":200,
+                "responseHeaders":[{"name":"Content-Type","value":"text/html"}]});
+            if let Some(phrase) = phrase {
+                event["responseStatusText"] = phrase.into();
+            }
+            let (_, reply) = response_parameters(&event).unwrap();
+            assert!(reply.get("responsePhrase").is_none());
+            assert_eq!(reply["responseCode"], 200);
+            assert_eq!(reply["responseHeaders"][0], event["responseHeaders"][0]);
+            assert_eq!(reply["responseHeaders"][1]["value"], CSP);
         }
     }
 

@@ -44,7 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::start()?;
     let origin = format!("https://127.0.0.1:{}", server.port);
     let own = OwnRule::new(OwnKind::EntraSignIn, "POST", &origin, "/own");
-    let answer = Windows.ask(WindowConfig {
+    let answer = Windows::new("com.nickalie.ngteams.signin.synthetic").ask(WindowConfig {
         engine: EngineSource,
         bound: Bound::Hosts(Arc::new(teams_signin::hosts::SignInHosts::for_tests(
             &["127.0.0.1"],
@@ -95,6 +95,8 @@ fn verify(server: &Server, log: &std::path::Path) -> Result<(), Box<dyn std::err
     for (method, path) in [
         ("GET", "/authorize"),
         ("GET", "/image"),
+        ("GET", "/empty-phrase"),
+        ("GET", "/empty-phrase-report?ok=1"),
         ("GET", "/geometry?full=1"),
         ("GET", "/frame"),
         ("GET", "/frame-report?locked=1"),
@@ -250,6 +252,7 @@ fn serve(mut stream: impl std::io::Read + std::io::Write, requests: &Mutex<Vec<(
     }
     let (status, headers, body) = match path.split('?').next().unwrap_or_default() {
         "/authorize" => ("200 OK", "Content-Type: text/html\r\n", PAGE),
+        "/empty-phrase" => ("200 ", "Content-Type: text/plain\r\n", "synthetic"),
         "/frame" => ("200 OK", "Content-Type: text/html\r\n", FRAME),
         "/own" => ("307 Temporary Redirect", "Location: /post-denied\r\n", ""),
         "/sync" => ("302 Found", "Location: /sync-next\r\n", ""),
@@ -274,6 +277,8 @@ new Image().src='/frame-report?locked='+(locked?1:0);
 const PAGE: &str = r"<!doctype html><html><body><h1>Synthetic sign-in</h1><p>Offline guard contract</p>
 <img src='/image'><iframe src='/frame'></iframe><script>
 (async()=>{
+ const emptyPhrase=await fetch('/empty-phrase').then(r=>r.text()).catch(()=> '');
+ new Image().src='/empty-phrase-report?ok='+(emptyPhrase==='synthetic'?1:0);
  const names=['WebSocket','Worker','SharedWorker','RTCPeerConnection','WebTransport'];
  let locked=names.every(k=>window[k]===undefined);
  const blank=document.createElement('iframe'); document.body.append(blank);

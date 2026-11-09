@@ -11,7 +11,6 @@
 //! app global, listed once per run in the background ([`Catalog::of`]).
 
 use std::io::Read as _;
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -156,7 +155,8 @@ fn codex_home() -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    let variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(variable).map(PathBuf::from).unwrap_or_default()
 }
 
 /// The text of the newest catalog Claude Code fetched for itself (`*-cc.json`, by its `fetchedAt`).
@@ -317,16 +317,14 @@ fn run(program: &Path, args: &[&str]) -> Option<String> {
 
 /// What `program args` prints, when it ends well within `wait`.
 fn run_within(program: &Path, args: &[&str], wait: Duration) -> Option<String> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        // its own group, so whatever it starts ends with it
-        .process_group(0)
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    let mut child = teams_platform::command::Tree::spawn(&mut command).ok()?;
     let stdout = child.stdout.take()?;
     let reading = thread::spawn(move || {
         let mut text = String::new();
@@ -339,14 +337,12 @@ fn run_within(program: &Path, args: &[&str], wait: Duration) -> Option<String> {
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             _ => {
-                let group = rustix::process::Pid::from_child(&child);
-                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-                let _ = child.kill();
-                let _ = child.wait();
+                child.stop();
                 break None;
             }
         }
     };
+    child.stop();
     let text = reading.join().ok()?;
     status.filter(std::process::ExitStatus::success).map(|_| text)
 }

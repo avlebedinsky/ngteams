@@ -100,7 +100,7 @@ sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "83a7b04e9017352bbaaa1da14d33499b244711a630d2b9ce966b43aa408372a7"
+sha256 = "f377ec11a5c1ccccbcf94861f567c582eff4d8a9ebfbebf7350f37377ed576c1"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe-client/src/event.rs"]
@@ -136,7 +136,7 @@ reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-
 context = { "crates/teams-core/src/attachments.rs" = "f5ddc5cec701324240acc8fd2743e1d5c8e548e99798a2776dee21735a4f3dca" }
 
 [unmapped_sources."crates/teams-platform/src/lib.rs"]
-sha256 = "3b9547e5a1b622541d0fb4819f5dcdab6a347f2861c5d46c0daaf52da9adf859"
+sha256 = "ac9a4480914f8b3230ee22fb73669594e7479dead4a541f364cccfb090523d62"
 reason = "module declaration and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-platform/src/private/windows.rs"]
@@ -221,11 +221,11 @@ sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"
 reason = "Windows-only host-local adapter for the test-support TURN fixture; exercised by native audio, video and screen-share relay contracts; absent from Linux compilation and production builds"
 
 [unmapped_sources."crates/teams-signin/src/native/browser.rs"]
-sha256 = "55471dc062decb1a925a7294766434001df81e6330ab51d704e3ceecb157b29d"
+sha256 = "2f00a6da1dba8a8655a0710e2682d90fd8a507b2068a99cb21da9bb501f5db5f"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/mod.rs"]
-sha256 = "82187a53e139b6971723033fd1e944d9ab6ba10ee6ac66b0ce55b19ebd49f8d5"
+sha256 = "41b95ab12c632ef1088b64dada09165074a6c8f9b426c086c31acb6d78d7bcaa"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/policy.rs"]
@@ -241,5 +241,21 @@ sha256 = "ee545f9c0eb28038c3de6a699fcc552e89205d76bc87ca4e1a64d77bfb47073c"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/wire.rs"]
-sha256 = "b7b10b220936c86125bbd354b61f7b2a0b87911e05a575b6055f4c257cbb8d2e"
+sha256 = "9605f6f0a4656e5a9696ee415cd716b3f8c54e11890c9d9e01d5376781521d91"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-platform/src/windows_command.rs"]
+sha256 = "a64e9b0de8a706b2798b270038c7fc23e5234b647be9747418f32d0e5149d510"
+reason = "Windows-only suspended command/job attachment and resume; native synthetic command tests exercise tree cleanup after parent exit and npm cmd argument transfer, without an account or GUI."
+
+[unmapped_sources."crates/teams-platform/src/windows_desktop.rs"]
+sha256 = "3ea6f905664080bfe9f8a97862c7d7ba75bbc1afc88e0590ada20eb3a906d456"
+reason = "Windows-only explicit taskbar identity; native application and synthetic WebView2 worker runs exercise it in the authorized VM console."
+
+[unmapped_sources."crates/teams-ui/src/video_surface/windows.rs"]
+sha256 = "ce4146044e927dcd6d27317a738f3c873c35bfc0ba0ea4bb366f35d02246821a"
+reason = "Windows-only BGRA image painting and bounded atlas lifetime; scripts/test-windows-video.ps1 exercises replacement, repeated drawing and element release in the authorized VM console with synthetic pixels."
+
+[unmapped_sources."crates/teams-ui/src/local_ai/windows_prompt.rs"]
+sha256 = "12e293514261be58d38d44d77a0ba0d3cc133f7797a40ffa83585fe4748ab6db"
+reason = "Windows-only Claude batch-shim private prompt-file adapter; native windows_local_ai exercises exact multiline instructions and prompt lifetime through a synthetic batch/PowerShell process tree without an account or network."

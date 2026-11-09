@@ -75,7 +75,22 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 }
 
 fn parent() -> ComResult<Parent> {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{IDI_APPLICATION, LoadIconW};
+    // SAFETY: queries this executable's already loaded module, without changing its lifetime.
+    let module = unsafe { GetModuleHandleW(None) };
+    let icon = module
+        .and_then(|module| {
+            // SAFETY: Win32 treats MAKEINTRESOURCEW(1) as a resource ID, not a dereferenceable address.
+            unsafe { LoadIconW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1))) }
+        })
+        .or_else(|_| {
+            // SAFETY: the stock application icon is an OS-owned shared resource, also used by synthetic harnesses.
+            unsafe { LoadIconW(None, IDI_APPLICATION) }
+        })
+        .unwrap_or_default();
     let class = WNDCLASSW {
+        hIcon: icon,
         lpfnWndProc: Some(procedure),
         lpszClassName: w!("NgteamsSignIn"),
         ..Default::default()
@@ -123,6 +138,8 @@ pub(super) fn run(start: &Start) -> Result<(), &'static str> {
     // SAFETY: the worker's main thread has no previous COM apartment; all native objects stay on it.
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() }
         .map_err(|_| "Windows could not initialize the sign-in window")?;
+    teams_platform::windows_desktop::set_app_id(&start.app_id)
+        .map_err(|_| "Windows could not set the sign-in identity")?;
     let parent = parent().map_err(|_| "Windows could not open the sign-in window")?;
     let mut context = wry::WebContext::new(Some(start.directory.join("browser")));
     let view = WebViewBuilder::new_with_web_context(&mut context)
@@ -145,7 +162,7 @@ pub(super) fn run(start: &Start) -> Result<(), &'static str> {
         .with_drag_drop_handler(|_| true)
         .build_as_child(&parent)
         .map_err(|_| "WebView2 could not open; install or repair the WebView2 Runtime, then try again")?;
-    let failed = Rc::new(Cell::new(false));
+    let failed = Rc::new(Cell::new(None));
     wire_view(&view, &failed)
         .map_err(|_| "WebView2 could not protect sign-in requests; update its Runtime and try again")?;
     let webview = view.webview();
@@ -167,8 +184,8 @@ pub(super) fn run(start: &Start) -> Result<(), &'static str> {
         .map_err(|_| "WebView2 could not open the sign-in page; close it and try again")?;
     pump(&parent, &view)?;
     drop(view);
-    if failed.get() {
-        return Err("WebView2 stopped while protecting sign-in; close the window and try again");
+    if let Some(reason) = failed.get() {
+        return Err(reason);
     }
     wire::send(&mut std::io::stdout().lock(), &Event::Closed)
         .map_err(|_| "the sign-in window lost its connection to ngteams")
@@ -223,7 +240,7 @@ fn resize(parent: &Parent, view: &WebView, shape: &mut Option<(i32, i32)>) -> Re
     Ok(())
 }
 
-fn wire_view(view: &WebView, failed: &Rc<Cell<bool>>) -> ComResult<()> {
+fn wire_view(view: &WebView, failed: &Rc<Cell<Option<&'static str>>>) -> ComResult<()> {
     let webview = view.webview();
     settings(&webview)?;
     navigation(&webview)?;
@@ -324,10 +341,12 @@ fn requests(
     }
 }
 
-fn failures(webview: &ICoreWebView2, failed: &Rc<Cell<bool>>) -> ComResult<()> {
+fn failures(webview: &ICoreWebView2, failed: &Rc<Cell<Option<&'static str>>>) -> ComResult<()> {
     let failure = Rc::clone(failed);
     let process = ProcessFailedEventHandler::create(Box::new(move |_, _| {
-        failure.set(true);
+        failure.set(Some(
+            "The WebView2 browser process stopped during sign-in. Close it and try again.",
+        ));
         // SAFETY: callbacks run on the worker's GUI thread, whose message loop receives the quit.
         unsafe {
             PostQuitMessage(0);
@@ -381,15 +400,15 @@ fn devtools_now(webview: &ICoreWebView2, method: &str, parameters: &Value) -> Re
     .map_err(|e| e.to_string())
 }
 
-fn stop(failed: &Cell<bool>) {
-    failed.set(true);
+fn stop(failed: &Cell<Option<&'static str>>, reason: &'static str) {
+    failed.set(Some(reason));
     // SAFETY: called only on the worker's GUI thread, whose message loop receives the quit.
     unsafe {
         PostQuitMessage(0);
     }
 }
 
-fn wire_responses(webview: &ICoreWebView2, failed: &Rc<Cell<bool>>) -> ComResult<()> {
+fn wire_responses(webview: &ICoreWebView2, failed: &Rc<Cell<Option<&'static str>>>) -> ComResult<()> {
     let target = webview.clone();
     let failed = Rc::clone(failed);
     // SAFETY: the receiver belongs to this view and is registered on its STA.
@@ -402,13 +421,19 @@ fn wire_responses(webview: &ICoreWebView2, failed: &Rc<Cell<bool>>) -> ComResult
         let parameters = text(|out| unsafe { args.ParameterObjectAsJson(out) })?;
         let parsed = serde_json::from_str::<Value>(&parameters).ok();
         let Some((method, parameters)) = parsed.as_ref().and_then(response_parameters) else {
-            stop(&failed);
+            stop(
+                &failed,
+                "WebView2 returned an invalid protected response. Close sign-in and try again.",
+            );
             return Ok(());
         };
         let failure = Rc::clone(&failed);
         let done = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, _| {
             if result.is_err() {
-                stop(&failure);
+                stop(
+                    &failure,
+                    "WebView2 could not resume a protected response. Close sign-in and try again.",
+                );
             }
             Ok(())
         }));

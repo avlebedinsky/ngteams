@@ -15,6 +15,7 @@ pub(super) fn identity() -> String {
 #[derive(Serialize, Deserialize)]
 pub(super) struct Start {
     pub identity: String,
+    pub app_id: String,
     pub authorize: String,
     pub proxy: String,
     pub directory: std::path::PathBuf,

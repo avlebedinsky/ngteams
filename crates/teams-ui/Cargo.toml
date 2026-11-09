@@ -50,10 +50,10 @@ teams-store.workspace = true
 teams-media.workspace = true
 # the diagnostic log's level in the settings (changed live) and the "copy diagnostics" text; never installed here
 teams-log.workspace = true
+teams-platform.workspace = true
+url.workspace = true
 # the settings file's problems
 thiserror.workspace = true
-# the local AI tools' processes (caption translation, recap summaries): each one's whole process group ended with it
-rustix = { workspace = true, features = ["process"] }
 # the bridge's stop signal to its drain task (a runtime-free oneshot)
 tokio = { workspace = true, features = ["sync"] }
 # the settings file
@@ -73,7 +73,7 @@ gpui-pre = { workspace = true, features = ["test-support"] }
 # the kit's widgets on GPUI's test context
 gpui-component = { workspace = true, features = ["test-support"] }
 # the kit's text area on the real platform, in the UI sandbox: GPUI's Linux platform, Wayland only
-gpui-pre-platform.workspace = true
+gpui-pre-platform = { workspace = true, features = ["test-support"] }
 # the settings file, in a directory of its own per test
 tempfile.workspace = true
 # compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens, the mock chat service and
@@ -84,8 +84,6 @@ teams-proto = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
 # the push channel's events the fake engine hands the bridge; the mock's Trouter for compose's two-account test
 teams-trouter = { workspace = true, features = ["test-support"] }
-# the compositor, private bus and virtual keyboard the kit window test runs in
-ui-sandbox.workspace = true
 
 [[test]]
 # the kit's text area and the theme in the UI sandbox: its own `main` (GPUI runs on the main thread), which runs
@@ -154,10 +152,23 @@ harness = false
 name = "workflows_app_window"
 harness = false
 
+[target.'cfg(unix)'.dev-dependencies]
+# Linux compositor, private bus and virtual keyboard; Windows uses the authorized VM console.
+ui-sandbox.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Claude's npm shim cannot receive multiline arguments; keep its private prompt file until the job exits.
+tempfile.workspace = true
+
 [lints]
 workspace = true
 
 [[test]]
 # Real sandbox rendering of channel management over synthetic data, in light and dark themes.
 name = "channel_window"
+harness = false
+
+[[test]]
+# Native Windows video upload/eviction contract, synthetic pixels only; run by the explicit VM console helper.
+name = "native_video"
 harness = false

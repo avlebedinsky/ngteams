@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! `ngteams`: desktop, read-only and lab startup. Build refusals come before anything is read or opened; application
 //! mode is checked after the internal sign-in page worker has had its chance to serve.
 
@@ -50,6 +51,9 @@ mod platform {
     pub fn application() -> gpui::Application {
         #[cfg(windows)]
         {
+            if let Err(error) = teams_platform::windows_desktop::set_app_id(crate::PERSONAL_APP_ID) {
+                log::warn!("Windows app identity: {error}");
+            }
             gpui_platform::application()
         }
         #[cfg(unix)]
@@ -286,6 +290,9 @@ fn run_setup(
         forget(&setup, upn)?;
         return Ok(Outcome::Quit);
     }
+    // The first sign-in needs the same credential-redacted guard diagnostics as an already signed-in account.
+    let file = SettingsFile::new(setup.paths.settings_file());
+    let diagnostics = app::install_log(setup.paths.log_dir(), file.load().settings.log_level);
     if let Some(asked) = cli.account.as_deref() {
         // the shortcut: that account, through the sign-in window at once when it isn't signed in
         let account = setup.ask_for(asked).map_err(|error| error.to_string())?;
@@ -301,8 +308,6 @@ fn run_setup(
         }
         return ask_account(setup, unready.first().map(|account| account.upn.clone()));
     }
-    let file = SettingsFile::new(setup.paths.settings_file());
-    let diagnostics = app::install_log(setup.paths.log_dir(), file.load().settings.log_level);
     // the native devices, shared by every account; without them the app runs without calls
     let devices = match CallDevices::open(reach) {
         Ok(devices) => Some(devices),

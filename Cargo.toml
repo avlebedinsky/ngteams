@@ -256,6 +256,8 @@ wayland-client = "0.31.15"
 wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wiremock = "0.6.5"
+# Native Windows executable icon resources, sharing GPUI's existing build dependency.
+embed-resource = "3.0.12"
 # Native Windows filesystem security, with no logging of its own.
 widestring = "1.2.1"
 windows-sys = "0.61.2"
@@ -338,6 +340,7 @@ opt-level = 3
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # LiveKit's libwebrtc bindings, the pinned 0.3.55 plus build/patches/libwebrtc (scripts/vendor-crates.sh):
 # `RtpTransceiver::set_direction`, which webrtc-sys binds and the safe API leaves out (0.4.0 too). A group call's screen
 # goes out on the mixer's sharing line, turned to send before the answer (crates/teams-media/src/rtc.rs). Only the Rust

@@ -732,4 +732,32 @@ proxy tunnel counts, redirect-code redaction and profile/process cleanup. Synthe
 `target/windows-signin-smoke-*` directories. No account, credential or tenant is used.
 
 Display-free Windows checks use `cargo test -p teams-signin --lib --test classify --test gate --test native_worker`.
-The full application still needs its remaining UI/platform integrations before live Windows sign-in can be tested.
+The normal lab application builds and opens the native Microsoft sign-in page. The Windows port still needs its
+remaining desktop integrations, complete production media runtime and release packaging before it is ready to use.
+
+### Windows video and local tools
+
+`pwsh -NoProfile -File scripts/test-windows-video.ps1` runs a synthetic GPUI video fixture in the authorized win11
+console. It uses numerical BGRA quadrants without an account, device or network. It checks that each replacement
+uploads one image, repainting reuses it, fully clipped frames submit nothing, and both replacement and hiding evict the previous atlas entry. `-HoldForShot`
+keeps the final synthetic frame visible briefly and saves its foreground client area as `frame.png` in the private run directory. The pinned Windows GPUI crate has a test-support atlas inspection patch, verified by `scripts/vendor-crates.sh --check`, so these checks query the actual DirectX atlas. Linux retains its persistent external
+surface and GPU completion trace; Windows records `video-tile submitted` after a successful image paint because
+GPUI's image API has no GPU-completion callback. Neither means a remote participant received a frame.
+
+Local AI tools are discovered as native executables or Windows npm `.cmd`/`.bat` shims. Their arguments use the
+standard library's native escaping. Each command starts suspended, enters a private non-breakaway job, then resumes;
+closing the owner terminates its descendants even after the first process exits. Model caches use `USERPROFILE`
+on Windows. Claude batch shims receive multiline instructions through its documented `--system-prompt-file` option
+in a private temporary directory, removed after its process tree exits. Settings, recap summaries and print pages use the platform's private file creation/restriction helpers;
+print links use encoded file URLs, including Windows drive paths.
+
+Both GUI executables embed the application icon, share an explicit Windows taskbar identity and use the Windows
+GUI subsystem. The complete debug application exceeds MSVC's PDB debug-record limit (LNK1140) with the full media/AI
+and UI dependencies even with line tables only. Its Windows final link omits the PDB; runtime diagnostic logging
+is unchanged. Linux and dependency/test debugging retain their usual settings. Release builds already omit debug
+information. This does not yet establish the production media runtime, notifications/tray or Windows release package.
+
+The initial sign-in installs the same private diagnostic logger before opening its page. Chromium rejects an
+explicitly empty response phrase when a paused response's headers are continued; HTTP/2 can supply that empty
+field. The response policy omits it and lets Chromium supply the status's standard phrase, preserving the original
+status and headers plus the additional restrictions. The native HTTPS contract includes an empty-phrase response.
