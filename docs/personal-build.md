@@ -148,7 +148,7 @@ inherited by ordinary WPE children.
 
 These are actions for the user, never an agent's personal-account test:
 
-1. Request or run `scripts/install-personal.sh`, then start `ngteams` and enter the work UPN.
+1. Request or run `scripts/install.sh`, then start `ngteams` and enter the work UPN.
 2. Complete sign-in in the host-gated window, including any supported multi-factor prompt. Tenant sign-in logs see
    the Teams desktop client from Linux. A tenant/device policy the app cannot satisfy is a refusal, not a workaround.
 3. Verify the account and tenant shown, inspect the chat list, and review the settings explaining automatic writes.
@@ -172,7 +172,7 @@ These are actions for the user, never an agent's personal-account test:
   its tokens, or type credentials through sandbox controls.
 
 A plain root Cargo build excludes `ngteams` through `default-members`. Test-support builds refuse to run. An
-installed binary carries `TEAMS_PERSONAL_INSTALL`, set by `scripts/install-personal.sh`; lab builds carry
+installed binary carries `TEAMS_PERSONAL_INSTALL`, set by `scripts/install.sh`; lab builds carry
 `TEAMS_LAB_BUILD`, set by `scripts/run-lab.sh`, and run only with explicit lab mode. The release workflow sets
 `TEAMS_PERSONAL_INSTALL` too, for the packages it publishes. The install marker still gates
 other app/broker modes. These markers prevent accidental runnable builds; they do not authorize setting them by

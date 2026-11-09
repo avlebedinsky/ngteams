@@ -60,7 +60,7 @@ notification waits at most a few seconds for its translation); the language menu
 | `crates/ui-sandbox` | private headless Wayland compositor, bus, input, URI opener, optional PipeWire/camera portal and `ui-sandbox-run` controls |
 | `crates/fixture-guard` | synthetic-fixture markers and credential/private-data scans |
 | `scripts/run-lab.sh`, `scripts/run-personal-read-only.sh` | isolated sending lab sessions and snapshot-based read-only personal sessions |
-| `scripts/install-personal.sh`, `packaging/` | user-requested personal release install, desktop entry and icons |
+| `scripts/install.sh`, `packaging/` | user-requested personal release install, desktop entry and icons |
 | `docs/protocol/` | protocol observations in our own words and the [endpoint inventory](protocol/endpoints.md) |
 | `docs/personal-build.md`, `docs/lab-rules.md` | personal account authorization and the agent's lab run check |
 | `spikes/gpui-video`, `tools/`, `vendor/` | standalone experiments, supporting asset tools and patched dependencies |
@@ -77,7 +77,7 @@ copy: the distribution's `wpewebkit` (`sudo pacman -S wpewebkit`) locally, ngter
 system's pkg-config (`wpe-webkit-2.0`, `wpe-web-process-extension-2.0`), the binaries load `libWPEWebKit-2.0.so` from
 the loader's own path, and the engine starts the package's helper processes (`WPEWebProcess`, `WPENetworkProcess`,
 `WPEGPUProcess`) from `/usr/lib/wpe-webkit-2.0/`, where their path is compiled into the library; GStreamer loads its
-plugins at run time. `scripts/install-personal.sh` refuses to build without it.
+plugins at run time. `scripts/install.sh` refuses to build without it.
 
 Only the `ngteams-web` worker (`crates/teams-wpe`) links WebKit. `ngteams` uses `crates/teams-wpe-client`, so it starts
 without an engine and picks one before each sign-in (`crates/teams-signin/src/engine.rs`): the system's if `ngteams-web
@@ -206,7 +206,7 @@ required for other app/broker modes. Binaries built with `test-support` refuse t
 for tests/`--all-targets`/`--all-features`, so use the normal runner build for live work, not a test executable.
 The workspace's default members exclude `ngteams`; never use `cargo build -p ngteams` as an agent shortcut.
 
-The personal release is built and installed with `scripts/install-personal.sh` **only when the user requests it**.
+The personal release is built and installed with `scripts/install.sh` **only when the user requests it**.
 It installs under `~/.local`, starts nothing and requires the user's own first sign-in. See
 [the personal-build guide](personal-build.md).
 
@@ -314,7 +314,7 @@ account files, stores and logs. `--shot` captures a window, `--screen <name>` th
 The user installs and runs their own app:
 
 ```sh
-scripts/install-personal.sh             # only on the user's explicit request
+scripts/install.sh             # only on the user's explicit request
 ngteams                                 # ask for the work account, then sign in
 ngteams --account you@example.com        # sign in this account, adding it if new
 ngteams --forget you@example.com         # remove credentials/config/region; quit its engine first; store stays
@@ -352,7 +352,7 @@ writes, add/remove account or tray item. It does not disturb the user's running 
 calls, the calendar, and a stream of what happens. Nothing in the app has to be turned on, and it asks no
 confirmation: the socket is `0600` in a `0700` directory, so only the user's own processes reach it. The server is
 one more caller of what the window calls (`Core`, the outbox, the call buttons' path, the status menu's), so it
-builds no request of its own. `scripts/install-personal.sh` installs it beside `ngteams` with bash, fish and zsh
+builds no request of its own. `scripts/install.sh` installs it beside `ngteams` with bash, fish and zsh
 completions; `ngteamsctl completions <shell>` prints one.
 
 Each app serves one socket, and `ngteamsctl` picks it by mode. `--socket <path>`, else `$NGTEAMS_CTL_SOCKET`,

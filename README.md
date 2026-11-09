@@ -122,10 +122,10 @@ For the tarball, do the same with its `ngteams` folder.
 sudo pacman -S --needed base-devel git rustup clang cmake wayland libxkbcommon fontconfig freetype2 \
     pipewire wpewebkit gstreamer gst-plugins-base gst-plugins-good gst-libav
 git clone https://github.com/nickalie/ngteams.git && cd ngteams
-scripts/install-personal.sh
+scripts/install.sh
 ```
 
-The app installs into `~/.local`; the first build downloads about 150 MB of call components. Other distributions need the equivalent packages, including WPE WebKit 2.54 or newer. To update, run `git pull && scripts/install-personal.sh` in that folder.
+The app installs into `~/.local`; the first build downloads about 150 MB of call components. Other distributions need the equivalent packages, including WPE WebKit 2.54 or newer. To update, run `git pull && scripts/install.sh` in that folder.
 
 ## Getting started
 

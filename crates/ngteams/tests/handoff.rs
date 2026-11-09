@@ -466,7 +466,7 @@ fn the_desktop_entry_hands_links_over_and_the_installer_keeps_that() {
     let lines: Vec<&str> = entry.lines().collect();
     assert!(lines.contains(&"Exec=ngteams %u"), "{entry}");
     assert!(lines.contains(&"MimeType=x-scheme-handler/msteams;"), "{entry}");
-    let installer = std::fs::read_to_string(root.join("scripts/install-personal.sh")).unwrap();
+    let installer = std::fs::read_to_string(root.join("scripts/install.sh")).unwrap();
     assert!(
         installer.contains(r#"sed "s|^Exec=ngteams %u$|Exec=$lib/ngteams %u|""#),
         "the installer's Exec rewrite matches the entry's line"

@@ -3,15 +3,14 @@
 //! The initial [`refusal`] gate rejects test-support and unmarked binaries before even the WPE worker starts.
 //! [`refusal_for`] restricts a lab-marked build to explicitly selected lab mode once the CLI is parsed.
 
-/// The install marker, set only by `scripts/install-personal.sh` and the release workflow when they compile this crate.
+/// The install marker, set only by `scripts/install.sh` and the release workflow when they compile this crate.
 pub const INSTALLED: Option<&str> = option_env!("TEAMS_PERSONAL_INSTALL");
 
 /// The lab marker, set only by `scripts/run-lab.sh` when it compiles this crate.
 pub const LAB_BUILD: Option<&str> = option_env!("TEAMS_LAB_BUILD");
 
-const TEST_SUPPORT: &str = "built with test-support (cargo test, --all-targets or --all-features unify it in): run a normal build made by scripts/run-lab.sh or scripts/install-personal.sh";
-const UNMARKED: &str =
-    "no install or lab build marker: run a build made by scripts/run-lab.sh or scripts/install-personal.sh";
+const TEST_SUPPORT: &str = "built with test-support (cargo test, --all-targets or --all-features unify it in): run a normal build made by scripts/run-lab.sh or scripts/install.sh";
+const UNMARKED: &str = "no install or lab build marker: run a build made by scripts/run-lab.sh or scripts/install.sh";
 const LAB_ONLY: &str = "a lab build runs only with --lab <alias> (including ngteams secrets --lab <alias>)";
 
 fn marked(marker: Option<&str>) -> bool {

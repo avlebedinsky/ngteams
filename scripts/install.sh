@@ -20,7 +20,7 @@
 # - Starts nothing. The first run is the user's: `ngteams`, which asks for the account (docs/personal-build.md,
 #   "The first run").
 #
-# Usage: scripts/install-personal.sh   (PREFIX overrides ~/.local)
+# Usage: scripts/install.sh   (PREFIX overrides ~/.local)
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

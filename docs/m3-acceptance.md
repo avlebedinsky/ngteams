@@ -303,7 +303,7 @@ log showed in the user's own words, never a chat id, a name, a token or an excer
 
 1. **Install the build with calls.** Quit the running `teams` (the tray item's "Quit"; closing the window only hides it
    while the tray has the item), then from a checkout that holds M3's calls (the branch `native-teams-m3-calls`, or
-   `main` once it is merged) run `scripts/install-personal.sh` (a release build of `teams` and
+   `main` once it is merged) run `scripts/install.sh` (a release build of `teams` and
    `teams-signin-personal`, installed under `~/.local/lib/teams/`, `teams` linked from `~/.local/bin/`) and start
    `teams`. The same two steps update it after a fix. Its first-run screen isn't shown again to an account that
    confirmed it; for calls it says: "Calls: when someone calls you, the call is told it rings here, as any Teams app

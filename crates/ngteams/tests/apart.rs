@@ -175,10 +175,10 @@ fn only_the_install_script_sets_the_install_marker_and_only_this_crate_reads_it(
     );
     let mut uses = holding(&["crates", "scripts"], &marker);
     uses.retain(|file| file != "scripts/run-lab.sh");
-    assert_eq!(uses, ["crates/ngteams/src/refusal.rs", "scripts/install-personal.sh"]);
+    assert_eq!(uses, ["crates/ngteams/src/refusal.rs", "scripts/install.sh"]);
     let refusal = fs::read_to_string(root().join("crates/ngteams/src/refusal.rs")).unwrap();
     assert!(refusal.contains(&format!("option_env!(\"{marker}\")")));
-    let script = fs::read_to_string(root().join("scripts/install-personal.sh")).unwrap();
+    let script = fs::read_to_string(root().join("scripts/install.sh")).unwrap();
     assert!(script.contains(&format!("{marker}=1")) && script.contains("--release -p ngteams"));
 }
 

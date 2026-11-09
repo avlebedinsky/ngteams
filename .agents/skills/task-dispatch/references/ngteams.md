@@ -26,7 +26,7 @@ project rules; this reference does not duplicate them.
   available tool/skill; do not require a missing `~/.claude/skills/cpu-cap` installation.
 - Commit with a conventional message and no AI attribution or Co-Authored-By line.
 - An explicit personal-build installation request is handled promptly from the main checkout with
-  `scripts/install-personal.sh`, in the background, outside the task queue. An install conditioned on another task
+  `scripts/install.sh`, in the background, outside the task queue. An install conditioned on another task
   waits for that task to land. Follow current personal-build rules. Start the installed app only when requested,
   detached from a working directory outside a disposable worktree, and preserve that requested process on cleanup.
 - The shared `scripts/land.sh` and `scripts/cleanup.sh` currently target `origin/main`; `land.sh` runs cargo checks.

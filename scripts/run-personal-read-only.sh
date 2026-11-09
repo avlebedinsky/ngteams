@@ -22,7 +22,7 @@
 #   scripts/run-personal-read-only.sh --stop [--keep]   stops it all; deletes the run (the snapshot of your chats
 #                                                       included) unless --keep
 #
-# TEAMS_BIN overrides the installed binary (default: ~/.local/lib/ngteams/ngteams, as scripts/install-personal.sh
+# TEAMS_BIN overrides the installed binary (default: ~/.local/lib/ngteams/ngteams, as scripts/install.sh
 # puts it). It refuses a binary without the read-only mode. It needs no live lock (it isn't a lab run; its sandbox is
 # its own).
 set -euo pipefail
@@ -93,10 +93,10 @@ stop() {
 start() {
     local upn="$1"
     running && die "already running ($run): stop it first with $0 --stop"
-    [[ -x "$teams" ]] || die "no installed ngteams at $teams (the user installs it: scripts/install-personal.sh)"
+    [[ -x "$teams" ]] || die "no installed ngteams at $teams (the user installs it: scripts/install.sh)"
     # without executing it: a build with the read-only mode reads its switch's variable
     grep -qa "TEAMS_READ_ONLY" "$teams" ||
-        die "$teams has no read-only mode: it needs a reinstall (the user's: scripts/install-personal.sh)"
+        die "$teams has no read-only mode: it needs a reinstall (the user's: scripts/install.sh)"
     echo "building ui-sandbox-run (target/lab)..."
     (cd "$root" && cargo build -q -p ui-sandbox --bin ui-sandbox-run --target-dir "$root/target/lab")
 

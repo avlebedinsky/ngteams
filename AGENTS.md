@@ -27,7 +27,7 @@ These protect real people, the user's account and the user's data. They hold for
   ([details](docs/personal-build.md#what-agents-may-do-with-the-personal-build)):
   - start it only through `scripts/run-personal-read-only.sh`; its data dirs (`~/.local/share/ngteams/`,
     `~/.config/ngteams/`) are readable any time;
-  - run `scripts/install-personal.sh` only on the user's explicit request, each time; afterwards start the installed
+  - run `scripts/install.sh` only on the user's explicit request, each time; afterwards start the installed
     `ngteams` detached if asked, and leave it alone;
   - never sign it in, drive, test or capture with it in sending mode, touch its keyring items or receive the user's
     tokens.
