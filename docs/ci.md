@@ -113,8 +113,9 @@ It also measures `teams-auth` natively and enforces that crate's existing floors
 
 ## Releases
 
-The [release workflow](../.github/workflows/release.yml) runs on every push to `main` and on manual dispatch. Each
-run makes a GitHub release tagged `v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version`
+The [release workflow](../.github/workflows/release.yml) runs on every push to `main` and on manual dispatch. It runs
+the full suite (the Coverage workflow above, called as its `tests` job, plus every `scripts/test_*.py`) and publishes
+only if that passes. Each run makes a GitHub release tagged `v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version`
 and `github.run_number`, monotonic for package upgrades), marked latest, targeting the pushed commit, from Linux
 x86_64 builds on `ubuntu-24.04`: `.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage`, a portable `.tar.gz` and
 `SHA256SUMS`, with GitHub build-provenance attestations over every asset, including the runtime below.

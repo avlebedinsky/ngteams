@@ -172,8 +172,14 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The full suite, the same one that gates pull requests: a release is published only if it passes.
+  tests:
+    uses: ./.github/workflows/coverage.yml
+    permissions:
+      contents: read
+
   publish:
-    needs: build
+    needs: [build, tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
