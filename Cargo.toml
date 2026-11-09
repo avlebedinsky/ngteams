@@ -207,6 +207,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
+# what a proposed correction changed in a draft, word by word (`teams-ui`'s `message_correct::diff`), as the UI kit links it
+similar = "2.7.0"
 # the sign-in engine's downloaded runtime (`teams-web-engine`): a blocking GET with no credentials, a tar.zst unpacked
 # by its own confined rules, and the system engine's version compared
 semver = "1.0.28"

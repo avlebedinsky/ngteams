@@ -1,5 +1,6 @@
 //! The settings' one control for a local AI choice ([`AiChoice`]), the same wherever a setting picks the tool that
-//! does some work on this computer (live captions' translation, recaps' summaries, chats' translation): a box titled by the work, of
+//! does some work on this computer (live captions' translation, recaps' summaries, chats' translation, drafts'
+//! proofreading): a box titled by the work, of
 //!
 //! - **the tool**: Automatic (Claude Code when it is installed, else Codex), Claude or Codex, side by side; under it
 //!   what goes to the tool, or that the tool isn't installed;
@@ -74,6 +75,16 @@ fn words(work: Work) -> Words {
             selector: "chat-translator",
             model_selector: "chat-translator-model",
             name_selector: "chat-translator-model-name",
+        },
+        Work::Correction => Words {
+            title: "Message correction",
+            tool: "Correct messages with",
+            sends: crate::message_correct::SETTINGS_NOTE,
+            install: "correct your messages",
+            model: "A stronger model finds the word that fits; you wait only when you ask for a correction.",
+            selector: "message-corrector",
+            model_selector: "message-corrector-model",
+            name_selector: "message-corrector-model-name",
         },
     }
 }

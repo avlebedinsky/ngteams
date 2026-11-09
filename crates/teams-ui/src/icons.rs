@@ -179,6 +179,7 @@ impl Glyph {
     pub const SETTINGS: Self = Self(include_bytes!("../assets/icons/settings.svg"));
     pub const SHARE: Self = Self(include_bytes!("../assets/icons/share.svg"));
     pub const SPARKLES: Self = Self(include_bytes!("../assets/icons/sparkles.svg"));
+    pub const SPELL_CHECK: Self = Self(include_bytes!("../assets/icons/spell-check.svg"));
     pub const SHIELD: Self = Self(include_bytes!("../assets/icons/shield.svg"));
     pub const SHRINK: Self = Self(include_bytes!("../assets/icons/shrink.svg"));
     pub const SKIP_BACK: Self = Self(include_bytes!("../assets/icons/rotate-ccw.svg"));

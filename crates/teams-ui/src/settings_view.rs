@@ -331,6 +331,7 @@ pub struct SettingsView {
     ai: Option<[Entity<AiPicker>; 2]>,
     /// The chats' translator's picker, once the General page showed it.
     chat_ai: Option<Entity<AiPicker>>,
+    correction_ai: Option<Entity<AiPicker>>,
     /// The page's scrolling.
     scroll: ScrollHandle,
     _observing: Subscription,
@@ -353,6 +354,7 @@ impl SettingsView {
             effects: None,
             ai: None,
             chat_ai: None,
+            correction_ai: None,
             scroll: ScrollHandle::new(),
             _observing: observing,
         }
@@ -913,6 +915,14 @@ impl SettingsView {
             .clone()
     }
 
+    /// The drafts' proofreader's picker ([`crate::message_correct`]), on the General page after the chats' translator.
+    pub fn correction_ai_picker(&mut self, cx: &mut Context<Self>) -> Entity<AiPicker> {
+        let model = self.model.clone();
+        self.correction_ai
+            .get_or_insert_with(|| cx.new(|cx| AiPicker::new(model, Work::Correction, cx)))
+            .clone()
+    }
+
     /// The local AI choices' pickers: the captions' translator, then the recaps' summarizer.
     pub fn ai_pickers(&mut self, cx: &mut Context<Self>) -> [Entity<AiPicker>; 2] {
         let model = self.model.clone();
@@ -1147,6 +1157,7 @@ impl SettingsView {
             Page::General => {
                 let mut boxes = self.general(settings, palette);
                 boxes.push(self.chat_ai_picker(cx).into_any_element());
+                boxes.push(self.correction_ai_picker(cx).into_any_element());
                 boxes
             }
             Page::Appearance => self.appearance(&settings.appearance, palette, window, cx),

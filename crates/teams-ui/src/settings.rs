@@ -375,6 +375,8 @@ pub struct Settings {
     pub chat_languages: Vec<ChatLanguage>,
     /// Which tool, and model, translates chats.
     pub chat_translator: AiChoice,
+    /// Which tool, and model, proofreads a draft when the user asks ([`crate::message_correct`]).
+    pub message_corrector: AiChoice,
 }
 
 /// The language an account reads a chat in, translated on this computer ([`crate::chat_translate`]).
@@ -539,13 +541,15 @@ impl Settings {
 }
 
 impl Settings {
-    /// The local AI choice of `work`: the captions' translator, the recaps' summarizer or the chats' translator.
+    /// The local AI choice of `work`: the captions' translator, the recaps' summarizer, the chats' translator or the
+    /// drafts' proofreader.
     #[must_use]
     pub fn ai(&self, work: Work) -> &AiChoice {
         match work {
             Work::Captions => &self.caption_translator,
             Work::Summary => &self.recap_summarizer,
             Work::Chat => &self.chat_translator,
+            Work::Correction => &self.message_corrector,
         }
     }
 
@@ -555,6 +559,7 @@ impl Settings {
             Work::Captions => self.caption_translator = choice,
             Work::Summary => self.recap_summarizer = choice,
             Work::Chat => self.chat_translator = choice,
+            Work::Correction => self.message_corrector = choice,
         }
     }
 }
@@ -587,6 +592,7 @@ impl Default for Settings {
             people_calendars: Vec::new(),
             chat_languages: Vec::new(),
             chat_translator: AiChoice::default(),
+            message_corrector: AiChoice::default(),
         }
     }
 }
@@ -633,6 +639,7 @@ pub mod keys {
     /// The languages chats are read in: an array of tables (`account`, `chat`, `language`).
     pub const CHAT_LANGUAGES: &str = "chat_languages";
     pub const CHAT_TRANSLATOR: &str = "chat_translator";
+    pub const MESSAGE_CORRECTOR: &str = "message_corrector";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -737,7 +744,9 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         }
         keys::ACCOUNTS => take_accounts(settings, value)?,
         keys::PEOPLE_CALENDARS => take_people_calendars(settings, value)?,
-        keys::CHAT_LANGUAGES | keys::CHAT_TRANSLATOR => take_chat_translation(settings, key, value)?,
+        keys::CHAT_LANGUAGES | keys::CHAT_TRANSLATOR | keys::MESSAGE_CORRECTOR => {
+            take_chat_translation(settings, key, value)?;
+        }
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
         }
@@ -782,9 +791,17 @@ fn take_people_calendars(settings: &mut Settings, value: &Value) -> Result<(), P
     if failed { Err(bad) } else { Ok(()) }
 }
 
-/// Takes the chats' translation: the tool translating them, or the language each account reads a chat in (an array
-/// of tables naming the account, the chat and the language; one that is bad is left out, the others are taken).
+/// Takes the chats' local AI settings: the tool proofreading drafts, the tool translating chats, or the language each
+/// account reads a chat in (an array of tables naming the account, the chat and the language; one that is bad is left
+/// out, the others are taken).
 fn take_chat_translation(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
+    if key == keys::MESSAGE_CORRECTOR {
+        settings.message_corrector = ai_choice(value).ok_or(Problem::BadValue {
+            key: keys::MESSAGE_CORRECTOR,
+            why: AI_CHOICE_SHAPE,
+        })?;
+        return Ok(());
+    }
     if key == keys::CHAT_TRANSLATOR {
         settings.chat_translator = ai_choice(value).ok_or(Problem::BadValue {
             key: keys::CHAT_TRANSLATOR,
@@ -1116,6 +1133,10 @@ fn render_chat_translation(settings: &Settings, table: &mut Table) {
     table.insert(
         keys::CHAT_TRANSLATOR.to_owned(),
         ai_choice_value(&settings.chat_translator),
+    );
+    table.insert(
+        keys::MESSAGE_CORRECTOR.to_owned(),
+        ai_choice_value(&settings.message_corrector),
     );
     if !settings.chat_languages.is_empty() {
         let chats = settings

@@ -163,7 +163,7 @@ pub fn unescape(text: &str) -> String {
 
 /// One piece of an answer.
 #[derive(Debug, PartialEq, Eq)]
-enum Token<'a> {
+pub(crate) enum Token<'a> {
     Text(&'a str),
     Open(usize),
     Close(usize),
@@ -171,7 +171,7 @@ enum Token<'a> {
 }
 
 /// The answer's markers and the text between them; anything else that looks like a tag is text.
-fn tokens(answer: &str) -> Vec<Token<'_>> {
+pub(crate) fn tokens(answer: &str) -> Vec<Token<'_>> {
     let mut found = Vec::new();
     let mut rest = answer;
     let mut text_start = 0;

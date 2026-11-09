@@ -167,7 +167,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 240] = [
+const STEPS: [Step; 5 + 247] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -338,6 +338,53 @@ const STEPS: [Step; 5 + 240] = [
     ("chat-translated-off", |shell, window, cx| {
         translate_chat(shell, None, cx);
         translate_another_chat(shell, None, cx);
+        cx.set_global(teams_ui::local_ai::Tools::default());
+        clear_compose(shell, window, cx);
+    }),
+    // a draft being corrected by the AI: the line over the box, Correct lit in the toolbar
+    ("compose-correcting", |shell, window, cx| {
+        chat_tools(CORRECTING_CLAUDE, cx);
+        type_in_compose(shell, "Bitte langsam lesen", window, cx);
+        with_compose(shell, cx, |compose, cx| compose.correct_draft(window, cx));
+    }),
+    // the proposal: what it takes out struck through, what it puts in highlighted, and what to do with it
+    ("compose-correction", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.end_correction(window, cx));
+        type_in_compose(
+            shell,
+            "Ich habe gestern dem Bericht geschickt. Kannst du es bitte durchschauen, wenn du Zeit machst?",
+            window,
+            cx,
+        );
+        with_compose(shell, cx, |compose, cx| compose.correct_draft(window, cx));
+    }),
+    // the same, as the text would read
+    ("compose-correction-result", |shell, _, cx| {
+        with_compose(shell, cx, Compose::toggle_correction_view);
+    }),
+    // what changed again, in Teams Dark (the theme alone, as the draft stays)
+    ("compose-correction-dark", |shell, _, cx| {
+        with_compose(shell, cx, Compose::toggle_correction_view);
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+    }),
+    // nothing to correct
+    ("compose-correction-clean", |shell, window, cx| {
+        show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
+        with_compose(shell, cx, |compose, cx| compose.end_correction(window, cx));
+        type_in_compose(shell, "Alles in Ordnung", window, cx);
+        with_compose(shell, cx, |compose, cx| compose.correct_draft(window, cx));
+    }),
+    // the tool signed out: why, with Try again, the draft as it was
+    ("compose-correction-failed", |shell, window, cx| {
+        chat_tools(SIGNED_OUT_CLAUDE, cx);
+        with_compose(shell, cx, |compose, cx| compose.end_correction(window, cx));
+        with_compose(shell, cx, |compose, cx| compose.correct_draft(window, cx));
+    }),
+    ("compose-correction-over", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.end_correction(window, cx));
         cx.set_global(teams_ui::local_ai::Tools::default());
         clear_compose(shell, window, cx);
     }),
@@ -2190,6 +2237,19 @@ fn with_stage_window(cx: &mut App, change: impl FnOnce(&mut CallStage, &mut Wind
         });
     }
 }
+
+/// A fake Claude Code for the tour's message correction (made-up German): one draft answered slowly, one left as it is,
+/// and one corrected.
+const CORRECTING_CLAUDE: &str = r#"#!/bin/bash
+while IFS= read -r line; do
+  case "$line" in
+    *langsam*) sleep 30; ans='<unchanged/>';;
+    *Ordnung*) ans='<unchanged/>';;
+    *) ans='<corrected><x0>Ich habe gestern den Bericht geschickt. Kannst du ihn bitte durchsehen, wenn du Zeit hast?</x0></corrected>';;
+  esac
+  printf '{"type":"result","is_error":false,"result":"%s"}\n' "$ans"
+done
+"#;
 
 /// A fake Claude Code for the tour: it answers the made-up captions with their German, anything else unchanged.
 const FAKE_CLAUDE: &str = r#"#!/bin/bash

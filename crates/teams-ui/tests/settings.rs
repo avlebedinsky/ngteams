@@ -92,6 +92,10 @@ fn changed() -> Settings {
             tool: TranslatorChoice::Only(Backend::Codex),
             model: teams_ui::local_ai::Model::Named("my-team-model".to_owned()),
         },
+        message_corrector: AiChoice {
+            tool: TranslatorChoice::Only(Backend::Claude),
+            model: teams_ui::local_ai::Model::ToolDefault,
+        },
     }
 }
 
@@ -759,6 +763,32 @@ fn ai_choices() -> Vec<AiChoice> {
         .into_iter()
         .flat_map(|tool| models.clone().map(|model| AiChoice { tool, model }))
         .collect()
+}
+
+#[test]
+fn the_message_corrector_goes_through_the_file() {
+    let defaults = Settings::default();
+    assert_eq!(defaults.message_corrector.tool, TranslatorChoice::Automatic);
+    assert_eq!(defaults.message_corrector.model, Model::Recommended);
+    for choice in ai_choices() {
+        let settings = Settings {
+            message_corrector: choice,
+            ..Settings::default()
+        };
+        let text = render(&settings);
+        assert!(text.contains("[message_corrector]"), "{text}");
+        let (read, problems) = parse(&text).expect("TOML");
+        assert_eq!(read, settings);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+    let (read, problems) = parse("message_corrector = 3").expect("TOML");
+    assert_eq!(read.message_corrector, AiChoice::default());
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.to_string().contains("message_corrector")),
+        "{problems:?}"
+    );
 }
 
 #[test]

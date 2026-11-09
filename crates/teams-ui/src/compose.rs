@@ -31,7 +31,7 @@
 //! - **The box** is drawn as Teams' compose box: the editor on a raised, rounded surface with a hairline border
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
 //!   controls inside it on the right: Format, Emoji, Attach, Loop and Actions and apps (the last two shown disabled,
-//!   saying the app doesn't have them yet), a thin divider, then Send. Expanded, the format bar
+//!   saying the app doesn't have them yet), Correct, a thin divider, then Send. Expanded, the format bar
 //!   ([`crate::editor::toolbar::FormatBar`]) runs along its top, the editor is taller, and the controls sit along its
 //!   foot; Discard on the bar empties the box (and ends a reply or an edit).
 //! - **Emoji** ([`Compose::toggle_emoji`], the button or Ctrl+.): every emoji Teams offers ([`ReactionPicker::for_emoji`],
@@ -40,7 +40,7 @@
 //!
 //! - **A channel's box** ([`Compose::in_channel`]): "Message in <channel>" posting to the channel, or a post's
 //!   thread's "Reply in thread" posting to the post's chain, with Teams' "Send to: thread only" over its text. It
-//!   offers Format, Emoji and Send, no more: it sends no typing (no capture showed a channel's) and takes no file (a
+//!   offers Format, Emoji, Correct and Send, no more: it sends no typing (no capture showed a channel's) and takes no file (a
 //!   channel's files go to its team's site, which this app doesn't upload to).
 //! - **New message's box** ([`Compose::for_new_chat`]): a chat's box for a chat not made yet. It sends no typing and
 //!   takes no pasted picture; its first message is handed to New message ([`ComposeEvent::Start`]), which makes the
@@ -50,10 +50,15 @@
 //!   this app (no write type is mapped to a `48:` stream), so their box shows [`READ_ONLY_NOTES`] in place of the text
 //!   area and its send: nothing can be typed, sent, replied to or edited there, and no typing goes out.
 //!
+//! - **Correct** ([`correction`], the button or Ctrl+Shift+G): the draft's spelling, grammar and style checked by the AI
+//!   tool the settings name, the proposal shown over the box word by word; nothing changes or goes out until the user
+//!   takes it.
+//!
 //! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
 //! `changed` each time what it holds changes), never its text.
 
 pub mod attachments;
+mod correction;
 mod pictures;
 mod translated;
 
@@ -78,6 +83,8 @@ use teams_core::{Action, Availability, NOTES, Transient};
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
 use teams_proto::is_group_chat_id;
 use teams_store::Message;
+
+pub use correction::{CorrectDraft, CorrectionStatus, KeepOriginal, SendCorrection, UseCorrection};
 
 pub use crate::editor::Editor;
 use crate::editor::convert::{self, CantLoad};
@@ -144,6 +151,7 @@ pub fn init(cx: &mut App) {
         ]
     }));
     cx.bind_keys([KeyBinding::new("ctrl-shift-u", AttachFiles, Some(CONTEXT))]);
+    correction::bind_keys(cx);
 }
 
 /// The shortest gap between two typing signals: the web client's throttle (`typingIndicator.notificationFrequency`,
@@ -617,6 +625,8 @@ pub struct Compose {
     writes: Writes,
     /// New message's first message while its chat is being made ([`ComposeEvent::Start`]): given back if that fails.
     starting: Option<Draft>,
+    /// The AI's correction of the draft ([`correction`]).
+    correction: correction::Correction,
     /// The emoji picker, while it is open.
     emoji: Option<(Entity<ReactionPicker>, Subscription)>,
     /// Where the emoji button was last drawn, for the picker to open by.
@@ -672,6 +682,7 @@ impl Compose {
                 // when the app has taken in what it typed
                 this.trace
                     .record(&TraceLine::new("compose", "changed").conversation(&this.conversation));
+                this.correction_follows_draft(cx);
                 this.refresh_picker(cx);
                 this.fit_pictures(cx);
                 this.typed(window, cx);
@@ -703,6 +714,7 @@ impl Compose {
         };
         // a picture pasted goes to the media service for this conversation, so a box that sends takes them
         editor.update(cx, |editor, _| editor.set_takes_pictures(note.is_none()));
+        let correction = correction::Correction::new(cx);
         Self {
             send_focus: cx.focus_handle(),
             core: parts.core,
@@ -725,6 +737,7 @@ impl Compose {
             translated: translated::Translated::default(),
             writes: Writes::Chat,
             starting: None,
+            correction,
             emoji: None,
             emoji_at: Rc::default(),
             emoji_on_press: false,
@@ -1083,6 +1096,8 @@ impl Compose {
             mode: self.mode.clone(),
             attachments: self.attachments.clone(),
         };
+        // what is sent is what the box holds: a correction of it is over
+        self.forget_correction();
         // a translated chat's message is translated before it goes to the outbox
         let Some((built, from)) = self.translate_first(built, from, window, cx) else {
             return;
@@ -1244,6 +1259,7 @@ impl Compose {
 
     /// Empties the box, ends a reply or an edit, and collapses an expanded box, as Teams' does once it sent.
     fn clear(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.forget_correction();
         self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         self.forget_untranslated();
         self.mode = Mode::New;
@@ -1484,6 +1500,8 @@ impl Compose {
         self.revalidate_picker(cx);
         if self.picker.is_some() {
             self.close_picker(cx);
+        } else if self.correction_on_show() {
+            self.end_correction(window, cx);
         } else if self.mode == Mode::New {
             cx.propagate();
         } else {
@@ -1620,7 +1638,8 @@ impl Compose {
     }
 
     /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop and Actions and
-    /// apps (the last two not in this app yet: shown disabled, saying so), a thin divider, then Send.
+    /// apps (the last two not in this app yet: shown disabled, saying so), then this app's Correct, a thin divider,
+    /// then Send.
     fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         div()
             .debug_selector(|| "compose-toolbar".to_owned())
@@ -1650,6 +1669,7 @@ impl Compose {
                 self.writes_a_chat()
                     .then(|| unavailable("compose-apps", Glyph::PLUS, NO_APPS)),
             )
+            .child(self.correct_button(cx))
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
             .child(self.send_button(palette, cx))
             .into_any_element()
@@ -1919,6 +1939,7 @@ impl Render for Compose {
         if let Some(note) = self.read_only {
             return read_only_view(palette, note);
         }
+        self.correction_follows_draft(cx);
         let focused = self.focused(window, cx);
         let keyed = div()
             .key_context(CONTEXT)
@@ -1930,6 +1951,7 @@ impl Render for Compose {
             .on_action(cx.listener(|this, _: &editor::ToggleExpanded, window, cx| this.toggle_expanded(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmoji, window, cx| this.toggle_emoji(window, cx)))
             .on_action(cx.listener(|this, _: &AttachFiles, window, cx| this.choose_files(window, cx)))
+            .on_action(cx.listener(|this, _: &CorrectDraft, window, cx| this.correct_draft(window, cx)))
             .flex()
             .flex_col()
             .gap_1()
@@ -1937,6 +1959,7 @@ impl Render for Compose {
             .children(self.mode_bar(palette, cx))
             .children(self.translation_view(palette, cx))
             .children(self.problem_view(palette))
+            .children(self.correction_view(palette, cx))
             .child(self.input_box(palette, focused, cx));
         div()
             .debug_selector(|| "compose".to_owned())

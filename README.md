@@ -48,11 +48,12 @@ built for the Linux desktop instead of a web page in a wrapper.
 
 **Optional extras on your computer**
 - Read and write a chat in another language, with translated messages kept for next time
+- Have a draft corrected before you send it, in any language: spelling, grammar and the word that fits best, previewed word by word
 - Translate live captions as people speak
 - Keep every call's captions as a searchable transcript, saved only on this computer
 - Get an AI summary of a meeting: purpose, key takeaways, topics, next steps and open questions
 
-Translation and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, and stay off until you turn them on.
+Translation, corrections and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, and stay off until you turn them on.
 
 **Make it yours**
 - Teams Light and Dark, High Contrast, Solarized Light and Dark, Nord and Dracula themes
@@ -169,7 +170,7 @@ The [full command list](docs/development.md#ngteamsctl) covers chats, calls, the
 - There's no ngteams server or ngteams account. The app talks to Teams directly as you.
 - Your messages and settings are stored on your computer, and your sign-in is kept in your desktop keyring.
 - Your camera starts off, and only you can turn it on.
-- If you turn on translation or AI summaries, that text goes to the tool you picked and its provider.
+- If you turn on translation or AI summaries, or ask for a correction, that text goes to the tool you picked and its provider. A correction also sends the chat's recent messages.
 - Logs at the debug level contain message text, so don't post them publicly.
 
 ## Good to know

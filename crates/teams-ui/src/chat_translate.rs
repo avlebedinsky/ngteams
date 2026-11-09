@@ -759,6 +759,13 @@ impl ChatTranslation {
         context
     }
 
+    /// The chat's latest messages, oldest first, as context for something new written in it: at most
+    /// [`CONTEXT_LINES`] and [`CONTEXT_CHARS`].
+    #[must_use]
+    pub fn recent_context(&self) -> Vec<Said> {
+        self.context_before(self.sources.len(), &HashSet::new())
+    }
+
     fn next_job_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;

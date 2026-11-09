@@ -312,6 +312,14 @@ impl Editor {
         Ok(())
     }
 
+    /// Replaces what it holds with `doc` as one edit (it can be undone), the cursor at its end.
+    pub fn replace_doc(&mut self, doc: Doc, cx: &mut Context<Self>) {
+        self.edit(Step::Other, cx, move |current, _| {
+            *current = doc;
+            Selection::caret(current.end())
+        });
+    }
+
     /// Empties it, as an edit (it can be undone).
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         if self.is_empty() {

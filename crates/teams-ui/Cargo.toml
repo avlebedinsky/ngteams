@@ -31,6 +31,8 @@ sha2.workspace = true
 # a reaction's animation strip (a PNG) cut into the frames GPUI plays, and a message's pictures (PNG, JPEG, GIF,
 # WebP) decoded: the version and decoders GPUI already links
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
+# a proposed correction's changes to a draft, word by word
+similar.workspace = true
 # the engine: its request side (behind `Core`), its events and its shutdown
 teams-core.workspace = true
 # a message's content read as rich text, for the chat list's preview line (sanitized, capped; never shown as HTML)

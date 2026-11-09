@@ -92,13 +92,14 @@ pub fn outgoing(context: &[Said], to: Option<&str>, text: &str) -> String {
     message
 }
 
-fn push_context(message: &mut String, context: &[Said]) {
+/// `context` as a `<context>` element, nothing when it is empty; names and text escaped, so neither closes it.
+pub(crate) fn push_context(message: &mut String, context: &[Said]) {
     if context.is_empty() {
         return;
     }
     message.push_str("<context>\n");
     for said in context {
-        let _ = writeln!(message, "{}: {}", single_line(&said.from), escape(&said.text));
+        let _ = writeln!(message, "{}: {}", escape(&single_line(&said.from)), escape(&said.text));
     }
     message.push_str("</context>\n");
 }
