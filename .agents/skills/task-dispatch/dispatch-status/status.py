@@ -160,7 +160,8 @@ class Status:
                 row.update(transcript_error=log.error, started_ms=log.first, written_ms=log.written,
                            doing=log.doing, said=log.said, background=list(log.background.values()), waiting_for=None)
                 if log.first is not None:
-                    phase, entered = progress(flow, log, row['group'] == 'completed', row['group'] == 'waiting')
+                    phase, entered = progress(flow, log, row['group'] == 'completed',
+                                              row['group'] in ('waiting', 'canceled'))
                     row.update(phase=phase, phase_since_ms=entered[phase], done=phase == len(PHASES[flow]) - 1,
                                ended_ms=entered[-1] if entered[-1] is not None else (
                                    log.last if row['group'] != 'running' else None), _entered=entered)
@@ -220,7 +221,8 @@ class Status:
         etas = sorted(row['eta_ms'] for row in rows if row['num'] not in reserved and row['eta_ms'] is not None)
         ahead = 0
         for place, row in enumerate(queued, 1):
-            blocker = next((other for other in rows if other['num'] == row['after'] and other['group'] != 'completed'), None)
+            blocker = next((other for other in rows if other['num'] == row['after']
+                            and other['group'] not in ('completed', 'canceled')), None)
             if blocker:
                 start = blocker['eta_ms']
             else:

@@ -267,6 +267,35 @@ class BoardTests(Files):
         order = re.findall(r'\["(\w+)", "[^"]+"\]', re.search(r'const GROUPS = (.*?);', page, re.S).group(1))
         self.assertEqual(order, ['waiting', 'failed', 'running', 'queued', 'completed', 'canceled'])
 
+    def test_canceled_handback_keeps_the_last_work_phase(self):
+        self.event('implement')
+        self.event('done', 'Question for the user', 1)
+        for flow in ('edit', 'review', 'scratch'):
+            for state in ('canceled', 'Cancelled by user'):
+                with self.subTest(flow=flow, state=state):
+                    task = {'num': 1, 'state': 'waiting on user', 'flow': flow,
+                            'transcript': str(self.events)}
+                    self.board([task])
+                    status = Status(self.ledger)
+                    waiting = status.snapshot()['tasks'][0]
+                    task['state'] = state
+                    self.board([task])
+                    canceled = status.snapshot()['tasks'][0]
+                    self.assertFalse(canceled['done'])
+                    self.assertEqual(canceled['phase'], waiting['phase'])
+                    self.assertEqual(canceled['phase_since_ms'], waiting['phase_since_ms'])
+                    self.assertIsNone(canceled['eta_ms'])
+
+    def test_canceled_prerequisite_releases_queue_and_counts_the_slot(self):
+        for state in ('canceled', 'Cancelled by user', 'landed abc'):
+            with self.subTest(state=state):
+                self.board([{'num': 1, 'state': state},
+                            {'num': 2, 'state': 'queued', 'after': 1},
+                            {'num': 3, 'state': 'queued'}], slots=1)
+                rows = Status(self.ledger).snapshot()['tasks']
+                self.assertEqual(rows[1]['queue'], {'place': 1, 'start_ms': 0})
+                self.assertEqual(rows[2]['queue'], {'place': 2, 'start_ms': None})
+
 
 class HttpTests(Files):
     def test_real_owner_exit_and_explicit_ownership(self):
