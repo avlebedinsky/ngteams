@@ -47,7 +47,7 @@
   .pill.running { color: var(--blue); background: color-mix(in srgb, var(--blue) 16%, var(--bg)); }
   .pill.waiting { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 20%, var(--bg)); }
   .pill.failed { color: var(--red); background: color-mix(in srgb, var(--red) 18%, var(--bg)); }
-  .pill.queued { color: var(--muted); background: color-mix(in srgb, var(--fg) 10%, var(--bg)); }
+  .pill.queued, .pill.canceled { color: var(--muted); background: color-mix(in srgb, var(--fg) 10%, var(--bg)); }
   .pill.completed { color: var(--green); background: color-mix(in srgb, var(--green) 16%, var(--bg)); }
   .meta { font-size: 12px; color: var(--muted); margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
   .meta .agent { font-family: ui-monospace, monospace; }
@@ -102,7 +102,7 @@
 "use strict";
 // Every string from the server is inserted with textContent only.
 const GROUPS = [["waiting", "Waiting on you"], ["failed", "Failed"], ["running", "Running"], ["queued", "Queued"],
-                ["completed", "Completed"]];
+                ["completed", "Completed"], ["canceled", "Canceled"]];
 const QUIET_MS = 10 * 60 * 1000;
 const DOWN_MS = 6000;
 let data = null, receivedAt = 0, skew = 0, lastOk = 0, lastTry = 0;

@@ -24,7 +24,8 @@ HEAD_MAX = 16 * 1024
 def group(state):
     state = state.strip().lower()
     for prefix, name in [('waiting', 'waiting'), ('fail', 'failed'), ('queued', 'queued'),
-                         ('landed', 'completed'), ('done', 'completed')]:
+                         ('landed', 'completed'), ('done', 'completed'),
+                         ('canceled', 'canceled'), ('cancelled', 'canceled')]:
         if state.startswith(prefix):
             return name
     return 'running'

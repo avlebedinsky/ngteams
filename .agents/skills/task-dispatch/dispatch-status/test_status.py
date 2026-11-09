@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -255,6 +256,16 @@ class BoardTests(Files):
         self.assertTrue(rows[0]['done'])
         self.assertFalse(rows[1]['done'])
         self.assertEqual(rows[1]['phase_typical_ms'], 120_000)
+
+    def test_canceled_tasks_take_no_slot_and_are_the_last_section(self):
+        self.board([{'num': 1, 'state': 'canceled'}, {'num': 2, 'state': 'Cancelled by user'},
+                    {'num': 3, 'state': 'running'}, {'num': 4, 'state': 'landed abc'}])
+        board = Status(self.ledger).snapshot()
+        self.assertEqual([row['group'] for row in board['tasks']], ['canceled', 'canceled', 'running', 'completed'])
+        self.assertEqual(board['slots_used'], 1)
+        page = (Path(__file__).with_name('assets') / 'index.html').read_text()
+        order = re.findall(r'\["(\w+)", "[^"]+"\]', re.search(r'const GROUPS = (.*?);', page, re.S).group(1))
+        self.assertEqual(order, ['waiting', 'failed', 'running', 'queued', 'completed', 'canceled'])
 
 
 class HttpTests(Files):
