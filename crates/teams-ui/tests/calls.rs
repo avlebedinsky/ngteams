@@ -64,6 +64,8 @@ const CALLER_NAME: &str = "Bee Caller";
 /// A ringer that counts the ringtones it started and the ones stopped.
 #[derive(Default)]
 struct FakeRinger {
+    quiet: bool,
+    contexts: Mutex<Vec<(String, bool)>>,
     started: AtomicUsize,
     stopped: Arc<AtomicUsize>,
 }
@@ -79,6 +81,11 @@ impl FakeRinger {
 }
 
 impl Ringer for FakeRinger {
+    fn audible(&self, account: &str, in_call: bool) -> bool {
+        self.contexts.lock().unwrap().push((account.to_owned(), in_call));
+        !self.quiet
+    }
+
     fn start(&self) -> Ringtone {
         self.started.fetch_add(1, Ordering::SeqCst);
         let stopped = Arc::clone(&self.stopped);
@@ -546,6 +553,32 @@ impl Rang<'_> {
         assert!(server.closed().contains(&3));
         assert!(!drawn(cx, "call-banner"));
         assert_eq!(actions(rig).len(), 2, "nothing is answered or declined by itself");
+    }
+}
+
+#[test]
+fn a_quiet_ringtone_still_shows_the_invitation_and_checks_whether_already_in_a_call() {
+    for in_call in [false, true] {
+        let rig = calling();
+        if in_call {
+            let (_shell, cx) = shell_window(&rig, Some(AB), Arc::new(ViewTrace::off()));
+            registered(&rig);
+            click(cx, "chat-call");
+            status(&rig, 1, CallStatus::Connected);
+        } else {
+            registered(&rig);
+        }
+        let ringer = Arc::new(FakeRinger {
+            quiet: true,
+            ..FakeRinger::default()
+        });
+        let server = Arc::new(FakeServer::default());
+        let alert = alert(&rig, &Arc::new(ViewTrace::off()), &ringer, &server);
+        rig.send(Event::IncomingCall(invitation(7, Some(CALLER_NAME), None)));
+        assert_eq!(ringer.started(), 0);
+        assert_eq!(server.shown().len(), 1);
+        assert!(!rig.cx.read(|cx| alert.read(cx).ringing_aloud()));
+        assert_eq!(*ringer.contexts.lock().unwrap(), [(LAB_A.to_owned(), in_call)]);
     }
 }
 

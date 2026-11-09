@@ -28,8 +28,8 @@ Name any of these events; one you leave out plays the default pack's sound:
 
 ## What a sound can be
 
-- WAV (8, 16, 24 or 32-bit PCM or 32-bit float), MP3 or Ogg (Vorbis or Opus). MP3 and Ogg are decoded by the system's
-  GStreamer plugins, which the app's packages install.
+- WAV, MP3 or Ogg (Vorbis or Opus). PCM and 32-bit float WAVs are read directly. Other WAV encodings, MP3 and Ogg
+  use the system's GStreamer plugins, which the app's packages install.
 - From 10 milliseconds to 30 seconds, and up to 16 MB. A pack holds up to 64 MB, and a `.zip` up to 256 entries.
 - Paths are relative to the pack, separated by `/`, without `..`.
 

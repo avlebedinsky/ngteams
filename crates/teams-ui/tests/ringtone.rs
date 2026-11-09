@@ -1,4 +1,4 @@
-//! The ringtone on a device (M3 Task 17): the [`DeviceRinger`] plays it on the device seam's speaker, here the file
+//! The ringtone on a device (M3 Task 17): the [`SoundBoard`] plays it on the device seam's speaker, here the file
 //! backend's recording (no audio server), in real time, until its [`Ringtone`] is dropped; a speaker that can't be
 //! opened plays nothing and fails nothing.
 
@@ -11,7 +11,8 @@ use std::time::Duration;
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{SAMPLE_RATE, wav};
 use teams_media::tone::amplitude_at;
-use teams_ui::ringtone::{DeviceRinger, RINGTONE, Ringer};
+use teams_ui::ringtone::{RINGTONE, Ringer};
+use teams_ui::sounds::SoundBoard;
 
 /// How long the ringtone is let play.
 const PLAYED: Duration = Duration::from_millis(1_200);
@@ -29,7 +30,7 @@ fn devices(recording: Option<std::path::PathBuf>) -> FileDevices {
 fn the_ringtone_plays_on_the_speaker_in_real_time_until_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let recording = dir.path().join("speaker.wav");
-    let ringer = DeviceRinger::new(Arc::new(devices(Some(recording.clone()))));
+    let ringer = SoundBoard::new(Arc::new(devices(Some(recording.clone()))));
     let ringtone = ringer.start();
     std::thread::sleep(PLAYED);
     drop(ringtone);
@@ -54,7 +55,7 @@ fn the_ringtone_plays_on_the_speaker_in_real_time_until_dropped() {
 fn a_speaker_that_can_t_be_opened_plays_nothing() {
     let dir = tempfile::tempdir().unwrap();
     // a recording in a directory that doesn't exist can't be made
-    let ringer = DeviceRinger::new(Arc::new(devices(Some(dir.path().join("gone/speaker.wav")))));
+    let ringer = SoundBoard::new(Arc::new(devices(Some(dir.path().join("gone/speaker.wav")))));
     let ringtone = ringer.start();
     std::thread::sleep(Duration::from_millis(100));
     drop(ringtone);

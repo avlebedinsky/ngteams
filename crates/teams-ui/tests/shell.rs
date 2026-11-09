@@ -1465,15 +1465,13 @@ fn every_sound_can_be_turned_off_changed_and_made_quieter() {
 
 #[test]
 fn an_imported_pack_is_chosen_listed_and_removed() {
-    use teams_ui::settings_view::sounds::Adding;
-    use teams_ui::sounds::{ImportKind, SoundEvent, SoundSource};
+    use teams_ui::sounds::{SoundEvent, SoundSource};
     let rig = seeded();
     let (_dir, model) = filed_settings();
     let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
     cx.update(|_, cx| shell.update(cx, Shell::show_settings));
     click(cx, "settings-page-notifications");
     assert!(bounds(cx, "sound-pack-add-folder").is_some());
-    let view = cx.update(|_, cx| shell.read(cx).settings_view().clone());
     let pack = tempfile::tempdir().expect("a temporary directory");
     std::fs::write(
         pack.path().join("pack.toml"),
@@ -1482,10 +1480,11 @@ fn an_imported_pack_is_chosen_listed_and_removed() {
     .expect("written");
     let import = |cx: &mut VisualTestContext| {
         let path = pack.path().to_owned();
-        cx.update(|_, cx| {
-            view.update(cx, |view, cx| {
-                view.import_now(&path, Adding::Pack(ImportKind::Folder), cx);
-            });
+        click(cx, "sound-pack-add-folder");
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.directories && !options.files && !options.multiple);
+            Some(vec![path])
         });
         cx.run_until_parked();
     };
@@ -1517,4 +1516,83 @@ fn an_imported_pack_is_chosen_listed_and_removed() {
     cx.run_until_parked();
     assert_eq!(settings_of(&shell, cx).sounds.pack, SoundSource::default());
     assert!(bounds(cx, "sound-pack-remove-lab-pack").is_none());
+}
+
+#[test]
+fn replacing_an_own_file_refreshes_the_playing_sound_without_changing_the_source() {
+    use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
+    use teams_media::devices::wav::{self, WavWriter};
+    use teams_ui::settings::attach_sounds;
+    use teams_ui::sounds::{SoundBoard, SoundEvent, SoundPlayer};
+    let rig = seeded();
+    let (dir, model) = filed_settings();
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    let recording = dir.path().join("out.wav");
+    let player = Arc::new(SoundBoard::new(Arc::new(FileDevices {
+        input: AudioInput::Silence,
+        recording: Some(recording.clone()),
+        camera: PatternCamera::default(),
+        pacing: Pacing::RealTime,
+    })));
+    cx.update(|_, cx| {
+        let settings = shell.read(cx).settings().clone();
+        attach_sounds(&settings, player.clone(), cx);
+    });
+    let (sender, heard) = std::sync::mpsc::channel();
+    player.watch_previewing(Box::new(move || {
+        sender.send(()).unwrap();
+    }));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-notifications");
+    for value in [0.1_f32, 0.25] {
+        let file = dir.path().join("own.wav");
+        let mut writer = WavWriter::create(&file).unwrap();
+        writer.write(&vec![value; 12_000]).unwrap();
+        writer.finish().unwrap();
+        click(cx, "sound-message");
+        click(cx, "sound-message-own-file");
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files && !options.directories && !options.multiple);
+            Some(vec![file])
+        });
+        cx.run_until_parked();
+        assert!(bounds(cx, "sound-pack-problem").is_none());
+        player.preview(SoundEvent::Message);
+        heard.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        heard.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        let samples = wav::read(&recording).unwrap();
+        assert!(!samples.is_empty());
+        assert!((samples[0] - value).abs() < 0.001, "the imported replacement plays");
+    }
+}
+
+#[test]
+fn another_import_cannot_replace_the_pending_chooser_and_cancel_allows_retry() {
+    use teams_ui::settings_view::sounds::Adding;
+    use teams_ui::sounds::SoundEvent;
+    let rig = seeded();
+    let (_dir, model) = filed_settings();
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-notifications");
+    click(cx, "sound-pack-add-folder");
+    cx.update(|_, cx| {
+        shell
+            .read(cx)
+            .settings_view()
+            .clone()
+            .update(cx, |view, cx| view.add(Adding::File(SoundEvent::Message), cx));
+    });
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.directories && !options.files, "the original chooser remains");
+        None
+    });
+    cx.run_until_parked();
+    click(cx, "sound-pack-add-archive");
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.files && !options.directories);
+        None
+    });
+    cx.run_until_parked();
 }

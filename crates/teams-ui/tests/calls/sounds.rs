@@ -80,15 +80,13 @@ fn placed(rig: &Rig) -> &'static mut gpui::VisualTestContext {
 #[test]
 fn a_call_rings_back_connects_and_ends_with_its_sounds() {
     let rig = calling();
-    let (entity, told) = sounds(&rig);
+    let (_entity, told) = sounds(&rig);
     placed(&rig);
     status(&rig, 1, CallStatus::Ringing);
     rig.cx.run_until_parked();
-    assert!(rig.cx.read(|cx| entity.read(cx).ringing_back()));
     assert_eq!(*told.loops.lock().expect("not poisoned"), 1);
     status(&rig, 1, CallStatus::Connected);
     rig.cx.run_until_parked();
-    assert!(!rig.cx.read(|cx| entity.read(cx).ringing_back()));
     assert_eq!(*told.stopped.lock().expect("not poisoned"), 1);
     assert_eq!(told.played(), [SoundEvent::CallJoined]);
     status(&rig, 1, CallStatus::Reconnecting);

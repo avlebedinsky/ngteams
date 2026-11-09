@@ -867,3 +867,65 @@ fn a_translation_slower_than_the_budget_notifies_as_written_once() {
     n.settle();
     assert_eq!(n.server.shown().len(), 1);
 }
+
+#[derive(Default)]
+struct SoundNotices(Mutex<Vec<teams_ui::sounds::SoundEvent>>);
+
+impl teams_ui::sounds::SoundPlayer for SoundNotices {
+    fn apply(&self, _: &Settings, _: Option<std::path::PathBuf>) {}
+    fn play(&self, event: teams_ui::sounds::SoundEvent, _: &str, _: bool) {
+        self.0.lock().unwrap().push(event);
+    }
+    fn looped(&self, _: teams_ui::sounds::SoundEvent) -> teams_ui::Ringtone {
+        panic!("notifications never loop")
+    }
+    fn preview(&self, _: teams_ui::sounds::SoundEvent) {
+        panic!("notifications never preview");
+    }
+    fn stop_preview(&self) {}
+    fn previewing(&self) -> Option<teams_ui::sounds::SoundEvent> {
+        None
+    }
+    fn watch_previewing(&self, _: Box<dyn Fn() + Send + Sync>) {}
+}
+
+#[test]
+fn collapsed_mentions_sound_for_this_batch_and_later_plain_messages_use_their_own_event() {
+    use teams_ui::settings::attach_sounds;
+    use teams_ui::sounds::SoundEvent;
+    for chat in [AB, CHANNEL] {
+        let n = Notifying::start(Settings::default());
+        n.rig.core.channel_data.lock().unwrap().insert(
+            format!("preferences:{CHANNEL}"),
+            teams_proto::ChannelData(serde_json::json!({"properties":{
+                "channelNotificationSettings":serde_json::json!({"allNewPosts":"On","dskNotif":"On"}).to_string()
+            }})),
+        );
+        let sounds = Arc::new(SoundNotices::default());
+        n.rig.cx.update(|cx| attach_sounds(&n.settings, sounds.clone(), cx));
+        // First exceed the single-notification limit with a batch containing a mention.
+        for id in 1..=4 {
+            let msg = message(chat, &id.to_string(), LAB_B, "<p>Synthetic message</p>", 5_000 + id);
+            n.arrive(if id == 4 { mentioning(msg, LAB_A) } else { msg }, Source::Delivery);
+        }
+        n.settle();
+        assert_eq!(*sounds.0.lock().unwrap(), [SoundEvent::Mention]);
+        n.arrive(message(chat, "5", LAB_B, "<p>Plain</p>", 5_005), Source::Delivery);
+        n.settle();
+        let plain = if chat == CHANNEL {
+            SoundEvent::ChannelMessage
+        } else {
+            SoundEvent::Message
+        };
+        assert_eq!(*sounds.0.lock().unwrap(), [SoundEvent::Mention, plain]);
+        n.arrive(
+            mentioning(message(chat, "6", LAB_B, "<p>Mention</p>", 5_006), LAB_A),
+            Source::Delivery,
+        );
+        n.settle();
+        assert_eq!(
+            *sounds.0.lock().unwrap(),
+            [SoundEvent::Mention, plain, SoundEvent::Mention]
+        );
+    }
+}

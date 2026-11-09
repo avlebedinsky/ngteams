@@ -449,6 +449,9 @@ impl SettingsView {
 
     /// The user picks what `adding` asks for; it is imported off the window's thread.
     pub fn add(&mut self, adding: Adding, cx: &mut Context<Self>) {
+        if self.adding.is_some() {
+            return;
+        }
         let Some(dir) = self.model.read(cx).sound_packs_dir() else {
             return;
         };
@@ -478,15 +481,6 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Imports `source` as `adding` says, at once: what a picked file comes to, without the system's chooser.
-    pub fn import_now(&mut self, source: &Path, adding: Adding, cx: &mut Context<Self>) {
-        let Some(dir) = self.model.read(cx).sound_packs_dir() else {
-            return;
-        };
-        let result = import_blocking(source, adding, &dir);
-        self.finish_adding(Some(result), adding, cx);
-    }
-
     /// An import done: the new sounds chosen and listed, or what is wrong with it said.
     fn finish_adding(&mut self, imported: Option<Result<PackInfo, PackError>>, adding: Adding, cx: &mut Context<Self>) {
         self.adding = None;
@@ -504,6 +498,8 @@ impl SettingsView {
                         },
                         cx,
                     );
+                    // A replacement can keep the same source id while changing the file behind it.
+                    model.apply_sounds();
                     model.reload_sound_packs(cx);
                 });
             }

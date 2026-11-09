@@ -107,12 +107,6 @@ impl CallSounds {
         }
     }
 
-    /// Whether the ringback plays.
-    #[must_use]
-    pub fn ringing_back(&self) -> bool {
-        self.ringback.is_some()
-    }
-
     fn player(&self, cx: &App) -> Option<Arc<dyn SoundPlayer>> {
         self.settings.read(cx).sound_player().cloned()
     }

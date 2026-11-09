@@ -66,9 +66,10 @@ use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, Trouter, TrouterCredentials};
 use teams_ui::Desktop;
-use teams_ui::ringtone::{DeviceRinger, RINGTONE};
+use teams_ui::ringtone::RINGTONE;
 use teams_ui::settings::Settings;
 use teams_ui::settings_view::{Page, SettingsView};
+use teams_ui::sounds::SoundBoard;
 use teams_ui::view::Root;
 use teams_ui::{Ringer, SettingsFile, VideoFeed};
 use tokio::sync::broadcast;
@@ -889,7 +890,7 @@ fn child(alias: Alias) -> SandboxResult {
         };
         settings.save(&opened).map_err(|problem| format!("{problem:?}"))?;
     }
-    let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(devices));
+    let ringer: Arc<dyn Ringer> = Arc::new(SoundBoard::new(devices));
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);

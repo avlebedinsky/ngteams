@@ -747,12 +747,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         | keys::FONT_SIZE
         | keys::FONT_FAMILY
         | keys::ANIMATIONS => take_appearance(&mut settings.appearance, key, value)?,
-        keys::TIME_FORMAT => {
-            settings.time_format = value
-                .as_str()
-                .and_then(TimeFormat::from_key)
-                .ok_or(bad(keys::TIME_FORMAT, "not one of system, 12-hour, 24-hour"))?;
-        }
+        keys::TIME_FORMAT => settings.time_format = take_time_format(value)?,
         keys::CAPTION_TRANSLATE_TO | keys::CAPTION_TRANSLATOR | keys::RECAP_SUMMARIZER => {
             take_captions(settings, key, value)?;
         }
@@ -772,6 +767,13 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         }
     }
     Ok(())
+}
+
+fn take_time_format(value: &Value) -> Result<TimeFormat, Problem> {
+    value.as_str().and_then(TimeFormat::from_key).ok_or(Problem::BadValue {
+        key: keys::TIME_FORMAT,
+        why: "not one of system, 12-hour, 24-hour",
+    })
 }
 
 /// Takes the people's calendars the accounts added: an array of tables each naming the account (an MRI), the person's
@@ -1546,7 +1548,7 @@ impl SettingsModel {
     }
 
     /// Tells the sounds the settings as they are now.
-    fn apply_sounds(&self) {
+    pub(crate) fn apply_sounds(&self) {
         if let Some(player) = &self.sounds {
             player.apply(&self.settings, self.sound_packs_dir());
         }

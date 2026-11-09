@@ -1,18 +1,15 @@
-//! The incoming call's ringtone (M3 Task 17): by default two tones and a pause, played on the default output while an
-//! invitation rings, through the device seam (`teams-media`'s [`Devices`]): the PipeWire opened with the reach selected
+//! The incoming call's ringtone (M3 Task 17): by default two tones and a pause, played on the calls' chosen speaker
+//! (or the system default) while an invitation rings, through the device seam
+//! (`teams-media`'s [`teams_media::devices::Devices`]): the PipeWire opened with the reach selected
 //! at startup, desktop for the normal app and sandbox for lab and test runs. Which sound it is, how loud and whether
 //! it plays are the settings' ([`crate::sounds`]).
 //!
 //! A [`Ringer`] starts it ([`Ringer::start`]) and the [`Ringtone`] it hands back stops it when dropped. The
-//! [`DeviceRinger`] plays it through the [`SoundBoard`]; a speaker that can't be opened or goes away ends the ringtone
+//! [`crate::sounds::SoundBoard`] plays it; a speaker that can't be opened or goes away ends the ringtone
 //! quietly (the banner and the notification still show the call).
 
-use std::sync::Arc;
-
-use teams_media::devices::{AudioFrame, Devices, FRAME_SAMPLES};
+use teams_media::devices::{AudioFrame, FRAME_SAMPLES};
 use teams_media::tone::{Tone, ToneGenerator};
-
-use crate::sounds::SoundBoard;
 
 /// The ringtone's two tones, one after the other.
 pub const RINGTONE: [Tone; 2] = [
@@ -89,7 +86,7 @@ impl Drop for Ringtone {
     }
 }
 
-/// What plays the ringtone: in the app the [`DeviceRinger`]; in a view test a fake that counts.
+/// What plays the ringtone: in the app the [`crate::sounds::SoundBoard`]; in a view test a fake that counts.
 pub trait Ringer: Send + Sync + 'static {
     /// Starts the ringtone; it plays until the [`Ringtone`] is dropped.
     fn start(&self) -> Ringtone;
@@ -100,39 +97,9 @@ pub trait Ringer: Send + Sync + 'static {
     }
 }
 
-/// The ringtone on the speaker of `devices` at the default settings (see the module docs); the app's ringtone is its
-/// [`SoundBoard`] itself, which follows the settings.
-pub struct DeviceRinger {
-    board: SoundBoard,
-}
-
-impl std::fmt::Debug for DeviceRinger {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeviceRinger").finish_non_exhaustive()
-    }
-}
-
-impl DeviceRinger {
-    #[must_use]
-    pub fn new(devices: Arc<dyn Devices + Send + Sync>) -> Self {
-        Self {
-            board: SoundBoard::new(devices),
-        }
-    }
-}
-
-impl Ringer for DeviceRinger {
-    fn start(&self) -> Ringtone {
-        self.board.start()
-    }
-
-    fn audible(&self, account: &str, in_call: bool) -> bool {
-        self.board.audible(account, in_call)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use teams_media::tone::amplitude_at;

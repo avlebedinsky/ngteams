@@ -195,7 +195,7 @@ fn run_loop(shared: &Shared, event: SoundEvent, stop: &AtomicBool) {
         if now != seen {
             seen = now;
             let next = shared.playing(event);
-            if !Arc::ptr_eq(&next.clip, &playing.clip) {
+            if *next.clip != *playing.clip {
                 at = 0;
             }
             cycle = next.clip.len().max(MIN_CYCLE);
@@ -220,21 +220,36 @@ fn job_within(jobs: &mpsc::Receiver<Job>, wait: Duration) -> Option<Job> {
     jobs.recv_timeout(wait).ok()
 }
 
-/// Plays `clip` once at `gain`; the job that came meanwhile, in its place.
-fn play_once(shared: &Shared, playing: &Playing, jobs: &mpsc::Receiver<Job>) -> Option<Job> {
+/// Plays `event` once, following its settings; a preview ignores only its switch. A newer job takes its place.
+fn play_once(shared: &Shared, event: SoundEvent, preview: bool, jobs: &mpsc::Receiver<Job>) -> Option<Job> {
     let mut speaker = shared.speaker("sound")?;
-    let start = Instant::now();
-    let frames = playing.clip.len().div_ceil(FRAME_SAMPLES);
-    for played in 0..frames {
+    let mut seen = shared.changes.load(Ordering::Acquire);
+    let mut playing = shared.playing(event);
+    let (start, mut at, mut played) = (Instant::now(), 0, 0);
+    while at < playing.clip.len() {
         if let Ok(next) = jobs.try_recv() {
             return Some(next);
         }
-        let frame = frame_at(&playing.clip, played * FRAME_SAMPLES, playing.gain);
+        let now = shared.changes.load(Ordering::Acquire);
+        if now != seen {
+            seen = now;
+            let next = shared.playing(event);
+            if *next.clip != *playing.clip {
+                at = 0;
+            }
+            playing = next;
+        }
+        if !preview && !playing.on {
+            break;
+        }
+        let frame = frame_at(&playing.clip, at, playing.gain);
         if let Err(error) = speaker.play(&frame) {
             log::warn!("the sound's speaker went away: {error}");
             return None;
         }
-        pace(start, played + 1);
+        at += FRAME_SAMPLES;
+        played += 1;
+        pace(start, played);
     }
     job_within(jobs, LEAD + TAIL)
 }
@@ -245,13 +260,11 @@ fn run_worker(shared: &Shared, jobs: &mpsc::Receiver<Job>) {
     while let Some(job) = next.take().or_else(|| jobs.recv().ok()) {
         match job {
             Job::Once(event) => {
-                let playing = shared.playing(event);
-                next = play_once(shared, &playing, jobs);
+                next = play_once(shared, event, false, jobs);
             }
             Job::Preview(event) => {
                 shared.set_previewing(Some(event));
-                let playing = shared.playing(event);
-                next = play_once(shared, &playing, jobs);
+                next = play_once(shared, event, true, jobs);
                 if !matches!(next, Some(Job::Preview(_))) {
                     shared.set_previewing(None);
                 }
@@ -393,6 +406,114 @@ mod tests {
     use super::*;
     use crate::ringtone::RINGTONE;
 
+    type AfterFrame = Arc<Mutex<Option<Box<dyn FnMut(usize) + Send>>>>;
+
+    /// Records every speaker open and frame, and can change settings exactly between two frames.
+    #[derive(Default)]
+    struct Heard {
+        opens: AtomicU64,
+        frames: Arc<Mutex<Vec<AudioFrame>>>,
+        after: AfterFrame,
+    }
+
+    struct Sink {
+        frames: Arc<Mutex<Vec<AudioFrame>>>,
+        after: AfterFrame,
+    }
+
+    impl AudioSink for Sink {
+        fn play(&mut self, frame: &AudioFrame) -> Result<(), teams_media::devices::DeviceError> {
+            let count = {
+                let mut frames = locked(&self.frames);
+                frames.push(frame.clone());
+                frames.len()
+            };
+            if let Some(after) = locked(&self.after).as_mut() {
+                after(count);
+            }
+            Ok(())
+        }
+    }
+
+    impl Devices for Heard {
+        fn speaker(&self) -> Result<Box<dyn AudioSink>, teams_media::devices::DeviceError> {
+            self.opens.fetch_add(1, Ordering::Release);
+            Ok(Box::new(Sink {
+                frames: self.frames.clone(),
+                after: self.after.clone(),
+            }))
+        }
+
+        fn microphone(&self) -> Result<Box<dyn teams_media::devices::AudioSource>, teams_media::devices::DeviceError> {
+            Err(teams_media::devices::DeviceError::Closed)
+        }
+
+        fn camera(&self) -> Result<Box<dyn teams_media::devices::VideoSource>, teams_media::devices::DeviceError> {
+            Err(teams_media::devices::DeviceError::Closed)
+        }
+    }
+
+    #[test]
+    fn a_volume_change_does_not_restart_a_ring() {
+        let heard = Arc::new(Heard::default());
+        let board = Arc::new(SoundBoard::new(heard.clone()));
+        let weak = Arc::downgrade(&board);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        *locked(&heard.after) = Some(Box::new(move |count| {
+            if count == 17 {
+                let mut settings = Settings::default();
+                settings.sounds.volume = 50;
+                weak.upgrade().expect("board").apply(&settings, None);
+            }
+            if count == 30 {
+                stopped.store(true, Ordering::Release);
+            }
+        }));
+        run_loop(&board.shared, SoundEvent::IncomingCall, &stop);
+        let clip = synth::render(synth::DEFAULT_PACK, SoundEvent::IncomingCall);
+        let frames = locked(&heard.frames);
+        assert_eq!(frames.len(), 30);
+        assert_eq!(frames[17], frame_at(&clip, 17 * FRAME_SAMPLES, 0.5));
+        assert_ne!(
+            frames[17],
+            frame_at(&clip, 0, 0.5),
+            "resuming the same clip at its position"
+        );
+    }
+
+    #[test]
+    fn one_shots_follow_volume_and_switch_changes_but_previews_ignore_the_switch() {
+        for preview in [false, true] {
+            let heard = Arc::new(Heard::default());
+            let board = Arc::new(SoundBoard::new(heard.clone()));
+            let weak = Arc::downgrade(&board);
+            *locked(&heard.after) = Some(Box::new(move |count| {
+                if count == 5 || count == 10 {
+                    let mut settings = Settings::default();
+                    settings.sounds.volume = 50;
+                    settings
+                        .sounds
+                        .change_event(SoundEvent::IncomingCall, |sound| sound.on = count != 10);
+                    weak.upgrade().expect("board").apply(&settings, None);
+                }
+            }));
+            let (_sender, jobs) = mpsc::channel();
+            assert!(play_once(&board.shared, SoundEvent::IncomingCall, preview, &jobs).is_none());
+            let frames = locked(&heard.frames);
+            let clip = synth::render(synth::DEFAULT_PACK, SoundEvent::IncomingCall);
+            assert_eq!(frames[5], frame_at(&clip, 5 * FRAME_SAMPLES, 0.5));
+            assert_eq!(
+                frames.len(),
+                if preview {
+                    clip.len().div_ceil(FRAME_SAMPLES)
+                } else {
+                    10
+                }
+            );
+        }
+    }
+
     fn board(recording: PathBuf) -> SoundBoard {
         let devices = FileDevices {
             input: AudioInput::Silence,
@@ -476,22 +597,19 @@ mod tests {
 
     #[test]
     fn a_sound_plays_once_and_the_same_event_at_once_is_one() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let recording = dir.path().join("once.wav");
-        let board = board(recording.clone());
+        let heard = Arc::new(Heard::default());
+        let board = SoundBoard::new(heard.clone());
+        let told = Arc::new(AtomicBool::new(false));
+        let counted = Arc::clone(&told);
+        board.watch_previewing(Box::new(move || {
+            counted.store(true, Ordering::Release);
+        }));
         board.play(SoundEvent::Message, "me", false);
         board.play(SoundEvent::Message, "me", false);
-        let expected = synth::render(synth::DEFAULT_PACK, SoundEvent::Message).len();
-        assert!(waited_for(
-            || wav::read(&recording).is_ok_and(|samples| samples.len() >= expected)
-        ));
-        thread::sleep(LEAD + TAIL);
-        let samples = wav::read(&recording).expect("recorded");
-        assert!(
-            samples.len() < expected * 2,
-            "played once: {} of {expected}",
-            samples.len()
-        );
+        // A FIFO barrier: Stop is reported only after both play requests have been processed.
+        board.stop_preview();
+        assert!(waited_for(|| told.load(Ordering::Acquire)));
+        assert_eq!(heard.opens.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -541,16 +659,30 @@ mod tests {
         board.preview(SoundEvent::IncomingCall);
         assert!(waited_for(|| board.previewing() == Some(SoundEvent::IncomingCall)));
         board.stop_preview();
-        assert!(waited_for(|| board.previewing().is_none()));
+        let until = Instant::now() + Duration::from_millis(500);
+        while board.previewing().is_some() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(board.previewing().is_none(), "stopped before the two-second clip ends");
     }
 
     #[test]
     fn a_speaker_that_cant_open_ends_quietly() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let board = board(dir.path().join("gone/out.wav"));
-        board.play(SoundEvent::Message, "me", false);
-        let ringtone = board.start();
-        thread::sleep(Duration::from_millis(100));
-        drop(ringtone);
+        let told = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&told);
+        board.watch_previewing(Box::new(move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }));
+        board.preview(SoundEvent::Message);
+        assert!(
+            waited_for(|| told.load(Ordering::Relaxed) == 2),
+            "worker reports start and end"
+        );
+        assert_eq!(board.previewing(), None);
+        // The worker survived the error and can report another preview ending.
+        board.preview(SoundEvent::Mention);
+        assert!(waited_for(|| told.load(Ordering::Relaxed) == 4));
     }
 }

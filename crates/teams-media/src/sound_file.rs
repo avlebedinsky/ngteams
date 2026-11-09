@@ -1,8 +1,8 @@
-//! A sound file made elsewhere, and so untrusted, read as mono samples: WAV by this crate's own reader
-//! ([`wav::decode_any`]), MP3 and Ogg by `GStreamer`, with the same elements kept out as the video player keeps out
+//! A sound file made elsewhere, and so untrusted, read as mono samples: WAV first by this crate's own reader
+//! ([`wav::decode_any`]), other WAV encodings, MP3 and Ogg by `GStreamer`, with the video player's restrictions
 //! (nothing that fetches: [`start_gstreamer`]). Its plugins are the ones the app's packages already install.
 //!
-//! The kind is told from the bytes, never from a name, and only a file that starts like an MP3 or an Ogg ever reaches
+//! The kind is told from the bytes, never from a name, and only a file that starts like a WAV, MP3 or Ogg ever reaches
 //! `GStreamer`. Reading stops once a file has run past the length its caller takes, so a small file that unpacks to
 //! hours costs no more than one that long, and past [`DEADLINE`] whatever it is doing, so a file made to stall holds
 //! nothing up.
@@ -39,7 +39,11 @@ fn looks_like_mp3(bytes: &[u8]) -> bool {
 /// It is none of those, or too damaged to read, or no installed plugin decodes it.
 pub fn decode(bytes: &[u8], max_seconds: f64) -> Result<AnyWav, DeviceError> {
     if bytes.starts_with(b"RIFF") {
-        return wav::decode_any(bytes);
+        let decoded = wav::decode_any(bytes);
+        if decoded.is_ok() || bytes.get(8..12) != Some(b"WAVE") {
+            return decoded;
+        }
+        return compressed(bytes, max_seconds);
     }
     if !bytes.starts_with(b"OggS") && !looks_like_mp3(bytes) {
         return Err(refused("not an MP3 or Ogg file"));
@@ -205,14 +209,32 @@ mod tests {
 
     #[test]
     fn reading_stops_past_the_length_taken() {
-        let sound = decode(&bytes_of(samples::OGG), 0.0).expect("decoded");
-        assert!(sound.seconds() <= 0.75, "{}", sound.seconds());
+        let sound = decode(&bytes_of(samples::OGG), -0.45).expect("decoded");
+        assert!(sound.seconds() < 0.20, "{}", sound.seconds());
         assert!(!sound.samples.is_empty());
     }
 
     #[test]
-    fn a_wav_goes_to_the_wav_reader() {
-        assert!(matches!(decode(b"RIFFxxxxWAVE", 1.0), Err(DeviceError::Wav(_))));
+    fn wav_encodings_the_reader_refuses_fall_through_to_gstreamer() {
+        // Synthetic mono mu-law WAV: our PCM reader refuses format 7, GStreamer reads it.
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend(8_036_u32.to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16_u32.to_le_bytes());
+        bytes.extend(7_u16.to_le_bytes());
+        bytes.extend(1_u16.to_le_bytes());
+        bytes.extend(8_000_u32.to_le_bytes());
+        bytes.extend(8_000_u32.to_le_bytes());
+        bytes.extend(1_u16.to_le_bytes());
+        bytes.extend(8_u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(8_000_u32.to_le_bytes());
+        bytes.extend(vec![0xFF; 8_000]);
+        assert!(wav::decode_any(&bytes).is_err());
+        let sound = decode(&bytes, 2.0).expect("mu-law decoded");
+        assert!((sound.seconds() - 1.0).abs() < 0.05);
+        assert!(matches!(decode(b"RIFFxxxxWEBP", 1.0), Err(DeviceError::Wav(_))));
+        assert!(matches!(decode(b"RIFFxxxxWAVE", 1.0), Err(DeviceError::SoundFile(_))));
     }
 
     #[test]

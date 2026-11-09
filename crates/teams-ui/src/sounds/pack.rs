@@ -371,9 +371,21 @@ fn normalized(bytes: &[u8], event: SoundEvent) -> Result<Vec<f32>, PackError> {
 /// Writes `samples` as `<event>.wav` in `dir`.
 fn write_sound(dir: &Path, event: SoundEvent, samples: &[f32]) -> Result<(), PackError> {
     let path = dir.join(format!("{}.wav", event.key()));
-    let mut writer = WavWriter::create(&path).map_err(|_| PackError::Storage)?;
-    writer.write(samples).map_err(|_| PackError::Storage)?;
-    writer.finish().map_err(|_| PackError::Storage)
+    replace_sound(&path, |temporary| {
+        let mut writer = WavWriter::create(temporary).map_err(|_| PackError::Storage)?;
+        writer.write(samples).map_err(|_| PackError::Storage)?;
+        writer.finish().map_err(|_| PackError::Storage)
+    })
+}
+
+/// Completes a replacement beside the kept file before publishing it. A failed write leaves that file intact.
+fn replace_sound(path: &Path, write: impl FnOnce(&Path) -> Result<(), PackError>) -> Result<(), PackError> {
+    let number = IMPORTS.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_file_name(format!(".sound-{}-{number}.wav", std::process::id()));
+    let result = write(&temporary).and_then(|()| fs::rename(&temporary, path).map_err(|_| PackError::Storage));
+    // Also removes a partially written file on failure; after a successful rename there is nothing to remove.
+    let _ = fs::remove_file(&temporary);
+    result
 }
 
 /// The manifest kept beside a pack's sounds.
@@ -412,7 +424,12 @@ fn free_id(name: &str, taken: &[PackInfo]) -> (String, String) {
     }
     let mut number = 2;
     loop {
-        let (id, shown) = (format!("{slug}-{number}"), format!("{name} ({number})"));
+        let suffix = format!(" ({number})");
+        let mut end = MAX_NAME.saturating_sub(suffix.len()).min(name.len());
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (id, shown) = (format!("{slug}-{number}"), format!("{}{suffix}", &name[..end]));
         if free(&id, &shown) {
             return (id, shown);
         }
@@ -506,7 +523,6 @@ pub fn import_single(source: &Path, event: SoundEvent, packs_dir: &Path) -> Resu
     let samples = normalized(&bytes, event)?;
     let dir = packs_dir.join(OWN_PACK);
     private_dir(&dir)?;
-    write_sound(&dir, event, &samples)?;
     let mut events = read_pack(&dir, OWN_PACK).map(|pack| pack.events).unwrap_or_default();
     if !events.contains(&event) {
         events.push(event);
@@ -517,6 +533,7 @@ pub fn import_single(source: &Path, event: SoundEvent, packs_dir: &Path) -> Resu
         stored_manifest(OWN_PACK_NAME, None, &events).as_bytes(),
     )
     .map_err(|_| PackError::Storage)?;
+    write_sound(&dir, event, &samples)?;
     Ok(PackInfo {
         id: OWN_PACK.to_owned(),
         name: OWN_PACK_NAME.to_owned(),
@@ -568,14 +585,37 @@ fn stored_file(dir: &Path, event: SoundEvent) -> Option<PathBuf> {
 }
 
 /// `event`'s sound in pack `id` of `packs_dir`, read again from its file; `None` when it can't be had (it is told why,
-/// without the pack's name, in the log).
+/// without the pack's name, in the log). An event absent from the manifest needs no fallback warning.
 #[must_use]
 pub fn read_sound(packs_dir: &Path, id: &str, event: SoundEvent) -> Option<Vec<f32>> {
     if !is_id(id) {
         return None;
     }
-    let path = stored_file(&packs_dir.join(id), event)?;
-    let bytes = match read_limited(File::open(&path).ok()?, MAX_STORED) {
+    let dir = packs_dir.join(id);
+    // Missing events are normal for a partial pack. A promised event that is missing or refused is damage.
+    let manifest = (|| {
+        let bytes = read_limited(File::open(dir.join(MANIFEST)).ok()?, MAX_MANIFEST).ok()?;
+        parse_manifest(std::str::from_utf8(&bytes).ok()?).ok()
+    })();
+    let Some(manifest) = manifest else {
+        log::warn!("a sound pack's manifest is missing or can't be read");
+        return None;
+    };
+    if !manifest.sounds.contains_key(&event) {
+        return None;
+    }
+    let Some(path) = stored_file(&dir, event) else {
+        log::warn!(
+            "a sound pack's {} sound is missing or isn't a plain file of the permitted size",
+            event.key()
+        );
+        return None;
+    };
+    let Ok(file) = File::open(&path) else {
+        log::warn!("a sound pack's {} sound can't be opened", event.key());
+        return None;
+    };
+    let bytes = match read_limited(file, MAX_STORED) {
         Ok(bytes) => bytes,
         Err(ReadError::TooLarge | ReadError::Failed) => {
             log::warn!("a sound pack's {} sound can't be read", event.key());
@@ -886,6 +926,39 @@ mod tests {
         assert!(is_id(&id), "{id}");
         assert_eq!(shown, "../Ünï Pack!");
         assert_eq!(free_id("!!!", &[]).0, "pack");
+    }
+
+    #[test]
+    fn repeated_long_names_stay_listed_and_removable() {
+        for name in ["x".repeat(MAX_NAME), "é".repeat(MAX_NAME / 2)] {
+            let manifest = format!("name = \"{name}\"\n[sounds]\nmessage = \"ping.wav\"\n");
+            let pack = folder(&manifest, &[("ping.wav", wav_bytes(0.1))]);
+            let packs = tempfile::tempdir().expect("a directory");
+            for _ in 0..3 {
+                let kept = import(pack.path(), ImportKind::Folder, packs.path()).expect("imported");
+                assert!(is_name(&kept.name));
+                assert!(list(packs.path()).contains(&kept));
+            }
+            for kept in list(packs.path()) {
+                remove(packs.path(), &kept.id).expect("removed");
+            }
+            assert!(list(packs.path()).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_partial_write_preserves_the_previous_sound_and_cleans_up() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("message.wav");
+        let original = wav_bytes(0.1);
+        fs::write(&path, &original).expect("written");
+        let result = replace_sound(&path, |temporary| {
+            fs::write(temporary, b"partial WAV").expect("partial write");
+            Err(PackError::Storage)
+        });
+        assert_eq!(result, Err(PackError::Storage));
+        assert_eq!(fs::read(&path).expect("old sound"), original);
+        assert_eq!(fs::read_dir(dir.path()).expect("directory").count(), 1);
     }
 
     #[test]

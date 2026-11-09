@@ -54,7 +54,7 @@
 //! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app and the
 //!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call strip of the
 //!   main window, [`call_window`] the call's own window (as Teams opens one) showing [`call_stage`]'s stage and
-//!   controls, [`effects`] the camera's background effects (blur, a picture) and their self-preview, [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification
+//!   controls, [`effects`] the camera's background effects (blur, a picture) and their self-preview, [`call_alert`] the incoming call's ringtone ([`ringtone`], on the calls’ speaker) and its notification
 //!   with Answer and Decline.
 //! - [`account_prompt`]: the personal build's first sign-in screen, a window of its own asking for the work account
 //!   before anything is signed in.
@@ -182,7 +182,7 @@ pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent
 pub use own_presence::OwnPresence;
 pub use people::Shown;
 pub use presence::Presences;
-pub use ringtone::{DeviceRinger, Ringer, Ringtone};
+pub use ringtone::{Ringer, Ringtone};
 pub use search::{Hit, HitTarget};
 pub use settings::{Copied, FirstRunState, LogLevel, Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};

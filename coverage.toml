@@ -91,7 +91,7 @@ sha256 = "c79cc5b9a48a7063864c27589061ae7fd49cad8ff8a4d1b40af129e5f2b817b3"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
-sha256 = "544c7f4e631f60f95a61a71be7bcffcd459bd9b3124055c7d89e422ebb7fcedf"
+sha256 = "89658cf4ef99ddf5c8fe1421dc8a85ebdf216842cf241e19d6d9362a2f272f8c"
 reason = "module declarations and derived error type only; no authored executable bodies"
 
 [unmapped_sources."crates/teams-media/src/video.rs"]
@@ -99,7 +99,7 @@ sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "dde2970f3084494c8004745559e35e71118663291426db77600eda2eb1eb1ab2"
+sha256 = "570dca96a5fc20b7697fa897bfd6ccf7498ba27d22a58ebeb67c3af3a661a552"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe-client/src/event.rs"]
@@ -145,3 +145,7 @@ reason = "Windows-only native ACL and creation APIs: absent from the Linux LLVM 
 [unmapped_sources."crates/teams-auth/src/secrets/windows.rs"]
 sha256 = "2706705ef13e524c953b2e4013f09ea6b73c1c551dcadb6c520ad1ead142b8fb"
 reason = "Windows-only Credential Manager adapter; no Linux LLVM mapping. Native synthetic-credential tests and coverage run in the Windows VM interactive logon session and the Windows portability job; raw third-party secret-bearing errors are redacted by construction."
+
+[unmapped_sources."crates/teams-media/src/sound_file_samples.rs"]
+sha256 = "7d31215be18d4133dbaecf624a19001f48d68e2f3df899657879e419ce994081"
+reason = "test-only synthetic encoded audio constants; no executable items"

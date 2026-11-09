@@ -423,13 +423,13 @@ impl Notifier {
                 .conversation(conversation)
                 .kind(kind.name()),
         );
-        self.sound(notice, cx);
+        self.sound(notice, notice.kind == NoticeKind::Mention, cx);
         Self::tell_shown(notice, cx);
     }
 
     /// Plays the sound of `notice`, a notification just shown.
-    fn sound(&self, notice: &Notice, cx: &App) {
-        let event = if notice.kind == NoticeKind::Mention {
+    fn sound(&self, notice: &Notice, mentioned: bool, cx: &App) {
+        let event = if mentioned {
             SoundEvent::Mention
         } else if self.channels.contains(&notice.conversation) {
             SoundEvent::ChannelMessage
@@ -468,7 +468,6 @@ impl Notifier {
                 .conversation(conversation)
                 .kind(NoticeKind::Collapsed.name()),
         );
-        self.sound(notice, cx);
         Self::tell_shown(notice, cx);
     }
 }
@@ -748,7 +747,8 @@ async fn show(
         server.close(id).await;
     }
     // a mention shown before, one by one or in the collapsed one this replaces, is still among the messages
-    let mention = mentioned || notices.iter().any(|notice| notice.kind == NoticeKind::Mention);
+    let batch_mentions = notices.iter().any(|notice| notice.kind == NoticeKind::Mention);
+    let mention = mentioned || batch_mentions;
     let notice = Notice {
         conversation: conversation.to_owned(),
         kind: NoticeKind::Collapsed,
@@ -756,7 +756,10 @@ async fn show(
         body: collapsed_body(total, mention),
     };
     if let Ok(id) = server.show(&notice, collapsed.unwrap_or(0)).await {
-        let _ = this.update(cx, |this, cx| this.shown_collapsed(&notice, id, total, mention, cx));
+        let _ = this.update(cx, |this, cx| {
+            this.shown_collapsed(&notice, id, total, mention, cx);
+            this.sound(&notice, batch_mentions, cx);
+        });
     }
 }
 
