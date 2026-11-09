@@ -1,6 +1,6 @@
 [package]
 name = "teams-signin"
-description = "The sign-in window: Microsoft's sign-in page in a WPE WebKit view drawn in a GPUI window, behind a request guard, handing the redirect's code to the app"
+description = "Microsoft sign-in behind a shared request guard and egress proxy, using WPE WebKit on Linux and WebView2 on Windows"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,26 +20,47 @@ teams-auth.workspace = true
 teams-log.workspace = true
 # shared credential-safe URL shape for guard diagnostics
 teams-proto.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 # the guard's wire protocol
 teams-signin-protocol.workspace = true
-# the page: WPE WebKit offscreen in the `ngteams-web` worker, its frames drawn here and the window's input handed to it
-teams-wpe-client.workspace = true
-# where the page's engine comes from: the system's or a pinned runtime, downloaded once
-teams-web-engine.workspace = true
 # the private directory for the guard's socket and the module
 tempfile.workspace = true
 # the personal window's host bound refusing a host
 thiserror.workspace = true
 url.workspace = true
 
-[dev-dependencies]
-# the window tests serve as their own worker, and drive the extension's client
+[target.'cfg(unix)'.dependencies]
+# Linux offscreen page worker and system/pinned WebKit runtime.
+teams-wpe-client.workspace = true
+teams-web-engine.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+teams-platform.workspace = true
+webview2-com.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+wry.workspace = true
+raw-window-handle.workspace = true
+
+[[bin]]
+name = "ngteams-webview"
+path = "src/bin/ngteams-webview.rs"
+
+[target.'cfg(windows)'.dev-dependencies]
+rcgen.workspace = true
+tokio-rustls.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+# Retained Linux offscreen engine and compositor tests.
 teams-signin-extension.workspace = true
 teams-wpe.workspace = true
+ui-sandbox.workspace = true
+
+[dev-dependencies]
+# the window tests serve as their own worker, and drive the extension's client
 gpui-pre = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
-ui-sandbox.workspace = true
 # the window test stands a local endpoint in for Entra; ngteams refuses test-support builds
 teams-signin = { path = ".", features = ["test-support"] }
 
@@ -60,3 +81,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "native_window"
+harness = false

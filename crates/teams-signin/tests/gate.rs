@@ -14,7 +14,7 @@ use teams_signin::classify::{Classification, Classifier, OwnKind};
 use teams_signin::egress::HostGate;
 use teams_signin::guard::{Decision, Guard};
 use teams_signin::hosts::{ENTRA_HOSTS, SignInHosts};
-use teams_signin_extension::protocol::OK;
+use teams_signin_protocol::protocol::OK;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

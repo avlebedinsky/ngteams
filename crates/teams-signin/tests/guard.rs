@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The guard's decisions, offline: by the sign-in rules (`teams_signin::classify`) for an armed page, every one in the diagnostic log
 //! before the answer, the redirect caught and never let through, an unarmed page denied; and
 //! the guard's socket, as the extension talks to it.

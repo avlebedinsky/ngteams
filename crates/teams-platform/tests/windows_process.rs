@@ -73,6 +73,26 @@ fn only_explicit_handles_and_uninterpreted_arguments_reach_the_child() {
 }
 
 #[test]
+fn private_standard_streams_are_transferred_without_changing_the_parents_streams() {
+    use std::io::Read as _;
+    let (input, mut writing) = std::io::pipe().unwrap();
+    let (mut reading, output) = std::io::pipe().unwrap();
+    let null = std::fs::OpenOptions::new().write(true).open("NUL").unwrap();
+    let transfer = Transfer::with_standard_streams([input.as_handle(), output.as_handle(), null.as_handle()]).unwrap();
+    let job = teams_platform::windows_job::Job::new().unwrap();
+    let child = transfer
+        .spawn_in_job(&std::env::current_exe().unwrap(), &arguments("pipes"), &job)
+        .unwrap();
+    drop((transfer, input, output));
+    writing.write_all(b"synthetic private request").unwrap();
+    drop(writing);
+    assert_eq!(child.wait(Duration::from_secs(20)).unwrap(), Some(0));
+    let mut text = String::new();
+    reading.read_to_string(&mut text).unwrap();
+    assert!(text.contains("synthetic private request"));
+}
+
+#[test]
 fn waits_are_bounded_and_kill_targets_the_owned_process() {
     let transfer = Transfer::new(&[]).unwrap();
     let child = transfer
@@ -164,6 +184,13 @@ fn transfer_child() {
     let Some(start) = args.iter().position(|value| value == MARKER) else {
         return;
     };
+    if args[start + 1] == "pipes" {
+        use std::io::Read as _;
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text).unwrap();
+        std::io::stdout().write_all(text.as_bytes()).unwrap();
+        return;
+    }
     if args[start + 1] == "restart" {
         let child = Transfer::new(&[])
             .unwrap()

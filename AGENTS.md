@@ -107,10 +107,11 @@ Undoing one needs a new reason, not a cleanup; the why is in each path's module 
 - Message text is drawn only from sanitized `RichText`; the UI kit is held to `crates/teams-ui/tests/reach.rs`; no Zed
   code is copied (GPL).
 - Call media is libwebrtc's (`crates/teams-media/src/rtc.rs`): relay-only ICE, SDP only in Teams' dialect.
-- The sign-in window (`crates/teams-signin`) is Microsoft's page in a WPE WebKit view in the `ngteams-web` worker
-  (`crates/teams-wpe`), on the system's `wpewebkit` or a release's pinned, hash-verified runtime
-  (`crates/teams-web-engine`); `ngteams` itself links no WebKit. Every page request is decided and logged by its guard,
-  and its only way out is the egress proxy.
+- The sign-in window (`crates/teams-signin`) is Microsoft's page in an isolated worker: WPE WebKit on Linux
+  (`ngteams-web`, `crates/teams-wpe`), using the system's `wpewebkit` or a release's pinned, hash-verified runtime
+  (`crates/teams-web-engine`); WebView2 on Windows (`ngteams-webview`), using Microsoft's installed runtime.
+  `ngteams` itself links no WebKit. Every page request is decided and logged by the guard, and the egress proxy is
+  the page's only way out.
 
 ## Where things live
 

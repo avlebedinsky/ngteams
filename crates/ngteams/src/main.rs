@@ -88,7 +88,12 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     // the sign-in window's engine worker, held from here so an update replacing the files can't swap it under this run
+    #[cfg(unix)]
     if let Err(error) = teams_wpe_client::worker::pin_worker() {
+        eprintln!("teams: {error}");
+    }
+    #[cfg(windows)]
+    if let Err(error) = teams_signin::window::pin_worker() {
         eprintln!("teams: {error}");
     }
     let cli = Cli::parse();
@@ -144,6 +149,7 @@ fn main() -> ExitCode {
 }
 
 /// Installs a sign-in engine runtime from a file, under the same checks a download gets.
+#[cfg(unix)]
 fn install_web_engine(archive: &std::path::Path) -> ExitCode {
     let installed = (|| {
         let pins = teams_web_engine::Pins::compiled()
@@ -160,6 +166,14 @@ fn install_web_engine(archive: &std::path::Path) -> ExitCode {
         }
         Err(error) => failed("install-web-engine", &error),
     }
+}
+
+#[cfg(windows)]
+fn install_web_engine(_archive: &std::path::Path) -> ExitCode {
+    failed(
+        "install-web-engine",
+        &"Windows uses Microsoft's installed WebView2 Runtime; install or repair it through Windows Settings",
+    )
 }
 
 /// This process run again by `exec` (which returns only when it couldn't).

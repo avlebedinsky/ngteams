@@ -82,3 +82,25 @@ jobs:
           ./scripts/test-windows-runner.ps1 -Runner "$pwd/target/llvm-cov-target/debug/teams-runner.exe" -SkipConsole
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo llvm-cov report --locked -p teams-runner --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90
+
+  signin:
+    name: Native sign-in boundary (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the repository toolchain
+        run: rustup show active-toolchain
+      - name: Format
+        run: cargo fmt -p teams-signin -- --check
+      - name: Compile every native sign-in target
+        run: cargo check --locked -p teams-signin --all-targets
+      - name: Lints
+        run: cargo clippy --locked -p teams-signin --all-targets -- -D warnings
+      - name: Offline guard and worker tests without a GUI or tenant
+        run: cargo test --locked -p teams-signin --lib --test classify --test gate --test native_worker
+      # Native browser windows are exercised only in the explicitly authorized win11 VM console.

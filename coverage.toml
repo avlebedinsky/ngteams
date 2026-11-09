@@ -168,7 +168,7 @@ sha256 = "e2d8868d9c820bb4f17e6786d91f3b251df014786b1bc3a436a0d1c1b1d589bc"
 reason = "Windows-only app listener binding and cleanup; compiled and exercised by teams-ctl app_listener tests on Windows without the remaining GUI/media dependencies"
 
 [unmapped_sources."crates/teams-platform/src/windows_process.rs"]
-sha256 = "a424ec0d758bfa49a5304d40ddca1f9d9a562a7888c573b2eecc8897eb86689b"
+sha256 = "8c7f9bdc2459de58768f5b572eff5bb5b61fd51d75573ed258437e78ac7fccfc"
 reason = "Windows-only selective native process/handle transfer; exercised with real synthetic subprocesses and measured by the Windows portability gate."
 
 [unmapped_sources."crates/teams-platform/src/windows_sandbox.rs"]
@@ -196,7 +196,7 @@ sha256 = "a2cd8de50eb53c0a437fa5d5824ab9a736ba6e3fd3620ec7f6418c0eb8df9ea5"
 reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
 
 [unmapped_sources."crates/teams-runner/src/windows.rs"]
-sha256 = "2de86c71f96fb8aa7764dfd022e0efe6186e0dc0573a7f44b4c1f47bd5349f6d"
+sha256 = "7331b3bf5b25bf67f7997ab7c14f6a8e3c345e63fd18ca406fc93800773d28dd"
 reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
 
 [unmapped_sources."crates/teams-runner/src/windows/locks.rs"]
@@ -219,3 +219,27 @@ context = { "crates/teams-media/src/devices/native.rs" = "5ad43e89abb76b2a91cef7
 [unmapped_sources."crates/teams-media/src/test_turn/windows.rs"]
 sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"
 reason = "Windows-only host-local adapter for the test-support TURN fixture; exercised by native audio, video and screen-share relay contracts; absent from Linux compilation and production builds"
+
+[unmapped_sources."crates/teams-signin/src/native/browser.rs"]
+sha256 = "55471dc062decb1a925a7294766434001df81e6330ab51d704e3ceecb157b29d"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/mod.rs"]
+sha256 = "82187a53e139b6971723033fd1e944d9ab6ba10ee6ac66b0ce55b19ebd49f8d5"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/policy.rs"]
+sha256 = "1304d50e70808654fe97b5f5f868f4f54289a90b85605ef63fde070ff6c85dc2"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/profile.rs"]
+sha256 = "b3f4c1fdc4f0e5bb663e591e716655868e74121f2eb0ebe89048510fe21433a6"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/refusals.rs"]
+sha256 = "ee545f9c0eb28038c3de6a699fcc552e89205d76bc87ca4e1a64d77bfb47073c"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/wire.rs"]
+sha256 = "b7b10b220936c86125bbd354b61f7b2a0b87911e05a575b6055f4c257cbb8d2e"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."

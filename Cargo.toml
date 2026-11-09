@@ -259,6 +259,10 @@ wiremock = "0.6.5"
 # Native Windows filesystem security, with no logging of its own.
 widestring = "1.2.1"
 windows-sys = "0.61.2"
+windows = "0.62.2"
+webview2-com = "0.39.1"
+wry = { version = "0.57", default-features = false }
+raw-window-handle = "0.6"
 # Native screen/window picker and Windows Graphics Capture; MIT, no logging dependency.
 windows-capture = "=2.0.1"
 # Windows broker byte streams through maintained local named-pipe bindings.

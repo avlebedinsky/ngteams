@@ -680,7 +680,7 @@ test alone to establish its cause; do not treat a lab-contact violation as a tim
 ### Windows VM runner
 
 Windows lab builds use `pwsh -NoProfile -File scripts/run-lab.ps1 -BuildOnly`; a normal build always sets only the
-lab marker, never the personal install marker. This ports the runner, not the remaining sign-in/media dependencies.
+lab marker, never the personal install marker. The runner also builds the sibling `ngteams-webview.exe` sign-in worker.
 The Windows app/release port is still in progress. Prerequisites are the repository Rust toolchain, MSVC C++/Windows
 SDK and the native media development libraries. The display-free `teams-runner` helper has its own bounded build
 in `target/runner`; the normally built app goes to `target/lab`.
@@ -708,3 +708,28 @@ removed after orderly completion or `-Stop`; a failed/crashed run retains diagno
 Offline lifecycle tests use a tiny synthetic native executable, no GUI, network or credentials:
 `cargo test -p teams-runner` and `scripts/test-windows-runner.ps1 -Runner <absolute-helper.exe>`. The latter adds
 actual CLI dispatch and console scheduling in the VM; `-SkipConsole` checks only the display-free paths on hosted CI.
+
+
+### Windows sign-in checks
+
+`teams-signin` selects native WebView2 on Windows; Linux retains the offscreen WPE worker. The native worker uses
+private standard-stream pipes to the same in-process guard, starts in a private kill-on-close job, and receives
+neither the broker nor view-trace handles. Its private, InPrivate browser profile is deleted after every browser
+process exits, including readonly Chromium cache metadata. Environment and registry overrides that could change
+the browser or proxy are refused. Request filters cover every document/worker source; response interception adds
+CSP restrictions, and document-created scripts remove unguarded network constructors in every frame. Proxy
+settings remove Chromium's implicit loopback bypass. TLS errors, ambient HTTP authentication, client certificates,
+external protocols, permissions, popups and downloads are refused in production.
+
+The Windows lab runner still requires the authorized VM console and the usual contact check for a live app run.
+For an offline native sign-in check, run `pwsh -NoProfile -File scripts/test-windows-signin.ps1` in that VM. It
+builds the test harness, then schedules its GUI in the existing Limited InteractiveToken console. `-HoldForShot`
+keeps the synthetic page visible longer for a VM screenshot. It uses only a self-signed numerical-loopback HTTPS
+fixture: the test-support worker permits that certificate alone, without changing Windows trust. The production
+proxy configuration is used even for loopback. Assertions cover per-request logging, allowed and denied POSTs,
+synchronous/POST redirects, main/frame/immediate-about-blank constructor restrictions, immutable restrictions,
+proxy tunnel counts, redirect-code redaction and profile/process cleanup. Synthetic evidence stays in the ignored
+`target/windows-signin-smoke-*` directories. No account, credential or tenant is used.
+
+Display-free Windows checks use `cargo test -p teams-signin --lib --test classify --test gate --test native_worker`.
+The full application still needs its remaining UI/platform integrations before live Windows sign-in can be tested.

@@ -94,6 +94,10 @@ fn execute_checked(action: Action, console: impl FnOnce() -> io::Result<Option<O
                 "ngteams",
                 "--bin",
                 "ngteams",
+                "-p",
+                "teams-signin",
+                "--bin",
+                "ngteams-webview",
                 "--target-dir",
                 "target/lab",
             ]

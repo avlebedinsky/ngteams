@@ -54,6 +54,21 @@ impl Transfer {
         Ok(Self { passed, standard })
     }
 
+    /// Duplicate an explicit set of standard streams, without inheriting any other process handles.
+    /// Workers use private pipes; this retains the same atomic job assignment as the runners.
+    ///
+    /// # Errors
+    /// Duplicating a supplied handle fails.
+    pub fn with_standard_streams(standard: [BorrowedHandle<'_>; 3]) -> io::Result<Self> {
+        Ok(Self {
+            passed: Vec::new(),
+            standard: standard
+                .into_iter()
+                .map(|handle| duplicate(handle.as_raw_handle()))
+                .collect::<io::Result<_>>()?,
+        })
+    }
+
     /// The child's numeric handle for the passed entry at `index`.
     #[must_use]
     pub fn value(&self, index: usize) -> Option<usize> {

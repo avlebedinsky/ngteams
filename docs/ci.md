@@ -222,3 +222,11 @@ Windows' native file-device relay contracts cover audio, camera video and screen
 own host address because Winsock rejects libwebrtc's interface-bound socket sending directly to 127/8 (10049).
 No production transport or ICE policy changes. The system-picker hardware contract is run explicitly in the
 win11 console against the runner's own dark-blue fixture window; it verifies BGRA contents and idle capture cleanup.
+
+
+The Windows portability workflow separately compiles/lints every `teams-signin` target and runs its display-free
+classifier, host-gate and private-worker rejection contracts. Its WebView2/STA callbacks require the authorized VM
+console and are exercised by `scripts/test-windows-signin.ps1`, using synthetic HTTPS and no account. Windows-only
+sources are hash-audited in the Linux inventory; native whole-application coverage remains part of the final port
+gates. Wry's optional tracing features are disabled, the app logger filters third-party targets, and the worker's
+stderr goes to NUL. Only fixed Chromium error codes are forwarded; guard decisions are logged in the parent.
