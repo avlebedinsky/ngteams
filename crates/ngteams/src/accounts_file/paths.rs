@@ -247,9 +247,10 @@ mod windows_tests {
             Path::new(r"C:\ABSENT\Personal"),
             Path::new(r"\\?\C:\absent\personal\sub")
         ));
-        assert!(overlapping(
-            Path::new(r"\\server\share\ABSENT"),
-            Path::new(r"\\?\UNC\SERVER\SHARE\absent\sub")
+        // Check UNC spelling normalization without asking the filesystem to open a network share.
+        assert!(contains(
+            Path::new(r"\\?\UNC\SERVER\SHARE\absent\sub"),
+            Path::new(r"\\server\share\ABSENT")
         ));
         assert!(!overlapping(&real, &dir.path().join("Personal-lab")));
         assert!(!overlapping(Path::new(r"C:\personal"), Path::new(r"D:\personal")));
