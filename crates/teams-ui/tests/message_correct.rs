@@ -35,6 +35,7 @@ const FAKE_CLAUDE: &str = r#"#!/bin/bash
 dir="$(dirname "$0")"
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$dir/received.log"
+  printf '%s' "$$" > "$dir/pid"
   while [ -e "$dir/hold" ]; do sleep 0.02; done
   t=$(printf '%s' "$line" | sed 's/.*<message>\\n\(.*\)\\n<\/message>.*/\1/')
   case "$t" in
@@ -88,6 +89,34 @@ impl Fake {
     fn questions(&self) -> String {
         read_log(self.dir.path())
     }
+
+    fn running_pid(&self, cx: &mut VisualTestContext) -> u32 {
+        until(cx, |_| self.pid().is_some_and(process_running));
+        self.pid().unwrap()
+    }
+
+    fn pid(&self) -> Option<u32> {
+        fs::read_to_string(self.dir.path().join("pid")).ok()?.parse().ok()
+    }
+
+    fn assert_stopped(&self, pid: u32, cx: &mut VisualTestContext) {
+        assert!(self.dir.path().join("hold").exists());
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while process_running(pid) && std::time::Instant::now() < deadline {
+            draw(cx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!process_running(pid), "tool {pid} survived cancellation");
+    }
+}
+
+fn process_running(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .unwrap()
+        .status
+        .success()
 }
 
 fn read_log(dir: &Path) -> String {
@@ -253,10 +282,21 @@ fn a_correction_is_shown_beside_the_draft_and_changes_nothing_by_itself() {
     let preview = compose.read_with(cx, |compose, _| compose.correction_proposal().unwrap().preview.clone());
     assert_eq!(preview.changes, "tehthe report");
     assert_eq!(preview.result, "the report");
-    let before = cx.debug_bounds("compose-correction-text").unwrap();
+    assert_eq!(
+        compose.read_with(cx, |compose, _| compose.correction_preview_text().unwrap().to_owned()),
+        preview.changes
+    );
     click(cx, "compose-correction-view");
     assert_eq!(status(&compose, cx), CorrectionStatus::Proposed);
-    assert!(cx.debug_bounds("compose-correction-text").unwrap().size.width <= before.size.width);
+    assert_eq!(
+        compose.read_with(cx, |compose, _| compose.correction_preview_text().unwrap().to_owned()),
+        preview.result
+    );
+    click(cx, "compose-correction-view");
+    assert_eq!(
+        compose.read_with(cx, |compose, _| compose.correction_preview_text().unwrap().to_owned()),
+        preview.changes
+    );
 }
 
 #[test]
@@ -286,6 +326,9 @@ fn the_keys_of_a_proposal_use_it_send_it_or_leave_it() {
     type_in(&compose, cx, "teh one");
     ask(&compose, cx);
     until_status(&compose, cx, &CorrectionStatus::Proposed);
+    // Correct again deliberately gives the preview the keyboard.
+    cx.simulate_keystrokes("ctrl-shift-g");
+    draw(cx);
     cx.simulate_keystrokes("enter");
     draw(cx);
     assert_eq!(value(&compose, cx), "the one");
@@ -297,6 +340,8 @@ fn the_keys_of_a_proposal_use_it_send_it_or_leave_it() {
     type_in(&compose, cx, " teh two");
     ask(&compose, cx);
     until_status(&compose, cx, &CorrectionStatus::Proposed);
+    cx.simulate_keystrokes("ctrl-shift-g");
+    draw(cx);
     cx.simulate_keystrokes("escape");
     draw(cx);
     assert_eq!(value(&compose, cx), "the one teh two");
@@ -306,10 +351,31 @@ fn the_keys_of_a_proposal_use_it_send_it_or_leave_it() {
     // Ctrl+Enter sends the correction
     ask(&compose, cx);
     until_status(&compose, cx, &CorrectionStatus::Proposed);
+    cx.simulate_keystrokes("ctrl-shift-g");
+    draw(cx);
     cx.simulate_keystrokes("ctrl-enter");
     until(cx, |_| !sent_texts(&rig).is_empty());
     assert_eq!(sent_texts(&rig), ["the one the two"]);
     assert_eq!(value(&compose, cx), "");
+}
+
+#[test]
+fn a_proposal_arriving_never_changes_the_editors_send_key() {
+    let rig = Rig::start();
+    let fake = Fake::new(&rig);
+    fake.hold();
+    let (compose, cx) = chat(&rig);
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.toggle_expanded(window, cx)));
+    type_in(&compose, cx, "teh original");
+    ask(&compose, cx);
+    fake.release();
+    until_status(&compose, cx, &CorrectionStatus::Proposed);
+    assert!(cx.update(|window, cx| compose.read(cx).focused(window, cx)));
+    assert!(sent_texts(&rig).is_empty());
+    cx.simulate_keystrokes("ctrl-enter");
+    until(cx, |_| !sent_texts(&rig).is_empty());
+    assert_eq!(sent_texts(&rig), ["teh original"]);
+    assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
 }
 
 #[test]
@@ -472,20 +538,25 @@ fn it_can_be_stopped_from_the_button_or_with_escape() {
     let (compose, cx) = chat(&rig);
     type_in(&compose, cx, "teh report");
     ask(&compose, cx);
-    draw(cx);
+    let pid = fake.running_pid(cx);
     click(cx, "compose-correct");
     assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
+    fake.assert_stopped(pid, cx);
 
     ask(&compose, cx);
+    let pid = fake.running_pid(cx);
     draw(cx);
     assert_eq!(status(&compose, cx), CorrectionStatus::Running);
     cx.simulate_keystrokes("escape");
     draw(cx);
     assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
+    fake.assert_stopped(pid, cx);
 
     ask(&compose, cx);
+    let pid = fake.running_pid(cx);
     click(cx, "compose-correction-dismiss");
     assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
+    fake.assert_stopped(pid, cx);
 
     fake.release();
     std::thread::sleep(Duration::from_millis(100));
@@ -546,6 +617,11 @@ fn editing_the_draft_under_a_proposal_drops_it_and_nothing_can_overwrite_the_new
     in_editor(&compose, cx, Editor::clear);
     draw(cx);
     assert_eq!(value(&compose, cx), "");
+    assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
+    assert!(cx.debug_bounds("compose-correction-changed").is_none());
+    type_in(&compose, cx, "a new draft");
+    draw(cx);
+    assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
 }
 
 #[test]
@@ -556,10 +632,11 @@ fn sending_the_draft_while_it_runs_ends_the_correction() {
     let (compose, cx) = chat(&rig);
     type_in(&compose, cx, "teh report");
     ask(&compose, cx);
-    draw(cx);
+    let pid = fake.running_pid(cx);
     cx.update(|window, cx| compose.update(cx, |compose, cx| compose.send(window, cx)));
     until(cx, |_| !sent_texts(&rig).is_empty());
     assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
+    fake.assert_stopped(pid, cx);
     fake.release();
     std::thread::sleep(Duration::from_millis(150));
     draw(cx);

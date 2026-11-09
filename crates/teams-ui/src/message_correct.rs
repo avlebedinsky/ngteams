@@ -148,7 +148,11 @@ fn ask(tool: &mut Tool, request: &Request, stop: &AtomicBool) -> Outcome {
     if let Ok(outcome) = read(&tool.ask(&message, wait, stop)?, &request.draft) {
         return Ok(outcome);
     }
-    read(&tool.ask(prompt::FIX_REQUEST, wait, stop)?, &request.draft).map_err(|Unusable| {
+    read(
+        &tool.ask(prompt::FIX_REQUEST, request.limits.answer, stop)?,
+        &request.draft,
+    )
+    .map_err(|Unusable| {
         Failure::Stopped(
             request.backend,
             Some("its answer didn't keep the message's formatting.".to_owned()),

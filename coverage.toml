@@ -99,7 +99,7 @@ sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "a7a0245609aab00f17a18f4242739fed6f193ce287c89e8947740b50bae874ac"
+sha256 = "dde2970f3084494c8004745559e35e71118663291426db77600eda2eb1eb1ab2"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe-client/src/event.rs"]

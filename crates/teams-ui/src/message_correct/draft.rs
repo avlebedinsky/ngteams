@@ -154,10 +154,14 @@ impl Encoded {
             return None;
         }
         let mut doc = self.doc.clone();
-        for (index, runs) in reading.done {
+        for (index, runs, words) in reading.done {
             let block = doc.blocks.get(index)?;
             let corrected = Block::new(block.kind, block.indent, runs);
-            if corrected.is_blank() {
+            let had_words = block
+                .runs
+                .iter()
+                .any(|run| !kept_whole(run) && run.text.chars().any(char::is_alphanumeric));
+            if corrected.is_blank() || (had_words && !words) {
                 return None;
             }
             doc.blocks[index] = corrected;
@@ -171,6 +175,15 @@ struct Open {
     marker: usize,
     index: usize,
     runs: Vec<Run>,
+    /// Words read from text, excluding the atoms restored unchanged.
+    words: bool,
+}
+
+/// A styled marker being read; a link needs a visible label to survive decoding.
+struct Styled<'a> {
+    marker: usize,
+    attrs: &'a Attrs,
+    visible: bool,
 }
 
 /// An answer being read.
@@ -178,9 +191,8 @@ struct Reading<'a> {
     slots: &'a [Slot],
     seen: Vec<bool>,
     block: Option<Open>,
-    /// The styled words the reading is in: their marker and attributes.
-    styled: Option<(usize, &'a Attrs)>,
-    done: Vec<(usize, Vec<Run>)>,
+    styled: Option<Styled<'a>>,
+    done: Vec<(usize, Vec<Run>, bool)>,
 }
 
 impl Reading<'_> {
@@ -203,8 +215,13 @@ impl Reading<'_> {
         let Some(open) = &mut self.block else {
             return text.trim().is_empty().then_some(());
         };
-        let attrs = self.styled.map_or_else(Attrs::default, |(_, attrs)| attrs.clone());
-        open.runs.push(Run::new(unescape(text), attrs));
+        let text = unescape(text);
+        open.words |= text.chars().any(char::is_alphanumeric);
+        let attrs = self.styled.as_mut().map_or_else(Attrs::default, |styled| {
+            styled.visible |= !text.trim().is_empty();
+            styled.attrs.clone()
+        });
+        open.runs.push(Run::new(text, attrs));
         Some(())
     }
 
@@ -216,11 +233,16 @@ impl Reading<'_> {
                     marker: n,
                     index: *index,
                     runs: Vec::new(),
+                    words: false,
                 });
                 Some(())
             }
             (Slot::Styled(block, attrs), Some(open), None) if open.index == *block => {
-                self.styled = Some((n, attrs));
+                self.styled = Some(Styled {
+                    marker: n,
+                    attrs,
+                    visible: false,
+                });
                 Some(())
             }
             _ => None,
@@ -228,12 +250,11 @@ impl Reading<'_> {
     }
 
     fn close(&mut self, n: usize) -> Option<()> {
-        if self.styled.is_some_and(|(marker, _)| marker == n) {
-            self.styled = None;
-            return Some(());
+        if let Some(styled) = self.styled.take_if(|styled| styled.marker == n) {
+            return (styled.attrs.link.is_none() || styled.visible).then_some(());
         }
         let open = self.block.take_if(|open| open.marker == n && self.styled.is_none())?;
-        self.done.push((open.index, open.runs));
+        self.done.push((open.index, open.runs, open.words));
         Some(())
     }
 

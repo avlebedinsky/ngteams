@@ -5,6 +5,8 @@
 //! - **Nothing is sent, and the draft isn't touched, until the user says so**: "Use correction" (Enter) puts it in the box
 //!   as one edit, so Ctrl+Z takes it back; "Send corrected" (Ctrl+Enter) puts it there and sends it; "Keep original"
 //!   (Escape) goes back to the draft.
+//!   A result leaves focus in the editor: press Correct again to focus the preview and use its keys. An arriving
+//!   proposal must never turn a key meant to send the original draft into sending an unread rewrite.
 //! - **A correction is of the draft it read**: the box notices when the draft changes, while the tool works or over the
 //!   proposal, and drops the correction, saying so; a result that comes after that is thrown away, and "Use correction"
 //!   checks again before it writes.
@@ -27,7 +29,7 @@ use crate::chat_translate::prompt::Said;
 use crate::editor::doc::Doc;
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::local_ai::{Failure, Tools, Work};
-use crate::message_correct::diff::{Change, Preview};
+use crate::message_correct::diff::Change;
 use crate::message_correct::draft::{self, Encoded};
 use crate::message_correct::{Correcting, Limits, MAX_DRAFT, Outcome, Proposal, Request};
 use crate::theme::{self, Palette};
@@ -88,6 +90,16 @@ struct Shown {
     changes: bool,
 }
 
+impl Shown {
+    fn text(&self) -> &str {
+        if self.changes {
+            &self.proposal.preview.changes
+        } else {
+            &self.proposal.preview.result
+        }
+    }
+}
+
 /// Where a box's correction stands, with what that needs.
 #[derive(Default)]
 enum State {
@@ -127,7 +139,7 @@ impl State {
 /// The box's correction.
 pub(super) struct Correction {
     state: State,
-    /// The proposal's own focus: its keys, not the editor's, while it is shown.
+    /// The proposal's own focus: its keys after the user deliberately focuses it.
     focus: FocusHandle,
     limits: Limits,
 }
@@ -166,6 +178,15 @@ impl Compose {
     pub fn correction_proposal(&self) -> Option<&Proposal> {
         match &self.correction.state {
             State::Proposed(shown) => Some(&shown.proposal),
+            _ => None,
+        }
+    }
+
+    /// The text currently displayed in the correction preview.
+    #[must_use]
+    pub fn correction_preview_text(&self) -> Option<&str> {
+        match &self.correction.state {
+            State::Proposed(shown) => Some(shown.text()),
             _ => None,
         }
     }
@@ -222,7 +243,7 @@ impl Compose {
         let done = correcting.done();
         let waiting = cx.spawn_in(window, async move |this, cx| {
             if let Ok(outcome) = done.recv().await {
-                let _ = this.update_in(cx, |this, window, cx| this.correction_came(outcome, window, cx));
+                let _ = this.update_in(cx, |this, _, cx| this.correction_came(outcome, cx));
             }
         });
         self.correction.state = State::Running {
@@ -268,9 +289,9 @@ impl Compose {
         cx.notify();
     }
 
-    /// The tool's outcome: thrown away unless the box still holds the draft it read. A proposal for a box the user is
-    /// typing in takes the keyboard; one that comes while they are somewhere else waits for them.
-    fn correction_came(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) {
+    /// The tool's outcome: thrown away unless the box still holds the draft it read. The proposal waits for the user
+    /// to focus it deliberately, preserving the meaning of the editor's send key when the answer arrives.
+    fn correction_came(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
         if !self.correction_holds(cx) {
             return;
         }
@@ -286,9 +307,6 @@ impl Compose {
                     proposal,
                     changes: true,
                 }));
-                if self.focused(window, cx) {
-                    window.focus(&self.correction.focus, cx);
-                }
             }
         }
         cx.notify();
@@ -298,6 +316,11 @@ impl Compose {
     /// have been counting on it, unless the box was emptied.
     fn correction_holds(&mut self, cx: &mut Context<Self>) -> bool {
         let editor = self.editor.read(cx);
+        if matches!(self.correction.state, State::Changed) && editor.is_blank() {
+            self.correction.state = State::Idle;
+            cx.notify();
+            return true;
+        }
         let Some(draft) = self.correction.state.draft() else {
             return true;
         };
@@ -494,7 +517,7 @@ impl Compose {
                     .max_h(px(PROPOSAL_MAX))
                     .overflow_y_scroll()
                     .text_sm()
-                    .child(proposal_text(&shown.proposal.preview, shown.changes, palette)),
+                    .child(proposal_text(shown, palette)),
             )
             .child(self.proposal_actions(cx))
             .into_any_element()
@@ -584,16 +607,19 @@ fn words(text: SharedString) -> gpui::Div {
 }
 
 /// The proposal's text: the words taken out struck through and those put in highlighted, or the text as it would be.
-fn proposal_text(preview: &Preview, changes: bool, palette: Palette) -> StyledText {
-    if !changes {
-        return StyledText::new(preview.result.clone());
+fn proposal_text(shown: &Shown, palette: Palette) -> StyledText {
+    let text = StyledText::new(shown.text().to_owned());
+    if !shown.changes {
+        return text;
     }
-    let highlights = preview
+    let highlights = shown
+        .proposal
+        .preview
         .marks
         .iter()
         .map(|(range, change)| (range.clone(), change_style(*change, palette)))
         .collect::<Vec<_>>();
-    StyledText::new(preview.changes.clone()).with_highlights(highlights)
+    text.with_highlights(highlights)
 }
 
 /// How a change is marked. Not by colour alone: what goes is struck through, what comes is bold.

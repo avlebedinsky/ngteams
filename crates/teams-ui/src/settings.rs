@@ -1128,7 +1128,7 @@ fn render_people(settings: &Settings, table: &mut Table) {
     }
 }
 
-/// The chats' translation, into the file's table (the chats' languages when there are any).
+/// The chats' local AI settings, including draft correction, and any chat languages, into the file's table.
 fn render_chat_translation(settings: &Settings, table: &mut Table) {
     table.insert(
         keys::CHAT_TRANSLATOR.to_owned(),

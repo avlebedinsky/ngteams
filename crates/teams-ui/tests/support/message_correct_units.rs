@@ -161,14 +161,64 @@ fn an_answer_that_doesn_t_keep_the_shape_is_refused() {
         // words outside any block, and a block emptied
         "note: <x0>one <x1>two</x1> <x2/></x0>\n<x3>three</x3>",
         "<x0>one <x1>two</x1> <x2/></x0>\n<x3> </x3>",
-        // a block's mark as a run, an atom as a run's mark
+        // block markers swapped
         "<x3>one <x1>two</x1> <x2/></x3>\n<x0>three</x0>",
+        // a block's mark as a run, an atom as a run's mark (all markers still present)
+        "<x0>one <x1>two</x1> <x2/> <x3>three</x3></x0>",
+        "<x0>one <x1>two</x1> <x2>Bee</x2></x0>\n<x3>three</x3>",
+        // all editable words lost, although the mention survives
+        "<x0><x1></x1><x2/></x0>\n<x3>three</x3>",
     ];
     for answer in refused {
         assert_eq!(encoded.decode(answer), None, "{answer}");
     }
     // a space around the blocks is fine
     assert!(encoded.decode(&format!("\n {}\n", encoded.text)).is_some());
+}
+
+#[test]
+fn a_link_label_cannot_be_emptied_or_moved_outside_its_marker() {
+    let encoded = encode(&Doc::new(vec![paragraph(vec![
+        plain("see "),
+        link("teh docs", "https://example.test/"),
+        plain(" now"),
+    ])]));
+    for answer in [
+        "<x0>see <x1></x1> now</x0>",
+        "<x0>see <x1> </x1> now</x0>",
+        "<x0>see <x1>&nbsp;</x1> now</x0>",
+        "<x0>see <x1></x1>the docs now</x0>",
+        "<x0>See the docs now<x1></x1></x0>",
+    ] {
+        assert_eq!(encoded.decode(answer), None, "{answer}");
+    }
+}
+
+#[test]
+fn atoms_cannot_hide_the_loss_of_all_editable_words() {
+    for atom in [
+        mention("Bee"),
+        styled("code", Marks::CODE),
+        link("https://example.test/", "https://example.test/"),
+    ] {
+        let encoded = encode(&Doc::new(vec![paragraph(vec![plain("fix this "), atom])]));
+        for answer in ["<x0><x1/></x0>", "<x0>! <x1/></x0>"] {
+            assert_eq!(encoded.decode(answer), None, "{answer}");
+        }
+        assert!(encoded.decode("<x0>fixed <x1/></x0>").is_some());
+    }
+    // Deleting a duplicated styled word is still a valid edit.
+    let encoded = encode(&Doc::new(vec![paragraph(vec![
+        plain("the "),
+        styled("the", Marks::BOLD),
+        plain(" report"),
+    ])]));
+    assert_eq!(
+        encoded.decode("<x0>the <x1></x1>report</x0>").unwrap().plain_text(),
+        "the report"
+    );
+    let atoms_only = encode(&Doc::new(vec![paragraph(vec![mention("Bee")])]));
+    assert_eq!(atoms_only.decode(&atoms_only.text).unwrap(), *atoms_only.doc());
 }
 
 #[test]
@@ -275,6 +325,16 @@ fn a_script_without_spaces_is_compared_character_by_character() {
 
 /// A fake tool that answers `body`'s text, written beside the test.
 fn outcome_of(script: &str) -> Outcome {
+    outcome_with_limits(
+        script,
+        Limits {
+            start: std::time::Duration::from_secs(10),
+            answer: std::time::Duration::from_secs(10),
+        },
+    )
+}
+
+fn outcome_with_limits(script: &str, limits: Limits) -> Outcome {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("claude");
     std::fs::write(&program, script).unwrap();
@@ -285,10 +345,7 @@ fn outcome_of(script: &str) -> Outcome {
         model: Model::Recommended,
         context: Vec::new(),
         draft: encode(&Doc::new(vec![Block::paragraph("teh")])),
-        limits: Limits {
-            start: std::time::Duration::from_secs(10),
-            answer: std::time::Duration::from_secs(10),
-        },
+        limits,
     });
     let done = correcting.done();
     done.recv_blocking().unwrap()
@@ -316,6 +373,22 @@ fn a_bad_answer_is_asked_again_once() {
             Backend::Claude,
             Some("its answer didn't keep the message's formatting.".to_owned())
         )
+    );
+}
+
+#[test]
+fn the_retry_gets_only_the_answer_budget() {
+    let script = answering(["nope", "<corrected><x0>the</x0></corrected>"])
+        .replace("  printf", "  if [ \"$n\" = 1 ]; then sleep 1; fi\n  printf");
+    assert_eq!(
+        outcome_with_limits(
+            &script,
+            Limits {
+                start: std::time::Duration::from_secs(5),
+                answer: std::time::Duration::from_millis(200),
+            }
+        ),
+        Err(Failure::TimedOut(Backend::Claude))
     );
 }
 
