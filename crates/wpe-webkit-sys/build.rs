@@ -12,7 +12,7 @@ fn main() {
     if let Err(s) = system_deps::Config::new().probe() {
         println!(
             "cargo::error={}: this crate needs WPE WebKit 2.54 or newer: install the system's wpewebkit (sudo pacman -S \
-             wpewebkit; README.md, WPE WebKit)",
+             wpewebkit; docs/development.md, WPE WebKit)",
             s.to_string().replace('\n', " ")
         );
     }

@@ -109,7 +109,7 @@ the installed app with no setting to turn on and no confirmation. The app serves
 writes, own status and calls take the same paths as the window's (the outbox, the status menu, the call buttons), so
 the outbox, transport and call rules above hold for them. A second launch, or a meeting link from the desktop entry,
 hands off to the running app over the same socket. Commands, events and exit codes:
-[README](../README.md#ngteamsctl).
+[the development guide](development.md#ngteamsctl).
 
 ## Its sign-in
 
@@ -198,7 +198,7 @@ scripts/run-personal-read-only.sh --stop        # deletes snapshot/run; --keep r
 
 The runner uses `~/.local/state/ngteams-read-only/run/` by default; its status prints the snapshot, logs, trace and
 screenshots. It leaves the user's normal running app and its source files untouched. `TEAMS_BIN` may choose the
-installed executable; a binary without read-only support is refused. See [README](../README.md#the-read-only-mode-scriptsrun-personal-read-onlysh).
+installed executable; a binary without read-only support is refused. See [the development guide](development.md#the-read-only-mode-scriptsrun-personal-read-onlysh).
 
 ## How the implementation reads it
 

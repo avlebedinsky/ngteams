@@ -94,7 +94,7 @@ own region metadata under the configured harness data directory for native HTTP 
 
 Launch the provisioned account with `scripts/run-lab.sh <alias> [--pipewire]`, which normally builds into `target/lab`
 with `TEAMS_LAB_BUILD=1`. `--build-only` opens no account, broker or window. The runner starts the lab account's
-scoped get/put/delete broker outside its UI sandbox and the app inside it; see [README](../../README.md) for controls.
+scoped get/put/delete broker outside its UI sandbox and the app inside it; see [the development guide](../development.md) for controls.
 Each live run requires the agent's [lab reach check](../lab-rules.md). Actual new-account setup and smoke testing
 remain separate from the offline implementation tests.
 

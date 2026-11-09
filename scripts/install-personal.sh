@@ -3,7 +3,7 @@
 # the user to run on their own desktop. **Agents run this script only when the user asks** (AGENTS.md): it is the only
 # thing that sets the install marker, without which `ngteams` refuses to start.
 #
-# - Requires the system's `wpewebkit` (2.54 or newer, README.md "WPE WebKit") for the sign-in window's page: the
+# - Requires the system's `wpewebkit` (2.54 or newer, docs/development.md "WPE WebKit") for the sign-in window's page: the
 #   build links it and the installed binary runs its helper processes, so without it the script stops before building.
 # - Builds `ngteams` with `cargo build --release -p ngteams`, its target dir apart from every other build
 #   (`target/personal`), so no `test-support` or lab build is unified in. The sign-in window lives in it: it opens

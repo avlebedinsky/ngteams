@@ -11,7 +11,7 @@ fn main() {
     {
         println!(
             "cargo::error=teams-signin-extension needs WPE WebKit 2.54 or newer ({}): install the system's wpewebkit \
-             (sudo pacman -S wpewebkit; README.md, WPE WebKit)",
+             (sudo pacman -S wpewebkit; docs/development.md, WPE WebKit)",
             error.to_string().replace('\n', " ")
         );
     }

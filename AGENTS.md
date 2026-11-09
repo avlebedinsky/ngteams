@@ -3,7 +3,7 @@
 A native Microsoft Teams client for Linux in Rust + GPUI, written against Teams' internal APIs with the web client as
 the reference. `ngteams` is the only client. Agents test it with dedicated lab accounts; the installed build runs the
 user's own account. `proto-lab` captures the web client and explores its protocol. Layout, commands and tests:
-[README.md](README.md).
+[docs/development.md](docs/development.md).
 
 ## Hard rules
 
@@ -18,7 +18,7 @@ These protect real people, the user's account and the user's data. They hold for
   user request, as below.
 - **No live write ever comes from a `cargo test` process**: live tests spawn the normally built lab client.
 - **Captures, tokens and debug logs never enter the repo**, not even sanitized. Committed fixtures are synthetic and
-  marked ([README](README.md#captures-and-fixtures)). Credentials never reach logs or stdout; print only aud, exp,
+  marked ([development guide](docs/development.md#captures-and-fixtures)). Credentials never reach logs or stdout; print only aud, exp,
   scopes and tenant. At `debug`, every API request and response and every Trouter frame is logged in full, with
   credentials redacted by the logger; `info` stays payload-free.
 - **Tokens go only where Teams sends them**: for the same user action, to the service each was issued for, and never
@@ -49,7 +49,7 @@ CI requires 90% coverage per runtime crate ([CPU runner and hardware-test except
 checks, waits and review from what a change can break, and stop once they cover that. A small change gets a small,
 fast check (the test that exercises it, or `cargo check` of its crate), not every suite of every crate it touched; a
 shared API, write-path or calling change earns more. Rerun only what failed. Say what you ran and what you left out.
-Commands: [README.md](README.md#tests).
+Commands: [docs/development.md](docs/development.md#tests).
 
 What the tooling enforces when it runs:
 
@@ -62,7 +62,7 @@ What the tooling enforces when it runs:
 
 ### Live runs
 
-Live runs reach the real tenant, so these stay firm. Commands are in README's lab section.
+Live runs reach the real tenant, so these stay firm. Commands are in the development guide's lab section.
 
 - State the lab-contact check before each live run. Do not widen whom the lab may reach without the user's sign-off.
 - Use `scripts/run-lab.sh` for `ngteams`; it builds normally into `target/lab`, holds the live and alias locks and
@@ -111,7 +111,8 @@ Undoing one needs a new reason, not a cleanup; the why is in each path's module 
 
 ## Where things live
 
-- [README.md](README.md): layout, building, each tool's commands, the lab's files, captures, fixtures and tests.
+- [README.md](README.md): what the app is and how to install it, for end users.
+- [docs/development.md](docs/development.md): layout, building, each tool's commands, the lab's files, captures, fixtures and tests.
 - `docs/protocol/`: how each Teams service works, `endpoints.md`, `chat-service.md`. `docs/lab-rules.md`: the lab rule
   and per-run check. `docs/personal-build.md`: the installed client. `docs/backlog/`: deferred work. `docs/plans/`:
   plans as decided then, not the current design.
