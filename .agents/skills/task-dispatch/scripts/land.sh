@@ -10,9 +10,10 @@
 # checkout holding commits origin doesn't, or on another branch, stops it before anything is sent.
 #
 # Exit codes: 0 landed (prints `RANGE <onto>..<head>`, the pushed commits, then `LANDED <hash>`; exit 6 prints RANGE
-# too); 1 a precondition failed; 2 the rebase conflicts (aborted; resolve it with `git rebase origin/main` yourself,
-# rerun `cargo check` on the touched crates, then run this again); 3 the workspace doesn't compile on the rebased branch
-# (fix, commit, run again); 4 the main checkout can't take the change (it isn't on main, its main holds commits origin
+# too); 1 a precondition failed; 2 the rebase conflicts (aborted; a new fix companion runs `git rebase origin/main`,
+# resolves it and checks the touched crates); 3 the workspace doesn't compile on the rebased branch (a new fix companion
+# fixes, checks and commits). After 2 or 3 the dispatcher reruns with the same --reviewed head; exit 7 requires re-review.
+# 4 the main checkout can't take the change (it isn't on main, its main holds commits origin
 # doesn't, or its uncommitted files overlap the change): nothing was pushed, report it, and never stash, reset, force or
 # touch its files; 5 the fetch or the push failed: nothing changed locally, run again; 6 pushed, but the main checkout
 # couldn't be fast-forwarded: the change is on origin, report that the checkout is behind; 7 the branch no longer makes
@@ -27,18 +28,29 @@ die() {
   exit "$code"
 }
 
-# What a range adds and removes, without the blob ids and hunk positions a rebase moves.
+# Include binary contents and nearby text so replacements and moved edits need review. Ignore blob ids, hunk
+# offsets and rename similarity scores a clean rebase can move; changes beside a hunk conservatively need review.
 changes() {
-  git diff --no-color --no-ext-diff --unified=0 "$1" "$2" | sed '/^index /d; /^@@ /d'
+  git diff --no-color --no-ext-diff --no-textconv --binary --unified=3 "$1" "$2" |
+    sed '/^index /d; /^@@ /d; /^similarity index /d; /^dissimilarity index /d'
 }
 
 rebase_onto_origin() {
+  local reviewed_tree
   if ! git rebase --quiet origin/main; then
     git rebase --abort
     die 2 "rebasing $branch onto origin/main conflicts"
   fi
   [ -z "$reviewed" ] || [ "$(changes "$reviewed_base" "$reviewed")" = "$(changes origin/main HEAD)" ] ||
     die 7 "$branch no longer makes the changes reviewed at ${reviewed:0:12}; nothing was pushed"
+  if [ -n "$reviewed" ]; then
+    # Context can repeat in a file. Compare the exact tree a clean merge of the accepted head would produce too,
+    # so moving an edit between identical blocks cannot pass just because their normalized patches look alike.
+    reviewed_tree=$(git merge-tree --write-tree --no-messages "$reviewed" origin/main) ||
+      die 7 "the reviewed head doesn't merge cleanly onto origin/main; re-review the rebased branch"
+    [ "$reviewed_tree" = "$(git rev-parse 'HEAD^{tree}')" ] ||
+      die 7 "$branch differs from the reviewed head merged onto origin/main; nothing was pushed"
+  fi
 }
 
 check_workspace() {

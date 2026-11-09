@@ -1,6 +1,7 @@
 """land.sh's review gate against synthetic Git repositories; cargo is a stub, nothing leaves the temp directory."""
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -27,6 +28,7 @@ class LandGate(unittest.TestCase):
         self.git('checkout', '-B', 'main', cwd=self.main)
         self.commit(self.main, 'shared', ''.join(f'line {n}\n' for n in range(40)))
         self.commit(self.main, 'other', 'base\n')
+        self.commit(self.main, 'asset.bin', b'\x00synthetic base\n')
         self.git('push', 'origin', 'main', cwd=self.main)
         self.git('worktree', 'add', '-b', 'task', self.wt, 'origin/main', cwd=self.main)
 
@@ -35,7 +37,10 @@ class LandGate(unittest.TestCase):
         return done.stdout.strip()
 
     def commit(self, tree, name, text):
-        (tree / name).write_text(text)
+        if isinstance(text, bytes):
+            (tree / name).write_bytes(text)
+        else:
+            (tree / name).write_text(text)
         self.git('add', name, cwd=tree)
         self.git('commit', '-m', f'change {name}', cwd=tree)
         return self.git('rev-parse', 'HEAD', cwd=tree)
@@ -71,11 +76,14 @@ class LandGate(unittest.TestCase):
     def test_a_clean_rebase_keeping_the_reviewed_changes_lands(self):
         head = self.edit_shared(self.wt, 'line 30\n', 'reviewed 30\n')
         self.move_main('other', 'moved\n')
-        self.edit_shared(self.main, 'line 2\n', 'main 2\n')
+        self.edit_shared(self.main, 'line 2\n', 'main 2\nmain 2b\n')
         self.git('push', 'origin', 'main', cwd=self.main)
+        reviewed_diff = self.git('diff', f'{head}^', head, '--', 'shared', cwd=self.wt)
         result = self.land('--reviewed', head)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.origin_head(), self.git('rev-parse', 'HEAD', cwd=self.wt))
+        rebased_diff = self.git('diff', 'HEAD^', 'HEAD', '--', 'shared', cwd=self.wt)
+        self.assertNotEqual(re.findall(r'^@@.*', reviewed_diff, re.M), re.findall(r'^@@.*', rebased_diff, re.M))
 
     def test_commits_after_the_review_stop_it(self):
         head = self.commit(self.wt, 'feature', 'reviewed\n')
@@ -84,6 +92,67 @@ class LandGate(unittest.TestCase):
         result = self.land('--reviewed', head)
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertEqual(self.origin_head(), before)
+
+    def test_binary_replacement_after_review_stops_it(self):
+        head = self.commit(self.wt, 'asset.bin', b'\x00synthetic reviewed\n')
+        self.commit(self.wt, 'asset.bin', b'\x00synthetic unreviewed replacement\n')
+        before = self.origin_head()
+        result = self.land('--reviewed', head)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(self.origin_head(), before)
+
+    def test_reviewed_binary_lands(self):
+        head = self.commit(self.wt, 'asset.bin', b'\x00synthetic reviewed\n')
+        result = self.land('--reviewed', head)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.origin_head(), head)
+
+    def test_moving_a_reviewed_edit_stops_it(self):
+        head = self.edit_shared(self.wt, 'line 10\n', 'guard\nline 10\n')
+        self.edit_shared(self.wt, 'guard\n', '')
+        self.edit_shared(self.wt, 'line 30\n', 'line 30\nguard\n')
+        before = self.origin_head()
+        result = self.land('--reviewed', head)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(self.origin_head(), before)
+
+    def test_moving_a_reviewed_edit_between_identical_contexts_stops_it(self):
+        block = 'same context\n' * 10
+        base = f'first\n{block}second\n{block}'
+        self.move_main('duplicate', base)
+        self.git('rebase', 'origin/main', cwd=self.wt)
+        guarded = 'same context\n' * 5 + 'guard\n' + 'same context\n' * 5
+        head = self.commit(self.wt, 'duplicate', f'first\n{guarded}second\n{block}')
+        self.commit(self.wt, 'duplicate', f'first\n{block}second\n{guarded}')
+        before = self.origin_head()
+        result = self.land('--reviewed', head)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(self.origin_head(), before)
+
+    def test_rebase_changing_context_next_to_a_reviewed_edit_stops_it(self):
+        head = self.edit_shared(self.wt, 'line 30\n', 'reviewed 30\n')
+        self.edit_shared(self.main, 'line 28\n', 'main 28\n')
+        self.git('push', 'origin', 'main', cwd=self.main)
+        before = self.origin_head()
+        result = self.land('--reviewed', head)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(self.origin_head(), before)
+
+    def test_clean_rebase_changing_only_rename_similarity_lands(self):
+        self.git('mv', 'shared', 'renamed', cwd=self.wt)
+        head = self.commit(self.wt, 'renamed', (self.wt / 'renamed').read_text().replace('line 30\n', 'reviewed 30\n'))
+        reviewed_diff = self.git('diff', 'origin/main', head, cwd=self.wt)
+        self.edit_shared(self.main, 'line 2\n', 'main 2\n' + 'extra main line\n' * 15)
+        self.git('push', 'origin', 'main', cwd=self.main)
+        result = self.land('--reviewed', head)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.origin_head(), self.git('rev-parse', 'HEAD', cwd=self.wt))
+        rebased_diff = self.git('diff', 'HEAD^', 'HEAD', cwd=self.wt)
+        before_score = re.search(r'^similarity index .*', reviewed_diff, re.M)
+        after_score = re.search(r'^similarity index .*', rebased_diff, re.M)
+        self.assertIsNotNone(before_score)
+        self.assertIsNotNone(after_score)
+        self.assertNotEqual(before_score.group(), after_score.group())
 
     def test_a_rebase_that_alters_the_reviewed_changes_stops_it(self):
         # Main already made one of the branch's two changes, so the rebase drops that commit without a conflict.

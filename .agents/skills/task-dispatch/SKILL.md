@@ -32,6 +32,8 @@ the Claude discovery path `.claude/skills/task-dispatch` links to it.
 - Each independent task gets one task companion. Send corrections and follow-ups to its current companion; once it
   has handed back, to a fix companion on its branch, whose commits the next round covers; after it lands, create a new
   task naming the earlier result. Preserve the user's whole scope, including screenshots.
+- Don't create dedicated tasks in the status page for review, fixing review findings, or merging to main: these are
+  all parts of the single task, shown in that task's one card.
 - Default to **2 concurrent task companions**, or the user's latest limit. Only task companions count: review and fix
   companions take no slot and never queue. A slot frees when its task hands back, not when it merges, and a companion
   waiting on the user stays open but frees its slot. Queue excess tasks FIFO and report their position. Free slots go
@@ -120,9 +122,10 @@ the Claude Code session UUID of a Claude companion. `transcript` is that Claude 
 companion's portable event log. `report_seen` and `status_seen` are the report mtime and status change time already
 handled. A task's `review` tracks its own review: `mode` (the revmux profile, or `none`) with its reason, the reviewed
 `range`, the branch `head` accepted so far, the `round`, `state` (`reviewing`, `fixing`, `reviewed`, `skipped`, or
-`blocked`), and the fix commits on the branch. Review and fix companions are board entries of their own with `of`
-naming the task. Like any task they get a brief, a report file, `text`, and the task's `worktree`, `branch`, and
-`base_commit`, so resume can inspect what they left. Older boards with `agent_id` and no `session` came from in-process agents, and older
+`blocked`), and the fix commits on the branch. A review or fix companion's board entry with `of` naming its task is
+bookkeeping for the waiter; the status page folds it into its task's one card. Each entry gets a brief, a report file,
+`text`, and the task's `worktree`, `branch`, and `base_commit`, so resume can inspect what they left. Older boards with
+`agent_id` and no `session` came from in-process agents, and older
 `review_base` fields came from batch review passes; resume their tasks as below and review their landed, unreviewed work
 per task.
 
@@ -145,7 +148,10 @@ preserved unfinished work. Only tasks explicitly deferred or canceled by the use
 completion summary. A task still in review, or reviewed and not yet landed, is work remaining.
 
 States: `queued`, `running`, `waiting on user`, `in review <head>` (handed back, committed on its branch, not merged),
-`landed <hash>`, `done` (read-only result), and `failed`. Record the question for a waiting task. Keep unfinished
+`landed <hash>`, `done` (read-only result or a review/fix companion whose handback was accepted), and `failed`.
+Mark a review or fix companion `done` when accepting its report, including a fix that committed work; only its parent
+task stays `in review` until landing. A failed or blocked companion remains unfinished. Record the question for a waiting
+task. Keep unfinished
 tasks' original words, follow-ups, relevant standing instructions, and screenshot descriptions with paths. A completed task can replace `text` with its result/check summary. Never
 store credentials, raw captures, or debug logs. Remove a dropped task only at the user's request.
 

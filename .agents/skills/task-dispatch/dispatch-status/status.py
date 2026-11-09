@@ -299,15 +299,15 @@ class Status:
     def queues(rows, slots):
         free = max(0, slots - sum(holds_slot(row) for row in rows))
         queued = sorted((row for row in rows if row['group'] == 'queued'), key=lambda row: row['num'])
-        reserved = {row['after'] for row in queued}
         etas = sorted(row['eta_ms'] for row in rows
-                      if holds_slot(row) and row['num'] not in reserved and row['eta_ms'] is not None)
+                      if holds_slot(row) and row['eta_ms'] is not None)
         ahead = 0
         for place, row in enumerate(queued, 1):
             blocker = next((other for other in rows if other['num'] == row['after']
                             and other['group'] not in ('completed', 'canceled')), None)
             if blocker:
-                start = blocker['eta_ms']
+                # A task ETA ends at handback; its dependent still needs review and landing to finish.
+                start = None
             else:
                 index = ahead - free
                 start = 0 if ahead < free else etas[index] if index < len(etas) else None

@@ -223,7 +223,7 @@ class BoardTests(Files):
         self.assertEqual(board['slots_max'], 3)
         self.assertEqual(board['tasks'][0]['phase'], 2)
         self.assertNotIn('synthetic-secret', json.dumps(board))
-        self.assertIsNotNone(board['tasks'][1]['queue']['start_ms'])
+        self.assertIsNone(board['tasks'][1]['queue']['start_ms'])
         self.ledger.write_text('{')
         stale = status.snapshot()
         self.assertEqual(len(stale['tasks']), 2)
@@ -278,6 +278,16 @@ class SlotTests(Files):
         self.board([{'num': 1, 'state': 'in review abc'}, {'num': 2, 'state': 'queued', 'after': 1}], slots=2)
         rows = Status(self.ledger).snapshot()['tasks']
         self.assertIsNone(rows[1]['queue']['start_ms'])
+
+    def test_running_prerequisite_frees_a_slot_for_independent_work_at_handback(self):
+        self.event('investigate')
+        self.board([{'num': 1, 'state': 'running', 'flow': 'edit', 'transcript': str(self.events)},
+                    {'num': 2, 'state': 'queued', 'after': 1},
+                    {'num': 3, 'state': 'queued'}], slots=1)
+        rows = Status(self.ledger).snapshot(1_793_707_400_000)['tasks']
+        self.assertIsNotNone(rows[0]['eta_ms'])
+        self.assertIsNone(rows[1]['queue']['start_ms'])
+        self.assertEqual(rows[2]['queue']['start_ms'], rows[0]['eta_ms'])
 
     def test_a_task_in_review_shows_its_phases_finished(self):
         self.event('investigate')
