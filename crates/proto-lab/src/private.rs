@@ -22,18 +22,26 @@ pub fn replace(path: &Path) -> io::Result<File> {
 /// Private staging, writing or persistence fails.
 pub fn atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| io::Error::other("missing output parent"))?;
-    private::create_dir_all(parent)?;
-    private::restrict_dir(parent)?;
-    // tempfile's randomized name is created within an already protected directory.
-    let mut stage = tempfile::Builder::new().prefix(".lab-").tempfile_in(parent)?;
-    // An elevated SSH token gives ordinary tempfile creation to Administrators. Set the exact user owner and
-    // protected DACL while it is still empty, then verify the opened handle before writing any bytes.
-    private::restrict_file(stage.path())?;
-    private::check_file(stage.as_file())?;
+    private::create_dir_all(parent).map_err(|error| stage_error("create output directory", &error))?;
+    private::restrict_dir(parent).map_err(|error| stage_error("protect output directory", &error))?;
+    // Use tempfile's unique name and cleanup guard with our native protected creation descriptor. Ordinary
+    // tempfile creation under an elevated SSH token would initially give the file to Administrators.
+    let mut stage = tempfile::Builder::new()
+        .prefix(".lab-")
+        .make_in(parent, |path| private::open(path, Open::NewReadWrite))
+        .map_err(|error| stage_error("create output stage", &error))?;
+    private::check_file(stage.as_file()).map_err(|error| stage_error("verify output stage", &error))?;
     stage.write_all(bytes)?;
     stage.as_file().sync_all()?;
-    stage.persist(path).map_err(|error| error.error)?;
+    // std's Windows rename supports FileRenameInfoEx when simultaneous replacements make MoveFileEx deny the
+    // destination. tempfile::persist uses MoveFileEx alone. Keep the cleanup guard until publication succeeds.
+    let stage = stage.into_temp_path();
+    std::fs::rename(&stage, path).map_err(|error| stage_error("publish output stage", &error))?;
     Ok(())
+}
+
+fn stage_error(operation: &str, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{operation}: {error}"))
 }
 
 /// Matches the Windows native runner's sharing-based lifetime lock.

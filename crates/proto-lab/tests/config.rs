@@ -1,21 +1,32 @@
 //! Parsing and validating `lab.toml`: exactly the 3 lab accounts `a`, `b`, `c`, all in one tenant domain, plus the
 //! approved service participants and the lab directories.
 
-// The full Linux browser/scenario harness is outside the Windows provisioning command set.
-#![cfg(unix)]
-
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use std::os::unix::fs::PermissionsExt as _;
+#[path = "support/directory_link.rs"]
+mod directory_link;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 
 use proto_lab::config::{
     Alias, ChatRecord, ChatsError, ConfigError, LabChats, LabConfig, LabLocations, LabPaths, MriRecord,
     record_abc_chat, record_account_mri, record_service_mri,
 };
 
+#[cfg(unix)]
 const DATA: &str = "/lab/data";
+#[cfg(windows)]
+const DATA: &str = "C:/lab/data";
+
+fn absolute(value: &str) -> PathBuf {
+    #[cfg(windows)]
+    return PathBuf::from(format!("C:{value}"));
+    #[cfg(unix)]
+    PathBuf::from(value)
+}
 
 fn account(alias: &str, upn: &str) -> String {
     format!("[[accounts]]\nalias = \"{alias}\"\nupn = \"{upn}\"\n\n")
@@ -82,8 +93,9 @@ fn lab_directories_derive_from_the_data_dir() {
 
 #[test]
 fn data_dir_in_the_file_overrides_the_default() {
-    let config = parse(&format!("data_dir = \"/elsewhere/lab\"\n\n{}", three())).unwrap();
-    assert_eq!(config.paths().data_dir(), Path::new("/elsewhere/lab"));
+    let elsewhere = absolute("/elsewhere/lab");
+    let config = parse(&format!("data_dir = {elsewhere:?}\n\n{}", three())).unwrap();
+    assert_eq!(config.paths().data_dir(), elsewhere);
 }
 
 #[test]
@@ -335,18 +347,22 @@ fn lab_paths_follow_lab_toml_and_need_none() {
 }
 
 fn os(value: &str) -> OsString {
-    OsString::from(value)
+    if value.starts_with('/') {
+        absolute(value).into_os_string()
+    } else {
+        OsString::from(value)
+    }
 }
 
 #[test]
 fn locations_follow_xdg_and_fall_back_to_home() {
     let xdg = LabLocations::resolve(Some(os("/xdg/config")), Some(os("/xdg/data")), Some(os("/home/u"))).unwrap();
-    assert_eq!(xdg.config_file, Path::new("/xdg/config/teams-lab/lab.toml"));
-    assert_eq!(xdg.data_dir, Path::new("/xdg/data/teams-lab"));
+    assert_eq!(xdg.config_file, absolute("/xdg/config/teams-lab/lab.toml"));
+    assert_eq!(xdg.data_dir, absolute("/xdg/data/teams-lab"));
 
     let home = LabLocations::resolve(None, None, Some(os("/home/u"))).unwrap();
-    assert_eq!(home.config_file, Path::new("/home/u/.config/teams-lab/lab.toml"));
-    assert_eq!(home.data_dir, Path::new("/home/u/.local/share/teams-lab"));
+    assert_eq!(home.config_file, absolute("/home/u/.config/teams-lab/lab.toml"));
+    assert_eq!(home.data_dir, absolute("/home/u/.local/share/teams-lab"));
 
     // The XDG spec says empty and relative values are ignored.
     let ignored = LabLocations::resolve(Some(os("")), Some(os("relative")), Some(os("/home/u"))).unwrap();
@@ -377,7 +393,6 @@ fn the_real_lab_config_is_valid() {
 // --- recording an account's MRI after its first login ---
 
 const COMMENTED: &str = "# The lab accounts. Passwords never go here.\n\
-data_dir = \"/lab/data\"\n\n\
 [[accounts]]\nalias = \"a\"\nupn = \"bot-a@lab.example.com\"\n# mri = \"\"\n\n\
 [[accounts]]\nalias = \"b\"\nupn = \"bot-b@lab.example.com\"\n# filled in after login\n\n\
 [[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\nmri = \"<mri:c>\"\n\n\
@@ -387,8 +402,8 @@ data_dir = \"/lab/data\"\n\n\
 fn lab_file(text: &str) -> std::io::Result<(tempfile::TempDir, LabLocations)> {
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("lab.toml");
-    fs::write(&file, text)?;
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
+    let text = format!("data_dir = {DATA:?}\n{text}");
+    teams_platform::private::open(&file, teams_platform::private::Open::NewReadWrite)?.write_all(text.as_bytes())?;
     let locations = LabLocations {
         config_file: file,
         data_dir: dir.path().join("data"),
@@ -412,11 +427,11 @@ fn an_mri_is_recorded_for_one_account_keeping_the_rest_of_the_file() {
     assert_eq!(outcome, MriRecord::Recorded);
 
     let text = fs::read_to_string(&locations.config_file).unwrap();
+    assert!(text.contains(&format!("data_dir = {DATA:?}")));
     for kept in [
         "# The lab accounts. Passwords never go here.",
         "# filled in after login",
         "# approved by the user",
-        "data_dir = \"/lab/data\"",
         "mri = \"<mri:c>\"",
     ] {
         assert!(text.contains(kept), "lost {kept:?}:\n{text}");
@@ -425,8 +440,7 @@ fn an_mri_is_recorded_for_one_account_keeping_the_rest_of_the_file() {
     assert_eq!(config.account(Alias::A).mri.as_deref(), Some("<mri:a>"));
     assert_eq!(config.account(Alias::B).mri, None);
     assert_eq!(config.account(Alias::C).mri.as_deref(), Some("<mri:c>"));
-    let mode = fs::metadata(&locations.config_file).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "the file's mode is kept");
+    privacy::assert_private(&locations.config_file, false);
     assert_eq!(names_in(dir.path()).unwrap(), ["lab.toml"], "no temporary file is left");
 }
 
@@ -498,8 +512,7 @@ fn a_service_mri_is_recorded_for_the_named_service_keeping_the_rest_of_the_file(
     assert_eq!(echo.mri.as_deref(), Some(BOT));
     // no account changed
     assert_eq!(config.account(Alias::A).mri, None);
-    let mode = fs::metadata(&locations.config_file).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "the file's mode is kept");
+    privacy::assert_private(&locations.config_file, false);
     assert_eq!(names_in(dir.path()).unwrap(), ["lab.toml"], "no temporary file is left");
 
     // the same again changes nothing
@@ -549,8 +562,7 @@ fn no_chats_file_is_no_chats_and_the_a_b_c_chat_is_recorded_once() {
 
     assert_eq!(record_abc_chat(&paths, GROUP).unwrap(), ChatRecord::Recorded);
     assert_eq!(LabChats::load(&paths).unwrap().abc.as_deref(), Some(GROUP));
-    let mode = fs::metadata(paths.chats_file()).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "lab data, owner only");
+    privacy::assert_private(&paths.chats_file(), false);
     assert_eq!(names_in(dir.path()).unwrap(), ["chats.toml"], "no temporary file left");
 
     // the same id again changes nothing; another one isn't put in its place
@@ -591,9 +603,9 @@ fn only_a_group_chat_id_is_recorded_or_read() {
 
 #[test]
 fn the_personal_data_dir_is_where_the_xdg_data_home_puts_ngteams() {
-    let locations = LabLocations::resolve(None, Some("/data".into()), Some("/home/someone".into())).unwrap();
-    assert_eq!(locations.data_dir, Path::new("/data/teams-lab"));
-    assert_eq!(locations.personal_data_dir, Path::new("/data/ngteams"));
+    let locations = LabLocations::resolve(None, Some(os("/data")), Some(os("/home/someone"))).unwrap();
+    assert_eq!(locations.data_dir, absolute("/data/teams-lab"));
+    assert_eq!(locations.personal_data_dir, absolute("/data/ngteams"));
 }
 
 #[test]
@@ -633,7 +645,7 @@ fn a_lab_data_dir_that_is_holds_or_lies_inside_the_personal_one_is_refused() {
     // through a symlink too
     fs::create_dir_all(&personal).unwrap();
     let link = dir.path().join("link");
-    std::os::unix::fs::symlink(&personal, &link).unwrap();
+    directory_link::create(&personal, &link);
     fs::write(&file, format!("data_dir = {link:?}\n{}", three())).unwrap();
     assert!(matches!(
         LabConfig::load(&locations),

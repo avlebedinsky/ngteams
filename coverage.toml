@@ -305,7 +305,7 @@ sha256 = "70bc92cb8f5f41512fc9477a4af98dea89f150a4f4a52231a05e4c5aad89c769"
 reason = "Windows-only installed Edge signature/product verification; no Linux LLVM mapping. VM console checks verify the fixed system browser before headless authorization."
 
 [unmapped_sources."crates/proto-lab/src/private.rs"]
-sha256 = "0cdcf18d373b3bea3d8ed2b7d46365fce17f7ae610a99ea5270bf6c3d3022bec"
+sha256 = "8f7c503fbad2b0316d4d1c955f653cb4cb9a8e07098b0637e34992c249baa246"
 reason = "Windows-only protected lab outputs, atomic publication and exclusive lifetime locks; no Linux LLVM mapping. Native input/redaction/output and real provisioning contracts exercise these boundaries."
 
 [unmapped_sources."crates/proto-lab/src/main_windows.rs"]

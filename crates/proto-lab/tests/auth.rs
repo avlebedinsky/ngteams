@@ -2,12 +2,13 @@
 //! what lands on disk (the region, never a token). The browser step is in `tests/auth_redirect.rs`, the live run in
 //! `tests/auth_live.rs`.
 
-// The full Linux browser/scenario harness is outside the Windows provisioning command set.
-#![cfg(unix)]
-
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[path = "support/directory_link.rs"]
+mod directory_link;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 
 use proto_lab::commands::auth::{
     AudienceOutcome, AuthError, AuthReport, NativeTarget, SkypetokenSummary, region_file, save_region, within,
@@ -42,12 +43,11 @@ fn native_account_and_region_are_private_atomic_and_keep_manual_same_account_set
     let identity = native_identity();
     let file = target.save(&identity, Some(&region())).unwrap();
     assert_eq!(file, dir.path().join(".local/share/ngteams-lab/b/accounts.toml"));
-    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(target.root()), 0o700);
-    assert_eq!(mode(&file), 0o600);
+    privacy::assert_private(target.root(), false);
+    privacy::assert_private(&file, false);
     let native_region = target.root().join(format!("regions/{}.json", identity.object_id));
-    assert_eq!(mode(native_region.parent().unwrap()), 0o700);
-    assert_eq!(mode(&native_region), 0o600);
+    privacy::assert_private(native_region.parent().unwrap(), false);
+    privacy::assert_private(&native_region, false);
     let mut saved: toml::Value = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(saved["account"][0]["name"].as_str(), Some("Synthetic Account"));
     saved["account"][0]["idp_hosts"] = toml::Value::Array(vec!["signin.example.test".into()]);
@@ -98,7 +98,7 @@ fn native_target_uses_xdg_data_and_rejects_personal_overlap_before_writing() {
     assert!(NativeTarget::resolve(Alias::A, Some("relative".into()), None, None).is_err());
     std::fs::create_dir_all(data.join("ngteams-lab")).unwrap();
     std::fs::create_dir_all(config.join("ngteams")).unwrap();
-    std::os::unix::fs::symlink(config.join("ngteams"), data.join("ngteams-lab/c")).unwrap();
+    directory_link::create(&config.join("ngteams"), &data.join("ngteams-lab/c"));
     assert!(target().is_err());
     assert!(std::fs::read_dir(config.join("ngteams")).unwrap().next().is_none());
 }
@@ -224,9 +224,8 @@ fn the_region_is_saved_privately_without_the_token() {
 
     assert_eq!(file, region_file(&paths, Alias::B));
     assert_eq!(file, dir.path().join("lab/auth/b.json"));
-    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&file), 0o600);
-    assert_eq!(mode(file.parent().unwrap()), 0o700);
+    privacy::assert_private(&file, false);
+    privacy::assert_private(file.parent().unwrap(), false);
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(Region::from_json(&saved), Some(region()));
     assert_eq!(saved["account"], "b");
@@ -284,6 +283,7 @@ fn saves_that_run_at_once_each_replace_the_file_whole() {
     });
 
     let file = region_file(&paths, Alias::C);
+    privacy::assert_private(&file, false);
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert!(
         expiries.contains(&saved["skypetokenExpiresAt"].as_u64().unwrap()),

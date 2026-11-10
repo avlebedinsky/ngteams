@@ -25,9 +25,7 @@ use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-#[cfg(any(unix, test))]
 use serde_json::json;
-#[cfg(unix)]
 use teams_auth::authz::unix_seconds;
 use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region, Skypetoken};
 use teams_auth::claims::TokenSummary;
@@ -438,22 +436,30 @@ pub fn region_file(paths: &LabPaths, alias: Alias) -> PathBuf {
     paths.region_file(alias)
 }
 
-/// Persists the account's region (`regionGtms` and all) and the skypetoken's expiry to [`region_file`]: the directory
-/// `0700`, the file `0600`, replaced by rename from a staging file of its own, so saves that run at once never share
-/// one (the last rename wins, whole). Not the token.
+/// Persists the account's region (`regionGtms` and all) and the skypetoken's expiry to [`region_file`], privately and
+/// atomically. Unix uses `0700`/`0600`; Windows uses the current user's protected DACL. Concurrent saves never share
+/// a staging file (the last rename wins, whole). Not the token.
 ///
 /// # Errors
 /// When the file can't be written.
-#[cfg(unix)]
 pub fn save_region(paths: &LabPaths, alias: Alias, skypetoken: &SkypetokenSummary) -> std::io::Result<PathBuf> {
     let file = region_file(paths, alias);
-    let dir = file.parent().unwrap_or(paths.data_dir());
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     let mut record = skypetoken.region.to_json();
     record["account"] = json!(alias.as_str());
     record["fetchedAt"] = json!(unix_seconds(SystemTime::now()));
     record["skypetokenExpiresAt"] = json!(unix_seconds(skypetoken.expires_at));
     let text = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
+    #[cfg(windows)]
+    crate::private::atomic(&file, text.as_bytes())?;
+    #[cfg(unix)]
+    save_region_text(paths, alias, &file, &text)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn save_region_text(paths: &LabPaths, alias: Alias, file: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let dir = file.parent().unwrap_or(paths.data_dir());
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     // a uniquely named staging file, removed if anything fails before the rename
     let mut staging = tempfile::Builder::new()
         .prefix(&format!(".{}.json.", alias.as_str()))
@@ -462,8 +468,8 @@ pub fn save_region(paths: &LabPaths, alias: Alias, skypetoken: &SkypetokenSummar
         .tempfile_in(dir)?;
     std::io::Write::write_all(&mut staging, text.as_bytes())?;
     staging.as_file().sync_all()?;
-    staging.persist(&file).map_err(|error| error.error)?;
-    Ok(file)
+    staging.persist(file).map_err(|error| error.error)?;
+    Ok(())
 }
 
 impl AuthReport {
