@@ -50,6 +50,7 @@ use crate::icons::{Glyph, selected_by};
 use crate::new_chat::Recipient;
 use crate::people::{self, Picture, Shown};
 use crate::presence::Presences;
+use crate::sending::settled_row;
 use crate::switcher::matches;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -77,8 +78,6 @@ pub const NOT_ADDED: &str = "We couldn't add them. Check your connection and try
 
 /// How long typing rests before the directory is asked.
 const PAUSE: Duration = Duration::from_millis(200);
-/// How often an add's outbox row is looked at while it is still going out.
-const SETTLE_EVERY: Duration = Duration::from_millis(500);
 /// The most people, and the most group chats, suggested.
 const MOST_PEOPLE: usize = 6;
 const MOST_CHATS: usize = 4;
@@ -87,6 +86,12 @@ const FLYOUT_WIDTH: f32 = 252.0;
 const PICKER_WIDTH: f32 = 402.0;
 /// A face in the flyout and in the suggestions, px.
 const FACE: f32 = 32.0;
+/// Where the suggestions hang from the picker's top, the most they take and one's height, px.
+const PANEL_TOP: f32 = 84.0;
+const PANEL_MOST: f32 = 260.0;
+const SUGGESTION_HEIGHT: f32 = 52.0;
+/// How far the picker reaches over the flyout from its left, px, as Teams lays it.
+const PICKER_OVER: f32 = 98.0;
 /// The most days of history a number takes (Teams takes any; this keeps the time sane).
 const MOST_DAYS: u32 = 36_500;
 
@@ -181,8 +186,10 @@ pub struct ChatPeople {
     /// The chat (empty for a new group chat not made yet).
     chat: String,
     of: PeopleOf,
-    /// The account first, then the others as the store lists them.
+    /// The account first, then the others as the store lists them (a 1:1 chat's partner when it lists nobody else).
     members: Vec<Person>,
+    /// A 1:1 chat's partner, as the chat itself names them: always the last of a group chat started from it.
+    partner: Option<Recipient>,
     /// The picker is open.
     picking: bool,
     query: Entity<InputState>,
@@ -197,8 +204,9 @@ pub struct ChatPeople {
     asking: Option<Task<()>>,
     loading: Option<Task<()>>,
     adding: Option<Task<()>>,
-    /// Where the picker was last drawn: a press there isn't one outside.
+    /// Where the picker, and its suggestions hanging under it, were last drawn: a press there isn't one outside.
     picker_at: Placed,
+    panel_at: Placed,
     /// Where the button that opens the flyout was last drawn: its own click toggles it.
     button_at: Placed,
     focus: FocusHandle,
@@ -221,6 +229,35 @@ impl Placed {
     fn holds(&self, point: gpui::Point<Pixels>) -> bool {
         self.0.get().is_some_and(|bounds| bounds.contains(&point))
     }
+
+    /// Where it was drawn last, if it was.
+    #[must_use]
+    pub fn bounds(&self) -> Option<Bounds<Pixels>> {
+        self.0.get()
+    }
+
+    fn set(&self, bounds: Option<Bounds<Pixels>>) {
+        self.0.set(bounds);
+    }
+
+    fn forget(&self) {
+        self.0.set(None);
+    }
+}
+
+/// A 1:1 chat's partner as the chat names them: the list row's (its name, its picture), else the one its id names.
+fn partner_of(list: &Entity<ChatList>, chat: &str, me: &str, cx: &gpui::App) -> Option<Recipient> {
+    let row = list.read(cx).row(chat);
+    let mri = row
+        .and_then(|row| row.partner.clone())
+        .or_else(|| chat_list::one_to_one_partner(chat, me))
+        .filter(|mri| mri != me)?;
+    let named = row.filter(|row| row.named);
+    Some(Recipient {
+        name: named.map_or_else(|| SharedString::from(chat_list::unnamed(&mri)), |row| row.name.clone()),
+        picture: named.and_then(|row| row.picture.clone()),
+        mri,
+    })
 }
 
 impl EventEmitter<ChatPeopleEvent> for ChatPeople {}
@@ -262,6 +299,9 @@ impl ChatPeople {
         parts
             .trace
             .record(&TraceLine::new("chat-people", "opened").conversation(&chat));
+        let partner = (of == PeopleOf::OneToOne)
+            .then(|| partner_of(&parts.list, &chat, parts.core.me(), cx))
+            .flatten();
         let mut this = Self {
             core: parts.core,
             trace: parts.trace,
@@ -270,6 +310,7 @@ impl ChatPeople {
             chat,
             of,
             members: Vec::new(),
+            partner,
             picking: false,
             query,
             days,
@@ -283,6 +324,7 @@ impl ChatPeople {
             loading: None,
             adding: None,
             picker_at: Placed::default(),
+            panel_at: Placed::default(),
             button_at: parts.button,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -291,11 +333,13 @@ impl ChatPeople {
         this
     }
 
-    /// Reads the chat's people (a new group chat's are given), the account first, and asks their presence.
-    fn load(&mut self, draft: Vec<Recipient>, cx: &mut Context<Self>) {
+    /// Reads the chat's people (a new group chat's are given), the account first, and asks their presence. A 1:1
+    /// chat the store lists nobody else in has the partner its id names, as the chat list shows it.
+    fn load(&mut self, mut draft: Vec<Recipient>, cx: &mut Context<Self>) {
         let core = Arc::clone(&self.core);
         let me = core.me().to_owned();
         let (chat, of) = (self.chat.clone(), self.of);
+        let partner = self.partner.clone();
         self.loading = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut mris: Vec<String> = if of == PeopleOf::Draft {
                 draft.iter().map(|person| person.mri.clone()).collect()
@@ -308,6 +352,10 @@ impl ChatPeople {
                     .collect()
             };
             mris.retain(|mri| *mri != me);
+            if let Some(partner) = partner.filter(|_| mris.is_empty()) {
+                mris.push(partner.mri.clone());
+                draft.push(partner);
+            }
             mris.insert(0, me);
             let mut members = Vec::with_capacity(mris.len());
             for mri in &mris {
@@ -433,6 +481,8 @@ impl ChatPeople {
         self.problem = None;
         self.query.update(cx, |query, cx| query.set_value("", window, cx));
         self.days.update(cx, |days, cx| days.set_value("1", window, cx));
+        self.picker_at.forget();
+        self.panel_at.forget();
         self.focus(window, cx);
         cx.notify();
     }
@@ -688,12 +738,18 @@ impl ChatPeople {
         }
     }
 
-    /// Whether Create or Add is lit.
+    /// Whether Create or Add is lit: someone taken, the chat's people read, nothing going out, a 1:1 chat's partner
+    /// known and a group chat's history choice one that can be sent.
     #[must_use]
     pub fn can_confirm(&self, cx: &gpui::App) -> bool {
         !self.picked.is_empty()
             && self.adding.is_none()
-            && (self.of != PeopleOf::Group || self.chat_history(cx).is_some())
+            && self.loading.is_none()
+            && match self.of {
+                PeopleOf::OneToOne => self.partner.is_some(),
+                PeopleOf::Group => self.chat_history(cx).is_some(),
+                PeopleOf::Draft => true,
+            }
     }
 
     // --- confirming ---
@@ -708,22 +764,32 @@ impl ChatPeople {
         let core = Arc::clone(&self.core);
         let me = core.me().to_owned();
         let members: Vec<String> = self.members.iter().map(|person| person.mri.clone()).collect();
-        let partner = (self.of == PeopleOf::OneToOne)
-            .then(|| self.members.iter().find(|person| person.mri != me).cloned())
-            .flatten();
+        // the partner as the chat names them (their name as read when it was)
+        let partner = self.partner.clone().map(|partner| {
+            self.members
+                .iter()
+                .find(|person| person.mri == partner.mri && person.named)
+                .map_or(partner, Person::recipient)
+        });
         let (of, chat) = (self.of, self.chat.clone());
         self.problem = None;
         self.adding = Some(cx.spawn_in(window, async move |this, cx: &mut AsyncWindowContext| {
             let mut people = expand(&core, &picked).await;
-            people.retain(|person| person.mri != me && !members.contains(&person.mri));
-            if let Some(partner) = partner {
-                people.push(partner.recipient());
-            }
-            let added = match of {
-                PeopleOf::OneToOne => Some(ChatPeopleEvent::StartGroup(people)),
-                PeopleOf::Draft => Some(ChatPeopleEvent::AddToDraft(people)),
-                PeopleOf::Group if people.is_empty() => Some(ChatPeopleEvent::Close),
-                PeopleOf::Group => {
+            people.retain(|person| {
+                person.mri != me
+                    && !members.contains(&person.mri)
+                    && partner.as_ref().is_none_or(|partner| partner.mri != person.mri)
+            });
+            let added = match (of, partner) {
+                // nobody new: nothing to start or add
+                (PeopleOf::OneToOne | PeopleOf::Group, _) if people.is_empty() => Some(ChatPeopleEvent::Close),
+                (PeopleOf::OneToOne, Some(partner)) => {
+                    people.push(partner);
+                    Some(ChatPeopleEvent::StartGroup(people))
+                }
+                (PeopleOf::OneToOne, None) => None,
+                (PeopleOf::Draft, _) => Some(ChatPeopleEvent::AddToDraft(people)),
+                (PeopleOf::Group, _) => {
                     let action = Action::AddMembers {
                         conversation: chat.clone(),
                         members: people.iter().map(|person| Mri::new(&person.mri)).collect(),
@@ -815,7 +881,8 @@ impl ChatPeople {
         )
     }
 
-    fn flyout(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// The flyout; the picker, while it is open, hangs from under its action ([`hung_under`]).
+    fn flyout(&self, picker: Option<AnyElement>, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let title = match self.of {
             PeopleOf::OneToOne => SharedString::from("People"),
             PeopleOf::Group | PeopleOf::Draft => format!("People ({})", self.members.len()).into(),
@@ -857,6 +924,7 @@ impl ChatPeople {
                 flyout
                     .child(div().mx_2().my_1().h(px(1.0)).bg(rgb(palette.border)))
                     .child(action)
+                    .children(picker.map(hung_under))
             })
             .into_any_element()
     }
@@ -911,7 +979,7 @@ impl ChatPeople {
             .id(SharedString::from(format!("chat-people-suggestion-{at}")))
             .debug_selector(move || format!("chat-people-suggestion-{at}"))
             .w_full()
-            .min_h(px(52.0))
+            .min_h(px(SUGGESTION_HEIGHT))
             .px_4()
             .py_1p5()
             .flex()
@@ -1042,30 +1110,8 @@ impl ChatPeople {
         };
         let confirm_label = if self.of == PeopleOf::OneToOne { "Create" } else { "Add" };
         let busy = self.adding.is_some();
-        let suggestions: Vec<AnyElement> = self
-            .suggestions
-            .iter()
-            .enumerate()
-            .map(|(at, suggested)| self.suggestion(at, suggested, palette, cx))
-            .collect();
-        let panel = (!suggestions.is_empty()).then(|| {
-            div()
-                .id("chat-people-suggestions")
-                .debug_selector(|| "chat-people-suggestions".to_owned())
-                .absolute()
-                .top(px(84.0))
-                .left(px(16.0))
-                .right(px(16.0))
-                .max_h(px(260.0))
-                .overflow_y_scroll()
-                .p_1()
-                .bg(rgb(palette.surface))
-                .border_1()
-                .border_color(rgb(palette.border))
-                .rounded_lg()
-                .shadow_lg()
-                .children(suggestions)
-        });
+        let shown = self.suggestions.len();
+        let panel = self.suggestions_panel(palette, cx);
         let history = (self.of == PeopleOf::Group).then(|| self.history_choices(palette, cx));
         let problem = self.problem.clone().map(|problem| {
             div()
@@ -1090,7 +1136,12 @@ impl ChatPeople {
                 .disabled(!self.can_confirm(cx))
                 .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
         );
-        div()
+        // the suggestions hang out of the picker's bounds: where they are drawn is kept too
+        let panel_at = self.panel_at.clone();
+        let picker = div()
+            .on_children_prepainted(move |children, _, _| {
+                panel_at.set((shown > 0).then(|| children.last().copied()).flatten());
+            })
             .id("chat-people-picker")
             .debug_selector(|| "chat-people-picker".to_owned())
             .occlude()
@@ -1110,9 +1161,58 @@ impl ChatPeople {
             .children(history)
             .children(problem)
             .child(div().flex().justify_end().gap_2().child(cancel).child(confirm))
-            .children(panel)
-            .into_any_element()
+            .children(panel);
+        with_reach(self.picker_at.keep(picker), shown)
     }
+
+    /// The suggestions, hanging under the picker's box over what follows it, while there are any.
+    fn suggestions_panel(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.suggestions.is_empty() {
+            return None;
+        }
+        let suggestions: Vec<AnyElement> = self
+            .suggestions
+            .iter()
+            .enumerate()
+            .map(|(at, suggested)| self.suggestion(at, suggested, palette, cx))
+            .collect();
+        Some(
+            div()
+                .id("chat-people-suggestions")
+                .debug_selector(|| "chat-people-suggestions".to_owned())
+                .occlude()
+                .absolute()
+                .top(px(PANEL_TOP))
+                .left(px(16.0))
+                .right(px(16.0))
+                .max_h(px(PANEL_MOST))
+                .overflow_y_scroll()
+                .p_1()
+                .bg(rgb(palette.surface))
+                .border_1()
+                .border_color(rgb(palette.border))
+                .rounded_lg()
+                .shadow_lg()
+                .children(suggestions)
+                .into_any_element(),
+        )
+    }
+}
+
+/// `picker` beside a zero-wide strut as tall as its `shown` suggestions reach, so it is kept in the window with them.
+fn with_reach(picker: gpui::Div, shown: usize) -> AnyElement {
+    let reach = if shown == 0 {
+        0.0
+    } else {
+        let rows = f32::from(u16::try_from(shown).unwrap_or(u16::MAX));
+        PANEL_TOP + (10.0 + SUGGESTION_HEIGHT * rows).min(PANEL_MOST)
+    };
+    div()
+        .flex()
+        .items_start()
+        .child(picker)
+        .child(div().w_0().h(px(reach)))
+        .into_any_element()
 }
 
 /// The people `picked` stand for, in order, each once: a person, or a group chat's people (read from the store).
@@ -1147,23 +1247,31 @@ async fn expand(core: &Arc<dyn Core>, picked: &[Picked]) -> Vec<Recipient> {
     people
 }
 
-/// Whether an add's outbox row went out, once the outbox settled it; a row still going out is watched, never written
-/// again.
+/// Whether an add's outbox row went out, once the outbox settled it ([`settled_row`]).
 async fn settled(
     core: &Arc<dyn Core>,
     reply: teams_core::Reply<teams_store::OutboxEntry>,
     cx: &mut AsyncWindowContext,
 ) -> bool {
-    let Ok(mut row) = reply.await else {
-        return false;
-    };
-    while matches!(row.state, OutboxState::Pending | OutboxState::Sending) {
-        cx.background_executor().timer(SETTLE_EVERY).await;
-        if let Ok(Some(updated)) = core.outbox_entry(row.id).await {
-            row = updated;
-        }
-    }
-    row.state == OutboxState::Sent
+    settled_row(core.as_ref(), reply, cx.background_executor())
+        .await
+        .is_some_and(|row| row.state == OutboxState::Sent)
+}
+
+/// `picker` over the flyout's left, from just under its action wherever the flyout is scrolled, as Teams lays it;
+/// drawn over everything and kept in the window.
+fn hung_under(picker: AnyElement) -> gpui::Div {
+    div().h_0().child(
+        gpui::deferred(
+            gpui::anchored()
+                .anchor(gpui::Anchor::TopRight)
+                // from the flyout's padded inside (its own left is 8 px further), over the action's foot
+                .offset(gpui::point(px(PICKER_OVER - 8.0), px(-6.0)))
+                .snap_to_window_with_margin(px(8.0))
+                .child(picker),
+        )
+        .with_priority(2),
+    )
 }
 
 impl Focusable for ChatPeople {
@@ -1175,8 +1283,8 @@ impl Focusable for ChatPeople {
 impl Render for ChatPeople {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
-        let flyout = self.flyout(palette, cx);
         let picker = self.picking.then(|| self.picker(window, palette, cx));
+        let flyout = self.flyout(picker, palette, cx);
         div()
             .id("chat-people-layer")
             .track_focus(&self.focus)
@@ -1188,8 +1296,10 @@ impl Render for ChatPeople {
                 }
             }))
             .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                // the picker hangs out of the flyout's bounds, and the button's own click toggles it
-                let inside = this.picker_at.holds(event.position) || this.button_at.holds(event.position);
+                // the picker and its suggestions hang out of the flyout's bounds, and the button's own click toggles it
+                let inside = [&this.picker_at, &this.panel_at, &this.button_at]
+                    .iter()
+                    .any(|placed| placed.holds(event.position));
                 if this.adding.is_none() && !inside {
                     cx.emit(ChatPeopleEvent::Close);
                 }
@@ -1199,18 +1309,5 @@ impl Render for ChatPeople {
             .flex_col()
             .items_end()
             .child(flyout)
-            .when_some(picker, |layer, picker| {
-                // over the flyout's left, from just under its action, as Teams lays it
-                let rows = f32::from(u16::try_from(self.members.len()).unwrap_or(u16::MAX));
-                let top = 8.0 + 30.0 + 48.0 * rows + 12.0 + 26.0;
-                let picker = self.picker_at.keep(picker);
-                layer.child(
-                    div()
-                        .absolute()
-                        .top(px(top))
-                        .right(px(FLYOUT_WIDTH - 98.0))
-                        .child(picker),
-                )
-            })
     }
 }

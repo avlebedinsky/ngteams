@@ -19,7 +19,9 @@
 //! - **The first message** of a new chat makes it through the outbox ([`Action::CreateChat`]: the people, and the
 //!   group name as its topic, the request Teams sent), waits for the outbox to settle that row, then sends the message
 //!   to the chat made ([`Action::Send`]) and opens it. A chat that couldn't be made gives the message back to the box
-//!   with what went wrong. A named chat needs at least two other people, as Teams sends none with one. Leaving New
+//!   with what went wrong. A named chat needs at least two other people, as Teams sends none with one. While the
+//!   chat is being made its people stay as they were sent (none taken or added, on To: or from a new group chat's
+//!   people), so nobody is shown in a chat made without them. Leaving New
 //!   message meanwhile doesn't call it off: the shell keeps it, out of sight, until the message is sent (the chat made
 //!   is then not opened over the place shown) or given back, which New message opened again shows
 //!   ([`NewChat::keeps_going`]).
@@ -59,6 +61,7 @@ use crate::chat_view::ChatView;
 use crate::compose::{Compose, ComposeEvent, ComposeParts};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::people::{self, Picture};
+use crate::sending::settled_row;
 use crate::shell::ShellParts;
 use crate::switcher::matches;
 use crate::theme::{self, Palette};
@@ -87,8 +90,6 @@ pub const NOT_STARTED: &str = "We couldn't start the chat. Check your connection
 
 /// How long typing rests before the directory is asked.
 const PAUSE: Duration = Duration::from_millis(200);
-/// How often a new chat's outbox row is looked at while it is still going out.
-const SETTLE_EVERY: Duration = Duration::from_millis(500);
 /// The most people, and the most group chats, the suggestions list.
 const MOST_PEOPLE: usize = 6;
 const MOST_CHATS: usize = 6;
@@ -358,10 +359,13 @@ impl NewChat {
         })
     }
 
-    /// Opens the new group chat's people, or closes them.
+    /// Opens the new group chat's people, or closes them; they don't open while its first message makes the chat.
     pub fn toggle_people(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.people_flyout.take().is_some() {
             cx.notify();
+            return;
+        }
+        if self.is_starting() {
             return;
         }
         let parts = ChatPeopleParts {
@@ -389,8 +393,11 @@ impl NewChat {
         cx.notify();
     }
 
-    /// `more` join the new group chat's people, each once.
+    /// `more` join the new group chat's people, each once; none while its first message makes the chat.
     fn add_to_draft(&mut self, more: &[Recipient], window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_starting() {
+            return;
+        }
         for person in more {
             if !self.people.iter().any(|known| known.mri == person.mri) {
                 self.people.push(person.clone());
@@ -417,6 +424,7 @@ impl NewChat {
             .collect();
         let button = icon_button("chat-header-people", Glyph::USER_PLUS, PEOPLE_TIP)
             .selected(self.people_flyout.is_some())
+            .disabled(self.is_starting())
             .label((self.people.len() + 1).to_string())
             .on_click(cx.listener(|this, _, window, cx| this.toggle_people(window, cx)));
         crate::shell::pane_header_led(face, title.join(", "), palette)
@@ -588,12 +596,14 @@ impl NewChat {
         cx.notify();
     }
 
-    /// Takes the suggestion at `at`: a person is added, a group chat opened.
+    /// Takes the suggestion at `at`: a person is added (not while the first message makes the chat: its people are
+    /// the ones it is made with), a group chat opened.
     pub fn choose(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chosen) = self.suggestions.get(at).cloned() else {
             return;
         };
         match chosen {
+            Suggested::Person { .. } if self.is_starting() => {}
             Suggested::Person { mri, name, picture, .. } => {
                 self.people.push(Recipient { mri, name, picture });
                 self.to.update(cx, |to, cx| to.set_value("", window, cx));
@@ -606,9 +616,9 @@ impl NewChat {
         }
     }
 
-    /// Takes the person at `at` off the line.
+    /// Takes the person at `at` off the line; nobody while the first message makes the chat.
     pub fn remove(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if at < self.people.len() {
+        if at < self.people.len() && !self.is_starting() {
             self.people.remove(at);
             self.refresh_suggestions(cx);
             self.resolve(window, cx);
@@ -726,6 +736,8 @@ impl NewChat {
         let topic = (!topic.is_empty()).then_some(topic);
         let core = Arc::clone(&self.core);
         let reply = self.core.write(Action::CreateChat { others, topic });
+        // the people are locked from here: those it is made with are those shown
+        self.people_flyout = None;
         self.starting = Some(cx.spawn_in(window, async move |this, cx: &mut AsyncWindowContext| {
             let made = settled_chat(&core, reply, cx).await;
             let sent = match &made {
@@ -1051,20 +1063,14 @@ fn searchable_name(row: &ChatRow) -> SharedString {
     name.into()
 }
 
-/// The chat a new chat's outbox row made, once the outbox settled it: its id when it went out (the row's answer
-/// names the thread), none when it didn't. A row still going out is watched, never written again.
+/// The chat a new chat's outbox row made, once the outbox settled it ([`settled_row`]): its id when it went out (the
+/// row's answer names the thread), none when it didn't.
 async fn settled_chat(
     core: &Arc<dyn Core>,
     reply: teams_core::Reply<teams_store::OutboxEntry>,
     cx: &mut AsyncWindowContext,
 ) -> Option<String> {
-    let mut row = reply.await.ok()?;
-    while matches!(row.state, OutboxState::Pending | OutboxState::Sending) {
-        cx.background_executor().timer(SETTLE_EVERY).await;
-        if let Ok(Some(updated)) = core.outbox_entry(row.id).await {
-            row = updated;
-        }
-    }
+    let row = settled_row(core.as_ref(), reply, cx.background_executor()).await?;
     (row.state == OutboxState::Sent).then_some(row.message_id).flatten()
 }
 

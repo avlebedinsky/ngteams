@@ -410,3 +410,200 @@ fn the_read_only_mode_lists_the_people_and_offers_no_add() {
     assert!(cx.debug_bounds("chat-people-start-group").is_none());
     assert!(rig.core.actions.lock().unwrap().is_empty());
 }
+
+/// A 1:1 chat's picker: a suggestion clicked under the picker's own box (the suggestions hang out of it) is taken,
+/// and the flyout and its picker stay open; a press away from them still closes the flyout.
+#[test]
+fn a_suggestion_clicked_below_the_picker_is_taken_and_keeps_the_flyout_open() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    click(cx, "chat-header-people");
+    click(cx, "chat-people-start-group");
+    let view = people(&shell, cx);
+    cx.simulate_input("Sea");
+    cx.executor().advance_clock(std::time::Duration::from_millis(300));
+    draw(cx);
+    let offered: Vec<String> = cx.update(|_, cx| {
+        view.read(cx)
+            .suggestions()
+            .iter()
+            .filter_map(|s| match s {
+                Picked::Person(p) => Some(p.mri.clone()),
+                Picked::Chat(_) => None,
+            })
+            .collect()
+    });
+    assert_eq!(offered, [LAB_C, LAB_D], "c's 1:1 chat, then the directory's d");
+    let picker = cx.debug_bounds("chat-people-picker").expect("the picker");
+    let second = cx
+        .debug_bounds("chat-people-suggestion-1")
+        .expect("the second suggestion");
+    assert!(second.center().y > picker.bottom(), "{second:?} hangs under {picker:?}");
+    cx.simulate_click(second.center(), Modifiers::none());
+    draw(cx);
+    assert!(cx.update(|_, cx| shell.read(cx).people().is_some()), "the flyout stays");
+    assert!(cx.update(|_, cx| view.read(cx).picking()), "and its picker");
+    assert_eq!(picked(&view, cx), [LAB_D]);
+    cx.simulate_click(gpui::point(px(400.0), px(700.0)), Modifiers::none());
+    draw(cx);
+    assert!(
+        cx.update(|_, cx| shell.read(cx).people().is_none()),
+        "a press away closes it"
+    );
+}
+
+/// A group chat of 21 people, its flyout scrolled to its end: Add's picker hangs from the action where it is drawn
+/// and stays in a short window.
+#[test]
+fn a_large_group_chat_s_picker_hangs_from_its_action_inside_the_window() {
+    const BIG: &str = "19:00000000000000000000000000000big@thread.v2";
+    let rig = seeded();
+    rig.core
+        .conversations
+        .lock()
+        .unwrap()
+        .push(chat(BIG, ConversationKind::Group, NOON + 6 * MINUTE));
+    rig.core.messages.lock().unwrap().insert(
+        BIG.to_owned(),
+        vec![message(BIG, "5", LAB_B, "RichText/Html", "<p>many</p>", NOON)],
+    );
+    let mut members = vec![Member::new(LAB_A, None)];
+    members.extend((1..=20).map(|n| Member::new(&format!("8:orgid:00000000-0000-4000-8000-0000000001{n:02}"), None)));
+    rig.core.members.lock().unwrap().insert(BIG.to_owned(), members);
+    let (shell, cx) = shell_window(&rig);
+    cx.simulate_resize(size(px(1200.0), px(600.0)));
+    draw(cx);
+    open(&shell, cx, BIG);
+    click(cx, "chat-header-people");
+    let view = people(&shell, cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).members().len()), 21);
+    let flyout = cx.debug_bounds("chat-people").expect("the flyout");
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: flyout.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-3000.0))),
+        touch_phase: gpui::TouchPhase::Moved,
+        ..gpui::ScrollWheelEvent::default()
+    });
+    draw(cx);
+    let add = cx.debug_bounds("chat-people-add").expect("Add people");
+    assert!(
+        add.bottom() <= flyout.bottom(),
+        "scrolled into view: {add:?} in {flyout:?}"
+    );
+    click(cx, "chat-people-add");
+    let picker = cx.debug_bounds("chat-people-picker").expect("the picker");
+    assert!(
+        picker.top() >= px(0.0) && picker.bottom() <= px(600.0),
+        "in the window: {picker:?}"
+    );
+    assert!(
+        picker.top() <= add.bottom(),
+        "pulled up to stay in it: {picker:?} under {add:?}"
+    );
+    assert!(
+        picker.right() > flyout.left() && picker.left() < flyout.left(),
+        "over the flyout's left: {picker:?}, {flyout:?}"
+    );
+    // a tall window: it hangs right under the action
+    cx.simulate_resize(size(px(1200.0), px(1000.0)));
+    draw(cx);
+    let add = cx.debug_bounds("chat-people-add").expect("Add people");
+    let picker = cx.debug_bounds("chat-people-picker").expect("the picker");
+    assert!(
+        (picker.top() - add.bottom()).abs() <= px(8.0),
+        "under the action: {picker:?}, {add:?}"
+    );
+    // its controls take clicks there
+    click(cx, "chat-people-history-all");
+    assert_eq!(cx.update(|_, cx| view.read(cx).history()), HistoryChoice::All);
+}
+
+/// A 1:1 chat the store lists no members for: its people are the account and the partner its id names, and a group
+/// chat started from it still ends with that partner.
+#[test]
+fn a_one_to_one_chat_without_stored_members_still_starts_the_group_with_its_partner() {
+    let rig = seeded();
+    rig.core.members.lock().unwrap().remove(AC);
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AC);
+    click(cx, "chat-header-people");
+    let view = people(&shell, cx);
+    let members: Vec<String> = cx.update(|_, cx| view.read(cx).members().iter().map(|p| p.mri.clone()).collect());
+    assert_eq!(members, [LAB_A, LAB_C], "the partner the chat names");
+    click(cx, "chat-people-start-group");
+    take(cx, "Dee");
+    assert_eq!(picked(&view, cx), [LAB_D]);
+    click(cx, "chat-people-confirm");
+    assert_eq!(main(&shell, cx), Main::NewChat);
+    let new_chat = cx.update(|_, cx| shell.read(cx).new_chat().cloned()).unwrap();
+    let people: Vec<String> = cx.update(|_, cx| new_chat.read(cx).people().into_iter().map(str::to_owned).collect());
+    assert_eq!(
+        people,
+        [LAB_D, LAB_C],
+        "a new group chat of a, d and c, never a's 1:1 chat with d"
+    );
+    let row = cx.update(|_, cx| new_chat.read(cx).draft_row()).unwrap();
+    assert_eq!(row.name.as_ref(), "Dee and Lab");
+}
+
+/// A new group chat's people while its first message makes the chat: its people flyout closes and doesn't open
+/// again, and nobody comes off; the chat is made with the people shown.
+#[test]
+fn a_new_group_chat_s_people_are_locked_while_its_first_message_makes_it() {
+    let rig = seeded();
+    // the chat's creation stays under way until the test settles it
+    rig.core.write_answers.lock().unwrap().push_back(common::outbox_row(
+        41,
+        OutboxKind::CreateChat,
+        OutboxState::Pending,
+    ));
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    click(cx, "chat-header-people");
+    click(cx, "chat-people-start-group");
+    take(cx, "Dee");
+    click(cx, "chat-people-confirm");
+    let new_chat = cx.update(|_, cx| shell.read(cx).new_chat().cloned()).unwrap();
+    click(cx, "chat-header-people");
+    assert!(cx.update(|_, cx| new_chat.read(cx).people_flyout().is_some()));
+    let compose = cx.update(|_, cx| new_chat.read(cx).compose(cx));
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input("hello both");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(cx.update(|_, cx| new_chat.read(cx).is_starting()));
+    assert!(
+        cx.update(|_, cx| new_chat.read(cx).people_flyout().is_none()),
+        "the flyout closed"
+    );
+    click(cx, "chat-header-people");
+    new_chat.update_in(cx, |new_chat, window, cx| {
+        if new_chat.people_flyout().is_none() {
+            new_chat.toggle_people(window, cx);
+        }
+    });
+    draw(cx);
+    assert!(
+        cx.update(|_, cx| new_chat.read(cx).people_flyout().is_none()),
+        "no people to add to meanwhile"
+    );
+    new_chat.update_in(cx, |new_chat, window, cx| new_chat.remove(0, window, cx));
+    let people = |cx: &mut VisualTestContext| -> Vec<String> {
+        cx.update(|_, cx| new_chat.read(cx).people().into_iter().map(str::to_owned).collect())
+    };
+    assert_eq!(people(cx), [LAB_D, LAB_B], "nobody comes off");
+    // made: the message goes to it
+    let mut made = common::outbox_row(41, OutboxKind::CreateChat, OutboxState::Sent);
+    made.message_id = Some(MADE.to_owned());
+    rig.core.outbox_answers.lock().unwrap().push_back(made);
+    cx.executor().advance_clock(std::time::Duration::from_secs(1));
+    draw(cx);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    let [Action::CreateChat { others, .. }, Action::Send { conversation, .. }] = actions.as_slice() else {
+        panic!("the chat made, then the message sent: {actions:?}");
+    };
+    let others: Vec<&str> = others.iter().map(teams_proto::Mri::as_str).collect();
+    assert_eq!(others, [LAB_D, LAB_B]);
+    assert_eq!(conversation, MADE);
+}
