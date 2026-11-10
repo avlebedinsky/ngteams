@@ -1,4 +1,0 @@
-interface:
-  display_name: "Task Dispatch"
-  short_description: "Queue tasks in Claude or Codex ngterm companions, each reviewed"
-  default_prompt: "Use $task-dispatch to dispatch my tasks to ngterm companion sessions."
