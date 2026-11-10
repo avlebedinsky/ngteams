@@ -1,5 +1,6 @@
 //! Call lifecycle logs and actual device failures through the loopback engine.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
 
 use teams_core::{CallAction, CallStatus, End};
@@ -80,12 +81,12 @@ async fn call_diagnostics_keep_lifecycle_but_omit_credentials_names_and_sdp() {
 
 struct FailingDevices {
     normal: FileDevices,
-    microphone_fails: bool,
+    microphone_fails: AtomicBool,
 }
 
 impl Devices for FailingDevices {
     fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
-        if self.microphone_fails {
+        if self.microphone_fails.load(Ordering::Relaxed) {
             Err(DeviceError::Refused("synthetic microphone unavailable".into()))
         } else {
             self.normal.microphone()
@@ -102,31 +103,48 @@ impl Devices for FailingDevices {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_open_failure_after_signaling_ends_the_call_and_sends_leave() {
+async fn missing_audio_devices_keep_the_call_connected_and_unmute_can_retry_the_microphone() {
     for microphone_fails in [true, false] {
         let lab = Lab::start().await;
-        let mut account = lab
-            .account_with_devices(Arc::new(FailingDevices {
-                normal: FileDevices {
-                    input: AudioInput::Tone(A_TONE),
-                    recording: None,
-                    camera: PatternCamera::default(),
-                    pacing: Pacing::RealTime,
-                },
-                microphone_fails,
-            }))
-            .await;
+        let devices = Arc::new(FailingDevices {
+            normal: FileDevices {
+                input: AudioInput::Tone(A_TONE),
+                recording: None,
+                camera: PatternCamera::default(),
+                pacing: Pacing::RealTime,
+            },
+            microphone_fails: AtomicBool::new(microphone_fails),
+        });
+        let mut account = lab.account_with_devices(devices.clone()).await;
         let call = account.handle.requests().call(test_call()).await.unwrap();
-        assert_eq!(account.ended(call).await, End::Failed("media"));
+        account.status(call, &CallStatus::Connected).await;
+        assert!(!lab.sent_by(LAB_A).iter().any(|op| op == "leave"));
+        if microphone_fails {
+            assert!(matches!(
+                account
+                    .handle
+                    .requests()
+                    .call(CallAction::Mute { call, muted: false })
+                    .await,
+                Err(teams_core::EngineError::Call(teams_core::CallActionError::Media(_)))
+            ));
+            devices.microphone_fails.store(false, Ordering::Relaxed);
+        }
+        account
+            .handle
+            .requests()
+            .call(CallAction::Mute { call, muted: false })
+            .await
+            .unwrap();
+        account
+            .handle
+            .requests()
+            .call(CallAction::HangUp { call })
+            .await
+            .unwrap();
+        assert_eq!(account.ended(call).await, End::HungUp);
         super::support::wait_until(|| lab.sent_by(LAB_A).last().is_some_and(|op| op == "leave")).await;
         assert_eq!(lab.sent_by(LAB_A).iter().filter(|op| op.as_str() == "start").count(), 1);
-        assert!(
-            LOG.0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.contains("its media failed:"))
-        );
     }
 }
 

@@ -459,7 +459,11 @@ pub(crate) enum MediaDone {
         reply: super::Waiting,
     },
     /// The call's devices opened (or not).
-    Opened { call: CallId, result: Result<(), String> },
+    Opened {
+        call: CallId,
+        result: Result<(), String>,
+        unmute: Option<super::Waiting>,
+    },
     /// The screen the user picked to share (or why there is none).
     ScreenPicked {
         call: CallId,
@@ -638,7 +642,11 @@ impl LiveMedia {
     fn device_closed(&mut self, device: SessionDevice) -> Option<MediaChange> {
         match device {
             SessionDevice::Camera => self.camera_stopped(),
-            SessionDevice::Microphone => Some(MediaChange::AudioClosed { microphone: true }),
+            // A retry may already have reopened capture before an older stream's closure is polled.
+            SessionDevice::Microphone => self
+                .session
+                .microphone_missing()
+                .then_some(MediaChange::AudioClosed { microphone: true }),
             SessionDevice::Speaker => Some(MediaChange::AudioClosed { microphone: false }),
             SessionDevice::Screen => self.shares.own.then_some(MediaChange::ScreenEnded),
         }
@@ -699,11 +707,13 @@ impl Deadlines {
 pub(super) fn open_devices(
     live: &LiveMedia,
     devices: Arc<dyn Devices + Send + Sync>,
+    unmute: Option<super::Waiting>,
 ) -> impl FnOnce() -> MediaDone + Send + use<> {
     let (call, session) = (live.call, Arc::clone(&live.session));
     move || MediaDone::Opened {
         call,
         result: session.open_devices(&*devices).map_err(|error| error.to_string()),
+        unmute,
     }
 }
 

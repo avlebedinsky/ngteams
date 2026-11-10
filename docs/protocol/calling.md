@@ -213,6 +213,13 @@ the mixer's control plane, the media descriptions and the bandwidth seed) and th
   module as the far end.
 - **The video switch**: the settings' "Video in calls" (on by default; off, a call starts no video).
 
+With no audio endpoints in the Windows VM, browser Teams reports an empty media-device list, starts a 1:1 call with
+the microphone muted, and continues to the callee's voicemail routing. The observed browser call later reported a
+lost connection; this establishes its initial device handling, not sustained connected media. The native session
+likewise opens audio devices independently: a microphone that cannot open sends no substitute audio and stays muted;
+a missing speaker does not stop decoding received audio or video, and decoded audio is never counted as played.
+An explicit unmute retries missing devices off the engine thread, preserving streams that are already running.
+
 ### Native video
 
 A 1:1 call's video in the native client (M3 Task 18), as the web client's camera-on flow above shows it:

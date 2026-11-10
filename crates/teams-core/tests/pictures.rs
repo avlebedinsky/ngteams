@@ -12,7 +12,6 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,6 +25,9 @@ use teams_proto::{Author, Client, Credentials, FileThumbnails, HttpTransport, Pa
 use teams_store::{PictureCache, Store};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 
 const LAB_A: &str = "8:orgid:0000000a-0000-4000-8000-00000000000a";
 const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
@@ -106,9 +108,8 @@ async fn a_picture_read_once_is_shown_from_the_cache_by_the_next_run() {
     assert_eq!(requests_to(&server, &view_path("imgo")).await, 1);
 
     let cache = PictureCache::file_beside(&store_file);
-    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&cache), 0o600, "the cache is private");
-    assert_eq!(mode(cache.parent().unwrap()), 0o700);
+    privacy::assert_private(&cache, false);
+    privacy::assert_private(cache.parent().unwrap(), false);
 
     // the next run: the same picture, by a `src` on another of AMS's hosts, without a read
     let second = engine(&server, &store_file);

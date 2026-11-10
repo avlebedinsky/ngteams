@@ -1260,6 +1260,7 @@ impl Calls {
         if let Some(active) = self.call.as_mut().filter(|active| active.id == call) {
             if microphone {
                 active.check.microphone_lost = true;
+                active.muted = true;
             } else {
                 active.check.speaker_lost = true;
             }

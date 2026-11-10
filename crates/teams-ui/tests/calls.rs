@@ -1721,6 +1721,11 @@ fn a_microphone_or_speaker_that_went_away_in_the_test_call_failed_its_check() {
             call: call(1),
             microphone,
         });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| calls_of(&rig).read(cx).call().unwrap().muted),
+            microphone
+        );
         status(&rig, 1, CallStatus::Ended(End::Remote(RemoteEnd::default())));
         let check = cx
             .update(|_, cx| calls_of(&rig).read(cx).ended().cloned())
