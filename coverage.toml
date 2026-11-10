@@ -184,7 +184,7 @@ sha256 = "ff2f75402e8094bbe216d8a47b9137b1bddc0a524f7347802b1d7e7ed9a6bc12"
 reason = "cfg-selected native descriptor module declarations and re-exports only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/descriptors/windows.rs"]
-sha256 = "f7e8b81fda33315167057f79f1b2be06184bae240c5862032de75850be77ad75"
+sha256 = "b6827bc649d8189fb77ae73c441b51258158ac1ba34a21dda63ccb843e06954c"
 reason = "Windows-only app handle adoption, peer verification and writable-trace validation; the actual module is compiled and exercised by native app_descriptors tests, pending whole-app Windows integration."
 
 [unmapped_sources."crates/ngteams/src/restart/windows.rs"]
@@ -277,7 +277,7 @@ sha256 = "ff4db966dd3bd15054beafb18906a25b7dbae043d4a32d275f3b507c6b953c0c"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/tray.rs"]
-sha256 = "b88da2c710d83e31bf50da01526c07b53f9d2188247850fa0fc08b1dfe13c93c"
+sha256 = "3c1936061db04371bf0286e001a691b9151c0c2e9daacab74747c359d39340b9"
 reason = "Windows-only native shell message loop with no Linux LLVM mapping. The authorized VM synthetic GPUI fixture exercises sent restart broadcasts restoring a withdrawn icon, actual tray/menu input, window recreation and unread taskbar overlays. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/ngteams/src/app/windows.rs"]

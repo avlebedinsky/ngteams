@@ -7,11 +7,14 @@
 
 #![cfg(test)]
 
+#[path = "support/fake_tool.rs"]
+#[expect(dead_code, reason = "the shared fake CLI helper serves several test harnesses")]
+mod fake_tool;
+
 #[expect(dead_code, reason = "the shared stand-ins hold more than this test uses")]
 mod common;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,10 +62,7 @@ done
 const SIGNED_OUT: &str = "#!/bin/bash\necho 'Invalid API key. Please run /login' >&2\nexit 1\n";
 
 fn fake(dir: &Path, body: &str) -> PathBuf {
-    let path = dir.join("claude");
-    fs::write(&path, body).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    fake_tool::write(dir, "claude", body)
 }
 
 /// The questions the fake was asked so far.

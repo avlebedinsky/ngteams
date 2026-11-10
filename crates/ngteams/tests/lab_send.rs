@@ -2,9 +2,9 @@
 
 #![cfg(test)]
 
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
+use teams_auth::broker::private_pair;
 
 use ngteams::accounts_file::{PersonalAccount, PersonalLocations};
 use ngteams::lab::{self, LAB_KEYRING_APPLICATION};
@@ -81,7 +81,7 @@ async fn lab_alias_sends_to_another_lab_account_and_rotates_credentials_through_
     let backing = Arc::new(MemorySecretStore::new());
     let refresh = refresh_token_key(UPN);
     backing.put(&refresh, &Secret::new("synthetic-refresh")).await.unwrap();
-    let (ours, theirs) = UnixStream::pair().unwrap();
+    let (ours, theirs) = private_pair().unwrap();
     let served_store = Arc::clone(&backing);
     let served = tokio::spawn(async move {
         let mut notes = Vec::new();

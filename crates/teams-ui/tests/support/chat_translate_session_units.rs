@@ -2,8 +2,9 @@
 //! answered in order, the process renewed once worn, and a failure told with its job, the next job starting the tool
 //! anew.
 
+use crate::fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -26,10 +27,7 @@ done
 "#;
 
 fn fake(dir: &Path) -> PathBuf {
-    let path = dir.join("claude");
-    fs::write(&path, FAKE).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    fake_tool::write(dir, "claude", FAKE)
 }
 
 fn next(session: &Session) -> Outcome {

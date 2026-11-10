@@ -108,7 +108,7 @@ fn adding_focuses_one_prompt_then_selects_the_started_account_and_closes_it() {
 fn a_lab_alias_keeps_sending_enabled_without_opening_an_add_account_prompt() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, first) = setup(dir.path(), 1);
-    let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (socket, peer) = teams_auth::broker::private_pair().unwrap();
     let setup = setup.with_secrets(crate::secrets::AppSecrets::lab(socket).unwrap());
     let cx = TestAppContext::single();
     let running = open(&cx, &setup, first);
@@ -233,7 +233,7 @@ fn an_invalid_added_account_reports_the_failure_in_its_existing_prompt() {
 #[test]
 fn account_video_and_device_settings_follow_the_shared_model_after_an_account_is_added() {
     // The unit backend is silent FileDevices + FixedDirectory; the ordinary build still requires real PipeWire.
-    let devices = crate::calling::CallDevices::open(teams_media::devices::pipewire::Reach::Sandbox).unwrap();
+    let devices = crate::calling::CallDevices::open(teams_media::devices::Reach::Sandbox).unwrap();
     let (_, calls) = devices.for_account();
     let first_feed = calls.video.clone().unwrap();
     let dir = tempfile::tempdir().unwrap();

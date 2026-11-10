@@ -7,14 +7,7 @@ use teams_auth::broker::BrokerStream;
 pub type AsyncStream = teams_auth::broker::AsyncBrokerStream;
 
 pub fn pair_sync() -> io::Result<(BrokerStream, BrokerStream)> {
-    #[cfg(unix)]
-    {
-        BrokerStream::pair()
-    }
-    #[cfg(windows)]
-    {
-        teams_auth::broker::private_pair()
-    }
+    teams_auth::broker::private_pair()
 }
 
 pub fn pair() -> io::Result<(AsyncStream, BrokerStream)> {

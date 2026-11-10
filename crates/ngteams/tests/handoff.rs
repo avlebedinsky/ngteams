@@ -11,11 +11,17 @@ mod ctl_support;
 
 use std::future::{self, Future};
 use std::io::BufReader;
-use std::os::unix::net::UnixListener;
+#[expect(
+    dead_code,
+    reason = "this fixture serves control requests instead of connecting a raw client"
+)]
+#[path = "support/transport.rs"]
+mod transport;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use transport::Listener;
 
 use clap::Parser as _;
 use ctl_support::{ask, pump_until, pumped, quit};
@@ -285,7 +291,7 @@ fn a_hung_app_times_out_and_the_second_launch_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ctl.sock");
     // takes connections (the kernel's backlog) and never answers
-    let _hung = UnixListener::bind(&socket).unwrap();
+    let _hung = Listener::bind(&socket).unwrap();
     let timeouts = Timeouts {
         connect: Duration::from_secs(1),
         read: Duration::from_millis(200),
@@ -304,10 +310,10 @@ fn a_hung_app_times_out_and_the_second_launch_says_so() {
 fn a_link_is_waited_for_past_the_short_answer_while_its_meeting_is_read() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ctl.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = Listener::bind(&socket).unwrap();
     // an app that greets at once and answers the link only after the short bound, as one reading a slow meeting
     let app = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let stream = listener.accept().unwrap();
         let mut reader = LineReader::new(BufReader::new(stream.try_clone().unwrap()));
         let mut writer = stream;
         let mut answer = |id: u64, response| {
@@ -352,8 +358,8 @@ fn nobody_behind_the_socket_is_a_normal_start_that_replaces_a_stale_file() {
         HandOff::NotRunning
     );
     teams_ctl::prepare_dir(&socket).unwrap();
-    drop(UnixListener::bind(&socket).unwrap());
-    assert!(socket.exists(), "the stale file stays");
+    drop(Listener::bind(&socket).unwrap());
+    assert_eq!(socket.exists(), cfg!(unix), "only Unix sockets leave a stale file");
     assert_eq!(
         handoff::hand_off(&socket, Request::Activate, handoff::TIMEOUTS),
         HandOff::NotRunning

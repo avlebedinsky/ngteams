@@ -95,8 +95,8 @@ receive diagnostic is unused and prints a mode number only).
 
 Broker scope, get-only behavior, framing, closure and session contracts run unchanged over Unix sockets or Windows
 named pipes. The caller supplies the established stream and is responsible for endpoint permissions.
-The Windows runner now supervises broker handles and the complete app process tree; the remaining GUI dependencies
-still prevent a runnable Windows client. Named pipes have no half-close, so malformed-request tests close the
+The Windows runner now supervises broker handles and the complete app process tree. The normal lab app builds;
+signed-in validation remains a separate gate. Named pipes have no half-close, so malformed-request tests close the
 complete synthetic peer when testing truncation.
 
 The VM's SSH token cannot access Credential Manager (Windows error 1312); native credential tests and coverage run
@@ -145,6 +145,14 @@ The existing native coverage floors remain unchanged. Windows-only sources use t
 The explicit VM-console guard also checks the active interactive session; its tests open no window. These boundaries
 now supply the Windows runner. Native WebView2 and the complete media runtime have offline VM contracts; signed-in
 application validation and the Windows release package remain unfinished.
+
+The app and UI all-target checks include real native handle, byte-pipe and file-privacy contracts, rather than
+compiling Unix-only test helpers on Windows. `scripts/test-windows-app.ps1` runs the synthetic application/startup,
+IPC, account, settings and local-tool model/view suites in the authorized VM console; Git for Windows interprets
+only the fake CLI protocols behind native `.cmd` shims. Shared screenshot scenes also run against native Windows
+GPUI through a console/child-verified capture boundary.
+Wayland input, portal/D-Bus and Linux runner harnesses and the separate native Windows desktop/shell/video fixtures
+remain platform-specific. No coverage floor is changed.
 
 
 The native runner gate measures its Windows CLI, locks, snapshot cleanup, deadlines, broker/app failures and restart

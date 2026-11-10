@@ -10,6 +10,10 @@
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
+#[path = "support/fake_tool.rs"]
+#[expect(dead_code, reason = "the shared fake CLI helper serves several test harnesses")]
+mod fake_tool;
+
 pub mod common;
 /// The Call health pane, from More → Settings.
 #[path = "calls/health.rs"]
@@ -2753,7 +2757,6 @@ fn translate_menu(window: &mut VisualTestContext) {
 
 #[test]
 fn captions_translate_on_this_computer_and_say_why_when_they_cannot() {
-    use std::os::unix::fs::PermissionsExt as _;
     let rig = calling();
     let (trace, written) = trace();
     let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
@@ -2800,9 +2803,7 @@ fn captions_translate_on_this_computer_and_say_why_when_they_cannot() {
     assert!(drawn(window, "call-caption-text"));
     // the tool installed meanwhile: Try again translates
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("claude");
-    std::fs::write(&program, FAKE_CLAUDE).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let program = fake_tool::write(dir.path(), "claude", FAKE_CLAUDE);
     rig.cx
         .update(|cx| cx.set_global(Translators::with(vec![(Backend::Claude, program)])));
     click(window, "call-caption-translate-retry");

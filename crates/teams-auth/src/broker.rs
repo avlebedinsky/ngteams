@@ -592,3 +592,12 @@ impl SecretStore for BrokerSecretStore {
 mod windows_pair;
 #[cfg(windows)]
 pub use windows_pair::private_pair;
+
+/// Two connected, private, noninheritable broker endpoints. No credential or protocol data is sent.
+///
+/// # Errors
+/// The operating system cannot create the socket pair.
+#[cfg(unix)]
+pub fn private_pair() -> io::Result<(BrokerStream, BrokerStream)> {
+    BrokerStream::pair()
+}

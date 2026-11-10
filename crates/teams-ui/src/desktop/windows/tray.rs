@@ -64,7 +64,7 @@ enum Command {
     Window(Option<usize>),
     Stop,
 }
-pub(crate) struct NativeTray {
+pub struct NativeTray {
     hwnd: usize,
     commands: mpsc::Sender<Command>,
     thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -514,23 +514,31 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
 
 #[cfg(test)]
 impl NativeTray {
-    pub(crate) async fn test_window(&self) -> usize {
+    /// The HWND this fixture's tray currently targets.
+    ///
+    /// # Panics
+    /// The owned tray loop stopped before answering the fixture.
+    pub async fn test_window(&self) -> usize {
         let (reply, result) = oneshot::channel();
         self.send(Command::TestWindow(reply));
         result.await.unwrap()
     }
-    pub(crate) async fn test_overlay(&self) -> bool {
+    /// Whether the shell accepted this fixture's most recent overlay update.
+    ///
+    /// # Panics
+    /// The owned tray loop stopped before answering the fixture.
+    pub async fn test_overlay(&self) -> bool {
         let (reply, result) = oneshot::channel();
         self.send(Command::TestOverlay(reply));
         result.await.unwrap()
     }
-    pub(crate) fn test_callback(&self, event: u32) {
+    pub fn test_callback(&self, event: u32) {
         // SAFETY: the fixture targets only the HWND this object created.
         unsafe {
             SendMessageW(self.hwnd as HWND, CALLBACK, 0, isize::try_from(event).unwrap_or(0));
         }
     }
-    pub(crate) fn test_explorer_restart(&self) {
+    pub fn test_explorer_restart(&self) {
         let message = taskbar_created();
         // SAFETY: simulate delivery only to our own hidden window; Explorer itself is never restarted.
         unsafe {

@@ -1,9 +1,9 @@
 //! Private command entry points, with only disposable files and socket pairs.
 
+use super::handles;
 use std::io::Write as _;
-use std::os::fd::IntoRawFd as _;
-use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
+use teams_auth::broker::{BrokerStream, private_pair};
 
 use ngteams::cli::ReadOnlyMode;
 use ngteams::setup::Setup;
@@ -18,7 +18,7 @@ pub(super) fn run(case: &str, setup: &Setup) {
         "command-invalid-account" => {
             let cli =
                 <ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams", "--account", "invalid-upn"]).unwrap();
-            assert!(super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox).is_err());
+            assert!(super::run(&cli, teams_media::devices::Reach::Sandbox).is_err());
         }
         "command-error-files" => corrupt_files(setup),
         "command-no-ready" => {
@@ -26,7 +26,7 @@ pub(super) fn run(case: &str, setup: &Setup) {
             assert!(matches!(
                 super::run(
                     &<ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams"]).unwrap(),
-                    teams_media::devices::pipewire::Reach::Sandbox
+                    teams_media::devices::Reach::Sandbox
                 ),
                 Ok(Outcome::Quit)
             ));
@@ -43,19 +43,28 @@ pub(super) fn run(case: &str, setup: &Setup) {
 }
 
 fn broker_boundaries(setup: &Setup) {
-    assert_eq!(broker("missing@example.test", -1), ExitCode::FAILURE);
-    let (peer, socket) = UnixStream::pair().unwrap();
+    assert_eq!(broker("missing@example.test", handles::INVALID), ExitCode::FAILURE);
+    let (peer, socket) = private_pair().unwrap();
     drop(peer);
-    assert_eq!(broker("missing@example.test", socket.into_raw_fd()), ExitCode::FAILURE);
+    assert_eq!(
+        broker("missing@example.test", handles::socket(socket)),
+        ExitCode::FAILURE
+    );
     super::signed(setup, "signed@example.test", 8, true);
-    let (peer, socket) = UnixStream::pair().unwrap();
+    let (peer, socket) = private_pair().unwrap();
     drop(peer);
     // EOF is handled before a lazy keyring lookup; no credential request is sent.
-    assert_eq!(broker("SIGNED@example.test", socket.into_raw_fd()), ExitCode::SUCCESS);
-    let (mut peer, socket) = UnixStream::pair().unwrap();
+    assert_eq!(
+        broker("SIGNED@example.test", handles::socket(socket)),
+        ExitCode::SUCCESS
+    );
+    let (mut peer, socket) = private_pair().unwrap();
     peer.write_all(&u32::MAX.to_be_bytes()).unwrap();
     drop(peer);
-    assert_eq!(broker("signed@example.test", socket.into_raw_fd()), ExitCode::FAILURE);
+    assert_eq!(
+        broker("signed@example.test", handles::socket(socket)),
+        ExitCode::FAILURE
+    );
 }
 
 fn snapshot_boundaries(setup: &Setup) {
@@ -77,35 +86,42 @@ fn snapshot_boundaries(setup: &Setup) {
     assert_eq!(take_snapshot(setup.paths.config_dir()), ExitCode::FAILURE);
 }
 
-fn mode(_setup: &Setup, socket: UnixStream) -> ReadOnlyMode {
+fn mode(_setup: &Setup, socket: BrokerStream) -> ReadOnlyMode {
     ReadOnlyMode {
         account: "signed@example.test".to_owned(),
         data: std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("missing-snapshot"),
-        secrets_fd: socket.into_raw_fd(),
+        secrets_fd: handles::socket(socket),
         trace_fd: None,
         ctl_socket: None,
     }
 }
 
 fn read_refusal(setup: &Setup) {
-    let (peer, socket) = UnixStream::pair().unwrap();
+    let (peer, socket) = private_pair().unwrap();
     let mut request = mode(setup, socket);
-    request.trace_fd = Some(-1);
-    assert!(run_read_only(&request).err().unwrap().contains("descriptor"));
-    let (_, socket) = UnixStream::pair().unwrap();
+    request.trace_fd = Some(handles::INVALID);
+    let error = run_read_only(&request).err().unwrap();
+    let kind = if cfg!(windows) { "handle" } else { "descriptor" };
+    assert!(error.contains(&format!("{kind} {}", handles::INVALID)), "{error}");
+    let (_, socket) = private_pair().unwrap();
     request = mode(setup, socket);
-    assert!(run_read_only(&request).err().unwrap().contains("compositor"));
+    assert!(
+        run_read_only(&request)
+            .err()
+            .unwrap()
+            .contains(if cfg!(windows) { "VM console" } else { "compositor" })
+    );
     drop(peer);
 }
 
 fn read_missing(setup: &Setup) {
-    let (peer, socket) = UnixStream::pair().unwrap();
+    let (peer, socket) = private_pair().unwrap();
     let mut request = mode(setup, socket);
     assert!(run_read_only(&request).err().unwrap().contains("holds no snapshot"));
     let root = tempfile::tempdir().unwrap();
     setup.ask_for("pending@example.test").unwrap();
     ngteams::snapshot::snapshot(&setup.paths, root.path()).unwrap();
-    let (_, socket) = UnixStream::pair().unwrap();
+    let (_, socket) = private_pair().unwrap();
     request = mode(setup, socket);
     request.data = root.path().to_owned();
     assert!(
@@ -121,7 +137,7 @@ fn read_window(setup: &Setup) {
     super::signed(setup, "signed@example.test", 10, true);
     let root = tempfile::tempdir().unwrap();
     let paths = ngteams::snapshot::snapshot(&setup.paths, root.path()).unwrap();
-    let (peer, socket) = UnixStream::pair().unwrap();
+    let (peer, socket) = private_pair().unwrap();
     let serving = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -140,7 +156,7 @@ fn read_window(setup: &Setup) {
     request.account = "SIGNED@example.test".to_owned();
     request.data = root.path().to_owned();
     let trace = std::fs::File::create(root.path().join("trace.jsonl")).unwrap();
-    request.trace_fd = Some(trace.into_raw_fd());
+    request.trace_fd = Some(handles::file(trace));
     let ctl = root.path().join("ctl.sock");
     request.ctl_socket = Some(ctl.clone());
     assert!(matches!(run_read_only(&request), Ok(Outcome::Quit)));
@@ -185,9 +201,12 @@ fn corrupt_files(setup: &Setup) {
     assert!(super::super::ready_accounts(setup).is_err());
     assert!(super::super::ask_account(setup.clone(), None).is_err());
     let cli = <ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams"]).unwrap();
-    assert!(super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox).is_err());
-    let (peer, socket) = UnixStream::pair().unwrap();
-    assert_eq!(broker("signed@example.test", socket.into_raw_fd()), ExitCode::FAILURE);
+    assert!(super::run(&cli, teams_media::devices::Reach::Sandbox).is_err());
+    let (peer, socket) = private_pair().unwrap();
+    assert_eq!(
+        broker("signed@example.test", handles::socket(socket)),
+        ExitCode::FAILURE
+    );
     drop(peer);
 }
 
@@ -201,7 +220,7 @@ fn read_errors(case: &str, setup: &Setup) {
     } else if case == "command-read-engine-error" {
         std::fs::write(paths.region_file(&account).unwrap(), b"invalid region").unwrap();
     }
-    let (peer, socket) = UnixStream::pair().unwrap();
+    let (peer, socket) = private_pair().unwrap();
     // An empty credential source: even the window-failure branch has no user credential or reachable token.
     drop(peer);
     let mut request = mode(setup, socket);
@@ -219,24 +238,30 @@ fn read_errors(case: &str, setup: &Setup) {
 
 pub(super) fn invalid_environment() {
     let cli = <ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams"]).unwrap();
-    assert!(super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox).is_err());
+    assert!(super::run(&cli, teams_media::devices::Reach::Sandbox).is_err());
     assert_eq!(
         take_snapshot(std::path::Path::new("/synthetic/not-created")),
         ExitCode::FAILURE
     );
-    let (peer, socket) = UnixStream::pair().unwrap();
-    assert_eq!(broker("signed@example.test", socket.into_raw_fd()), ExitCode::FAILURE);
+    let (peer, socket) = private_pair().unwrap();
+    assert_eq!(
+        broker("signed@example.test", handles::socket(socket)),
+        ExitCode::FAILURE
+    );
     drop(peer);
-    let (peer, socket) = UnixStream::pair().unwrap();
+    let (peer, socket) = private_pair().unwrap();
     let request = ReadOnlyMode {
         account: "signed@example.test".to_owned(),
         data: "/synthetic/not-created".into(),
-        secrets_fd: socket.into_raw_fd(),
+        secrets_fd: handles::socket(socket),
         trace_fd: None,
         ctl_socket: None,
     };
     let error = run_read_only(&request).err().unwrap();
-    assert!(error.contains("HOME"), "{error}");
+    assert!(
+        error.contains(if cfg!(windows) { "LOCALAPPDATA" } else { "HOME" }),
+        "{error}"
+    );
     drop(peer);
 }
 
@@ -267,7 +292,10 @@ fn bootstrap_failures(setup: &Setup) {
     );
     assert!(invoked);
     let error = ngteams::restart::exec(&mut std::process::Command::new(
-        "/ngteams-synthetic-missing-personal-restart",
+        setup
+            .paths
+            .data_dir()
+            .join("ngteams-synthetic-missing-personal-restart.exe"),
     ));
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }

@@ -768,6 +768,30 @@ Display-free Windows checks use `cargo test -p teams-signin --lib --test classif
 The normal lab application builds and opens the native Microsoft sign-in page. The Windows port still needs its
 signed-in validation and release packaging before it is ready to use.
 
+### Windows application contracts
+
+`pwsh -NoProfile -File scripts/test-windows-app.ps1` builds and executes the synthetic app and UI contracts in the
+authorized win11 console. `-Group app`, `-Group ui` or `-Group scenes` selects app contracts, shared model/view contracts
+or real rendered scenes. `-Only` accepts exact inventory keys such as `ngteams-test-descriptors` or
+`teams-ui-scene-font_styles` to rerun failed targets. It checks actual native descriptor
+ownership/inheritance and restart, account/sign-in persistence, read-only and lab broker behavior, startup, control
+IPC and handoff, settings privacy and the translation/correction/recap models and views. All identities and services
+are synthetic; no installed AI tool or tenant is reached. Its evidence and executable inventory stay under a private
+`target/windows-app-smoke-*` directory. Builds retain dependency debugging and omit only each selected test image's
+final PDB; deadlines, the 1.5 GiB free-space guard and scheduled-task cleanup cover each run.
+
+Fake CLI protocols use the same scripts on both platforms. Windows launches them through native `.cmd` shims, with
+Git for Windows' `Program Files/Git/bin/bash.exe` interpreting the synthetic protocol. This exercises the app's actual
+prompt-file adaptation and process-tree cancellation; process liveness is checked in Bash's PID namespace before
+and after cancellation. Windows privacy assertions inspect actual ACL grants, and publication-failure tests use
+native file-sharing rules. Chat list, notes, meetings, recap, channels, workflows and font-style scenes share their
+real rendering code in `tests/support/scenes/`; their small fixture boundary selects the private compositor or native Windows window capture
+and close. Windows snapshots verify the child executable and console session, crop only its foreground client area
+and retain its process tree until cleanup. Font checks use native installed families, one family per short Windows
+window to keep shell overlays outside the measured pixels. The Wayland drag, portal, D-Bus and Linux app-runner
+harnesses stay in `tests/support/linux/`; Windows has native desktop/shell/video fixtures. Shared model/view tests
+remain available on both platforms. These offline gates do not establish signed-in feature behavior or physical devices.
+
 ### Windows video and local tools
 
 `pwsh -NoProfile -File scripts/test-windows-video.ps1` runs a synthetic GPUI video fixture in the authorized win11

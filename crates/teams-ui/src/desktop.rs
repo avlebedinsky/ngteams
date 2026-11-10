@@ -174,6 +174,11 @@ pub struct Desktop {
     _subscriptions: [Subscription; 3],
 }
 
+// Public only in the library's test image: the integration fixture compiles the same transport source and uses
+// these hooks. Reachability keeps the complete lib-test target lintable without suppressing unused test code.
+#[cfg(all(test, windows))]
+pub use windows::tray::NativeTray as NativeTrayTest;
+
 impl EventEmitter<DesktopEvent> for Desktop {}
 
 /// The shell `window` shows.

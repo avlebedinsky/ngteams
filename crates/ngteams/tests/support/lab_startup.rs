@@ -1,9 +1,9 @@
 //! Lab startup controllers use only disposable files, socket pairs and the existing mock GPUI/account backend.
 
+use crate::startup_tests::{environment, handles};
 use std::fs;
-use std::os::fd::IntoRawFd as _;
-use std::os::unix::net::UnixStream;
 use std::process::{Command, ExitCode};
+use teams_auth::broker::private_pair;
 
 use clap::Parser as _;
 use ngteams::accounts_file::PersonalAccount;
@@ -30,7 +30,8 @@ fn lab_startup_and_broker_use_alias_files_and_preserve_restart_descriptors() {
         "broker",
     ] {
         let root = tempfile::tempdir().unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
             .args([
                 "--exact",
                 "lab_startup_tests::lab_child",
@@ -59,9 +60,9 @@ fn lab_startup_and_broker_use_alias_files_and_preserve_restart_descriptors() {
             )
             .env("UI_SANDBOX_DIR", root.path().join("sandbox"))
             .env("WAYLAND_DISPLAY", root.path().join("sandbox/synthetic-wayland"))
-            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
-            .output()
-            .unwrap();
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)));
+        environment::isolate(&mut child, root.path(), true);
+        let output = child.output().unwrap();
         assert!(
             output.status.success(),
             "{case}: {}",
@@ -109,13 +110,13 @@ fn lab_child() {
         pending_failure(&case, &paths, &account);
         return;
     }
-    let (peer, socket) = UnixStream::pair().unwrap();
+    let (peer, socket) = private_pair().unwrap();
     let mut args = vec![
         "ngteams".to_owned(),
         "--lab".into(),
         "a".into(),
         "--secrets-fd".into(),
-        socket.into_raw_fd().to_string(),
+        handles::socket(socket).to_string(),
     ];
     if case == "wrong-account" {
         args.extend(["--account".into(), "other@example.test".into()]);
@@ -129,7 +130,12 @@ fn lab_child() {
     let mode = cli.lab_mode().unwrap().unwrap();
     if case == "no-sandbox" {
         // SAFETY: this isolated subprocess has not started any runtime/thread or GUI backend yet.
-        unsafe { std::env::set_var("DISPLAY", ":synthetic-forbidden") };
+        unsafe {
+            #[cfg(unix)]
+            std::env::set_var("DISPLAY", ":synthetic-forbidden");
+            #[cfg(windows)]
+            std::env::remove_var("NGTEAMS_WINDOWS_VM_SANDBOX");
+        };
     }
     let outcome = run_lab(&cli, &mode);
     let served: Vec<String> = crate::startup_tests::calls()
@@ -147,15 +153,26 @@ fn lab_child() {
     };
     assert_eq!(served, expected, "{case}");
     assert!(!ctl.exists(), "{case}: the quit removes the socket");
-    match (case.as_str(), outcome) {
-        ("ready" | "ready-ctl", Ok(Outcome::Quit)) => assert!(paths.store_file(&account).unwrap().exists()),
+    check_outcome(&case, outcome, &paths, &account);
+    drop(peer);
+}
+
+fn check_outcome(
+    case: &str,
+    outcome: Result<Outcome, String>,
+    paths: &ngteams::accounts_file::PersonalPaths,
+    account: &PersonalAccount,
+) {
+    match (case, outcome) {
+        ("ready" | "ready-ctl", Ok(Outcome::Quit)) => assert!(paths.store_file(account).unwrap().exists()),
         ("pending", Ok(Outcome::LabRestart(descriptors))) => assert!(descriptors.socket().is_ok()),
         ("wrong-account", Err(error)) => assert!(error.contains("configured for")),
-        ("no-sandbox", Err(error)) => assert!(error.contains("DISPLAY")),
+        ("no-sandbox", Err(error)) => {
+            assert!(error.contains(if cfg!(windows) { "VM console opt-in" } else { "DISPLAY" }));
+        }
         (_, Err(error)) => panic!("{case}: {error}"),
         _ => panic!("{case}: unexpected startup outcome"),
     }
-    drop(peer);
 }
 
 /// Exercise the actual add/sign-in failure distinction, not merely a fake backend returning an error. Neither
@@ -200,13 +217,13 @@ pub(super) fn failed_sign_in(
 fn pending_failure(case: &str, paths: &ngteams::accounts_file::PersonalPaths, account: &PersonalAccount) {
     let before = fs::read(paths.accounts_file()).unwrap();
     for _ in 0..2 {
-        let (peer, socket) = UnixStream::pair().unwrap();
+        let (peer, socket) = private_pair().unwrap();
         let mut args = vec![
             "ngteams".to_owned(),
             "--lab".into(),
             "a".into(),
             "--secrets-fd".into(),
-            socket.into_raw_fd().to_string(),
+            handles::socket(socket).to_string(),
         ];
         if case.contains("shortcut") {
             args.extend(["--account".into(), account.upn.clone()]);
@@ -225,19 +242,19 @@ fn pending_failure(case: &str, paths: &ngteams::accounts_file::PersonalPaths, ac
         assert_eq!(fs::read(paths.accounts_file()).unwrap(), before);
         assert_eq!(ngteams::lab::account(paths).unwrap(), *account);
         drop(peer);
-        let (peer, socket) = UnixStream::pair().unwrap();
+        let (peer, socket) = private_pair().unwrap();
         drop(peer);
-        assert_eq!(lab_broker("a", socket.into_raw_fd()), ExitCode::SUCCESS);
+        assert_eq!(lab_broker("a", handles::socket(socket)), ExitCode::SUCCESS);
     }
 }
 
 fn broker_cases(paths: &ngteams::accounts_file::PersonalPaths, pending: &PersonalAccount) {
     let closed_broker = || {
-        let (peer, socket) = UnixStream::pair().unwrap();
+        let (peer, socket) = private_pair().unwrap();
         drop(peer);
-        lab_broker("a", socket.into_raw_fd())
+        lab_broker("a", handles::socket(socket))
     };
-    assert_eq!(lab_broker("a", -1), ExitCode::FAILURE);
+    assert_eq!(lab_broker("a", handles::INVALID), ExitCode::FAILURE);
     assert_eq!(closed_broker(), ExitCode::SUCCESS, "EOF opens no lazy keyring");
     pending.save(paths).unwrap();
     assert_eq!(

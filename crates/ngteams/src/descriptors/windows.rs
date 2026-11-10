@@ -10,6 +10,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_APPEND_DATA, FILE_TYPE_DISK, FILE_WRITE_DATA, GetFileType};
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+use windows_sys::Win32::System::Pipes::{GetNamedPipeInfo, PIPE_TYPE_MESSAGE};
 
 /// The command-line representation of a Windows kernel handle, including all bits on x64.
 pub type RawDescriptor = usize;
@@ -68,7 +69,33 @@ fn adopt(fd: RawDescriptor) -> Result<OwnedHandle, AdoptError> {
 /// # Errors
 /// A reserved/closed handle, invalid native pipe, peer identity mismatch, or inability to clear inheritance.
 pub fn adopt_socket(fd: RawDescriptor) -> Result<BrokerStream, AdoptError> {
-    let pipe = interprocess::os::windows::named_pipe::local_socket::Stream::try_from(adopt(fd)?).map_err(|error| {
+    let owned = adopt(fd)?;
+    let mut flags = 0;
+    // interprocess accepts message pipes as byte receivers. Our inherited broker endpoint is explicitly a byte
+    // pipe; validate that native kind before wrapping it, preserving the runner's framing/ownership contract.
+    // SAFETY: owned keeps the queried handle alive; flags is a live output and all other outputs are omitted.
+    if unsafe {
+        GetNamedPipeInfo(
+            owned.as_raw_handle(),
+            &raw mut flags,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(AdoptError::NotAPipe {
+            fd,
+            source: io::Error::last_os_error(),
+        });
+    }
+    if flags & PIPE_TYPE_MESSAGE != 0 {
+        return Err(AdoptError::NotAPipe {
+            fd,
+            source: io::Error::new(io::ErrorKind::InvalidInput, "the broker requires a byte-type pipe"),
+        });
+    }
+    let pipe = interprocess::os::windows::named_pipe::local_socket::Stream::try_from(owned).map_err(|error| {
         AdoptError::NotAPipe {
             fd,
             source: error.into(),

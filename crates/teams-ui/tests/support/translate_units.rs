@@ -1,8 +1,9 @@
 //! Caption translation's languages, tools and model, the model driven against a fake `claude` on GPUI's test context
 //! (synthetic captions only).
 
+use crate::fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -67,12 +68,12 @@ fn only_an_executable_file_is_a_tool() {
     let file = dir.path().join("claude");
     fs::write(&file, "").unwrap();
     assert!(!executable(&file));
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(executable(&file));
+    let program = fake_tool::write(dir.path(), "claude", "exit 0");
+    assert!(executable(&program));
     assert!(!executable(dir.path()));
     // the PATH as the tests run with it: whatever it finds is an executable of the tool's name
     for (backend, program) in &Translators::detect().found {
-        assert!(program.ends_with(backend.program()) && executable(program));
+        assert!(program.file_stem().unwrap() == backend.program() && executable(program));
     }
 }
 
@@ -132,9 +133,7 @@ fn translate_to(app: &mut gpui::TestAppContext, settings: &Entity<SettingsModel>
 #[test]
 fn captions_are_translated_only_once_a_language_is_picked_and_while_they_show() {
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("claude");
-    fs::write(&program, FAKE_CLAUDE).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let program = fake_tool::write(dir.path(), "claude", FAKE_CLAUDE);
     let mut app = gpui::TestAppContext::single();
     let (settings, translation) = translation(&mut app, vec![(Backend::Claude, program)]);
     let lines = vec![caption(1, "Synthetic hello.", true)];
@@ -205,9 +204,7 @@ fn a_tool_missing_shows_the_captions_as_spoken_and_try_again_looks_again() {
     });
     // the tool installed meanwhile, but it fails as it starts: still as spoken, with why
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("codex");
-    fs::write(&program, "#!/bin/bash\necho 'synthetic failure' >&2\nexit 1\n").unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let program = fake_tool::write(dir.path(), "codex", "echo 'synthetic failure' >&2\nexit 1\n");
     app.update(|cx| cx.set_global(Translators::with(vec![(Backend::Codex, program)])));
     translation.update(&mut app, CaptionTranslation::retry);
     until(&mut app, |app| {

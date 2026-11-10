@@ -2,7 +2,8 @@
 
 use ngteams::accounts_file::{PersonalAccount, PersonalError, PersonalPaths};
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const TENANT: &str = "00000000-0000-4000-8000-000000000001";
 const GUID_C: &str = "00000000-0000-4000-8000-00000000000c";
@@ -58,8 +59,8 @@ fn accounts_toml_keeps_the_accounts_in_the_order_added_and_saves_by_upn() -> Tes
     assert_eq!(upns(&paths)?, ["ONE@example.test", "three@example.test"]);
     assert_eq!(PersonalAccount::remove(&paths, "two@example.test")?, None);
     // the file and its directory are the user's alone, and no staging file is left
-    assert_eq!(fs::metadata(paths.accounts_file())?.permissions().mode() & 0o777, 0o600);
-    assert_eq!(fs::metadata(paths.config_dir())?.permissions().mode() & 0o777, 0o700);
+    privacy::assert_private(&paths.accounts_file(), false);
+    privacy::assert_private(paths.config_dir(), false);
     let names: Vec<_> = fs::read_dir(paths.config_dir())?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<Result<_, _>>()?;
@@ -137,12 +138,9 @@ fn a_single_account_s_files_are_read_until_moved_to_the_files_of_several() -> Te
         .ok_or("a signed-in account has a region file")?;
     assert_eq!(region, paths.data_dir().join("regions").join(format!("{GUID_X}.json")));
     assert_eq!(fs::read_to_string(&region)?, "{\"region\":\"amer\"}");
-    assert_eq!(
-        fs::metadata(region.parent().ok_or("dir")?)?.permissions().mode() & 0o777,
-        0o700
-    );
+    privacy::assert_private(region.parent().ok_or("dir")?, false);
     assert_eq!(PersonalAccount::load_all(&paths)?, vec![account.clone()]);
-    assert_eq!(fs::metadata(paths.accounts_file())?.permissions().mode() & 0o777, 0o600);
+    privacy::assert_private(&paths.accounts_file(), false);
     // a second time: nothing to do
     let migrated = fs::read_to_string(paths.accounts_file())?;
     paths.migrate_single_account()?;
@@ -248,12 +246,31 @@ fn an_unwritable_config_reports_the_target_and_preserves_published_accounts() ->
     let paths = paths_in(&dir);
     PersonalAccount::pending("first@example.test")?.save(&paths)?;
     let before = fs::read(paths.accounts_file())?;
-    let mode = fs::metadata(paths.config_dir())?.permissions();
-    fs::set_permissions(paths.config_dir(), fs::Permissions::from_mode(0o555))?;
+    #[cfg(unix)]
+    let restore = {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(paths.config_dir())?.permissions();
+        fs::set_permissions(paths.config_dir(), fs::Permissions::from_mode(0o555))?;
+        || fs::set_permissions(paths.config_dir(), mode)
+    };
+    // Windows' read-only directory flag does not deny file creation. A reader without delete sharing prevents
+    // atomic replacement instead, exercising the native publication failure and preservation contract.
+    #[cfg(windows)]
+    let restore = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(paths.accounts_file())?;
+        move || {
+            drop(held);
+            Ok::<_, std::io::Error>(())
+        }
+    };
     let result = PersonalAccount::pending("second@example.test")?.save(&paths);
     let after = fs::read(paths.accounts_file());
     // Restore before assertions, including on the expected refusal, so the private fixture cleans up normally.
-    fs::set_permissions(paths.config_dir(), mode)?;
+    restore()?;
     assert!(matches!(result, Err(PersonalError::Write { path, .. }) if path == paths.accounts_file()));
     assert_eq!(after?, before);
     assert_eq!(upns(&paths)?, ["first@example.test"]);

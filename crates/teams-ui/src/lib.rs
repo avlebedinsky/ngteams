@@ -196,3 +196,7 @@ pub use trace::{TraceId, TraceLine, ViewTrace};
 pub use tray::{Tray, TrayEvent, TrayIcon};
 pub use video::{Tiles, VideoFeed};
 pub use view::Root;
+
+#[cfg(test)]
+#[path = "../tests/support/fake_tool.rs"]
+mod fake_tool;
