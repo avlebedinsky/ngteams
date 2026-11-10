@@ -389,11 +389,11 @@ fn a_meetup_join_link_in_either_form_opens_its_pre_join() {
         let request = Request::OpenLink { url: link.clone() };
         assert_eq!(running.handed(request), HandOff::Done { note: None }, "{link}");
         let prejoin = running.prejoin().unwrap_or_else(|| panic!("{link}: no pre-join"));
-        assert_eq!(prejoin.to_join.chat, THREAD);
-        assert_eq!(prejoin.to_join.meeting.organizer_id, ORGANIZER);
-        assert_eq!(prejoin.to_join.meeting.tenant_id, TENANT);
+        assert_eq!(prejoin.to_join.chat(), Some(THREAD));
+        assert_eq!(prejoin.to_join.meeting().unwrap().organizer_id, ORGANIZER);
+        assert_eq!(prejoin.to_join.meeting().unwrap().tenant_id, TENANT);
         // the mock has no such thread: the link's organizer, under the pre-join's own title
-        assert_eq!(prejoin.to_join.title, "Meeting");
+        assert_eq!(prejoin.to_join.title(), "Meeting");
         assert!(!prejoin.joining, "nothing is joined");
     }
 }
@@ -437,7 +437,7 @@ fn the_link_the_app_started_with_opens_once_it_runs() {
     pump_until(&running.cx, Duration::from_millis(10), |cx| {
         calls(cx).read(cx).prejoin().is_some()
     });
-    assert_eq!(running.prejoin().unwrap().to_join.chat, THREAD);
+    assert_eq!(running.prejoin().unwrap().to_join.chat(), Some(THREAD));
 }
 
 #[test]

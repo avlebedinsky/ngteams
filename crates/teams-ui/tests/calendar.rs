@@ -503,8 +503,8 @@ fn a_meetings_card_offers_join_any_time_and_join_goes_to_its_pre_join() {
     click(cx, "calendar-card-join");
     let told = told.lock().unwrap();
     assert_eq!(told.len(), 1);
-    assert_eq!(told[0].chat, "19:meeting_MadeUpMeeting0001@thread.v2");
-    assert_eq!(told[0].title, title);
+    assert_eq!(told[0].chat(), Some("19:meeting_MadeUpMeeting0001@thread.v2"));
+    assert_eq!(told[0].title(), title);
     assert!(cx.update(|_, cx| view.read(cx).card().is_none()), "the card gives way");
 }
 

@@ -727,11 +727,12 @@ impl CallStage {
             .calls
             .read(cx)
             .meeting_to_join()
-            .filter(|to_join| to_join.chat == chat)?;
+            .filter(|to_join| to_join.chat() == Some(chat))?;
+        let meeting = to_join.meeting()?;
         Some(format!(
             "https://teams.microsoft.com/meetingOptions/?organizerId={}&tenantId={}&threadId={}&messageId=0",
-            to_join.meeting.organizer_id,
-            to_join.meeting.tenant_id,
+            meeting.organizer_id,
+            meeting.tenant_id,
             chat.replace(':', "_")
         ))
     }

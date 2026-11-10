@@ -1215,7 +1215,8 @@ impl Core for FakeCore {
             | CallAction::Join { .. }
             | CallAction::MeetNow { .. }
             | CallAction::JoinChannel { .. }
-            | CallAction::JoinMeeting { .. } => CallId::for_tests(1),
+            | CallAction::JoinMeeting { .. }
+            | CallAction::JoinMeetingCode(_) => CallId::for_tests(1),
         };
         Reply::ready(locked(&self.call_answers).pop_front().unwrap_or(Ok(named)))
     }

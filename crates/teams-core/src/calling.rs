@@ -194,6 +194,8 @@ pub enum CallAction {
     /// The account goes into the call of the meeting whose chat is `chat`: it starts the call when nobody has yet, and
     /// joins it when it runs.
     JoinMeeting { chat: String, meeting: MeetingInfo },
+    /// Join an invitation by ID and passcode, resolved by the calling service.
+    JoinMeetingCode(teams_proto::MeetingCode),
     /// A new meeting in the channel `channel` (a team's channel thread), its header's Meet now: the account starts it
     /// and organizes it, and the service posts it to the channel.
     MeetNow { channel: String },
@@ -270,6 +272,7 @@ impl CallAction {
                 | Self::TestCall { .. }
                 | Self::Join { .. }
                 | Self::JoinMeeting { .. }
+                | Self::JoinMeetingCode(_)
                 | Self::MeetNow { .. }
                 | Self::JoinChannel { .. }
         )
@@ -1810,12 +1813,8 @@ where
             }
             _ if busy || self.calls.current().is_some() => return refuse(reply, CallActionError::Busy),
             Act::Join(chat) if !self.calls.joinable(chat) => return refuse(reply, CallError::NotJoinable.into()),
-            Act::Place(
-                Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. } | Placement::Transferred { .. },
-            ) => (None, None, VideoKind::OneToOne),
-            Act::Place(Placement::Chat { .. } | Placement::Meeting { .. } | Placement::Channel { .. })
-            | Act::Join(_)
-            | Act::JoinChannel(..) => (None, None, VideoKind::Group),
+            Act::Place(placement) => (None, None, placement_video(placement)),
+            Act::Join(_) | Act::JoinChannel(..) => (None, None, VideoKind::Group),
             // only a start, a join or an answer sets its media up
             _ => return refuse(reply, CallError::NotNow.into()),
         };
@@ -1939,6 +1938,18 @@ where
         if let Some(call) = told {
             self.told_placing = None;
             self.ended(call, End::Failed("setup"));
+        }
+    }
+}
+
+/// A meeting uses the mixer's receiving lines even when its invitation has no local chat yet.
+fn placement_video(placement: &Placement) -> VideoKind {
+    match placement {
+        Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. } | Placement::Transferred { .. } => {
+            VideoKind::OneToOne
+        }
+        Placement::Chat { .. } | Placement::Meeting { .. } | Placement::MeetingCode(_) | Placement::Channel { .. } => {
+            VideoKind::Group
         }
     }
 }

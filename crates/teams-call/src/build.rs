@@ -57,6 +57,7 @@ pub(crate) fn start(
             group_chat: Some(_),
             ..
         } | Placement::Meeting { .. }
+            | Placement::MeetingCode(_)
             | Placement::Channel { .. }
     );
     match placement {
@@ -64,7 +65,7 @@ pub(crate) fn start(
         Placement::Chat { group_chat: None, .. } | Placement::Transferred { .. } => {
             offer.required_features = Some(ONE_TO_ONE_FEATURES.to_owned());
         }
-        Placement::Chat { .. } | Placement::Meeting { .. } | Placement::Channel { .. } => {}
+        Placement::Chat { .. } | Placement::Meeting { .. } | Placement::MeetingCode(_) | Placement::Channel { .. } => {}
     }
     let parts = start_parts(call, identity, group, offer)?;
     let start = match placement {
@@ -75,6 +76,7 @@ pub(crate) fn start(
             StartCall::in_chat(&call.context, &parts, &callees, group_chat.as_deref())?
         }
         Placement::Meeting { chat, meeting } => StartCall::in_meeting(&call.context, &parts, chat, meeting)?,
+        Placement::MeetingCode(code) => StartCall::by_code(&call.context, &parts, code)?,
         // a new meeting is subscribed to first: its entry, with the offer, goes once its conversation is known
         Placement::Channel { channel } => StartCall::meet_now(&call.context, &parts, channel)?,
     };

@@ -356,11 +356,11 @@ fn join_meeting_opens_its_pre_join_and_sends_nothing() {
     assert_eq!(lab.ask(join_meeting(&event.id, false)).unwrap(), Response::Done);
     let prejoin = lab.cx.read(|cx| lab.calls().read(cx).prejoin().cloned()).unwrap();
     assert!(
-        prejoin.to_join.chat.starts_with("19:meeting_MadeUpMeeting"),
+        prejoin.to_join.chat().unwrap().starts_with("19:meeting_MadeUpMeeting"),
         "{prejoin:?}"
     );
-    assert_eq!(prejoin.to_join.meeting.organizer_id, ORGANIZER);
-    assert_eq!(prejoin.to_join.title, "Product all hands");
+    assert_eq!(prejoin.to_join.meeting().unwrap().organizer_id, ORGANIZER);
+    assert_eq!(prejoin.to_join.title(), "Product all hands");
     assert!(!prejoin.joining && !prejoin.camera && !prejoin.muted, "{prejoin:?}");
     assert!(
         lab.traced.asked("join-meeting").is_empty(),
@@ -383,7 +383,7 @@ fn join_meeting_now_asks_the_pre_join_s_join_now_of_the_engine() {
         let calls = calls.read(cx);
         assert!(calls.call().is_none() && !calls.busy());
         assert_eq!(
-            calls.meeting_to_join().map(|to_join| to_join.title.as_str()),
+            calls.meeting_to_join().map(teams_ui::calls::MeetingToJoin::title),
             Some("Product all hands")
         );
     });

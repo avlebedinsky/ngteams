@@ -2199,7 +2199,7 @@ fn a_dropped_group_call_offers_rejoin_and_a_one_to_one_invitation_call_back_by_t
 const MEETING_CHAT: &str = "19:meeting_MadeUpMeeting0001@thread.v2";
 
 fn meeting_to_join() -> teams_ui::calls::MeetingToJoin {
-    teams_ui::calls::MeetingToJoin {
+    teams_ui::calls::MeetingToJoin::Chat {
         chat: MEETING_CHAT.to_owned(),
         meeting: teams_core::MeetingInfo {
             organizer_id: "00000000-0000-4000-8000-00000000000b".to_owned(),
@@ -2212,8 +2212,8 @@ fn meeting_to_join() -> teams_ui::calls::MeetingToJoin {
 fn join_meeting_action() -> CallAction {
     let to_join = meeting_to_join();
     CallAction::JoinMeeting {
-        chat: to_join.chat,
-        meeting: to_join.meeting,
+        chat: to_join.chat().unwrap().to_owned(),
+        meeting: to_join.meeting().unwrap().clone(),
     }
 }
 
@@ -2363,9 +2363,9 @@ fn a_meet_nows_subject_is_edited_in_its_pre_join_and_titles_the_new_meeting() {
     let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     let channel = "19:MadeUpChannel0001@thread.tacv2";
-    let to_join = teams_ui::calls::MeetingToJoin {
+    let to_join = teams_ui::calls::MeetingToJoin::Chat {
         chat: channel.to_owned(),
-        meeting: meeting_to_join().meeting,
+        meeting: meeting_to_join().meeting().unwrap().clone(),
         title: "Meeting in \"General\"".to_owned(),
     };
     rig.cx
@@ -2403,7 +2403,7 @@ fn a_meeting_chats_header_joins_the_meeting_by_its_chat() {
         .insert(
             MEETING_CHAT.to_owned(),
             teams_core::MeetingDetails {
-                meeting: meeting_to_join().meeting,
+                meeting: meeting_to_join().meeting().unwrap().clone(),
                 title: Some("Synthetic meeting".to_owned()),
                 join_url: None,
             },
@@ -2520,7 +2520,7 @@ fn meeting_chat_with(rig: &Rig, link: Option<&str>) {
         .insert(
             MEETING_CHAT.to_owned(),
             teams_core::MeetingDetails {
-                meeting: meeting_to_join().meeting,
+                meeting: meeting_to_join().meeting().unwrap().clone(),
                 title: Some("Synthetic meeting".to_owned()),
                 join_url: link.map(str::to_owned),
             },
@@ -2528,82 +2528,103 @@ fn meeting_chat_with(rig: &Rig, link: Option<&str>) {
 }
 
 #[test]
-fn join_with_an_id_the_calendar_lacks_finds_the_meeting_among_its_chats() {
+fn join_with_an_id_uses_the_invitation_when_the_thread_has_a_long_link() {
     let rig = calling();
-    let (trace, _) = trace();
-    meeting_chat_with(&rig, Some(MEETING_LINK));
+    let (trace, written) = trace();
+    // Synthetic: an inactive meeting's thread has no numeric ID or passcode, only a long join link.
+    meeting_chat_with(
+        &rig,
+        Some("https://teams.microsoft.com/l/meetup-join/19%3ameeting_Synthetic%40thread.v2/0"),
+    );
+    rig.core.listing.lock().unwrap().empty.push(MEETING_CHAT.to_owned());
     let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
     let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
-    let code = teams_core::MeetingCode::typed("1234 5678 9012", "MadeUp").expect("a code");
-    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code, cx)));
+    let code = teams_core::MeetingCode::typed("1234 5678 9012", "KeepPrivate29").expect("a code");
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code.clone(), cx)));
     let window = prejoin_window(&rig, &windows);
     assert!(drawn(window, "prejoin-title"));
-    let prejoin = rig
-        .cx
-        .read(|cx| calls_of(&rig).read(cx).prejoin().cloned())
-        .expect("the pre-join opened");
-    assert_eq!(prejoin.to_join, meeting_to_join());
-    assert!(actions(&rig).is_empty(), "nothing goes out while it shows");
-}
-
-#[test]
-fn join_with_an_id_finds_a_new_empty_meeting_among_older_listed_meetings() {
-    let rig = calling();
-    let (trace, _) = trace();
-    meeting_chat_with(&rig, Some(MEETING_LINK));
-    rig.core.listing.lock().unwrap().empty.push(MEETING_CHAT.to_owned());
-    // Empty, newly created meetings stay searchable even when a full page of older meetings is listed.
-    for index in 0..teams_ui::shell::MEETING_CHATS_LOOKED_THROUGH {
-        let mut older = chat(
-            &format!("19:synthetic-old-meeting-{index}@thread.v2"),
-            ConversationKind::Meeting,
-            None,
-        );
-        older.last_activity = Some(1);
-        rig.core.conversations.lock().unwrap().push(older);
-    }
-    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
-    let (windows, _) = call_windows(&rig, &shell, &trace);
-    registered(&rig);
+    let prejoin = rig.cx.read(|cx| calls_of(&rig).read(cx).prejoin().cloned()).unwrap();
+    assert_eq!(prejoin.to_join, teams_ui::calls::MeetingToJoin::Code(code.clone()));
+    assert!(actions(&rig).is_empty(), "opening pre-join never enters a meeting");
+    click(window, "prejoin-join");
+    assert_eq!(actions(&rig), vec![CallAction::JoinMeetingCode(code.clone())]);
+    status(&rig, 1, CallStatus::Joining);
+    status(&rig, 1, CallStatus::Connected);
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
     rig.cx.read(|cx| {
-        let list = shell.read(cx).list().read(cx);
-        assert!(list.row(MEETING_CHAT).is_some(), "the meeting remains findable");
-        assert!(
-            !list.all_rows().any(|row| row.id == MEETING_CHAT),
-            "its empty chat stays out of the sidebar"
+        let calls = calls_of(&rig).read(cx);
+        assert_eq!(
+            calls.rejoin_of(calls.ended().unwrap()),
+            Some(Ask::JoinMeetingCode(code.clone()))
         );
     });
-    let code = teams_core::MeetingCode::typed("123456789012", "MadeUp").expect("a code");
-    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code, cx)));
-    let window = prejoin_window(&rig, &windows);
-    assert!(drawn(window, "prejoin-title"));
-    let prejoin = rig
-        .cx
-        .read(|cx| calls_of(&rig).read(cx).prejoin().cloned())
-        .expect("the pre-join opened");
-    assert_eq!(prejoin.to_join, meeting_to_join());
-    assert!(actions(&rig).is_empty(), "joining still needs an explicit action");
+    let trace_text = String::from_utf8(written.0.lock().unwrap().clone()).unwrap();
+    assert!(!trace_text.contains(&code.id) && !trace_text.contains(&code.passcode));
 }
 
 #[test]
-fn join_with_an_id_no_meeting_chat_carries_is_refused() {
+fn join_with_an_id_keeps_the_resolved_meeting_for_controls_and_rejoin() {
     let rig = calling();
     let (trace, _) = trace();
-    // the chat's meeting has another ID, or names its long link only
-    meeting_chat_with(&rig, Some("https://teams.microsoft.com/meet/999999999999?p=Other"));
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    let code = teams_core::MeetingCode::typed("123456789012", "MadeUp").unwrap();
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code, cx)));
+    click(prejoin_window(&rig, &windows), "prejoin-join");
+    status(&rig, 1, CallStatus::Joining);
+    let known = meeting_to_join();
+    let info = known.meeting().unwrap();
+    let reference = format!(
+        "https://teams.microsoft.com/l/meetup-join/{MEETING_CHAT}/0?context={{\"Tid\":\"{}\",\"Oid\":\"{}\"}}",
+        info.tenant_id, info.organizer_id
+    );
+    rig.send(Event::CallMeeting {
+        call: call(1),
+        state: teams_core::MeetingState {
+            join: Some(teams_proto::MeetingJoinInfo {
+                reference_link: Some(reference),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    });
+    rig.send(Event::CallGroupChat {
+        call: call(1),
+        chat: MEETING_CHAT.to_owned(),
+    });
+    rig.cx.read(|cx| {
+        let calls = calls_of(&rig).read(cx);
+        let resolved = calls.meeting_to_join().unwrap();
+        assert_eq!(resolved.chat(), Some(MEETING_CHAT));
+        assert_eq!(resolved.meeting(), known.meeting());
+    });
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
+    rig.cx.read(|cx| {
+        let calls = calls_of(&rig).read(cx);
+        assert_eq!(
+            calls.rejoin_of(calls.ended().unwrap()),
+            Some(Ask::JoinMeeting {
+                chat: MEETING_CHAT.to_owned(),
+                meeting: info.clone()
+            })
+        );
+    });
+}
+
+#[test]
+fn join_with_an_id_without_a_local_chat_can_be_cancelled_without_a_write() {
+    let rig = calling();
+    let (trace, _) = trace();
     let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
     let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     let code = teams_core::MeetingCode::typed("123456789012", "MadeUp").expect("a code");
     cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code, cx)));
-    rig.cx.run_until_parked();
-    assert!(rig.cx.read(|cx| windows.read(cx).prejoin_window().is_none()));
-    let refused = rig
-        .cx
-        .read(|cx| calls_of(&rig).read(cx).refused().cloned())
-        .expect("refused");
-    assert_eq!(refused.why, "no-meeting-code");
+    let window = prejoin_window(&rig, &windows);
+    click(window, "prejoin-cancel");
+    assert!(rig.cx.read(|cx| calls_of(&rig).read(cx).prejoin().is_none()));
     assert!(actions(&rig).is_empty());
 }
 

@@ -3246,6 +3246,7 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
             Act::JoinChannel(chat, Arc::default())
         }
         CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
+        CallAction::JoinMeetingCode(code) => Act::Place(Placement::MeetingCode(code)),
         CallAction::MeetNow { channel } => Act::Place(Placement::Channel { channel }),
         CallAction::JoinChannel { channel } => Act::JoinChannel(channel, Arc::default()),
         CallAction::Answer { call } => Act::Answer(call),
@@ -3372,6 +3373,14 @@ mod start_within {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         call_act(&store, ME, action)
+    }
+
+    #[test]
+    fn a_meeting_code_is_resolved_by_the_service_without_a_chat_lookup() {
+        let code = teams_proto::MeetingCode::typed("123456789012", "MadeUp").unwrap();
+        let action = CallAction::JoinMeetingCode(code.clone());
+        assert!(action.starts());
+        assert!(matches!(resolved(action), Ok(Act::Place(Placement::MeetingCode(found))) if found == code));
     }
 
     #[test]

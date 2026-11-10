@@ -144,9 +144,6 @@ pub const LIST_MIN: f32 = 220.0;
 pub const LIST_MAX: f32 = 560.0;
 /// An account's avatar on the rail, px.
 const ACCOUNT_AVATAR: f32 = 36.0;
-/// How many of the account's meeting chats, newest first, Join with an ID reads for a meeting the calendar doesn't
-/// have ([`Shell::join_meeting_code`]).
-pub const MEETING_CHATS_LOOKED_THROUGH: usize = 40;
 /// How often a channel shown is read again for a meeting that runs in it (its header's Join): nothing the native
 /// client hears tells it.
 pub const CHANNEL_MEETUP_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
@@ -802,7 +799,7 @@ impl Shell {
                 Ok(Some(details)) => {
                     let title = title.or(details.title).unwrap_or_else(|| "Meeting".to_owned());
                     this.open_prejoin(
-                        MeetingToJoin {
+                        MeetingToJoin::Chat {
                             chat,
                             meeting: details.meeting,
                             title,
@@ -824,64 +821,11 @@ impl Shell {
         .detach();
     }
 
-    /// Join with an ID for a meeting the calendar doesn't have: the meeting is looked for among the account's meeting
-    /// chats (the newest [`MEETING_CHATS_LOOKED_THROUGH`] the list holds, shown or not), each one's thread read for its join link, and
-    /// the one whose short link carries `code` is joined by its chat, as its chat's Join joins it. A meeting whose chat
-    /// the account isn't in is refused: no read ties an ID to the people in its meeting, so nothing would let the join
-    /// be judged by them (`docs/protocol/calling.md`, "Joining a meeting").
-    pub fn join_meeting_code(&mut self, wanted: teams_core::MeetingCode, cx: &mut Context<Self>) {
-        // A new Meet now chat can be empty and absent from the sidebar. It is still a joinable meeting;
-        // rank every findable meeting before applying the bound, including empty chats and favourites.
-        let mut candidates: Vec<_> = self
-            .list
-            .read(cx)
-            .findable_rows()
-            .filter(|row| row.kind == crate::chat_list::RowKind::Meeting)
-            .map(|row| (row.last_activity, row.id.clone()))
-            .collect();
-        candidates.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-        let chats: Vec<String> = candidates
-            .into_iter()
-            .take(MEETING_CHATS_LOOKED_THROUGH)
-            .map(|(_, id)| id)
-            .collect();
+    /// Open the pre-join for an invitation. The service resolves its ID only after Join now; a meeting's
+    /// chat may hold a long link and cannot reliably be searched by numeric code.
+    pub fn join_meeting_code(&mut self, code: teams_core::MeetingCode, cx: &mut Context<Self>) {
         self.trace.record(&TraceLine::new("call", "meeting-code"));
-        let core = Arc::clone(&self.core);
-        cx.spawn(async move |this, cx| {
-            let mut found = None;
-            for chat in chats {
-                let Ok(Some(details)) = core.meeting(chat.clone()).await else {
-                    continue;
-                };
-                let carries = details
-                    .join_url
-                    .as_deref()
-                    .and_then(teams_core::MeetingCode::of_link)
-                    .is_some_and(|carried| carried == wanted);
-                if carries {
-                    found = Some((chat, details));
-                    break;
-                }
-            }
-            let _ = this.update(cx, |this, cx| {
-                if let Some((chat, details)) = found {
-                    let title = details.title.unwrap_or_else(|| "Meeting".to_owned());
-                    this.open_prejoin(
-                        MeetingToJoin {
-                            chat,
-                            meeting: details.meeting,
-                            title,
-                        },
-                        cx,
-                    );
-                } else {
-                    let ask = Ask::Join { chat: String::new() };
-                    let (calls, trace) = (this.models.calls.clone(), Arc::clone(&this.trace));
-                    calls::refuse_here(&calls, &trace, &ask, "no-meeting-code", cx);
-                }
-            });
-        })
-        .detach();
+        self.open_prejoin(MeetingToJoin::Code(code), cx);
     }
 
     /// The account's models the shell shows.
@@ -1077,7 +1021,7 @@ impl Shell {
                 .kind("meet-now"),
         );
         // nobody organizes the meeting before it starts: the account will, and the start names no organizer
-        let to_join = MeetingToJoin {
+        let to_join = MeetingToJoin::Chat {
             chat: channel,
             meeting: teams_proto::MeetingInfo {
                 organizer_id: String::new(),
@@ -1156,7 +1100,7 @@ impl Shell {
         };
         let title = self.channel_meeting_title(&channel, cx);
         self.open_prejoin(
-            MeetingToJoin {
+            MeetingToJoin::Chat {
                 chat: channel,
                 meeting: meetup.meeting,
                 title,

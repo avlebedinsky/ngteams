@@ -729,6 +729,48 @@ fn a_meeting_goes_from_its_start_to_joining_rings_nobody_and_connects_on_its_acc
     );
 }
 
+#[test]
+fn a_meeting_code_start_uses_group_media_and_enters_without_ringing() {
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let code = teams_proto::MeetingCode::typed("123456789012", "MadeUp").unwrap();
+    let call = calls.place(&Placement::MeetingCode(code), media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let start = placed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Send { id, write } => Some((*id, write)),
+            _ => None,
+        })
+        .unwrap();
+    let body = body_of(start.1);
+    assert_eq!(
+        body["callInvitation"]["callModalities"],
+        json!(["Audio", "ScreenViewer"])
+    );
+    assert_eq!(body["meetingData"]["meetingCode"], "123456789012");
+    let chat = "19:meeting_SyntheticCode@thread.v2";
+    let reference = format!("https://teams.microsoft.com/l/meetup-join/{chat}/0");
+    let html = format!(
+        r#"<a id="meet_invite_block.action.join_link" href="https://teams.microsoft.com/meet/123456789012?p=MadeUp">Join</a><a id="meet_invite_block.action.join_link_compatibility" href="{reference}">System reference</a>"#
+    );
+    let invitation: String = url::form_urlencoded::byte_serialize(html.as_bytes()).collect();
+    let mut answer = conversation_answer();
+    answer["meetingDetails"] = json!({"invitation": invitation});
+    calls.on_outcome(start.0, &ok(&answer), now);
+    let told = events(&effects(&mut calls));
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, CallEvent::State { call: id, state: CallState::Joining } if *id == call))
+    );
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, CallEvent::GroupChat { call: id, chat: at } if *id == call && at == chat))
+    );
+    assert_eq!(calls.call.as_ref().unwrap().caption_thread.as_deref(), Some(chat));
+}
+
 fn body_of(write: &crate::CallWrite) -> serde_json::Value {
     use teams_proto::Request as _;
     match write {

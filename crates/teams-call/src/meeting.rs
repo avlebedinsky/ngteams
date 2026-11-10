@@ -343,5 +343,22 @@ impl Calls {
             let (id, state) = (call.id, call.meeting.state.clone());
             self.out.event(CallEvent::Meeting { call: id, state });
         }
+        // A code start initially knows no chat. The resolved invitation can name its exact thread, which
+        // captions, recording and organizer controls need; keep it unknown until that link is supplied.
+        if call.caption_thread.is_none()
+            && matches!(call.side, crate::call::Side::Meeting)
+            && let Some(chat) = call
+                .meeting
+                .state
+                .join
+                .as_ref()
+                .and_then(|join| join.reference_link.as_deref())
+                .filter(|link| link.starts_with("https://teams.microsoft.com/l/meetup-join/"))
+                .and_then(teams_proto::join_url_chat)
+                .filter(|chat| teams_proto::is_meeting_chat_id(chat))
+        {
+            call.caption_thread = Some(chat.clone());
+            self.out.event(CallEvent::GroupChat { call: call.id, chat });
+        }
     }
 }

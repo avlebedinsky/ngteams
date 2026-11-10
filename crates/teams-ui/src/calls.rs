@@ -492,6 +492,8 @@ pub enum Ask {
         chat: String,
         meeting: MeetingInfo,
     },
+    /// Join by invitation ID after the user confirms Join now.
+    JoinMeetingCode(teams_core::MeetingCode),
     /// Start a new meeting in the channel `channel` (its header's Meet now): the account organizes it.
     MeetNow {
         channel: String,
@@ -571,7 +573,7 @@ impl Ask {
             Self::Call { .. } => "call",
             Self::TestCall => "test-call",
             Self::Join { .. } => "join",
-            Self::JoinMeeting { .. } => "join-meeting",
+            Self::JoinMeeting { .. } | Self::JoinMeetingCode(_) => "join-meeting",
             Self::MeetNow { .. } => "meet-now",
             Self::Answer => "answer",
             Self::Decline => "decline",
@@ -613,6 +615,7 @@ impl Ask {
         match self {
             Self::Call { chat } => Some((CallKind::Chat, Some(chat.clone()))),
             Self::TestCall => Some((CallKind::TestCall, None)),
+            Self::JoinMeetingCode(_) => Some((CallKind::Meeting, None)),
             Self::Join { chat } => Some((CallKind::Join, Some(chat.clone()))),
             Self::JoinMeeting { chat, .. } | Self::MeetNow { channel: chat } => {
                 Some((CallKind::Meeting, Some(chat.clone())))
@@ -624,13 +627,54 @@ impl Ask {
 
 /// A meeting a user can go into, as its calendar event names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MeetingToJoin {
-    /// Its chat.
-    pub chat: String,
-    /// Its organizer and tenant.
-    pub meeting: MeetingInfo,
-    /// Its title.
-    pub title: String,
+pub enum MeetingToJoin {
+    /// A calendar or chat meeting with known organizer and tenant.
+    Chat {
+        chat: String,
+        meeting: MeetingInfo,
+        title: String,
+    },
+    /// An invitation resolved by the calling service on Join now.
+    Code(teams_core::MeetingCode),
+}
+
+impl MeetingToJoin {
+    /// The known chat, if the invitation has already been resolved.
+    #[must_use]
+    pub fn chat(&self) -> Option<&str> {
+        match self {
+            Self::Chat { chat, .. } => Some(chat),
+            Self::Code(_) => None,
+        }
+    }
+
+    /// The organizer and tenant, if already known.
+    #[must_use]
+    pub fn meeting(&self) -> Option<&MeetingInfo> {
+        match self {
+            Self::Chat { meeting, .. } => Some(meeting),
+            Self::Code(_) => None,
+        }
+    }
+
+    /// The heading without exposing the invitation's code or passcode.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Chat { title, .. } => title,
+            Self::Code(_) => "Meeting",
+        }
+    }
+
+    fn ask(&self) -> Ask {
+        match self {
+            Self::Chat { chat, meeting, .. } => Ask::JoinMeeting {
+                chat: chat.clone(),
+                meeting: meeting.clone(),
+            },
+            Self::Code(code) => Ask::JoinMeetingCode(code.clone()),
+        }
+    }
 }
 
 /// A meeting's pre-join while it shows: what it goes into, and what its switches say.
@@ -725,6 +769,8 @@ pub struct Calls {
     prejoin: Option<Prejoin>,
     /// The meeting last gone into: its call's title, and what a Rejoin goes into.
     meeting: Option<MeetingToJoin>,
+    /// The call that actually adopted that pre-join, so Rejoin cannot reuse a different meeting.
+    meeting_call: Option<CallId>,
     /// What the pre-join chose, until its call took it.
     choices: Option<Choices>,
     /// The pre-join was cancelled after its Join now went: the meeting's call that comes of it is hung up as soon as
@@ -959,9 +1005,10 @@ impl Calls {
     pub fn set_prejoin_title(&mut self, title: String, cx: &mut Context<Self>) {
         if let Some(prejoin) = &mut self.prejoin
             && prejoin.entry == PrejoinEntry::MeetNow
-            && prejoin.to_join.title != title
+            && let MeetingToJoin::Chat { title: current, .. } = &mut prejoin.to_join
+            && *current != title
         {
-            prejoin.to_join.title = title;
+            *current = title;
             cx.notify();
         }
     }
@@ -1010,14 +1057,8 @@ impl Calls {
     /// What goes into the meeting a call that ended was in once more, as its Rejoin.
     #[must_use]
     pub fn rejoin_of(&self, ended: &Ended) -> Option<Ask> {
-        let to_join = self
-            .meeting
-            .as_ref()
-            .filter(|to_join| ended.chat.as_deref() == Some(to_join.chat.as_str()))?;
-        Some(Ask::JoinMeeting {
-            chat: to_join.chat.clone(),
-            meeting: to_join.meeting.clone(),
-        })
+        let to_join = self.meeting.as_ref().filter(|_| self.meeting_call == Some(ended.id))?;
+        Some(to_join.ask())
     }
 
     /// The next of the pre-join's choices its call can take now: the microphone muted once the call's media is set up,
@@ -1222,6 +1263,37 @@ impl Calls {
             }
             _ => {}
         }
+        self.resolve_meeting();
+    }
+
+    /// Replace an unresolved invitation only when the service supplies its matching thread and organizer.
+    fn resolve_meeting(&mut self) {
+        let Some(active) = &self.call else { return };
+        if self.meeting_call != Some(active.id) || !matches!(self.meeting, Some(MeetingToJoin::Code(_))) {
+            return;
+        }
+        let Some(reference) = active
+            .meeting
+            .join
+            .as_ref()
+            .and_then(|join| join.reference_link.as_deref())
+        else {
+            return;
+        };
+        if !reference.starts_with("https://teams.microsoft.com/l/meetup-join/") {
+            return;
+        }
+        let Some(chat) = teams_proto::join_url_chat(reference).filter(|chat| active.chat.as_ref() == Some(chat)) else {
+            return;
+        };
+        let Some(meeting) = teams_proto::join_url_meeting(reference) else {
+            return;
+        };
+        self.meeting = Some(MeetingToJoin::Chat {
+            chat,
+            meeting,
+            title: active.title.clone().unwrap_or_else(|| "Meeting".to_owned()),
+        });
     }
 
     /// `who` (named `name`) was added to `call`: People lists them ringing until the roster has them in the call; one
@@ -1326,11 +1398,12 @@ impl Calls {
             let (kind, chat) = self.asked.take().unwrap_or((CallKind::Chat, None));
             (kind, chat, None, None)
         };
+        self.meeting_call = (kind == CallKind::Meeting && self.meeting.is_some()).then_some(call);
         let title = self
             .meeting
             .as_ref()
             .filter(|_| kind == CallKind::Meeting)
-            .map(|to_join| to_join.title.clone());
+            .map(|to_join| to_join.title().to_owned());
         ActiveCall {
             id: call,
             kind,
@@ -1393,7 +1466,12 @@ impl Calls {
             Ask::ToggleCaptions | Ask::Captions(_) | Ask::RecordCaptions(_) | Ask::CaptionLanguage(_) => {
                 self.caption_action(ask)
             }
-            Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } | Ask::JoinMeeting { .. } | Ask::MeetNow { .. }
+            Ask::Call { .. }
+            | Ask::TestCall
+            | Ask::Join { .. }
+            | Ask::JoinMeeting { .. }
+            | Ask::JoinMeetingCode(_)
+            | Ask::MeetNow { .. }
                 if busy =>
             {
                 Err("busy")
@@ -1409,6 +1487,7 @@ impl Calls {
                 .ok_or("no-echo"),
             Ask::Join { chat } if !self.joinable(chat) => Err("not-joinable"),
             Ask::Join { chat } => Ok(CallAction::Join { chat: chat.clone() }),
+            Ask::JoinMeetingCode(code) => Ok(CallAction::JoinMeetingCode(code.clone())),
             Ask::JoinMeeting { chat, meeting } => Ok(CallAction::JoinMeeting {
                 chat: chat.clone(),
                 meeting: meeting.clone(),
@@ -1712,9 +1791,6 @@ fn local_refusal_text(why: &str) -> String {
         "no-chat" => "no chat is open".to_owned(),
         "another-account" => "another account is in a call".to_owned(),
         "no-meeting" => "this meeting couldn't be found: try again in a moment".to_owned(),
-        "no-meeting-code" => {
-            "no meeting you were invited to has this ID: open the meeting's link to join it".to_owned()
-        }
         "no-video" => "calls here carry no video".to_owned(),
         "not-waiting" => "they aren't waiting in the lobby any more".to_owned(),
         "not-organizer" => "only the meeting's organizer can end it for everyone".to_owned(),
@@ -1769,6 +1845,9 @@ pub fn ask_then(
     let start = ask.starts().map(|start| {
         // busy until its call is told or it is refused: the header's Call goes, and another start is refused meanwhile
         calls.update(cx, |calls, cx| {
+            if !matches!(ask, Ask::MeetNow { .. }) && calls.meeting.as_ref().is_some_and(|target| target.ask() != ask) {
+                calls.meeting = None;
+            }
             calls.asked = Some(start);
             calls.starts += 1;
             cx.notify();
@@ -1855,15 +1934,14 @@ pub fn join_now_then(
         calls.meeting = Some(to_join.clone());
         cx.notify();
         // a Rejoin of a meeting started here goes into it as it runs (`Self::rejoin_of`)
-        Some(if starts {
-            Ask::MeetNow { channel: to_join.chat }
-        } else {
-            Ask::JoinMeeting {
-                chat: to_join.chat,
-                meeting: to_join.meeting,
+        let ask = if starts {
+            Ask::MeetNow {
+                channel: to_join.chat()?.to_owned(),
             }
-        })
-        .map(|asked| (asked, starts.then_some(to_join.title)))
+        } else {
+            to_join.ask()
+        };
+        Some((ask, starts.then(|| to_join.title().to_owned())))
     });
     let Some((asked, title)) = asked else {
         cx.defer(move |cx| then(false, cx));
@@ -1895,15 +1973,16 @@ pub fn show_prejoin(
 ) -> bool {
     let busy = calls.read(cx).busy();
     if busy || busy_elsewhere {
-        let ask = Ask::JoinMeeting {
-            chat: to_join.chat,
-            meeting: to_join.meeting,
-        };
+        let ask = to_join.ask();
         let why = if busy { "busy" } else { "another-account" };
         refuse_here(calls, trace, &ask, why, cx);
         return false;
     }
-    trace.record(&TraceLine::new("call", "prejoin").conversation(&to_join.chat));
+    let mut shown = TraceLine::new("call", "prejoin");
+    if let Some(chat) = to_join.chat() {
+        shown = shown.conversation(chat);
+    }
+    trace.record(&shown);
     calls.update(cx, |calls, cx| calls.open_prejoin(to_join, cx));
     crate::call_window::raise(cx);
     calls.read(cx).prejoin().is_some()

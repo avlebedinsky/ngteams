@@ -1299,7 +1299,7 @@ const STEPS: [Step; 5 + 272] = [
         let calendar = shell.read(cx).calendar_view().clone();
         let shown = calendar.read(cx).card().cloned();
         let to_join = shown.and_then(|shown| {
-            Some(teams_ui::calls::MeetingToJoin {
+            Some(teams_ui::calls::MeetingToJoin::Chat {
                 chat: shown.event.meeting_chat.clone()?,
                 meeting: shown.event.meeting.clone()?,
                 title: shown.title(),
