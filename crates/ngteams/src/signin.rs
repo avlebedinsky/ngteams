@@ -56,10 +56,21 @@ impl Global for SignInWindows {}
 
 /// The app's sign-in windows ([`Windows`], under the app's own app id), served from the first ask on.
 pub fn windows(cx: &mut App) -> Windows {
+    windows_under(PERSONAL_APP_ID, cx)
+}
+
+/// The current account setup's shell identity also groups its sign-in worker. In particular a lab sign-in must
+/// never share the installed client's taskbar identity, even before its first signed-in main window exists.
+pub fn windows_for(setup: &Setup, cx: &mut App) -> Windows {
+    let app_id = crate::app::shell_id(setup, false, cx);
+    windows_under(app_id, cx)
+}
+
+fn windows_under(app_id: &str, cx: &mut App) -> Windows {
     if let Some(windows) = cx.try_global::<SignInWindows>() {
         return windows.0.clone();
     }
-    let windows = Windows::serve(PERSONAL_APP_ID, cx);
+    let windows = Windows::serve(app_id, cx);
     cx.set_global(SignInWindows(windows.clone()));
     windows
 }

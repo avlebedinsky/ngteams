@@ -6,7 +6,10 @@ use crate::{
     tray::{TrayEvent, TrayIcon, title},
 };
 use futures_util::future::BoxFuture;
-use std::{io, sync::mpsc};
+use std::{
+    io,
+    sync::{OnceLock, mpsc},
+};
 use tokio::sync::oneshot;
 use windows::Win32::{
     Foundation::HWND as ComHwnd,
@@ -23,22 +26,30 @@ use windows_sys::Win32::{
         },
         WindowsAndMessaging::{
             AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-            DestroyWindow, DispatchMessageW, EndMenu, GetCursorPos, GetMessageW, HICON, MF_STRING, MSG, PostMessageW,
-            RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetMenuDefaultItem, TPM_RETURNCMD,
-            TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_NULL, WNDCLASSW,
-            WS_EX_TOOLWINDOW,
+            DestroyWindow, DispatchMessageW, EndMenu, GetCursorPos, GetMessageW, HICON, InSendMessageEx, MF_STRING,
+            MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetMenuDefaultItem,
+            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_NULL,
+            WNDCLASSW, WS_EX_TOOLWINDOW,
         },
     },
 };
 
 #[cfg(test)]
-use windows_sys::Win32::UI::WindowsAndMessaging::{WS_OVERLAPPEDWINDOW, WS_VISIBLE};
+use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WS_OVERLAPPEDWINDOW, WS_VISIBLE};
 
 const WAKE: u32 = WM_APP + 31;
 const CALLBACK: u32 = WM_APP + 32;
 const ICON_ID: u32 = 1;
 // Windows SDK: NIN_KEYSELECT is NIN_SELECT | NINF_KEY (not exported by windows-sys).
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
+
+fn taskbar_created() -> u32 {
+    static MESSAGE: OnceLock<u32> = OnceLock::new();
+    *MESSAGE.get_or_init(|| {
+        // SAFETY: fixed terminated system broadcast message name; the returned ID is process-independent.
+        unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) }
+    })
+}
 
 pub(crate) enum Event {
     Asked(TrayEvent),
@@ -185,8 +196,7 @@ impl State {
         // SAFETY: a valid newly created taskbar object.
         unsafe { taskbar.HrInit() }.map_err(io::Error::other)?;
         let hwnd = create_window()?;
-        // SAFETY: fixed NUL-terminated system broadcast message name.
-        let taskbar_created = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
+        let taskbar_created = taskbar_created();
         let mut state = Self {
             hwnd,
             app,
@@ -482,6 +492,16 @@ fn create_window() -> io::Result<HWND> {
     }
 }
 unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // GetMessage dispatches cross-thread SendMessage/SendNotifyMessage inside the call, without returning them to
+    // State::run. Queue the shell's numeric callbacks/broadcasts so the same loop handles both delivery methods.
+    if (message == CALLBACK || (message != 0 && message == taskbar_created()))
+        // SAFETY: read-only query of this thread's current window-procedure invocation.
+        && unsafe { InSendMessageEx(std::ptr::null()) } != 0
+    {
+        // SAFETY: this procedure's live HWND; shell parameters are integers, never borrowed pointers.
+        unsafe { PostMessageW(hwnd, message, wparam, lparam) };
+        return 0;
+    }
     if message == WAKE {
         // SAFETY: end only this thread's popup, so shutdown cannot wait on an open tray menu.
         unsafe {
@@ -507,15 +527,14 @@ impl NativeTray {
     pub(crate) fn test_callback(&self, event: u32) {
         // SAFETY: the fixture targets only the HWND this object created.
         unsafe {
-            PostMessageW(self.hwnd as HWND, CALLBACK, 0, isize::try_from(event).unwrap_or(0));
+            SendMessageW(self.hwnd as HWND, CALLBACK, 0, isize::try_from(event).unwrap_or(0));
         }
     }
     pub(crate) fn test_explorer_restart(&self) {
-        // SAFETY: fixed terminated broadcast-message name.
-        let message = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
+        let message = taskbar_created();
         // SAFETY: simulate delivery only to our own hidden window; Explorer itself is never restarted.
         unsafe {
-            PostMessageW(self.hwnd as HWND, message, 0, 0);
+            SendMessageW(self.hwnd as HWND, message, 0, 0);
         }
     }
 }

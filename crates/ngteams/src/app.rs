@@ -51,6 +51,14 @@ mod windows;
 #[cfg(windows)]
 use windows::desktop_id;
 
+#[cfg(windows)]
+pub(crate) use windows::shell_id;
+
+#[cfg(unix)]
+pub(crate) const fn shell_id(_: &crate::setup::Setup, _: bool, _: &App) -> &'static str {
+    PERSONAL_APP_ID
+}
+
 #[cfg(unix)]
 const fn desktop_id(_: &Runner, _: bool, _: &App) -> &'static str {
     PERSONAL_APP_ID
@@ -492,7 +500,7 @@ impl Running {
             return;
         }
         let setup = self.runner.setup.clone();
-        let windows = crate::signin::windows(cx);
+        let windows = crate::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let signed = signing.await;

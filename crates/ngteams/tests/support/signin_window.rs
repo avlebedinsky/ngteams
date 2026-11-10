@@ -26,7 +26,7 @@ fn bound_windows_refuse_foreign_pages_and_report_data_failures_before_the_servic
     let root = tempfile::tempdir().unwrap();
     let (setup, _) = crate::app::tests::setup(root.path(), 1);
     let cx = TestAppContext::single();
-    let windows = cx.update(super::windows);
+    let windows = cx.update(|cx| super::windows_for(&setup, cx));
     let again = cx.update(super::windows);
     let refused = window(&setup, &windows)(request("https://example.test/authorize"));
     assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("isn't on the sign-in window's hosts")));
@@ -44,10 +44,16 @@ fn a_bound_request_with_an_unusable_redirect_is_refused_before_any_engine() {
     let root = tempfile::tempdir().unwrap();
     let (setup, _) = crate::app::tests::setup(root.path(), 2);
     let cx = TestAppContext::single();
-    let windows = cx.update(super::windows);
-    // no worker beside the test binary: resolving an engine would fail on that instead
-    let refused = window(&setup, &windows)(request("https://login.microsoftonline.com/authorize"));
-    assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
+    let windows = cx.update(|cx| super::windows_for(&setup, cx));
+    let ask = window(&setup, &windows);
+    let replying = std::thread::spawn(move || ask(request("https://login.microsoftonline.com/authorize")));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !replying.is_finished() {
+        cx.run_until_parked();
+        assert!(Instant::now() < deadline, "foreground service did not answer");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(matches!(replying.join().unwrap(), SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
     assert_eq!(cx.update(|cx| cx.windows().len()), 0);
 }
 
@@ -88,7 +94,7 @@ fn a_bound_valid_request_without_a_foreground_service_fails_without_opening_a_pa
     let root = tempfile::tempdir().unwrap();
     let (setup, _) = crate::app::tests::setup(root.path(), 2);
     let cx = TestAppContext::single();
-    let windows = cx.update(super::windows);
+    let windows = cx.update(|cx| super::windows_for(&setup, cx));
     let ask = window(&setup, &windows);
     drop(cx);
     let answer = ask(SignInRequest {

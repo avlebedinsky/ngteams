@@ -277,12 +277,12 @@ sha256 = "ff4db966dd3bd15054beafb18906a25b7dbae043d4a32d275f3b507c6b953c0c"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/tray.rs"]
-sha256 = "78127b6ed124e79c83a6555792ad111a121d6deec2457b3ee6d6a5a6f2511161"
-reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+sha256 = "b88da2c710d83e31bf50da01526c07b53f9d2188247850fa0fc08b1dfe13c93c"
+reason = "Windows-only native shell message loop with no Linux LLVM mapping. The authorized VM synthetic GPUI fixture exercises sent restart broadcasts restoring a withdrawn icon, actual tray/menu input, window recreation and unread taskbar overlays. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/ngteams/src/app/windows.rs"]
-sha256 = "e5503dfcefbdd5ca429bebb6d0d38d6dd4079b2047b347adf57e6281f7c0f91e"
-reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+sha256 = "be760eeb94abba85797c9b03530df0d94145b194dd1cb75b39ce92b93d969d45"
+reason = "Windows-only per-mode shell identity shared with native sign-in. Native namespace contracts and the authorized VM application/sign-in grouping checks cover the platform boundary. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/activation.rs"]
 sha256 = "cc7c9d8d2d739c0021178f2414a41ac742a998b88c2991453c4e939313663cd1"

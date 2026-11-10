@@ -676,7 +676,7 @@ fn sign_in_from_prompt(
     restart: Rc<Cell<bool>>,
     cx: &mut App,
 ) {
-    let windows = ngteams::signin::windows(cx);
+    let windows = ngteams::signin::windows_for(&setup, cx);
     let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
     cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
         Ok(_) => {
@@ -703,7 +703,7 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
     application.run(move |cx: &mut App| {
         // the sign-in window is the only one: closing it mustn't quit before the sign-in is done
         cx.set_quit_mode(gpui::QuitMode::Explicit);
-        let windows = ngteams::signin::windows(cx);
+        let windows = ngteams::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move {
             if setup.secrets().application() == lab::LAB_KEYRING_APPLICATION {
                 accounts::sign_in(&setup, &account, &windows)
@@ -739,7 +739,7 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
 fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>) -> SignInAgain {
     Rc::new(move |cx: &mut App| {
         let (setup, account, restart) = (setup.clone(), account.clone(), Rc::clone(&restart));
-        let windows = ngteams::signin::windows(cx);
+        let windows = ngteams::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move { accounts::sign_in(&setup, &account, &windows) });
         cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
             Ok(_) => {

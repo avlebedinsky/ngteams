@@ -183,3 +183,8 @@ harness = false
 # Account-free Windows shell notifications, tray and taskbar integration in the VM console.
 name = "native_desktop"
 harness = false
+
+[[test]]
+# Real GPUI Desktop over two synthetic accounts, with native tray and taskbar in the VM console.
+name = "native_shell"
+harness = false

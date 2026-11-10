@@ -13,6 +13,15 @@ function Get-NgteamsRunner([string]$Root) {
     return $runner
 }
 
+function Add-NgteamsEnvironmentPath([string]$Value, [string]$Directory) {
+    $canonical = $Directory.Trim('"').Replace('/','\').TrimEnd('\')
+    $remaining = @()
+    if ($Value) {
+        $remaining = @($Value -split ';' | Where-Object { $_.Trim('"').Replace('/','\').TrimEnd('\') -ine $canonical })
+    }
+    return (@($Directory) + $remaining) -join ';'
+}
+
 function Set-NgteamsMediaEnvironment([string]$Root) {
     $gst = @(
         $env:GSTREAMER_1_0_ROOT_MSVC_X86_64,
@@ -22,8 +31,9 @@ function Set-NgteamsMediaEnvironment([string]$Root) {
         (Join-Path $env:ProgramFiles 'gstreamer/1.0/msvc_x86_64')
     ) | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ 'bin/pkg-config.exe')) } | Select-Object -First 1
     if ($gst) {
-        $env:PATH = (Join-Path $gst 'bin') + ';' + $env:PATH
-        $env:PKG_CONFIG_PATH = (Join-Path $gst 'lib/pkgconfig') + $(if ($env:PKG_CONFIG_PATH) { ';' + $env:PKG_CONFIG_PATH })
+        # Keep repeated preparation byte-identical: pkg-config build scripts fingerprint these environment values.
+        $env:PATH = Add-NgteamsEnvironmentPath $env:PATH (Join-Path $gst 'bin')
+        $env:PKG_CONFIG_PATH = Add-NgteamsEnvironmentPath $env:PKG_CONFIG_PATH (Join-Path $gst 'lib/pkgconfig')
     }
 }
 

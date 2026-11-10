@@ -237,3 +237,9 @@ Shell_NotifyIcon and ITaskbarList3 in the authorized VM console. The native tran
 the Linux coverage inventory because those APIs have no Linux mapping; native whole-application coverage remains
 a final Windows-port gate. Linux still measures and exercises the freedesktop notification/tray transports and the
 shared multi-account notification and unread models, with unchanged coverage floors.
+
+`scripts/test-windows-shell.ps1` adds the real GPUI Desktop over synthetic accounts in the authorized VM console:
+minimize/activation, native tray/menu input, close/reopen, selected account/theme, settings/chat routing and unread
+taskbar overlays. A fixture-owned icon is removed and restored through a synchronous `TaskbarCreated` message;
+no real Explorer restart or account is needed. The captures contain the verified native controls and synthetic
+window, including the app's taskbar button before/after the unread count changes and its window is recreated.

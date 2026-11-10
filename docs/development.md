@@ -772,7 +772,8 @@ queue only arguments; the notification thread validates the identity, notice gen
 routing it. Replaced, withdrawn, foreign and unknown activations are ignored.
 Lab and read-only processes use distinct temporary identities and shortcuts, so concurrent runners do not share a
 COM endpoint or alter the installed client's shell registration. Those temporary registrations are removed on
-shutdown. Message sounds follow Windows notification preferences; the app's ringer owns call audio.
+shutdown. The same selected identity groups the main window and its native sign-in worker, including the first
+sign-in before a main window exists. Message sounds follow Windows notification preferences; the app's ringer owns call audio.
 The running app owns its toasts and withdraws them on normal shutdown. A fresh run never accepts an old call action.
 Windows’ COM `-Embedding` startup marker is filtered before argument parsing; other arguments, including all lab and
 read-only runner requirements, still pass through the ordinary command line checks.
@@ -791,5 +792,16 @@ the native shell control and must return the exact notification ID/action throug
 immediate desktop children to locate toast roots, then searches their trees for the exact synthetic title. It waits
 for visible controls and stable geometry before the console helper captures that verified rectangle. A history entry
 alone cannot pass. The fixture also tests stale/foreign COM arguments, history replacement and withdrawal, tray
-callbacks and taskbar APIs. Signed-in application flows, actual tray/menu appearance and main-window lifecycle remain
-separate Windows validation gates.
+callbacks and taskbar APIs.
+
+`scripts/test-windows-shell.ps1` exercises the production GPUI Desktop over two synthetic accounts in that console.
+It checks real window activation after minimizing, close to tray, the visible native tray/menu's Open Teams action,
+window recreation with its selected account and theme, account-specific settings/chat routing, and combined unread
+counts. It withdraws only its own tray icon and sends `TaskbarCreated` synchronously to its own HWND, requiring the
+icon to return before it can open the menu. Explorer itself is never restarted. The window procedure queues sent
+shell callbacks/broadcasts as well as posted ones: `GetMessage` dispatches sent messages without returning them to
+the outer loop. The fixture saves the visible tray/menu rectangles, app taskbar button before/after unread changes
+and recreation, and the foreground synthetic client in Light/Dark. UI Automation uses bounded provider calls and
+known shell HWNDs, with a unique per-run synthetic icon label; capture includes Explorer's layered windows.
+Pass `-Executable <absolute-native_shell-test.exe>` to rerun an already-built fixture. Its GUI subsystem prevents a
+driver console from taking focus away from the popup. Signed-in application flows remain a separate Windows gate.
