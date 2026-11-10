@@ -40,8 +40,19 @@ fn project(root: &Path, dir: &Path) {
     }
 }
 
+#[cfg(windows)]
+fn timeout_program() -> PathBuf {
+    // System32's TIMEOUT.EXE only pauses a console. The shared test needs GNU timeout's child supervision.
+    PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join("Git/usr/bin/timeout.exe")
+}
+
+#[cfg(not(windows))]
+fn timeout_program() -> PathBuf {
+    PathBuf::from("timeout")
+}
+
 fn check(dir: &Path, cache: &Path, target: &str) -> Output {
-    let mut command = Command::new("timeout");
+    let mut command = Command::new(timeout_program());
     command
         .args(["300", env!("CARGO"), "check", "--offline", "-j", "4", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))

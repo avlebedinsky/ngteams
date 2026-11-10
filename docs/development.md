@@ -815,7 +815,8 @@ final PDB; deadlines, the 1.5 GiB free-space guard and scheduled-task cleanup co
 Fake CLI protocols use the same scripts on both platforms. Windows launches them through native `.cmd` shims, with
 Git for Windows' `Program Files/Git/bin/bash.exe` interpreting the synthetic protocol. This exercises the app's actual
 prompt-file adaptation and process-tree cancellation; process liveness is checked in Bash's PID namespace before
-and after cancellation. Windows privacy assertions inspect actual ACL grants, and publication-failure tests use
+and after cancellation. The Trouter production-dependency contract uses Git's `usr/bin/timeout.exe` for the same
+300-second child deadline as Linux. Windows privacy assertions inspect actual ACL grants, and publication-failure tests use
 native file-sharing rules. Chat list, notes, meetings, recap, channels, workflows and font-style scenes share their
 real rendering code in `tests/support/scenes/`; their small fixture boundary selects the private compositor or native Windows window capture
 and close. Windows snapshots verify the child executable and console session, crop only its foreground client area
