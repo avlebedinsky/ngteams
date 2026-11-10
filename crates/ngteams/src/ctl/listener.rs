@@ -19,7 +19,7 @@ use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use teams_ctl::transport::Stream as UnixStream;
 
 use teams_ctl::codec::{self, CodecError, LineReader};
@@ -283,14 +283,17 @@ fn write_events(events: &async_channel::Receiver<EventLine>, writer: &UnixStream
             log::warn!("a subscriber's hang-up isn't watched: its stream ends at its next event: {error}");
         }
         let mut writer = writer;
+        let mut deadline = Instant::now() + WRITE;
         while let Ok(line) = events.recv_blocking() {
             let last = line.event == CtlEvent::Lagged;
+            deadline = Instant::now() + WRITE;
             if codec::write_line(&mut writer, &line).is_err() || last {
                 break;
             }
         }
-        // wakes the watch: a socket shut down both ways is hung up
-        let _ = writer.shutdown(std::net::Shutdown::Both);
+        // DisconnectNamedPipe discards unread bytes, including the final lagged line. Drain within the last write's
+        // existing deadline before disconnecting; stop still forces shutdown and wakes both this and the watch.
+        let _ = teams_ctl::transport::finish_writes(writer, deadline);
     });
 }
 

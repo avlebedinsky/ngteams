@@ -6,7 +6,7 @@ use std::io::{Read as _, Write as _};
 use std::net::Shutdown;
 use std::thread;
 use std::time::{Duration, Instant};
-use teams_ctl::transport::{Listener, Stream, connect};
+use teams_ctl::transport::{Listener, Stream, connect, finish_writes};
 
 fn accept(listener: &Listener) -> Stream {
     let started = Instant::now();
@@ -128,4 +128,82 @@ fn writes_larger_than_the_native_pipe_quota_make_progress_in_both_directions() {
     client.read_exact(&mut echoed).unwrap();
     assert_eq!(echoed, payload);
     reading.join().unwrap();
+}
+
+#[test]
+fn finishing_preserves_buffered_output_until_a_late_reader_gets_it_in_both_directions() {
+    for server_writes in [true, false] {
+        let (_dir, _listener, client, server) = pair();
+        let (mut writer, mut reader) = if server_writes {
+            (server, client)
+        } else {
+            (client, server)
+        };
+        reader.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let terminal = b"queued terminal event\n";
+        writer.write_all(terminal).unwrap();
+        let finishing = thread::spawn(move || finish_writes(&writer, Instant::now() + Duration::from_secs(2)));
+        thread::sleep(Duration::from_millis(50));
+        assert!(!finishing.is_finished(), "unread output must not be discarded");
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received).unwrap();
+        assert_eq!(received, terminal);
+        finishing.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn finishing_a_nonreading_peer_uses_the_existing_write_deadline_then_disconnects() {
+    let (_dir, _listener, mut client, mut server) = pair();
+    server.write_all(b"unread").unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        finish_writes(&server, started + Duration::from_millis(50))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(client.read(&mut [0]).unwrap(), 0);
+    assert!(server.write_all(b"closed").is_err());
+}
+
+#[test]
+fn forced_shutdown_interrupts_a_pending_finish_without_waiting_for_its_deadline() {
+    let (_dir, _listener, _client, mut server) = pair();
+    server.write_all(b"unread").unwrap();
+    let stop = server.try_clone().unwrap();
+    let finishing = thread::spawn(move || finish_writes(&server, Instant::now() + Duration::from_secs(5)));
+    thread::sleep(Duration::from_millis(50));
+    assert!(!finishing.is_finished());
+    let started = Instant::now();
+    stop.shutdown(Shutdown::Both).unwrap();
+    assert_eq!(
+        finishing.join().unwrap().unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn an_empty_output_needs_no_drain_wait() {
+    let (_dir, _listener, mut client, server) = pair();
+    let started = Instant::now();
+    finish_writes(&server, started).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(client.read(&mut [0]).unwrap(), 0);
+    assert_eq!(
+        finish_writes(&server, started).unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+fn a_peer_that_disconnects_without_reading_cannot_hold_a_finish() {
+    let (_dir, _listener, client, mut server) = pair();
+    server.write_all(b"unread").unwrap();
+    client.shutdown(Shutdown::Both).unwrap();
+    let started = Instant::now();
+    assert!(finish_writes(&server, started + Duration::from_secs(5)).is_err());
+    assert!(started.elapsed() < Duration::from_secs(2));
 }

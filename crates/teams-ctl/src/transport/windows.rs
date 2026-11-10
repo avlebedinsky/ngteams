@@ -18,6 +18,11 @@ use interprocess::os::windows::security_descriptor::SecurityDescriptor;
 use sha2::{Digest as _, Sha256};
 use teams_platform::windows_security as security;
 use widestring::U16CString;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_PIPE_CONNECTED_STATE, FILE_PIPE_LOCAL_INFORMATION, FilePipeLocalInformation, NtQueryInformationFile,
+};
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::Pipes::{DisconnectNamedPipe, GetNamedPipeInfo, PeekNamedPipe};
 
 const POLL: Duration = Duration::from_millis(10);
@@ -125,6 +130,17 @@ pub fn connect(path: &Path, timeout: Duration) -> io::Result<Stream> {
     Stream::new(pipe)
 }
 
+/// Ends a response stream after queued output drains, within the last write's deadline. A forced shutdown still
+/// interrupts this wait; a nonreading peer cannot hold a worker or a flush thread indefinitely.
+///
+/// # Errors
+/// A closed pipe, native quota-query failure or expiry of `deadline`. The stream is shut down on every outcome.
+pub fn finish_writes(stream: &Stream, deadline: Instant) -> io::Result<()> {
+    let drained = stream.drain(deadline);
+    let _ = stream.shutdown(Shutdown::Both);
+    drained
+}
+
 impl Stream {
     fn new(pipe: Pipe) -> io::Result<Self> {
         pipe.set_nonblocking(true)?;
@@ -203,6 +219,19 @@ impl Stream {
         Ok(self.state.closed.load(Ordering::Acquire) || self.available()? != Some(0))
     }
 
+    fn drain(&self, deadline: Instant) -> io::Result<()> {
+        loop {
+            let empty = match lock(&self.pipe).as_ref() {
+                Some(pipe) => output_empty(pipe.as_raw_handle(), pipe.is_server())?,
+                None => return Err(io::ErrorKind::BrokenPipe.into()),
+            };
+            if empty {
+                return Ok(());
+            }
+            self.wait(Some(deadline))?;
+        }
+    }
+
     fn available(&self) -> io::Result<Option<u32>> {
         let held = lock(&self.pipe);
         let Some(pipe) = held.as_ref() else {
@@ -240,6 +269,34 @@ impl Stream {
         thread::sleep(POLL);
         Ok(())
     }
+}
+
+/// Local metadata only: unlike `FlushFileBuffers` this query never waits for the peer to read. The available quota
+/// is the unoccupied outbound buffer on a server, inbound buffer on a client (MS-FSCC `FilePipeLocalInformation`):
+/// <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/de9abdc7-b974-4ec3-a4dc-42853777f412>
+fn output_empty(handle: HANDLE, server: bool) -> io::Result<bool> {
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let mut info = FILE_PIPE_LOCAL_INFORMATION::default();
+    let size = u32::try_from(std::mem::size_of_val(&info)).map_err(io::Error::other)?;
+    // SAFETY: handle borrows a live local pipe; both writable, aligned outputs remain alive throughout this local
+    // metadata query. The supplied size and information class describe exactly FILE_PIPE_LOCAL_INFORMATION.
+    let status = unsafe {
+        NtQueryInformationFile(
+            handle,
+            &raw mut status_block,
+            (&raw mut info).cast(),
+            size,
+            FilePipeLocalInformation,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::other(format!("native pipe quota query failed: {status:#x}")));
+    }
+    if info.NamedPipeState != FILE_PIPE_CONNECTED_STATE {
+        return Err(io::ErrorKind::BrokenPipe.into());
+    }
+    let quota = if server { info.OutboundQuota } else { info.InboundQuota };
+    Ok(info.WriteQuotaAvailable >= quota)
 }
 
 fn set_timeout(value: &Mutex<Option<Duration>>, timeout: Option<Duration>) -> io::Result<()> {
@@ -320,6 +377,13 @@ mod tests {
     use windows_sys::Win32::Security::{
         DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     };
+
+    #[test]
+    fn output_quota_query_reports_a_non_pipe_handle() {
+        // SAFETY: GetCurrentProcess returns a live pseudo-handle; the metadata query rejects its object type.
+        let process = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
+        assert!(output_empty(process, false).is_err());
+    }
 
     #[test]
     fn the_live_pipe_has_only_its_exact_user_and_system_grants_and_an_integrity_label() {

@@ -1,5 +1,6 @@
 //! Unix connects, bounded even when the listener's backlog stays full.
 use std::io;
+use std::net::Shutdown;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,6 +9,14 @@ use rustix::io::Errno;
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 
 pub use std::os::unix::net::UnixStream as Stream;
+
+/// Ends a response stream without discarding bytes already written. Unix shutdown preserves its queued output.
+///
+/// # Errors
+/// The socket's shutdown error.
+pub fn finish_writes(stream: &Stream, _deadline: Instant) -> io::Result<()> {
+    stream.shutdown(Shutdown::Both)
+}
 
 /// Connect without sending a byte, within `timeout`.
 ///
