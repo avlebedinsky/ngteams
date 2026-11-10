@@ -2548,6 +2548,45 @@ fn join_with_an_id_the_calendar_lacks_finds_the_meeting_among_its_chats() {
 }
 
 #[test]
+fn join_with_an_id_finds_a_new_empty_meeting_among_older_listed_meetings() {
+    let rig = calling();
+    let (trace, _) = trace();
+    meeting_chat_with(&rig, Some(MEETING_LINK));
+    rig.core.listing.lock().unwrap().empty.push(MEETING_CHAT.to_owned());
+    // Empty, newly created meetings stay searchable even when a full page of older meetings is listed.
+    for index in 0..teams_ui::shell::MEETING_CHATS_LOOKED_THROUGH {
+        let mut older = chat(
+            &format!("19:synthetic-old-meeting-{index}@thread.v2"),
+            ConversationKind::Meeting,
+            None,
+        );
+        older.last_activity = Some(1);
+        rig.core.conversations.lock().unwrap().push(older);
+    }
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    rig.cx.read(|cx| {
+        let list = shell.read(cx).list().read(cx);
+        assert!(list.row(MEETING_CHAT).is_some(), "the meeting remains findable");
+        assert!(
+            !list.all_rows().any(|row| row.id == MEETING_CHAT),
+            "its empty chat stays out of the sidebar"
+        );
+    });
+    let code = teams_core::MeetingCode::typed("123456789012", "MadeUp").expect("a code");
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code, cx)));
+    let window = prejoin_window(&rig, &windows);
+    assert!(drawn(window, "prejoin-title"));
+    let prejoin = rig
+        .cx
+        .read(|cx| calls_of(&rig).read(cx).prejoin().cloned())
+        .expect("the pre-join opened");
+    assert_eq!(prejoin.to_join, meeting_to_join());
+    assert!(actions(&rig).is_empty(), "joining still needs an explicit action");
+}
+
+#[test]
 fn join_with_an_id_no_meeting_chat_carries_is_refused() {
     let rig = calling();
     let (trace, _) = trace();

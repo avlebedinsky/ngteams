@@ -830,13 +830,20 @@ impl Shell {
     /// the account isn't in is refused: no read ties an ID to the people in its meeting, so nothing would let the join
     /// be judged by them (`docs/protocol/calling.md`, "Joining a meeting").
     pub fn join_meeting_code(&mut self, wanted: teams_core::MeetingCode, cx: &mut Context<Self>) {
-        let chats: Vec<String> = self
+        // A new Meet now chat can be empty and absent from the sidebar. It is still a joinable meeting;
+        // rank every findable meeting before applying the bound, including empty chats and favourites.
+        let mut candidates: Vec<_> = self
             .list
             .read(cx)
-            .all_rows()
+            .findable_rows()
             .filter(|row| row.kind == crate::chat_list::RowKind::Meeting)
-            .map(|row| row.id.clone())
+            .map(|row| (row.last_activity, row.id.clone()))
+            .collect();
+        candidates.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        let chats: Vec<String> = candidates
+            .into_iter()
             .take(MEETING_CHATS_LOOKED_THROUGH)
+            .map(|(_, id)| id)
             .collect();
         self.trace.record(&TraceLine::new("call", "meeting-code"));
         let core = Arc::clone(&self.core);
