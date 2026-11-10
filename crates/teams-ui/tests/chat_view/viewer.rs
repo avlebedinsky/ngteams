@@ -162,7 +162,8 @@ fn a_zoomed_picture_pans_only_as_far_as_its_edges_and_zooms_about_the_pointer() 
 
 #[test]
 fn the_downloads_folder_comes_from_user_dirs() {
-    let home = std::path::Path::new("/home/someone");
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
     let dirs = "# made up\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Fetched\"\n";
     assert_eq!(
         picture_viewer::user_dir(dirs, "XDG_DOWNLOAD_DIR", home),
