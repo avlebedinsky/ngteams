@@ -1202,7 +1202,7 @@ async fn people_added_to_a_group_chat_join_its_members_with_the_history_chosen()
     for members in [&[][..], &[LAB_B], &[LAB_A], &[OUTSIDER, OUTSIDER]] {
         let refused = a.handle.write(add(&chat, members)).await;
         assert!(
-            matches!(refused, Err(EngineError::NotAChat)),
+            matches!(refused, Err(EngineError::NotAddable { ref conversation }) if *conversation == chat),
             "{members:?}: {refused:?}"
         );
     }

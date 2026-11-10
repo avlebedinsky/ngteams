@@ -77,6 +77,18 @@ fn request_errors_are_named_without_message_ids_or_failure_text() {
             "unknown field",
         ),
         (EngineError::NotAChat, "not a chat"),
+        (
+            EngineError::NotAGroupChat {
+                conversation: PRIVATE.to_owned(),
+            },
+            "not a group chat",
+        ),
+        (
+            EngineError::NotAddable {
+                conversation: PRIVATE.to_owned(),
+            },
+            "not addable",
+        ),
         (EngineError::NoEndpoint, "no endpoint"),
         (EngineError::Stopped, "stopped"),
         (EngineError::AnimationUnread, "animation unread"),

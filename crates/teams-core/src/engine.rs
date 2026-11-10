@@ -548,6 +548,9 @@ pub enum EngineError {
     /// People are added only to a stored group chat.
     #[error("{conversation} isn't a group chat the store knows, so nobody can be added to it")]
     NotAGroupChat { conversation: String },
+    /// An add names nobody, the account itself, someone already in the chat, or someone twice.
+    #[error("those people can't be added to {conversation}: none, the account, a member already, or one twice")]
+    NotAddable { conversation: String },
     /// The account's own availability names its endpoint, and no registration of this run went through yet (or the
     /// push channel stopped): nothing can be sent.
     #[error("no endpoint of the account's is registered in this run, so its availability can't be set")]
@@ -621,6 +624,7 @@ impl EngineError {
             Self::Unknown { .. } => "unknown field",
             Self::NotAChat => "not a chat",
             Self::NotAGroupChat { .. } => "not a group chat",
+            Self::NotAddable { .. } => "not addable",
             Self::NoEndpoint => "no endpoint",
             Self::Runtime(_) => "runtime",
             Self::Thread(_) => "thread",
@@ -2717,12 +2721,12 @@ where
         for member in members {
             let mri = member.as_str();
             if member == me || present.iter().any(|stored| stored.mri == mri) || added.iter().any(|m| m == mri) {
-                return Err(EngineError::NotAChat);
+                return Err(EngineError::NotAddable { conversation });
             }
             added.push(mri.to_owned());
         }
         if added.is_empty() {
-            return Err(EngineError::NotAChat);
+            return Err(EngineError::NotAddable { conversation });
         }
         Ok(Command::AddMembers {
             conversation,
