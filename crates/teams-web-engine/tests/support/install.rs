@@ -635,6 +635,26 @@ fn a_data_dir_that_is_no_directory_fails_both_installs_before_any_network() {
 }
 
 #[test]
+fn cache_file_paths_occupied_by_directories_fail_without_removing_their_contents() {
+    let bytes = archive(|_| {});
+    for name in [".install.lock", "fixture-key.download"] {
+        let state = tempfile::tempdir().unwrap();
+        let root = runtime_root(state.path());
+        let conflict = root.join(name);
+        fs::create_dir_all(&conflict).unwrap();
+        fs::write(conflict.join("keep"), b"existing data").unwrap();
+        let mut pins = pins(&bytes);
+        pins.url = "http://127.0.0.1:1/unused".to_owned();
+        let error = pins.download(state.path(), |_| {}).unwrap_err();
+        assert!(matches!(&error, crate::Error::Io(_)), "{error}");
+        assert!(error.to_string().contains(conflict.to_str().unwrap()), "{error}");
+        assert_eq!(fs::read(conflict.join("keep")).unwrap(), b"existing data");
+        assert!(!root.join("fixture-key").exists());
+        assert!(!root.join("fixture-key.partial").exists());
+    }
+}
+
+#[test]
 fn a_missing_offline_archive_is_an_error_and_publishes_nothing() {
     let state = tempfile::tempdir().unwrap();
     let bytes = archive(|_| {});
