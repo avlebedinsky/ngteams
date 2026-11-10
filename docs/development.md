@@ -485,6 +485,8 @@ tool and its provider. It is kept per recording, copied as Markdown, or sent to 
 meeting's chat after a preview. Settings control appearance, notifications, privacy,
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.
+The focused Linux calendar layout check is `GPUI_SMOKE_REQUIRE=1 cargo test -p teams-ui --test calendar_window`;
+it saves synthetic day/work-week shots at 1024px and 1280px in both themes under `target/ui-shots/calendar-*.png`.
 
 Calls open a separate window; closing it leaves the call. Its toolbar follows Teams': Transfer and Hold (1:1 calls;
 Resume while held), Chat (the call's chat beside the stage), People, Raise and React (group calls and meetings), View (Gallery or

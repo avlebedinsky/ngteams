@@ -180,6 +180,11 @@ name = "native_video"
 harness = false
 
 [[test]]
+# The calendar toolbar at desktop widths, in the private Linux sandbox with synthetic data.
+name = "calendar_window"
+harness = false
+
+[[test]]
 # Account-free Windows shell notifications, tray and taskbar integration in the VM console.
 name = "native_desktop"
 harness = false

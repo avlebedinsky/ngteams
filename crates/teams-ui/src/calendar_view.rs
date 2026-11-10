@@ -45,6 +45,7 @@
 //!   `calendar stored` when the store's were drawn first,
 //!   `calendar-event opened` (the event's kind), `calendar-event answered` (the answer), never a subject or a name.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -230,6 +231,8 @@ pub struct CalendarView {
     /// Where the card opens: next to the point its event was clicked at (window coordinates), else centred.
     card_at: Option<gpui::Point<gpui::Pixels>>,
     scroll: ScrollHandle,
+    /// The toolbar's own available width, including when the calendar pane is toggled.
+    toolbar_width: Rc<Cell<gpui::Pixels>>,
     _ticker: Task<()>,
 }
 
@@ -282,6 +285,7 @@ impl CalendarView {
             others: people::Others::default(),
             card_at: None,
             scroll: ScrollHandle::new(),
+            toolbar_width: Rc::new(Cell::new(px(0.0))),
             _ticker: ticker,
         }
     }

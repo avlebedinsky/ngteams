@@ -104,6 +104,48 @@ fn the_calendar_filters_declined_events_sorts_reads_and_navigates_by_keyboard() 
 }
 
 #[test]
+fn the_calendar_toolbar_keeps_its_actions_inside_a_narrow_window() {
+    let rig = Rig::start();
+    let (view, cx, _) = window(&rig);
+    // The 1024px desktop leaves 948px for the calendar after the app rail.
+    for width in [948.0, 1228.0, 948.0] {
+        cx.simulate_resize(size(px(width), px(720.0)));
+        for mode in [Mode::WorkWeek, Mode::Day, Mode::Month] {
+            cx.update(|_, cx| view.update(cx, |view, cx| view.set_mode(mode, cx)));
+            draw(cx);
+            let toolbar = cx.debug_bounds("calendar-toolbar").unwrap();
+            assert!(toolbar.right() <= px(width), "the toolbar fits its parent");
+            for selector in [
+                "calendar-pane-toggle",
+                "calendar-today",
+                "calendar-previous",
+                "calendar-next",
+                "calendar-dates",
+                "calendar-mode",
+                "calendar-filter",
+                "calendar-more",
+                "calendar-meet-now",
+                "calendar-meet-now-more",
+                "calendar-new",
+                "calendar-new-more",
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                assert!(bounds.size.width > px(0.0), "{selector} remains reachable");
+                assert!(bounds.left() >= toolbar.left(), "{selector} stays after the pane");
+                assert!(bounds.right() <= toolbar.right(), "{selector} stays inside the toolbar");
+            }
+        }
+    }
+    click(cx, "calendar-pane-toggle");
+    let new = cx.debug_bounds("calendar-new-more").unwrap();
+    assert!(new.right() <= px(948.0), "the actions also fit after hiding the pane");
+    click(cx, "calendar-pane-toggle");
+    click(cx, "calendar-meet-now");
+    assert!(cx.debug_bounds("calendar-meet-now-name").is_some());
+    assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
+}
+
+#[test]
 fn a_failed_read_retries_and_a_stopped_refresh_keeps_the_previous_events() {
     let rig = Rig::start();
     rig.core
