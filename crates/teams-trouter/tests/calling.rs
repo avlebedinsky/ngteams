@@ -419,6 +419,34 @@ async fn an_offered_invitation_is_handed_on_and_gets_its_typed_receipt() {
 }
 
 #[tokio::test]
+async fn an_account_coordinator_can_withhold_an_invitation_without_answering_it() {
+    let lab = Lab::start().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&seen);
+    let stack = CallStack::new(Arc::clone(&lab.tracker)).observing(move |delivery| {
+        observed.lock().unwrap().push(delivery.id);
+        Observed::Ignored
+    });
+    let mut push = lab.calling().for_calls(stack).spawn();
+    connected(&mut push).await;
+    registered(&mut push).await;
+
+    let id = lab.trouter.deliver_call_invitation(LAB_B, LAB_A);
+    next(&mut push, |event| match event {
+        PushEvent::Ignored(teams_trouter::Ignored::IncomingCall) => Some(()),
+        PushEvent::Call(delivery) => panic!("the coordinator withheld this invitation: {delivery:?}"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(*seen.lock().unwrap(), [id]);
+    push.stop().await;
+    assert!(
+        responses(&lab.trouter).is_empty(),
+        "a withheld invitation is never answered"
+    );
+}
+
+#[tokio::test]
 async fn a_registered_call_s_acceptance_reaches_its_consumer_and_only_it_is_acknowledged() {
     let lab = Lab::start().await;
     let mut push = lab.calling().spawn();
@@ -476,6 +504,9 @@ async fn a_dropped_calling_socket_comes_back_on_the_same_endpoint_registers_agai
     let _ = lab.trouter.deliver_call_invitation(LAB_B, LAB_A);
     let invitation = call_delivery(&mut push).await;
     assert_eq!(invitation.observed, Observed::Offered);
+    let receipt = InvitationReceipt::new(&invitation.delivery, 2).unwrap();
+    let responder = invitation.responder();
+    drop(invitation);
     register_test_call(&lab.tracker, &endpoint);
 
     lab.trouter.drop_sockets(LAB_B);
@@ -507,12 +538,7 @@ async fn a_dropped_calling_socket_comes_back_on_the_same_endpoint_registers_agai
         "the second socket sent the reconnect parameters back"
     );
     // a response to the first connection's delivery isn't sent on the second
-    assert_eq!(
-        invitation
-            .respond(InvitationReceipt::new(&invitation.delivery, 2).unwrap())
-            .await,
-        Err(RespondFailure::Gone)
-    );
+    assert_eq!(responder.respond(receipt).await, Err(RespondFailure::Gone));
     // the call's acceptance, at the link the start handed out before the drop, reaches the consumer on the new
     // connection and is acknowledged there
     let (_, at) = callback(&endpoint, "03030303", "call", "acceptance");
