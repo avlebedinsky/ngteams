@@ -270,6 +270,7 @@ fn a_folder_the_user_cant_write_is_said_and_left_alone() {
     let error = source.prepare(&installation, &release, |_, _| {}).unwrap_err();
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(error.to_string().contains("can't write to"), "{error}");
+    assert!(error.to_string().contains(crate::RELEASES_URL), "{error}");
     assert_eq!(
         fs::read_to_string(installation.root().join(IDENTITY)).unwrap(),
         "0.1.0.5\n"
@@ -426,6 +427,7 @@ fn a_closed_prompt_or_none_at_all_changes_nothing() {
     let (mut prepared, _feed) = package_prepared(&agentless);
     let error = prepared.install().unwrap_err();
     assert!(error.to_string().contains("no password prompt"), "{error}");
+    assert!(error.to_string().contains(crate::RELEASES_URL), "{error}");
     assert!(error.to_string().contains("ngteams_0.1.0.6-1_amd64.deb"), "{error}");
     let home = tempfile::tempdir().unwrap();
     let missing =
@@ -487,5 +489,63 @@ fn the_root_script_refuses_a_package_or_installation_changed_since_the_check() {
     assert!(
         error.to_string().contains("changed after it was verified"),
         "{error} ({before})"
+    );
+}
+
+#[test]
+fn a_failed_swap_and_rollback_keep_the_previous_install_after_prepared_is_dropped() {
+    let home = tempfile::tempdir().unwrap();
+    let installation = archive_installation(home.path(), "0.1.0.5");
+    let feed = Feed::start().unwrap();
+    let asset = Format::Archive.asset(version("0.1.0.6"));
+    publish(&feed, "v0.1.0.6", &asset, &archive_bytes("0.1.0.6", |_| {}).unwrap());
+    let source = Source::local(&feed.base);
+    let release = source.check(&installation, version("0.1.0.5")).unwrap().unwrap();
+    let mut prepared = source.prepare(&installation, &release, |_, _| {}).unwrap();
+    let stage = prepared.work.as_ref().unwrap().path().to_path_buf();
+    let mut renames = 0;
+    let error = prepared
+        .install_with_rename(|from, to| {
+            renames += 1;
+            if renames == 1 {
+                fs::rename(from, to)
+            } else {
+                Err(std::io::Error::other("injected rename failure"))
+            }
+        })
+        .unwrap_err();
+    assert_eq!(renames, 3, "both the swap and rollback were attempted");
+    assert!(
+        error
+            .to_string()
+            .contains(&stage.join("previous").display().to_string())
+    );
+    assert!(!installation.root().exists());
+    drop(prepared);
+    assert_eq!(
+        fs::read_to_string(stage.join("previous").join(IDENTITY)).unwrap(),
+        "0.1.0.5\n"
+    );
+    assert!(stage.join(crate::stage::RECOVERY).is_file());
+    assert_eq!(
+        installation.cleanup_stale(),
+        0,
+        "startup must preserve recovery files too"
+    );
+    assert!(stage.join("previous/usr/bin/ngteams").is_file());
+}
+
+#[test]
+fn a_package_changed_before_the_prompt_is_refused_against_the_verified_digest() {
+    let home = tempfile::tempdir().unwrap();
+    // The actual privileged script runs as this user and must refuse before any package manager runs.
+    let installation = package_installation(home.path(), Format::Deb, "shift; exec \"$@\"");
+    let (mut prepared, _feed) = package_prepared(&installation);
+    fs::write(&prepared.candidate, "replaced while waiting for a restart").unwrap();
+    let error = prepared.install().unwrap_err();
+    assert!(error.to_string().contains("changed after it was verified"), "{error}");
+    assert_eq!(
+        fs::read_to_string(installation.root().join(IDENTITY)).unwrap(),
+        "0.1.0.5\n"
     );
 }

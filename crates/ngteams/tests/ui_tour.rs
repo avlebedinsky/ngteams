@@ -3146,7 +3146,6 @@ fn show_page(shell: &Entity<Shell>, page: Page, cx: &mut App) {
     view.update(cx, |view, cx| view.show_page(page, cx));
 }
 
-/// The a–b chat shown in the catalog's theme `key`, whatever the system says.
 /// The made-up release the update steps show.
 const TOUR_RELEASE: &str = "0.1.0.13";
 
@@ -3174,6 +3173,7 @@ fn update_failed() -> UpdateStatus {
     }
 }
 
+/// The a–b chat shown in the catalog's theme `key`, whatever the system says.
 fn show_chat_in_theme(shell: &Entity<Shell>, key: &'static str, window: &mut Window, cx: &mut App) {
     let model = shell.read(cx).settings().clone();
     model.update(cx, |model, cx| {

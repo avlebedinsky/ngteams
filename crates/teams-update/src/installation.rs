@@ -141,7 +141,7 @@ impl Installation {
     }
 
     /// What tells this installation's current contents apart: its release identity file, or the AppImage file's
-    /// device, inode, size and change time. An update compares it before replacing anything.
+    /// device, inode, size and modification time. An update compares it before replacing anything.
     pub(crate) fn identity(&self) -> std::io::Result<Vec<u8>> {
         if self.format == Format::AppImage {
             use std::os::unix::fs::MetadataExt as _;

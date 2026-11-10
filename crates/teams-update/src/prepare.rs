@@ -57,6 +57,7 @@ impl Source {
             installation: installation.clone(),
             work: Some(work),
             candidate,
+            sha256: expected,
             identity,
             version: release.version,
         })
@@ -195,9 +196,9 @@ pub(crate) fn unwritable(error: std::io::Error, parent: &Path) -> Error {
     // by kind: the temporary folder's errors carry their path, not the OS's code
     match error.kind() {
         ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => crate::error(format!(
-            "ngteams can't write to {}, so it can't update itself there. Download the update from the releases \
-             page instead.",
-            parent.display()
+            "ngteams can't write to {}, so it can't update itself there. Download the update from {} instead.",
+            parent.display(),
+            crate::RELEASES_URL
         )),
         _ if full(&error) => crate::error(format!(
             "There isn't enough free space in {} for the update. Nothing was changed.",

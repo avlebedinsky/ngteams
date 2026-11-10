@@ -401,6 +401,14 @@ fn first_message_then_away(
     cx.simulate_keystrokes("enter");
     draw(cx);
     assert!(cx.update(|_, cx| view.read(cx).is_starting()));
+    assert!(
+        cx.update(|_, cx| compose.read(cx).editor().read(cx).is_empty()),
+        "the editor was cleared"
+    );
+    assert!(
+        cx.update(|_, cx| shell.read(cx).has_unsent(cx)),
+        "the pending first message holds a restart"
+    );
     click(cx, "chat-row-0");
     assert!(matches!(main(&shell, cx), Main::Chat(_)));
     // the outbox settles the row

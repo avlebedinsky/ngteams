@@ -11,8 +11,9 @@
 //! - **The press** (Install update): the release's asset for this installation is downloaded and verified, the button
 //!   showing how far. Then, unless a call is up or ringing or a box holds a message not sent yet
 //!   ([`teams_ui::update::Waiting`]), it is installed at once; else the button waits as Restart to update, and its
-//!   press says what holds it up. A failure (a bad checksum, no permission, a full disk, a closed password prompt)
-//!   leaves the installation as it was and shows Update failed, whose press tries again.
+//!   press says what holds it up. A failure (a bad checksum, no permission, a full disk)
+//!   shows Update failed, whose press tries again. A closed password prompt keeps the download and returns to
+//!   Restart to update. A failed rollback keeps the previous installation in the stage named by the error.
 //! - **The restart**: once the update is in, the app quits as it always does, every engine shut down first (the
 //!   outbox's rows and the store stay), and `main` runs the new version in this process, with this run's arguments.
 //!   The keyring's credentials are untouched.
@@ -49,20 +50,23 @@ pub fn for_this_run(paths: &PersonalPaths) -> Option<Updater> {
         crate::refusal::LAB_BUILD,
         crate::refusal::test_support(),
     )?;
-    let places = Places::from_process(
+    let places = for_this_copy(Places::from_process(
         paths.data_dir().join("updates"),
         vec![paths.data_dir().to_path_buf(), paths.config_dir().to_path_buf()],
-    )
-    .ok()?;
-    match Installation::detect(&places) {
-        Ok(installation) => {
-            log::info!("updates: release {current}, installed as {:?}", installation.format());
-            Some(Updater {
-                current,
-                installation,
-                source: Source::github(),
-            })
-        }
+    ))?;
+    let installation = for_this_copy(Installation::detect(&places))?;
+    log::info!("updates: release {current}, installed as {:?}", installation.format());
+    Some(Updater {
+        current,
+        installation,
+        source: Source::github(),
+    })
+}
+
+/// Both path lookup and installation detection explain why updates aren't available for this copy.
+fn for_this_copy<T>(result: Result<T, impl std::fmt::Display>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
         Err(error) => {
             log::info!("updates: not for this copy ({error})");
             None
@@ -82,6 +86,8 @@ struct Flow {
     release: Option<Release>,
     /// Its download, verified, waiting for its install.
     prepared: Option<Prepared>,
+    /// Already installed, awaiting a safe restart; a later press must not install it again.
+    installed: Option<PathBuf>,
     /// A download or an install runs.
     busy: bool,
     /// Where a restart's program goes for `main` to run, once the update is in.
@@ -139,6 +145,7 @@ pub fn start(started: Started, cx: &mut App) {
         updater,
         release: None,
         prepared: None,
+        installed: None,
         busy: false,
         restart,
         quit,
@@ -153,7 +160,7 @@ fn version(version: Version) -> SharedString {
 /// Asks GitHub for a newer release, unless a download or install is under way or waits; one found is offered.
 pub fn check(cx: &mut App) -> Option<Task<()>> {
     let flow = cx.try_global::<Flow>()?;
-    if flow.busy || flow.prepared.is_some() {
+    if flow.busy || flow.prepared.is_some() || flow.installed.is_some() {
         return None;
     }
     let Updater {
@@ -182,7 +189,7 @@ fn found_release(found: Result<Option<Release>, Error>, cx: &mut App) {
         }
     };
     let flow = cx.global_mut::<Flow>();
-    if flow.busy || flow.prepared.is_some() || flow.release.as_ref() == Some(&release) {
+    if flow.busy || flow.prepared.is_some() || flow.installed.is_some() || flow.release.as_ref() == Some(&release) {
         return;
     }
     log::info!("updates: release {} is out", release.version);
@@ -199,7 +206,9 @@ fn press(cx: &mut App) {
     if flow.busy {
         return;
     }
-    if flow.prepared.is_some() {
+    if flow.installed.is_some() {
+        restart_when_ready(cx);
+    } else if flow.prepared.is_some() {
         install(cx);
     } else if let Some(release) = flow.release.clone() {
         download(release, cx);
@@ -289,11 +298,11 @@ fn installed_now(prepared: Prepared, installed: Result<PathBuf, Error>, shown: &
     match installed {
         Ok(executable) => {
             log::info!("updates: {shown} is in: the app restarts into {}", executable.display());
-            flow.restart.set(Some(executable));
-            // the stage stays as it is until the new version's start removes it
+            flow.installed = Some(executable);
+            // Package prompts may have waited while a call arrived or a draft was typed.
+            // Remember the successful install separately so the next press only restarts.
             flow.prepared = Some(prepared);
-            let quit = Rc::clone(&flow.quit);
-            quit(cx);
+            restart_when_ready(cx);
         }
         Err(Error::Cancelled) => {
             log::info!("updates: the password prompt was closed");
@@ -302,6 +311,22 @@ fn installed_now(prepared: Prepared, installed: Result<PathBuf, Error>, shown: &
         }
         Err(error) => failed(shown, &error, cx),
     }
+}
+
+/// Re-check holds after installation as well as on a later press; never quit automatically once held.
+fn restart_when_ready(cx: &mut App) {
+    if let Some(waiting) = button::waiting(cx) {
+        log::info!("updates: the restart waits ({waiting:?})");
+        if let Some(prepared) = &cx.global::<Flow>().prepared {
+            button::set_status(UpdateStatus::Ready(version(prepared.version())), cx);
+        }
+        return;
+    }
+    let flow = cx.global_mut::<Flow>();
+    flow.restart.set(flow.installed.take());
+    flow.busy = true;
+    let quit = Rc::clone(&flow.quit);
+    quit(cx);
 }
 
 /// The update didn't go through: said on the button, whose press starts over from the download.

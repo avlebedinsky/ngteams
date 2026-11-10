@@ -297,10 +297,10 @@ impl Shell {
             .channel
             .as_ref()
             .is_some_and(|(view, _)| !view.read(cx).drafts(cx).is_empty());
-        let new_chat = self
-            .new_chat
-            .as_ref()
-            .is_some_and(|(view, _)| view.read(cx).compose(cx).read(cx).has_draft(cx));
+        let new_chat = self.new_chat.as_ref().is_some_and(|(view, _)| {
+            let view = view.read(cx);
+            view.is_starting() || view.compose(cx).read(cx).has_draft(cx)
+        });
         kept || chat || channel || new_chat
     }
 

@@ -174,7 +174,7 @@ pub fn button(
     cx: &App,
 ) -> Option<AnyElement> {
     let status = status(cx);
-    let (glyph, words, tip) = face(&status, waiting(cx))?;
+    let (glyph, words, tip) = face(&status, None)?;
     let busy = glyph.is_none();
     let failed = matches!(status, UpdateStatus::Failed { .. });
     let frame = rgb(palette.on_frame);
@@ -216,7 +216,16 @@ pub fn button(
                     })
                     .on_click(pressed)
             })
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            // A shell is leased during render. Ask the desktop about its shells only when the
+            // tooltip opens, after rendering, just as a press checks the current holds.
+            .tooltip(move |window, cx| {
+                let tip = if matches!(status, UpdateStatus::Ready(_)) {
+                    face(&status, waiting(cx)).map_or_else(|| tip.clone(), |(_, _, tip)| tip)
+                } else {
+                    tip.clone()
+                };
+                Tooltip::new(tip).build(window, cx)
+            })
             .child(mark)
             .child(words)
             .into_any_element(),

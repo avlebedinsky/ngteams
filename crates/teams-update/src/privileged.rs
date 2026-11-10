@@ -1,7 +1,7 @@
 //! A system package's update (`.deb`, `.rpm`, Arch): the system's package manager installs it with administrator
 //! rights, so its package records stay right, behind the desktop's password prompt (`pkexec`), while the app is still
 //! open. A dismissed prompt changes nothing. After ngterm's (MIT), without its terminal fallback: a desktop with no
-//! prompt gets the release page instead.
+//! prompt gets a message with the release-page URL instead.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -67,10 +67,10 @@ pub(crate) fn prompt(
     installation: &Installation,
     kind: &str,
     package: &Path,
+    sha256: &str,
     identity: &[u8],
 ) -> Result<Prompted, Error> {
     use sha2::Digest as _;
-    let sha256 = hex(&sha2::Sha256::digest(std::fs::read(package)?));
     let mut command = Command::new(&installation.prompter);
     // pkexec's own text agent would otherwise prompt on a terminal nobody watches
     command
