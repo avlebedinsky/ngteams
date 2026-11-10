@@ -733,7 +733,7 @@ proxy tunnel counts, redirect-code redaction and profile/process cleanup. Synthe
 
 Display-free Windows checks use `cargo test -p teams-signin --lib --test classify --test gate --test native_worker`.
 The normal lab application builds and opens the native Microsoft sign-in page. The Windows port still needs its
-remaining desktop integrations, complete production media runtime and release packaging before it is ready to use.
+signed-in validation, complete production media runtime and release packaging before it is ready to use.
 
 ### Windows video and local tools
 
@@ -755,9 +755,30 @@ Both GUI executables embed the application icon, share an explicit Windows taskb
 GUI subsystem. The complete debug application exceeds MSVC's PDB debug-record limit (LNK1140) with the full media/AI
 and UI dependencies even with line tables only. Its Windows final link omits the PDB; runtime diagnostic logging
 is unchanged. Linux and dependency/test debugging retain their usual settings. Release builds already omit debug
-information. This does not yet establish the production media runtime, notifications/tray or Windows release package.
+information. This does not yet establish the production media runtime, signed-in application flows or Windows release package.
 
 The initial sign-in installs the same private diagnostic logger before opening its page. Chromium rejects an
 explicitly empty response phrase when a paused response's headers are continued; HTTP/2 can supply that empty
 field. The response policy omits it and lets Chromium supply the status's standard phrase, preserving the original
 status and headers plus the additional restrictions. The native HTTPS contract includes an empty-phrase response.
+
+Windows desktop integration uses WinRT toasts and the native notification area rather than a session bus.
+The same notifier handles mentions, collapsed messages, translations, focused-chat suppression and notification
+settings on both platforms. Notification IDs are shared across accounts; activations are handed to the existing account/chat/channel and
+explicit Answer/Decline handlers. Windows receives fixed
+action names and numeric tags, with escaped plain display text; notification content never enters the view trace.
+The unpackaged app registers its name/icon and a matching Start-menu shortcut under its per-user AppUserModelID.
+Lab and read-only runs use separate notification IDs and temporary shortcuts, leaving the installed client’s shell registration alone. Message sounds follow Windows notification preferences; the app's ringer owns call audio.
+The running app owns its toasts and withdraws them on normal shutdown. There is no launch-on-click handler after the process exits.
+
+The Windows tray offers Open Teams and Quit. Its icon and taskbar overlay follow the combined unread-chat count,
+including a main window reopened from the tray; the icon re-registers after Explorer restarts. Without a tray item,
+closing the main window retains the existing quit behavior. Read-only mode creates no tray item. Native shell work
+runs on dedicated threads and returns actions to GPUI; it builds no Teams requests.
+
+`scripts/test-windows-desktop.ps1` runs account-free toast/history, native toast action, tray callback and taskbar contracts in the
+explicitly authorized win11 console. It never signs in or opens a microphone or camera. Like the other native fixture
+runners, it creates only a Limited InteractiveToken task and removes that task when the bounded run ends.
+
+The Windows shell fixture currently passes its native history and tray/taskbar primitives, but on-screen toast
+delivery/activation has not passed in the VM. That remains a release gate, along with signed-in application validation.

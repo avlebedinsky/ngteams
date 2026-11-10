@@ -259,3 +259,27 @@ reason = "Windows-only BGRA image painting and bounded atlas lifetime; scripts/t
 [unmapped_sources."crates/teams-ui/src/local_ai/windows_prompt.rs"]
 sha256 = "12e293514261be58d38d44d77a0ba0d3cc133f7797a40ffa83585fe4748ab6db"
 reason = "Windows-only Claude batch-shim private prompt-file adapter; native windows_local_ai exercises exact multiline instructions and prompt lifetime through a synthetic batch/PowerShell process tree without an account or network."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/apartment.rs"]
+sha256 = "bf41283c316a4b1a62472033aafcd035cecaef69ae73738f3b5f235a3f2d5c2d"
+reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/mod.rs"]
+sha256 = "ecfcb51b5d8ed7d18a6b73a646d4313e296ea8e8d87ec1d7dc2f6a2b63f9ea58"
+reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/registration.rs"]
+sha256 = "ce098caa47f3ff7483c1aa4c6905620f5f72ed3c8db750f29427ed8990f80d17"
+reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/toasts.rs"]
+sha256 = "5164a7dec75d79db5c5ebb8a15bb74287879c9a14994a14fd17c820f40d0b737"
+reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/tray.rs"]
+sha256 = "78127b6ed124e79c83a6555792ad111a121d6deec2457b3ee6d6a5a6f2511161"
+reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/ngteams/src/app/windows.rs"]
+sha256 = "a27d8a50bd5da70e97bc859582c41768a070894ebff7950eab0068bae52b231c"
+reason = "Windows-only shell identity selection isolating lab/read-only metadata from the installed client; no Linux LLVM mapping. Native whole-application validation and coverage remain final Windows-port gates."

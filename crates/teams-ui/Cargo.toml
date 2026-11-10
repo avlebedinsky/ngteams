@@ -60,8 +60,6 @@ tokio = { workspace = true, features = ["sync"] }
 toml.workspace = true
 # a sound pack the user imports as an archive (deflate only; entries read by name, never unpacked by their paths)
 zip.workspace = true
-# the notifications and the tray item, on the bus the app is given (async-io, as GPUI's own)
-zbus.workspace = true
 
 [dev-dependencies]
 # a synthetic card message's Swift payload (`tests/chat_view/cards.rs`)
@@ -152,11 +150,18 @@ harness = false
 name = "workflows_app_window"
 harness = false
 
+[target.'cfg(unix)'.dependencies]
+zbus.workspace = true
+
 [target.'cfg(unix)'.dev-dependencies]
 # Linux compositor, private bus and virtual keyboard; Windows uses the authorized VM console.
 ui-sandbox.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# Native desktop shell and WinRT toasts; no optional logging features.
+windows = { workspace = true, features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+raw-window-handle.workspace = true
 # Claude's npm shim cannot receive multiline arguments; keep its private prompt file until the job exits.
 tempfile.workspace = true
 
@@ -171,4 +176,9 @@ harness = false
 [[test]]
 # Native Windows video upload/eviction contract, synthetic pixels only; run by the explicit VM console helper.
 name = "native_video"
+harness = false
+
+[[test]]
+# Account-free Windows shell notifications, tray and taskbar integration in the VM console.
+name = "native_desktop"
 harness = false

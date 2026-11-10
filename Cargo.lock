@@ -11574,6 +11574,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "log",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -11594,6 +11595,8 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "ui-sandbox",
  "url",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
  "zbus",
  "zip 9.0.5",
 ]

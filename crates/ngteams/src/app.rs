@@ -33,7 +33,9 @@ use teams_core::EngineHandle;
 use teams_log::diagnostics::Source as DiagnosticsSource;
 use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent};
 use teams_ui::bus::BusError;
-use teams_ui::window::{KitRoot, PERSONAL_APP_ID};
+use teams_ui::window::KitRoot;
+#[cfg(unix)]
+use teams_ui::window::PERSONAL_APP_ID;
 use teams_ui::{
     AccountParts, Bridge, Core, Desktop, DesktopEvent, DesktopParts, LogLevel, Models, SettingsFile, SettingsModel,
     ShellParts, VideoFeed, ViewTrace,
@@ -44,6 +46,17 @@ use crate::accounts::{self, Runner, Started};
 use crate::calling::PersonalCalls;
 use crate::engine::display_name;
 use crate::secrets::AppSecrets;
+
+#[cfg(windows)]
+#[path = "app/windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::desktop_id;
+
+#[cfg(unix)]
+const fn desktop_id(_: &Runner, _: bool, _: &App) -> &'static str {
+    PERSONAL_APP_ID
+}
 
 /// The window's title and the app's name on its notifications and tray item.
 pub const TITLE: &str = "ngteams";
@@ -174,6 +187,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         trace,
         ctl,
     } = launch;
+    let app_id = desktop_id(&runner, read_only, cx);
     let (hint, sign_in_again) = signing_out(read_only, sign_in_again);
     play_videos_on(runner.devices.as_ref(), cx);
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down
@@ -199,7 +213,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     let desktop = cx.new(|cx| {
         Desktop::new(
             DesktopParts {
-                app_id: PERSONAL_APP_ID,
+                app_id,
                 app_name: TITLE.into(),
                 title: TITLE.into(),
                 shell: parts,

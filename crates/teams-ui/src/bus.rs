@@ -1,4 +1,4 @@
-//! The session bus the app is given, for its notifications ([`crate::notify`]) and its tray item ([`crate::tray`]).
+//! The Linux session bus the app is given, for its notifications ([`crate::notify`]) and its tray item ([`crate::tray`]).
 //!
 //! The app is given one address, the `DBUS_SESSION_BUS_ADDRESS` it was started with (in the lab, the UI sandbox's
 //! private bus), and connects there and nowhere else: no `$XDG_RUNTIME_DIR/bus`, no other address in a list, no
@@ -8,7 +8,9 @@
 
 use std::ffi::OsStr;
 
+#[cfg(unix)]
 use zbus::Connection;
+#[cfg(unix)]
 use zbus::address::Address;
 
 /// The variable the address is read from.
@@ -21,6 +23,7 @@ pub enum BusError {
     NotGiven,
     #[error("the session bus address given isn't one this app takes: {0}")]
     Address(String),
+    #[cfg(unix)]
     #[error("the session bus given can't be reached: {0}")]
     Connect(#[source] zbus::Error),
 }
@@ -42,6 +45,7 @@ pub fn given_address(value: Option<&OsStr>) -> Result<String, BusError> {
     if text.contains(';') {
         return Err(BusError::Address("a list of addresses".to_owned()));
     }
+    #[cfg(unix)]
     Address::try_from(text).map_err(|error| BusError::Address(error.to_string()))?;
     Ok(text.to_owned())
 }
@@ -50,6 +54,7 @@ pub fn given_address(value: Option<&OsStr>) -> Result<String, BusError> {
 ///
 /// # Errors
 /// See [`given_address`].
+#[cfg(unix)]
 pub fn address_from_env() -> Result<String, BusError> {
     given_address(std::env::var_os(ADDRESS_ENV).as_deref())
 }
@@ -58,6 +63,7 @@ pub fn address_from_env() -> Result<String, BusError> {
 ///
 /// # Errors
 /// [`BusError::Connect`] when that bus can't be reached or refuses the connection.
+#[cfg(unix)]
 pub async fn connect(address: &str) -> Result<Connection, BusError> {
     zbus::connection::Builder::address(address)
         .map_err(BusError::Connect)?
@@ -72,11 +78,12 @@ pub async fn connect(address: &str) -> Result<Connection, BusError> {
 ///
 /// # Errors
 /// The address's own error, or [`connect`]'s.
+#[cfg(unix)]
 pub async fn connect_given(address: Result<String, BusError>) -> Result<Connection, BusError> {
     connect(&address?).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
@@ -102,4 +109,13 @@ mod tests {
         let not_utf8 = OsString::from_vec(vec![b'u', 0xff]);
         assert!(matches!(given_address(Some(&not_utf8)), Err(BusError::Address(_))));
     }
+}
+
+/// Windows uses its native shell, with no session bus address to read.
+///
+/// # Errors
+/// Always returns `NotGiven`; the Windows desktop connects directly to its native session.
+#[cfg(windows)]
+pub fn address_from_env() -> Result<String, BusError> {
+    Err(BusError::NotGiven)
 }
