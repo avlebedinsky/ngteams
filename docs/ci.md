@@ -143,7 +143,8 @@ and UNC spellings, and conservatively treats trailing dots/spaces as aliases. Re
 working directory before interpreting `..`; an unresolved Windows drive-relative path cannot prove separation.
 The existing native coverage floors remain unchanged. Windows-only sources use the hash-checked Linux inventory.
 The explicit VM-console guard also checks the active interactive session; its tests open no window. These boundaries
-now supply the Windows runner; WebView2, media integration and a runnable GUI/release package remain unfinished.
+now supply the Windows runner. Native WebView2 and the complete media runtime have offline VM contracts; signed-in
+application validation and the Windows release package remain unfinished.
 
 
 The native runner gate measures its Windows CLI, locks, snapshot cleanup, deadlines, broker/app failures and restart
@@ -203,6 +204,13 @@ digest (the tag's anonymous registry answer's `Docker-Content-Digest`), and put 
 
 `scripts/test_web_engine_closure.py` and `scripts/test_check_linux_package.py` run under
 `python3 -B -m unittest discover -s scripts -p 'test_*.py'`; they need `cc`, `ldd`, `patchelf` and `zstd`.
+
+`scripts/test_windows_media_closure.py` builds tiny real PE fixtures with clang and Rust's LLD, and reads them with
+LLVM's `llvm-readobj` (`llvm-tools-preview`). It checks delay/transitive imports, Windows' case-insensitive DLL
+names, unresolved and ambiguous dependencies, architecture, and missing/corrupt/extra packaged files. The native
+runtime gate is `scripts/test-windows-media.ps1`, using the samples made by `scripts/make-media-samples.py` and the
+same manifest/plugin/DLL/license closure as packaging. It runs only in the authorized Windows VM console, with no
+account or physical capture. Signed-in flows and physical devices remain separate gates.
 
 
 The Windows media backend uses GStreamer's WASAPI2 and Media Foundation providers and `windows-capture`'s system

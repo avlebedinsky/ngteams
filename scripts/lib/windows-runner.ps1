@@ -22,19 +22,35 @@ function Add-NgteamsEnvironmentPath([string]$Value, [string]$Directory) {
     return (@($Directory) + $remaining) -join ';'
 }
 
-function Set-NgteamsMediaEnvironment([string]$Root) {
-    $gst = @(
+function Get-NgteamsGStreamerRoot([string]$Root) {
+    return @(
         $env:GSTREAMER_1_0_ROOT_MSVC_X86_64,
         [Environment]::GetEnvironmentVariable('GSTREAMER_1_0_ROOT_MSVC_X86_64', 'User'),
         (Join-Path $Root 'windows-deps/gstreamer'),
         (Join-Path $env:LOCALAPPDATA 'Programs/gstreamer/1.0/msvc_x86_64'),
         (Join-Path $env:ProgramFiles 'gstreamer/1.0/msvc_x86_64')
     ) | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ 'bin/pkg-config.exe')) } | Select-Object -First 1
+}
+
+function Set-NgteamsMediaEnvironment([string]$Root) {
+    $gst = Get-NgteamsGStreamerRoot $Root
     if ($gst) {
         # Keep repeated preparation byte-identical: pkg-config build scripts fingerprint these environment values.
         $env:PATH = Add-NgteamsEnvironmentPath $env:PATH (Join-Path $gst 'bin')
         $env:PKG_CONFIG_PATH = Add-NgteamsEnvironmentPath $env:PKG_CONFIG_PATH (Join-Path $gst 'lib/pkgconfig')
     }
+}
+
+function Set-NgteamsMediaRuntime([string]$Root, [string]$Runtime) {
+    if (!$Runtime) { $Runtime = Join-Path $Root 'target/windows-media-runtime' }
+    if (!(Test-Path -LiteralPath (Join-Path $Runtime 'MEDIA-MANIFEST.json'))) {
+        throw 'Private media runtime is missing; run scripts/package-windows-media.ps1 first.'
+    }
+    # Never scan the development SDK or a user's unrelated plugins during a runner/test launch.
+    $env:PATH = Add-NgteamsEnvironmentPath $env:PATH (Join-Path $Runtime 'bin')
+    $env:GST_PLUGIN_SYSTEM_PATH_1_0 = Join-Path $Runtime 'lib/gstreamer-1.0'
+    $env:GST_PLUGIN_PATH_1_0 = ''
+    $env:GST_PLUGIN_SCANNER_1_0 = Join-Path $Runtime 'libexec/gstreamer-1.0/gst-plugin-scanner.exe'
 }
 
 function Build-NgteamsLab([string]$Root, [int]$TimeoutSeconds) {
@@ -49,6 +65,9 @@ function Build-NgteamsLab([string]$Root, [int]$TimeoutSeconds) {
         Set-NgteamsMediaEnvironment $Root
         Remove-Item Env:TEAMS_PERSONAL_INSTALL -ErrorAction SilentlyContinue
         & $runner build --cargo (Get-Command cargo -CommandType Application | Select-Object -First 1).Source --timeout $TimeoutSeconds
+        if ($LASTEXITCODE -eq 0) {
+            & (Join-Path $Root 'scripts/package-windows-media.ps1') -Binary (Join-Path $Root 'target/lab/debug/ngteams.exe')
+        }
     } finally {
         $env:TEAMS_LAB_BUILD = $previousLab
         $env:TEAMS_PERSONAL_INSTALL = $previousInstall
@@ -118,7 +137,9 @@ function Invoke-NgteamsRunner {
     & $runner prepare --directory $Directory
     if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare private run directory.' }
     if ($Serve) {
-        Set-NgteamsMediaEnvironment $Root
+        $media = if ($ScopeName -eq 'Account') { Split-Path (Split-Path $App) } else { Join-Path $Root 'target/windows-media-runtime' }
+        Set-NgteamsMediaRuntime $Root $media
+        $env:GST_REGISTRY_1_0 = Join-Path $Directory 'gstreamer-registry.bin'
         $env:NGTEAMS_WINDOWS_VM_SANDBOX = 'win11'
         $env:UI_SANDBOX_DIR = $Directory
         $scopeFlag = if ($ScopeName -eq 'Alias') { '--alias' } else { '--account' }

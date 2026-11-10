@@ -1,6 +1,6 @@
 # Windows counterpart of run-personal-read-only.sh. Runs only an already installed executable, with a get-only
 # credential broker, a disposable snapshot, and the explicit win11 VM console sandbox. Does not build/install it.
-# ./scripts/run-personal-read-only.ps1 user@example.test -App C:/path/to/installed/ngteams.exe
+# ./scripts/run-personal-read-only.ps1 user@example.test -App C:/path/to/ngteams/bin/ngteams.exe
 # ./scripts/run-personal-read-only.ps1 -Status / -Stop. Snapshot is deleted after orderly stop, logs retained.
 #Requires -Version 7.0
 [CmdletBinding()]

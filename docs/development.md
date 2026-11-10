@@ -685,6 +685,38 @@ The Windows app/release port is still in progress. Prerequisites are the reposit
 SDK and the native media development libraries. The display-free `teams-runner` helper has its own bounded build
 in `target/runner`; the normally built app goes to `target/lab`.
 
+The media SDK is the official GStreamer MSVC x64 build pinned in
+`packaging/windows/media-pins.json`. Install it with `/CURRENTUSER /VERYSILENT /NORESTART /TYPE=devel` into
+`windows-deps/gstreamer`, checking the pin's SHA-256 first. Also install the repository toolchain's
+`llvm-tools-preview` component and Python 3. The lab build then runs `scripts/package-windows-media.ps1` to assemble
+`target/windows-media-runtime`; an existing runtime is verified, never silently replaced. To rebuild it after a
+policy/SDK change, retain the old directory for diagnosis and package to a new output directory.
+
+`packaging/windows/gstreamer-plugins.txt` records the production plugin roots. The packager reads normal **and delay**
+PE imports with LLVM, copies every non-OS dependency recursively, and refuses anything unresolved. Only the declared
+Windows 11 components/API sets remain external; the MSVC CRT comes from VS's x64 redistributable directory. SDK
+licenses, exact component versions, the hash-verified Microsoft runtime license and a per-file SHA-256 manifest are
+included. The standard `bin`, `lib/gstreamer-1.0` and `libexec/gstreamer-1.0` layout also works when the SDK is absent.
+Lab launches use that private runtime with a per-alias registry. The lab-contact rule still applies to live runs.
+
+The Windows decoder equivalents are libav for AAC/HEVC and dav1d/libav for AV1; WASAPI2 and Media Foundation provide
+the native devices. Hardware video decoding remains unranked by the player on both platforms. The Linux WPE
+manifest additionally serves WebKit's Web Audio/WebCodecs/MediaRecorder; Windows sign-in uses WebView2. The client's
+inline player is for video attachments and recordings. Call RTP, screen capture and background segmentation use
+libwebrtc, Windows Graphics Capture and the embedded Rust CPU/wgpu model respectively, with no extra GStreamer
+device/effects runtime to install.
+
+`python scripts/make-media-samples.py <directory>` creates 21 disposable FFmpeg test-pattern/tone samples, with no
+captured input. Copy that directory into the VM and run
+`pwsh -NoProfile -File scripts/test-windows-media.ps1 -Samples <directory>`. This offline console gate checks the
+default runtime layout without SDK paths, a fresh complete plugin scan/blacklist, each plugin's actual path, native
+device and decoder factories, every generated container/codec, and the real player's MP4/fragmented-recording and
+background-effects tests. It does not capture a physical microphone/camera or reach a tenant. Each process has a
+deadline and the build/run stops below 1.5 GiB free; diagnostics remain in the private `target/windows-media-smoke-*`
+directory. Targets link sequentially using `cargo rustc --profile test`; only their final links omit the large
+native PDBs. Dependencies retain their normal debug settings and compiled/static caches. Run
+`python -B scripts/test_windows_media_closure.py` for the display-free PE packaging contracts.
+
 The only Windows UI sandbox authorized for agents is the **win11 VM's interactive console**. After the lab-contact
 check, `scripts/run-lab.ps1 a` builds then schedules a Limited InteractiveToken action for the already logged-in
 user, without a password. The native console guard refuses an SSH/session-zero window. Provision exactly one lab
@@ -701,9 +733,10 @@ kill-on-close Job Objects. Job assignment is atomic with process creation; app r
 remain in the app job. Cleanup waits until its jobs contain no processes before releasing locks. `holder.log` and
 `trace.jsonl` are private and retained; they are never repository artifacts.
 
-For an **already installed** personal Windows executable, `scripts/run-personal-read-only.ps1 <upn> -App C:/path/to/ngteams.exe` uses the same VM console, the app's consistent snapshot and its get-only broker. It does
+For an **already installed** personal Windows executable, `scripts/run-personal-read-only.ps1 <upn> -App C:/path/to/ngteams/bin/ngteams.exe` uses the same VM console, the app's consistent snapshot and its get-only broker. It does
 not build, install or sign in the personal client. Snapshot data is under `%LOCALAPPDATA%/ngteams-read-only/run/`,
 removed after orderly completion or `-Stop`; a failed/crashed run retains diagnostic evidence until stopped.
+It uses the installed package's adjacent media runtime and manifest.
 
 Offline lifecycle tests use a tiny synthetic native executable, no GUI, network or credentials:
 `cargo test -p teams-runner` and `scripts/test-windows-runner.ps1 -Runner <absolute-helper.exe>`. The latter adds
@@ -733,7 +766,7 @@ proxy tunnel counts, redirect-code redaction and profile/process cleanup. Synthe
 
 Display-free Windows checks use `cargo test -p teams-signin --lib --test classify --test gate --test native_worker`.
 The normal lab application builds and opens the native Microsoft sign-in page. The Windows port still needs its
-signed-in validation, complete production media runtime and release packaging before it is ready to use.
+signed-in validation and release packaging before it is ready to use.
 
 ### Windows video and local tools
 
@@ -755,7 +788,7 @@ Both GUI executables embed the application icon, share an explicit Windows taskb
 GUI subsystem. The complete debug application exceeds MSVC's PDB debug-record limit (LNK1140) with the full media/AI
 and UI dependencies even with line tables only. Its Windows final link omits the PDB; runtime diagnostic logging
 is unchanged. Linux and dependency/test debugging retain their usual settings. Release builds already omit debug
-information. This does not yet establish the production media runtime, signed-in application flows or Windows release package.
+information. Signed-in application flows and the Windows release package remain separate gates.
 
 The initial sign-in installs the same private diagnostic logger before opening its page. Chromium rejects an
 explicitly empty response phrase when a paused response's headers are continued; HTTP/2 can supply that empty
