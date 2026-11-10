@@ -11575,6 +11575,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
+ "iana-time-zone",
  "image",
  "log",
  "raw-window-handle",

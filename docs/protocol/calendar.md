@@ -327,7 +327,8 @@ their typed protocol requests with the service's own credential.
 - It never sends the online meeting's delete.
 - **Meet now** (`crates/teams-ui/src/calendar_view/meet_now.rs`): the meeting made through the outbox (`MeetNow`, one
   attempt), then its pre-join (Start meeting) or its short link (Get a link to share).
-- **Time zones** (`crates/teams-ui/src/event_form/zones.rs`): the form's slot stays in the desktop's time; a start zone
+- **Time zones** (`crates/teams-ui/src/event_form/zones.rs`): the form resolves the desktop's IANA zone from a valid
+  `TZ` override or the OS on Windows and Unix, and its slot stays in the desktop's time; a start zone
   other than the desktop's is sent as the draft's `zone`, whose Exchange name the engine reads for `eventTimeZone`, and
   both times are written in it. A series' days are the start zone's (its weekday, its first and last days, the
   summary), written as that zone's midnights. Each zone picker searches its zones by city, region or offset, and

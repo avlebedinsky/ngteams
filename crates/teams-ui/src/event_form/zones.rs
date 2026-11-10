@@ -82,7 +82,7 @@ impl Zones {
     }
 }
 
-/// The desktop's time zone: `TZ`, else where `/etc/localtime` links to.
+/// The desktop's time zone: a valid `TZ` override, else the operating system's zone.
 #[must_use]
 pub fn desktop_zone() -> Option<Tz> {
     if let Ok(zone) = std::env::var("TZ") {
@@ -91,9 +91,7 @@ pub fn desktop_zone() -> Option<Tz> {
             return Some(zone);
         }
     }
-    let target = std::fs::read_link("/etc/localtime").ok()?;
-    let target = target.to_string_lossy();
-    target.split_once("zoneinfo/")?.1.parse().ok()
+    iana_time_zone::get_timezone().ok()?.parse().ok()
 }
 
 /// Whether `one` and `other` keep the same clock through the two years from `from` (an alias of the other, such as
