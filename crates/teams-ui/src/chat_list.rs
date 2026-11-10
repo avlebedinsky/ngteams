@@ -178,6 +178,9 @@ pub struct ChatRow {
     pub partner: Option<String>,
     /// A group chat's two members its avatar shows, half each (none for any other chat, or a group of one other).
     pub faces: Vec<HalfFace>,
+    /// How many people the store lists in the chat, the account among them (0 when it lists none: a channel, the
+    /// account's notes); a group chat's header counts them.
+    pub members: usize,
     /// A channel's team's name, whose initial its avatar shows (none for a chat).
     pub team: Option<SharedString>,
     /// The last message's first line.
@@ -341,7 +344,7 @@ pub fn unnamed(mri: &str) -> &'static str {
 }
 
 /// The first word of a name, as Teams names a group chat's members.
-fn first_name(name: &str) -> &str {
+pub(crate) fn first_name(name: &str) -> &str {
     name.split_whitespace().next().unwrap_or(name)
 }
 
@@ -476,6 +479,7 @@ pub async fn notes_row(core: &dyn Core) -> ChatRow {
         picture: person.and_then(|person| person.picture),
         partner: Some(me.clone()),
         faces: Vec::new(),
+        members: 0,
         team: None,
         preview,
         previewed,
@@ -502,6 +506,7 @@ pub async fn channel_row(core: &dyn Core, team: &Team, channel: &TeamChannel, la
         picture: None,
         partner: None,
         faces: Vec::new(),
+        members: 0,
         team: Some(team.name.clone().into()),
         preview,
         previewed,
@@ -617,6 +622,7 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         picture,
         partner,
         faces,
+        members: members.len(),
         team: None,
         preview,
         previewed,

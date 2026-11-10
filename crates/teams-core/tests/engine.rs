@@ -31,8 +31,10 @@ use teams_core::engine::{
     self, Action, Cause, EngineError, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push, Source,
 };
 use teams_core::search::{Backfill, Step};
-use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox, Transient, TransientSent};
-use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, TrouterMock};
+use teams_core::{ChatHistory, Clock, MAX_FAILED_CHECKS, Outbox, Transient, TransientSent};
+use teams_mock::{
+    AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, OUTSIDER, TrouterMock,
+};
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Client, Credentials, HttpError, HttpTransport, Read, Request as ProtoRequest, Response, Transport,
@@ -1175,6 +1177,65 @@ async fn a_new_group_chat_is_created_and_its_first_message_brings_it_to_b_and_c(
     for native in [a, b, c] {
         native.shutdown();
     }
+}
+
+#[tokio::test]
+async fn people_added_to_a_group_chat_join_its_members_with_the_history_chosen() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    let created = a
+        .write(Action::CreateChat {
+            others: vec![Mri::new(LAB_B), Mri::new(LAB_C)],
+            topic: None,
+        })
+        .await;
+    let chat = id_of(&created);
+    // only a stored group chat takes people, and only people not in it yet
+    let add = |conversation: &str, members: &[&str]| Action::AddMembers {
+        conversation: conversation.to_owned(),
+        members: members.iter().map(|mri| Mri::new(*mri)).collect(),
+        history: ChatHistory::Days(3),
+    };
+    let refused = a.handle.write(add(AB_CHAT, &[LAB_C])).await;
+    assert!(matches!(refused, Err(EngineError::NotAGroupChat { .. })), "{refused:?}");
+    for members in [&[][..], &[LAB_B], &[LAB_A], &[OUTSIDER, OUTSIDER]] {
+        let refused = a.handle.write(add(&chat, members)).await;
+        assert!(
+            matches!(refused, Err(EngineError::NotAChat)),
+            "{members:?}: {refused:?}"
+        );
+    }
+
+    let before = now_ms();
+    let added = a.write(add(&chat, &[OUTSIDER])).await;
+    assert_eq!(
+        (added.kind, added.state),
+        (OutboxKind::AddMembers, OutboxState::Sent),
+        "{added:?}"
+    );
+    // the history's start is worked out once, when it is asked for: three days back
+    let command: Value = serde_json::from_str(&added.payload).unwrap();
+    let since = command["share_history_time"].as_i64().unwrap();
+    let three_days = 3 * 86_400_000;
+    assert!(
+        (before - three_days..=now_ms() - three_days).contains(&since),
+        "{since}"
+    );
+    // the chat's members as the service now has them, read after the write
+    let mut members: Vec<String> = a
+        .handle
+        .members(chat.as_str())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|member| member.mri)
+        .collect();
+    members.sort();
+    let mut expected = vec![LAB_A, LAB_B, LAB_C, OUTSIDER];
+    expected.sort_unstable();
+    assert_eq!(members, expected);
+    a.shutdown();
 }
 
 #[tokio::test]

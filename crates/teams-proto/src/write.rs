@@ -42,8 +42,8 @@ pub use channel::{
     channel_error_code,
 };
 pub use chat::{
-    Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage,
-    SetMeetingTitle, SetReaction, Typing,
+    AddChatMembers, Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage,
+    SetMeetingTitle, SetReaction, SharedHistory, Typing,
 };
 pub use meeting_options::{MeetingOption, MeetingOptions, MeetingOptionsRead, OptionsOf, SetMeetingOption};
 pub use team::{

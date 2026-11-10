@@ -393,7 +393,8 @@ fn conversation_of(action: &Action) -> Option<String> {
         | Action::Delete { conversation, .. }
         | Action::React { conversation, .. }
         | Action::Unreact { conversation, .. }
-        | Action::Read { conversation, .. } => Some(conversation.clone()),
+        | Action::Read { conversation, .. }
+        | Action::AddMembers { conversation, .. } => Some(conversation.clone()),
         Action::CreateChat { .. } => None,
     }
 }

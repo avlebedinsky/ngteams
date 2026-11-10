@@ -98,6 +98,7 @@ use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
 mod channel_management;
+mod chat_people;
 mod meeting_tabs;
 mod new_chat;
 mod title_bar;
@@ -347,6 +348,8 @@ pub struct Shell {
     channel_events: Option<Subscription>,
     /// New message, while it is open.
     new_chat: new_chat::Open,
+    /// The chat header's people flyout, while it is open, and where its button was last drawn.
+    people: chat_people::State,
     _subscriptions: [Subscription; 12],
 }
 
@@ -385,7 +388,6 @@ impl Shell {
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, &settings, cx);
-        let focus = Self::focused(window, cx);
         let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
         search_box.update(cx, |search, cx| search.set_previews(previews, cx));
@@ -422,7 +424,7 @@ impl Shell {
             main: selected.map_or(Main::Nothing, Main::Chat),
             before_settings: Main::Nothing,
             panes: cx.new(|_| ResizableState::default()),
-            focus,
+            focus: Self::focused(window, cx),
             own_presence: None,
             status_menu: false,
             status_anchor: MenuAnchor::Rail,
@@ -433,6 +435,7 @@ impl Shell {
             chat_events,
             channel_events: None,
             new_chat: None,
+            people: chat_people::State::default(),
             _subscriptions: [
                 opened,
                 channel_opened,
@@ -2057,6 +2060,7 @@ impl Shell {
             return;
         }
         self.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
+        self.people.open = None;
         self.hide_calendar(window, cx);
         self.reset_meeting_tabs(&id, cx);
         let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
@@ -2766,42 +2770,7 @@ impl Shell {
             .flex_col()
             .bg(rgb(palette.background));
         match &self.main {
-            Main::Chat(id) => {
-                let row = self.list.read(cx).row(id);
-                let name = row.map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
-                let face =
-                    row.map(|row| people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small));
-                let chat = self
-                    .chat
-                    .clone()
-                    .filter(|chat| chat.read(cx).conversation() == id.as_str());
-                let presence = self.header_presence(cx).map(|availability| {
-                    presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
-                });
-                let call = self.call_header_button(cx);
-                // the chat's language: its messages read in it, and the account's sent in the chat's own
-                let translate = chat.as_ref().map(|chat| {
-                    let model = chat.read(cx).translation().clone();
-                    crate::chat_translate::header_button(&model, window, cx)
-                });
-                let tabs = self.meeting_tab_bar(id, palette, cx);
-                // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
-                // presence, the call on the right
-                let header = pane_header(face, name, palette)
-                    .children(tabs)
-                    .children(presence)
-                    .child(div().flex_1())
-                    .children(translate)
-                    .children(call)
-                    .debug_selector(|| "chat-header".to_owned());
-                let body = self.meeting_tab_body().map_or_else(
-                    || div().flex_1().min_h_0().children(chat),
-                    |tab| div().flex_1().min_h_0().child(tab),
-                );
-                // another chat fades in from a little below
-                let body = crate::motion::rise(body, SharedString::from(format!("chat-in-{id}")), 10.0, cx);
-                pane.child(header).child(body).into_any_element()
-            }
+            Main::Chat(id) => self.chat_pane(id, pane, palette, window, cx),
             Main::Channel(id) => {
                 let shown = self
                     .channel
@@ -2845,6 +2814,56 @@ impl Shell {
             | Main::CreateTeamMore
             | Main::Workflows => pane.child(no_chat(palette, cx)).into_any_element(),
         }
+    }
+
+    /// The conversation pane over chat `id`: its header (Teams' chat header: the chat's picture and name, a meeting's
+    /// tabs after it, the other member's presence, then the translation, the call and the people on the right) and
+    /// the chat, the people flyout over it while open.
+    fn chat_pane(
+        &self,
+        id: &str,
+        pane: gpui::Div,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = self.list.read(cx).row(id);
+        let name = row.map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
+        let face = row.map(|row| people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small));
+        let chat = self.chat.clone().filter(|chat| chat.read(cx).conversation() == id);
+        let presence = self.header_presence(cx).map(|availability| {
+            presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
+        });
+        let call = self.call_header_button(cx);
+        let people = self.people_header_button(id, cx);
+        let flyout = self.people_layer(id, cx);
+        // the chat's language: its messages read in it, and the account's sent in the chat's own
+        let translate = chat.as_ref().map(|chat| {
+            let model = chat.read(cx).translation().clone();
+            crate::chat_translate::header_button(&model, window, cx)
+        });
+        let tabs = self.meeting_tab_bar(id, palette, cx);
+        // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
+        // presence, the call on the right
+        let header = pane_header(face, name, palette)
+            .children(tabs)
+            .children(presence)
+            .child(div().flex_1())
+            .children(translate)
+            .children(call)
+            .children(people)
+            .debug_selector(|| "chat-header".to_owned());
+        let body = self.meeting_tab_body().map_or_else(
+            || div().flex_1().min_h_0().children(chat),
+            |tab| div().flex_1().min_h_0().child(tab),
+        );
+        // another chat fades in from a little below
+        let body = crate::motion::rise(body, SharedString::from(format!("chat-in-{id}")), 10.0, cx);
+        pane.relative()
+            .child(header)
+            .child(body)
+            .children(flyout)
+            .into_any_element()
     }
 }
 
@@ -2948,7 +2967,7 @@ pub(crate) fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, 
 }
 
 /// [`pane_header`] led by any element in the face's place: a channel's team tile.
-fn pane_header_led(lead: Option<AnyElement>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
+pub(crate) fn pane_header_led(lead: Option<AnyElement>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
     div()
         .h(px(48.0))
         .flex_none()

@@ -1236,6 +1236,17 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         Ok(Some(applied))
     }
 
+    /// A chat's members read again as a thread, now: after the account added people to it.
+    ///
+    /// # Errors
+    ///
+    /// [`CatchUpError::Read`] when the read fails, [`CatchUpError::Store`] when the store does.
+    pub(crate) async fn sync_members(&self, store: &mut Store, id: &str) -> Result<(), CatchUpError> {
+        let reads = ChatReads::new(&self.client);
+        let thread = self.waiting(store, reads.thread(id)).await?;
+        self.store_members(store, &thread)
+    }
+
     /// A chat's members, read as a thread when the list's `rosterVersion` is newer than the stored one, or there is
     /// none stored, or the list's can't be read (it may be newer). A list without one keeps the stored members.
     /// Channels and the other conversations that are no chat keep none.

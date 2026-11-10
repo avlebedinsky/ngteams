@@ -321,6 +321,52 @@ pub(crate) fn create_chat(state: &mut State, call: &Call<'_>) -> ResponseTemplat
         .insert_header("Location", format!("{REGIONAL_HOST}/v1/threads/{id}").as_str())
 }
 
+/// `PUT v1/threads/<id>/members` (`docs/protocol/chat-service.md`, "Adding people to a chat"): `{members: [{id,
+/// role, shareHistoryTime}]}` from a member of the group chat `id`; the people not in it yet join it, its roster moves
+/// on, and it is answered 200. A 1:1 chat or a stream takes nobody (400), as the web client offers no add there.
+pub(crate) fn add_members(state: &mut State, call: &Call<'_>, id: &str) -> ResponseTemplate {
+    let kind = match member_of(state, id, &call.caller) {
+        Ok(conversation) => conversation.kind,
+        Err(code) => return status(code),
+    };
+    let added: Option<Vec<String>> = call
+        .object()
+        .and_then(|body| body.get("members")?.as_array().cloned())
+        .and_then(|members| {
+            members
+                .iter()
+                .map(|member| {
+                    member.get("shareHistoryTime")?.as_i64()?;
+                    member
+                        .get("id")?
+                        .as_str()
+                        .filter(|id| is_orgid_mri(id))
+                        .map(str::to_owned)
+                })
+                .collect()
+        });
+    let Some(added) = added.filter(|added| !added.is_empty()) else {
+        return status(400);
+    };
+    if kind != Kind::Group {
+        return status(400);
+    }
+    let time = state.tick();
+    let Some(conversation) = state.conversation_mut(id) else {
+        return status(404);
+    };
+    for member in added {
+        if !conversation.is_member(&member) {
+            conversation.members.push(member);
+        }
+    }
+    conversation.roster = time;
+    conversation.version = time;
+    conversation.entry["threadProperties"]["rosterVersion"] = json!(time);
+    state.changed();
+    status(200)
+}
+
 /// Whether `caller` may write to the chat `id`: a member, and not of a read-only conversation (403).
 fn writable(state: &State, id: &str, caller: &str) -> Result<(), u16> {
     let conversation = member_of(state, id, caller)?;

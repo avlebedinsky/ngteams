@@ -190,6 +190,42 @@ back, so nothing went out):
 - **An opened empty chat** (one the list hides) is listed from then on at the list's foot, and stays there when
   another chat is opened.
 
+### Adding people to a chat
+
+Seen 2026-11-10 in browser Teams with lab account a (`proto-lab run team-manage` steps; every chat-service write on
+`v1/threads` held back, so nothing went out; the people were lab accounts, plus the user's own account in held
+requests only):
+
+- **The header's people button** ("View and add participants"; a 1:1 chat's is an icon, a group chat's carries the
+  member count) opens a flyout: "People" (a group chat: "People (<n>)"), each member with their picture and presence,
+  the account first with "You" under its name; under a rule a 1:1 chat offers "Start a group chat" and "Add agents", a
+  group chat "Add people", "Add agents" and "Leave". A group chat's member shows a remove × on hover.
+- **The picker** is a small popover over the flyout: "Start a group chat" (a 1:1 chat) or "Add" (a group chat), a box
+  "Enter a name, email, or tag" offering people and the group chats whose names match (none with nothing typed),
+  each taken as a chip with a remove ×, then Cancel and Create (or Add), off until someone is taken. Nobody in the
+  chat already is offered. A group chat taken stands for its members.
+- **A 1:1 chat's Create sends nothing.** With an unnamed group chat of exactly those people (a, b and c had several)
+  Teams opened the one whose roster came last, as New message does. Otherwise it opened a new group chat not made
+  yet: its row at the top of the list named after the people ("<first>, <first>, and <first>"), its header their first
+  names with the people count, "You're starting a new conversation / Type your first message below.", and a flyout
+  with "Add people". The first message sent `POST v1/threads` with `{"members": [the account, the people added, the
+  1:1 chat's partner], "properties": {"threadType": "chat"}}`, as [above](#new-message-and-a-new-chat). The 1:1 chat
+  stayed as it was.
+- **A group chat's Add** has three history choices under the box: "Don't include chat history" (the default),
+  "Include history from the past number of days:" with a number box (1 to start; it takes digits only, and Add is off
+  while it is empty or 0; 999 was taken), and "Include all chat history". Add sent `PUT v1/threads/<chat>/members`
+  with `{"members": [{"id": <mri>, "role": "Admin", "shareHistoryTime": <n>}]}`: `-1` for none, `0` for all, and for
+  the past days the time of the click less that many days in epoch milliseconds (31 days gave the time 31 days
+  before). Held back, Teams said "Something went wrong. Please try again." and kept the chat as it was.
+- **Remove and Leave**: the member's × asked "Remove <name> from the conversation? They'll still have access to the
+  chat history." (Cancel, Remove) and sent `DELETE v1/threads/<chat>/members/<mri>` with no body; Leave asked "Leave
+  this chat?" with a "Remove chat history" box (not sent). ngteams doesn't offer these yet
+  ([backlog](../backlog/chat-people-remove-and-leave.md)).
+
+ngteams follows this: `Action::AddMembers` (one outbox row, `AddChatMembers`; the history's start is worked out when
+the user asks, so every attempt sends the same; an attempt whose outcome is unknown is failed, never sent twice), and
+after it went through the chat's members are read again as a thread.
+
 `proto-lab` records browser traffic without a browser fence. A scenario that needs a request's shape without its
 side effect installs an explicit capture hold before navigation or the matching action. Held marker messages,
 including legacy queued probes, stay held on later sessions so the browser cannot resend them then. Holds are

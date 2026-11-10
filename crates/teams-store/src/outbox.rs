@@ -39,6 +39,8 @@ pub enum OutboxKind {
     RemoveReaction,
     ReadReceipt,
     CreateChat,
+    /// People added to a group chat.
+    AddMembers,
 }
 
 /// Where a row stands.
@@ -93,6 +95,7 @@ text_enum!(OutboxKind {
     RemoveReaction => "remove_reaction",
     ReadReceipt => "read_receipt",
     CreateChat => "create_chat",
+    AddMembers => "add_members",
 });
 
 text_enum!(OutboxState {

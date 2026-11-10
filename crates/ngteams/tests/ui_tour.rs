@@ -53,10 +53,11 @@ use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::VideoFeed;
 use teams_ui::call_stage::CallStage;
+use teams_ui::chat_people::{ChatPeople, HistoryChoice, Picked};
 use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
 use teams_ui::global_search::{Mode as SearchMode, Tab};
-use teams_ui::new_chat::{NewChat, Suggested};
+use teams_ui::new_chat::{NewChat, Recipient, Suggested};
 use teams_ui::settings::VideoEffect;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
@@ -1016,6 +1017,75 @@ const STEPS: [Step; 5 + 255] = [
         with_new_chat(shell, cx, |view, cx| view.set_group_name("Lab trio", window, cx));
     }),
     ("new-chat-named-dark", |shell, _, cx| {
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+    }),
+    // the a–b chat's people from its header (Teams Dark): "People", the account and b, "Start a group chat"
+    ("chat-people-dark", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+        clear_compose(shell, window, cx);
+        shell.update(cx, |shell, cx| shell.toggle_people(window, cx));
+    }),
+    // its picker, "lab" typed: the people found, then the group chats
+    ("chat-people-picker-dark", |shell, window, cx| {
+        with_people(shell, cx, |people, cx| {
+            people.open_picker(window, cx);
+            people.set_query("lab", window, cx);
+        });
+    }),
+    // c taken as a chip, Create lit (Teams Light)
+    ("chat-people-picker", |shell, window, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        with_people(shell, cx, |people, cx| {
+            let at = people
+                .suggestions()
+                .iter()
+                .position(|picked| matches!(picked, Picked::Person(person) if person.mri == LAB_C));
+            if let Some(at) = at {
+                people.take(at, window, cx);
+            }
+        });
+    }),
+    // no group chat of those people: a new one not made yet, its row and header named after them
+    ("chat-people-draft", |shell, window, cx| {
+        let named = |mri: &str, cx: &App| {
+            shell
+                .read(cx)
+                .list()
+                .read(cx)
+                .all_rows()
+                .find(|row| row.partner.as_deref() == Some(mri))
+                .map_or_else(|| "Lab".into(), |row| row.name.clone())
+        };
+        let people = vec![
+            Recipient {
+                mri: OUTSIDER.to_owned(),
+                name: "Synthetic Guest".into(),
+                picture: None,
+            },
+            Recipient {
+                mri: LAB_B.to_owned(),
+                name: named(LAB_B, cx),
+                picture: None,
+            },
+        ];
+        shell.update(cx, |shell, cx| shell.open_group_draft(people, window, cx));
+        show_chats_section(shell, cx);
+    }),
+    ("chat-people-draft-flyout", |shell, window, cx| {
+        with_new_chat(shell, cx, |view, cx| view.toggle_people(window, cx));
+    }),
+    // the a–b–c chat's people, counted on the button, and its "Add" with the history choices
+    ("chat-people-group", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_chat(ABC_CHAT.to_owned(), window, cx);
+            shell.toggle_people(window, cx);
+        });
+        with_people(shell, cx, |people, cx| {
+            people.open_picker(window, cx);
+            people.choose_history(HistoryChoice::Days, cx);
+        });
+    }),
+    ("chat-people-group-dark", |shell, _, cx| {
         theme(shell, teams_ui::theme::DARK_KEY, cx);
     }),
     // the a–b chat in Teams Dark: the frame, the sheet, its own bubbles' tint and the reply's quote card
@@ -3044,6 +3114,13 @@ fn hover_none(shell: &Entity<Shell>, cx: &mut App) {
 }
 
 /// Runs `change` on the compose box of the chat shown.
+/// Changes the chat header's people flyout, while it is open.
+fn with_people(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut ChatPeople, &mut Context<ChatPeople>)) {
+    if let Some(view) = shell.read(cx).people().cloned() {
+        view.update(cx, change);
+    }
+}
+
 /// Changes New message, while it is open.
 fn with_new_chat(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut NewChat, &mut Context<NewChat>)) {
     if let Some(view) = shell.read(cx).new_chat().cloned() {

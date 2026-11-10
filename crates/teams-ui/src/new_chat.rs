@@ -24,6 +24,13 @@
 //!   is then not opened over the place shown) or given back, which New message opened again shows
 //!   ([`NewChat::keeps_going`]).
 //!
+//! - **A new group chat from a 1:1 chat** ([`NewChat::start_draft`]: its header's "Start a group chat" when the
+//!   account has no unnamed group chat of exactly those people) is New message with its people fixed, as Teams draws
+//!   it: no To: line, but a chat's header (the group's face, the people's first names, the people button with their
+//!   count, whose "Add people" adds to them: [`crate::chat_people`]), and its row in the list named after them
+//!   ([`NewChat::draft_row`]); its first message makes the chat as above, the people in the order Teams sends them
+//!   (those added, the 1:1 chat's partner last).
+//!
 //! Nothing is written in the read-only mode: the shell offers no New message there. Traced: `new-chat opened`,
 //! `new-chat found` (the chat it is, or none), `new-chat started` (the chat made), never a name or a text.
 
@@ -37,6 +44,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::Disableable as _;
+use gpui_component::Selectable as _;
 use gpui_component::input::{Backspace, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, SearchScope};
@@ -46,6 +54,7 @@ use teams_store::OutboxState;
 
 use crate::bridge::Core;
 use crate::chat_list::{self, ChatList, ChatRow, RowKind};
+use crate::chat_people::{ChatPeople, ChatPeopleEvent, ChatPeopleParts, PEOPLE_TIP, PeopleOf, Placed};
 use crate::chat_view::ChatView;
 use crate::compose::{Compose, ComposeEvent, ComposeParts};
 use crate::icons::{Glyph, icon_button, selected_by};
@@ -117,6 +126,17 @@ pub enum Suggested {
 pub enum NewChatEvent {
     /// A chat to open in its place: one chosen from the suggestions, one a message was just sent to.
     Open(String),
+    /// A new group chat's people changed: its row in the list follows them.
+    DraftChanged,
+}
+
+/// What New message is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// New message: its To: line.
+    NewMessage,
+    /// A new group chat from a 1:1 chat ([`NewChat::start_draft`]).
+    GroupDraft,
 }
 
 /// The chat the people are, while one is found, shown under the line.
@@ -152,6 +172,12 @@ pub struct NewChat {
     starting: Option<Task<()>>,
     /// A first message given back since New message was last shown.
     given_back: bool,
+    /// New message's own, or a new group chat from a 1:1 chat (its people fixed, its header drawn in place of To:).
+    kind: Kind,
+    /// Its people flyout, while it is open.
+    people_flyout: Option<(Entity<ChatPeople>, Subscription)>,
+    /// Where its header's people button was last drawn.
+    people_button: Placed,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -215,6 +241,9 @@ impl NewChat {
             draft,
             starting: None,
             given_back: false,
+            kind: Kind::NewMessage,
+            people_flyout: None,
+            people_button: Placed::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -267,6 +296,134 @@ impl NewChat {
         } else {
             String::new()
         }
+    }
+
+    // --- a new group chat from a 1:1 chat ---
+
+    /// Makes this a new group chat of `people` (see the module docs), its box taking the keyboard.
+    pub fn start_draft(&mut self, people: Vec<Recipient>, window: &mut Window, cx: &mut Context<Self>) {
+        self.kind = Kind::GroupDraft;
+        self.naming = false;
+        self.suggesting = false;
+        self.people = people;
+        self.to.update(cx, |to, cx| to.set_value("", window, cx));
+        self.trace.record(&TraceLine::new("new-chat", "drafted"));
+        self.resolve(window, cx);
+        let compose = self.compose(cx);
+        compose.update(cx, |compose, cx| compose.focus(window, cx));
+        cx.emit(NewChatEvent::DraftChanged);
+        cx.notify();
+    }
+
+    /// Whether this is a new group chat from a 1:1 chat.
+    #[must_use]
+    pub fn drafting(&self) -> bool {
+        self.kind == Kind::GroupDraft
+    }
+
+    /// A new group chat's row in the list, as Teams names it: the people's first names joined.
+    #[must_use]
+    pub fn draft_row(&self) -> Option<ChatRow> {
+        if self.kind != Kind::GroupDraft {
+            return None;
+        }
+        let names: Vec<String> = self
+            .people
+            .iter()
+            .map(|person| chat_list::first_name(&person.name).to_owned())
+            .collect();
+        let faces = self
+            .people
+            .iter()
+            .take(2)
+            .map(|person| chat_list::HalfFace {
+                name: Some(person.name.clone()),
+                picture: person.picture.clone(),
+            })
+            .collect();
+        Some(ChatRow {
+            id: String::new(),
+            kind: RowKind::Group,
+            name: chat_list::joined(&names, 0).into(),
+            named: true,
+            picture: None,
+            partner: None,
+            faces,
+            members: self.people.len() + 1,
+            team: None,
+            preview: SharedString::default(),
+            previewed: None,
+            last_activity: None,
+            unread: 0,
+        })
+    }
+
+    /// Opens the new group chat's people, or closes them.
+    pub fn toggle_people(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.people_flyout.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let parts = ChatPeopleParts {
+            core: Arc::clone(&self.core),
+            trace: Arc::clone(&self.trace),
+            list: self.list.clone(),
+            presence: self.parts.models.presence.clone(),
+            button: self.people_button.clone(),
+        };
+        let people = self.people.clone();
+        let view = cx.new(|cx| ChatPeople::new(parts, String::new(), PeopleOf::Draft, people, window, cx));
+        let events = cx.subscribe_in(
+            &view,
+            window,
+            |this: &mut Self, _, event: &ChatPeopleEvent, window, cx| {
+                if let ChatPeopleEvent::AddToDraft(more) = event {
+                    this.add_to_draft(more, window, cx);
+                }
+                this.people_flyout = None;
+                cx.notify();
+            },
+        );
+        view.update(cx, |view, cx| view.focus(window, cx));
+        self.people_flyout = Some((view, events));
+        cx.notify();
+    }
+
+    /// `more` join the new group chat's people, each once.
+    fn add_to_draft(&mut self, more: &[Recipient], window: &mut Window, cx: &mut Context<Self>) {
+        for person in more {
+            if !self.people.iter().any(|known| known.mri == person.mri) {
+                self.people.push(person.clone());
+            }
+        }
+        self.resolve(window, cx);
+        cx.emit(NewChatEvent::DraftChanged);
+    }
+
+    /// The new group chat's people flyout, while it is open.
+    #[must_use]
+    pub fn people_flyout(&self) -> Option<&Entity<ChatPeople>> {
+        self.people_flyout.as_ref().map(|(view, _)| view)
+    }
+
+    /// The new group chat's header in place of To: (see the module docs).
+    fn draft_header(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let row = self.draft_row();
+        let face = row.as_ref().map(|row| chat_list::group_face(row, palette, 32.0));
+        let title: Vec<&str> = self
+            .people
+            .iter()
+            .map(|person| chat_list::first_name(&person.name))
+            .collect();
+        let button = icon_button("chat-header-people", Glyph::USER_PLUS, PEOPLE_TIP)
+            .selected(self.people_flyout.is_some())
+            .label((self.people.len() + 1).to_string())
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_people(window, cx)));
+        crate::shell::pane_header_led(face, title.join(", "), palette)
+            .debug_selector(|| "new-chat-draft-header".to_owned())
+            .child(div().flex_1())
+            .child(self.people_button.keep(selected_by("chat-header-people", button)))
+            .into_any_element()
     }
 
     // --- the To: line ---
@@ -921,10 +1078,21 @@ impl Render for NewChat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
         let name_focused = self.name.read(cx).focus_handle(cx).is_focused(window);
-        let group = self.naming.then(|| self.group_name_line(name_focused, palette));
-        let to = self.to_line(palette, cx);
+        let group = (self.naming && self.kind != Kind::GroupDraft).then(|| self.group_name_line(name_focused, palette));
+        let to = if self.kind == Kind::GroupDraft {
+            self.draft_header(palette, cx)
+        } else {
+            self.to_line(palette, cx)
+        };
         let top = if self.naming { 52.0 + 60.0 } else { 60.0 };
-        let panel = self.suggestions_panel(top, palette, cx);
+        let panel = if self.kind == Kind::GroupDraft {
+            None
+        } else {
+            self.suggestions_panel(top, palette, cx)
+        };
+        let flyout = self.people_flyout.as_ref().map(|(view, _)| {
+            gpui::deferred(div().absolute().top(px(50.0)).right(px(12.0)).child(view.clone())).with_priority(1)
+        });
         let body = match &self.found {
             Some(found) => div().flex_1().min_h_0().child(found.view.clone()).into_any_element(),
             None => div()
@@ -948,5 +1116,6 @@ impl Render for NewChat {
             .child(to)
             .child(body)
             .children(panel)
+            .children(flyout)
     }
 }

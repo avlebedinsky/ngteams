@@ -28,7 +28,7 @@ use gpui_component::Sizable as _;
 use gpui_component::tooltip::Tooltip;
 use teams_store::Team;
 
-use crate::chat_list::{ChatList, ROW_HEIGHT};
+use crate::chat_list::{ChatList, ChatRow, ROW_HEIGHT};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::models::Models;
 use crate::teams_list::{CHANNEL_HEIGHT, ChannelMenuAnchor, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
@@ -202,6 +202,8 @@ pub struct Sidebar {
     cursor: Option<(u8, String)>,
     /// New message is open: its row heads the chats, selected.
     new_message: NewMessageRow,
+    /// New message is a new group chat not made yet: its row is this chat's, named after its people.
+    new_message_draft: Option<ChatRow>,
     _observing: [Subscription; 2],
 }
 
@@ -244,6 +246,20 @@ impl Sidebar {
         self.new_message == NewMessageRow::Shown
     }
 
+    /// Draws New message's row as a new group chat's, named after its people (`None`: New message's own).
+    pub fn set_new_message_draft(&mut self, draft: Option<ChatRow>, cx: &mut Context<Self>) {
+        if self.new_message_draft != draft {
+            self.new_message_draft = draft;
+            self.rebuild(cx);
+        }
+    }
+
+    /// The new group chat New message's row is drawn as, if it is one.
+    #[must_use]
+    pub fn new_message_draft(&self) -> Option<&ChatRow> {
+        self.new_message_draft.as_ref()
+    }
+
     /// The sidebar over the chat list and the Teams list, both sections unfolded.
     pub fn new(
         list: Entity<ChatList>,
@@ -273,6 +289,7 @@ impl Sidebar {
             focus: cx.focus_handle().tab_stop(true),
             cursor: None,
             new_message: NewMessageRow::Hidden,
+            new_message_draft: None,
             _observing: [chats, teamed],
         };
         sidebar.rebuild(cx);
@@ -577,7 +594,10 @@ impl Sidebar {
             Entry::SeeMore => self.see_more_row(palette, cx),
             Entry::SeeAllChannels { index, id } => Self::see_all_channels_row(index, id, palette, cx),
             Entry::SeeAllTeams => Self::see_all_teams_row(palette, cx),
-            Entry::NewMessage => new_message_row(palette),
+            Entry::NewMessage => match &self.new_message_draft {
+                Some(draft) => draft_row(draft, palette),
+                None => new_message_row(palette),
+            },
             Entry::Note(text) => div()
                 .debug_selector(|| "teams-note".to_owned())
                 .px_3()
@@ -1114,6 +1134,42 @@ impl Sidebar {
             .child(status_text(status));
         Some(pill.into_any_element())
     }
+}
+
+/// A new group chat's row at the top of the chats while it isn't made yet, as Teams adds it: the group's face and the
+/// people's names, selected.
+fn draft_row(draft: &ChatRow, palette: Palette) -> AnyElement {
+    div()
+        .debug_selector(|| "chat-row-new-group".to_owned())
+        .relative()
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded_md()
+        .bg(rgb(palette.selected))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(10.0))
+                .bottom(px(10.0))
+                .w(px(3.0))
+                .rounded_r_sm()
+                .bg(theme::gradient(palette.brand, palette.accent, 180.0)),
+        )
+        .child(crate::chat_list::group_face(draft, palette, crate::chat_list::AVATAR))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(rgb(palette.foreground))
+                .child(draft.name.clone()),
+        )
+        .into_any_element()
 }
 
 /// New message's row at the top of the chats, as Teams adds it while New message is open: its pen and name, selected.

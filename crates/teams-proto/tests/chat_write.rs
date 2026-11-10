@@ -17,8 +17,8 @@ use teams_proto::chat::{
     parse_html,
 };
 use teams_proto::{
-    Author, CreateChat, Credentials, DeleteMessage, EditMessage, HttpTransport, Original, ReadReceipt, RemoveReaction,
-    Response, SendMessage, SetReaction, Transport, Typing,
+    AddChatMembers, Author, CreateChat, Credentials, DeleteMessage, EditMessage, HttpTransport, Original, ReadReceipt,
+    RemoveReaction, Response, SendMessage, SetReaction, SharedHistory, Transport, Typing,
 };
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -144,6 +144,7 @@ enum ChatWrite {
     Receipt(ReadReceipt),
     Typing(Typing),
     Create(CreateChat),
+    Add(AddChatMembers),
 }
 
 impl ChatWrite {
@@ -158,6 +159,7 @@ impl ChatWrite {
             Self::Receipt(request) => transport.deliver(request).await,
             Self::Typing(request) => transport.deliver(request).await,
             Self::Create(request) => transport.deliver(request).await,
+            Self::Add(request) => transport.deliver(request).await,
         }
     }
 }
@@ -820,6 +822,45 @@ async fn a_named_group_chat_carries_its_name_as_the_web_client_sent_it() -> Test
         .ok_or("one chat")?
         .named("Pair");
     assert_eq!(one.topic(), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn adding_people_to_a_group_chat_puts_them_with_the_history_chosen() -> TestResult {
+    // browser Teams' group chat "Add" (2026-11-10): one PUT naming everyone added, each an Admin with the history
+    // chosen as `shareHistoryTime`: -1 none, 0 all, else the time the shared history starts
+    let since = NEW_YEAR_MS - 3 * 86_400_000;
+    for (history, time) in [
+        (SharedHistory::None, -1),
+        (SharedHistory::All, 0),
+        (SharedHistory::Since(since), since),
+    ] {
+        let add = AddChatMembers::new(ABC_CHAT, vec![mri(LAB_B), mri(LAB_C)], history).ok_or("an add")?;
+        assert_eq!(add.conversation(), ABC_CHAT);
+        assert_eq!(add.members(), [mri(LAB_B), mri(LAB_C)]);
+        assert_eq!(add.history(), history);
+        assert_eq!(SharedHistory::from_share_history_time(time), history);
+
+        let sent = sent(ChatWrite::Add(add)).await?;
+
+        assert_eq!(sent.method, "PUT");
+        assert_eq!(sent.path, format!("{BASE_PATH}/threads/{ABC_CHAT}/members"));
+        assert_eq!(sent.query, None);
+        let members: Vec<Value> = [LAB_B, LAB_C]
+            .iter()
+            .map(|id| json!({"id": id, "role": "Admin", "shareHistoryTime": time}))
+            .collect();
+        assert_eq!(sent.body, Some(json!({"members": members})));
+    }
+    // nobody, or someone twice, is no add
+    assert_eq!(AddChatMembers::new(ABC_CHAT, Vec::new(), SharedHistory::All), None);
+    assert_eq!(
+        AddChatMembers::new(ABC_CHAT, vec![mri(LAB_B), mri(LAB_B)], SharedHistory::All),
+        None
+    );
+    // a time before the epoch is no time: the history from its start, never "none" by accident
+    assert_eq!(SharedHistory::Since(0).share_history_time(), 1);
+    assert_eq!(SharedHistory::from_share_history_time(-5), SharedHistory::None);
     Ok(())
 }
 

@@ -41,6 +41,8 @@ pub(crate) struct Conversation {
     /// Who made the chat (empty for a read-only conversation).
     pub(crate) creator: String,
     pub(crate) created: u64,
+    /// Its members' `rosterVersion`: when it was made, else when people were last added.
+    pub(crate) roster: u64,
     /// The conversation's `version`: the time of its last change.
     pub(crate) version: u64,
     /// Its messages in arrival order, each as a read gives it.
@@ -272,6 +274,7 @@ fn listed(entry: &Value, kind: Kind, members: &[&str], messages: Vec<Value>) -> 
             LAB_A.to_owned()
         },
         created: entry["threadProperties"]["rosterVersion"].as_u64().unwrap_or_default(),
+        roster: entry["threadProperties"]["rosterVersion"].as_u64().unwrap_or_default(),
         version: entry["version"].as_u64().unwrap_or_default(),
         messages,
         horizons,
@@ -294,6 +297,7 @@ fn unlisted_channel(messages: Vec<Value>) -> Conversation {
         members: [LAB_A, LAB_B, LAB_C].map(str::to_owned).to_vec(),
         creator: String::new(),
         created,
+        roster: created,
         version: created,
         messages,
         horizons: BTreeMap::new(),
@@ -331,6 +335,7 @@ pub(crate) fn created(empty: &Value, id: &str, kind: Kind, members: &[&str], cre
         members: members.iter().map(|&member| member.to_owned()).collect(),
         creator: creator.to_owned(),
         created,
+        roster: created,
         version: created,
         messages: Vec::new(),
         horizons: BTreeMap::new(),

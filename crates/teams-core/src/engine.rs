@@ -121,9 +121,9 @@ use teams_proto::{
     TeamPicture, TeamTemplateCard, TeamTemplateDetails, TeamWrite, Transport,
 };
 use teams_store::{
-    Applied, CallTranscript, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState,
-    PageCursor, Reaction, ReadHorizon, SearchHit, SentOriginal, Store, StoreError, StoredTranslation, Team,
-    TranscriptLine,
+    Applied, CallTranscript, Conversation, ConversationKind, Member, Message, MessagePage, OutboxEntry, OutboxKind,
+    OutboxState, PageCursor, Reaction, ReadHorizon, SearchHit, SentOriginal, Store, StoreError, StoredTranslation,
+    Team, TranscriptLine,
 };
 use teams_trouter::{
     Change, ChatEvent, Delivery, Down, MessageLoss, PushEvent, RegistrationReport, Stop, Trouter, TrouterCredentials,
@@ -150,7 +150,7 @@ use crate::calling::{
 };
 use crate::emoticons::{Animations, Strip};
 use crate::file_content::{FileContents, FileStream};
-use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
+use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue, now_ms};
 use crate::pictures::{Disk, PictureBytes, Pictures};
 use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
@@ -276,6 +276,39 @@ pub enum Action {
     /// A chat of the account and `others`: their 1:1 chat for one, a new group chat for two or more, named `topic`
     /// when one is given (New message's "Add group name"; a 1:1 chat takes no name).
     CreateChat { others: Vec<Mri>, topic: Option<String> },
+    /// People added to a group chat, seeing as much of its history as `history` says (Teams' "Add people").
+    AddMembers {
+        conversation: String,
+        members: Vec<Mri>,
+        history: ChatHistory,
+    },
+}
+
+/// How much of a group chat's history people added to it see, as Teams' "Add" offers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChatHistory {
+    /// "Don't include chat history", Teams' default.
+    #[default]
+    None,
+    /// "Include history from the past number of days": this many days back from when they are added (at least 1).
+    Days(u32),
+    /// "Include all chat history".
+    All,
+}
+
+impl ChatHistory {
+    /// The request's choice when the user asks at `now_ms` (milliseconds since the Unix epoch): days back from then.
+    #[must_use]
+    pub fn shared(self, now_ms: i64) -> teams_proto::SharedHistory {
+        const DAY_MS: i64 = 86_400_000;
+        match self {
+            Self::None => teams_proto::SharedHistory::None,
+            Self::Days(days) => {
+                teams_proto::SharedHistory::Since(now_ms.saturating_sub(i64::from(days.max(1)) * DAY_MS))
+            }
+            Self::All => teams_proto::SharedHistory::All,
+        }
+    }
 }
 
 /// What a message event changed.
@@ -512,6 +545,9 @@ pub enum EngineError {
     },
     #[error("those members don't make a chat (none, the account itself, or one given twice)")]
     NotAChat,
+    /// People are added only to a stored group chat.
+    #[error("{conversation} isn't a group chat the store knows, so nobody can be added to it")]
+    NotAGroupChat { conversation: String },
     /// The account's own availability names its endpoint, and no registration of this run went through yet (or the
     /// push channel stopped): nothing can be sent.
     #[error("no endpoint of the account's is registered in this run, so its availability can't be set")]
@@ -584,6 +620,7 @@ impl EngineError {
             Self::Deleted { .. } => "deleted",
             Self::Unknown { .. } => "unknown field",
             Self::NotAChat => "not a chat",
+            Self::NotAGroupChat { .. } => "not a group chat",
             Self::NoEndpoint => "no endpoint",
             Self::Runtime(_) => "runtime",
             Self::Thread(_) => "thread",
@@ -2656,6 +2693,41 @@ where
                 let topic = request.topic().map(str::to_owned);
                 Command::CreateChat { others, topic }
             }
+            Action::AddMembers {
+                conversation,
+                members,
+                history,
+            } => self.add_members(conversation, &members, history)?,
+        })
+    }
+
+    /// The command adding `members` to the stored group chat `conversation`: nobody already in it, not the account,
+    /// none twice.
+    fn add_members(&self, conversation: String, members: &[Mri], history: ChatHistory) -> Result<Command, EngineError> {
+        let group = self
+            .store
+            .conversation(&conversation)?
+            .is_some_and(|stored| stored.kind == ConversationKind::Group);
+        if !group {
+            return Err(EngineError::NotAGroupChat { conversation });
+        }
+        let present = self.store.members(&conversation)?;
+        let me = self.outbox.me().mri();
+        let mut added: Vec<String> = Vec::new();
+        for member in members {
+            let mri = member.as_str();
+            if member == me || present.iter().any(|stored| stored.mri == mri) || added.iter().any(|m| m == mri) {
+                return Err(EngineError::NotAChat);
+            }
+            added.push(mri.to_owned());
+        }
+        if added.is_empty() {
+            return Err(EngineError::NotAChat);
+        }
+        Ok(Command::AddMembers {
+            conversation,
+            members: added,
+            share_history_time: history.shared(now_ms()).share_history_time(),
         })
     }
 
@@ -2705,8 +2777,8 @@ where
         Ok(message)
     }
 
-    /// A row as it settled: once it went through, its conversation synced (a new chat's thread), so the account's own
-    /// change is in the store; then told to the owner. Told after the sync, not before: the store answers queries
+    /// A row as it settled: once it went through, its conversation synced (a new chat's thread; a chat people were
+    /// added to, its members too), so the account's own change is in the store; then told to the owner. Told after the sync, not before: the store answers queries
     /// while the sync waits on the service, so an owner told first could look for the change and not find it yet.
     async fn settled(&mut self, row: &OutboxEntry) {
         let conversation = match row.kind {
@@ -2719,10 +2791,17 @@ where
                 .as_deref()
                 .map(|id| teams_proto::stored_conversation(id).to_owned()),
         };
-        if let Some(conversation) = conversation
-            && let Err(error) = self.catch_up.sync_messages(&mut self.store, &conversation).await
+        if let Some(conversation) = conversation.as_deref()
+            && let Err(error) = self.catch_up.sync_messages(&mut self.store, conversation).await
         {
             self.missed("the sync after a write", error);
+        }
+        // people added: the chat's roster as it now stands, for its people and its name
+        if row.kind == OutboxKind::AddMembers
+            && let Some(conversation) = conversation.as_deref()
+            && let Err(error) = self.catch_up.sync_members(&mut self.store, conversation).await
+        {
+            self.missed("the members' read after people were added", error);
         }
         self.emit(Event::Outbox(row.clone()));
     }

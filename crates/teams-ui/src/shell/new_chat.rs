@@ -2,7 +2,8 @@
 //! pane, with its row at the top of the chats; a chat it names (chosen from its suggestions, or one a message was just
 //! sent to) opens in its place. Left while its first message is on its way, it is kept out of sight until that is
 //! settled ([`NewChat::keeps_going`]): a chat made then isn't opened over the place shown, and a message given back is
-//! there when New message opens again. The read-only mode opens none: it writes nothing.
+//! there when New message opens again. A 1:1 chat's "Start a group chat" opens it as a new group chat of its people
+//! ([`Shell::open_group_draft`]), its row named after them. The read-only mode opens none: it writes nothing.
 
 use gpui::{AnyElement, AppContext as _, Context, Entity, IntoElement as _, ParentElement as _, Subscription, Window};
 
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use super::{Main, Shell};
 use crate::chat_list::ChatList;
 use crate::models::Models;
-use crate::new_chat::{NewChat, NewChatEvent};
+use crate::new_chat::{NewChat, NewChatEvent, Recipient};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::teams_list::TeamsList;
 use crate::theme::Palette;
@@ -45,13 +46,52 @@ impl Shell {
         }
         if self.main == Main::NewChat
             && let Some((view, _)) = &self.new_chat
+            && !view.read(cx).drafting()
         {
             view.update(cx, |view, cx| view.focus(window, cx));
             return;
         }
+        // a new group chat not made yet gives way to New message, unless its first message is on its way
+        if self
+            .new_chat
+            .as_ref()
+            .is_some_and(|(view, _)| view.read(cx).drafting() && !view.read(cx).keeps_going())
+        {
+            self.new_chat = None;
+        }
+        let view = self.show_new_chat(window, cx);
+        view.update(cx, |view, cx| view.focus(window, cx));
+        self.finish_opening_new_chat(window, cx);
+    }
+
+    /// A new group chat of `people` not made yet, from a 1:1 chat's "Start a group chat" ([`NewChat::start_draft`]),
+    /// in New message's place; one whose first message is on its way is shown as it is instead, and nothing opens in
+    /// the read-only mode.
+    pub fn open_group_draft(&mut self, people: Vec<Recipient>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.read_only() {
+            return;
+        }
+        if self
+            .new_chat
+            .as_ref()
+            .is_some_and(|(view, _)| !view.read(cx).keeps_going())
+        {
+            self.new_chat = None;
+        }
+        let fresh = self.new_chat.is_none();
+        let view = self.show_new_chat(window, cx);
+        if fresh {
+            view.update(cx, |view, cx| view.start_draft(people, window, cx));
+        }
+        self.finish_opening_new_chat(window, cx);
+    }
+
+    /// New message made or kept, put in the conversation pane's place.
+    fn show_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<NewChat> {
         self.hide_calendar(window, cx);
         self.put_chat_away(cx);
         self.keep_draft(cx);
+        self.people.open = None;
         // one kept out of sight (its first message on its way, or given back) is shown again
         let (view, events) = if let Some(kept) = self.new_chat.take() {
             kept
@@ -62,11 +102,15 @@ impl Shell {
                 // a chat made while New message is out of sight isn't opened over the place shown
                 NewChatEvent::Open(id) if this.main == Main::NewChat => this.open_chat(id.clone(), window, cx),
                 NewChatEvent::Open(_) => cx.notify(),
+                NewChatEvent::DraftChanged => this.sync_new_message_row(cx),
             });
             (view, events)
         };
-        view.update(cx, |view, cx| view.focus(window, cx));
-        self.new_chat = Some((view, events));
+        self.new_chat = Some((view.clone(), events));
+        view
+    }
+
+    fn finish_opening_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.list.update(cx, |list, cx| list.select(None, cx));
         self.teams.update(cx, |teams, cx| teams.select(None, cx));
         self.main = Main::NewChat;
@@ -107,6 +151,16 @@ impl Shell {
         }
         if self.sidebar.read(cx).new_message_open() != open {
             self.sidebar.update(cx, |sidebar, cx| sidebar.set_new_message(open, cx));
+        }
+        // a new group chat's row is named after its people
+        let draft = self
+            .new_chat
+            .as_ref()
+            .filter(|_| open)
+            .and_then(|(view, _)| view.read(cx).draft_row());
+        if self.sidebar.read(cx).new_message_draft() != draft.as_ref() {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_new_message_draft(draft, cx));
         }
     }
 }

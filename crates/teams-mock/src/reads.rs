@@ -221,7 +221,7 @@ pub(crate) fn thread_body(state: &State, conversation: &Conversation) -> Value {
         )),
     );
     fields.insert("eTag".to_owned(), json!(format!("\"{}\"", conversation.created)));
-    fields.insert("rosterVersion".to_owned(), json!(conversation.created));
+    fields.insert("rosterVersion".to_owned(), json!(conversation.roster));
     fields.insert("version".to_owned(), json!(conversation.created));
     let properties = object(fields.entry("properties").or_insert(Value::Null));
     properties.insert("createdat".to_owned(), json!(conversation.created.to_string()));

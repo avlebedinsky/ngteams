@@ -73,6 +73,9 @@ enum Route {
         id: String,
     },
     CreateChat,
+    AddMembers {
+        id: String,
+    },
 }
 
 impl Route {
@@ -86,6 +89,7 @@ impl Route {
             ("GET", ["threads", id, "members"]) => Self::Members { id: text(id) },
             ("GET", ["threads", id, "filtered"]) => Self::Filtered { id: text(id) },
             ("POST", ["threads"]) => Self::CreateChat,
+            ("PUT", ["threads", id, "members"]) => Self::AddMembers { id: text(id) },
             (method, ["users", "ME", "conversations", chat, rest @ ..]) => return Self::of_chat(method, chat, rest),
             _ => return None,
         };
@@ -207,6 +211,7 @@ fn dispatch(state: &mut State, route: Route, call: &Call<'_>) -> ResponseTemplat
         },
         Route::OwnConversation { chat } => reads::own_conversation(state, call, &chat),
         Route::CreateChat => writes::create_chat(state, call),
+        Route::AddMembers { id } => writes::add_members(state, call, &id),
     }
 }
 
@@ -283,11 +288,16 @@ mod tests {
             Some(Route::ConversationProperty { chat })
         );
         assert_eq!(route("POST", "threads"), Some(Route::CreateChat));
+        assert_eq!(
+            route("PUT", "threads/19:x@thread.v2/members"),
+            Some(Route::AddMembers {
+                id: "19:x@thread.v2".to_owned()
+            })
+        );
         for (method, path) in [
             ("GET", "users/ME/properties"),
             ("PATCH", "users/ME/conversations/19:x@thread.v2/messages/1"),
             ("POST", "users/someone/conversations/19:x@thread.v2/messages"),
-            ("PUT", "threads/19:x@thread.v2/members"),
             ("POST", "agents/28:bot/invoke"),
         ] {
             assert_eq!(route(method, path), None, "{method} {path}");

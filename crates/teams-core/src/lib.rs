@@ -68,8 +68,8 @@ pub use calling::{
 pub use channels::{ChannelDraft, ChannelMade, ChannelProblem};
 pub use emoticons::Strip;
 pub use engine::{
-    Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,
-    Parts, Push, Reply, Source, TranscriptWrite,
+    Action, Answer, Cause, ChatHistory, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange,
+    OwnStatus, Parts, Push, Reply, Source, TranscriptWrite,
 };
 pub use file_content::FileStream;
 pub use outbox::{

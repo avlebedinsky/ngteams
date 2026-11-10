@@ -46,7 +46,7 @@
 //!   machine, another attempt only after a 401 or a short throttle ([`CallRetries`]), never after an unknown outcome.
 //!
 //! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
-//! and taking it back, a read receipt and a new chat; the engine (M1 Task 18) builds them from what the user asks
+//! and taking it back, a read receipt, a new chat and people added to a group chat; the engine (M1 Task 18) builds them from what the user asks
 //! for. Only a message post can be looked for by its `clientmessageid`, so only its row is checked and tried again
 //! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice. The sync
 //! the check relies on is the [`ConversationSync`] seam, which M1 Task 17's catch-up sync fills.
@@ -72,8 +72,8 @@ use teams_call::Tracker;
 use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
-    Author, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError, Original, ReadReceipt,
-    RemoveReaction, Request, Response, SendMessage, SetReaction, Transport,
+    AddChatMembers, Author, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError, Original,
+    ReadReceipt, RemoveReaction, Request, Response, SendMessage, SetReaction, SharedHistory, Transport,
 };
 use teams_store::{
     Applied, AttemptOutcome, CheckFailed, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction,
@@ -133,6 +133,13 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         topic: Option<String>,
     },
+    /// Adds `members` (MRIs) to the group chat `conversation`, sharing its history from `share_history_time` as
+    /// [`SharedHistory`] reads it (worked out when the user asked, so every attempt sends the same).
+    AddMembers {
+        conversation: String,
+        members: Vec<String>,
+        share_history_time: i64,
+    },
 }
 
 /// What commands go out in the order they were asked for on: a later one of this run waits while an earlier one on
@@ -186,6 +193,7 @@ impl Command {
             Self::React { on: false, .. } => OutboxKind::RemoveReaction,
             Self::ReadReceipt { .. } => OutboxKind::ReadReceipt,
             Self::CreateChat { .. } => OutboxKind::CreateChat,
+            Self::AddMembers { .. } => OutboxKind::AddMembers,
         }
     }
 
@@ -197,13 +205,14 @@ impl Command {
             | Self::Edit { conversation, .. }
             | Self::Delete { conversation, .. }
             | Self::React { conversation, .. }
-            | Self::ReadReceipt { conversation, .. } => Some(conversation),
+            | Self::ReadReceipt { conversation, .. }
+            | Self::AddMembers { conversation, .. } => Some(conversation),
             Self::CreateChat { .. } => None,
         }
     }
 
-    /// What it has to go out in order on with the other commands of this run ([`Lane`]); none for a message post and
-    /// a new chat.
+    /// What it has to go out in order on with the other commands of this run ([`Lane`]); none for a message post, a
+    /// new chat and people added.
     #[must_use]
     pub fn lane(&self) -> Option<Lane<'_>> {
         match self {
@@ -225,7 +234,7 @@ impl Command {
                 message_id,
             }),
             Self::ReadReceipt { conversation, .. } => Some(Lane::ReadHorizon { conversation }),
-            Self::Send { .. } | Self::CreateChat { .. } => None,
+            Self::Send { .. } | Self::CreateChat { .. } | Self::AddMembers { .. } => None,
         }
     }
 
@@ -237,7 +246,7 @@ impl Command {
             | Self::Delete { message_id, .. }
             | Self::React { message_id, .. }
             | Self::ReadReceipt { message_id, .. } => Some(message_id),
-            Self::Send { .. } | Self::CreateChat { .. } => None,
+            Self::Send { .. } | Self::CreateChat { .. } | Self::AddMembers { .. } => None,
         }
     }
 }
@@ -959,6 +968,18 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 Some(request) => self.deliver(request).await,
                 None => Tried::NotSent("the chat's members don't make a chat".to_owned()),
             },
+            Command::AddMembers {
+                conversation,
+                members,
+                share_history_time,
+            } => {
+                let members = members.iter().map(Mri::new).collect();
+                let history = SharedHistory::from_share_history_time(share_history_time);
+                match AddChatMembers::new(conversation, members, history) {
+                    Some(request) => self.deliver(request).await,
+                    None => Tried::NotSent("nobody to add".to_owned()),
+                }
+            }
         }
     }
 
@@ -1120,11 +1141,11 @@ fn from_transport(error: HttpError) -> Tried {
 }
 
 /// The id a row that went through is kept with: a post's new message, a new chat's thread (from the answer), the
-/// message an edit, a delete or a reaction acted on; none for a read receipt.
+/// message an edit, a delete or a reaction acted on; none for a read receipt and people added.
 fn answered_id(row: &OutboxEntry, answer: &Response) -> Option<String> {
     match row.kind {
         OutboxKind::Send | OutboxKind::CreateChat => message_id(answer),
-        OutboxKind::ReadReceipt => None,
+        OutboxKind::ReadReceipt | OutboxKind::AddMembers => None,
         OutboxKind::Edit | OutboxKind::Delete | OutboxKind::AddReaction | OutboxKind::RemoveReaction => {
             let command = serde_json::from_str::<Command>(&row.payload).ok()?;
             command.message_id().map(str::to_owned)

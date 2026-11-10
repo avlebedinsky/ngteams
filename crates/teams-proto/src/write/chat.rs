@@ -1,4 +1,4 @@
-//! Typed message, edit, reaction, receipt, typing and chat-creation requests. `MessageText` keeps the composed wire form.
+//! Typed message, edit, reaction, receipt, typing, chat-creation and chat-membership requests. `MessageText` keeps the composed wire form.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -590,6 +590,104 @@ impl Prepared for CreateChat {
             method: Method::Post,
             endpoint: Endpoint::new(["v1", "threads"]),
             body: Some(json!({"members": members, "properties": properties})),
+        })
+    }
+}
+
+/// How much of a group chat's history people added to it see, as Teams' "Add" asks it: sent as each member's
+/// `shareHistoryTime`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedHistory {
+    /// "Don't include chat history": `-1`.
+    None,
+    /// "Include history from the past number of days": the messages since this time, in milliseconds since the Unix
+    /// epoch (the time of the click less that many days, as the web client works it out).
+    Since(i64),
+    /// "Include all chat history": `0`.
+    All,
+}
+
+impl SharedHistory {
+    /// The `shareHistoryTime` each member is sent with.
+    #[must_use]
+    pub fn share_history_time(self) -> i64 {
+        match self {
+            Self::None => -1,
+            Self::Since(at) => at.max(1),
+            Self::All => 0,
+        }
+    }
+
+    /// The choice a stored `shareHistoryTime` is: `-1` (or any other negative) none, `0` all, else since then.
+    #[must_use]
+    pub fn from_share_history_time(time: i64) -> Self {
+        match time {
+            0 => Self::All,
+            time if time < 0 => Self::None,
+            time => Self::Since(time),
+        }
+    }
+}
+
+/// Adds people to a group chat: `PUT v1/threads/<chat>/members` with `{"members": [{"id", "role": "Admin",
+/// "shareHistoryTime"}, …]}`, as browser Teams' "Add people" sent it (2026-11-10, `docs/protocol/chat-service.md`,
+/// "Adding people to a chat"). Everyone is added as an `Admin`, as a group chat's every member is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddChatMembers {
+    conversation: String,
+    members: Vec<Mri>,
+    history: SharedHistory,
+}
+
+impl AddChatMembers {
+    /// `members` added to `conversation` with `history`; `None` with nobody to add or someone given twice.
+    #[must_use]
+    pub fn new(conversation: impl Into<String>, members: Vec<Mri>, history: SharedHistory) -> Option<Self> {
+        let twice = members
+            .iter()
+            .enumerate()
+            .any(|(at, member)| members[..at].contains(member));
+        (!members.is_empty() && !twice).then(|| Self {
+            conversation: conversation.into(),
+            members,
+            history,
+        })
+    }
+
+    /// The chat they are added to.
+    #[must_use]
+    pub fn conversation(&self) -> &str {
+        &self.conversation
+    }
+
+    /// The people added, in the order given.
+    #[must_use]
+    pub fn members(&self) -> &[Mri] {
+        &self.members
+    }
+
+    /// How much of the history they see.
+    #[must_use]
+    pub fn history(&self) -> SharedHistory {
+        self.history
+    }
+}
+
+impl Prepared for AddChatMembers {
+    fn wire(&self) -> Option<Wire> {
+        let time = self.history.share_history_time();
+        let members: Vec<Value> = self
+            .members
+            .iter()
+            .map(|mri| json!({"id": mri.as_str(), "role": "Admin", "shareHistoryTime": time}))
+            .collect();
+        Some(Wire {
+            raw: None,
+            service: Service::ChatService,
+            headers: Vec::new(),
+            method: Method::Put,
+            endpoint: Endpoint::new(["v1", "threads", self.conversation.as_str(), "members"]),
+            body: Some(json!({"members": members})),
         })
     }
 }
