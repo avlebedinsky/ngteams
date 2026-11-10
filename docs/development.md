@@ -766,7 +766,7 @@ proxy tunnel counts, redirect-code redaction and profile/process cleanup. Synthe
 
 Display-free Windows checks use `cargo test -p teams-signin --lib --test classify --test gate --test native_worker`.
 The normal lab application builds and opens the native Microsoft sign-in page. The Windows port still needs its
-signed-in validation and release packaging before it is ready to use.
+signed-in validation before it is ready to use.
 
 ### Windows application contracts
 
@@ -812,7 +812,7 @@ Both GUI executables embed the application icon, share an explicit Windows taskb
 GUI subsystem. The complete debug application exceeds MSVC's PDB debug-record limit (LNK1140) with the full media/AI
 and UI dependencies even with line tables only. Its Windows final link omits the PDB; runtime diagnostic logging
 is unchanged. Linux and dependency/test debugging retain their usual settings. Release builds already omit debug
-information. Signed-in application flows and the Windows release package remain separate gates.
+information. Signed-in application flows remain a separate gate; release packaging is described below.
 
 The initial sign-in installs the same private diagnostic logger before opening its page. Chromium rejects an
 explicitly empty response phrase when a paused response's headers are continued; HTTP/2 can supply that empty
@@ -862,3 +862,36 @@ and recreation, and the foreground synthetic client in Light/Dark. UI Automation
 known shell HWNDs, with a unique per-run synthetic icon label; capture includes Explorer's layered windows.
 Pass `-Executable <absolute-native_shell-test.exe>` to rerun an already-built fixture. Its GUI subsystem prevents a
 driver console from taking focus away from the popup. Signed-in application flows remain a separate Windows gate.
+
+
+### Windows release packaging
+
+The Windows job in `.github/workflows/release.yml` builds the install-marked app, `ngteams-webview.exe` and
+`ngteamsctl.exe` on `windows-2025`, using the same workspace-version/run-number and source commit as Linux.
+Both build jobs have read-only permissions. The publish job requires both artifacts and runs only for
+`refs/heads/main`; a branch dispatch builds artifacts without publishing. The Windows zip joins the Linux assets
+in the release's checksums and build-provenance attestation. No agent builds the install-marked client locally.
+
+`scripts/release-windows-deps.ps1` installs the hash-pinned GStreamer development SDK. After the hosted binaries
+are built, `scripts/package-release-windows.ps1 -Binaries target/release -Version <major.minor.patch.run> -Commit
+<full-commit>` assembles the verified media closure, collects notices from the resolved Windows Cargo graph and
+libwebrtc, and stages all three executables under `bin/`. `scripts/windows-release.py` checks every PE's ordinary
+and delay imports against that private tree. `PACKAGE-MANIFEST.json` hashes every shipped file, including the
+unchanged media manifest. Missing/extra/changed files, unresolved DLLs and stale plugin roots fail packaging;
+staging and the archive must fit above the existing 1.5 GiB disk guard.
+
+The zip contains Windows PowerShell 5.1-compatible `Install.ps1` and `Unregister.ps1`. Setup verifies the extracted
+tree, copies it to a versioned per-user program directory, creates a Start shortcut and registers an available
+MSTeams handler through Windows Default Apps capabilities. It does not replace the current default or start the
+client. The first normal startup adds the shortcut's notification properties and COM registration. Setup detects
+WebView2 using Microsoft's documented per-user/per-machine registry values; if missing it downloads the official
+Evergreen bootstrapper, checks its Microsoft Authenticode signature and runs its bounded per-user installation.
+Unregister removes only metadata still pointing at that package version and retains account files/credentials.
+See the [Microsoft deployment guide](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution).
+
+`python -B scripts/test_windows_release.py` exercises real x64 PE delayed/transitive dependencies, archive contents,
+metadata, corruption, missing binaries, existing-output protection and the disk guard. The workflow also unpacks
+and verifies its zip, checks build identity and CLI help, and runs `Install.ps1 -VerifyOnly`. No GUI, account,
+installer execution or tenant access is needed for these checks. Agents can package normally built lab binaries
+with the same scripts and `-Runtime target/windows-media-runtime`; they never install or start them as a personal
+client. The signed-in VM checks and physical device/GPU limits remain separate from package integrity.

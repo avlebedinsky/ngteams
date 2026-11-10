@@ -4,10 +4,10 @@
 
 # ngteams
 
-**A native Microsoft Teams app for Linux.**
+**A native Microsoft Teams app for Linux and Windows.**
 
 Chats, channels, calendar, calls and meetings for your work account,
-built for the Linux desktop instead of a web page in a wrapper.
+built for your desktop instead of a web page in a wrapper.
 
 [Install](#install) · [Features](#what-you-can-do) · [Shortcuts](#keyboard-shortcuts) · [Privacy](#your-data) · [Good to know](#good-to-know)
 
@@ -88,15 +88,16 @@ Translation, corrections and summaries use your own [Claude Code](https://claude
 
 **You'll need:**
 
-- A Linux desktop running on **Wayland**
+- A Linux desktop running on **Wayland**, or **Windows 11 x64**
 - A Microsoft 365 **work or school** account with Teams (personal Microsoft accounts aren't supported)
-- A desktop keyring, such as GNOME Keyring, to hold your sign-in
-- PipeWire for calls, which most current desktops already use
+- On Linux, a desktop keyring, such as GNOME Keyring, to hold your sign-in
+- On Linux, PipeWire for calls, which most current desktops already use
 
-Every release is on the [releases page](https://github.com/nickalie/ngteams/releases/latest). Linux x86_64 only.
+Every release is on the [releases page](https://github.com/nickalie/ngteams/releases/latest). Linux x86_64 and Windows x64.
 
 | On | Download | Install with |
 |---|---|---|
+| Windows 11 x64 | `ngteams-*-windows-x86_64.zip` | extract, then run `Install.ps1` in PowerShell (see below) |
 | Debian 13+, Ubuntu 24.04+ | `ngteams_*_amd64.deb` | `sudo apt install ./ngteams_*_amd64.deb` |
 | Fedora, RHEL-likes | `ngteams-*.x86_64.rpm` | `sudo dnf install ./ngteams-*.x86_64.rpm` |
 | openSUSE | `ngteams-*.x86_64.rpm` | `sudo zypper install --allow-unsigned-rpm ./ngteams-*.x86_64.rpm` |
@@ -106,7 +107,14 @@ Every release is on the [releases page](https://github.com/nickalie/ngteams/rele
 
 **Updates**: ngteams checks for a newer release once an hour. When there is one, **Install update** appears in its title bar: select it and ngteams downloads the release, checks it against the release's `SHA256SUMS`, installs it and restarts. A `.deb`, `.rpm` or Arch package asks for your password first. If a call is going on or you have a message you haven't sent, the restart waits until you select **Restart to update**. To update by hand, install the newer package the same way. The unpacked `.tar.gz` (or an extracted AppImage) updates itself only while it stays in its own folder named `ngteams`.
 
-**The sign-in window** runs on WPE WebKit 2.54 or newer. If your system has it (the Arch package installs it, Debian testing and openSUSE Tumbleweed have it), ngteams uses it. Otherwise it downloads a verified copy of about 120 MB once, the first time you sign in.
+**On Windows**, extract the zip and open PowerShell in its `ngteams` folder. Run
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1` as your ordinary user, then open ngteams from
+Start. Setup installs a separate copy under `%LOCALAPPDATA%\Programs\ngteams`, creates the shortcut and installs
+Microsoft's WebView2 Runtime if missing. To open Teams links here, choose ngteams for MSTeams in Windows Settings →
+Apps → Default apps. The app is unsigned; Windows may show a SmartScreen prompt. The archive's `README.txt` covers
+portable use, verification and removal. Setup never starts the app or changes your current link default.
+
+**On Linux, the sign-in window** runs on WPE WebKit 2.54 or newer. If your system has it (the Arch package installs it, Debian testing and openSUSE Tumbleweed have it), ngteams uses it. Otherwise it downloads a verified copy of about 120 MB once, the first time you sign in.
 
 **On Ubuntu 24.04 and later, prefer the `.deb`.** Those systems restrict the sandbox the sign-in window needs, and the `.deb` installs the AppArmor profile that allows it. To run an AppImage there, extract it to a permanent place and install the profile it carries:
 
@@ -183,7 +191,7 @@ The [full command list](docs/development.md#ngteamsctl) covers chats, calls, the
 
 - **ngteams is an independent, unofficial project.** It isn't affiliated with or endorsed by Microsoft. Microsoft Teams is a trademark of Microsoft.
 - **Things can break.** ngteams relies on Teams' internal services, which Microsoft can change at any time.
-- **Your organization's rules still apply.** If your company only allows sign-in from managed devices, sign-in will be refused and ngteams won't work around it. Security keys, device-bound sign-in and client certificates aren't supported. Your administrators can see the sign-in as a Teams desktop client on Linux, so check with IT if you're unsure.
+- **Your organization's rules still apply.** If your company only allows sign-in from managed devices, sign-in will be refused and ngteams won't work around it. Security keys, device-bound sign-in and client certificates aren't supported. Your administrators can see the sign-in as a Teams desktop client, so check with IT if you're unsure.
 - **It's early.** ngteams is at version 0.1 and under active development.
 
 ## For developers

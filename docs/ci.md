@@ -259,3 +259,11 @@ minimize/activation, native tray/menu input, close/reopen, selected account/them
 taskbar overlays. A fixture-owned icon is removed and restored through a synchronous `TaskbarCreated` message;
 no real Explorer restart or account is needed. The captures contain the verified native controls and synthetic
 window, including the app's taskbar button before/after the unread count changes and its window is recreated.
+
+
+The release workflow builds Windows and Linux artifacts under read-only tokens, and its main-only publish job
+checksums and attests both platforms before creating the release. Windows packaging uses the same verified media
+closure as the lab runner, with all three executables beside its DLLs and a full-package hash manifest. Real PE
+package tests and an unpacked-archive identity/manifest check run without an account or GUI. Local VM packaging
+uses lab binaries only; install-marked builds remain exclusive to the hosted release job and explicit personal
+install requests. A branch dispatch cannot publish a release.
