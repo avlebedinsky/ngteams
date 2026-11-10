@@ -2,6 +2,9 @@
 //! what lands on disk (the region, never a token). The browser step is in `tests/auth_redirect.rs`, the live run in
 //! `tests/auth_live.rs`.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

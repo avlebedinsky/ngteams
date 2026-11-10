@@ -1,5 +1,8 @@
 //! The `echo-call` scenario's offline parts: the fake microphone's tone and the call's captured WebRTC audio statistics.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::time::{Duration, Instant};
 
 use proto_lab::scenario::echo_call::{

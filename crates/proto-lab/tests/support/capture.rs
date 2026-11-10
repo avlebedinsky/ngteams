@@ -22,14 +22,28 @@ fn entries(recorder: &Recorder) -> Vec<Value> {
 fn write_failure_is_sticky_and_sync_failure_is_reported_without_losing_its_path() {
     let root = tempfile::tempdir().unwrap();
     let recorder = Recorder::create(root.path(), "synthetic").unwrap();
-    recorder.writer().file = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    #[cfg(unix)]
+    {
+        recorder.writer().file = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    }
+    #[cfg(windows)]
+    {
+        recorder.writer().file = std::fs::File::open(recorder.events_file()).unwrap();
+    }
     recorder.record(json!({"synthetic": true}));
     assert_eq!(recorder.entries(), 1);
     recorder.record(json!({"must_not_be_written": true}));
     assert_eq!(recorder.entries(), 1);
     assert!(matches!(recorder.finish(), Err(CaptureError::Lost(_))));
     let recorder = Recorder::create(root.path(), "synthetic").unwrap();
-    recorder.writer().file = OpenOptions::new().write(true).open("/dev/null").unwrap();
+    #[cfg(unix)]
+    {
+        recorder.writer().file = OpenOptions::new().write(true).open("/dev/null").unwrap();
+    }
+    #[cfg(windows)]
+    {
+        recorder.writer().file = std::fs::File::open("NUL").unwrap();
+    }
     assert!(matches!(recorder.finish(), Err(CaptureError::Io {path, ..}) if path == recorder.events_file()));
     assert_eq!(unix_ms(UNIX_EPOCH - Duration::from_secs(1)), 0);
     assert_eq!(

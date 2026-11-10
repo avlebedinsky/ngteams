@@ -7,18 +7,23 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+#[cfg(unix)]
 use super::dsl::Driver;
-use crate::cdp::{Cdp, Event, Events, SessionId};
+#[cfg(unix)]
+use crate::cdp::Event;
+use crate::cdp::{Cdp, Events, SessionId};
 
 pub(crate) struct Page {
+    #[cfg(unix)]
     pub(crate) driver: Driver,
+    #[cfg(unix)]
     pub(crate) events: mpsc::UnboundedSender<Event>,
     wire: mpsc::UnboundedSender<Value>,
     cdp: Cdp,
     incoming: Option<Events>,
     commands: Arc<Mutex<Vec<Value>>>,
     peer: tokio::task::JoinHandle<()>,
-    close_process: Arc<Mutex<Option<rustix::process::Pid>>>,
+    close_process: Arc<Mutex<Option<u32>>>,
     action_targets: Option<Arc<crate::action_targets::ActionTargets>>,
 }
 
@@ -54,7 +59,7 @@ impl Page {
                     && outcome.is_ok()
                     && let Some(pid) = *process.lock().unwrap()
                 {
-                    outcome = rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+                    outcome = super::test_process::terminate(pid)
                         .map(|()| outcome.unwrap())
                         .map_err(|error| format!("synthetic process did not stop: {error}"));
                 }
@@ -68,9 +73,12 @@ impl Page {
             }
         });
         let (cdp, incoming) = Cdp::connect(&endpoint).await.unwrap();
+        #[cfg(unix)]
         let (events, queue) = mpsc::unbounded_channel();
         Self {
+            #[cfg(unix)]
             driver: Driver::new(cdp.clone(), SessionId::new("synthetic-page"), queue),
+            #[cfg(unix)]
             events,
             wire,
             cdp,
@@ -83,6 +91,7 @@ impl Page {
     }
 
     /// A local synthetic page with an explicit selected conversation; call evidence is supplied separately.
+    #[cfg(unix)]
     pub(crate) async fn new_lab_chat(
         expected: &str,
         mut answer: impl FnMut(&Value) -> Result<Value, String> + Send + 'static,
@@ -121,22 +130,9 @@ impl Page {
 
     /// The close acknowledgement stops a real disposable stand-in; ordinary close then waits for and reaps it.
     pub(crate) fn managed_session(&mut self, dir: &std::path::Path, record: bool) -> (crate::session::LabSession, u32) {
-        let child = tokio::process::Command::new("/bin/sleep")
-            .arg("300")
-            .env_clear()
-            .process_group(0)
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id().unwrap();
-        *self.close_process.lock().unwrap() = rustix::process::Pid::from_raw(pid.cast_signed());
-        (
-            self.session_with_process(dir, record, Some(crate::browser::Browser::synthetic_process(child))),
-            pid,
-        )
+        let (browser, pid) = super::test_process::spawn();
+        *self.close_process.lock().unwrap() = Some(pid);
+        (self.session_with_process(dir, record, Some(browser)), pid)
     }
 
     fn session_with_process(

@@ -6,6 +6,9 @@
 //! The Chrome tests run headless on throwaway user-data-dirs against local servers; see `common` for how Chrome is
 //! found.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 mod common;
 #[path = "common/page.rs"]
 mod page;

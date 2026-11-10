@@ -20,12 +20,16 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+#[cfg(any(unix, test))]
 use serde_json::json;
-use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region, Skypetoken, unix_seconds};
+#[cfg(unix)]
+use teams_auth::authz::unix_seconds;
+use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region, Skypetoken};
 use teams_auth::claims::TokenSummary;
 use teams_auth::id_token::Account;
 use teams_auth::pkce::PkceError;
@@ -76,6 +80,9 @@ pub struct AuthOptions {
 /// Why native sign-in or account provisioning failed; tokens may already be stored.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    #[cfg(windows)]
+    #[error(transparent)]
+    Login(#[from] super::login::LoginError),
     #[error(transparent)]
     Session(#[from] SessionError),
     #[error("can't make the authorization request: {0}")]
@@ -159,6 +166,22 @@ pub async fn authorize<S: SecretStore>(
     options: &AuthOptions,
 ) -> Result<AuthReport, AuthError> {
     let target = NativeTarget::from_env(alias)?;
+    authorize_target(config, alias, store, options, target).await
+}
+
+/// Provisions a verified account into an explicitly selected isolated native target.
+///
+/// # Errors
+/// The same browser, identity, token and private-file failures as [`authorize`].
+pub async fn authorize_target<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    options: &AuthOptions,
+    target: NativeTarget,
+) -> Result<AuthReport, AuthError> {
+    #[cfg(windows)]
+    target.expect_account(&config.account(alias).upn)?;
     let entra = EntraConfig::teams_native();
     authorize_with(
         config,
@@ -175,6 +198,72 @@ pub async fn authorize<S: SecretStore>(
         },
     )
     .await
+}
+
+/// Windows lab provisioning, using the existing dedicated password state machine on the native authorize page.
+///
+/// # Errors
+/// Account mismatch, MFA/rejection, invalid redirect/identity, exchange, or private publication fails.
+#[cfg(windows)]
+pub async fn authorize_password<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    options: &AuthOptions,
+    target: NativeTarget,
+    credentials: &crate::accounts::Credentials,
+) -> Result<AuthReport, AuthError> {
+    let upn = &config.account(alias).upn;
+    if !credentials.email().eq_ignore_ascii_case(upn) {
+        return Err(super::login::LoginError::Accounts(crate::accounts::AccountsError::EmailMismatch(alias)).into());
+    }
+    target.expect_account(upn)?;
+    authorize_with(
+        config,
+        alias,
+        store,
+        options,
+        EntraConfig::teams_native(),
+        AuthSteps {
+            target,
+            redirect: async |authorization: &Authorization| {
+                super::login::authorization_profile(config.paths(), alias, authorization, credentials, options.timeout)
+                    .await
+                    .map_err(AuthError::from)
+            },
+            skype: async |tokens: &Tokens| skypetoken(store, upn, tokens).await,
+        },
+    )
+    .await
+}
+
+/// Completes Windows native provisioning from a refresh token whose account was already verified by code exchange.
+///
+/// # Errors
+/// Existing native/roster identity mismatch, refresh, authz or private publication fails.
+#[cfg(windows)]
+pub async fn refresh_native<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    target: &NativeTarget,
+) -> Result<SkypetokenSummary, AuthError> {
+    let configured = config.account(alias);
+    let account = target.account(&configured.upn)?;
+    if !configured
+        .mri
+        .as_ref()
+        .is_some_and(|mri| mri.eq_ignore_ascii_case(&format!("8:orgid:{}", account.object_id)))
+    {
+        return Err(AuthError::BadMri);
+    }
+    let client = TokenClient::new(EntraConfig::teams_native())?;
+    let tokens = client.refresh(store, &configured.upn, &Scope::spaces()).await?;
+    let skype = skypetoken(store, &configured.upn, &tokens)
+        .await
+        .map_err(TokenError::from)?;
+    target.save(&account, Some(&skype.region))?;
+    Ok(skype)
 }
 
 struct AuthSteps<D, K> {
@@ -355,6 +444,7 @@ pub fn region_file(paths: &LabPaths, alias: Alias) -> PathBuf {
 ///
 /// # Errors
 /// When the file can't be written.
+#[cfg(unix)]
 pub fn save_region(paths: &LabPaths, alias: Alias, skypetoken: &SkypetokenSummary) -> std::io::Result<PathBuf> {
     let file = region_file(paths, alias);
     let dir = file.parent().unwrap_or(paths.data_dir());

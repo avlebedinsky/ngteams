@@ -3,6 +3,9 @@
 //! Entra on one mock server, Graph on another, reached through the `test-support` mock origin. Every value here is
 //! made up.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

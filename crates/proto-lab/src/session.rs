@@ -16,6 +16,7 @@ use crate::browser::{Browser, BrowserError, Display, LaunchOptions, Media};
 use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
 use crate::capture_hold::{CaptureHold, HeldRequest, Hold};
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
+#[cfg(unix)]
 use crate::commands::chrome::ChromeBuild;
 use crate::config::{Alias, LabPaths};
 use crate::frame_hold::FrameHold;
@@ -499,7 +500,11 @@ impl LabSession {
         options: SessionOptions,
         catch: Option<RedirectCatch>,
     ) -> Result<Self, SessionError> {
+        #[cfg(unix)]
         let chrome = ChromeBuild::pinned().executable(&paths.chrome_dir());
+        #[cfg(windows)]
+        let chrome =
+            crate::browser::installed_edge().map_err(|error| SessionError::ActionTargets(error.to_string()))?;
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
         }
@@ -562,6 +567,7 @@ impl LabSession {
     }
 
     /// Declares the exact conversation and participants of this browser call scenario.
+    #[cfg(unix)]
     pub(crate) fn declare_target(&self, chat: &str, members: &[String]) -> Result<(), SessionError> {
         self.watch
             .action_targets
@@ -694,5 +700,6 @@ impl LabSession {
 mod tests;
 
 #[cfg(test)]
+#[cfg(unix)]
 #[path = "../tests/support/session_startup.rs"]
 mod startup_tests;

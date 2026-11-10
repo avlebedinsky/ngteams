@@ -1,6 +1,9 @@
 //! How ab-chat-full checks that a's mention named b (`proto_lab::scenario::ab_chat_full::mentions`): the post's
 //! `properties.mentions`, a JSON string of a list, both read strictly. Made-up MRIs only.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use proto_lab::scenario::ab_chat_full::mentions;
 use serde_json::json;
 

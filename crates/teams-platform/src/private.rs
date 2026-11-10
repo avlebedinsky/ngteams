@@ -65,3 +65,16 @@ pub fn restrict_file(path: &Path) -> io::Result<()> {
 pub fn open(path: &Path, access: Open) -> io::Result<File> {
     platform::open(path, access)
 }
+
+#[cfg(windows)]
+#[path = "private/windows_check.rs"]
+mod windows_check;
+
+/// Verifies that an opened file's owner and access grants are private, without changing them.
+///
+/// # Errors
+/// The file is not regular, not owned by the current user, or grants access to anyone but this user and SYSTEM.
+#[cfg(windows)]
+pub fn check_file(file: &File) -> io::Result<()> {
+    windows_check::check_file(file)
+}

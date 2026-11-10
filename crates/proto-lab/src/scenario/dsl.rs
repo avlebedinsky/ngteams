@@ -313,6 +313,7 @@ pub struct Driver {
     call_timeout: Duration,
     /// Synthetic peers can omit observation pauses while retaining all request deadlines.
     #[cfg(test)]
+    #[cfg(unix)]
     pause_override: Option<Duration>,
     action_targets: Option<Arc<ActionTargets>>,
 }
@@ -330,6 +331,7 @@ impl Driver {
             closed: false,
             call_timeout: CALL_TIMEOUT,
             #[cfg(test)]
+            #[cfg(unix)]
             pause_override: None,
             action_targets: None,
         }
@@ -417,6 +419,7 @@ impl Driver {
     }
 
     /// Lets a changed page settle for the scenario's observation interval.
+    #[cfg(unix)]
     pub(crate) async fn pause(&self, duration: Duration) {
         #[cfg(test)]
         let duration = self.pause_override.unwrap_or(duration);
@@ -424,6 +427,7 @@ impl Driver {
     }
 
     #[cfg(test)]
+    #[cfg(unix)]
     pub(crate) fn omit_observation_pauses(&mut self) {
         self.pause_override = Some(Duration::ZERO);
     }

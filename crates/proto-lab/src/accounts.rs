@@ -18,6 +18,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Read as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -135,13 +136,18 @@ impl AccountsFile {
         };
         let mut file = std::fs::File::open(path).map_err(read_error)?;
         // the mode of the file opened, not of whatever the path names a moment later
-        let mode = file.metadata().map_err(read_error)?.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(AccountsError::Mode {
-                path: path.to_path_buf(),
-                mode,
-            });
+        #[cfg(unix)]
+        {
+            let mode = file.metadata().map_err(read_error)?.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(AccountsError::Mode {
+                    path: path.to_path_buf(),
+                    mode,
+                });
+            }
         }
+        #[cfg(windows)]
+        teams_platform::private::check_file(&file).map_err(read_error)?;
         let mut text = Zeroizing::new(String::new());
         file.read_to_string(&mut text).map_err(read_error)?;
         Self::parse(&text, env)

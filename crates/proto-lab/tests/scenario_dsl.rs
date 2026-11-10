@@ -2,6 +2,9 @@
 //! `data-tid` element, for a request matching a pattern, typing and pressing Enter; and a wait that runs out fails
 //! with an error naming its step. Also what a scenario expects of the fence (`DenyPolicy`) and `ab-chat`'s helpers.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 mod common;
 #[path = "common/page.rs"]
 mod page;

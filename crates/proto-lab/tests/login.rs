@@ -5,6 +5,9 @@
 //!
 //! Nothing here touches a lab profile, the real accounts file or the network beyond 127.0.0.1.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 mod common;
 
 use std::os::unix::fs::PermissionsExt as _;

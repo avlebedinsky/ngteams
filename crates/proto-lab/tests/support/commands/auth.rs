@@ -409,3 +409,26 @@ async fn waiting_for_a_redirect_stops_on_foreign_hosts_expired_signin_and_lost_c
     let result = within(Duration::from_secs(2), wait_for_redirect(&mut session, &mut caught)).await;
     assert!(matches!(result, Err(AuthError::ConnectionLost)));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_native_target_without_browser_never_exchanges_tokens_or_publishes_files() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let target = native_target(root.path());
+    let store = MemorySecretStore::new();
+    let options = AuthOptions {
+        timeout: Duration::from_secs(1),
+        skypetoken: true,
+        other_audiences: false,
+    };
+    let error = authorize_target(&config, Alias::A, &store, &options, target.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AuthError::Session(SessionError::NoChrome(_))));
+    assert!(!target.root().exists(), "no native account/region was published");
+    assert!(
+        !config.paths().profile_dir(Alias::A).exists(),
+        "no browser profile was opened"
+    );
+}

@@ -93,6 +93,15 @@ them to fixed error categories and zeroes secret buffers. The keyring-core debug
 not values; the app logger ignores this third-party target. Interprocess is used only in byte mode (its message-mode
 receive diagnostic is unused and prints a mode number only).
 
+Windows Credential Manager limits an individual blob to 2,560 bytes; an authz skypetoken/region record can exceed
+that limit. The adapter retains legacy raw-item reads and stores new values as bounded pieces, under the same
+hashed application/account/audience namespace. One root write commits a random generation and a SHA-256 digest;
+readers never combine generations. A small pending journal recovers interrupted staging without enumerating any
+credentials, and the committed manifest retains the prior generation until cleanup can succeed. A per-key native
+file lock serializes distinct store instances/processes; its file contains no credential data. Synthetic tests cover
+native large/multibyte values, reopen, replacement, concurrent instances, corruption, missing pieces and interruption
+at every mutation of an update. The VM runs the native store tests only under its console token.
+
 Broker scope, get-only behavior, framing, closure and session contracts run unchanged over Unix sockets or Windows
 named pipes. The caller supplies the established stream and is responsible for endpoint permissions.
 The Windows runner now supervises broker handles and the complete app process tree. The normal lab app builds;

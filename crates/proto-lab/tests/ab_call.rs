@@ -4,6 +4,9 @@
 //! page it hung up, and how a call the service ended at once because the chat already has a running call is read. All
 //! ids, hosts and bodies here are made up.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use base64::Engine as _;
 use proto_lab::capture_hold::{HeldRequest, PausedRequest};
 use proto_lab::protocol::CALL_START_URL;

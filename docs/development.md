@@ -724,6 +724,34 @@ account in `%LOCALAPPDATA%/ngteams-lab/a/accounts.toml` first, as on Linux. `-St
 alias; `-TimeoutSeconds 1800` sets its deadline. The VM's normal screenshot/input tools operate its console; never
 enter credentials with a typing helper. Use only the authorized VM, never a physical Windows desktop.
 
+`pwsh scripts/provision-lab.ps1 -Command Browser` checks the installed system Edge's Microsoft signature and product
+identity. The Windows `proto-lab` command set contains only lab browser verification, native login/provisioning and
+read-only reach evidence; Linux keeps its full capture/scenario CLI. Both reuse our CDP connection, login decisions,
+redirect catcher, PKCE, identity checks and token publication. Windows launches Edge headless in a separate protected
+`%LOCALAPPDATA%/teams-lab/profiles/<a|b|c>` profile, in an atomically assigned kill-on-close job. It never enables
+password/debugging input in the shipped WebView2 worker.
+
+After the lab-contact check, prepare `%LOCALAPPDATA%/teams-lab` privately (`teams-runner prepare --directory <path>`),
+place the approved roster in `lab.toml`, and transfer only the required lab account entries as `accounts.json` over
+scp, never as command text or a password argument. Protect the input file's owner and DACL for the console user and
+SYSTEM before transfer; the loader checks the opened handle and refuses broad grants, a different owner or an
+unmatched roster email without repairing it. Remove that password input from the VM when validation ends.
+`pwsh scripts/provision-lab.ps1 -Command Login -Alias a -NativeAlias <runner-alias>` runs the dedicated one-password
+state machine on Microsoft's native authorization page, stops for MFA/rejection, checks the redirect/state/ID token,
+and publishes native account/region files and tokens in the VM's `ngteams-lab` Credential Manager namespace. It
+never opens the Teams web client. `-Command Auth` instead reuses an already authenticated browser profile without
+typing a password. `-Command Refresh` instead completes authz and region publication from a stored refresh token,
+after matching the previously verified native identity against the roster; it opens no browser. Tokens remain in the VM.
+The scheduled console action is bounded, uses the existing interactive user, owns its browser descendants and holds the same exclusive live lock used by Windows capture tools.
+
+Before starting a signed-in engine, run `-Command Reach -Alias a -NativeAlias <runner-alias> -Chat <checked-chat-id>` under a fresh lab-contact
+check. It follows every conversation page and reads actual member lists through the production GET transport;
+`reach-a.json` privately records roster completeness and allowed actor labels separately. Only explicitly selected
+targets gate the run: incomplete rosters or unlisted people on a selected target fail the operator check. A visible
+channel outside the allowed set remains inventory, never a target to open or act in. Review that evidence and any
+intended meeting/call participants before
+using `run-lab.ps1`; the installed client has the ordinary Teams feature policy.
+
 The runner retains a kernel sharing lock per alias and a shared `%LOCALAPPDATA%/teams-lab/live.lock` for its entire
 lifetime and cleanup. Windows capture tools must open the latter with read/write access and no sharing for their
 exclusive lock; Linux `flock` and Windows file-sharing locks are separate OS domains. Global alias paths make

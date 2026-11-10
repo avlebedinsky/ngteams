@@ -274,7 +274,7 @@ async fn login_cleanup_records_identity_only_after_the_real_owned_process_has_cl
         assert_eq!(report.mri, expected);
         assert!(!report.signed_in && report.refused.is_none());
         assert!(report.capture.unwrap().join(crate::capture::EVENTS_FILE).exists());
-        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        assert!(crate::scenario::test_process::exited(pid));
         assert_eq!(peer.commands().last().unwrap()["method"], "Browser.close");
     }
     assert_eq!(
@@ -303,7 +303,7 @@ async fn a_failed_identity_or_status_write_still_closes_the_process_before_retur
         run.finish(session, &locations, Alias::A).await,
         Err(LoginError::BadIdentity(_))
     ));
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(crate::scenario::test_process::exited(pid));
     assert!(LabConfig::load(&locations).unwrap().account(Alias::A).mri.is_none());
     fs::remove_file(&status.path).unwrap();
     fs::create_dir(&status.path).unwrap();
@@ -313,7 +313,7 @@ async fn a_failed_identity_or_status_write_still_closes_the_process_before_retur
         run.finish(session, &locations, Alias::A).await,
         Err(LoginError::Status(_))
     ));
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(crate::scenario::test_process::exited(pid));
 }
 
 #[test]
@@ -360,4 +360,74 @@ fn final_status_reports_done_refused_or_the_original_error_without_masking_faile
         capture: None,
     };
     assert!(matches!(finish_status(&status, Ok(report)), Err(LoginError::Status(_))));
+}
+
+#[tokio::test]
+async fn native_authorization_uses_the_dedicated_driver_and_closes_before_returning_a_secret() {
+    use teams_auth::secrets::Secret;
+    use teams_auth::token::{Authorization, EntraConfig, Scope};
+    let root = tempfile::tempdir().unwrap();
+    let accounts = accounts();
+    let credentials = accounts.for_alias(Alias::A, UPN).unwrap();
+    let authorization = Authorization::new(&EntraConfig::teams_native(), UPN, Scope::spaces()).unwrap();
+    let status = StatusFile::new(root.path(), Alias::A);
+    let (send, mut caught) = tokio::sync::mpsc::unbounded_channel();
+    let mut page = Page::new(move |command| match command["method"].as_str().unwrap() {
+        "Page.navigate" | "Browser.close" | "Input.insertText" => Ok(json!({})),
+        "Runtime.evaluate" => {
+            let expression = command["params"]["expression"].as_str().unwrap();
+            if expression == PROBE {
+                Ok(evaluated(json!({"password":"#synthetic-password"})))
+            } else {
+                if expression == PRESS_NEXT {
+                    send.send(Secret::new("synthetic-redirect-secret")).unwrap();
+                }
+                Ok(evaluated(json!(true)))
+            }
+        }
+        method => Err(format!("unexpected synthetic authorization command {method}")),
+    })
+    .await;
+    let (session, pid) = page.managed_session(root.path(), false);
+    page.send(
+        "Page.frameNavigated",
+        json!({"frame":{"id":"synthetic-auth","url":authorization.url()}}),
+    );
+    page.send("Page.frameStoppedLoading", json!({"frameId":"synthetic-auth"}));
+    let (redirect, report) = authorization_session(
+        session,
+        &authorization,
+        credentials,
+        &status,
+        Duration::from_secs(5),
+        &mut caught,
+    )
+    .await
+    .unwrap();
+    assert_eq!(redirect.expose(), "synthetic-redirect-secret");
+    assert!(!report.failed());
+    assert!(crate::scenario::test_process::exited(pid));
+    let commands = page.commands();
+    assert_eq!(
+        commands.iter().filter(|c| c["method"] == "Input.insertText").count(),
+        credentials.password().expose().chars().count()
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|c| c["params"]["expression"] == PRESS_NEXT)
+            .count(),
+        1
+    );
+    assert!(
+        commands
+            .iter()
+            .filter(|c| c["method"] == "Page.navigate")
+            .all(|c| c["params"]["url"] == authorization.url())
+    );
+    assert!(
+        !std::fs::read_to_string(root.path().join("status-a.json"))
+            .unwrap()
+            .contains("synthetic-redirect-secret")
+    );
 }

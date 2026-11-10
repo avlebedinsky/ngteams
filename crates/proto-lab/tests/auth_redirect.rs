@@ -5,6 +5,9 @@
 //!
 //! The browser runs headless on a throwaway profile against a local mock server; see `common` for how Chrome is found.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 mod common;
 
 use std::path::Path;

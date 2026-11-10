@@ -84,7 +84,7 @@ sha256 = "91b8fa5c32139ecb8aa673323b8acb4ad0b80a1e4e2629854aeff0d6ee067e8e"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/commands.rs"]
-sha256 = "2eecebd31a3e9cbf23ddb16701b634f807043dbdd91aec1d52c77079bcc00d2f"
+sha256 = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
@@ -123,7 +123,7 @@ reason = "trait declarations and documentation only; no default methods or execu
 [unmapped_sources."crates/proto-lab/src/action_targets/tests.rs"]
 sha256 = "df7bda12a7f0d1af686c5ddb95c1b968917f9b170d2cbf1bc6237d50b3eb925f"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/proto-lab/src/action_targets.rs" = "91c1449f912a12df45289bb1356b30350a841e933bfbf324972e978a8f215145" }
+context = { "crates/proto-lab/src/action_targets.rs" = "624e25a8a896080702107574e179c0497fe4fbb4b892bf8fdbd0c1eb951b6168" }
 
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "909df35e897a2669555420ad24f34094b1c62b2efe007ea18651d547be12b144"
@@ -140,12 +140,12 @@ sha256 = "ac9a4480914f8b3230ee22fb73669594e7479dead4a541f364cccfb090523d62"
 reason = "module declaration and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-platform/src/private/windows.rs"]
-sha256 = "6b05e0bef51023d11b0c344eee42ada04cd3f32f4ff842206d6fbe1c6353cc74"
+sha256 = "000c4c69f2bbc2fe6b50501e90afa52441f337ff7938fb62a119cf79871b97d3"
 reason = "Windows-only native ACL and creation APIs: absent from the Linux LLVM export; exercised by native private-file, log-rotation, SQLite and snapshot tests in the Windows VM and Windows portability workflow"
 
 [unmapped_sources."crates/teams-auth/src/secrets/windows.rs"]
-sha256 = "2706705ef13e524c953b2e4013f09ea6b73c1c551dcadb6c520ad1ead142b8fb"
-reason = "Windows-only Credential Manager adapter; no Linux LLVM mapping. Native synthetic-credential tests and coverage run in the Windows VM interactive logon session and the Windows portability job; raw third-party secret-bearing errors are redacted by construction."
+sha256 = "398105d0d707a02daae589f4270e98db58e7695d7ca2eae77eac22162630848c"
+reason = "Windows-only Credential Manager adapter and per-key file lock; no Linux LLVM mapping. The VM console runs synthetic native large-value, reopen, replacement, concurrent-store and secret-redaction contracts. Whole-task native coverage remains required."
 
 [unmapped_sources."crates/teams-media/src/sound_file_samples.rs"]
 sha256 = "7d31215be18d4133dbaecf624a19001f48d68e2f3df899657879e419ce994081"
@@ -287,3 +287,39 @@ reason = "Windows-only per-mode shell identity shared with native sign-in. Nativ
 [unmapped_sources."crates/teams-ui/src/desktop/windows/activation.rs"]
 sha256 = "cc7c9d8d2d739c0021178f2414a41ac742a998b88c2991453c4e939313663cd1"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-auth/src/secrets/windows_parts.rs"]
+sha256 = "17ed3dcb6db7a85ba5ee833b6f3499a3b5b0b2ccdfcecca1bb064c873844cc83"
+reason = "Windows-only multipart credential protocol; no Linux LLVM mapping. Native/offline synthetic tests exercise complete-value reads, legacy compatibility, multibyte boundaries, corruption, missing pieces, interruption recovery and deletion; native coverage remains required."
+
+[unmapped_sources."crates/teams-platform/src/private/windows_check.rs"]
+sha256 = "1d243bb4f73ed54c711dc49819a417cef8756e87b3afe923594b30b0caaa3d4a"
+reason = "Windows-only opened-handle ACL verification; no Linux LLVM mapping. Native private-file tests reject unsafe grants without repairing them, then verify restricted input succeeds."
+
+[unmapped_sources."crates/proto-lab/src/browser/windows.rs"]
+sha256 = "e139c19197e0709865192c7d748b3ceee1d850f7e664aaa1c7457615a3921ae8"
+reason = "Windows-only lab browser ownership in atomically assigned jobs; no Linux LLVM mapping. Native synthetic process teardown contracts and VM sign-in exercise cleanup."
+
+[unmapped_sources."crates/proto-lab/src/browser/windows_edge.rs"]
+sha256 = "70bc92cb8f5f41512fc9477a4af98dea89f150a4f4a52231a05e4c5aad89c769"
+reason = "Windows-only installed Edge signature/product verification; no Linux LLVM mapping. VM console checks verify the fixed system browser before headless authorization."
+
+[unmapped_sources."crates/proto-lab/src/private.rs"]
+sha256 = "0cdcf18d373b3bea3d8ed2b7d46365fce17f7ae610a99ea5270bf6c3d3022bec"
+reason = "Windows-only protected lab outputs, atomic publication and exclusive lifetime locks; no Linux LLVM mapping. Native input/redaction/output and real provisioning contracts exercise these boundaries."
+
+[unmapped_sources."crates/proto-lab/src/main_windows.rs"]
+sha256 = "3408813a9fa676dcd7a909e14b67d002cfb66589b2eddc3117806a0a8c017da0"
+reason = "Windows-only restricted lab CLI; no Linux LLVM mapping. Offline test-support refusal and VM console browser, native authorization and reach audit commands validate the entry point."
+
+[unmapped_sources."crates/proto-lab/src/commands/reach_windows.rs"]
+sha256 = "2a1074a3ca6b5eb9f3e3af96cb5bf27842283d9a0c349f76c2da439611024afd"
+reason = "Windows-only read-only operator reach evidence; no Linux LLVM mapping. Native synthetic tests keep incomplete rosters and unlisted humans unchecked; real checks precede every signed-in engine run."
+
+[unmapped_sources."crates/proto-lab/src/scenario/windows.rs"]
+sha256 = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126"
+reason = "Windows sign-in module declarations only; no executable items"
+
+[unmapped_sources."crates/proto-lab/src/main.rs"]
+sha256 = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d"
+reason = "Linux entry point is included at the binary root from main_unix.rs to retain the existing isolated CLI test namespace; this file has only cfg/include declarations on Linux. The Windows entry forwards to the native lab CLI."

@@ -17,6 +17,56 @@ use windows_native_keyring_store::Store;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{Secret, SecretError, SecretKey, SecretStore};
+#[path = "windows_parts.rs"]
+mod parts;
+
+struct NativeEntries {
+    native: Arc<Store>,
+    account: String,
+}
+
+impl parts::Storage for NativeEntries {
+    fn read(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SecretError> {
+        match self.entry(name)?.get_secret() {
+            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+            Err(Error::NoEntry) => Ok(None),
+            Err(error) => Err(failed(error)),
+        }
+    }
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<(), SecretError> {
+        self.entry(name)?.set_secret(bytes).map_err(failed)
+    }
+    fn remove(&self, name: &str) -> Result<(), SecretError> {
+        match self.entry(name)?.delete_credential() {
+            Ok(()) | Err(Error::NoEntry) => Ok(()),
+            Err(error) => Err(failed(error)),
+        }
+    }
+}
+
+impl NativeEntries {
+    fn entry(&self, name: &str) -> Result<Entry, SecretError> {
+        let modifiers = HashMap::from([("target", name), ("persistence", "Local")]);
+        self.native
+            .build("ngteams", &self.account, Some(&modifiers))
+            .map_err(failed)
+    }
+}
+
+fn credential_lock(name: &str) -> Result<std::fs::File, SecretError> {
+    use teams_platform::private::{self, Open};
+    let failed = |_| SecretError::WindowsKeyring("credential lock unavailable");
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or(SecretError::WindowsKeyring("LOCALAPPDATA must be absolute"))?;
+    let root = local.join("ngteams-credential-locks");
+    private::create_dir_all(&root).map_err(failed)?;
+    let file =
+        private::open(&root.join(format!("{}.lock", name.replace(':', "_"))), Open::ReadWrite).map_err(failed)?;
+    file.lock().map_err(failed)?;
+    Ok(file)
+}
 
 #[derive(Debug)]
 pub struct KeyringSecretStore {
@@ -42,15 +92,19 @@ impl KeyringSecretStore {
         )
     }
 
+    #[cfg(test)]
     fn entry(&self, key: &SecretKey) -> Result<Entry, SecretError> {
-        let target = target(&self.application, key);
-        let modifiers = HashMap::from([("target", target.as_str()), ("persistence", "Local")]);
-        self.native
-            .build("ngteams", key.account(), Some(&modifiers))
-            .map_err(failed)
+        self.entries(key).entry(&target(&self.application, key))
     }
 
-    async fn execute<T, F>(&self, operation: F) -> Result<T, SecretError>
+    fn entries(&self, key: &SecretKey) -> NativeEntries {
+        NativeEntries {
+            native: Arc::clone(&self.native),
+            account: key.account().to_owned(),
+        }
+    }
+
+    async fn execute<T, F>(&self, name: String, operation: F) -> Result<T, SecretError>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T, SecretError> + Send + 'static,
@@ -58,6 +112,7 @@ impl KeyringSecretStore {
         let serial = Arc::clone(&self.serial);
         tokio::task::spawn_blocking(move || {
             let _guard = serial.lock().unwrap_or_else(PoisonError::into_inner);
+            let _file = credential_lock(&name)?;
             operation()
         })
         .await
@@ -67,33 +122,32 @@ impl KeyringSecretStore {
 
 impl SecretStore for KeyringSecretStore {
     async fn put(&self, key: &SecretKey, secret: &Secret) -> Result<(), SecretError> {
-        let entry = self.entry(key)?;
+        let entries = self.entries(key);
+        let name = target(&self.application, key);
         let secret = secret.clone();
-        self.execute(move || entry.set_secret(secret.expose().as_bytes()).map_err(failed))
-            .await
+        self.execute(name.clone(), move || {
+            parts::write(&entries, &name, secret.expose().as_bytes())
+        })
+        .await
     }
 
     async fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError> {
-        let entry = self.entry(key)?;
-        self.execute(move || match entry.get_secret() {
-            Ok(bytes) => {
-                let bytes = Zeroizing::new(bytes);
-                let text = std::str::from_utf8(&bytes).map_err(|_| SecretError::NotUtf8)?;
-                Ok(Some(Secret::new(text)))
-            }
-            Err(Error::NoEntry) => Ok(None),
-            Err(error) => Err(failed(error)),
+        let entries = self.entries(key);
+        let name = target(&self.application, key);
+        self.execute(name.clone(), move || {
+            let Some(bytes) = parts::read(&entries, &name)? else {
+                return Ok(None);
+            };
+            let text = std::str::from_utf8(&bytes).map_err(|_| SecretError::NotUtf8)?;
+            Ok(Some(Secret::new(text)))
         })
         .await
     }
 
     async fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
-        let entry = self.entry(key)?;
-        self.execute(move || match entry.delete_credential() {
-            Ok(()) | Err(Error::NoEntry) => Ok(()),
-            Err(error) => Err(failed(error)),
-        })
-        .await
+        let entries = self.entries(key);
+        let name = target(&self.application, key);
+        self.execute(name.clone(), move || parts::delete(&entries, &name)).await
     }
 }
 
@@ -174,5 +228,35 @@ mod tests {
         let result = store.get(&key).await;
         store.delete(&key).await.unwrap();
         assert!(matches!(result, Err(SecretError::NotUtf8)));
+    }
+    #[tokio::test]
+    async fn large_native_values_survive_reopen_replace_and_concurrent_store_instances() {
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).unwrap();
+        let application = format!("ngteams-synthetic-large-{random:x?}");
+        let first = KeyringSecretStore::new(&application).await.unwrap();
+        let second = KeyringSecretStore::new(&application).await.unwrap();
+        let key = SecretKey::new("synthetic@example.test", "large-record");
+        let result: Result<(), SecretError> = async {
+            for length in [0, 2559, 2560, 2561, 20_000] {
+                let secret = Secret::new("é".repeat(length));
+                first.put(&key, &secret).await?;
+                let reopened = KeyringSecretStore::new(&application).await?;
+                assert_eq!(reopened.get(&key).await?.unwrap().expose(), secret.expose());
+            }
+            let left = Secret::new("synthetic-left".repeat(1000));
+            let right = Secret::new("synthetic-right".repeat(1000));
+            let (a, b) = tokio::join!(first.put(&key, &left), second.put(&key, &right));
+            a?;
+            b?;
+            let actual = first.get(&key).await?.unwrap();
+            assert!(actual.expose() == left.expose() || actual.expose() == right.expose());
+            Ok(())
+        }
+        .await;
+        let cleaned = first.delete(&key).await;
+        result.unwrap();
+        cleaned.unwrap();
+        assert!(second.get(&key).await.unwrap().is_none());
     }
 }

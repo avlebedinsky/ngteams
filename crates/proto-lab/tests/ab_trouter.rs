@@ -2,6 +2,9 @@
 //! back, how it judges its denies, and its registration checks (also on a local page in a throwaway armed
 //! browser). All URLs and ids here are made up.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 mod common;
 
 use std::time::Duration;

@@ -120,7 +120,7 @@ async fn session_navigation_pumps_disconnects_and_a_real_confirmed_close_are_rep
     session.clear_holds();
     assert!(!session.report().failed());
     assert!(session.close().await.is_ok());
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(crate::scenario::test_process::exited(pid));
 }
 
 #[test]

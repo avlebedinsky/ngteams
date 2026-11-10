@@ -40,6 +40,15 @@ impl Tree {
         }
     }
 
+    /// Signals the owned Windows process job without releasing its ownership.
+    ///
+    /// # Errors
+    /// Windows cannot terminate the job.
+    #[cfg(windows)]
+    pub fn terminate(&self) -> io::Result<()> {
+        self.job.terminate(1)
+    }
+
     /// Terminate and reap this command and all its descendants, even after the initial child exits.
     pub fn stop(&mut self) {
         if self.stopped {

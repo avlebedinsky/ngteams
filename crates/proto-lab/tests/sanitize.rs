@@ -5,6 +5,9 @@
 //!
 //! Every secret and identity here is made up.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::Path;
 

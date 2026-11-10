@@ -241,7 +241,7 @@ pub(crate) fn token_information(token: &OwnedHandle, class: TOKEN_INFORMATION_CL
 /// # Safety
 ///
 /// `text` is a NUL-terminated UTF-16 string allocated with `LocalAlloc` that the caller owns.
-unsafe fn take_local_string(text: *mut u16) -> String {
+pub(super) unsafe fn take_local_string(text: *mut u16) -> String {
     let mut len = 0;
     // SAFETY: the caller guarantees a NUL terminator, so every unit up to it is in bounds.
     while unsafe { *text.wrapping_add(len) } != 0 {

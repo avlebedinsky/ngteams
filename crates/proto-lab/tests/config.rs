@@ -1,6 +1,9 @@
 //! Parsing and validating `lab.toml`: exactly the 3 lab accounts `a`, `b`, `c`, all in one tenant domain, plus the
 //! approved service participants and the lab directories.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -144,3 +144,38 @@ fn permissive_existing_files_and_directories_are_tightened() {
     privacy::assert_private(&path, false);
     assert_eq!(fs::read(&path).unwrap(), b"earlier bytes");
 }
+
+#[cfg(windows)]
+#[test]
+fn check_open_file_rejects_unsafe_acl_without_repairing_it() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("input.json");
+    let file = private::open(&path, Open::NewReadWrite).unwrap();
+    private::check_file(&file).unwrap();
+    let changed = std::process::Command::new("powershell.exe")
+        .env_remove("PSModulePath")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r"
+            $ErrorActionPreference = 'Stop'
+            $acl = Get-Acl -LiteralPath $env:NGTEAMS_TEST_FILE
+            $everyone = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone, 'Read', 'Allow'))
+            Set-Acl -LiteralPath $env:NGTEAMS_TEST_FILE -AclObject $acl
+        ",
+        ])
+        .env("NGTEAMS_TEST_FILE", &path)
+        .output()
+        .unwrap();
+    assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stderr));
+    for _ in 0..2 {
+        assert_eq!(
+            private::check_file(&file).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    private::restrict_file(&path).unwrap();
+    private::check_file(&file).unwrap();
+}

@@ -6,6 +6,9 @@
 //! (lab.toml's `data_dir` when set); without either it says so on stderr and passes, unless
 //! `PROTO_LAB_REQUIRE_CHROME=1`.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 mod common;
 #[path = "common/process.rs"]
 mod process;

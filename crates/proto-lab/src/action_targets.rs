@@ -110,6 +110,7 @@ impl ActionTargets {
     }
 
     /// Declares an operation's exact intended conversation and people, including the actor.
+    #[cfg(any(unix, test))]
     pub(crate) fn declare(&self, chat: &str, members: &[String]) -> Result<(), String> {
         let unique: BTreeSet<_> = members.iter().collect();
         if chat.is_empty()
