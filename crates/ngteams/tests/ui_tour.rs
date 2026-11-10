@@ -61,6 +61,7 @@ use teams_ui::settings::VideoEffect;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::sidebar::Sidebar;
+use teams_ui::update::UpdateStatus;
 use teams_ui::view::Root;
 use teams_ui::window::KitRoot;
 use teams_ui::{event_form, picture_viewer};
@@ -184,7 +185,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 248] = [
+const STEPS: [Step; 5 + 255] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -198,7 +199,19 @@ const STEPS: [Step; 5 + 248] = [
         );
         shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
     }),
-    ("chat-hover-theirs", |shell, _, cx| hover_last(shell, false, cx)),
+    // the title bar's update button (`teams_ui::update`), its states as the app's updater sets them
+    ("update-available", |_, _, cx| {
+        update_shown(available(), cx);
+    }),
+    ("update-downloading", |_, _, cx| update_shown(downloading(), cx)),
+    ("update-ready", |_, _, cx| {
+        update_shown(UpdateStatus::Ready(TOUR_RELEASE.into()), cx);
+    }),
+    ("update-failed", |_, _, cx| update_shown(update_failed(), cx)),
+    ("chat-hover-theirs", |shell, _, cx| {
+        update_shown(UpdateStatus::None, cx);
+        hover_last(shell, false, cx);
+    }),
     ("chat-hover-mine", |shell, _, cx| hover_last(shell, true, cx)),
     ("chat-actions", |shell, window, cx| {
         hover_none(shell, cx);
@@ -898,7 +911,13 @@ const STEPS: [Step; 5 + 248] = [
         shell.update(cx, |shell, cx| shell.show_chats(window, cx));
         select_last_message(shell, window, cx);
     }),
+    ("update-available-dark", |_, _, cx| {
+        update_shown(available(), cx);
+    }),
+    ("update-downloading-dark", |_, _, cx| update_shown(downloading(), cx)),
+    ("update-failed-dark", |_, _, cx| update_shown(update_failed(), cx)),
     ("chat-dark-compose", |shell, window, cx| {
+        update_shown(UpdateStatus::None, cx);
         type_in_compose(shell, "Lunch at noon?\nThe usual place, or the new one?", window, cx);
     }),
     ("chat-dark-compose-expanded", |shell, window, cx| {
@@ -3128,6 +3147,33 @@ fn show_page(shell: &Entity<Shell>, page: Page, cx: &mut App) {
 }
 
 /// The a–b chat shown in the catalog's theme `key`, whatever the system says.
+/// The made-up release the update steps show.
+const TOUR_RELEASE: &str = "0.1.0.13";
+
+fn update_shown(status: UpdateStatus, cx: &mut App) {
+    teams_ui::update::set_status(status, cx);
+}
+
+fn available() -> UpdateStatus {
+    UpdateStatus::Available(TOUR_RELEASE.into())
+}
+
+fn downloading() -> UpdateStatus {
+    UpdateStatus::Downloading {
+        version: TOUR_RELEASE.into(),
+        percent: 42,
+    }
+}
+
+fn update_failed() -> UpdateStatus {
+    UpdateStatus::Failed {
+        version: TOUR_RELEASE.into(),
+        reason: "There isn't enough free space in /home/you/.local/opt for the update (it needs about 255 MB). \
+                 Nothing was changed."
+            .into(),
+    }
+}
+
 fn show_chat_in_theme(shell: &Entity<Shell>, key: &'static str, window: &mut Window, cx: &mut App) {
     let model = shell.read(cx).settings().clone();
     model.update(cx, |model, cx| {

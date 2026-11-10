@@ -139,6 +139,12 @@ Its key hashes the pinned digest, the exact Ubuntu package versions copied and t
 on its own `web-engine-<key>` prerelease (never latest), and reused while the key is unchanged: a release compiles
 that exact file's URL, size and SHA-256 into the app, so a published archive is never replaced.
 
+The build compiles the release's version into the app (`NGTEAMS_RELEASE_VERSION`), and each package carries
+`usr/share/ngteams/release` (that version) and `usr/share/ngteams/update-format` (how it installs: `linux-archive`,
+`linux-appimage`, `linux-deb`, `linux-rpm`, `linux-pacman`). The installed app's updater (`crates/teams-update`) reads
+them to pick the asset of a newer release that replaces it. A Windows package adds its own format word and install
+step there.
+
 `build` runs the tests of the packaging scripts, builds, packages and smoke-tests: the build identity in the archive,
 the AppImage and the installed `.deb`, `--install-web-engine` into a private `XDG_DATA_HOME`, `ngteams-web --probe`
 on that installed runtime with the build's WPE prefix moved away, and `apt` installing the `.deb`. It holds only a

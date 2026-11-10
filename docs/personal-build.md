@@ -100,6 +100,16 @@ An agent may freely drive lab accounts in their sandbox after the per-run check,
 echo service and the user's own account. The user's own account may participate when the user drives it; the agent
 still does not sign in or drive that personal account in sending mode. Follow [the lab rule](lab-rules.md).
 
+## Updates
+
+A copy installed from a release package updates itself from GitHub's releases (`crates/teams-update`,
+`crates/ngteams/src/update.rs`): an anonymous check of the latest release an hour, no token or account data sent,
+and the title bar's Install update downloads the matching asset, verifies it against `SHA256SUMS`, installs it (a system
+package through `pkexec` and its package manager) and restarts. The restart waits while a call is up or a message is
+unsent. A source build (`scripts/install.sh`), a lab build, a `test-support` build and a read-only run never check:
+only a build the release workflow made knows its release version. Agents test the updater against a local fake feed
+and temporary installations only, never the user's installed copy.
+
 ## `ngteamsctl`
 
 The installer puts `ngteamsctl` beside `ngteams` (`~/.local/lib/ngteams/`, linked from `~/.local/bin/`) with its

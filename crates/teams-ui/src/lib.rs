@@ -154,6 +154,7 @@ pub mod theme;
 pub mod trace;
 pub mod translate;
 pub mod tray;
+pub mod update;
 pub mod video;
 pub mod video_player;
 pub mod view;

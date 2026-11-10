@@ -139,6 +139,8 @@ struct Slot {
 pub struct Desktop {
     parts: DesktopParts,
     window: Option<WindowHandle<KitRoot>>,
+    /// The window's root view, read without the window: a click's handler runs while GPUI holds its window.
+    root: Option<WeakEntity<Root>>,
     /// The accounts, the first one's slot first.
     slots: Vec<Slot>,
     accounts: Entity<Accounts>,
@@ -222,6 +224,7 @@ impl Desktop {
         let mut this = Self {
             parts,
             window: None,
+            root: None,
             slots: Vec::new(),
             accounts,
             tray,
@@ -477,6 +480,21 @@ impl Desktop {
         &self.slots[0].call_alert
     }
 
+    /// What holds an update's restart up now ([`crate::update::Waiting`]): any account's call, up or ringing, then a
+    /// message any account's box holds unsent in the window.
+    #[must_use]
+    pub fn update_waiting(&self, cx: &App) -> Option<crate::update::Waiting> {
+        if self.slots.iter().any(|slot| slot.shell.models.calls.read(cx).busy()) {
+            return Some(crate::update::Waiting::Call);
+        }
+        let unsent = self
+            .root
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .is_some_and(|root| root.read(cx).shells().iter().any(|shell| shell.read(cx).has_unsent(cx)));
+        unsent.then_some(crate::update::Waiting::Unsent)
+    }
+
     /// The tray item's total.
     #[must_use]
     pub fn tray(&self) -> &Entity<Tray> {
@@ -591,6 +609,11 @@ impl Desktop {
             None => window::open(cx, app_id, title, self.parts.shell.clone())?,
         };
         self.window = Some(window);
+        self.root = window
+            .update(cx, |kit, _, _| kit.view().clone().downcast::<Root>().ok())
+            .ok()
+            .flatten()
+            .map(|root| root.downgrade());
         cx.notify();
         Ok(window)
     }
@@ -673,6 +696,7 @@ impl Desktop {
             return;
         }
         self.window = None;
+        self.root = None;
         self.parts.shell.trace.record(&TraceLine::new("window", "closed"));
         cx.notify();
         // a call's window keeps the app until it closes too

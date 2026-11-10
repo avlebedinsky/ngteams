@@ -103,7 +103,7 @@ Every release is on the [releases page](https://github.com/nickalie/ngteams/rele
 | Anything with glibc 2.39 or newer | `ngteams-*-linux-x86_64.AppImage` | `chmod +x` it and run it |
 | | `ngteams-*-linux-x86_64.tar.gz` | unpack it and run `ngteams/AppRun` |
 
-To update, install the newer package the same way.
+**Updates**: ngteams checks for a newer release once an hour. When there is one, **Install update** appears in its title bar: select it and ngteams downloads the release, checks it against the release's `SHA256SUMS`, installs it and restarts. A `.deb`, `.rpm` or Arch package asks for your password first. If a call is going on or you have a message you haven't sent, the restart waits until you select **Restart to update**. To update by hand, install the newer package the same way. The unpacked `.tar.gz` (or an extracted AppImage) updates itself only while it stays in its own folder named `ngteams`.
 
 **The sign-in window** runs on WPE WebKit 2.54 or newer. If your system has it (the Arch package installs it, Debian testing and openSUSE Tumbleweed have it), ngteams uses it. Otherwise it downloads a verified copy of about 120 MB once, the first time you sign in.
 
@@ -129,7 +129,7 @@ git clone https://github.com/nickalie/ngteams.git && cd ngteams
 scripts/install.sh
 ```
 
-The app installs into `~/.local`; the first build downloads about 150 MB of call components. Other distributions need the equivalent packages, including WPE WebKit 2.54 or newer. To update, run `git pull && scripts/install.sh` in that folder.
+The app installs into `~/.local`; the first build downloads about 150 MB of call components. Other distributions need the equivalent packages, including WPE WebKit 2.54 or newer. A build from source doesn't update itself: to update, run `git pull && scripts/install.sh` in that folder.
 
 ## Getting started
 
@@ -174,6 +174,7 @@ The [full command list](docs/development.md#ngteamsctl) covers chats, calls, the
 - There's no ngteams server or ngteams account. The app talks to Teams directly as you.
 - Your messages and settings are stored on your computer, and your sign-in is kept in your desktop keyring.
 - Your camera starts off, and only you can turn it on.
+- The update check asks GitHub for ngteams' latest release. It sends no account data and no sign-in, only the app's name and version.
 - If you turn on translation or AI summaries, or ask for a correction, that text goes to the tool you picked and its provider. A correction also sends the chat's recent messages.
 - Logs at the debug level contain message text, so don't post them publicly.
 

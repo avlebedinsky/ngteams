@@ -34,24 +34,20 @@ pub fn build_refusal(
     (!marked(installed)).then_some(UNMARKED)
 }
 
+/// Whether this binary was built with any crate's test-support (`cargo test`, `--all-targets`, `--all-features`).
+#[must_use]
+pub fn test_support() -> bool {
+    teams_proto::test_support_enabled() || teams_signin::test_support_enabled() || teams_update::test_support_enabled()
+}
+
 /// The initial gate, independent of app/broker mode so the inherited WPE worker can start.
 #[must_use]
 pub fn refusal() -> Option<&'static str> {
-    build_refusal(
-        teams_proto::test_support_enabled() || teams_signin::test_support_enabled(),
-        INSTALLED,
-        LAB_BUILD,
-        marked(LAB_BUILD),
-    )
+    build_refusal(test_support(), INSTALLED, LAB_BUILD, marked(LAB_BUILD))
 }
 
 /// The strict gate after CLI parsing: lab-marked binaries may only run an explicitly selected lab mode.
 #[must_use]
 pub fn refusal_for(lab: bool) -> Option<&'static str> {
-    build_refusal(
-        teams_proto::test_support_enabled() || teams_signin::test_support_enabled(),
-        INSTALLED,
-        LAB_BUILD,
-        lab,
-    )
+    build_refusal(test_support(), INSTALLED, LAB_BUILD, lab)
 }

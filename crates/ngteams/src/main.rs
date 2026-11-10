@@ -61,6 +61,12 @@ enum Outcome {
     },
     /// Lab sign-in keeps the broker and trace available for this same process's next image.
     LabRestart(ngteams::restart::RestartDescriptors),
+    /// An update is in (`ngteams::update`): the process runs `executable`, its new version, with this run's arguments
+    /// (the link it `opened` left out, as for [`Outcome::Restart`]).
+    Update {
+        executable: PathBuf,
+        opened: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -111,6 +117,11 @@ fn main() -> ExitCode {
                 .args(restart_args(std::env::args_os().skip(1), opened.as_deref()))
                 .exec()
         }),
+        Ok(Outcome::Update { executable, opened }) => updated(&executable, &mut |command| {
+            command
+                .args(restart_args(std::env::args_os().skip(1), opened.as_deref()))
+                .exec()
+        }),
         Ok(Outcome::LabRestart(descriptors)) => {
             restarted(&mut |command| descriptors.exec(command.args(std::env::args_os().skip(1))))
         }
@@ -148,6 +159,21 @@ fn restarted(exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// The new version run by `exec` once an update is in, without the AppImage runtime's variables (the new AppImage's
+/// runtime sets them again); `exec` returns only when it couldn't.
+fn updated(executable: &Path, exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
+    let mut command = Command::new(executable);
+    for variable in ngteams::update::APPIMAGE_ENV {
+        command.env_remove(variable);
+    }
+    let error = exec(&mut command);
+    eprintln!(
+        "teams: the update is installed, but it can't start ({error}): start {} yourself",
+        executable.display()
+    );
+    ExitCode::FAILURE
+}
+
 /// The arguments a restart runs with: this run's (`args`), the link it `opened` left out.
 fn restart_args(args: impl Iterator<Item = OsString>, opened: Option<&str>) -> Vec<OsString> {
     args.filter(|arg| opened.is_none_or(|link| arg.as_os_str() != link))
@@ -168,7 +194,9 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
         return handed;
     }
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
-    run_setup(cli, reach, setup, ViewTrace::off(), ctl)
+    // the user's own app, installed from a release, updates itself; no other mode does
+    let updater = ngteams::update::for_this_run(&setup.paths);
+    run_setup(cli, reach, setup, ViewTrace::off(), ctl, updater)
 }
 
 /// How this launch ends once handed off: `None` when nobody took it, so it starts the app.
@@ -221,7 +249,14 @@ fn personal_ctl(cli: &Cli) -> Option<PathBuf> {
     }
 }
 
-fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Option<PathBuf>) -> Result<Outcome, String> {
+fn run_setup(
+    cli: &Cli,
+    reach: Reach,
+    setup: Setup,
+    trace: ViewTrace,
+    ctl: Option<PathBuf>,
+    updater: Option<ngteams::update::Updater>,
+) -> Result<Outcome, String> {
     if let Some(upn) = cli.forget.as_deref() {
         forget(&setup, upn)?;
         return Ok(Outcome::Quit);
@@ -264,6 +299,8 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Optio
     let restart = Rc::new(Cell::new(false));
     let failed = Rc::new(Cell::new(false));
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
+    let update = Rc::new(Cell::new(None));
+    let update_in_app = Rc::clone(&update);
     // a link this launch was given with no app to hand it to (only the personal app takes one: `Cli`)
     let link = cli.url.clone();
     let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
@@ -283,11 +320,11 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Optio
             trace: Arc::new(trace),
             ctl,
         };
-        if let Err(failure) = app::launch(cx, launch) {
-            eprintln!("teams: the window can't be opened: {}", failure.error);
-            failed_in_app.set(true);
-            app::quit_after(failure.stopped, cx);
+        let Some(launched) = launched_or_said(launch, &failed_in_app, cx) else {
             return;
+        };
+        if let Some(updater) = updater {
+            start_updates(updater, &launched, update_in_app, cx);
         }
         if let Some(url) = link {
             app::open_link(url, cx);
@@ -301,12 +338,54 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace, ctl: Optio
         return Err("the window couldn't be opened".to_owned());
     }
     // the link was opened in this run: a sign-in's restart doesn't show its pre-join again
-    let opened = cli.url.clone();
-    Ok(if restart.get() {
-        Outcome::Restart { opened }
-    } else {
-        Outcome::Quit
-    })
+    Ok(ended(restart.get(), update.take(), cli.url.clone()))
+}
+
+/// How a run that opened its window ended: into an update's new version, signed in again, or quit.
+fn ended(restart: bool, update: Option<PathBuf>, opened: Option<String>) -> Outcome {
+    match (update, restart) {
+        (Some(executable), _) => Outcome::Update { executable, opened },
+        (None, true) => Outcome::Restart { opened },
+        (None, false) => Outcome::Quit,
+    }
+}
+
+/// The app launched over `launch`, or why its window can't be opened said, `failed` set and the engines' shutdown
+/// followed by the quit.
+fn launched_or_said<S: teams_auth::secrets::SecretStore + 'static>(
+    launch: Launch<S>,
+    failed: &Cell<bool>,
+    cx: &mut App,
+) -> Option<ngteams::app::Launched> {
+    match app::launch(cx, launch) {
+        Ok(launched) => Some(launched),
+        Err(failure) => {
+            eprintln!("teams: the window can't be opened: {}", failure.error);
+            failed.set(true);
+            app::quit_after(failure.stopped, cx);
+            None
+        }
+    }
+}
+
+/// The app's updates (`ngteams::update`) for the window `launched`: its restart waits on the desktop's calls and
+/// drafts, and its program goes to `restart_into` before the app quits.
+fn start_updates(
+    updater: ngteams::update::Updater,
+    launched: &ngteams::app::Launched,
+    restart_into: Rc<Cell<Option<PathBuf>>>,
+    cx: &mut App,
+) {
+    ngteams::update::start(
+        ngteams::update::Started {
+            updater,
+            holds: ngteams::update::holds(launched.desktop.downgrade()),
+            restart: restart_into,
+            quit: Rc::new(app::quit),
+            first_check: Some(ngteams::update::FIRST_CHECK),
+        },
+        cx,
+    );
 }
 
 /// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
@@ -386,7 +465,7 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
         }
     }
     // the control socket only where its runner says (its state dir), never the personal one
-    match run_setup(cli, Reach::Sandbox, setup, trace, mode.ctl_socket.clone())? {
+    match run_setup(cli, Reach::Sandbox, setup, trace, mode.ctl_socket.clone(), None)? {
         Outcome::Restart { .. } => Ok(Outcome::LabRestart(descriptors)),
         outcome => Ok(outcome),
     }

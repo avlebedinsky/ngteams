@@ -20,6 +20,7 @@ members = [
     "crates/teams-store",
     "crates/teams-trouter",
     "crates/teams-web-engine",
+    "crates/teams-update",
     "crates/teams-ui",
     "crates/teams-wpe",
     "crates/teams-wpe-client",
@@ -49,6 +50,7 @@ default-members = [
     "crates/teams-store",
     "crates/teams-trouter",
     "crates/teams-web-engine",
+    "crates/teams-update",
     "crates/teams-ui",
     "crates/teams-wpe",
     "crates/teams-wpe-client",
@@ -99,6 +101,8 @@ teams-ui = { path = "crates/teams-ui" }
 # its own, its frames in shared memory and the window's input forwarded to it
 teams-wpe = { path = "crates/teams-wpe" }
 teams-web-engine = { path = "crates/teams-web-engine" }
+# the installed app's updates from its GitHub releases: checked, downloaded, verified and installed
+teams-update = { path = "crates/teams-update" }
 teams-wpe-client = { path = "crates/teams-wpe-client" }
 # the gir bindings `teams-wpe` is written over (taken from ngterm, MIT; generated, so they set their own lints)
 wpe-javascriptcore-sys = { path = "crates/wpe-javascriptcore-sys" }

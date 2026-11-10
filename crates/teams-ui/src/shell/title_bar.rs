@@ -10,6 +10,8 @@
 //! - **The launcher** lists the app's own places (Chat, Calendar, Settings), as Teams' lists its apps.
 //! - **Settings and more**: the settings, the zoom (the base font size: Ctrl+=, Ctrl+-, Ctrl+0) and "Copy
 //!   diagnostics".
+//! - **The app's update** ([`crate::update`]), right of the search while there is one: Install update, its progress,
+//!   Restart to update, or Update failed.
 //!
 //! Traced: `title-bar back` and `forward` (the place gone to, by kind), `list-pane hidden`/`shown`.
 
@@ -240,7 +242,8 @@ impl Shell {
                     .min_w_0()
                     .child(self.search_box.clone()),
             )
-            .child(drag_area().min_w(px(8.0)));
+            .child(drag_area().min_w(px(8.0)))
+            .children(Self::update_button(palette, cx));
         let right = div()
             .w(px(RIGHT_WIDTH))
             .flex_none()
@@ -265,6 +268,40 @@ impl Shell {
             .child(center)
             .child(right)
             .into_any_element()
+    }
+
+    /// The app's update, while there is one to show ([`crate::update`]): a press the restart waits on says why.
+    fn update_button(palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shell = cx.weak_entity();
+        crate::update::button(
+            palette,
+            move |_, _, cx| {
+                if let Some(waiting) = crate::update::press(cx) {
+                    let _ = shell.update(cx, |shell, cx| shell.show_toast(waiting.says(), cx));
+                }
+            },
+            cx,
+        )
+    }
+
+    /// Whether a box of this account holds a message not sent yet (a chat's, a channel's or a thread's, New
+    /// message's): an update's restart waits for it ([`crate::update::Waiting::Unsent`]).
+    #[must_use]
+    pub fn has_unsent(&self, cx: &App) -> bool {
+        let kept = self.drafts.values().any(|compose| compose.read(cx).has_draft(cx));
+        let chat = self
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.read(cx).compose().read(cx).has_draft(cx));
+        let channel = self
+            .channel
+            .as_ref()
+            .is_some_and(|(view, _)| !view.read(cx).drafts(cx).is_empty());
+        let new_chat = self
+            .new_chat
+            .as_ref()
+            .is_some_and(|(view, _)| view.read(cx).compose(cx).read(cx).has_draft(cx));
+        kept || chat || channel || new_chat
     }
 
     /// The app launcher: the app's own places, as Teams lists its apps.

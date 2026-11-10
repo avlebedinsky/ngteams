@@ -41,6 +41,8 @@ teams-signin.workspace = true
 teams-wpe-client.workspace = true
 # `--install-web-engine`
 teams-web-engine.workspace = true
+# the installed app's updates from its GitHub releases (`ngteams::update`)
+teams-update.workspace = true
 # `ngteams --forget` takes the account's engine lock before it deletes anything
 teams-store.workspace = true
 # the views and the bridge over the engine
@@ -77,6 +79,8 @@ teams-proto = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 wiremock.workspace = true
+# the updates' flow against a local fake release feed (`tests/support/update.rs`)
+teams-update = { workspace = true, features = ["test-support"] }
 
 [[test]]
 name = "window"

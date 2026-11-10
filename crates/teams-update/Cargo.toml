@@ -1,0 +1,31 @@
+[package]
+name = "teams-update"
+description = "The installed app's updates: GitHub's latest release checked, its asset for this installation downloaded and verified against SHA256SUMS, installed and run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# A release feed over plain HTTP on the loopback (`Source::local`), for tests of the updater and its callers; shipped
+# builds never enable it, and a binary built with it refuses to run (`ngteams::refusal`).
+test-support = []
+
+[dependencies]
+# the release archive (`.tar.gz`) unpacked into its stage
+flate2.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+# GitHub's API and release downloads: HTTPS only, no proxy, no credentials (as teams-web-engine's download)
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

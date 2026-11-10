@@ -178,7 +178,10 @@ struct OnDesktop {
 
 impl OnDesktop {
     fn start() -> Self {
-        let rig = seeded();
+        Self::start_on(seeded())
+    }
+
+    fn start_on(rig: Rig) -> Self {
         let written = Written::default();
         let shell = parts::parts(&rig, Settings::default(), Arc::new(ViewTrace::new(written.clone())));
         let server = Arc::new(FakeServer::default());
@@ -583,4 +586,64 @@ fn a_refused_bus_connection_reports_why_and_leaves_the_open_window_usable() {
     assert_eq!(d.window(), Some(window));
     d.tray(TrayEvent::Open);
     assert!(d.asked.lock().unwrap().is_empty());
+}
+
+/// What holds an update's restart up (`teams_ui::update`): a message typed and not sent in any account's box, then a
+/// call ringing or up.
+#[test]
+fn an_updates_restart_waits_for_an_unsent_message_and_for_a_call() {
+    use teams_ui::editor::doc::{Block, Doc};
+    use teams_ui::update::Waiting;
+    let rig = Rig::start_with(|cx| teams_ui::Models::with_calls(None, cx));
+    rig.core
+        .conversations
+        .lock()
+        .unwrap()
+        .push(chat(AB, ConversationKind::OneToOne, None));
+    let d = OnDesktop::start_on(rig);
+    let waiting = |d: &OnDesktop| d.rig.cx.read(|cx| d.desktop.read(cx).update_waiting(cx));
+    assert_eq!(waiting(&d), None, "no window, nothing typed");
+    let window = d.open();
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.open_chat(AB.to_owned(), cx)));
+    d.rig.cx.run_until_parked();
+    assert_eq!(waiting(&d), None);
+    let draft = |text: Option<&str>| {
+        d.rig.cx.update(|cx| {
+            let root = window::content(window, cx).unwrap();
+            let shell = root.read(cx).shell().unwrap().clone();
+            let compose = shell.read(cx).chat().unwrap().read(cx).compose().clone();
+            let editor = compose.read(cx).editor().clone();
+            let doc = text.map_or_else(Doc::default, |text| Doc::new(vec![Block::paragraph(text)]));
+            editor.update(cx, |editor, cx| editor.set_doc(doc, cx));
+        });
+    };
+    draft(Some("Lunch at noon?"));
+    assert_eq!(waiting(&d), Some(Waiting::Unsent));
+    // kept while another place is shown
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.show_calendar_of(LAB_A, cx)));
+    d.rig.cx.run_until_parked();
+    assert_eq!(waiting(&d), Some(Waiting::Unsent));
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.open_chat(AB.to_owned(), cx)));
+    d.rig.cx.run_until_parked();
+    draft(None);
+    assert_eq!(waiting(&d), None);
+    // a call ringing holds it up too, before anything typed
+    d.rig.send(Event::CallingRegistration(RegistrationReport::Registered));
+    d.rig.send(Event::IncomingCall(teams_core::IncomingCall {
+        call: teams_core::CallId::for_tests(1),
+        caller: teams_proto::Mri::new(LAB_B),
+        caller_name: Some("Bee".to_owned()),
+        group_chat: None,
+    }));
+    d.rig.cx.run_until_parked();
+    assert_eq!(waiting(&d), Some(Waiting::Call));
+    // the window closed: its boxes are gone with it, the call still holds
+    d.close(window);
+    assert_eq!(waiting(&d), Some(Waiting::Call));
 }

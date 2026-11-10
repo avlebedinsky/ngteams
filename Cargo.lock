@@ -7380,6 +7380,7 @@ dependencies = [
  "teams-store",
  "teams-trouter",
  "teams-ui",
+ "teams-update",
  "teams-web-engine",
  "teams-wpe-client",
  "tempfile",
@@ -11413,6 +11414,21 @@ dependencies = [
  "ui-sandbox",
  "zbus",
  "zip 9.0.5",
+]
+
+[[package]]
+name = "teams-update"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq 3.5.1",
 ]
 
 [[package]]

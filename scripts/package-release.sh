@@ -57,6 +57,16 @@ done
 
 python3 "$repo/scripts/check-linux-package.py" --prepare "$root"
 
+# The app's updater (crates/teams-update) reads the release this tree is and how it was installed: the marker is
+# rewritten for each package made from the tree below.
+install -d -m 0755 "$root/usr/share/ngteams"
+printf '%s\n' "$version" > "$root/usr/share/ngteams/release"
+mark() {
+  printf '%s\n' "$1" > "$root/usr/share/ngteams/update-format"
+}
+mark linux-archive
+chmod 0644 "$root/usr/share/ngteams/release" "$root/usr/share/ngteams/update-format"
+
 tar -C "$work" -czf "$dist/ngteams-$version-linux-x86_64.tar.gz" ngteams
 
 download() {
@@ -98,6 +108,11 @@ download "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nf
   "$work/nfpm.tar.gz" "$NFPM_X86_64_SHA256"
 tar -xf "$work/nfpm.tar.gz" -C "$work" nfpm
 for format in deb rpm archlinux; do
+  case "$format" in
+    deb) mark linux-deb ;;
+    rpm) mark linux-rpm ;;
+    archlinux) mark linux-pacman ;;
+  esac
   (cd "$repo" && "$work/nfpm" package --config "$work/nfpm.yaml" --packager "$format" --target "$dist/")
 done
 
@@ -106,5 +121,6 @@ download "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETO
 download "https://github.com/AppImage/type2-runtime/releases/download/$APPIMAGE_RUNTIME_VERSION/runtime-x86_64" \
   "$work/appimage-runtime" "$APPIMAGE_RUNTIME_X86_64_SHA256"
 chmod +x "$work/appimagetool.AppImage"
+mark linux-appimage
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$work/appimagetool.AppImage" \
   --runtime-file "$work/appimage-runtime" --no-appstream "$root" "$dist/ngteams-$version-linux-x86_64.AppImage"

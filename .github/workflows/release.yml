@@ -129,6 +129,8 @@ jobs:
           PKG_CONFIG_PATH: ${{ env.NGTEAMS_RELEASE_WPE }}/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ env.NGTEAMS_RELEASE_WPE }}/lib
           TEAMS_PERSONAL_INSTALL: "1"
+          # the version the app's updater compares GitHub's latest release with (crates/teams-update)
+          NGTEAMS_RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           cargo build --locked --release -p ngteams -p teams-wpe --bin ngteams --bin ngteams-web
           cargo build --locked --release -p teams-ctl --bin ngteamsctl
@@ -157,6 +159,9 @@ jobs:
           done
           identity="$(APPIMAGE_EXTRACT_AND_RUN=1 "dist/ngteams-$VERSION-linux-x86_64.AppImage" --build-identity)"
           [[ "$identity" == "$expected" ]] || { echo "::error::the AppImage is '$identity', expected '$expected'"; exit 1; }
+          # what the updater reads: the release this tree is and how it was installed
+          [[ "$(cat "$SMOKE/ngteams/usr/share/ngteams/release")" == "$VERSION" ]]
+          [[ "$(cat "$SMOKE/ngteams/usr/share/ngteams/update-format")" == linux-archive ]]
       - name: Install the runtime with the packaged app
         run: |
           XDG_DATA_HOME="$SMOKE/data" "$SMOKE/ngteams/usr/bin/ngteams" --install-web-engine "dist/$WEB_ENGINE_ARCHIVE"
@@ -180,6 +185,8 @@ jobs:
           [[ "$(dpkg-query -W -f '${Version}' ngteams)" == "${VERSION}-1" ]]
           identity="$(/usr/bin/ngteams --build-identity)"
           [[ "$identity" == "$WORKSPACE_VERSION"$'\n'"$NGTEAMS_BUILD_COMMIT" ]] || { echo "::error::the .deb's ngteams is '$identity'"; exit 1; }
+          [[ "$(cat /opt/ngteams/usr/share/ngteams/release)" == "$VERSION" ]]
+          [[ "$(cat /opt/ngteams/usr/share/ngteams/update-format)" == linux-deb ]]
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
