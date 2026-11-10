@@ -134,9 +134,11 @@ fn sources(dirs: &[&str]) -> Vec<(PathBuf, String)> {
                 }
                 continue;
             }
-            let wanted = path
-                .extension()
-                .is_some_and(|extension| ["rs", "toml", "sh"].iter().any(|wanted| extension == *wanted));
+            let wanted = path.extension().is_some_and(|extension| {
+                ["rs", "toml", "sh", "ps1", "yml", "yaml"]
+                    .iter()
+                    .any(|wanted| extension == *wanted)
+            });
             if let (true, Ok(text)) = (wanted, fs::read_to_string(&path)) {
                 found.push((path, text));
             }
@@ -153,7 +155,7 @@ fn holding(dirs: &[&str], needle: &str) -> Vec<String> {
         .filter(|(_, text)| text.contains(needle))
         .map(|(path, _)| {
             let path = path.canonicalize().unwrap();
-            path.strip_prefix(&base).unwrap().display().to_string()
+            path.strip_prefix(&base).unwrap().to_string_lossy().replace('\\', "/")
         })
         .collect();
     found.sort();
@@ -161,25 +163,60 @@ fn holding(dirs: &[&str], needle: &str) -> Vec<String> {
 }
 
 #[test]
-fn only_the_install_script_sets_the_install_marker_and_only_this_crate_reads_it() {
+fn lab_runners_clear_the_install_marker_before_building() {
     let marker = ["TEAMS_PERSONAL", "_INSTALL"].concat();
     let runner = fs::read_to_string(root().join("scripts/run-lab.sh")).unwrap();
     let unset = format!("env -u {marker} ");
-    assert!(
-        runner.contains(&unset),
-        "the lab runner clears an inherited install marker"
-    );
+    assert!(runner.contains(&unset));
     assert!(
         !runner.replace(&unset, "").contains(&marker),
-        "the lab runner only clears the marker"
+        "the Linux runner only clears it"
     );
-    let mut uses = holding(&["crates", "scripts"], &marker);
-    uses.retain(|file| file != "scripts/run-lab.sh");
-    assert_eq!(uses, ["crates/ngteams/src/refusal.rs", "scripts/install.sh"]);
+    let windows = fs::read_to_string(root().join("scripts/lib/windows-runner.ps1")).unwrap();
+    let save = format!("$previousInstall = $env:{marker}");
+    let clear = format!("Remove-Item Env:{marker} -ErrorAction SilentlyContinue");
+    let restore = format!("$env:{marker} = $previousInstall");
+    let build = windows.find("& $runner build").unwrap();
+    assert!(windows.find(&save).unwrap() < windows.find(&clear).unwrap());
+    assert!(windows.find(&clear).unwrap() < build && build < windows.find(&restore).unwrap());
+    let remaining = windows.replace(&save, "").replace(&clear, "").replace(&restore, "");
+    assert!(
+        !remaining.contains(&marker),
+        "the Windows runner only clears and restores it"
+    );
+}
+
+#[test]
+fn the_install_marker_is_confined_to_refusals_runners_and_authorized_builders() {
+    let marker = ["TEAMS_PERSONAL", "_INSTALL"].concat();
+    assert_eq!(
+        holding(&["crates", "scripts", ".github/workflows"], &marker),
+        [
+            ".github/workflows/release.yml",
+            "crates/ngteams/src/refusal.rs",
+            "crates/teams-runner/src/windows.rs",
+            "scripts/install.sh",
+            "scripts/lib/windows-runner.ps1",
+            "scripts/run-lab.sh",
+        ]
+    );
     let refusal = fs::read_to_string(root().join("crates/ngteams/src/refusal.rs")).unwrap();
     assert!(refusal.contains(&format!("option_env!(\"{marker}\")")));
+    let native = fs::read_to_string(root().join("crates/teams-runner/src/windows.rs")).unwrap();
+    assert_eq!(
+        native.matches(&marker).count(),
+        1,
+        "the native runner only reads it for its build refusal"
+    );
+    assert!(native.contains(&format!("std::env::var_os(\"{marker}\")")));
     let script = fs::read_to_string(root().join("scripts/install.sh")).unwrap();
     assert!(script.contains(&format!("{marker}=1")) && script.contains("--release -p ngteams"));
+    let release = fs::read_to_string(root().join(".github/workflows/release.yml")).unwrap();
+    assert_eq!(
+        release.matches(&format!("{marker}: \"1\"")).count(),
+        2,
+        "only the Linux and Windows release builds set it"
+    );
 }
 
 #[test]
@@ -194,7 +231,7 @@ fn the_binary_refuses_first() {
         "pin_worker",
         "Cli::parse",
         "Setup::from_env",
-        "gpui_platform",
+        "platform::application",
         "accounts::",
     ] {
         assert!(
@@ -228,11 +265,23 @@ fn only_this_crate_names_the_personal_keyring() {
 #[test]
 fn the_binary_built_with_test_support_refuses_and_touches_nothing() {
     let home = tempfile::tempdir().unwrap();
+    // Windows still needs the private runtime DLL path and the OS loader environment before main can refuse.
+    let loader = if cfg!(windows) {
+        ["PATH", "SYSTEMROOT", "WINDIR"]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let output = Command::new(env!("CARGO_BIN_EXE_ngteams"))
         .args(["--account", "someone@example.test"])
         .env_clear()
+        .envs(loader)
         .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
         .env("HOME", home.path())
+        .env("LOCALAPPDATA", home.path().join("data"))
+        .env("APPDATA", home.path().join("config"))
         .env("XDG_CONFIG_HOME", home.path().join("config"))
         .env("XDG_DATA_HOME", home.path().join("data"))
         .output()

@@ -61,7 +61,7 @@ Set-NgteamsMediaEnvironment $root
 $exes=@{}
 $targets=@(
  @('ngteams','lib','ngteams'),@('ngteams','bin','ngteams'),
- @('ngteams','test','descriptors'),@('ngteams','test','accounts_file'),@('ngteams','test','signin'),
+ @('ngteams','test','apart'),@('ngteams','test','descriptors'),@('ngteams','test','accounts_file'),@('ngteams','test','signin'),
  @('ngteams','test','read_only'),@('ngteams','test','lab_secrets'),@('ngteams','test','lab_send'),
  @('ngteams','test','lab_mode'),@('ngteams','test','lab_restart'),@('ngteams','test','ctl'),@('ngteams','test','handoff'),
  @('teams-ui','lib','teams_ui'),@('teams-ui','test','settings'),@('teams-ui','test','chat_translate'),
