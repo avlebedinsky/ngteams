@@ -59,13 +59,8 @@ $runner=Get-NgteamsRunner $root
 if($LASTEXITCODE -ne 0){throw 'Cannot prepare private application test evidence.'}
 Set-NgteamsMediaEnvironment $root
 $exes=@{}
-$targets=@(
- @('ngteams','lib','ngteams'),@('ngteams','bin','ngteams'),
- @('ngteams','test','apart'),@('ngteams','test','descriptors'),@('ngteams','test','accounts_file'),@('ngteams','test','signin'),
- @('ngteams','test','read_only'),@('ngteams','test','lab_secrets'),@('ngteams','test','lab_send'),
- @('ngteams','test','lab_mode'),@('ngteams','test','lab_restart'),@('ngteams','test','ctl'),@('ngteams','test','handoff'),
- @('teams-ui','lib','teams_ui'),@('teams-ui','test','settings'),@('teams-ui','test','chat_translate'),
- @('teams-ui','test','chat_translate_view'),@('teams-ui','test','message_correct'),@('teams-ui','test','recap_view'),
+$targets=@(@('ngteams','lib','ngteams'),@('ngteams','bin','ngteams'),@('teams-ui','lib','teams_ui'))
+$scenes=@(
  @('teams-ui','scene','chat_list_window'),
  @('teams-ui','scene','font_styles'),
  @('teams-ui','scene','notes_window'),
@@ -76,6 +71,19 @@ $targets=@(
  @('teams-ui','scene','workflows_app_window'),
  @('teams-ui','scene','channel_window')
 )
+# Keep the shared contracts complete as Cargo discovers new integration tests. The Linux compositor harnesses
+# and native Windows fixtures have their own drivers; the scene targets below use their own main functions.
+$separate=@{
+ 'ngteams'=@('window','accounts_window','call_window','ui_tour')
+ 'teams-ui'=@('kit_window','attachment_window','gpui_notification','calendar_window','desktop_bus',
+              'native_video','native_desktop','native_shell')+@($scenes|ForEach-Object {$_[2]})
+}
+foreach($package in @('ngteams','teams-ui')){
+ foreach($file in Get-ChildItem -LiteralPath "$root/crates/$package/tests" -Filter '*.rs' -File|Sort-Object Name){
+  if($file.BaseName -notin $separate[$package]){$targets+=,@($package,'test',$file.BaseName)}
+ }
+}
+$targets+=$scenes
 foreach($target in $targets){
  if(($Group -eq 'app' -and $target[0] -ne 'ngteams') -or ($Group -eq 'ui' -and ($target[0] -ne 'teams-ui' -or $target[1] -eq 'scene')) -or ($Group -eq 'scenes' -and $target[1] -ne 'scene')){continue}
  $package,$kind,$name=$target

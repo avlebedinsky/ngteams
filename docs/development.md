@@ -803,7 +803,9 @@ signed-in validation before it is ready to use.
 `pwsh -NoProfile -File scripts/test-windows-app.ps1` builds and executes the synthetic app and UI contracts in the
 authorized win11 console. `-Group app`, `-Group ui` or `-Group scenes` selects app contracts, shared model/view contracts
 or real rendered scenes. `-Only` accepts exact inventory keys such as `ngteams-test-descriptors` or
-`teams-ui-scene-font_styles` to rerun failed targets. It checks actual native descriptor
+`teams-ui-scene-font_styles` to rerun failed targets. The app and UI groups discover their shared integration tests
+from each crate's test directory, including calls, calendar and control events; Linux compositor/bus harnesses and
+the separately driven native Windows fixtures are excluded from that discovery. It checks actual native descriptor
 ownership/inheritance and restart, account/sign-in persistence, read-only and lab broker behavior, startup, control
 IPC and handoff, settings privacy and the translation/correction/recap models and views. All identities and services
 are synthetic; no installed AI tool or tenant is reached. Its evidence and executable inventory stay under a private
