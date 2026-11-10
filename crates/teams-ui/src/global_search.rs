@@ -49,6 +49,7 @@ use crate::clock::{self, HourCycle};
 use crate::icons::Glyph;
 use crate::people::{self, Picture};
 use crate::search::{self, Hit, HitTarget};
+use crate::sending::settled_row;
 use crate::switcher::matches;
 use crate::teams_list::TeamsList;
 use crate::theme::{self, Palette};
@@ -925,19 +926,9 @@ impl GlobalSearch {
         let navigation = self.navigation;
         cx.emit(GlobalSearchEvent::Toast("Opening a chat…"));
         self.opening_person = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let mut answer = reply.await.ok();
-            // A throttled or uncertain write already owns an outbox row. Watch it; never submit it again.
-            while let Some(row) = &answer {
-                if !matches!(row.state, OutboxState::Pending | OutboxState::Sending) {
-                    break;
-                }
-                let id = row.id;
-                cx.background_executor().timer(Duration::from_millis(500)).await;
-                if let Ok(Some(updated)) = core.outbox_entry(id).await {
-                    answer = Some(updated);
-                }
-            }
-            let chat = answer
+            // a throttled or uncertain write already owns an outbox row: it is watched, never submitted again
+            let chat = settled_row(core.as_ref(), reply, cx.background_executor())
+                .await
                 .filter(|row| row.state == OutboxState::Sent)
                 .and_then(|row| row.message_id);
             let _ = this.update(cx, |this, cx| {

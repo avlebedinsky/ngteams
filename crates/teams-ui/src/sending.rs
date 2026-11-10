@@ -14,12 +14,38 @@
 //!   never sent again over the newer one.
 //! - **Where**: a message post shows as a pending message of its own until its message is in the store; an edit, a
 //!   delete or a reaction shows on the message it acts on. Read receipts and a new chat's creation aren't shown.
+//! - **Waiting on one** ([`settled_row`]): a view that needs a write's outcome (a new chat made, people added) watches
+//!   its row until the outbox settles it, never writing it again.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
+use std::time::Duration;
 
-use teams_core::Command;
+use gpui::BackgroundExecutor;
+use teams_core::{Command, Reply};
 use teams_store::{OutboxEntry, OutboxKind, OutboxState};
+
+use crate::bridge::Core;
+
+/// How often a write's row is looked at while it is still going out.
+const SETTLE_EVERY: Duration = Duration::from_millis(500);
+
+/// A write's outbox row once the outbox settled it (sent, failed, denied...), none when the write was refused. A
+/// throttled or uncertain write already owns its row: it is watched, never written again.
+pub(crate) async fn settled_row(
+    core: &dyn Core,
+    reply: Reply<OutboxEntry>,
+    executor: &BackgroundExecutor,
+) -> Option<OutboxEntry> {
+    let mut row = reply.await.ok()?;
+    while matches!(row.state, OutboxState::Pending | OutboxState::Sending) {
+        executor.timer(SETTLE_EVERY).await;
+        if let Ok(Some(updated)) = core.outbox_entry(row.id).await {
+            row = updated;
+        }
+    }
+    Some(row)
+}
 
 /// Where an outbox row stands, as the view shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
