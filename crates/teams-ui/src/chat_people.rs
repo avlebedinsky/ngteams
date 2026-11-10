@@ -11,7 +11,7 @@
 //!   Down move in them, Enter takes the one highlighted (else the first), Backspace in the empty box takes the last
 //!   chip off. Each one taken is a chip with its face and a remove button; a group chat taken stands for its people.
 //!   Nobody already in the chat, nor the account, is offered. Cancel closes it; Create or Add is lit once someone is
-//!   taken.
+//!   taken and the chat's people are read (a 1:1 chat's partner known), as [`ChatPeople::can_confirm`] says.
 //! - **A group chat's history** (its "Add" only): "Don't include chat history" (Teams' default), "Include history
 //!   from the past number of days:" with its number (1 to start; digits only, and Add is off while it is empty or
 //!   0), or "Include all chat history" ([`ChatHistory`]).
@@ -228,12 +228,6 @@ impl Placed {
 
     fn holds(&self, point: gpui::Point<Pixels>) -> bool {
         self.0.get().is_some_and(|bounds| bounds.contains(&point))
-    }
-
-    /// Where it was drawn last, if it was.
-    #[must_use]
-    pub fn bounds(&self) -> Option<Bounds<Pixels>> {
-        self.0.get()
     }
 
     fn set(&self, bounds: Option<Bounds<Pixels>>) {

@@ -412,7 +412,8 @@ fn the_read_only_mode_lists_the_people_and_offers_no_add() {
 }
 
 /// A 1:1 chat's picker: a suggestion clicked under the picker's own box (the suggestions hang out of it) is taken,
-/// and the flyout and its picker stay open; a press away from them still closes the flyout.
+/// and the flyout and its picker stay open, in a window too short for them where they hang; a press away from them
+/// still closes the flyout.
 #[test]
 fn a_suggestion_clicked_below_the_picker_is_taken_and_keeps_the_flyout_open() {
     let rig = seeded();
@@ -435,6 +436,11 @@ fn a_suggestion_clicked_below_the_picker_is_taken_and_keeps_the_flyout_open() {
             .collect()
     });
     assert_eq!(offered, [LAB_C, LAB_D], "c's 1:1 chat, then the directory's d");
+    // a short window: the picker alone would fit, its suggestions not, so it is pulled up with them
+    cx.simulate_resize(size(px(1200.0), px(460.0)));
+    draw(cx);
+    let suggestions = cx.debug_bounds("chat-people-suggestions").expect("the suggestions");
+    assert!(suggestions.bottom() <= px(460.0), "in the window: {suggestions:?}");
     let picker = cx.debug_bounds("chat-people-picker").expect("the picker");
     let second = cx
         .debug_bounds("chat-people-suggestion-1")
@@ -445,6 +451,8 @@ fn a_suggestion_clicked_below_the_picker_is_taken_and_keeps_the_flyout_open() {
     assert!(cx.update(|_, cx| shell.read(cx).people().is_some()), "the flyout stays");
     assert!(cx.update(|_, cx| view.read(cx).picking()), "and its picker");
     assert_eq!(picked(&view, cx), [LAB_D]);
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    draw(cx);
     cx.simulate_click(gpui::point(px(400.0), px(700.0)), Modifiers::none());
     draw(cx);
     assert!(
