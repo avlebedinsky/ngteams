@@ -100,7 +100,7 @@ fn main() -> ExitCode {
     if let Err(error) = teams_signin::window::pin_worker() {
         eprintln!("teams: {error}");
     }
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(ngteams::cli::shell_arguments(std::env::args_os()));
     if cli.build_identity {
         println!("{}", env!("CARGO_PKG_VERSION"));
         println!("{}", option_env!("NGTEAMS_BUILD_COMMIT").unwrap_or(""));

@@ -4,10 +4,12 @@ use gpui::App;
 use teams_ui::window::PERSONAL_APP_ID;
 
 pub(super) fn desktop_id(runner: &Runner, read_only: bool, cx: &App) -> &'static str {
+    static LAB_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static READ_ONLY_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let id = if read_only {
-        "com.nickalie.ngteams.readonly"
+        READ_ONLY_ID.get_or_init(|| format!("com.nickalie.ngteams.readonly.{}", std::process::id()))
     } else if runner.setup.secrets().application() == crate::lab::LAB_KEYRING_APPLICATION {
-        "com.nickalie.ngteams.lab"
+        LAB_ID.get_or_init(|| format!("com.nickalie.ngteams.lab.{}", std::process::id()))
     } else {
         PERSONAL_APP_ID
     };

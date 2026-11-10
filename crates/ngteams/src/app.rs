@@ -33,9 +33,7 @@ use teams_core::EngineHandle;
 use teams_log::diagnostics::Source as DiagnosticsSource;
 use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent};
 use teams_ui::bus::BusError;
-use teams_ui::window::KitRoot;
-#[cfg(unix)]
-use teams_ui::window::PERSONAL_APP_ID;
+use teams_ui::window::{KitRoot, PERSONAL_APP_ID};
 use teams_ui::{
     AccountParts, Bridge, Core, Desktop, DesktopEvent, DesktopParts, LogLevel, Models, SettingsFile, SettingsModel,
     ShellParts, VideoFeed, ViewTrace,

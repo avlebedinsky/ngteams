@@ -231,7 +231,8 @@ sources are hash-audited in the Linux inventory; native whole-application covera
 gates. Wry's optional tracing features are disabled, the app logger filters third-party targets, and the worker's
 stderr goes to NUL. Only fixed Chromium error codes are forwarded; guard decisions are logged in the parent.
 
-Windows desktop shell contracts use real WinRT toast history (replacement, withdrawal and shutdown cleanup), explicit synthetic call toast actions,
+Windows desktop shell contracts require visible message/call toasts and actual body/Answer/Decline COM activation,
+reject stale/foreign arguments and use real WinRT history (replacement, withdrawal and shutdown cleanup),
 Shell_NotifyIcon and ITaskbarList3 in the authorized VM console. The native transport sources are hash-audited in
 the Linux coverage inventory because those APIs have no Linux mapping; native whole-application coverage remains
 a final Windows-port gate. Linux still measures and exercises the freedesktop notification/tray transports and the

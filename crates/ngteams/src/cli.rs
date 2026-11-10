@@ -24,6 +24,13 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+/// COM appends `-Embedding` when it starts an unpackaged Windows local server. It is a shell startup marker,
+/// not an application action: ordinary startup registers the live class factory and rejects old toast generations.
+/// Other arguments still pass through Clap, including the runner requirements for lab/read-only launches.
+pub fn shell_arguments(args: impl Iterator<Item = std::ffi::OsString>) -> impl Iterator<Item = std::ffi::OsString> {
+    args.filter(|arg| !cfg!(windows) || arg != "-Embedding")
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "ngteams",

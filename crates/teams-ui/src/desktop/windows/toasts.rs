@@ -1,5 +1,5 @@
 //! Live-process `WinRT` notifications, with explicit replacement, withdrawal and global account-safe IDs.
-use super::{Apartment, registration};
+use super::{Apartment, activation::Activator, registration};
 use crate::notify::{
     ANSWER_ACTION, DECLINE_ACTION, DEFAULT_ACTION, Notice, NoticeKind, NotificationServer, escape_markup,
 };
@@ -17,10 +17,10 @@ use windows::{
     Data::Xml::Dom::XmlDocument,
     Foundation::TypedEventHandler,
     UI::Notifications::{
-        ToastActivatedEventArgs, ToastDismissalReason, ToastDismissedEventArgs, ToastNotification,
+        ToastDismissalReason, ToastDismissedEventArgs, ToastFailedEventArgs, ToastNotification,
         ToastNotificationManager, ToastNotifier,
     },
-    core::{HSTRING, IInspectable, Interface as _},
+    core::HSTRING,
 };
 
 type Activation = (u32, String);
@@ -29,6 +29,7 @@ enum Command {
     Show(Notice, u32, oneshot::Sender<Result<u32, String>>),
     Close(u32),
     Forget(u32, Arc<AtomicBool>),
+    Activate(String),
     Stop,
 }
 /// Commands are serialized on an MTA thread. The final owner explicitly stops it, regardless of callback senders.
@@ -66,12 +67,17 @@ impl Notifications {
             .name("ngteams-toasts".into())
             .spawn(move || {
                 let result = Apartment::new().map_err(|e| e.to_string()).and_then(|apartment| {
+                    let activation_commands = callbacks.clone();
+                    let activator = Activator::register(&app_id, &registration::activator_id(&app_id), move |args| {
+                        let _ = activation_commands.send(Command::Activate(args));
+                    })
+                    .map_err(|e| e.to_string())?;
                     let registered = registration::register(&app_id, &name).map_err(|e| e.to_string())?;
                     let center = Center::new(app_id, callbacks, events).map_err(|e| e.to_string())?;
-                    Ok((apartment, registered, center))
+                    Ok((apartment, activator, registered, center))
                 });
                 match result {
-                    Ok((_apartment, _registered, mut center)) => {
+                    Ok((_apartment, _activator, _registered, mut center)) => {
                         if ready.send(Ok(())).is_ok() && opened.recv().is_ok() {
                             center.run(&queue);
                         }
@@ -108,6 +114,7 @@ impl NotificationServer for Notifications {
 struct Shown {
     toast: ToastNotification,
     live: Arc<AtomicBool>,
+    key: String,
 }
 struct Center {
     app_id: HSTRING,
@@ -118,6 +125,7 @@ struct Center {
     events: async_channel::Sender<Activation>,
     shown: HashMap<u32, Shown>,
     next: u32,
+    generation: u64,
 }
 impl Center {
     fn new(
@@ -129,11 +137,16 @@ impl Center {
         Ok(Self {
             notifier: ToastNotificationManager::CreateToastNotifierWithId(&app_id)?,
             app_id,
-            group: HSTRING::from(format!("run-{}", std::process::id())),
+            // A fresh run nonce prevents PID reuse or a crash from reviving an old call action.
+            // SAFETY: CoCreateGuid returns a value and needs no caller-owned pointers.
+            group: HSTRING::from(format!("run-{:?}", unsafe {
+                windows::Win32::System::Com::CoCreateGuid()
+            }?)),
             commands,
             events,
             shown: HashMap::new(),
             next: 0,
+            generation: 0,
         })
     }
     fn run(&mut self, queue: &mpsc::Receiver<Command>) {
@@ -151,6 +164,7 @@ impl Center {
                         self.shown.remove(&id);
                     }
                 }
+                Command::Activate(args) => self.activated(&args),
                 Command::Stop => break,
             }
         }
@@ -170,7 +184,9 @@ impl Center {
             self.next
         };
         let document = XmlDocument::new()?;
-        document.LoadXml(&HSTRING::from(xml(notice)))?;
+        self.generation += 1;
+        let key = format!("{}-{}-{}", self.group, id, self.generation);
+        document.LoadXml(&HSTRING::from(xml(notice, &key)))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         toast.SetGroup(&self.group)?;
         toast.SetTag(&HSTRING::from(id.to_string()))?;
@@ -178,25 +194,21 @@ impl Center {
         let live = Arc::new(AtomicBool::new(true));
         self.handlers(&toast, id, &live)?;
         self.notifier.Show(&toast)?;
-        if let Some(old) = self.shown.insert(id, Shown { toast, live }) {
+        if let Some(old) = self.shown.insert(id, Shown { toast, live, key }) {
             old.live.store(false, Ordering::Release);
         }
         Ok(id)
     }
     fn handlers(&self, toast: &ToastNotification, id: u32, live: &Arc<AtomicBool>) -> windows::core::Result<()> {
-        let (active, events) = (Arc::clone(live), self.events.clone());
-        toast.Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
+        let (active, commands) = (Arc::clone(live), self.commands.clone());
+        toast.Failed(&TypedEventHandler::<ToastNotification, ToastFailedEventArgs>::new(
             move |_, args| {
-                let action = args
-                    .as_ref()
-                    .and_then(|arg| arg.cast::<ToastActivatedEventArgs>().ok())
-                    .and_then(|arg| arg.Arguments().ok())
-                    .map(|arg| arg.to_string_lossy());
-                if active.load(Ordering::Acquire)
-                    && let Some(action) = action.filter(|a| valid_action(a))
-                {
-                    let _ = events.try_send((id, action));
-                }
+                let code = args.as_ref().and_then(|args| args.ErrorCode().ok()).map(|code| code.0);
+                log::warn!("Windows toast rejected ({code:x?})");
+                #[cfg(test)]
+                eprintln!("synthetic Windows toast rejected ({code:x?})");
+                active.store(false, Ordering::Release);
+                let _ = commands.send(Command::Forget(id, Arc::clone(&active)));
                 Ok(())
             },
         ))?;
@@ -212,6 +224,19 @@ impl Center {
         ))?;
         Ok(())
     }
+    fn activated(&mut self, args: &str) {
+        let Some((key, action)) = args.rsplit_once(':') else {
+            return;
+        };
+        if !valid_action(action) {
+            return;
+        }
+        if let Some((&id, shown)) = self.shown.iter().find(|(_, shown)| shown.key == key)
+            && shown.live.swap(false, Ordering::AcqRel)
+        {
+            let _ = self.events.try_send((id, action.into()));
+        }
+    }
     fn close(&mut self, id: u32) {
         if let Some(shown) = self.shown.remove(&id) {
             shown.live.store(false, Ordering::Release);
@@ -226,23 +251,25 @@ fn valid_action(action: &str) -> bool {
     matches!(action, DEFAULT_ACTION | ANSWER_ACTION | DECLINE_ACTION)
 }
 
-/// Only fixed actions are launch arguments. Display text is XML-escaped and remains plain text.
-fn xml(notice: &Notice) -> String {
+/// Only an opaque per-notice key and fixed actions are launch arguments. Display text is XML-escaped and remains plain text.
+fn xml(notice: &Notice, key: &str) -> String {
     let call = notice.kind == NoticeKind::Call;
     let scenario = if call {
-        " scenario=\"incomingCall\" duration=\"long\""
+        " scenario=\"incomingCall\" duration=\"long\" useButtonStyle=\"true\""
     } else {
         ""
     };
     let actions = if call {
-        r#"<actions><action content="Answer" arguments="answer" activationType="foreground"/><action content="Decline" arguments="decline" activationType="foreground"/></actions>"#
+        format!(
+            r#"<actions><action content="Answer" hint-buttonStyle="Success" arguments="{key}:answer" activationType="foreground"/><action content="Decline" hint-buttonStyle="Critical" arguments="{key}:decline" activationType="foreground"/></actions>"#
+        )
     } else {
-        ""
+        String::new()
     };
     // Message sounds follow Windows notification preferences; the app's ringer owns call audio.
     let audio = if call { r#"<audio silent="true"/>"# } else { "" };
     format!(
-        r#"<toast launch="default"{scenario}><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual>{actions}{audio}</toast>"#,
+        r#"<toast launch="{key}:default"{scenario}><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual>{actions}{audio}</toast>"#,
         escape_markup(&notice.summary),
         escape_markup(&notice.body)
     )

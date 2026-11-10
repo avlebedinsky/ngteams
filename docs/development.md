@@ -765,11 +765,17 @@ status and headers plus the additional restrictions. The native HTTPS contract i
 Windows desktop integration uses WinRT toasts and the native notification area rather than a session bus.
 The same notifier handles mentions, collapsed messages, translations, focused-chat suppression and notification
 settings on both platforms. Notification IDs are shared across accounts; activations are handed to the existing account/chat/channel and
-explicit Answer/Decline handlers. Windows receives fixed
-action names and numeric tags, with escaped plain display text; notification content never enters the view trace.
-The unpackaged app registers its name/icon and a matching Start-menu shortcut under its per-user AppUserModelID.
-Lab and read-only runs use separate notification IDs and temporary shortcuts, leaving the installed client’s shell registration alone. Message sounds follow Windows notification preferences; the app's ringer owns call audio.
-The running app owns its toasts and withdraws them on normal shutdown. There is no launch-on-click handler after the process exits.
+explicit Answer/Decline handlers. Windows receives fixed action names, opaque per-run/per-notice keys and numeric
+tags, with escaped plain display text; notification content never enters the view trace. The unpackaged app registers
+its name/icon, matching Start-menu shortcut and COM activation class under its per-user AppUserModelID. COM callbacks
+queue only arguments; the notification thread validates the identity, notice generation and fixed action before
+routing it. Replaced, withdrawn, foreign and unknown activations are ignored.
+Lab and read-only processes use distinct temporary identities and shortcuts, so concurrent runners do not share a
+COM endpoint or alter the installed client's shell registration. Those temporary registrations are removed on
+shutdown. Message sounds follow Windows notification preferences; the app's ringer owns call audio.
+The running app owns its toasts and withdraws them on normal shutdown. A fresh run never accepts an old call action.
+Windows’ COM `-Embedding` startup marker is filtered before argument parsing; other arguments, including all lab and
+read-only runner requirements, still pass through the ordinary command line checks.
 
 The Windows tray offers Open Teams and Quit. Its icon and taskbar overlay follow the combined unread-chat count,
 including a main window reopened from the tray; the icon re-registers after Explorer restarts. Without a tray item,
@@ -780,5 +786,10 @@ runs on dedicated threads and returns actions to GPUI; it builds no Teams reques
 explicitly authorized win11 console. It never signs in or opens a microphone or camera. Like the other native fixture
 runners, it creates only a Limited InteractiveToken task and removes that task when the bounded run ends.
 
-The Windows shell fixture currently passes its native history and tray/taskbar primitives, but on-screen toast
-delivery/activation has not passed in the VM. That remains a release gate, along with signed-in application validation.
+The shell fixture requires visible synthetic message and incoming-call toasts: body, Answer and Decline each invoke
+the native shell control and must return the exact notification ID/action through COM. UI Automation examines only
+immediate desktop children to locate toast roots, then searches their trees for the exact synthetic title. It waits
+for visible controls and stable geometry before the console helper captures that verified rectangle. A history entry
+alone cannot pass. The fixture also tests stale/foreign COM arguments, history replacement and withdrawal, tray
+callbacks and taskbar APIs. Signed-in application flows, actual tray/menu appearance and main-window lifecycle remain
+separate Windows validation gates.

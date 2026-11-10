@@ -4,7 +4,7 @@ use windows_sys::Win32::{
     Foundation::ERROR_SUCCESS,
     System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
-        RegSetValueExW,
+        RegDeleteTreeW, RegSetValueExW,
     },
 };
 
@@ -14,11 +14,15 @@ pub(super) fn wide(text: &str) -> Vec<u16> {
 
 pub(super) struct Registered {
     temporary_shortcut: Option<std::path::PathBuf>,
+    temporary_identity: Option<String>,
 }
 impl Drop for Registered {
     fn drop(&mut self) {
         if let Some(path) = &self.temporary_shortcut {
             let _ = std::fs::remove_file(path);
+        }
+        if let Some(id) = &self.temporary_identity {
+            remove_temporary_identity(id);
         }
     }
 }
@@ -47,6 +51,7 @@ pub(super) fn register(app_id: &str, name: &str) -> io::Result<Registered> {
     file.set_len(0)?;
     file.write_all(png)?;
     write_registration(app_id, name, &icon)?;
+    register_server(app_id)?;
     shortcut(app_id, name)
 }
 
@@ -70,15 +75,16 @@ fn write_registration(app_id: &str, name: &str, icon: &Path) -> io::Result<()> {
     if status != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(status.cast_signed()));
     }
-    let result =
-        set_string(key, "DisplayName", name).and_then(|()| set_string(key, "IconUri", &icon.to_string_lossy()));
+    let result = set_string(key, "DisplayName", name)
+        .and_then(|()| set_string(key, "IconUri", &icon.to_string_lossy()))
+        .and_then(|()| set_string(key, "CustomActivator", &format!("{{{:?}}}", activator_id(app_id))));
     // SAFETY: this is the one owned key returned by RegCreateKeyExW.
     unsafe {
         RegCloseKey(key);
     }
     result
 }
-fn set_string(key: HKEY, name: &str, value: &str) -> io::Result<()> {
+pub(super) fn set_string(key: HKEY, name: &str, value: &str) -> io::Result<()> {
     let (name, value) = (wide(name), wide(value));
     let bytes = u32::try_from(value.len() * 2).map_err(io::Error::other)?;
     // SAFETY: open key and terminated UTF-16 buffers alive for this call; length includes NUL.
@@ -117,8 +123,8 @@ fn shortcut(app_id: &str, name: &str) -> io::Result<Registered> {
     unsafe { link.SetPath(&exe) }.map_err(io::Error::other)?;
     // Non-personal shortcuts exist only to register their notification endpoint, never to start a sending client.
     let args = match app_id {
-        "com.nickalie.ngteams.readonly" => "--read-only",
-        "com.nickalie.ngteams.lab" => "--lab",
+        id if id.starts_with("com.nickalie.ngteams.readonly.") => "--read-only",
+        id if id.starts_with("com.nickalie.ngteams.lab.") => "--lab",
         _ => "",
     };
     // SAFETY: a fixed argument string, copied by the shell link; lab/read-only launches fail closed without a runner.
@@ -136,6 +142,14 @@ fn shortcut(app_id: &str, name: &str) -> io::Result<Registered> {
     };
     // SAFETY: live property store, canonical key and an owned variant whose value is copied by SetValue.
     unsafe { store.SetValue(&raw const key, &raw const id) }.map_err(io::Error::other)?;
+    let activator_key = windows::Win32::Foundation::PROPERTYKEY { pid: 26, ..key };
+    let clsid = activator_id(app_id);
+    // SAFETY: the GUID is valid throughout the call; the returned variant owns its copied value.
+    let activator =
+        unsafe { windows::Win32::System::Com::StructuredStorage::InitPropVariantFromCLSID(&raw const clsid) }
+            .map_err(io::Error::other)?;
+    // SAFETY: canonical System.AppUserModel.ToastActivatorCLSID property, copied into this owned shell link.
+    unsafe { store.SetValue(&raw const activator_key, &raw const activator) }.map_err(io::Error::other)?;
     // SAFETY: commits this link's property store before saving the link.
     unsafe { store.Commit() }.map_err(io::Error::other)?;
     let file: IPersistFile = link.cast().map_err(io::Error::other)?;
@@ -143,6 +157,7 @@ fn shortcut(app_id: &str, name: &str) -> io::Result<Registered> {
     unsafe { file.Save(&HSTRING::from(path.as_os_str()), true) }.map_err(io::Error::other)?;
     Ok(Registered {
         temporary_shortcut: temporary.then_some(path),
+        temporary_identity: temporary.then(|| app_id.to_owned()),
     })
 }
 
@@ -163,4 +178,61 @@ fn app_id_value(app_id: &str) -> windows::core::Result<windows::Win32::System::C
             }),
         },
     })
+}
+
+// A stable, namespace-separated class per identity keeps personal, lab and synthetic registrations apart.
+pub(super) fn activator_id(app_id: &str) -> windows::core::GUID {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(format!("ngteams.toast.activator:{app_id}"));
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    windows::core::GUID::from_u128(u128::from_be_bytes(bytes))
+}
+fn register_server(app_id: &str) -> io::Result<()> {
+    let clsid = activator_id(app_id);
+    let path = wide(&format!(r"Software\Classes\CLSID\{{{clsid:?}}}\LocalServer32"));
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: terminated string and writable out-pointer; this per-user key is closed below.
+    let status = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            std::ptr::null(),
+            &raw mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status.cast_signed()));
+    }
+    let args = match app_id {
+        id if id.starts_with("com.nickalie.ngteams.lab.") => " --lab",
+        id if id.starts_with("com.nickalie.ngteams.readonly.") => " --read-only",
+        _ => "",
+    };
+    let result = std::env::current_exe().and_then(|exe| set_string(key, "", &format!("\"{}\"{args}", exe.display())));
+    // SAFETY: the one owned handle returned above.
+    unsafe {
+        RegCloseKey(key);
+    }
+    result
+}
+
+fn remove_temporary_identity(app_id: &str) {
+    for path in [
+        format!(r"Software\Classes\AppUserModelId\{app_id}"),
+        format!(r"Software\Classes\CLSID\{{{:?}}}", activator_id(app_id)),
+    ] {
+        // SAFETY: only this run's unique per-user metadata, never the installed identity.
+        unsafe {
+            RegDeleteTreeW(HKEY_CURRENT_USER, wide(&path).as_ptr());
+        }
+    }
+    if let Some(home) = std::env::var_os("LOCALAPPDATA") {
+        let _ = std::fs::remove_dir_all(std::path::PathBuf::from(home).join("ngteams-desktop").join(app_id));
+    }
 }

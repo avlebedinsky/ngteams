@@ -1,6 +1,7 @@
 //! Native shell integration. No D-Bus fallback: toasts and the tray each own a native thread.
 //! IDs are allocated across accounts by the single toast center; activation returns only an ID/action to Desktop.
 //! Quitting removes this run's notifications, so a later launch never offers stale call actions.
+mod activation;
 pub(crate) mod registration;
 pub(crate) mod toasts;
 pub(crate) mod tray;

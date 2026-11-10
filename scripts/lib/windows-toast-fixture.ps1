@@ -18,6 +18,12 @@ function Save-NgteamsSyntheticToast([string]$Directory, [string]$Action) {
 
 function Remove-NgteamsSyntheticShellIdentity([int]$OwnedProcessId) {
     $identity='com.nickalie.ngteams.synthetic.'+$OwnedProcessId
+    # Derive exactly this fixture's class; never delete a CLSID taken from mutable shell metadata.
+    $digest=[Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('ngteams.toast.activator:'+$identity))
+    $hex=[Convert]::ToHexString($digest).Substring(0,32)
+    $activator=[guid]::ParseExact($hex,'N').ToString('B')
+    Remove-Item -LiteralPath ('HKCU:\Software\Classes\CLSID\'+$activator) -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath ('HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\'+$identity) -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath ('HKCU:\Software\Classes\AppUserModelId\'+$identity) -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA ('ngteams-desktop/'+$identity)) -Recurse -Force -ErrorAction SilentlyContinue
     $shortcut=Join-Path $env:APPDATA ('Microsoft/Windows/Start Menu/Programs/'+$identity+'.'+$OwnedProcessId+'.lnk')

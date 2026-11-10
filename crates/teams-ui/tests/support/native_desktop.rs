@@ -1,4 +1,6 @@
 //! Actual native shell contract; no Teams services or account.
+#[path = "../../src/desktop/windows/activation.rs"]
+mod activation;
 #[path = "../../src/desktop/windows/apartment.rs"]
 mod apartment;
 use apartment::Apartment;
@@ -42,15 +44,7 @@ async fn contract() {
     let (server, activations) = toasts::Notifications::start(app_id.clone(), "NGTEAMS SYNTHETIC DESKTOP".into())
         .await
         .unwrap();
-    match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(&app_id))
-        .and_then(|notifier| notifier.Setting())
-    {
-        Ok(setting) => println!("synthetic system notification setting={}", setting.0),
-        Err(error) => println!(
-            "synthetic notification setting query unavailable ({:#x})",
-            error.code().0
-        ),
-    }
+    notification_setting(&app_id);
     let (tray, events) = tray::NativeTray::start("NGTEAMS SYNTHETIC DESKTOP".into())
         .await
         .unwrap();
@@ -61,9 +55,20 @@ async fn contract() {
         summary: "NGTEAMS SYNTHETIC DESKTOP".into(),
         body: "Synthetic message <one> & two".into(),
     };
-    history_contract(&server, &app_id, &notice).await;
-    tray_contract(&tray, &events).await;
+    // SAFETY: read-only shell availability query; no notification preference is changed.
+    println!("synthetic shell notification state={:?}", unsafe {
+        windows::Win32::UI::Shell::SHQueryUserNotificationState()
+    });
+    println!(
+        "synthetic notification mode={:?}",
+        ToastNotificationManager::GetDefault().and_then(|manager| manager.NotificationMode())
+    );
     activation_contract(&server, &activations, &notice).await;
+    history_contract(&server, &app_id, &notice).await;
+    notification_setting(&app_id);
+    stale_activation_contract(&server, &activations, &app_id, &notice).await;
+    tray_contract(&tray, &events).await;
+    server.show(&notice, 0).await.unwrap();
     let history = ToastNotificationManager::History().unwrap();
     drop(server);
     wait_history(&history, &app_id, 0).await;
@@ -137,13 +142,13 @@ async fn activation_contract(
     notice: &Notice,
 ) {
     for (title, action, kind) in [
-        ("NGTEAMS SYNTHETIC ANSWER", "answer", NoticeKind::Call),
-        ("NGTEAMS SYNTHETIC DECLINE", "decline", NoticeKind::Call),
         (
             "NGTEAMS SYNTHETIC OPEN",
             teams_ui::notify::DEFAULT_ACTION,
             NoticeKind::Message,
         ),
+        ("NGTEAMS SYNTHETIC ANSWER", "answer", NoticeKind::Call),
+        ("NGTEAMS SYNTHETIC DECLINE", "decline", NoticeKind::Call),
     ] {
         let call = Notice {
             kind,
@@ -154,15 +159,14 @@ async fn activation_contract(
         let id = server.show(&call, 0).await.unwrap();
         println!("synthetic toast ready: {title}");
         driver::click(title, action).await;
-        let actual = activations.recv().await.unwrap();
+        let actual = tokio::time::timeout(Duration::from_secs(3), activations.recv())
+            .await
+            .expect("toast activation callback deadline")
+            .unwrap();
         assert_eq!(actual, (id, action.to_owned()), "real toast action carries its own ID");
         server.close(id).await;
+        driver::closed(title).await;
     }
-    let final_notice = Notice {
-        summary: "NGTEAMS SYNTHETIC CLEANUP".into(),
-        ..notice.clone()
-    };
-    server.show(&final_notice, 0).await.unwrap();
 }
 async fn wait_history(history: &ToastNotificationHistory, app_id: &str, count: u32) {
     for _ in 0..100 {
@@ -190,5 +194,78 @@ async fn tray_activation_contract(tray: &tray::NativeTray, events: &async_channe
             events.recv().await.unwrap(),
             tray::Event::Asked(TrayEvent::Open)
         ));
+    }
+}
+
+// Exercise the actual COM class factory, including reusing a notification ID after replacement.
+async fn stale_activation_contract(
+    server: &toasts::Notifications,
+    events: &async_channel::Receiver<(u32, String)>,
+    app_id: &str,
+    notice: &Notice,
+) {
+    use windows::Win32::System::Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance};
+    use windows::Win32::UI::Notifications::INotificationActivationCallback;
+    let clsid = registration::activator_id(app_id);
+    // SAFETY: this initialized MTA connects only to our exact synthetic COM class.
+    let callback: INotificationActivationCallback =
+        unsafe { CoCreateInstance(&raw const clsid, None, CLSCTX_LOCAL_SERVER) }.unwrap();
+    let history = ToastNotificationManager::History().unwrap();
+    let id = server.show(notice, 0).await.unwrap();
+    wait_history(&history, app_id, 1).await;
+    let old = launch_argument(&history, app_id);
+    assert_eq!(server.show(notice, id).await.unwrap(), id);
+    let mut current = old.clone();
+    for _ in 0..100 {
+        current = launch_argument(&history, app_id);
+        if current != old {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert_ne!(old, current);
+    for (identity, arguments) in [
+        ("com.nickalie.ngteams.synthetic.invalid", current.clone()),
+        (app_id, old),
+        (app_id, current.replace(":default", ":unknown")),
+    ] {
+        // SAFETY: terminated synthetic strings; no user input data or tenant action.
+        unsafe { callback.Activate(&HSTRING::from(identity), &HSTRING::from(arguments), &[]) }.unwrap();
+    }
+    server.close(id).await;
+    wait_history(&history, app_id, 0).await;
+    // SAFETY: checks a closed notification's opaque key against the same owned synthetic COM callback.
+    unsafe { callback.Activate(&HSTRING::from(app_id), &HSTRING::from(current), &[]) }.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        events.is_empty(),
+        "stale, foreign and unknown COM activations are ignored"
+    );
+    println!("synthetic COM stale activation contract passed");
+}
+fn launch_argument(history: &ToastNotificationHistory, app_id: &str) -> String {
+    history
+        .GetHistoryWithId(&HSTRING::from(app_id))
+        .unwrap()
+        .GetAt(0)
+        .unwrap()
+        .Content()
+        .unwrap()
+        .DocumentElement()
+        .unwrap()
+        .GetAttribute(&HSTRING::from("launch"))
+        .unwrap()
+        .to_string_lossy()
+}
+
+fn notification_setting(app_id: &str) {
+    match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))
+        .and_then(|notifier| notifier.Setting())
+    {
+        Ok(setting) => println!("synthetic notification setting={}", setting.0),
+        Err(error) => println!(
+            "synthetic notification setting query unavailable ({:#x})",
+            error.code().0
+        ),
     }
 }

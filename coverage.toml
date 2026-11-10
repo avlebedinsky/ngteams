@@ -262,24 +262,28 @@ reason = "Windows-only Claude batch-shim private prompt-file adapter; native win
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/apartment.rs"]
 sha256 = "bf41283c316a4b1a62472033aafcd035cecaef69ae73738f3b5f235a3f2d5c2d"
-reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/mod.rs"]
-sha256 = "ecfcb51b5d8ed7d18a6b73a646d4313e296ea8e8d87ec1d7dc2f6a2b63f9ea58"
-reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+sha256 = "84a44333c5707b3536c81a97b40132b1ac8bc008ab94402163954716be3735ee"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/registration.rs"]
-sha256 = "ce098caa47f3ff7483c1aa4c6905620f5f72ed3c8db750f29427ed8990f80d17"
-reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+sha256 = "f8c88e838dddc3dc86fae8a9828c6f01bce6d1bbc64d2b1974c2b328ccb2a6a7"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/toasts.rs"]
-sha256 = "5164a7dec75d79db5c5ebb8a15bb74287879c9a14994a14fd17c820f40d0b737"
-reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+sha256 = "ff4db966dd3bd15054beafb18906a25b7dbae043d4a32d275f3b507c6b953c0c"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/tray.rs"]
 sha256 = "78127b6ed124e79c83a6555792ad111a121d6deec2457b3ee6d6a5a6f2511161"
-reason = "Windows-only native toast, tray and taskbar integration; no Linux LLVM mapping. The explicit win11 console fixture exercises real toast history and native shell primitives without an account; its on-screen activation gate is still unfinished. Native whole-application coverage remains a final port gate."
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/ngteams/src/app/windows.rs"]
-sha256 = "a27d8a50bd5da70e97bc859582c41768a070894ebff7950eab0068bae52b231c"
-reason = "Windows-only shell identity selection isolating lab/read-only metadata from the installed client; no Linux LLVM mapping. Native whole-application validation and coverage remain final Windows-port gates."
+sha256 = "e5503dfcefbdd5ca429bebb6d0d38d6dd4079b2047b347adf57e6281f7c0f91e"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/activation.rs"]
+sha256 = "cc7c9d8d2d739c0021178f2414a41ac742a998b88c2991453c4e939313663cd1"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
