@@ -11304,6 +11304,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "getrandom 0.4.3",
+ "iana-time-zone",
  "log",
  "reqwest 0.13.5",
  "serde",

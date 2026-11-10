@@ -307,8 +307,9 @@ their typed protocol requests with the service's own credential.
   (`Outbox::try_calendar`): one attempt, with another only after a 401 or a short throttle,
   never after an unknown outcome. A Teams meeting's creation first makes its online meeting (`CreateOnlineMeeting`, a
   plain request) and carries it. The engine fills in the organizer (the account's MRI, its profile's address, its
-  name) and the time zone (`TimeZoneSettings`, from `TZ` or `/etc/localtime`), each kept once read (one that didn't
-  read is asked again at the next write; a change without the zone keeps the event's own).
+  name) and the time zone (`TimeZoneSettings`, from `TZ` or the OS's IANA zone through `iana-time-zone`, on Windows
+  and Unix), each kept once read (one that didn't read is asked again at the next write; a change without the zone
+  keeps the event's own).
 - A change sends the event as `EventRead` gave it with the form's fields over it, so what the form doesn't show goes
   back as it came; a Teams meeting stays one, an occurrence one and a series' master one.
 - **A series** (`crates/teams-ui/src/event_form/repeat.rs`, `teams-proto`'s `Recurrence`): the form's Series makes a

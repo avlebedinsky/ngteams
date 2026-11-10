@@ -940,7 +940,7 @@ async fn zone_name<C: Credentials + 'static>(client: &Client<HttpTransport<C>>, 
     TimeZoneSettings::read_answer(answer.body())
 }
 
-/// The desktop's time zone by its IANA name: `TZ`, else where `/etc/localtime` links to.
+/// The desktop's IANA zone: honor `TZ`, else use the OS resolver (including Windows' native time-zone mapping).
 fn local_zone() -> Option<String> {
     if let Ok(zone) = std::env::var("TZ") {
         let zone = zone.trim_start_matches(':').trim();
@@ -948,9 +948,7 @@ fn local_zone() -> Option<String> {
             return Some(zone.to_owned());
         }
     }
-    let target = std::fs::read_link("/etc/localtime").ok()?;
-    let target = target.to_string_lossy();
-    target.split_once("zoneinfo/").map(|(_, zone)| zone.to_owned())
+    iana_time_zone::get_timezone().ok()
 }
 
 /// A Teams meeting's online meeting, made now ([`CreateOnlineMeeting`]): what its event carries.

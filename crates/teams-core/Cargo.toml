@@ -16,6 +16,8 @@ test-support = ["teams-proto/test-support"]
 [dependencies]
 # a calendar event's time without an offset placed in the desktop's time zone, as the calendar view places it
 chrono.workspace = true
+# The calendar service expects an IANA zone; Windows does not have /etc/localtime.
+iana-time-zone.workspace = true
 # a fresh `clientmessageid` for each command, from the system random source
 getrandom.workspace = true
 # a lab engine's warning that the region's middle-tier base was refused (never its value); capped at `debug` at compile

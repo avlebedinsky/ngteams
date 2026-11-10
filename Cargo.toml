@@ -123,6 +123,8 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # the scheduling form's start and end time zones: the IANA zones and their offsets at a time (no logging of its own,
 # so nothing of it reaches the compile-time log cap)
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
+# The desktop's IANA zone on Windows and Unix; already used by Chrono. No runtime logging on either platform.
+iana-time-zone = "0.1.65"
 clap ={ version = "4.6.7", features = ["derive"] }
 # `ngteamsctl completions`: the shells' completion scripts of its command line, for the clap the workspace takes
 # (no logging of its own, so nothing of it reaches the compile-time log cap)
