@@ -28,6 +28,8 @@ on:
       - scripts/web-engine-closure.py
       - scripts/check-linux-package.py
       - scripts/lib/fetch-tool.sh
+      - scripts/windows-*
+      - scripts/lib/windows-runner.ps1
   workflow_dispatch:
 
 permissions:
