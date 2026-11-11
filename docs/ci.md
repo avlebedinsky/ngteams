@@ -129,6 +129,20 @@ with `cargo-llvm-cov` 0.9.1 and requires 90% in lines, functions and regions, in
 It also measures `teams-auth` natively and enforces that crate's existing floors: 96% lines, 96% functions and
 94% regions, including the Windows credential backend.
 
+Space-limited native measurements can build test targets individually without PDB files. Set
+`CARGO_TARGET_DIR` to the instrumented directory before applying `cargo llvm-cov show-env --pwsh`; its output is
+PowerShell code, with escaped environment values. Discover the selected crate's library and integration-test
+targets from `cargo metadata`, then use `cargo rustc --profile test` with the corresponding `--lib` or `--test`
+selection and final-target arguments `-- -C link-arg=/DEBUG:NONE`. Accept only Cargo artifacts with
+`profile.test = true`, run every discovered harness, and retain their executables and profiles for the report.
+This changes only the test link's debug symbols: LLVM's coverage mappings remain in the executable. A native
+comparison exported byte-identical coverage summaries with and without the same test's PDB.
+
+Keep the usual workspace-artifact cleanup before a fresh measurement, the complete source audit and the saved
+per-crate floors. A resumed measurement must preserve successful harness results and profiles, run every remaining
+target, and reject a failed build or test even if its partial coverage is high enough. This technique does not
+build a runnable client or replace the lab runner.
+
 Control IPC uses Unix sockets or local-only byte pipes on Windows. Pipes are created with a protected DACL granting
 only the exact current user and SYSTEM full access; a mandatory label refuses lower-integrity access. Clients verify
 the server process's user before sending their first byte. Names hash the user's SID and the logical endpoint's
