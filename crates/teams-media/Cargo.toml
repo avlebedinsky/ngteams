@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [features]
 # Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests, the

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [features]
 # A release feed over plain HTTP on the loopback (`Source::local`), for tests of the updater and its callers; shipped

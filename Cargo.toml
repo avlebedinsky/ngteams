@@ -68,6 +68,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
 publish = false
+license = "MIT OR Apache-2.0"
 
 # Shared dependency versions; crates take them with `name.workspace = true`.
 [workspace.dependencies]
