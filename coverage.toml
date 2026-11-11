@@ -516,3 +516,28 @@ context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8
 sha256 = "8044e3282259a087a638705fd58826e8e40b4b0f3c0e4bbdc649d87179d7a056"
 reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
 context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire.rs"]
+sha256 = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7"
+reason = "Linux-only PipeWire device and loop-thread backend, selected by the cfg(target_os = \"linux\") module in devices.rs; absent from native Windows compilation and still required by the Linux inventory."
+context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9a66d1cad9ecd3ab0a5b028ac76d8f1d1c5b" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire/listing.rs"]
+sha256 = "b8ad34b4f46e935c7ed2b28a92ee32dc8eed5cd564170b99ddf307ed0e8e30ea"
+reason = "Linux-only PipeWire registry and default-device watcher, reached through the Linux-selected pipewire module; both module roots are hash-pinned and Linux still requires this source."
+context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9a66d1cad9ecd3ab0a5b028ac76d8f1d1c5b", "crates/teams-media/src/devices/pipewire.rs" = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire/serve.rs"]
+sha256 = "f8dee682c0c58b16a9edb653a8fa6853bd17f4a14c974ccec8937f710e508781"
+reason = "Linux-only PipeWire loop-thread command handler, reached through the Linux-selected pipewire module; both module roots are hash-pinned and Linux still requires this source."
+context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9a66d1cad9ecd3ab0a5b028ac76d8f1d1c5b", "crates/teams-media/src/devices/pipewire.rs" = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire/streams.rs"]
+sha256 = "a2a5dd46a427243f8dbc3118088c34e489b0e7258c3d554e909ec9c59779d014"
+reason = "Linux-only PipeWire audio/video stream callbacks, reached through the Linux-selected pipewire module; both module roots are hash-pinned and Linux still requires this source."
+context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9a66d1cad9ecd3ab0a5b028ac76d8f1d1c5b", "crates/teams-media/src/devices/pipewire.rs" = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/portal.rs"]
+sha256 = "0bfffc1309a9cea78bdcdfd4d00e8847097a758fa6fc3b87dff8ea8b2b0e9b44"
+reason = "Linux-only D-Bus camera and screen-cast portal boundary, selected by cfg(target_os = \"linux\") in devices.rs; absent from native Windows compilation and still required by the Linux inventory."
+context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9a66d1cad9ecd3ab0a5b028ac76d8f1d1c5b" }

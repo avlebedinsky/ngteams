@@ -131,9 +131,9 @@ It also measures `teams-auth` natively and enforces that crate's existing floors
 
 Space-limited native measurements can build test targets individually without PDB files. Set
 `CARGO_TARGET_DIR` to the instrumented directory before applying `cargo llvm-cov show-env --pwsh`; its output is
-PowerShell code, with escaped environment values. Discover the selected crate's library and integration-test
-targets from `cargo metadata`, then use `cargo rustc --profile test` with the corresponding `--lib` or `--test`
-selection and final-target arguments `-- -C link-arg=/DEBUG:NONE`. Accept only Cargo artifacts with
+PowerShell code, with escaped environment values. Discover every enabled library, binary and integration test
+harness for the selected crate from `cargo metadata`. Build each using `cargo rustc --profile test` with `--lib`,
+`--bin` or `--test` and the final Rust arguments `-- -C link-arg=/DEBUG:NONE`. Accept only Cargo artifacts with
 `profile.test = true`, run every discovered harness, and retain their executables and profiles for the report.
 This changes only the test link's debug symbols: LLVM's coverage mappings remain in the executable. A native
 comparison exported byte-identical coverage summaries with and without the same test's PDB.
