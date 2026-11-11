@@ -301,6 +301,12 @@ fn presences() -> Vec<(&'static str, Availability)> {
 
 fn after_frames(window: &Window, frames: usize, done: impl FnOnce(&mut Window, &mut App) + 'static) {
     window.on_next_frame(move |window, cx| {
+        #[cfg(windows)]
+        if !fixture::scene_activated(window) {
+            after_frames(window, frames, done);
+            window.refresh();
+            return;
+        }
         if frames <= 1 {
             done(window, cx);
         } else {

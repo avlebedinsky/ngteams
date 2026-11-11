@@ -286,6 +286,12 @@ fn then_page(dialog: &Entity<WorkflowDialog>, page: &str, window: &mut Window, c
 }
 fn after(window: &mut Window, frames: usize, done: impl FnOnce(&mut Window, &mut App) + 'static) {
     window.on_next_frame(move |window, cx| {
+        #[cfg(windows)]
+        if !fixture::scene_activated(window) {
+            after(window, frames, done);
+            window.refresh();
+            return;
+        }
         if frames == 0 {
             done(window, cx);
         } else {

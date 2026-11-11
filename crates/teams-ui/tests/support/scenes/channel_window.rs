@@ -101,6 +101,12 @@ fn shot(sandbox: &Sandbox, theme: &str, name: &str, surface: &str) -> SandboxRes
 }
 fn after_frames(window: &Window, n: usize, done: impl FnOnce(&mut Window, &mut App) + 'static) {
     window.on_next_frame(move |window, cx| {
+        #[cfg(windows)]
+        if !fixture::scene_activated(window) {
+            after_frames(window, n, done);
+            window.refresh();
+            return;
+        }
         if n <= 1 {
             done(window, cx);
         } else {

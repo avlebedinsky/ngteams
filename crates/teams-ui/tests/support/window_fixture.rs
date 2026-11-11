@@ -31,6 +31,28 @@ pub fn window_allowed() -> SandboxResult {
     Ok(())
 }
 
+/// Activate each synthetic child before it opens menus: a later title-bar click would dismiss them. Scheduled
+/// console tasks do not necessarily give a newly created window foreground permission. Use GPUI's native window
+/// activation, then wait for the actual foreground HWND rather than its thread-local active-window state.
+#[cfg(windows)]
+pub fn scene_activated(window: &gpui::Window) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REQUESTED: AtomicBool = AtomicBool::new(false);
+    if !REQUESTED.swap(true, Ordering::Relaxed) {
+        window.activate_window();
+    }
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+    // SAFETY: read-only query; the live GPUI window owns the compared HWND.
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.addr()
+        == handle.hwnd.get().cast_unsigned()
+}
+
 pub struct Sandbox {
     #[cfg(target_os = "linux")]
     inner: ui_sandbox::Sandbox,
