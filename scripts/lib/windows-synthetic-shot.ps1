@@ -6,6 +6,7 @@ function Save-NgteamsSyntheticShot([Diagnostics.Process]$Process, [string]$Title
     if (!('NgteamsSyntheticShot' -as [type])) {
         Add-Type @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public static class NgteamsSyntheticShot {
     [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
@@ -23,8 +24,23 @@ public static class NgteamsSyntheticShot {
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     delegate bool WindowVisitor(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] static extern bool EnumWindows(WindowVisitor visitor, IntPtr parameter);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int length);
+    public static bool HasSystemDialog() {
+        bool found = false;
+        EnumWindows((window, unused) => {
+            if (!IsWindowVisible(window)) return true;
+            var name = new StringBuilder(256);
+            GetClassName(window, name, name.Capacity);
+            if (name.ToString() != "Shell_SystemDialogProxy") return true;
+            // XAML security dialogs can be drawn over the foreground app even when WindowFromPoint returns
+            // that app and the proxy sorts below it in EnumWindows. Refuse the desktop until it is clear.
+            found = true;
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
     public static bool CanCapture(IntPtr window, Point origin, Rect client) {
-        if (!IsInputDesktop() || GetForegroundWindow() != window) return false;
+        if (!IsInputDesktop() || HasSystemDialog() || GetForegroundWindow() != window) return false;
         var info = new MonitorInfo { Size = Marshal.SizeOf(typeof(MonitorInfo)) };
         if (!GetMonitorInfo(MonitorFromWindow(window, 2), ref info)) return false;
         int right = origin.X + client.Right, bottom = origin.Y + client.Bottom;
@@ -70,7 +86,8 @@ public static class NgteamsSyntheticShot {
         if ($rect.Right -le 0 -or $rect.Bottom -le 0) { return $false }
         if (![NgteamsSyntheticShot]::CanCapture($handle,$point,$rect)) {
             # Data-free diagnostics for the owned fixture; never retain the rejected desktop pixels.
-            @{ foreground=([NgteamsSyntheticShot]::GetForegroundWindow() -eq $handle); origin=$point; client=$rect } |
+            @{ foreground=([NgteamsSyntheticShot]::GetForegroundWindow() -eq $handle);
+                system_dialog=[NgteamsSyntheticShot]::HasSystemDialog(); origin=$point; client=$rect } |
                 ConvertTo-Json -Compress | Set-Content -LiteralPath ($OutputFile+'.refused.json')
             return $false
         }

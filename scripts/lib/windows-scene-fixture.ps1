@@ -7,14 +7,24 @@ if($process.Path -ine $Executable -or $process.SessionId -ne [Diagnostics.Proces
  throw 'Scene child identity/session mismatch.'
 }
 . "$PSScriptRoot/windows-synthetic-shot.ps1"
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class NgteamsSceneFocus {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+}
+'@
 $deadline=[DateTime]::UtcNow.AddSeconds(12)
 do {
  $process.Refresh()
  if($process.HasExited){throw 'Scene child exited before its window action.'}
  if($Action -eq 'Close'){
   if($process.MainWindowHandle -and $process.CloseMainWindow()){exit 0}
- }elseif($process.MainWindowTitle -and (Save-NgteamsSyntheticShot $process $process.MainWindowTitle $OutputFile)){
-  exit 0
+ }elseif($process.MainWindowTitle -and $process.MainWindowHandle){
+  # A console task need not inherit foreground activation. Request it only for the verified child; the
+  # screenshot guard still requires the input desktop, foreground ownership and an unobscured client area.
+  $null=[NgteamsSceneFocus]::SetForegroundWindow($process.MainWindowHandle)
+  if(Save-NgteamsSyntheticShot $process $process.MainWindowTitle $OutputFile){exit 0}
  }
  Start-Sleep -Milliseconds 50
 }while([DateTime]::UtcNow -lt $deadline)
