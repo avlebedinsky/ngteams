@@ -3,7 +3,8 @@
 //!
 //! - **Hover**: the pointer resting [`HOVER_OPEN`] on a face or a name opens its compact card beside it (under it, or
 //!   over it near the window's foot; left of it near the window's right edge); the card closes [`HOVER_CLOSE`] after the
-//!   pointer left both, unless it came back to either. A card opened by a click stays until Escape or a press outside.
+//!   pointer left both, unless it came back to either. A card opened by a click, or one pressed or typed in since, stays
+//!   until Escape or a press outside.
 //! - **The full card** opens over the dimmed window from a click on a face, or from the compact card's links; no hover
 //!   opens a card over it.
 //! - **What the card asks**: Chat opens the 1:1 chat in its place, or New message to them alone (a new chat its first
@@ -225,6 +226,12 @@ impl Shell {
                 let Some(open) = &self.cards.open else { return };
                 let (of, anchor) = (open.view.read(cx).of().clone(), open.anchor);
                 self.open_card(of, (Form::Full, tab), anchor, window, cx);
+            }
+            ProfileCardEvent::Engaged => {
+                if let Some(open) = &mut self.cards.open {
+                    open.sticky = true;
+                }
+                self.cards.closing = None;
             }
             ProfileCardEvent::Hovered(on) => {
                 self.cards.on_card = on;

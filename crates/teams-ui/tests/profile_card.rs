@@ -218,6 +218,10 @@ fn main(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Main {
     cx.update(|_, cx| shell.read(cx).main().clone())
 }
 
+fn quick_text(view: &Entity<ProfileCard>, cx: &mut VisualTestContext) -> String {
+    cx.update(|_, cx| view.read(cx).quick_text(cx).to_string())
+}
+
 fn sent_row(id: i64, kind: OutboxKind, made: Option<&str>) -> teams_store::OutboxEntry {
     let mut row = outbox_row(id, kind, OutboxState::Sent);
     row.message_id = made.map(str::to_owned);
@@ -395,6 +399,8 @@ fn a_quick_message_goes_through_the_outbox_and_the_card_stays() {
         cx.update(|_, cx| view.read(cx).note().cloned()),
         Some(QuickNote::Failed)
     );
+    assert_eq!(quick_text(&view, cx), "Again?", "the text kept");
+    assert!(drawn(cx, "profile-card-send"));
 }
 
 #[test]
@@ -441,6 +447,243 @@ fn a_quick_message_to_someone_without_a_chat_makes_the_chat_first() {
         cx.update(|_, cx| view.read(cx).note().cloned()),
         Some(QuickNote::Failed)
     );
+    assert_eq!(quick_text(&view, cx), "Hello again", "the text kept");
+}
+
+#[test]
+fn a_quick_message_still_goes_once_when_its_card_closes_while_the_chat_is_made() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    rest_on(cx, "profile-card-from-avatar-1");
+    let view = card_view(&shell, cx).unwrap();
+    // the outbox holds the new chat's row a while
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(outbox_row(1, OutboxKind::CreateChat, OutboxState::Pending));
+    view.update_in(cx, |view, window, cx| {
+        view.set_quick("Hello", window, cx);
+        view.send_quick(window, cx);
+    });
+    draw(cx);
+    assert!(cx.update(|_, cx| view.read(cx).is_sending()));
+    // the card closes, and is gone, before the chat is made
+    let gone = view.downgrade();
+    drop(view);
+    shell.update_in(cx, Shell::close_card);
+    draw(cx);
+    assert!(card_view(&shell, cx).is_none());
+    assert!(gone.upgrade().is_none(), "the card is dropped");
+    // made: the message still goes to it, once
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent_row(1, OutboxKind::CreateChat, Some(MADE)));
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(sent_row(2, OutboxKind::Send, None));
+    for _ in 0..4 {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        draw(cx);
+    }
+    let actions = rig.core.actions.lock().unwrap().clone();
+    match actions.as_slice() {
+        [
+            Action::CreateChat { others, topic: None },
+            Action::Send { conversation, .. },
+        ] => {
+            assert_eq!(others, &[Mri::new(LAB_C)]);
+            assert_eq!(conversation, MADE);
+        }
+        other => panic!("the chat made, then the message sent once: {other:?}"),
+    }
+}
+
+#[test]
+fn a_quick_message_whose_engine_stopped_stops_being_watched() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    click(cx, "profile-card-from-name-1");
+    let view = card_view(&shell, cx).unwrap();
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(outbox_row(1, OutboxKind::CreateChat, OutboxState::Pending));
+    view.update_in(cx, |view, window, cx| {
+        view.set_quick("Hello", window, cx);
+        view.send_quick(window, cx);
+    });
+    draw(cx);
+    // the fake engine answers no more reads: stopped
+    cx.executor().advance_clock(Duration::from_secs(1));
+    draw(cx);
+    let checks = |rig: &Rig| {
+        rig.core
+            .asked()
+            .iter()
+            .filter(|asked| **asked == "outbox_entry")
+            .count()
+    };
+    assert_eq!(checks(&rig), 1);
+    assert!(!cx.update(|_, cx| view.read(cx).is_sending()));
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).note().cloned()),
+        Some(QuickNote::Failed)
+    );
+    cx.executor().advance_clock(Duration::from_secs(5));
+    draw(cx);
+    assert_eq!(checks(&rig), 1, "not watched any more");
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 1, "nothing sent");
+}
+
+#[test]
+fn a_failed_quick_message_is_sent_again_as_its_own_row_after_the_warning_when_it_may_have_arrived() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    click(cx, "profile-card-from-name-2");
+    let view = card_view(&shell, cx).unwrap();
+    let mut maybe = outbox_row(1, OutboxKind::Send, OutboxState::Failed);
+    maybe.unreadable_seen_at = Some(NOON);
+    rig.core.write_answers.lock().unwrap().push_back(maybe);
+    view.update_in(cx, |view, window, cx| {
+        view.set_quick("Lunch?", window, cx);
+        view.send_quick(window, cx);
+    });
+    draw(cx);
+    let note = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).note().cloned());
+    assert_eq!(note(cx), Some(QuickNote::MayHaveArrived));
+    assert_eq!(quick_text(&view, cx), "Lunch?");
+    // Send again: its own row, sent again by the engine, not a new message
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent_row(1, OutboxKind::Send, None));
+    click(cx, "profile-card-send");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    draw(cx);
+    assert_eq!(*rig.core.resent.lock().unwrap(), [1]);
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 1, "no new message");
+    assert_eq!(note(cx), Some(QuickNote::Sent));
+    assert_eq!(quick_text(&view, cx), "");
+    // a failed one that didn't arrive: Send sends its row again, with no warning
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(outbox_row(2, OutboxKind::Send, OutboxState::Failed));
+    view.update_in(cx, |view, window, cx| {
+        view.set_quick("Coffee?", window, cx);
+        view.send_quick(window, cx);
+    });
+    draw(cx);
+    assert_eq!(note(cx), Some(QuickNote::Failed));
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent_row(2, OutboxKind::Send, None));
+    click(cx, "profile-card-send");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    draw(cx);
+    assert_eq!(*rig.core.resent.lock().unwrap(), [1, 2]);
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 2);
+    // changed text after a failure is a new message
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(outbox_row(3, OutboxKind::Send, OutboxState::Failed));
+    view.update_in(cx, |view, window, cx| {
+        view.set_quick("Tea?", window, cx);
+        view.send_quick(window, cx);
+    });
+    draw(cx);
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(sent_row(4, OutboxKind::Send, None));
+    view.update_in(cx, |view, window, cx| {
+        view.set_quick("Tea at four?", window, cx);
+        view.send_quick(window, cx);
+    });
+    draw(cx);
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 4);
+    assert_eq!(rig.core.resent.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn text_typed_while_a_quick_message_goes_stays_in_the_box() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    click(cx, "profile-card-from-name-2");
+    let view = card_view(&shell, cx).unwrap();
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(outbox_row(1, OutboxKind::Send, OutboxState::Pending));
+    view.update_in(cx, |view, window, cx| {
+        view.set_quick("Lunch?", window, cx);
+        view.send_quick(window, cx);
+        view.set_quick("And coffee?", window, cx);
+    });
+    draw(cx);
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent_row(1, OutboxKind::Send, None));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).note().cloned()), Some(QuickNote::Sent));
+    assert_eq!(quick_text(&view, cx), "And coffee?", "what wasn't sent is kept");
+}
+
+#[test]
+fn another_person_shown_in_the_card_empties_the_quick_message_box() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    click(cx, "profile-card-from-name-1");
+    click(cx, "profile-card-org");
+    let view = card_view(&shell, cx).unwrap();
+    view.update_in(cx, |view, window, cx| view.set_quick("For Sea", window, cx));
+    click(cx, "profile-card-person-0");
+    assert_eq!(shown(&shell, cx).0, LAB_B);
+    assert_eq!(quick_text(&view, cx), "", "nothing typed to c goes to b");
+    view.update_in(cx, |view, window, cx| view.set_quick("For Bee", window, cx));
+    click(cx, "profile-card-back");
+    assert_eq!(shown(&shell, cx).0, LAB_C);
+    assert_eq!(quick_text(&view, cx), "");
+    view.update_in(cx, ProfileCard::send_quick);
+    draw(cx);
+    assert!(rig.core.actions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_rest_opened_card_stays_once_its_quick_message_box_is_pressed() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    rest_on(cx, "profile-card-from-avatar-1");
+    assert!(card_view(&shell, cx).is_some());
+    click(cx, "profile-card-quick");
+    cx.simulate_mouse_move(point(px(1190.0), px(790.0)), None, Modifiers::none());
+    draw(cx);
+    cx.executor().advance_clock(HOVER_CLOSE * 2);
+    draw(cx);
+    assert!(card_view(&shell, cx).is_some(), "kept after the pointer left");
 }
 
 #[test]

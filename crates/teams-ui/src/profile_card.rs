@@ -15,6 +15,12 @@
 //!   Organization tab), a video or an audio call ([`ProfileCardEvent::Call`]: their 1:1 chat's call, the camera turned on
 //!   once a video call is up), the quick message (sent to the 1:1 chat through the outbox, the chat made first when there
 //!   is none, "Quick message sent" after) and the email (`mailto:`).
+//! - **A quick message outlives its card.** Its sending (the chat made, then the message posted, each watched until the
+//!   outbox settles it) is a task of the app's, not the card's: closing the card, or the card going over to someone
+//!   else, never drops a message half way, and only a card still showing its person hears how it went. One that failed
+//!   is kept: sending the same text again sends its outbox row again ([`Core::resend`]), after the chat view's warning
+//!   when it may have arrived, never as a new message. A press on a card opened by a rest, or typing in it, keeps it
+//!   open.
 //! - **The read-only mode** offers no quick message and no call; Chat still opens a chat there is. The account's own
 //!   card has its calls drawn off, as Teams draws them, no quick message, and "Your local time".
 //! - **Nobody without a card**: a face or a name of anyone but a directory user (a bot, a phone number) opens none
@@ -30,22 +36,22 @@ mod draw;
 pub use draw::{COMPACT_MOST, COMPACT_WIDTH, FULL_MOST};
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, AsyncWindowContext, Bounds, Context, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, WindowId, div,
+    AnyElement, AppContext as _, AsyncWindowContext, BackgroundExecutor, Bounds, Context, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, WindowId, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use teams_core::{Action, ProfileCard as CardData};
 use teams_proto::Mri;
 use teams_proto::chat::MessageText;
-use teams_store::OutboxState;
+use teams_store::{OutboxEntry, OutboxState};
 
 use crate::bridge::Core;
 use crate::chat_list::{self, ChatList, RowKind};
@@ -53,7 +59,7 @@ use crate::keyboard::Handles;
 use crate::models::Models;
 use crate::new_chat::Recipient;
 use crate::people::{Picture, Shown};
-use crate::sending::settled_row;
+use crate::sending::{Again, settled_row_unowned};
 use crate::trace::{TraceLine, ViewTrace};
 
 /// The quick message box's hint, as Teams words it.
@@ -62,6 +68,8 @@ pub const QUICK_HINT: &str = "Send a quick message";
 pub const QUICK_SENT: &str = "Quick message sent";
 /// What it says when one couldn't go.
 pub const QUICK_FAILED: &str = "Your message wasn't sent. Check your connection and try again.";
+/// What it says when one isn't known sent but may have arrived: Send sends it again, as the chat view's warning asks.
+pub const QUICK_MAY_HAVE_ARRIVED: &str = crate::chat_view::MAY_HAVE_ARRIVED;
 /// What it says when the card couldn't be read.
 pub const NOT_LOADED: &str = "We couldn't load the profile card. Check your connection and try again.";
 pub const CONTACT: &str = "Contact information";
@@ -345,6 +353,9 @@ pub enum ProfileCardEvent {
     Expand(CardTab),
     /// The pointer came onto the card (`true`) or left it.
     Hovered(bool),
+    /// The card was pressed, or its quick message box typed in: a card opened by a rest stays open, as one opened by a
+    /// click does.
+    Engaged,
 }
 
 /// The card's read, as it stands.
@@ -360,6 +371,37 @@ pub enum Loaded {
 pub enum QuickNote {
     Sent,
     Failed,
+    /// It isn't known sent but may have arrived: Send sends it again.
+    MayHaveArrived,
+}
+
+/// A quick message that didn't go, kept while its person's card shows the same text: Send sends its outbox row again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Kept {
+    row: i64,
+    text: String,
+    /// Its message may have arrived: the card says so before it is sent again.
+    warn: bool,
+}
+
+/// How a quick message goes.
+enum Quick {
+    /// A new message to the 1:1 chat with `mri` (`chat`, else one made first).
+    New {
+        chat: Option<String>,
+        mri: String,
+        text: Box<MessageText>,
+    },
+    /// A failed one's outbox row, sent again.
+    Again(i64),
+}
+
+/// How a quick message's sending ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Settled {
+    Sent,
+    /// Not sent; its row kept when it can be sent again.
+    Failed(Option<Kept>),
 }
 
 /// What a card is made with.
@@ -387,7 +429,10 @@ pub struct ProfileCard {
     faces: HashMap<String, Shown>,
     quick: Entity<InputState>,
     note: Option<QuickNote>,
-    sending: Option<Task<()>>,
+    /// Whom a quick message is going out to (their sending is the app's: see the module docs).
+    sending: HashSet<String>,
+    /// The shown person's quick message that failed.
+    failed: Option<Kept>,
     loading: Option<Task<()>>,
     note_shown: Option<Task<()>>,
     tabs: Handles,
@@ -411,11 +456,16 @@ impl ProfileCard {
     ) -> Self {
         let quick = cx.new(|cx| InputState::new(window, cx).placeholder(QUICK_HINT));
         let subscriptions = vec![
-            cx.subscribe_in(&quick, window, |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.send_quick(window, cx);
-                }
-            }),
+            cx.subscribe_in(
+                &quick,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.send_quick(window, cx),
+                    // typed in (a press on the card is the card's own)
+                    InputEvent::Change => cx.emit(ProfileCardEvent::Engaged),
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            ),
             cx.observe(&parts.models.presence, |_, _, cx| cx.notify()),
             cx.observe(&parts.list, |_, _, cx| cx.notify()),
         ];
@@ -434,7 +484,8 @@ impl ProfileCard {
             faces: HashMap::new(),
             quick,
             note: None,
-            sending: None,
+            sending: HashSet::new(),
+            failed: None,
             loading: None,
             note_shown: None,
             tabs: Handles::default(),
@@ -520,10 +571,16 @@ impl ProfileCard {
         self.note.as_ref()
     }
 
-    /// Whether a quick message is going out.
+    /// Whether a quick message to the person shown is going out.
     #[must_use]
     pub fn is_sending(&self) -> bool {
-        self.sending.is_some()
+        self.sending.contains(&self.of.mri)
+    }
+
+    /// The quick message box's text.
+    #[must_use]
+    pub fn quick_text(&self, cx: &gpui::App) -> SharedString {
+        self.quick.read(cx).value()
     }
 
     /// Whom Back returns to, the last first.
@@ -644,25 +701,31 @@ impl ProfileCard {
     }
 
     /// Opens `person`'s card in its place (the Organization tab's people), this one kept for Back.
-    pub fn open_person(&mut self, person: CardOf, cx: &mut Context<Self>) {
+    pub fn open_person(&mut self, person: CardOf, window: &mut Window, cx: &mut Context<Self>) {
         if person.mri == self.of.mri {
             return;
         }
         let shown = std::mem::replace(&mut self.of, person);
         self.back.push(shown);
-        self.note = None;
-        self.load(cx);
-        cx.notify();
+        self.person_changed(window, cx);
     }
 
     /// Back to the card before, on the same tab.
-    pub fn go_back(&mut self, cx: &mut Context<Self>) {
+    pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(before) = self.back.pop() {
             self.of = before;
-            self.note = None;
-            self.load(cx);
-            cx.notify();
+            self.person_changed(window, cx);
         }
+    }
+
+    /// Another person shown: their card read, and the quick message box emptied, so that nothing typed to one goes to
+    /// the other.
+    fn person_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quick.update(cx, |quick, cx| quick.set_value("", window, cx));
+        self.note = None;
+        self.failed = None;
+        self.load(cx);
+        cx.notify();
     }
 
     /// Their email, opened in the mail app.
@@ -684,40 +747,79 @@ impl ProfileCard {
     }
 
     /// Sends the box's text to the 1:1 chat with them through the outbox (the chat made first when the account has
-    /// none), then clears the box and says so; what went wrong otherwise, the text kept.
+    /// none), then clears the box and says so; what went wrong otherwise, the text kept. The same text after a failure
+    /// sends the failed row again, once the card said it may have arrived when it may have.
     pub fn send_quick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.quick.read(cx).value().trim().to_owned();
-        if typed.is_empty() || !self.writes() || self.sending.is_some() {
+        if typed.is_empty() || !self.writes() || self.is_sending() {
             return;
         }
-        let Ok(text) = MessageText::plain(&typed) else {
-            self.note = Some(QuickNote::Failed);
-            cx.notify();
-            return;
+        let quick = match self.failed.clone().filter(|kept| kept.text == typed) {
+            Some(kept) if kept.warn && self.note != Some(QuickNote::MayHaveArrived) => {
+                self.note = Some(QuickNote::MayHaveArrived);
+                cx.notify();
+                return;
+            }
+            Some(kept) => Quick::Again(kept.row),
+            None => {
+                let Ok(text) = MessageText::plain(&typed) else {
+                    self.note = Some(QuickNote::Failed);
+                    cx.notify();
+                    return;
+                };
+                Quick::New {
+                    chat: self.existing_chat(cx),
+                    mri: self.of.mri.clone(),
+                    text: Box::new(text),
+                }
+            }
         };
-        let core = Arc::clone(&self.core);
-        let chat = self.existing_chat(cx);
+        let (core, trace) = (Arc::clone(&self.core), Arc::clone(&self.trace));
+        let executor = cx.background_executor().clone();
         let mri = self.of.mri.clone();
+        self.sending.insert(mri.clone());
         self.note = None;
-        self.sending = Some(cx.spawn_in(window, async move |this, cx: &mut AsyncWindowContext| {
-            let sent = send(&core, chat, &mri, text, cx).await;
-            let _ = this.update_in(cx, |this, window, cx| this.quick_settled(sent, window, cx));
-        }));
+        self.failed = None;
+        // the app's task, not the card's: a card closed (or showing someone else) meanwhile drops nothing
+        cx.spawn_in(window, async move |this, cx: &mut AsyncWindowContext| {
+            let settled = send(&core, &executor, quick, &typed).await;
+            if settled == Settled::Sent {
+                trace.record(&TraceLine::new("profile-card", "quick-sent"));
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.quick_settled(&mri, &typed, settled, window, cx);
+            });
+        })
+        .detach();
         cx.notify();
     }
 
-    fn quick_settled(&mut self, sent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.sending = None;
-        if sent {
-            self.trace.record(&TraceLine::new("profile-card", "quick-sent"));
-            self.quick.update(cx, |quick, cx| quick.set_value("", window, cx));
-            self.note = Some(QuickNote::Sent);
-            self.note_shown = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
-                cx.background_executor().timer(NOTE_SHOWN).await;
-                let _ = this.update(cx, Self::sent_note_shown);
-            }));
-        } else {
-            self.note = Some(QuickNote::Failed);
+    /// The quick message `typed` to `mri` settled: told only while the card still shows them, the box cleared only
+    /// while it still holds what went.
+    fn quick_settled(&mut self, mri: &str, typed: &str, settled: Settled, window: &mut Window, cx: &mut Context<Self>) {
+        self.sending.remove(mri);
+        if self.of.mri == mri {
+            match settled {
+                Settled::Sent => {
+                    if self.quick.read(cx).value().trim() == typed {
+                        self.quick.update(cx, |quick, cx| quick.set_value("", window, cx));
+                    }
+                    self.note = Some(QuickNote::Sent);
+                    self.note_shown = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                        cx.background_executor().timer(NOTE_SHOWN).await;
+                        let _ = this.update(cx, Self::sent_note_shown);
+                    }));
+                }
+                Settled::Failed(kept) => {
+                    let warn = kept.as_ref().is_some_and(|kept| kept.warn);
+                    self.note = Some(if warn {
+                        QuickNote::MayHaveArrived
+                    } else {
+                        QuickNote::Failed
+                    });
+                    self.failed = kept;
+                }
+            }
         }
         cx.notify();
     }
@@ -760,38 +862,56 @@ fn people_of(card: &CardData) -> Vec<String> {
     people
 }
 
-/// Sends `text` to `chat`, or to a new 1:1 chat with `mri` made first ([`Action::CreateChat`], as New message's first
-/// message makes one); whether the outbox sent it.
-async fn send(
-    core: &Arc<dyn Core>,
-    chat: Option<String>,
-    mri: &str,
-    text: MessageText,
-    cx: &mut AsyncWindowContext,
-) -> bool {
-    let chat = match chat {
-        Some(chat) => Some(chat),
-        None => made_chat(core, mri, cx).await,
+/// Sends a quick message (`typed`, as the box held it): a new one to `chat`, or to a new 1:1 chat made first
+/// ([`Action::CreateChat`], as New message's first message makes one), or a failed one's row again; each write watched
+/// until the outbox settles it.
+async fn send(core: &Arc<dyn Core>, executor: &BackgroundExecutor, quick: Quick, typed: &str) -> Settled {
+    let reply = match quick {
+        Quick::New { chat, mri, text } => {
+            let chat = match chat {
+                Some(chat) => Some(chat),
+                None => made_chat(core, &mri, executor).await,
+            };
+            // a 1:1 chat that couldn't be made is made anew by the next try: Teams' 1:1 chat with someone is one thread
+            let Some(chat) = chat else {
+                return Settled::Failed(None);
+            };
+            core.write(Action::Send {
+                conversation: chat,
+                text: *text,
+            })
+        }
+        Quick::Again(row) => core.resend(row),
     };
-    let Some(chat) = chat else {
-        return false;
+    settled(settled_row_unowned(core.as_ref(), reply, executor).await, typed)
+}
+
+/// What a quick message's settled row (none: refused) comes to: a failed row that may be sent again is kept.
+fn settled(row: Option<OutboxEntry>, typed: &str) -> Settled {
+    let Some(row) = row else {
+        return Settled::Failed(None);
     };
-    let reply = core.write(Action::Send {
-        conversation: chat,
-        text,
-    });
-    settled_row(core.as_ref(), reply, cx.background_executor())
-        .await
-        .is_some_and(|row| row.state == OutboxState::Sent)
+    if row.state == OutboxState::Sent {
+        return Settled::Sent;
+    }
+    let kept = match Again::of(&row, false) {
+        Again::No => None,
+        again => Some(Kept {
+            row: row.id,
+            text: typed.to_owned(),
+            warn: again == Again::AfterWarning,
+        }),
+    };
+    Settled::Failed(kept)
 }
 
 /// A new 1:1 chat with `mri`, made through the outbox; its id once the outbox made it.
-async fn made_chat(core: &Arc<dyn Core>, mri: &str, cx: &mut AsyncWindowContext) -> Option<String> {
+async fn made_chat(core: &Arc<dyn Core>, mri: &str, executor: &BackgroundExecutor) -> Option<String> {
     let made = core.write(Action::CreateChat {
         others: vec![Mri::new(mri)],
         topic: None,
     });
-    let row = settled_row(core.as_ref(), made, cx.background_executor()).await?;
+    let row = settled_row_unowned(core.as_ref(), made, executor).await?;
     row.message_id.filter(|_| row.state == OutboxState::Sent)
 }
 

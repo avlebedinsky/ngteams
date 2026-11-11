@@ -16,7 +16,8 @@ use teams_core::CardPerson;
 use super::words::{self, Length, Now};
 use super::{
     CLOSE, CONTACT, CardOf, CardTab, EMAIL, Form, JOB_TITLE, MORE_CONTACT, NOT_LOADED, OFFICE, OUT_OF_OFFICE, PROFILE,
-    ProfileCard, ProfileCardEvent, QUICK_FAILED, QUICK_HINT, QUICK_SENT, QuickNote, REPORTS_TO, SHOW_MORE,
+    ProfileCard, ProfileCardEvent, QUICK_FAILED, QUICK_HINT, QUICK_MAY_HAVE_ARRIVED, QUICK_SENT, QuickNote, REPORTS_TO,
+    SHOW_MORE,
 };
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard;
@@ -209,13 +210,14 @@ impl ProfileCard {
         let send = selected_by(
             "profile-card-send",
             icon_button("profile-card-send", Glyph::SEND, "Send")
-                .disabled(empty || self.sending.is_some())
+                .disabled(empty || self.is_sending())
                 .on_click(cx.listener(|this, _, window, cx| this.send_quick(window, cx))),
         );
         let note = self.note.as_ref().map(|note| {
             let (text, color) = match note {
                 QuickNote::Sent => (QUICK_SENT, palette.muted_foreground),
                 QuickNote::Failed => (QUICK_FAILED, theme::DANGER),
+                QuickNote::MayHaveArrived => (QUICK_MAY_HAVE_ARRIVED, theme::DANGER),
             };
             div()
                 .debug_selector(|| "profile-card-quick-note".to_owned())
@@ -512,7 +514,7 @@ impl ProfileCard {
             selected_by(
                 "profile-card-back",
                 icon_button("profile-card-back", Glyph::ARROW_LEFT, super::back_tip(&name))
-                    .on_click(cx.listener(|this, _, _, cx| this.go_back(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
             )
         });
         let close = selected_by(
@@ -787,7 +789,9 @@ impl ProfileCard {
                             .child(email)
                     })),
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_person(of.clone(), cx)));
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.open_person(of.clone(), window, cx);
+            }));
         row.into_any_element()
     }
 
@@ -825,7 +829,9 @@ impl ProfileCard {
                     .line_clamp(2)
                     .child(name),
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_person(of.clone(), cx)));
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.open_person(of.clone(), window, cx);
+            }));
         keyboard::stop(("profile-card-person-stop", at), tile, palette)
             .edge()
             .into_any_element()
@@ -952,6 +958,10 @@ impl Render for ProfileCard {
                 }
             }))
             .on_mouse_down_out(cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| cx.emit(ProfileCardEvent::Close)))
+            // a press anywhere on it (its quick message box too) keeps a card opened by a rest open
+            .capture_any_mouse_down(cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| {
+                cx.emit(ProfileCardEvent::Engaged);
+            }))
             .on_hover(cx.listener(|_, hovered: &bool, _, cx| cx.emit(ProfileCardEvent::Hovered(*hovered))))
             .child(card)
     }
