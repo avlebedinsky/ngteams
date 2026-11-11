@@ -45,15 +45,9 @@ fn a_bound_request_with_an_unusable_redirect_is_refused_before_any_engine() {
     let (setup, _) = crate::app::tests::setup(root.path(), 2);
     let cx = TestAppContext::single();
     let windows = cx.update(|cx| super::windows_for(&setup, cx));
-    let ask = window(&setup, &windows);
-    let replying = std::thread::spawn(move || ask(request("https://login.microsoftonline.com/authorize")));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !replying.is_finished() {
-        cx.run_until_parked();
-        assert!(Instant::now() < deadline, "foreground service did not answer");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert!(matches!(replying.join().unwrap(), SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
+    // no worker beside the test binary: resolving an engine would fail on that instead
+    let refused = window(&setup, &windows)(request("https://login.microsoftonline.com/authorize"));
+    assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
     assert_eq!(cx.update(|cx| cx.windows().len()), 0);
 }
 
