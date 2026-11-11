@@ -619,6 +619,10 @@ impl NativeTray {
         self.send(Command::TestOverlay(reply));
         result.await.unwrap()
     }
+    /// Successful native overlay applications, without applying another overlay for the query.
+    ///
+    /// # Panics
+    /// The owned tray loop stopped before answering the fixture.
     pub async fn test_overlay_count(&self) -> u64 {
         let (reply, result) = oneshot::channel();
         self.send(Command::TestOverlayCount(reply));

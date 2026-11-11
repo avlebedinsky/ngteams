@@ -160,10 +160,13 @@ fn check_open_file_rejects_unsafe_acl_without_repairing_it() {
             "-Command",
             r"
             $ErrorActionPreference = 'Stop'
-            $acl = Get-Acl -LiteralPath $env:NGTEAMS_TEST_FILE
+            # Change only the DACL: restoring unrelated audit/owner sections can require SeSecurityPrivilege
+            # in the Limited console even though this user owns the file and may change its access rules.
+            $sections = [Security.AccessControl.AccessControlSections]::Access
+            $acl = [IO.File]::GetAccessControl($env:NGTEAMS_TEST_FILE, $sections)
             $everyone = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
             $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone, 'Read', 'Allow'))
-            Set-Acl -LiteralPath $env:NGTEAMS_TEST_FILE -AclObject $acl
+            [IO.File]::SetAccessControl($env:NGTEAMS_TEST_FILE, $acl)
         ",
         ])
         .env("NGTEAMS_TEST_FILE", &path)
