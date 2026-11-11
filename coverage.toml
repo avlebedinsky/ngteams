@@ -582,3 +582,13 @@ context = { "crates/ngteams/src/ctl/listener.rs" = "1f80998bdb1842b78d3706aa8c2b
 sha256 = "245b9f666ee6d0f3f5c89a02b6c4542c04c03718b98b81a7d20882409766aeeb"
 reason = "Unix-only inherited broker/trace descriptor adoption and close-on-exec validation; descriptors.rs selects it only under cfg(unix). Native Windows uses validated native handles and Linux still requires this source."
 context = { "crates/ngteams/src/descriptors.rs" = "ff2f75402e8094bbe216d8a47b9137b1bddc0a524f7347802b1d7e7ed9a6bc12" }
+
+[unmapped_sources_windows."crates/teams-platform/src/private/unix.rs"]
+sha256 = "fbc9482041833c601839adbf5b671c076d9e813b4f50b54ed65dcec8eca6c464"
+reason = "Unix-only private file creation and permission backend, selected by cfg(unix) in private.rs; absent from native Windows compilation. Linux continues to require its LLVM mapping."
+context = { "crates/teams-platform/src/private.rs" = "8a7f837c30e65f5b168acdfcb05c9b9a1c228d893740c44aa6d11f4caee413c3" }
+
+[unmapped_sources_windows."crates/teams-ctl/src/transport/unix.rs"]
+sha256 = "ad27e12873ffa495db29809fde0975b5a74221ced1285b4433b0c730e31e68ab"
+reason = "Unix-only domain socket transport, selected by cfg(unix) in transport.rs; absent from native Windows compilation. Linux continues to require its LLVM mapping."
+context = { "crates/teams-ctl/src/transport.rs" = "b82f8babf1f6097107ebd061f21f4d48281a45b2ab89f62ad5c78c9b5303c562" }
