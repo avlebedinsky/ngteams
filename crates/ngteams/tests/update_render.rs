@@ -2,7 +2,7 @@
 //! All account state, releases and installation files are synthetic; no platform GUI or network service is used.
 
 // Test-only helpers, including the shared fake core.
-#![cfg(test)]
+#![cfg(all(test, unix))]
 
 #[path = "../../teams-ui/tests/common/mod.rs"]
 pub mod common;

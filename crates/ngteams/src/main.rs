@@ -138,9 +138,7 @@ fn main() -> ExitCode {
             ngteams::restart::exec(command.args(restart_args(std::env::args_os().skip(1), opened.as_deref())))
         }),
         Ok(Outcome::Update { executable, opened }) => updated(&executable, &mut |command| {
-            command
-                .args(restart_args(std::env::args_os().skip(1), opened.as_deref()))
-                .exec()
+            ngteams::restart::exec(command.args(restart_args(std::env::args_os().skip(1), opened.as_deref())))
         }),
         Ok(Outcome::LabRestart(descriptors)) => {
             restarted(&mut |command| descriptors.exec(command.args(std::env::args_os().skip(1))))
@@ -192,6 +190,7 @@ fn restarted(exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
 /// runtime sets them again); `exec` returns only when it couldn't.
 fn updated(executable: &Path, exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
     let mut command = Command::new(executable);
+    #[cfg(unix)]
     for variable in ngteams::update::APPIMAGE_ENV {
         command.env_remove(variable);
     }
@@ -224,7 +223,11 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     }
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
     // the user's own app, installed from a release, updates itself; no other mode does
+    #[cfg(unix)]
     let updater = ngteams::update::for_this_run(&setup.paths);
+    // Windows updates aren't built yet
+    #[cfg(windows)]
+    let updater = None;
     run_setup(cli, reach, setup, ViewTrace::off(), ctl, updater)
 }
 
@@ -284,7 +287,7 @@ fn run_setup(
     setup: Setup,
     trace: ViewTrace,
     ctl: Option<PathBuf>,
-    updater: Option<ngteams::update::Updater>,
+    updater: Option<Updater>,
 ) -> Result<Outcome, String> {
     if let Some(upn) = cli.forget.as_deref() {
         forget(&setup, upn)?;
@@ -400,8 +403,9 @@ fn launched_or_said<S: teams_auth::secrets::SecretStore + 'static>(
 
 /// The app's updates (`ngteams::update`) for the window `launched`: its restart waits on the desktop's calls and
 /// drafts, and its program goes to `restart_into` before the app quits.
+#[cfg(unix)]
 fn start_updates(
-    updater: ngteams::update::Updater,
+    updater: Updater,
     launched: &ngteams::app::Launched,
     restart_into: Rc<Cell<Option<PathBuf>>>,
     cx: &mut App,
@@ -417,6 +421,18 @@ fn start_updates(
         cx,
     );
 }
+
+#[cfg(windows)]
+fn start_updates(updater: Updater, _: &ngteams::app::Launched, _: Rc<Cell<Option<PathBuf>>>, _: &mut App) {
+    match updater {}
+}
+
+/// What checks for and installs this copy's updates (`ngteams::update`).
+#[cfg(unix)]
+type Updater = ngteams::update::Updater;
+/// Windows updates aren't built yet: no updater exists there.
+#[cfg(windows)]
+enum Updater {}
 
 /// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
 /// socket taken over first, before anything opens a descriptor of its own; `get` only, of an account

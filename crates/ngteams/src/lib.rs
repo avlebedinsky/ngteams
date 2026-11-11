@@ -9,7 +9,7 @@
 //! [`lab`] runs one lab alias in the sandbox with writable broker credentials and sandbox media.
 //! [`ctl`] serves `ngteamsctl`'s control socket over the running app.
 //! [`handoff`] hands a second launch, or a Teams link, to the app already running over that socket.
-//! [`update`] installs a newer release of an app installed from one, from the title bar.
+//! `update` installs a newer release of an app installed from one, from the title bar (Linux only for now).
 
 pub mod accounts;
 pub mod accounts_file;
@@ -29,6 +29,7 @@ pub mod secrets;
 pub mod setup;
 pub mod signin;
 pub mod snapshot;
+#[cfg(unix)]
 pub mod update;
 
 pub use refusal::refusal;
