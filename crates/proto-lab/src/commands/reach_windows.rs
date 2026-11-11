@@ -101,17 +101,9 @@ type NativeClient = Client<HttpTransport<Session<KeyringSecretStore>>>;
 
 async fn native_client(config: &LabConfig, alias: Alias, target: &NativeTarget) -> Result<NativeClient, Error> {
     let account = config.account(alias);
-    target.expect_account(&account.upn)?;
-    let native: toml::Table = toml::from_str(&std::fs::read_to_string(target.root().join("accounts.toml"))?)?;
-    let oid = native
-        .get("account")
-        .and_then(toml::Value::as_array)
-        .and_then(|entries| entries.first())
-        .and_then(|entry| entry.get("oid"))
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| refused("native alias is not provisioned"))?;
+    let oid = target.account(&account.upn)?.object_id;
     let expected = account.mri.as_ref().and_then(|mri| mri.strip_prefix("8:orgid:"));
-    if !expected.is_some_and(|expected| expected.eq_ignore_ascii_case(oid)) {
+    if !expected.is_some_and(|expected| expected.eq_ignore_ascii_case(&oid)) {
         return Err(refused("native identity does not match roster MRI"));
     }
     let region = Region::load(&target.root().join(format!("regions/{oid}.json")))?;

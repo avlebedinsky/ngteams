@@ -407,6 +407,9 @@ pub enum SessionError {
     ActionTargets(String),
     #[error("no Chrome for Testing at {} (run `proto-lab chrome install`)",.0.display())]
     NoChrome(PathBuf),
+    #[cfg(windows)]
+    #[error("Microsoft Edge is unavailable: {0}")]
+    NoEdge(#[source] std::io::Error),
     #[error(transparent)]
     Browser(#[from] BrowserError),
     #[error(transparent)]
@@ -503,8 +506,7 @@ impl LabSession {
         #[cfg(unix)]
         let chrome = ChromeBuild::pinned().executable(&paths.chrome_dir());
         #[cfg(windows)]
-        let chrome =
-            crate::browser::installed_edge().map_err(|error| SessionError::ActionTargets(error.to_string()))?;
+        let chrome = crate::browser::installed_edge().map_err(SessionError::NoEdge)?;
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
         }

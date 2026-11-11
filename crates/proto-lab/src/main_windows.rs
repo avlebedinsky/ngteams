@@ -85,7 +85,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     teams_platform::windows_sandbox::window_allowed_here()?;
     teams_platform::private::create_dir_all(&locations.data_dir)?;
     teams_platform::private::restrict_dir(&locations.data_dir)?;
-    let _live = proto_lab::private::exclusive(&locations.data_dir.join("live.lock"))?;
+    let _live = teams_platform::private::share_lock(&locations.data_dir.join("live.lock"), false)?;
     match command {
         Command::Browser => {
             println!(
@@ -135,7 +135,7 @@ async fn provision(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = LabConfig::load(locations)?;
     let target = auth::NativeTarget::windows_alias(native_alias.unwrap_or(alias.as_str()))?;
-    let native_file = target.root().join("accounts.toml");
+    let provisioned = target.clone();
     let store = KeyringSecretStore::new(auth::KEYRING_APPLICATION).await?;
     let options = auth::AuthOptions {
         timeout: Duration::from_secs(timeout),
@@ -150,14 +150,7 @@ async fn provision(
         auth::authorize_target(&config, alias, &store, &options, target).await?
     };
     show_report(&report)?;
-    let native: toml::Table = toml::from_str(&std::fs::read_to_string(native_file)?)?;
-    let oid = native
-        .get("account")
-        .and_then(toml::Value::as_array)
-        .and_then(|entries| entries.first())
-        .and_then(|entry| entry.get("oid"))
-        .and_then(toml::Value::as_str)
-        .ok_or("verified identity was not saved")?;
+    let oid = provisioned.account(&config.account(alias).upn)?.object_id;
     proto_lab::config::record_account_mri(locations, alias, &format!("8:orgid:{oid}"))?;
     Ok(())
 }

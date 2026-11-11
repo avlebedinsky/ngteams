@@ -233,7 +233,7 @@ async fn native_commands() {
         assert!(run(command).await.is_err());
     }
     // All entry paths released their live lock after refusal; no token read or browser navigation occurred.
-    drop(proto_lab::private::exclusive(&locations.data_dir.join("live.lock")).unwrap());
+    drop(teams_platform::private::share_lock(&locations.data_dir.join("live.lock"), false).unwrap());
 }
 
 async fn public_entry_refusals(locations: &LabLocations, target: &auth::NativeTarget) {

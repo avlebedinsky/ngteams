@@ -638,3 +638,24 @@ async fn explicit_native_target_without_browser_never_exchanges_tokens_or_publis
         "no browser profile was opened"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn native_account_reader_refuses_damaged_ids_before_they_can_become_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let target = native_target(root.path());
+    target.save(&native_account(), None).unwrap();
+    let path = target.root().join("accounts.toml");
+    let valid = std::fs::read_to_string(&path).unwrap();
+    for (field, damaged) in [("oid", "../outside"), ("oid", "not-a-guid"), ("tid", "../tenant")] {
+        let mut table: toml::Table = toml::from_str(&valid).unwrap();
+        table["account"].as_array_mut().unwrap()[0][field] = toml::Value::String(damaged.into());
+        std::fs::write(&path, toml::to_string(&table).unwrap()).unwrap();
+        assert!(target.account(&native_account().username).is_err());
+    }
+    std::fs::write(&path, valid).unwrap();
+    assert_eq!(
+        target.account(&native_account().username).unwrap().object_id,
+        native_account().object_id
+    );
+}

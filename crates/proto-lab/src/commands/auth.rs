@@ -4,7 +4,7 @@
 //!    `nativeclient` redirect, PKCE, `login_hint`) is opened in the profile, whose Microsoft session signs it in
 //!    silently. The browser catches Entra's redirect to the registered redirect URI and fails it
 //!    ([`RedirectCatch`]); the code comes from that URL once its `state` is the request's. If Entra shows a page
-//!    instead (the session has expired, or it wants an interaction), the run stops: nothing is ever typed here.
+//!    instead (the session has expired, or it wants an interaction), the Auth run stops without typing. Windows Login instead submits the roster password once on the native authorize page.
 //! 2. **Code → tokens** in Rust ([`TokenClient::exchange_code`]): the refresh token is stored only once the ID token
 //!    names the account (and its object id from `lab.toml`).
 //! 3. **Refresh** for `api.spaces.skype.com`, proving the stored refresh token works; with `--audiences`, one refresh
@@ -13,7 +13,8 @@
 //!    persisted to `<data dir>/auth/<alias>.json` ([`save_region`]) for native HTTP probes and to the native client's
 //!    `ngteams-lab/<alias>/regions/<oid>.json`. Its verified identity is provisioned in that alias's `accounts.toml`.
 //!
-//! The CLI keeps the secrets in the Secret Service under the lab's own application attribute ([`KEYRING_APPLICATION`]);
+//! The CLI keeps secrets in Linux Secret Service or Windows Credential Manager under `ngteams-lab`
+//! ([`KEYRING_APPLICATION`]);
 //! tests pass a memory store. Nothing prints or logs a token, a code or the redirect URL: the report
 //! ([`AuthReport::lines`]) shows only each token's audience, expiry, scopes and tenant, and the skypetoken's expiry and
 //! region, or the refusal.
@@ -40,7 +41,7 @@ use crate::config::{Alias, LabConfig, LabPaths};
 use crate::redirect_catch::{CatchError, RedirectCatch};
 use crate::session::{LabSession, SessionError, SessionReport, SessionState};
 
-/// The native lab client's fixed Secret Service namespace. Browser profile files remain in `teams-lab`.
+/// The native lab client's fixed credential-store namespace. Browser profile files remain in `teams-lab`.
 pub const KEYRING_APPLICATION: &str = "ngteams-lab";
 
 pub use native::NativeTarget;

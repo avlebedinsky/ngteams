@@ -1,4 +1,4 @@
-//! Windows Chrome belongs to a kill-on-close job from its first instruction.
+//! Windows Edge belongs to a kill-on-close job from its first instruction.
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;

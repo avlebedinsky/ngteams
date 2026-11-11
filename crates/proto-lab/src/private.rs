@@ -44,22 +44,6 @@ fn stage_error(operation: &str, error: &io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("{operation}: {error}"))
 }
 
-/// Matches the Windows native runner's sharing-based lifetime lock.
-///
-/// # Errors
-/// A holder already has this lock, or it cannot be privately created/opened.
-pub fn exclusive(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    if !path.try_exists()? {
-        drop(private::open(path, Open::Append)?);
-    }
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(0)
-        .open(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,10 +62,10 @@ mod tests {
         assert_eq!(std::fs::read(&output).unwrap(), b"new");
         private::check_file(&File::open(&output).unwrap()).unwrap();
         let lock = root.path().join("live.lock");
-        let held = exclusive(&lock).unwrap();
-        assert!(exclusive(&lock).is_err());
+        let held = private::share_lock(&lock, false).unwrap();
+        assert!(private::share_lock(&lock, false).is_err());
         drop(held);
-        drop(exclusive(&lock).unwrap());
+        drop(private::share_lock(&lock, false).unwrap());
         assert!(
             std::fs::read_dir(root.path()).unwrap().all(|entry| !entry
                 .unwrap()
@@ -104,7 +88,7 @@ mod tests {
         atomic(&blocked, b"blocking file").unwrap();
         assert!(atomic(&blocked.join("child"), b"must not publish").is_err());
         assert!(replace(&destination).is_err());
-        assert!(exclusive(&blocked.join("missing")).is_err());
+        assert!(private::share_lock(&blocked.join("missing"), false).is_err());
     }
 
     #[test]
