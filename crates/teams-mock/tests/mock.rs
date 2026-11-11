@@ -1384,9 +1384,14 @@ async fn a_channel_takes_a_post_and_a_reply_in_a_posts_thread_posted_to_its_chai
 #[test]
 fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for dir in ["src", "tests"] {
-        for file in std::fs::read_dir(crate_dir.join(dir))? {
+    let mut pending = vec![crate_dir.join("src"), crate_dir.join("tests")];
+    while let Some(dir) = pending.pop() {
+        for file in std::fs::read_dir(dir)? {
             let path = file?.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
             let source = std::fs::read_to_string(&path)?;
             // split, so this file doesn't name them itself
             let forbidden = [
