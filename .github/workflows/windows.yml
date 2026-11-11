@@ -45,17 +45,20 @@ jobs:
         run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -- --test-threads=1
       - name: Windows coverage tools
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           rustup component add llvm-tools-preview
           cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Require 90% native Windows filesystem coverage
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           cargo llvm-cov clean --workspace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo llvm-cov --locked -p teams-platform --fail-under-lines 90 --fail-under-functions 90 --fail-under-regions 90
       - name: Require the authentication crate's native coverage floors
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           cargo llvm-cov clean --workspace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -63,6 +66,7 @@ jobs:
           cargo llvm-cov --locked -p teams-auth --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions
       - name: Require the control crate's native coverage floors
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           cargo llvm-cov clean --workspace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -70,6 +74,7 @@ jobs:
           cargo llvm-cov --locked -p teams-ctl --fail-under-lines $floors.lines --fail-under-functions $floors.functions --fail-under-regions $floors.regions -- --test-threads=1
       - name: Require native runner coverage without a GUI or live client
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $env:CARGO_LLVM_COV_TARGET_DIR = "$pwd/target/llvm-cov-target"
           cargo llvm-cov clean --workspace
