@@ -111,7 +111,7 @@ fn verify_refusal(server: &Server, origin: &str) -> Result<(), Box<dyn std::erro
     if !server
         .requests
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|(_, path)| path == "/refusal-alive")
     {
@@ -139,7 +139,9 @@ fn refusal_close() {
         }
         true.into()
     }
-    let root = std::path::PathBuf::from(std::env::var_os("UI_SANDBOX_DIR").unwrap());
+    let Some(root) = std::env::var_os("UI_SANDBOX_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
     std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !root.join("refusal-alive").exists() {
@@ -150,7 +152,7 @@ fn refusal_close() {
         }
         // SAFETY: callback closes only this worker's own windows; no borrowed callback state.
         unsafe {
-            EnumWindows(Some(close), LPARAM(0)).unwrap();
+            let _ = EnumWindows(Some(close), LPARAM(0));
         }
     });
 }
@@ -326,8 +328,12 @@ fn serve(mut stream: impl std::io::Read + std::io::Write, requests: &Mutex<Vec<(
         );
     }
     if path == "/refusal-alive" {
-        let root = std::path::PathBuf::from(std::env::var_os("UI_SANDBOX_DIR").unwrap());
-        std::fs::write(root.join("refusal-alive"), b"original page survived cancellation").unwrap();
+        let Some(root) = std::env::var_os("UI_SANDBOX_DIR").map(std::path::PathBuf::from) else {
+            return;
+        };
+        if std::fs::write(root.join("refusal-alive"), b"original page survived cancellation").is_err() {
+            return;
+        }
     }
     let (status, headers, body) = match path.split('?').next().unwrap_or_default() {
         "/refusal" => ("200 OK", "Content-Type: text/html\r\n", REFUSAL),
