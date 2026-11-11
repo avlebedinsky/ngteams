@@ -1328,7 +1328,8 @@ impl Calls {
         }
     }
 
-    /// The microphone (`microphone`) or the speaker of `call` went away for good: its check fails.
+    /// The microphone (`microphone`) or the speaker of `call` went away: its check fails. The microphone shows muted,
+    /// as it stays until an unmute opens it again; the speaker is reopened by the engine about once a second.
     fn audio_closed(&mut self, call: CallId, microphone: bool) {
         if let Some(active) = self.call.as_mut().filter(|active| active.id == call) {
             if microphone {

@@ -550,8 +550,9 @@ pub(super) enum MediaChange {
     /// The camera went off by itself (its device went away): nothing more is sent on our video line until the account
     /// turns it on again.
     CameraOff,
-    /// The microphone (`true`) or the speaker (`false`) went away for good (its stream ended, not moved): nothing is
-    /// recorded or played on it any more, while the call goes on.
+    /// The microphone (`true`) or the speaker (`false`) went away or couldn't open (its stream ended, not moved),
+    /// while the call goes on: the microphone stays muted until an unmute opens it again; the speaker is reopened
+    /// about once a second, and playback resumes once it opens.
     AudioClosed {
         microphone: bool,
     },
@@ -647,8 +648,8 @@ impl LiveMedia {
         changes
     }
 
-    /// A device of the session went away for good: the camera as [`Self::camera_stopped`], the microphone or the
-    /// speaker told as it is.
+    /// A device of the session went away: the camera as [`Self::camera_stopped`], the microphone or the speaker told
+    /// while it is still missing (the speaker is reopened about once a second, the microphone on an unmute).
     fn device_closed(&mut self, device: SessionDevice) -> Option<MediaChange> {
         match device {
             SessionDevice::Camera => self.camera_stopped(),
