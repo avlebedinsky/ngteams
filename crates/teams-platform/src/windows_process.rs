@@ -16,7 +16,7 @@ use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_IN
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
     InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
@@ -76,7 +76,7 @@ impl Transfer {
     }
 
     /// Launch an absolute native executable with this exact transfer set, the current directory and environment.
-    /// Standard streams stay the runner's streams (usually private log files). Shell scripts are refused.
+    /// Standard streams are the duplicates selected by the constructor. Shell scripts are refused.
     ///
     /// # Errors
     /// Invalid executable/arguments, attribute-list allocation, or process creation failure.
@@ -255,21 +255,6 @@ impl Child {
             }
             _ => Err(io::Error::last_os_error()),
         }
-    }
-
-    /// Terminate this exact child, never a later process reusing its PID.
-    ///
-    /// # Errors
-    /// Native termination failed and the child has not already exited.
-    pub fn kill(&self) -> io::Result<()> {
-        // SAFETY: process is the owned child handle, not a PID lookup or pseudo-handle.
-        if unsafe { TerminateProcess(self.process.as_raw_handle(), 1) } == 0 {
-            let error = io::Error::last_os_error();
-            if self.wait(Duration::ZERO)?.is_none() {
-                return Err(error);
-            }
-        }
-        Ok(())
     }
 }
 

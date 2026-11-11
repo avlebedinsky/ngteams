@@ -55,10 +55,6 @@ use crate::sounds::{self, PackInfo, SoundPlayer, SoundSettings, SoundSource};
 use crate::theme::{self, Appearance};
 use crate::translate;
 
-/// The settings file's mode.
-pub const FILE_MODE: u32 = 0o600;
-/// Its directory's mode.
-pub const DIR_MODE: u32 = 0o700;
 /// The idle times the settings take, in minutes.
 pub const IDLE_MINUTES: RangeInclusive<u32> = 1..=240;
 /// The idle time by default, in minutes.
@@ -1281,7 +1277,8 @@ impl SettingsFile {
     }
 }
 
-/// The file's text; `None` when there is no file. A file readable by others is tightened to [`FILE_MODE`] first.
+/// The file's text; `None` when there is no file. Access by others is removed before reading; Unix owner-only
+/// modes are preserved, and Windows uses the platform's protected DACL.
 fn read_private(path: &Path) -> Result<Option<String>, String> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -1292,8 +1289,17 @@ fn read_private(path: &Path) -> Result<Option<String>, String> {
     if !metadata.is_file() {
         return Err("it isn't a file".to_owned());
     }
-    teams_platform::private::restrict_file(path)
-        .map_err(|error| format!("the settings file can't be made private: {error}"))?;
+    #[cfg(unix)]
+    let restrict = {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o077 != 0
+    };
+    #[cfg(windows)]
+    let restrict = true;
+    if restrict {
+        teams_platform::private::restrict_file(path)
+            .map_err(|error| format!("the settings file can't be made private: {error}"))?;
+    }
     let mut text = String::new();
     file.take(MAX_FILE + 1)
         .read_to_string(&mut text)
@@ -1322,9 +1328,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.push(format!(".{}.tmp", std::process::id()));
     let temporary = PathBuf::from(temporary);
     let written = (|| {
-        let mut file = teams_platform::private::open(&temporary, teams_platform::private::Open::ReadWrite)?;
-        teams_platform::private::restrict_file(&temporary)?;
-        file.set_len(0)?;
+        let mut file = teams_platform::private::replace(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);

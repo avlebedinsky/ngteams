@@ -114,12 +114,7 @@ fn page_path() -> PathBuf {
 /// What the file system said, in plain words.
 pub fn write(page: &str) -> Result<String, String> {
     let path = page_path();
-    let mut file = teams_platform::private::open(&path, teams_platform::private::Open::ReadWrite)
-        .and_then(|file| {
-            teams_platform::private::restrict_file(&path)?;
-            file.set_len(0)?;
-            Ok(file)
-        })
+    let mut file = teams_platform::private::replace(&path)
         .map_err(|error| format!("the page to print couldn't be written: {error}"))?;
     file.write_all(page.as_bytes())
         .map_err(|error| format!("the page to print couldn't be written: {error}"))?;

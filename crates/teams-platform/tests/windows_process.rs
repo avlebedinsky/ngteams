@@ -58,7 +58,6 @@ fn only_explicit_handles_and_uninterpreted_arguments_reach_the_child() {
     assert_ne!(child.id(), 0);
     drop(transfer);
     assert_eq!(child.wait(Duration::from_secs(20)).unwrap(), Some(0));
-    child.kill().unwrap(); // Already exited is also successful.
     let actual = std::fs::read(&trace).unwrap();
     let expected: Vec<u8> = payload
         .iter()
@@ -93,13 +92,14 @@ fn private_standard_streams_are_transferred_without_changing_the_parents_streams
 }
 
 #[test]
-fn waits_are_bounded_and_kill_targets_the_owned_process() {
+fn waits_are_bounded_and_job_termination_stops_the_owned_process() {
     let transfer = Transfer::new(&[]).unwrap();
+    let job = teams_platform::windows_job::Job::new().unwrap();
     let child = transfer
-        .spawn(&std::env::current_exe().unwrap(), &arguments("sleep"))
+        .spawn_in_job(&std::env::current_exe().unwrap(), &arguments("sleep"), &job)
         .unwrap();
     assert_eq!(child.wait(Duration::ZERO).unwrap(), None);
-    child.kill().unwrap();
+    job.terminate(1).unwrap();
     assert_eq!(child.wait(Duration::from_secs(10)).unwrap(), Some(1));
 }
 

@@ -179,3 +179,36 @@ fn check_open_file_rejects_unsafe_acl_without_repairing_it() {
     private::restrict_file(&path).unwrap();
     private::check_file(&file).unwrap();
 }
+
+#[test]
+fn replacing_a_private_output_truncates_and_restricts_existing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("output");
+    private::replace(&path)
+        .unwrap()
+        .write_all(b"synthetic long output")
+        .unwrap();
+    std::fs::write(&path, b"earlier output").unwrap();
+    let mut file = private::replace(&path).unwrap();
+    privacy::assert_private(&path, false);
+    file.write_all(b"new").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert!(private::replace(dir.path()).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn shared_holders_exclude_exclusive_and_exclusive_excludes_every_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lock");
+    let first = private::share_lock(&path, true).unwrap();
+    let second = private::share_lock(&path, true).unwrap();
+    assert!(private::share_lock(&path, false).is_err());
+    drop((first, second));
+    let exclusive = private::share_lock(&path, false).unwrap();
+    assert!(private::share_lock(&path, false).is_err());
+    assert!(private::share_lock(&path, true).is_err());
+    drop(exclusive);
+    private::share_lock(&path, true).unwrap();
+    assert!(private::share_lock(&dir.path().join("absent/lock"), false).is_err());
+}

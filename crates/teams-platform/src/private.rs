@@ -78,3 +78,33 @@ mod windows_check;
 pub fn check_file(file: &File) -> io::Result<()> {
     windows_check::check_file(file)
 }
+
+/// Opens a kernel sharing lock. Shared holders coexist; an exclusive holder excludes all other holders.
+/// The returned file owns the lock until it closes, including after a process crash.
+///
+/// # Errors
+/// A conflicting holder exists or the file cannot be privately created/opened.
+#[cfg(windows)]
+pub fn share_lock(path: &Path, shared: bool) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    if !path.try_exists()? {
+        drop(open(path, Open::Append)?);
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(!shared)
+        .share_mode(if shared { FILE_SHARE_READ } else { 0 })
+        .open(path)
+}
+
+/// Opens privately, removes other users' access, then truncates the file before any new bytes are written.
+///
+/// # Errors
+/// Opening, restricting or truncating the file fails.
+pub fn replace(path: &Path) -> io::Result<File> {
+    let file = open(path, Open::ReadWrite)?;
+    restrict_file(path)?;
+    file.set_len(0)?;
+    Ok(file)
+}

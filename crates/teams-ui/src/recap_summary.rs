@@ -635,9 +635,7 @@ fn write_private(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
         teams_platform::private::restrict_dir(dir)?;
     }
     let part = file.with_extension("part");
-    let mut out = teams_platform::private::open(&part, teams_platform::private::Open::ReadWrite)?;
-    teams_platform::private::restrict_file(&part)?;
-    out.set_len(0)?;
+    let mut out = teams_platform::private::replace(&part)?;
     out.write_all(bytes)?;
     out.sync_all()?;
     drop(out);

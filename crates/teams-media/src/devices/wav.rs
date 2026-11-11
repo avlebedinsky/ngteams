@@ -291,9 +291,7 @@ impl WavWriter {
     /// # Errors
     /// The file can't be created or written.
     pub fn create(path: &Path) -> Result<Self, DeviceError> {
-        let file = teams_platform::private::open(path, teams_platform::private::Open::ReadWrite)?;
-        teams_platform::private::restrict_file(path)?;
-        file.set_len(0)?;
+        let file = teams_platform::private::replace(path)?;
         let mut writer = Self {
             file: BufWriter::new(file),
             samples: 0,

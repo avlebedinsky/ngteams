@@ -103,7 +103,7 @@ fn preparation_and_personal_snapshot_cleanup_use_only_the_synthetic_fixture() {
         supervise(&app, &run, Some("app-exits"), None, Duration::from_secs(5)).unwrap(),
         7
     );
-    let held = locks::lock(&run.join("holder.lock"), false).unwrap();
+    let held = private::share_lock(&run.join("holder.lock"), false).unwrap();
     assert!(supervise(&app, &run, Some("a"), None, Duration::ZERO).is_err());
     drop(held);
     assert!(

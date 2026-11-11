@@ -47,8 +47,7 @@ pub(super) fn register(app_id: &str, name: &str) -> io::Result<Registered> {
     teams_platform::private::create_dir_all(&directory)?;
     let icon = directory.join("icon.png");
     let png = include_bytes!("../../../../../packaging/icons/hicolor/64x64/apps/com.nickalie.ngteams.png");
-    let mut file = teams_platform::private::open(&icon, teams_platform::private::Open::ReadWrite)?;
-    file.set_len(0)?;
+    let mut file = teams_platform::private::replace(&icon)?;
     file.write_all(png)?;
     write_registration(app_id, name, &icon)?;
     register_server(app_id)?;

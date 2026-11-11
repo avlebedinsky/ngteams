@@ -13,7 +13,7 @@ pub const DIRECTORY_ENV: &str = "UI_SANDBOX_DIR";
 ///
 /// # Errors
 /// Missing opt-in/directory or a process outside the active VM console (including an SSH/service process).
-pub fn console_allowed(
+fn console_allowed(
     vm: Option<&OsStr>,
     directory: Option<&OsStr>,
     process_session: u32,

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use teams_auth::broker::{BrokerStream, private_pair};
 use teams_platform::{private, windows_process::Transfer, windows_sandbox};
 
-mod locks;
 mod supervisor;
 
 #[derive(Parser)]
@@ -157,9 +156,9 @@ fn supervise(
     private::create_dir_all(&shared)?;
     // The lock name is global to this user's lab, shared across all worktrees and console sessions.
     let _live = alias
-        .map(|_| locks::lock(&shared.join("live.lock"), true))
+        .map(|_| private::share_lock(&shared.join("live.lock"), true))
         .transpose()?;
-    let _alias = locks::lock(&directory.join("holder.lock"), false)?;
+    let _alias = private::share_lock(&directory.join("holder.lock"), false)?;
     let stop = directory.join("stop");
     match std::fs::remove_file(&stop) {
         Ok(()) => (),

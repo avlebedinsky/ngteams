@@ -1045,3 +1045,17 @@ fn people_s_calendars_are_kept_by_account_and_a_bad_one_left_out() {
     assert_eq!(parse(&render(&read)).unwrap().0.people_calendars, read.people_calendars);
     assert_eq!(parse("people_calendars = 3").unwrap().1.len(), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn reading_preserves_unix_modes_that_already_exclude_other_users() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (file, path) = file_in(&dir);
+    file.save(&changed()).unwrap();
+    for mode in [0o400, 0o600, 0o700] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(file.load().settings, changed());
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+    }
+}
