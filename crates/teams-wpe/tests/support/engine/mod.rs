@@ -123,6 +123,7 @@ fn child(backend: Backend, frames: FrameMode) -> Result {
     assert!(engine.frames.values().any(|frame| frame.shm));
     engine.shutdown();
     if backend == Backend::Worker {
+        let config = scenarios::with_extensions(config, &engine.root)?;
         let mut next = pump::Engine::start(config, backend, engine.root.clone())?;
         scenarios::restart(&mut next)?;
         next.shutdown();

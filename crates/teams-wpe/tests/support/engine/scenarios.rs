@@ -1,5 +1,7 @@
 mod input;
 mod navigation;
+mod refusals;
+mod stores;
 
 use serde_json::{Value, json};
 use teams_wpe::{
@@ -54,6 +56,10 @@ pub(super) fn run(engine: &mut Engine) -> Result {
     engine.frame(view, 320, 240)?;
     eprintln!("native stage: input");
     input::run(engine, view).map_err(|error| format!("input: {error}"))?;
+    eprintln!("native stage: refusals");
+    refusals::run(engine, session).map_err(|error| format!("refusals: {error}"))?;
+    eprintln!("native stage: stores");
+    stores::run(engine).map_err(|error| format!("stores: {error}"))?;
     eprintln!("native stage: lifecycle");
     lifecycle(engine, session, view).map_err(|error| format!("lifecycle: {error}"))?;
     Ok(())
@@ -109,14 +115,25 @@ fn lifecycle(engine: &mut Engine, session: SessionId, view: ViewId) -> Result {
     Ok(())
 }
 
+/// A second engine, its web processes given an (empty) extension directory; its page is left open for the shutdown
+/// to close.
 pub(super) fn restart(engine: &mut Engine) -> Result {
     let session = engine.host.create_session(SessionSpec::Ephemeral);
     let view = create(engine, spec(session))?;
     engine.load(view, teams_wpe::Load::Uri(page::TWO.into()))?;
     assert_eq!(engine.eval(view, "document.title", None)?, Value::String("two".into()));
-    engine.host.close_view(view);
-    engine.host.drop_session(session);
     Ok(())
+}
+
+pub(super) fn with_extensions(mut config: HostConfig, root: &std::path::Path) -> Result<HostConfig> {
+    let directory = root.join("extensions");
+    std::fs::create_dir_all(&directory)?;
+    config.extensions = Some(teams_wpe::WebProcessExtensions {
+        directory: directory.clone(),
+        data: "synthetic extension data".into(),
+        sandbox_paths: vec![directory],
+    });
+    Ok(config)
 }
 
 pub(super) fn refused_restart(config: HostConfig) {

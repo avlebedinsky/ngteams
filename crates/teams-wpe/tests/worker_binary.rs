@@ -1,8 +1,13 @@
-//! The real `ngteams-web` binary: what the app asks it at startup, and that it serves only an app.
+//! The real `ngteams-web` binary: what the app asks it at startup, that it serves only an app, and how it talks to
+//! one (the worker protocol, driven by hand off the user's session).
 
 use std::process::Command;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_ngteams-web");
+
+#[cfg(test)]
+#[path = "support/worker_protocol.rs"]
+mod protocol;
 
 #[test]
 fn the_probe_prints_the_loaded_engine() {
@@ -16,7 +21,7 @@ fn the_probe_prints_the_loaded_engine() {
 
 #[test]
 fn the_pinned_worker_reports_the_system_engine() {
-    teams_wpe_client::worker::pin_worker_path(std::path::Path::new(WORKER)).unwrap();
+    protocol::pinned();
     let version = teams_wpe_client::worker::probe_system().unwrap();
     assert!(version.starts_with("2."), "{version}");
 }

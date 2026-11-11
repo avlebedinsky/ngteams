@@ -21,9 +21,9 @@ teams-call = { lines = 95, functions = 96, regions = 91 }
 teams-auth = { lines = 96, functions = 96, regions = 94 }
 teams-proto = { lines = 94, functions = 93, regions = 92 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
-teams-wpe = { lines = 88, functions = 90, regions = 88 }
+teams-wpe = { lines = 93, functions = 96, regions = 93 }
 teams-wpe-client = { lines = 84, functions = 75, regions = 84 }
-teams-web-engine = { lines = 95, functions = 91, regions = 90 }
+teams-web-engine = { lines = 96, functions = 93, regions = 91 }
 teams-signin-protocol = { lines = 100, functions = 100, regions = 98 }
 ngteams = { lines = 92, functions = 91, regions = 90 }
 teams-core = { lines = 92, functions = 93, regions = 90 }

@@ -7,8 +7,12 @@ use super::Result;
 pub(super) const ONE: &str = "synthetic://fixture/one";
 pub(super) const TWO: &str = "synthetic://fixture/two";
 
+/// A base for loaded HTML that is a secure context (a page on the synthetic scheme is not one); nothing is fetched
+/// from it.
+pub(super) const SECURE: &str = "http://localhost/synthetic-secure";
+
 pub(super) fn allowed(uri: &str) -> bool {
-    uri.starts_with("synthetic://fixture/") || uri == "about:blank"
+    uri.starts_with("synthetic://fixture/") || uri == "about:blank" || uri == SECURE
 }
 
 pub(super) fn response(uri: &str, root: &Path) -> Result<SchemeResponse> {
