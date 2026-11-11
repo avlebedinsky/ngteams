@@ -48,19 +48,12 @@ use crate::secrets::AppSecrets;
 #[cfg(windows)]
 #[path = "app/windows.rs"]
 mod windows;
-#[cfg(windows)]
-use windows::desktop_id;
 
 #[cfg(windows)]
 pub(crate) use windows::shell_id;
 
 #[cfg(unix)]
 pub(crate) const fn shell_id(_: &crate::setup::Setup, _: bool, _: &App) -> &'static str {
-    PERSONAL_APP_ID
-}
-
-#[cfg(unix)]
-const fn desktop_id(_: &Runner, _: bool, _: &App) -> &'static str {
     PERSONAL_APP_ID
 }
 
@@ -193,7 +186,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         trace,
         ctl,
     } = launch;
-    let app_id = desktop_id(&runner, read_only, cx);
+    let app_id = shell_id(&runner.setup, read_only, cx);
     let (hint, sign_in_again) = signing_out(read_only, sign_in_again);
     play_videos_on(runner.devices.as_ref(), cx);
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down

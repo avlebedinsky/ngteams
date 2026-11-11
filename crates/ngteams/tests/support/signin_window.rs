@@ -27,7 +27,7 @@ fn bound_windows_refuse_foreign_pages_and_report_data_failures_before_the_servic
     let (setup, _) = crate::app::tests::setup(root.path(), 1);
     let cx = TestAppContext::single();
     let windows = cx.update(|cx| super::windows_for(&setup, cx));
-    let again = cx.update(super::windows);
+    let again = cx.update(|cx| super::windows_for(&setup, cx));
     let refused = window(&setup, &windows)(request("https://example.test/authorize"));
     assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("isn't on the sign-in window's hosts")));
     let mut broken = setup.clone();

@@ -12,6 +12,9 @@ impl super::RestartDescriptors {
     /// Start the successor with only fresh broker/trace duplicates, then exit. Failed launches close all temporary
     /// duplicates and keep the originals private and usable.
     pub fn exec(&self, command: &mut Command) -> io::Error {
+        if let Err(error) = validate(command) {
+            return error;
+        }
         let BrokerStream::NamedPipe(socket) = &self.socket;
         let mut handles = vec![socket.inner().as_handle()];
         if let Some(trace) = &self.trace {
@@ -29,27 +32,21 @@ impl super::RestartDescriptors {
         // Only the arguments are changed, using a fresh command so the old descriptor numbers cannot slip through.
         let mut next = Command::new(command.get_program());
         next.args(args);
-        if command.get_envs().next().is_some() || command.get_current_dir().is_some() {
-            return io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a restart inherits its environment and directory",
-            );
-        }
-        exec(&next, &Ok(transfer))
+        exec(&next, &transfer)
     }
 }
 
-pub(super) fn exec(command: &Command, transfer: &io::Result<Transfer>) -> io::Error {
-    let transfer = match transfer {
-        Ok(transfer) => transfer,
-        Err(error) => return io::Error::new(error.kind(), error.to_string()),
-    };
+pub(super) fn validate(command: &Command) -> io::Result<()> {
     if command.get_envs().next().is_some() || command.get_current_dir().is_some() {
-        return io::Error::new(
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "a restart inherits its environment and directory",
-        );
+        ));
     }
+    Ok(())
+}
+
+pub(super) fn exec(command: &Command, transfer: &Transfer) -> io::Error {
     let args: Vec<OsString> = command.get_args().map(OsStr::to_os_string).collect();
     match transfer.spawn(Path::new(command.get_program()), &args) {
         Ok(_) => std::process::exit(0),

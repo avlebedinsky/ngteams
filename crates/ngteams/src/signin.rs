@@ -41,7 +41,6 @@ use teams_auth::signin::{SignInAnswer, SignInRequest, WindowError, WindowSignInE
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
 use teams_signin::hosts::{HostRefused, SignInHosts};
 use teams_signin::window::{self, Bound, WindowConfig, Windows};
-use teams_ui::window::PERSONAL_APP_ID;
 
 use crate::setup::Setup;
 
@@ -53,11 +52,6 @@ pub type Window = Box<dyn FnOnce(SignInRequest) -> SignInAnswer + Send>;
 struct SignInWindows(Windows);
 
 impl Global for SignInWindows {}
-
-/// The app's sign-in windows ([`Windows`], under the app's own app id), served from the first ask on.
-pub fn windows(cx: &mut App) -> Windows {
-    windows_under(PERSONAL_APP_ID, cx)
-}
 
 /// The current account setup's shell identity also groups its sign-in worker. In particular a lab sign-in must
 /// never share the installed client's taskbar identity, even before its first signed-in main window exists.

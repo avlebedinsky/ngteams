@@ -1,11 +1,6 @@
 //! Distinct Windows shell identities keep lab/read-only metadata separate from the installed client.
-use crate::accounts::Runner;
 use gpui::App;
 use teams_ui::window::PERSONAL_APP_ID;
-
-pub(super) fn desktop_id(runner: &Runner, read_only: bool, cx: &App) -> &'static str {
-    shell_id(&runner.setup, read_only, cx)
-}
 
 pub(crate) fn shell_id(setup: &crate::setup::Setup, read_only: bool, cx: &App) -> &'static str {
     static LAB_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();

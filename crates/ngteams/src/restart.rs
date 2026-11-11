@@ -108,6 +108,12 @@ pub fn exec(command: &mut Command) -> io::Error {
     }
     #[cfg(windows)]
     {
-        windows::exec(command, &teams_platform::windows_process::Transfer::new(&[]))
+        if let Err(error) = windows::validate(command) {
+            return error;
+        }
+        match teams_platform::windows_process::Transfer::new(&[]) {
+            Ok(transfer) => windows::exec(command, &transfer),
+            Err(error) => error,
+        }
     }
 }
