@@ -12,8 +12,6 @@
 //! it (its main audio `serverMuted`, Mute all's). The organizer mutes everyone else at the conversation's `mute` link
 //! ([`Calls::mute_all`]).
 
-use std::collections::BTreeMap;
-
 use serde_json::Value;
 use teams_proto::{
     MeetingJoinInfo, MeetingTimer, Mri, MuteParticipants, TimerUpdate, UpdateMeetingSettings, UpdateMeetingStates,
@@ -97,11 +95,8 @@ pub(crate) struct Meeting {
     pub(crate) state: MeetingState,
     timer: Option<TimerUpdate>,
     settings: u64,
-    // The recording service's two MRIs have separate participant version sequences.
-    recorder_versions: BTreeMap<&'static str, u64>,
-    recorder_mri: Option<&'static str>,
-    // Use the same handover rule as captions and the transport binding, including across MRIs.
-    recorder_service: Option<teams_proto::captions::CaptionService>,
+    // Captions and meeting modes read the same merged roster and endpoint selection.
+    pub(crate) services: teams_proto::captions::CaptionRoster,
     own_version: Option<u64>,
 }
 
@@ -126,20 +121,13 @@ struct ConversationUpdate {
 }
 
 /// Whether the bot records and transcribes now, each with who started it (`userId`, which stays once it stopped:
-/// its `state` tells whether it runs). Read only the followed endpoint, when the service has named one.
-fn recorder(entry: &Value, endpoint_id: Option<&str>) -> (Option<Recording>, Option<Transcription>) {
-    let active = entry.get("state").and_then(Value::as_str) == Some("active");
+/// its `state` tells whether it runs). Read only the endpoint selected from the merged service roster.
+fn recorder(metadata: Option<&Value>) -> (Option<Recording>, Option<Transcription>) {
     let running = |name: &str| {
-        let pointer = format!("/endpointMetadata/processingModes/{name}");
-        entry
-            .get("endpoints")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(|endpoints| endpoints.iter())
-            .filter(|(id, _)| endpoint_id.is_none_or(|followed| followed == id.as_str()))
-            .filter_map(|(_, endpoint)| endpoint.pointer(&pointer))
-            .find(|mode| mode.get("state").and_then(Value::as_str) == Some("Active"))
-            .filter(|_| active)
+        metadata?
+            .get("processingModes")?
+            .get(name)
+            .filter(|mode| mode.get("state").and_then(Value::as_str) == Some("Active"))
     };
     let by = |mode: &Value| {
         mode.get("userId")
@@ -209,40 +197,13 @@ impl Meeting {
         let Ok(body) = serde_json::from_slice::<Value>(body) else {
             return false;
         };
-        let Some((mri, entry)) = teams_proto::captions::service_entry(&body) else {
-            return false;
-        };
-        let Some(version) = entry.get("version").and_then(Value::as_u64) else {
-            return false;
-        };
-        if self.recorder_versions.get(mri).is_some_and(|told| *told >= version) {
-            return false;
-        }
-        self.recorder_versions.insert(mri, version);
-        self.recorder_service =
-            teams_proto::captions::CaptionService::updated(self.recorder_service.as_ref(), mri, entry);
-        if let Some(service) = &self.recorder_service
-            && (service.mri != mri
-                || entry
-                    .get("endpoints")
-                    .and_then(|endpoints| endpoints.get(&service.endpoint_id))
-                    .and_then(|endpoint| endpoint.get("endpointMetadata"))
-                    .is_none())
-        {
-            return false;
-        }
-        let active = entry.get("state").and_then(Value::as_str) == Some("active");
-        if self.recorder_mri.is_some_and(|followed| followed != mri) && !active {
-            return false;
-        }
-        if active {
-            self.recorder_mri = Some(mri);
-        }
-        let endpoint = self
-            .recorder_service
-            .as_ref()
-            .map(|service| service.endpoint_id.as_str());
-        let (recording, transcribing) = recorder(entry, endpoint);
+        self.services.update(&body);
+        self.recorder_state()
+    }
+
+    /// Projects recording modes from the same endpoint that supplies the caption command binding.
+    fn recorder_state(&mut self) -> bool {
+        let (recording, transcribing) = recorder(self.services.followed().map(|service| service.metadata));
         let changed = self.state.recording != recording || self.state.transcribing != transcribing;
         self.state.recording = recording;
         self.state.transcribing = transcribing;
@@ -308,7 +269,7 @@ impl Calls {
     pub(crate) fn recorder_told(&mut self, body: &[u8]) {
         let me = self.identity.mri.clone();
         let entries = crate::read::roster(body).unwrap_or_default();
-        self.meeting_told(|meeting| meeting.roster(body) | meeting.own(&entries, &me));
+        self.meeting_told(|meeting| meeting.recorder_state() | meeting.own(&entries, &me));
     }
 
     /// Why [`Calls::options_of`] names no options for `call`, in a few words (never an id): what the log says of a

@@ -931,6 +931,17 @@ fn captions_allow_the_newest_endpoint_of_the_service_from_another_region() {
     tracker.observe_delivery(&delivery(30, ROSTER_PATH, stale_roster.to_string().into_bytes()));
     assert!(tracker.caption_allowed(&start));
     assert!(!tracker.caption_allowed(&stale));
+    // Process the followed MRI's departure even beside the other MRI's older full read.
+    let mut both = older_entry;
+    both["participants"][teams_proto::captions::CAPTION_SERVICE_MRI]["version"] = json!(22);
+    both["participants"][teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI] =
+        json!({"version": 3, "state": "disconnected"});
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, both.to_string().into_bytes()));
+    assert!(
+        !tracker.caption_allowed(&start),
+        "departed endpoint loses command authorization"
+    );
+    assert!(tracker.caption_allowed(&stale), "still-active older region takes over");
 }
 fn assert_invalid_reply_envelopes_are_refused(tracker: &Tracker, envelope: &Value) {
     use teams_proto::CallState as _;

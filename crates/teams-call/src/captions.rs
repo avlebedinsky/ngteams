@@ -1,7 +1,5 @@
 //! Caption operations use their own outcome path: a service failure never fails the voice call.
-use teams_proto::captions::{
-    CAPTION_SERVICE_MRI, CaptionService, CaptionWrite, Processing, RecordCommand, service_entry,
-};
+use teams_proto::captions::{CAPTION_SERVICE_MRI, CaptionService, CaptionWrite, Processing, RecordCommand};
 
 use super::{CallError, CallEvent, CallId, Calls};
 use crate::agent::Kind;
@@ -38,7 +36,7 @@ impl Calls {
             .as_ref()
             .filter(|call| call.id == id && call.phase == Phase::Connected)
             .ok_or(CallError::NotNow)?;
-        let service = call.caption_service.as_ref().ok_or(CallError::NotNow)?;
+        let service = call.meeting.services.service().ok_or(CallError::NotNow)?;
         let thread = call.caption_thread.as_deref().ok_or(CallError::NotNow)?;
         match language {
             Some(language) => CaptionWrite::language(&call.context, &service.command, &call.me, thread, language),
@@ -60,7 +58,7 @@ impl Calls {
             .as_ref()
             .filter(|call| call.id == id && call.phase == Phase::Connected)
             .ok_or(CallError::NotNow)?;
-        let service = call.caption_service.as_ref().ok_or(CallError::NotNow)?;
+        let service = call.meeting.services.service().ok_or(CallError::NotNow)?;
         let thread = call.caption_thread.as_deref().ok_or(CallError::NotNow)?;
         let (link, me, context) = (&service.command, &call.me, &call.context);
         let recording = if call.meeting.state.transcribing.is_some() {
@@ -93,8 +91,9 @@ impl Calls {
         self.call
             .as_ref()
             .filter(|call| call.id == id)?
-            .caption_service
-            .as_ref()
+            .meeting
+            .services
+            .service()
     }
 
     pub(super) fn caption_roster(&mut self, body: &[u8]) {
@@ -102,18 +101,10 @@ impl Calls {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
             return;
         };
-        let Some((mri, entry)) = service_entry(&value) else {
-            return;
-        };
-        if let Some(version) = entry.get("version").and_then(serde_json::Value::as_u64) {
-            if call.caption_versions.get(mri).is_some_and(|old| version <= *old) {
-                return;
-            }
-            call.caption_versions.insert(mri, version);
-        }
-
-        let service = CaptionService::updated(call.caption_service.as_ref(), mri, entry);
-        if service == call.caption_service {
+        let before = call.meeting.services.service().cloned();
+        call.meeting.services.update(&value);
+        let service = call.meeting.services.service().cloned();
+        if service == before {
             return;
         }
         log::info!(
@@ -132,7 +123,6 @@ impl Calls {
                 ),
             )
         );
-        call.caption_service.clone_from(&service);
         call.caption_inviting = false;
         self.out.event(CallEvent::CaptionService { call: call.id, service });
     }

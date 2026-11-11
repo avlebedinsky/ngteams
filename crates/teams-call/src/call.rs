@@ -278,10 +278,7 @@ pub(crate) struct Call {
     pub(crate) phase: Phase,
     pub(crate) context: CallContext,
     pub(crate) caption_thread: Option<String>,
-    pub(crate) caption_service: Option<teams_proto::captions::CaptionService>,
     pub(crate) caption_inviting: bool,
-    /// Roster versions are per participant, including the service's two region MRIs.
-    pub(crate) caption_versions: BTreeMap<&'static str, u64>,
     /// The account in this call (its participant id fresh for the call).
     pub(crate) me: CallParticipant,
     agent: CallAgent,
@@ -375,9 +372,7 @@ impl Call {
             phase,
             context,
             caption_thread: None,
-            caption_service: None,
             caption_inviting: false,
-            caption_versions: BTreeMap::new(),
             me,
             agent,
             callbacks: Vec::new(),

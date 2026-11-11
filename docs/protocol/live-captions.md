@@ -40,7 +40,7 @@ The invitation always names the commercial recorder MRI, but the service that an
 another region and then joins the roster as a second MRI, `CAPTION_SERVICE_ALTERNATE_MRI`. The current web client's
 calling configuration lists it for the commercial cloud (`recordingBotMrisFromAlternateRegions`), and the client
 watches both participants as the one recording/caption service. The native client does the same
-(`teams_proto::captions::service_entry`): either MRI's active entry is the call's service, its command URL is
+(`teams_proto::captions::CaptionRoster`): either MRI's active endpoint can be the call's service, its command URL is
 trusted on the same terms, and neither is ever shown as a person. A client that only looks for the invited MRI sees an
 accepted invitation and a successful `addParticipantSuccess`, then never learns the command URL or the `Active`
 state, so captions stay "Starting" until they time out. The lab tenant was always served from its own region
@@ -48,8 +48,22 @@ state, so captions stay "Starting" until they time out. The lab tenant was alway
 
 A participant entry's `endpoints` can hold more than one endpoint. The web client treats a later one as a handover:
 it follows the endpoint with the latest `endpointMetadata.joinTime`, whatever its key, and takes that endpoint's
-command URL, language and states. The native client does the same, and a roster update that repeats an older
-endpoint never takes it back there. Key order in the JSON object means nothing.
+command URL, language and states. The native client accumulates each MRI's participant version, activity and
+endpoints independently. Every named entry in a roster body is applied before selecting anything; a full read for
+one region cannot hide the other region's delta or departure. Omitted metadata, including `joinTime`, stays as last
+told for that endpoint. A supplied `processingModes` map replaces that endpoint's mode snapshot; omitting the whole
+map preserves it. Versions are compared only within the MRI that owns them.
+
+One pure selection over that accumulated state follows the active endpoint with the newest join across both MRIs;
+the invited MRI wins a tie. A repeat of an older endpoint cannot undo a handover while the newer one remains active.
+A departure removes that participant's endpoints, allowing a handback to an older endpoint still active in the other
+region. With no active endpoint there is no followed service. Key order in the JSON object means nothing.
+
+Caption state, the transport's command authorization and the meeting's recording/transcription modes use that same
+selection. Recording-only metadata can select an endpoint even without a caption command link; an empty active entry
+from the other MRI cannot clear those modes. A caption binding requires the selected endpoint's validated command
+URL and caption state. An invalid replacement URL revokes that binding rather than selecting an older command link.
+The recorder credential is sent only to the selected endpoint's validated command URL.
 
 ### Side by side with the web client (2026-11-11)
 

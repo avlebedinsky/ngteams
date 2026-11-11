@@ -2498,13 +2498,23 @@ fn recording_and_captions_follow_the_same_regional_service_and_endpoint() {
     calls.on_delivery(&delivery(&roster, &both), Observed::Nothing, now);
     assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
     assert_eq!(calls.caption_service(call), Some(&service));
-    // A genuinely newer join hands over all modes, and its own departure clears them.
+    // A newer join hands over all modes; its departure hands back while the other region stays active.
     let newest = bot(CAPTION_SERVICE_MRI, 26, "2026-01-01T00:00:03Z", "Active");
     calls.on_delivery(&delivery(&roster, &newest), Observed::Nothing, now);
     assert_eq!(calls.caption_service(call).unwrap().mri, CAPTION_SERVICE_MRI);
     assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+    regional_departures(&mut calls, call, &roster, now, &expected);
+}
+
+fn regional_departures(calls: &mut Calls, call: CallId, roster: &str, now: Instant, expected: &crate::MeetingState) {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
     let departed = json!({"participants": {CAPTION_SERVICE_MRI: {"version": 27, "state": "disconnected"}}});
-    calls.on_delivery(&delivery(&roster, &departed), Observed::Nothing, now);
+    calls.on_delivery(&delivery(roster, &departed), Observed::Nothing, now);
+    // The alternate endpoint is still active: the derived answer hands back to it.
+    assert_eq!(calls.caption_service(call).unwrap().mri, CAPTION_SERVICE_ALTERNATE_MRI);
+    assert_eq!(&calls.call.as_ref().unwrap().meeting.state, expected);
+    let departed = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {"version": 3, "state": "disconnected"}}});
+    calls.on_delivery(&delivery(roster, &departed), Observed::Nothing, now);
     assert!(calls.caption_service(call).is_none());
     assert!(calls.call.as_ref().unwrap().meeting.state.recording.is_none());
     assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_none());
@@ -2520,4 +2530,47 @@ fn mixer_explicitly_marks_only_the_initial_caption_media_fork_as_a_new_session()
     content["newOffer"] = json!(true);
     content["fromMixer"] = json!(false);
     assert!(!crate::read::media(&content).unwrap().new_mixer_session);
+}
+
+#[test]
+fn recording_without_a_caption_link_survives_another_mris_empty_active_entry() {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let recording = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 1, "state": "active", "endpoints": {"synthetic": {"endpointMetadata": {
+            "processingModes": {"recording": {"state": "Active"}, "realTimeTranscript": {"state": "Active"}}
+        }}}
+    }}});
+    calls.on_delivery(&delivery(&roster, &recording), Observed::Nothing, now);
+    let expected = calls.call.as_ref().unwrap().meeting.state.clone();
+    assert!(expected.recording.is_some() && expected.transcribing.is_some());
+    assert!(calls.caption_service(call).is_none());
+    let _ = effects(&mut calls);
+    for entry in [
+        json!({"version": 21, "state": "disconnected"}),
+        json!({"version": 22, "state": "connecting"}),
+        json!({"version": 23}),
+        json!({"version": 24, "state": "active"}),
+    ] {
+        let other = json!({"participants": {CAPTION_SERVICE_MRI: entry}});
+        calls.on_delivery(&delivery(&roster, &other), Observed::Nothing, now);
+        assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+        assert!(
+            !events(&effects(&mut calls))
+                .iter()
+                .any(|event| matches!(event, CallEvent::Meeting { .. }))
+        );
+    }
+    let departed = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {"version": 2, "state": "disconnected"}}});
+    calls.on_delivery(&delivery(&roster, &departed), Observed::Nothing, now);
+    assert!(calls.call.as_ref().unwrap().meeting.state.recording.is_none());
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_none());
 }

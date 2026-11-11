@@ -172,7 +172,7 @@ fn another_region_keeps_recording_when_the_invited_leg_leaves_before_caption_met
     let expected = calls.call.as_ref().unwrap().meeting.state.clone();
     assert_eq!(told, vec![expected.clone()]);
     assert!(expected.recording.is_some() && expected.transcribing.is_some());
-    for (version, state) in [(22, "disconnected"), (23, "connecting")] {
+    for (version, state) in [(22, "disconnected"), (23, "connecting"), (24, "active")] {
         let other = json!({"participants": {CAPTION_SERVICE_MRI: {"version": version, "state": state}}});
         calls.on_delivery(&delivery(&roster, &other), Observed::Nothing, now);
         assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);

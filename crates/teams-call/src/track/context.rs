@@ -1,8 +1,8 @@
 //! Account, callback and caption metadata on the canonical tracked call entries.
 use super::{Delivery, Observed, State, Tracker, offer::OfferState};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
-use teams_proto::captions::{CaptionService, CaptionWrite, CaptionWriteKind, service_entry};
+use std::collections::BTreeSet;
+use teams_proto::captions::{CaptionRoster, CaptionWrite, CaptionWriteKind};
 use teams_proto::{CallState, Mri};
 
 #[derive(Debug, Default)]
@@ -11,9 +11,7 @@ pub(super) struct Context {
     actor: Option<(String, String)>,
     conversation: Option<String>,
     caption_add: Option<String>,
-    caption_service: Option<CaptionService>,
-    // Participant versions are independent even when both MRIs represent the caption service.
-    caption_versions: BTreeMap<&'static str, u64>,
+    captions: CaptionRoster,
     callbacks: BTreeSet<String>,
 }
 impl Context {
@@ -72,6 +70,9 @@ impl Context {
             return;
         };
         self.answer_value(&value);
+        if let Some(roster) = value.get("roster") {
+            self.captions.update(roster);
+        }
     }
     fn answer_value(&mut self, body: &Value) {
         if self.conversation.is_none() {
@@ -120,17 +121,7 @@ impl Context {
         let Ok(value) = serde_json::from_slice::<Value>(body) else {
             return;
         };
-        let Some((mri, entry)) = service_entry(&value) else {
-            return;
-        };
-        if let Some(version) = entry.get("version").and_then(Value::as_u64) {
-            if self.caption_versions.get(mri).is_some_and(|old| version <= *old) {
-                return;
-            }
-            self.caption_versions.insert(mri, version);
-        }
-        // the same service, and endpoint, the call machine follows (`Calls::caption_roster`)
-        self.caption_service = CaptionService::updated(self.caption_service.as_ref(), mri, entry);
+        self.captions.update(&value);
     }
     fn owns_callback(&self, path: &str) -> bool {
         self.callbacks
@@ -147,7 +138,7 @@ impl Context {
         }
         let expected = match write.kind() {
             CaptionWriteKind::Invite => self.caption_add.as_deref(),
-            _ => self.caption_service.as_ref().map(|service| service.command.as_str()),
+            _ => self.captions.service().map(|service| service.command.as_str()),
         };
         if expected != Some(write.url().as_str()) {
             return false;
