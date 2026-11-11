@@ -34,7 +34,6 @@ impl FollowedService<'_> {
             mri: self.mri,
             endpoint_id: self.endpoint_id.to_owned(),
             command: CaptionCommandLink::parse(self.metadata.get("commandUrl")?.as_str()?)?,
-            joined: self.metadata.get("joinTime").and_then(Value::as_str).map(str::to_owned),
             spoken_language: self
                 .metadata
                 .get("spokenLanguage")

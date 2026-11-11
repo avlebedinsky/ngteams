@@ -87,8 +87,6 @@ pub struct CaptionService {
     pub mri: &'static str,
     pub command: CaptionCommandLink,
     pub endpoint_id: String,
-    /// When the endpoint joined (`joinTime`, as the service wrote it), if the roster said.
-    pub joined: Option<String>,
     pub spoken_language: String,
     /// The service's own processing state; unknown states are preserved rather than treated as active.
     pub state: String,

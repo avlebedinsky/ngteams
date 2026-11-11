@@ -89,7 +89,7 @@ pub struct Transcription {
 
 /// The meeting-state part of a call the machine keeps: the state told, the timer as last delivered (its sequence and
 /// its JSON text, which the next change names and sends back), the settings changes the account made, and the
-/// recording bot's roster version.
+/// per-MRI recording/caption service roster that supplies both the recording modes and the caption command binding.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Meeting {
     pub(crate) state: MeetingState,
@@ -192,12 +192,9 @@ impl Meeting {
         self.state != before
     }
 
-    /// Takes what a roster update `body` tells of the recording bot; whether the state changed.
-    pub(crate) fn roster(&mut self, body: &[u8]) -> bool {
-        let Ok(body) = serde_json::from_slice::<Value>(body) else {
-            return false;
-        };
-        self.services.update(&body);
+    /// Merges a service roster and projects its recording modes; whether the meeting state changed.
+    pub(crate) fn roster(&mut self, body: &Value) -> bool {
+        self.services.update(body);
         self.recorder_state()
     }
 
@@ -264,12 +261,11 @@ impl Calls {
         self.meeting_told(|meeting| meeting.conversation(&delivery.body));
     }
 
-    /// A roster update's word on the recording bot and on the account itself: the meeting's state told when it
-    /// changed.
-    pub(crate) fn recorder_told(&mut self, body: &[u8]) {
+    /// A roster update's word on the account itself: the meeting's state told when it changed.
+    pub(crate) fn own_roster_told(&mut self, body: &[u8]) {
         let me = self.identity.mri.clone();
         let entries = crate::read::roster(body).unwrap_or_default();
-        self.meeting_told(|meeting| meeting.recorder_state() | meeting.own(&entries, &me));
+        self.meeting_told(|meeting| meeting.own(&entries, &me));
     }
 
     /// Why [`Calls::options_of`] names no options for `call`, in a few words (never an id): what the log says of a
@@ -333,7 +329,12 @@ impl Calls {
 
     /// A start's or a join's answer, as the conversation it is: what it tells of the meeting.
     pub(crate) fn meeting_answered(&mut self, body: &[u8]) {
-        self.meeting_told(|meeting| meeting.conversation(body) | meeting.roster_of_answer(body));
+        self.meeting_told(|meeting| meeting.conversation(body));
+        if let Ok(answer) = serde_json::from_slice::<Value>(body)
+            && let Some(roster) = answer.get("roster")
+        {
+            self.service_roster(roster);
+        }
     }
 
     fn meeting_told(&mut self, apply: impl FnOnce(&mut Meeting) -> bool) {
@@ -342,18 +343,5 @@ impl Calls {
             let (id, state) = (call.id, call.meeting.state.clone());
             self.out.event(CallEvent::Meeting { call: id, state });
         }
-    }
-}
-
-impl Meeting {
-    /// A start's answer's `roster` (as an update's): the recording bot in it.
-    fn roster_of_answer(&mut self, body: &[u8]) -> bool {
-        let Some(roster) = serde_json::from_slice::<Value>(body)
-            .ok()
-            .and_then(|body| body.get("roster").cloned())
-        else {
-            return false;
-        };
-        self.roster(roster.to_string().as_bytes())
     }
 }

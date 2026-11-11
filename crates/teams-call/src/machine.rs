@@ -1936,8 +1936,10 @@ impl Calls {
 
     /// A roster update at the call's own callback: the participants told when they changed.
     fn roster_updated(&mut self, delivery: &Delivery) {
-        self.caption_roster(&delivery.body);
-        self.recorder_told(&delivery.body);
+        if let Ok(roster) = serde_json::from_slice::<serde_json::Value>(&delivery.body) {
+            self.service_roster(&roster);
+        }
+        self.own_roster_told(&delivery.body);
         let Some(update) = read::roster(&delivery.body) else {
             return;
         };

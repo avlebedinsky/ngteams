@@ -134,7 +134,7 @@ fn newest_endpoint_preserves_join_and_partial_metadata_and_revokes_bad_links() {
     }}}});
     apply(&mut roster, X, delta);
     let service = roster.service().unwrap();
-    assert_eq!(service.joined.as_deref(), Some(LATE));
+    assert_eq!(roster.followed().unwrap().metadata["joinTime"], LATE);
     assert_eq!(service.spoken_language, "en-gb");
     assert_eq!(service.state, "Active");
     assert_eq!(service.command.as_str(), COMMAND);

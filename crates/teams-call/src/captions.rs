@@ -96,34 +96,37 @@ impl Calls {
             .service()
     }
 
-    pub(super) fn caption_roster(&mut self, body: &[u8]) {
+    /// Applies either an answer roster or a roster update and reports both projections of the shared service state.
+    pub(super) fn service_roster(&mut self, body: &serde_json::Value) {
         let Some(call) = self.call.as_mut() else { return };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-            return;
-        };
         let before = call.meeting.services.service().cloned();
-        call.meeting.services.update(&value);
+        let meeting_changed = call.meeting.roster(body);
         let service = call.meeting.services.service().cloned();
-        if service == before {
-            return;
+        if service != before {
+            log::info!(
+                "call {}: caption service {}",
+                call.id.get(),
+                service.as_ref().map_or_else(
+                    || "not in the call".to_owned(),
+                    |service| format!(
+                        "in the call{}, captions {}",
+                        if service.mri == CAPTION_SERVICE_MRI {
+                            ""
+                        } else {
+                            " from another region"
+                        },
+                        service.state
+                    ),
+                )
+            );
+            call.caption_inviting = false;
+            self.out.event(CallEvent::CaptionService { call: call.id, service });
         }
-        log::info!(
-            "call {}: caption service {}",
-            call.id.get(),
-            service.as_ref().map_or_else(
-                || "not in the call".to_owned(),
-                |service| format!(
-                    "in the call{}, captions {}",
-                    if service.mri == CAPTION_SERVICE_MRI {
-                        ""
-                    } else {
-                        " from another region"
-                    },
-                    service.state
-                ),
-            )
-        );
-        call.caption_inviting = false;
-        self.out.event(CallEvent::CaptionService { call: call.id, service });
+        if meeting_changed {
+            self.out.event(CallEvent::Meeting {
+                call: call.id,
+                state: call.meeting.state.clone(),
+            });
+        }
     }
 }

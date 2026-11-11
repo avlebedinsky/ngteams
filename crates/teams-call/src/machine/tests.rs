@@ -2443,6 +2443,78 @@ fn the_caption_service_from_another_region_serves_captions_and_recording_and_sta
     );
 }
 
+/// An answer's roster announces the service immediately; later updates report only changed projections.
+#[test]
+fn an_answer_roster_reports_caption_and_recording_state_without_a_followup_update() {
+    use teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI;
+    let now = Instant::now();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let initial = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 1, "state": "active", "endpoints": {"synthetic": {"endpointMetadata": {
+            "commandUrl": command, "spokenLanguage": "en-us", "processingModes": {
+                "closedCaptions": {"state": "Active"}, "recording": {"state": "Active"},
+                "realTimeTranscript": {"state": "Active"}
+            }
+        }}}
+    }}});
+    let (mut calls, call, told) = meeting_answered(initial.clone(), now);
+    let service = calls.caption_service(call).unwrap();
+    assert_eq!(service.mri, CAPTION_SERVICE_ALTERNATE_MRI);
+    assert_eq!(service.command.as_str(), command);
+    assert_eq!(
+        told.iter()
+            .filter(|event| matches!(event,
+                CallEvent::CaptionService { call: of, service: Some(told) } if *of == call && told == service
+            ))
+            .count(),
+        1
+    );
+    assert!(told.iter().any(|event| matches!(event,
+        CallEvent::Meeting { call: of, state }
+            if *of == call && state.recording.is_some() && state.transcribing.is_some()
+    )));
+    let path = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    calls.on_delivery(&delivery(&path, &initial), Observed::Nothing, now);
+    let repeated = events(&effects(&mut calls));
+    assert!(
+        !repeated
+            .iter()
+            .any(|event| matches!(event, CallEvent::CaptionService { .. } | CallEvent::Meeting { .. }))
+    );
+    // Recording can stop without changing the caption binding: it still needs its own meeting event.
+    let stopped = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 2, "endpoints": {"synthetic": {"endpointMetadata": {
+            "processingModes": {"closedCaptions": {"state": "Active"}}
+        }}}
+    }}});
+    calls.on_delivery(&delivery(&path, &stopped), Observed::Nothing, now);
+    let told = events(&effects(&mut calls));
+    assert!(
+        !told
+            .iter()
+            .any(|event| matches!(event, CallEvent::CaptionService { .. }))
+    );
+    assert!(told.iter().any(|event| matches!(event,
+        CallEvent::Meeting { call: of, state }
+            if *of == call && state.recording.is_none() && state.transcribing.is_none()
+    )));
+    let departed = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 3, "state": "disconnected"
+    }}});
+    calls.on_delivery(&delivery(&path, &departed), Observed::Nothing, now);
+    let told = events(&effects(&mut calls));
+    assert!(told.iter().any(|event| matches!(event,
+        CallEvent::CaptionService { call: of, service: None } if *of == call
+    )));
+    assert!(calls.caption_service(call).is_none());
+}
+
 /// Both region identities describe one service; unrelated or older entries cannot stop its recording.
 #[test]
 fn recording_and_captions_follow_the_same_regional_service_and_endpoint() {
