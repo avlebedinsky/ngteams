@@ -217,7 +217,7 @@ sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"
 reason = "Windows-only host-local adapter for the test-support TURN fixture; exercised by native audio, video and screen-share relay contracts; absent from Linux compilation and production builds"
 
 [unmapped_sources."crates/teams-signin/src/native/browser.rs"]
-sha256 = "a1ab23ceeb492b0e304ab464be6a2051b291952df46727b9cf600c70d643ba65"
+sha256 = "e94bca6fba4c7d26e0be6644dbfea59704bcd251907ec75af7bac6f2efa4949e"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/mod.rs"]

@@ -474,7 +474,16 @@ fn download_handler() -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWeb
 }
 
 fn loaded_handler() -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationCompletedEventHandler {
-    NavigationCompletedEventHandler::create(Box::new(|_, args| {
+    loaded_handler_with(|status| {
+        let _ = wire::send(&mut std::io::stdout().lock(), &Event::LoadFailed(status));
+    })
+}
+
+/// The main-frame load handler, telling `failed` each failed load's native status that should be reported.
+fn loaded_handler_with(
+    mut failed: impl FnMut(i32) + 'static,
+) -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationCompletedEventHandler {
+    NavigationCompletedEventHandler::create(Box::new(move |_, args| {
         let Some(args) = args else {
             return Ok(());
         };
@@ -488,7 +497,7 @@ fn loaded_handler() -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebVi
             // A refused navigation is cancelled deliberately. Keep the current page alive so closing the
             // window returns the refused IdP host, rather than replacing it with a connection failure.
             if status != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED {
-                let _ = wire::send(&mut std::io::stdout().lock(), &Event::LoadFailed(status.0));
+                failed(status.0);
             }
         }
         Ok(())

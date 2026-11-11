@@ -79,11 +79,17 @@ mod com {
 
 #[test]
 fn downloads_are_cancelled_and_failed_main_frame_loads_query_the_native_status() {
-    for (success, fail, status) in [
-        (true, false, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN),
-        (false, false, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN),
-        (false, false, COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED),
-        (true, true, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN),
+    // the load failures reported: a refused (cancelled) navigation keeps its page and reports none
+    for (success, fail, status, reported) in [
+        (true, false, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN, None),
+        (
+            false,
+            false,
+            COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN,
+            Some(COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN.0),
+        ),
+        (false, false, COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED, None),
+        (true, true, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN, None),
     ] {
         let cancelled = Rc::new(Cell::new(false));
         let handled = Rc::new(Cell::new(false));
@@ -102,9 +108,17 @@ fn downloads_are_cancelled_and_failed_main_frame_loads_query_the_native_status()
         assert_eq!(cancelled.get(), !fail);
         assert_eq!(handled.get(), !fail);
         let completed = args.cast::<ICoreWebView2NavigationCompletedEventArgs>().unwrap();
+        let failures = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let told = Rc::clone(&failures);
+        let loaded = loaded_handler_with(move |status| told.borrow_mut().push(status));
         // SAFETY: the fake completion object supplies only fixed synthetic status outputs.
-        assert_ne!(unsafe { loaded_handler().Invoke(None, &completed) }.is_ok(), fail);
+        assert_ne!(unsafe { loaded.Invoke(None, &completed) }.is_ok(), fail);
         assert_eq!(status_read.get(), !success && !fail);
+        assert_eq!(
+            *failures.borrow(),
+            reported.into_iter().collect::<Vec<_>>(),
+            "status {status:?}"
+        );
         // SAFETY: the generated handler explicitly accepts missing native event arguments.
         unsafe { download_handler().Invoke(None, None) }.unwrap();
         // SAFETY: same null-argument contract on the navigation handler.
