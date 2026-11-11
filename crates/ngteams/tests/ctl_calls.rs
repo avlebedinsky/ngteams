@@ -3,8 +3,8 @@
 //! peer behind each party the mock plays), its calls' media on file devices (no PipeWire, no portal). The mock rings a
 //! as b (it plays b, no client of b's runs); a answers, declines, calls the a–b chat and hangs up only by a command,
 //! each asked through the calls' model as the call buttons ask, so the model's refusals (busy, no call, not ringing,
-//! no video) come back as the command's error. The view trace counts the asks: a switch already as asked asks
-//! nothing. A meeting of a's calendar (the mock's middle tier) is joined only where its media setup fails, so nothing
+//! no video) come back as the command's error; one mute goes to a's engine directly, as an organizer's Mute all comes,
+//! to overtake an unmute. The view trace counts the asks: a switch already as asked asks nothing. A meeting of a's calendar (the mock's middle tier) is joined only where its media setup fails, so nothing
 //! of it goes to the calling service. The app without calling answers `no_calling`. Every id is made up or the mock's
 //! own.
 
@@ -18,6 +18,7 @@ use std::future::{self, Future};
 use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -34,7 +35,7 @@ use teams_auth::session::{AccessToken, Renewal, Session};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_core::account::AccountEngine;
 use teams_core::engine::{self, EngineOptions, Parts, Push};
-use teams_core::{CallFloor, CallMedia, CallParts, CallStatus, Identity, Outbox, Relay};
+use teams_core::{CallAction, CallFloor, CallMedia, CallParts, CallStatus, Identity, Outbox, Relay};
 use teams_ctl::ClientError;
 use teams_ctl::protocol::{CalendarRow, CallRow, CtlError, ErrorCode, Request, Response, Toggle, local_today};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
@@ -60,22 +61,34 @@ const PEER_TONE: Tone = Tone {
 };
 /// How long a's camera takes to open: a command asked meanwhile finds the camera's change still on its way.
 const CAMERA_OPENS: Duration = Duration::from_millis(400);
+/// How long a's microphone takes to open once it was missing: a mute asked meanwhile overtakes the unmute reopening it.
+const MICROPHONE_OPENS: Duration = Duration::from_millis(400);
 
-/// File devices whose camera opens [`CAMERA_OPENS`] late, as a real one takes a moment.
-struct SlowCamera(FileDevices);
+/// File devices whose camera opens [`CAMERA_OPENS`] late, as a real one takes a moment; with `microphone_missing`,
+/// their microphone can't open at first, and opens [`MICROPHONE_OPENS`] late afterwards (plugged in meanwhile).
+struct LabDevices {
+    files: FileDevices,
+    microphone_missing: Option<AtomicBool>,
+}
 
-impl Devices for SlowCamera {
+impl Devices for LabDevices {
     fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
-        self.0.microphone()
+        if let Some(missing) = &self.microphone_missing {
+            if missing.swap(false, Ordering::SeqCst) {
+                return Err(DeviceError::Refused("no microphone is plugged in".into()));
+            }
+            std::thread::sleep(MICROPHONE_OPENS);
+        }
+        self.files.microphone()
     }
 
     fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
-        self.0.speaker()
+        self.files.speaker()
     }
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
         std::thread::sleep(CAMERA_OPENS);
-        self.0.camera()
+        self.files.camera()
     }
 }
 
@@ -162,6 +175,11 @@ struct Lab {
 impl Lab {
     /// a's app on the mock, its calling endpoint registered; its calls carry video when `video`.
     fn start(video: bool) -> Self {
+        Self::with_microphone(video, false)
+    }
+
+    /// [`Self::start`], a's microphone missing at first when `microphone_missing` ([`LabDevices`]).
+    fn with_microphone(video: bool, microphone_missing: bool) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -174,7 +192,7 @@ impl Lab {
             let _entered = runtime.enter();
             let trouter = mock.start_trouter().unwrap();
             let relay = mock.start_media(dir.path(), PEER_TONE).unwrap();
-            let handle = a_engine(&mock, &trouter, relay, feed.clone(), dir.path());
+            let handle = a_engine(&mock, &trouter, relay, feed.clone(), microphone_missing, dir.path());
             (trouter, handle)
         };
         // a–b stored, as a catch-up stores it: a call names its chat
@@ -309,12 +327,14 @@ impl Drop for Lab {
 }
 
 /// a's engine on the mock with its push channel and its calling, its calls' media on file devices relayed through the
-/// mock's TURN server at `relay`, their video on `feed` when given.
+/// mock's TURN server at `relay`, their video on `feed` when given, their microphone missing at first when
+/// `microphone_missing`.
 fn a_engine(
     mock: &ChatServiceMock,
     trouter: &TrouterMock,
     relay: std::net::SocketAddr,
     feed: Option<VideoFeed>,
+    microphone_missing: bool,
     dir: &std::path::Path,
 ) -> engine::EngineHandle {
     let tracker = Arc::new(teams_call::Tracker::new(Mri::new(LAB_A)));
@@ -348,12 +368,15 @@ fn a_engine(
     let calling = trouter().for_calls(CallStack::new(Arc::clone(&tracker)));
     let push = Push::new(trouter());
     let media = CallMedia {
-        devices: Arc::new(SlowCamera(FileDevices {
-            input: AudioInput::Silence,
-            recording: None,
-            camera: PatternCamera::default(),
-            pacing: Pacing::RealTime,
-        })),
+        devices: Arc::new(LabDevices {
+            files: FileDevices {
+                input: AudioInput::Silence,
+                recording: None,
+                camera: PatternCamera::default(),
+                pacing: Pacing::RealTime,
+            },
+            microphone_missing: microphone_missing.then(|| AtomicBool::new(true)),
+        }),
         relay: Relay::Fixed(vec![RelayServer::udp(relay)]),
         session: SessionConfig {
             processing: ProcessingConfig::OFF,
@@ -549,6 +572,56 @@ fn overlapping_switches_end_as_the_later_one_says(lab: &Lab) {
         assert_eq!(shown, (false, false), "{kind} stays off");
         assert_eq!(lab.traced.asked(kind), before + 2, "{kind} on, then off");
     }
+}
+
+/// A `mute off` with a's microphone missing reopens it first ([`MICROPHONE_OPENS`]); a mute asked meanwhile (as an
+/// organizer's Mute all asks it, not through the calls) takes its place: the command says so, rather than an earlier
+/// refusal or one that says nothing, and the call stays muted with nothing told in its bar.
+#[test]
+fn an_unmute_a_newer_mute_overtook_while_the_microphone_reopened_says_so() {
+    let lab = Lab::with_microphone(false, true);
+    let id = lab.ring();
+    lab.row(Request::Answer);
+    lab.settle(connected);
+    lab.settle(|calls| {
+        calls
+            .call()
+            .is_some_and(|call| call.muted && call.check.microphone_lost)
+    });
+    let calls = lab.calls();
+    let call = lab.cx.read(|cx| calls.read(cx).call().unwrap().id);
+    let core = lab.cx.read(|cx| app::bridges(cx)[0].read(cx).core());
+
+    let unmute = {
+        let socket = lab.socket.clone();
+        std::thread::spawn(move || connect(&socket)?.request(None, mute(Toggle::Off)))
+    };
+    let start = Instant::now();
+    while lab.traced.asked("mute") == 0 {
+        assert!(start.elapsed() < WAIT, "the unmute wasn't asked");
+        lab.cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // asked of the engine after the unmute, while its microphone reopens
+    let muted = lab.runtime.block_on(core.call(CallAction::Mute { call, muted: true }));
+    assert_eq!(muted.unwrap(), call);
+    ctl_support::pump_until_done(&lab.cx, &unmute);
+    let refused = match unmute.join().unwrap() {
+        Err(ClientError::Server(error)) => error,
+        other => panic!("mute off: {other:?}"),
+    };
+    assert_eq!(refused.code, ErrorCode::Engine, "{refused:?}");
+    assert!(refused.message.contains("newer mute"), "{}", refused.message);
+
+    let rows = lab.listed();
+    assert!(rows.len() == 1 && rows[0].muted, "stays muted: {rows:?}");
+    assert!(
+        lab.cx.read(|cx| calls.read(cx).refused().is_none()),
+        "nothing went wrong to tell"
+    );
+    assert_eq!(lab.traced.asked("mute"), 1);
+    lab.row(Request::HangUp);
+    let _ = lab.mock.close_peer(&id, LAB_A);
 }
 
 #[test]

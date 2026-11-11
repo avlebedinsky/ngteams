@@ -1812,18 +1812,42 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
     ask_then(calls, core, trace, ask, cx, |_, _| {});
 }
 
-/// [`ask`], and then `then` told whether the engine took it (`false`: refused here or by the engine, or no calls shown).
-/// `then` is told later, never while this runs, so a view may ask from within its own update.
+/// How an ask went, as [`ask_then`] tells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answered {
+    /// The engine took it (or the views did it themselves).
+    Taken,
+    /// Refused here or by the engine, or no calls shown.
+    Refused,
+    /// An unmute a newer mute or unmute overtook while its microphone reopened
+    /// ([`CallActionError::Superseded`]): the newer one decides, and nothing went wrong, so nothing is kept in
+    /// [`Calls::refused`].
+    Superseded,
+}
+
+impl Answered {
+    /// The engine's answer to an ask's action, as it goes.
+    fn of<T>(answer: &Result<T, EngineError>) -> Self {
+        match answer {
+            Ok(_) => Self::Taken,
+            Err(EngineError::Call(CallActionError::Superseded)) => Self::Superseded,
+            Err(_) => Self::Refused,
+        }
+    }
+}
+
+/// [`ask`], and then `then` told how it went ([`Answered`]). `then` is told later, never while this runs, so a view may
+/// ask from within its own update.
 pub fn ask_then(
     calls: &Entity<Calls>,
     core: &Arc<dyn Core>,
     trace: &Arc<ViewTrace>,
     ask: Ask,
     cx: &mut App,
-    then: impl FnOnce(bool, &mut App) + 'static,
+    then: impl FnOnce(Answered, &mut App) + 'static,
 ) {
     if !calls.read(cx).shows() {
-        cx.defer(move |cx| then(false, cx));
+        cx.defer(move |cx| then(Answered::Refused, cx));
         return;
     }
     let mut asked = TraceLine::new("call", "asked").kind(ask.name());
@@ -1834,7 +1858,7 @@ pub fn ask_then(
     log::info!("call: {} asked{}", ask.name(), logged_chat(&ask));
     // the caption pane shown or hidden here; the captions themselves only when they don't run for the saved transcript
     let Some(ask) = calls.update(cx, |calls, cx| calls.caption_pane_ask(ask, cx)) else {
-        cx.defer(move |cx| then(true, cx));
+        cx.defer(move |cx| then(Answered::Taken, cx));
         return;
     };
     let action = match calls.read(cx).action_for(&ask) {
@@ -1842,7 +1866,7 @@ pub fn ask_then(
         Err(why) => {
             refused(trace, &ask, why);
             calls.update(cx, |calls, cx| calls.refuse(&ask, why, local_refusal_text(why), cx));
-            cx.defer(move |cx| then(false, cx));
+            cx.defer(move |cx| then(Answered::Refused, cx));
             return;
         }
     };
@@ -1868,10 +1892,10 @@ pub fn ask_then(
         if let Err(error) = &answer {
             refused(&trace, &ask, refusal_kind(error));
         }
-        let taken = answer.is_ok();
+        let answered = Answered::of(&answer);
         // calls that are gone have nobody left to tell
         let _ = weak.update(cx, |calls, cx| calls.answered(&ask, start, &action, answer, cx));
-        cx.update(|cx| then(taken, cx));
+        cx.update(|cx| then(answered, cx));
     })
     .detach();
 }
@@ -1915,7 +1939,7 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
     join_now_then(calls, core, trace, cx, |_, _| {});
 }
 
-/// [`join_now`], and then `then` told whether the engine took its join, as [`ask_then`] tells it (`false` too when
+/// [`join_now`], and then `then` told whether the engine took its join ([`Answered::Taken`] of [`ask_then`]; `false` too when
 /// nothing was asked: no pre-join shows or its join is under way). `then` is told later, never while this runs.
 pub fn join_now_then(
     calls: &Entity<Calls>,
@@ -1955,7 +1979,9 @@ pub fn join_now_then(
         (Ask::MeetNow { channel }, Some(title)) if !title.trim().is_empty() => Some((channel.clone(), title)),
         _ => None,
     };
-    ask_then(calls, core, trace, asked, cx, then);
+    ask_then(calls, core, trace, asked, cx, move |answered, cx| {
+        then(answered == Answered::Taken, cx);
+    });
     // as Teams' pre-join does: its subject titles the new meeting's post once the service posted it (the engine
     // looks for the post, and titles nothing when the meeting didn't start); a Meet now refused here asks nothing,
     // so no other meeting's post of the account's in that channel is titled
