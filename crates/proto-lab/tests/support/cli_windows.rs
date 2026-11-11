@@ -208,6 +208,7 @@ async fn native_commands() {
         br#"[{"profile":"a","email":"synthetic-a@example.test","password":"synthetic-only"}]"#,
     )
     .unwrap();
+    public_entry_refusals(&locations, &target).await;
     for command in [
         Command::Auth {
             alias: Alias::A,
@@ -233,4 +234,40 @@ async fn native_commands() {
     }
     // All entry paths released their live lock after refusal; no token read or browser navigation occurred.
     drop(proto_lab::private::exclusive(&locations.data_dir.join("live.lock")).unwrap());
+}
+
+async fn public_entry_refusals(locations: &LabLocations, target: &auth::NativeTarget) {
+    let config = LabConfig::load(locations).unwrap();
+    let wrong = target.account("synthetic-another@example.test").unwrap();
+    auth::NativeTarget::from_env(Alias::A)
+        .unwrap()
+        .save(&wrong, None)
+        .unwrap();
+    let options = auth::AuthOptions {
+        timeout: Duration::from_secs(1),
+        skypetoken: true,
+        other_audiences: false,
+    };
+    assert!(matches!(
+        auth::authorize(
+            &config,
+            Alias::A,
+            &teams_auth::secrets::MemorySecretStore::new(),
+            &options
+        )
+        .await,
+        Err(auth::AuthError::Provision(_))
+    ));
+    // The public login entry refuses a missing synthetic roster credential before opening any profile.
+    assert!(
+        proto_lab::commands::login::login(
+            Alias::B,
+            proto_lab::commands::login::LoginOptions {
+                timeout: Duration::from_secs(1)
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(!config.paths().profile_dir(Alias::B).exists());
 }

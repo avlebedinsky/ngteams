@@ -803,6 +803,10 @@ fn upn_domain(upn: &str) -> Result<String, ConfigError> {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/config_edit.rs"]
+mod edit_tests;
+
+#[cfg(test)]
 mod tests {
     use std::fs;
 

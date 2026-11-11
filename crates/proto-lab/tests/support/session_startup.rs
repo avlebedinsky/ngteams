@@ -92,6 +92,19 @@ fn install_test_chrome(root: &Path, chrome: &Path) {
     symlink(chrome.parent().unwrap(), executable.parent().unwrap()).unwrap();
 }
 
+async fn blank_holds(session: &LabSession) {
+    session.hold(Hold::new("POST", "^http://127\\.0\\.0\\.1/").unwrap());
+    assert!(session.held_requests().is_empty());
+    let frames = FrameHold::new("^ws://127\\.0\\.0\\.1:")
+        .unwrap()
+        .with_text_containing("synthetic")
+        .labelled("synthetic-startup");
+    assert!(frames.matches("ws://127.0.0.1:1234/", "synthetic-frame"));
+    assert!(!frames.matches("ws://foreign.example/", "synthetic-frame"));
+    session.hold_frames(frames).await.unwrap();
+    session.clear_holds();
+}
+
 async fn startup_matrix() {
     let locations = crate::config::LabLocations::from_env().unwrap();
     let paths = locations.lab_paths().unwrap();
@@ -102,6 +115,7 @@ async fn startup_matrix() {
     let mut session = LabSession::open(&paths, Alias::A).await.unwrap();
     assert_eq!(session.watch().state(), SessionState::Loading);
     assert!(session.capture_dir().is_none());
+    blank_holds(&session).await;
     queued_capture_messages_stay_local(&mut session).await;
     let (report, _) = close_after_arming(session, &paths).await;
     assert_clean(&report);

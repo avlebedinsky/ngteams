@@ -299,6 +299,77 @@ async fn password_and_silent_authorization_refuse_foreign_aliases_before_opening
     ));
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn native_profile_authorization_catches_only_a_synthetic_loopback_grant_and_closes() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(root.path().join("lab"));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/v2.0/authorize"))
+        .respond_with(|request: &Request| {
+            let state = request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "state")
+                .unwrap()
+                .1
+                .into_owned();
+            let mut redirect = url::Url::parse(NATIVE_CLIENT_REDIRECT).unwrap();
+            redirect
+                .query_pairs_mut()
+                .append_pair("code", "synthetic-local-code")
+                .append_pair("state", &state);
+            ResponseTemplate::new(302).insert_header("Location", redirect.as_str())
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let entra = EntraConfig::teams_native().with_authority(server.uri());
+    let authorization = Authorization::new(&entra, UPN, Scope::spaces()).unwrap();
+    let (redirect, report) =
+        redirect_through_profile(&paths, Alias::A, &entra, &authorization, Duration::from_secs(10))
+            .await
+            .unwrap();
+    assert!(!report.failed());
+    assert_eq!(
+        authorization.code_from_redirect(redirect.expose()).unwrap().expose(),
+        "synthetic-local-code"
+    );
+    let authorization = Authorization::new(&entra, UPN, Scope::spaces()).unwrap();
+    let accounts = crate::accounts::AccountsFile::parse(
+        r#"[{"profile":"a","email":"synthetic-a@example.test","password":"synthetic-unused"}]"#,
+        |_| None,
+    )
+    .unwrap();
+    let credentials = accounts.for_alias(Alias::A, UPN).unwrap();
+    let (redirect, report) = crate::commands::login::authorization_profile(
+        &paths,
+        Alias::B,
+        &authorization,
+        credentials,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert!(!report.failed());
+    assert_eq!(
+        authorization.code_from_redirect(redirect.expose()).unwrap().expose(),
+        "synthetic-local-code"
+    );
+    let status = std::fs::read_to_string(paths.data_dir().join("status-b.json")).unwrap();
+    assert!(!status.contains("synthetic-local-code"));
+    assert!(!status.contains("synthetic-unused"));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.url.path() == "/oauth2/v2.0/authorize")
+    );
+}
+
 #[tokio::test]
 async fn optional_grants_are_not_requested_and_a_refused_authz_is_a_reported_failure() {
     let root = tempfile::tempdir().unwrap();

@@ -38,6 +38,39 @@ async fn page(probe: Value) -> Page {
     .await
 }
 
+#[tokio::test]
+async fn selecting_another_account_tile_requires_the_observed_element_to_still_exist() {
+    let root = tempfile::tempdir().unwrap();
+    let accounts = accounts();
+    let credentials = accounts.for_alias(Alias::A, UPN).unwrap();
+    for present in [true, false] {
+        let mut page = Page::new(move |command| match command["method"].as_str().unwrap() {
+            "Runtime.evaluate" => Ok(evaluated(json!(present))),
+            "Browser.close" => Ok(json!({})),
+            method => Err(format!("unexpected synthetic account-tile command {method}")),
+        })
+        .await;
+        let (session, pid) = page.managed_session(root.path(), false);
+        let mut progress = Progress::default();
+        let result = perform(
+            session.cdp(),
+            session.page(),
+            &Action::ClickOtherTile("#synthetic-tile".into()),
+            credentials,
+            &mut progress,
+        )
+        .await;
+        if present {
+            result.unwrap();
+        } else {
+            assert!(matches!(result, Err(LoginError::FieldGone)));
+        }
+        assert!(!progress.email_sent && !progress.password_sent);
+        session.close().await.unwrap();
+        assert!(crate::scenario::test_process::exited(pid));
+    }
+}
+
 fn identity(page: &Page, oid: &str) {
     let encode = |value: Value| URL_SAFE_NO_PAD.encode(value.to_string());
     let token = format!(
