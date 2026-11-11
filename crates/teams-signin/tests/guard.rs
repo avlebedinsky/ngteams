@@ -296,3 +296,15 @@ fn malformed_and_valid_protocol_requests_use_the_same_page_decisions() -> TestRe
     );
     Ok(())
 }
+
+#[test]
+fn typed_arming_uses_the_same_page_and_event_contract_as_the_wire() -> TestResult {
+    let lab = lab()?;
+    let url = "https://login.microsoftonline.com/";
+    assert_eq!(lab.guard.decide(PAGE, "GET", url), Decision::Deny);
+    lab.guard.arm(PAGE);
+    assert!(matches!(lab.events.recv()?, GuardEvent::Armed { page } if page == PAGE));
+    assert_eq!(lab.guard.decide(PAGE, "GET", url), Decision::Allow);
+    assert_eq!(lab.guard.decide(PAGE + 1, "GET", url), Decision::Deny);
+    Ok(())
+}

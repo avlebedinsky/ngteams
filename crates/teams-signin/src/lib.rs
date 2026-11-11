@@ -2,7 +2,8 @@
 //! [`hosts::SignInHosts`] binds every production window to Entra and the account's identity provider hosts.
 //! [`egress::HostGate`] is its network session's only way out; [`guard`] decides and logs page requests without
 //! bodies or credentials. The window catches the redirect and hands it directly to `teams_auth::signin` to verify
-//! the request's state and redeem its code. There is no standalone sign-in binary or pipe protocol.
+//! the request's state and redeem its code. Linux has no standalone sign-in binary. Windows uses the disposable `ngteams-webview` worker
+//! and the private stdin/stdout protocol in `native/wire.rs`.
 //!
 //! `WebKit` follows some redirects without asking the page guard; the network host gate still applies to them.
 //! Windows uses all-source request filters and response restrictions in a disposable native worker.

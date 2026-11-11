@@ -17,6 +17,7 @@ mod com {
         pub(super) cancelled: Rc<Cell<bool>>,
         pub(super) handled: Rc<Cell<bool>>,
         pub(super) success: bool,
+        pub(super) status: COREWEBVIEW2_WEB_ERROR_STATUS,
         pub(super) fail: bool,
         pub(super) status_read: Rc<Cell<bool>>,
     }
@@ -66,7 +67,7 @@ mod com {
             self.status_read.set(true);
             // SAFETY: the generated handler supplies the writable status output for this synchronous call.
             unsafe {
-                *value = COREWEBVIEW2_WEB_ERROR_STATUS(42);
+                *value = self.status;
             }
             Ok(())
         }
@@ -78,7 +79,12 @@ mod com {
 
 #[test]
 fn downloads_are_cancelled_and_failed_main_frame_loads_query_the_native_status() {
-    for (success, fail) in [(true, false), (false, false), (true, true)] {
+    for (success, fail, status) in [
+        (true, false, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN),
+        (false, false, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN),
+        (false, false, COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED),
+        (true, true, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN),
+    ] {
         let cancelled = Rc::new(Cell::new(false));
         let handled = Rc::new(Cell::new(false));
         let status_read = Rc::new(Cell::new(false));
@@ -86,6 +92,7 @@ fn downloads_are_cancelled_and_failed_main_frame_loads_query_the_native_status()
             cancelled: Rc::clone(&cancelled),
             handled: Rc::clone(&handled),
             success,
+            status,
             fail,
             status_read: Rc::clone(&status_read),
         }

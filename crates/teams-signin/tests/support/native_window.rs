@@ -18,6 +18,7 @@ pub fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|a| a == "--guarded-signin") {
         #[cfg(coverage)]
         profiling::worker();
+        refusal_close();
         window::worker();
         return ExitCode::SUCCESS;
     }
@@ -84,7 +85,74 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if !logger.flush_written() {
         return Err("diagnostic log flush failed".into());
     }
-    verify(&server, &log)
+    verify(&server, &log)?;
+    verify_refusal(&server, &origin)
+}
+
+fn verify_refusal(server: &Server, origin: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let answer = Windows::new("com.nickalie.ngteams.signin.synthetic").ask(WindowConfig {
+        engine: EngineSource,
+        bound: Bound::Hosts(Arc::new(teams_signin::hosts::SignInHosts::for_tests(
+            &["127.0.0.1"],
+            server.port,
+        ))),
+        request: SignInRequest {
+            authorize: format!("{origin}/refusal"),
+            redirect_uri: NATIVE_CLIENT_REDIRECT.into(),
+        },
+        extension: std::env::current_exe()?,
+        setup: Box::new(|guard| guard),
+    });
+    match answer {
+        SignInAnswer::Refused(host) if host == "sso.example.test" => {}
+        SignInAnswer::Failed(reason) => return Err(format!("refusal became a load failure: {reason}").into()),
+        _ => return Err("refused main-frame navigation did not return its IdP host".into()),
+    }
+    if !server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, path)| path == "/refusal-alive")
+    {
+        return Err("refused navigation did not preserve the original page".into());
+    }
+    println!("cancelled main-frame navigation kept its page and returned Refused(sso.example.test)");
+    Ok(())
+}
+
+// Runs inside this fixture's worker only. Close its own window after the still-running page proves the
+// main-frame refusal did not kill it. No HWND from another process can receive this synthetic close.
+fn refusal_close() {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE};
+    use windows::core::BOOL;
+    unsafe extern "system" fn close(hwnd: HWND, _: LPARAM) -> BOOL {
+        let mut pid = 0;
+        // SAFETY: hwnd comes from EnumWindows and pid is a live output.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
+        }
+        if pid == std::process::id() {
+            // SAFETY: only this fixture worker's own windows are targeted.
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        }
+        true.into()
+    }
+    let root = std::path::PathBuf::from(std::env::var_os("UI_SANDBOX_DIR").unwrap());
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !root.join("refusal-alive").exists() {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: callback closes only this worker's own windows; no borrowed callback state.
+        unsafe {
+            EnumWindows(Some(close), LPARAM(0)).unwrap();
+        }
+    });
 }
 
 fn verify(server: &Server, log: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -257,7 +325,12 @@ fn serve(mut stream: impl std::io::Read + std::io::Write, requests: &Mutex<Vec<(
             b"synthetic page ready",
         );
     }
+    if path == "/refusal-alive" {
+        let root = std::path::PathBuf::from(std::env::var_os("UI_SANDBOX_DIR").unwrap());
+        std::fs::write(root.join("refusal-alive"), b"original page survived cancellation").unwrap();
+    }
     let (status, headers, body) = match path.split('?').next().unwrap_or_default() {
+        "/refusal" => ("200 OK", "Content-Type: text/html\r\n", REFUSAL),
         "/authorize" => ("200 OK", "Content-Type: text/html\r\n", PAGE),
         "/empty-phrase" => ("200 ", "Content-Type: text/plain\r\n", "synthetic"),
         "/frame" => ("200 OK", "Content-Type: text/html\r\n", FRAME),
@@ -277,6 +350,10 @@ fn serve(mut stream: impl std::io::Read + std::io::Write, requests: &Mutex<Vec<(
     let _ = stream.write_all(response.as_bytes());
 }
 
+const REFUSAL: &str = r"<!doctype html><h1>Synthetic identity provider refusal</h1><script>
+setTimeout(()=>{location.href='https://sso.example.test/signin';},100);
+setTimeout(()=>{fetch('/refusal-alive');},800);
+</script>";
 const FRAME: &str = r"<!doctype html><script>
 let locked = ['WebSocket','Worker','SharedWorker','RTCPeerConnection','WebTransport'].every(k=>window[k]===undefined);
 new Image().src='/frame-report?locked='+(locked?1:0);

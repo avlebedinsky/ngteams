@@ -25,6 +25,8 @@ mod profile;
 mod refusals;
 mod wire;
 
+const PAGE: u64 = 1;
+
 pub const TITLE: &str = "Sign in to Microsoft Teams";
 pub const EXTENSION_FILE: &str = "ngteams-webview.exe";
 pub const SIZE: (u16, u16) = (520, 720);
@@ -187,14 +189,14 @@ fn ask(config: WindowConfig, app_id: &str) -> io::Result<SignInAnswer> {
     }
     let (events, hearing) = mpsc::channel();
     let guard = Arc::new((config.setup)(Guard::new(Arc::clone(&hosts), redirect.clone(), events)));
-    guard.answer("armed 1 1");
+    guard.arm(PAGE);
     let proxy = crate::egress::HostGate::start(Arc::clone(&guard), Arc::clone(&hosts))?.uri();
     let mut worker = Worker::start(&config.extension, config.request.authorize, proxy, app_id)?;
     let mut refused = None;
     loop {
         let event: wire::Event = wire::read(&mut worker.output)?;
         let allow = match event {
-            wire::Event::Request { method, url } => guard.decide(1, &method, &url) == Decision::Allow,
+            wire::Event::Request { method, url } => guard.decide(PAGE, &method, &url) == Decision::Allow,
             wire::Event::Navigation(url) => {
                 if redirect.matches(&url) {
                     guard.caught_navigation(&url);

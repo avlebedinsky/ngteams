@@ -11,9 +11,10 @@ use std::cell::Cell;
 use std::num::NonZeroIsize;
 use std::rc::Rc;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    COREWEBVIEW2_WEB_ERROR_STATUS, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-    COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL, GetAvailableCoreWebView2BrowserVersionString, ICoreWebView2,
-    ICoreWebView2_4, ICoreWebView2_22, ICoreWebView2Settings3, ICoreWebView2Settings4,
+    COREWEBVIEW2_WEB_ERROR_STATUS, COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL, COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
+    GetAvailableCoreWebView2BrowserVersionString, ICoreWebView2, ICoreWebView2_4, ICoreWebView2_22,
+    ICoreWebView2Settings3, ICoreWebView2Settings4,
 };
 use webview2_com::{
     CallDevToolsProtocolMethodCompletedHandler, DevToolsProtocolEventReceivedEventHandler,
@@ -452,13 +453,10 @@ fn process_handler(
     failure: Rc<Cell<Option<&'static str>>>,
 ) -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ProcessFailedEventHandler {
     ProcessFailedEventHandler::create(Box::new(move |_, _| {
-        failure.set(Some(
+        stop(
+            &failure,
             "The WebView2 browser process stopped during sign-in. Close it and try again.",
-        ));
-        // SAFETY: callbacks run on the worker's GUI thread, whose message loop receives the quit.
-        unsafe {
-            PostQuitMessage(0);
-        }
+        );
         Ok(())
     }))
 }
@@ -487,7 +485,11 @@ fn loaded_handler() -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebVi
             let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
             // SAFETY: status is a writable output for the live event.
             unsafe { args.WebErrorStatus(&raw mut status) }?;
-            let _ = wire::send(&mut std::io::stdout().lock(), &Event::LoadFailed(status.0));
+            // A refused navigation is cancelled deliberately. Keep the current page alive so closing the
+            // window returns the refused IdP host, rather than replacing it with a connection failure.
+            if status != COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED {
+                let _ = wire::send(&mut std::io::stdout().lock(), &Event::LoadFailed(status.0));
+            }
         }
         Ok(())
     }))

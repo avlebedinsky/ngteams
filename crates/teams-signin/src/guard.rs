@@ -104,8 +104,7 @@ impl Guard {
         match Query::parse(line) {
             // the process id is on the wire but unused: arming is per page
             Some(Query::Armed { page, .. }) => {
-                self.armed.lock().unwrap_or_else(PoisonError::into_inner).insert(page);
-                self.tell(GuardEvent::Armed { page });
+                self.arm(page);
                 OK
             }
             Some(Query::Request { page, method, url }) => match self.decide(page, &method, &url) {
@@ -114,6 +113,12 @@ impl Guard {
             },
             None => DENY,
         }
+    }
+
+    /// Arms one page after its request interception is connected.
+    pub fn arm(&self, page: u64) {
+        self.armed.lock().unwrap_or_else(PoisonError::into_inner).insert(page);
+        self.tell(GuardEvent::Armed { page });
     }
 
     /// Whether `page` may send `method` `url`; the decision is submitted to the diagnostic log before this returns.
