@@ -574,7 +574,7 @@ reason = "Unix-only StatusNotifierItem, D-Bus menu and launcher unread transport
 context = { "crates/teams-ui/src/lib.rs" = "4ce2a0490d4264f421f953549d8abdf7202f17382c73052a961c34fee168d58e", "crates/teams-ui/src/tray.rs" = "891e7b2b637aa563f5a90fc8bd3467d822687e99c07dbe74ec3c3e16b1a1dafd" }
 
 [unmapped_sources_windows."crates/ngteams/src/ctl/socket/unix.rs"]
-sha256 = "27a00f3aeb4ccdb71f5572acdf305e58551fa7b24dc9e8d8189ae07a56eae0e2"
+sha256 = "dc2c4f49b225b6b9ec6abd79a07a60d22b32258f124dd4d2413a850699d57fdd"
 reason = "Unix-only control socket transport, stale-inode recovery and filesystem cleanup; listener.rs selects it only under cfg(unix). Native Windows uses the byte-pipe module and Linux still requires this source."
 context = { "crates/ngteams/src/ctl/listener.rs" = "1f80998bdb1842b78d3706aa8c2b3bd6f736246a5baf744fe25177db8f21f94a" }
 

@@ -260,6 +260,30 @@ fn a_file_that_is_no_socket_is_left_alone() {
     assert_eq!(fs::read(&socket).unwrap(), b"the user's");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_socket_the_probe_may_not_reach_is_refused_with_its_own_error_kind() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = socket_in(&dir);
+    fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let _behind = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o000)).unwrap();
+    // root reaches it regardless: nothing to check there
+    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        return;
+    }
+    match ngteams::ctl::bind(&socket) {
+        Err(BindError::Io { path, source }) => {
+            assert_eq!(path, socket);
+            assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied, "{source}");
+            assert!(source.raw_os_error().is_some(), "the OS error kept: {source:?}");
+        }
+        other => panic!("bound over a socket it couldn't probe: {other:?}"),
+    }
+    assert!(socket.exists(), "left in place");
+}
+
 #[cfg(windows)]
 #[test]
 fn a_native_endpoint_keeps_files_at_its_logical_path_and_can_be_rebound_after_quit() {

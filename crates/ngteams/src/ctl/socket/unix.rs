@@ -6,7 +6,7 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use teams_ctl::{ClientError, connect_stream};
+use teams_ctl::{ClientError, CodecError, connect_stream};
 const PROBE: Duration = Duration::from_millis(500);
 /// The Unix socket and the filesystem identity held until shutdown.
 #[derive(Debug)]
@@ -53,19 +53,18 @@ fn remove_stale(path: &Path) -> Result<(), BindError> {
     match connect_stream(path, PROBE) {
         // a busy app (its backlog full) is running all the same
         Ok(_) | Err(ClientError::Timeout) => Err(BindError::AlreadyRunning(path.to_owned())),
-        Err(ClientError::NotRunning { source, .. }) => match source.kind() {
-            io::ErrorKind::ConnectionRefused => {
-                log::info!("the control socket was left by an app that didn't quit: it is replaced");
-                match fs::remove_file(path) {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(failed(error)),
-                }
+        Err(ClientError::NotRunning { source, .. }) if source.kind() == io::ErrorKind::ConnectionRefused => {
+            log::info!("the control socket was left by an app that didn't quit: it is replaced");
+            match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(failed(error)),
             }
-            // gone meanwhile
-            io::ErrorKind::NotFound => Ok(()),
-            _ => Err(failed(source)),
-        },
+        }
+        // `connect_stream`'s only other `NotRunning`: the file went meanwhile
+        Err(ClientError::NotRunning { .. }) => Ok(()),
+        // the probe's own failure (permission, a path too long, …), its kind and OS error kept
+        Err(ClientError::Codec(CodecError::Io(source))) => Err(failed(source)),
         Err(error) => Err(failed(io::Error::other(error.to_string()))),
     }
 }
