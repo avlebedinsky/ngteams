@@ -1310,11 +1310,6 @@ fn read_private(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
-/// Makes a directory `builder` creates private, where the platform has modes.
-pub(crate) fn private_dir_mode(builder: &mut DirBuilder) {
-    builder.mode(DIR_MODE);
-}
-
 /// Writes `bytes` to `path` whole: the directory made (or kept) `0700`, a temporary file beside it `0600`, then
 /// renamed over it.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
