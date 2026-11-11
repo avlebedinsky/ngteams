@@ -500,7 +500,8 @@ impl ChatServiceMock {
                     .and_then(|(first, last)| Some((first.parse::<usize>().ok()?, last.parse::<usize>().ok()?)));
                 match asked {
                     None => ResponseTemplate::new(200).set_body_raw(body.clone(), &content_type),
-                    Some((first, _)) if first >= total => ResponseTemplate::new(416),
+                    // A malformed reversed range must not panic the loopback server while slicing the body.
+                    Some((first, last)) if first >= total || last < first => ResponseTemplate::new(416),
                     Some((first, last)) => {
                         let last = last.min(total - 1);
                         ResponseTemplate::new(206)
