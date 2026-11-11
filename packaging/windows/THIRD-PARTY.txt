@@ -4,10 +4,10 @@ The dependencies/ directory carries the Cargo dependency inventory and the
 upstream license/notice files from the exact package sources used by the build,
 plus libwebrtc's consolidated third-party notice. Build dependencies are included.
 
-The adjacent GStreamer license directories and ../versions.txt record the shipped
+The adjacent GStreamer license directories and ../../versions.txt record the shipped
 media components. MEDIA-MANIFEST.json records their hashes, versions and source
 recipe URL. These DLLs remain separately replaceable under their upstream terms.
-The Microsoft VC redistributable license is under microsoft-vc-runtime/.
+The Microsoft VC redistributable license is under ../microsoft-vc-runtime/.
 
 The Lucide icon, Fluent Emoji reaction and MediaPipe segmentation model notices
 are included under dependencies/assets/. The model is compiled into the app.

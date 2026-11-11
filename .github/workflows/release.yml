@@ -242,6 +242,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B scripts/test_windows_release.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          scripts/test-package-release-windows.ps1
       # Only the hosted release workflow may build the install-marked client. Branch dispatches may build artifacts,
       # but publish below is main-only and requires both native jobs to succeed.
       - name: Release binaries
