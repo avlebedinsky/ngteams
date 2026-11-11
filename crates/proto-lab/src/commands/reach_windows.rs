@@ -8,7 +8,7 @@ use teams_auth::secrets::KeyringSecretStore;
 use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient};
 use teams_proto::chat::{ChatReads, Field, MemberList};
-use teams_proto::{Client, HttpTransport};
+use teams_proto::{Client, Credentials, HttpTransport};
 
 use crate::commands::auth::{KEYRING_APPLICATION, NativeTarget};
 use crate::config::{Alias, LabConfig};
@@ -29,9 +29,18 @@ fn refused(reason: &'static str) -> Error {
 /// # Errors
 /// Identity, service reads, incomplete rosters, paging or private evidence publication fails.
 pub async fn audit(config: &LabConfig, alias: Alias, target: &NativeTarget, selected: &[String]) -> Result<(), Error> {
-    let account = config.account(alias);
     let client = native_client(config, alias, target).await?;
     let reads = ChatReads::new(&client);
+    audit_reads(config, alias, selected, &reads).await
+}
+
+async fn audit_reads<C: Credentials>(
+    config: &LabConfig,
+    alias: Alias,
+    selected: &[String],
+    reads: &ChatReads<'_, C>,
+) -> Result<(), Error> {
+    let account = config.account(alias);
     let allowed = allowed(config);
     let mut page = reads.conversations().await?;
     let mut seen = BTreeSet::new();
@@ -201,3 +210,7 @@ mod tests {
         assert!(!selected_allowed(&rows, &["missing".into()]));
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/commands/reach_windows.rs"]
+mod orchestration_tests;

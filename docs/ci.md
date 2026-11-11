@@ -85,6 +85,16 @@ explicitly name the current user as owner. See [Windows object ownership](https:
 The Linux coverage inventory records the Windows-only filesystem source with the existing hash-checked
 `unmapped_sources` mechanism: it has no Linux LLVM mapping. Native Windows tests exercise that source in the VM
 and hosted job; this entry neither removes mapped counts nor changes any existing coverage floor.
+
+Native exports use the same source inventory and saved per-crate floors. When inspecting a VM export on another
+machine, run `python3 scripts/coverage-report.py report <export.json> --output <summary.json> --packages proto-lab
+--platform windows --source-root C:/src/ngteams-windows-port-3` (as one command). The explicit source root rebases
+only that checkout's filenames; counts stay unchanged. `unmapped_sources_windows` records individually hashed
+Unix-only lab sources and their cfg/module roots. These reviews apply only to the Windows audit: Linux still
+requires those sources, an edited source or module root invalidates its review, and any supplied LLVM mapping
+always counts, including zero-hit code. Missing compiled sources still fail the audit. The restricted Windows
+lab CLI does not compile the Unix capture/scenario command set; it retains only sign-in, provisioning and reach
+evidence plus their browser driver.
 Authentication uses Secret Service on Unix and Windows Credential Manager on Windows. The Windows backend selects
 its native store explicitly, persists only on this machine, and hashes length-delimited application/account/audience
 keys to avoid Credential Manager's case-insensitive-name collisions. Tests use unique synthetic namespaces and exact

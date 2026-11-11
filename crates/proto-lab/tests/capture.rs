@@ -6,14 +6,12 @@
 //! The Chrome tests run headless on throwaway user-data-dirs against local servers; see `common` for how Chrome is
 //! found.
 
-// The full Linux browser/scenario harness is outside the Windows provisioning command set.
-#![cfg(unix)]
-
 mod common;
 #[path = "common/page.rs"]
 mod page;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,6 +27,7 @@ use proto_lab::capture::{
 use proto_lab::capture_hold::{CaptureHold, Hold};
 use proto_lab::cdp::{Cdp, SessionId};
 use proto_lab::frame_hold::FrameHold;
+#[cfg(unix)]
 use proto_lab::scenario::echo_call::tone_wav;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
@@ -54,10 +53,6 @@ fn a_capture_dir_is_named_by_its_utc_time() {
     assert_eq!(capture_dir_name(at(4_102_444_799)), "20991231T235959Z");
 }
 
-fn mode(path: &Path) -> TestResult<u32> {
-    Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
-}
-
 #[test]
 fn a_capture_goes_to_its_scenario_and_time_private_to_the_user() {
     let root = tempfile::tempdir().unwrap();
@@ -72,10 +67,10 @@ fn a_capture_goes_to_its_scenario_and_time_private_to_the_user() {
     assert_ne!(first.dir(), second.dir());
     assert_eq!(first.events_file(), first.dir().join(EVENTS_FILE));
     assert!(first.events_file().is_file());
-    assert_eq!(mode(&captures).unwrap(), 0o700);
-    assert_eq!(mode(&captures.join("load")).unwrap(), 0o700);
-    assert_eq!(mode(first.dir()).unwrap(), 0o700);
-    assert_eq!(mode(&first.events_file()).unwrap(), 0o600);
+    privacy::assert_private(&captures, false);
+    privacy::assert_private(&captures.join("load"), false);
+    privacy::assert_private(first.dir(), false);
+    privacy::assert_private(&first.events_file(), false);
 }
 
 #[test]
@@ -749,6 +744,7 @@ async fn the_audio_tap_reads_each_received_tone_in_the_page() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_call_scenario_s_fake_microphone_sends_its_tone_file() {
     let pages = serve_pages().await;
     let media = tempfile::tempdir().unwrap();

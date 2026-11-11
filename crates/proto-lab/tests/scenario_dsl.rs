@@ -10,7 +10,7 @@ mod page;
 
 use std::time::Duration;
 
-use futures_util::StreamExt as _;
+use futures_util::{SinkExt as _, StreamExt as _};
 use proto_lab::arming::ArmedBrowser;
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture_hold::CaptureHold;
@@ -452,6 +452,115 @@ async fn silent_cdp() -> TestResult<Cdp> {
     });
     let (cdp, _events) = Cdp::connect(&format!("ws://{address}")).await?;
     Ok(cdp)
+}
+
+async fn answering_cdp(answer: Value) -> TestResult<Cdp> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+            return;
+        };
+        while let Some(Ok(message)) = socket.next().await {
+            let Ok(text) = message.to_text() else { break };
+            let Ok(request) = serde_json::from_str::<Value>(text) else {
+                break;
+            };
+            let response = json!({"id":request["id"],"result":answer});
+            if socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    response.to_string().into(),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let (cdp, _) = Cdp::connect(&format!("ws://{address}")).await?;
+    Ok(cdp)
+}
+
+#[tokio::test]
+async fn request_bodies_are_decoded_and_cached_on_their_observed_request() -> TestResult {
+    for (answer, expected) in [
+        (json!({"postData":"synthetic body"}), Some("synthetic body")),
+        (
+            json!({"postData":"c3ludGhldGlj","base64Encoded":true}),
+            Some("synthetic"),
+        ),
+        (json!({"postData":"/w==","base64Encoded":true}), None),
+        (json!({"postData":"not base64!","base64Encoded":true}), None),
+        (json!({}), None),
+    ] {
+        let (events, watch) = tokio::sync::mpsc::unbounded_channel();
+        let mut driver = Driver::new(answering_cdp(answer).await?, SessionId::new("S-page"), watch);
+        events.send(network_event(
+            "Network.requestWillBeSent",
+            json!({
+                "requestId":"synthetic", "request":{"method":"POST","url":"http://127.0.0.1/synthetic"}
+            }),
+        ))?;
+        let seen = driver
+            .wait_for_seen("observe", "synthetic request", 0, Duration::from_secs(1), |_| true)
+            .await?;
+        let read = driver.read_body("get body", &seen).await?;
+        assert_eq!(read.body.as_deref(), expected);
+        assert_eq!(driver.requests()[0].body.as_deref(), expected);
+        if expected.is_some() {
+            assert_eq!(driver.read_body("cached body", &read).await?.body, read.body);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn screenshot_decode_failure_names_the_step_and_a_silent_body_read_times_out() -> TestResult {
+    let (_events, watch) = tokio::sync::mpsc::unbounded_channel();
+    let driver = Driver::new(
+        answering_cdp(json!({"data":"invalid!"})).await?,
+        SessionId::new("S-page"),
+        watch,
+    );
+    let error = driver.screenshot("diagnostic shot").await.unwrap_err();
+    assert!(matches!(error, StepError::Failed { ref step, .. } if step == "diagnostic shot"));
+    let (events, watch) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = Driver::new(silent_cdp().await?, SessionId::new("S-page"), watch);
+    driver.set_call_timeout(Duration::from_millis(100));
+    events.send(network_event(
+        "Network.requestWillBeSent",
+        json!({
+            "requestId":"synthetic", "request":{"method":"POST","url":"http://127.0.0.1/synthetic?private=value"}
+        }),
+    ))?;
+    let seen = driver
+        .wait_for_seen("observe", "synthetic request", 0, Duration::from_secs(1), |_| true)
+        .await?;
+    let error = driver.read_body("stalled body", &seen).await.unwrap_err();
+    assert!(matches!(error, StepError::Timeout { ref step, .. } if step == "stalled body"));
+    assert!(!error.to_string().contains("private=value"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pointer_input_and_png_diagnostics_work_on_the_armed_local_page() -> TestResult {
+    with_html(
+        r#"<!doctype html><button data-tid="click" onclick="this.textContent='clicked'">ready</button>"#,
+        async |run| {
+            run.driver.pointer_click("pointer", Selector::Tid("click")).await?;
+            run.driver
+                .wait_for_text("clicked", "clicked", Duration::from_secs(2))
+                .await?;
+            let png = run.driver.screenshot("local screenshot").await?;
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            Ok(())
+        },
+    )
+    .await
 }
 
 fn network_event(method: &str, params: Value) -> Event {

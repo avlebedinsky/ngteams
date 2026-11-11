@@ -67,6 +67,47 @@ mod tests {
     use crate::config::Alias;
 
     #[test]
+    fn output_replacement_and_exclusive_lock_release_use_native_file_handles() {
+        let root = tempfile::tempdir().unwrap();
+        private::restrict_dir(root.path()).unwrap();
+        let output = root.path().join("output.json");
+        atomic(&output, b"synthetic-long-output").unwrap();
+        let mut file = replace(&output).unwrap();
+        file.write_all(b"new").unwrap();
+        drop(file);
+        assert_eq!(std::fs::read(&output).unwrap(), b"new");
+        private::check_file(&File::open(&output).unwrap()).unwrap();
+        let lock = root.path().join("live.lock");
+        let held = exclusive(&lock).unwrap();
+        assert!(exclusive(&lock).is_err());
+        drop(held);
+        drop(exclusive(&lock).unwrap());
+        assert!(
+            std::fs::read_dir(root.path()).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".lab-"))
+        );
+    }
+
+    #[test]
+    fn failed_output_publication_cleans_its_stage_and_keeps_the_destination() {
+        let root = tempfile::tempdir().unwrap();
+        private::restrict_dir(root.path()).unwrap();
+        let destination = root.path().join("directory");
+        private::create_dir_all(&destination).unwrap();
+        assert!(atomic(&destination, b"must not publish").is_err());
+        assert!(destination.is_dir());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        let blocked = destination.join("file");
+        atomic(&blocked, b"blocking file").unwrap();
+        assert!(atomic(&blocked.join("child"), b"must not publish").is_err());
+        assert!(replace(&destination).is_err());
+        assert!(exclusive(&blocked.join("missing")).is_err());
+    }
+
+    #[test]
     fn account_input_requires_safe_acl_and_matches_the_requested_roster_account() {
         let root = tempfile::tempdir().unwrap();
         private::restrict_dir(root.path()).unwrap();

@@ -246,6 +246,26 @@ pub async fn refresh_native<S: SecretStore>(
     store: &S,
     target: &NativeTarget,
 ) -> Result<SkypetokenSummary, AuthError> {
+    refresh_native_with(
+        config,
+        alias,
+        store,
+        target,
+        &TokenClient::new(EntraConfig::teams_native())?,
+        &AuthzClient::new().map_err(TokenError::from)?,
+    )
+    .await
+}
+
+#[cfg(windows)]
+async fn refresh_native_with<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    target: &NativeTarget,
+    client: &TokenClient,
+    authz: &AuthzClient,
+) -> Result<SkypetokenSummary, AuthError> {
     let configured = config.account(alias);
     let account = target.account(&configured.upn)?;
     if !configured
@@ -255,9 +275,8 @@ pub async fn refresh_native<S: SecretStore>(
     {
         return Err(AuthError::BadMri);
     }
-    let client = TokenClient::new(EntraConfig::teams_native())?;
     let tokens = client.refresh(store, &configured.upn, &Scope::spaces()).await?;
-    let skype = skypetoken(store, &configured.upn, &tokens)
+    let skype = skypetoken_with(store, &configured.upn, &tokens, authz)
         .await
         .map_err(TokenError::from)?;
     target.save(&account, Some(&skype.region))?;

@@ -103,6 +103,69 @@ fn native_target_uses_xdg_data_and_rejects_personal_overlap_before_writing() {
     assert!(std::fs::read_dir(config.join("ngteams")).unwrap().next().is_none());
 }
 
+#[cfg(windows)]
+#[test]
+fn native_alias_requires_exactly_one_matching_account_with_verified_guid_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = NativeTarget::resolve(Alias::A, None, None, Some(dir.path().as_os_str().to_owned())).unwrap();
+    let identity = native_identity();
+    assert!(target.expect_account(&identity.username).is_ok());
+    assert!(target.account(&identity.username).is_err());
+    let file = target.save(&identity, None).unwrap();
+    assert_eq!(
+        target.account(&identity.username.to_uppercase()).unwrap().object_id,
+        identity.object_id
+    );
+    assert!(target.expect_account("another@example.test").is_err());
+    assert_eq!(
+        target.account(&identity.username).unwrap().display_name,
+        identity.display_name
+    );
+    let saved = std::fs::read_to_string(&file).unwrap();
+    for text in [
+        "not valid toml = [".to_owned(),
+        "account = []".to_owned(),
+        saved.repeat(2),
+        saved.replace(&identity.object_id, "unverified-object"),
+        saved.replace(&identity.tenant, "unverified-tenant"),
+        saved
+            .lines()
+            .filter(|line| !line.starts_with("oid"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ] {
+        std::fs::write(&file, text).unwrap();
+        assert!(target.account(&identity.username).is_err());
+    }
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    assert!(target.expect_account(&identity.username).is_err());
+}
+
+#[test]
+fn invalid_native_identity_and_unreadable_existing_config_never_replace_an_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = NativeTarget::resolve(Alias::A, None, None, Some(dir.path().as_os_str().to_owned())).unwrap();
+    let identity = native_identity();
+    for bad in [
+        Account {
+            object_id: "bad".into(),
+            ..identity.clone()
+        },
+        Account {
+            tenant: "bad".into(),
+            ..identity.clone()
+        },
+    ] {
+        assert!(target.save(&bad, None).is_err());
+        assert!(!target.root().exists());
+    }
+    let file = target.save(&identity, None).unwrap();
+    std::fs::write(&file, "malformed = [").unwrap();
+    assert!(target.save(&identity, None).is_err());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "malformed = [");
+}
+
 fn spaces_summary() -> TokenSummary {
     TokenSummary {
         audience: vec!["https://api.spaces.skype.com".to_owned()],

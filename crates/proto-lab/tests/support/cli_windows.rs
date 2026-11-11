@@ -130,3 +130,107 @@ fn a_report_without_native_tokens_and_a_test_support_entry_point_refuse_success(
     );
     assert_eq!(main(), ExitCode::FAILURE);
 }
+
+#[tokio::test]
+async fn native_commands_run_only_with_private_inputs() {
+    const CHILD: &str = "PROTO_LAB_SYNTHETIC_NATIVE_COMMANDS";
+    if std::env::var_os(CHILD).is_some() {
+        native_commands().await;
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+    child.env_clear();
+    for name in [
+        "PATH",
+        "SystemRoot",
+        "WINDIR",
+        "COMSPEC",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+        "TEMP",
+        "TMP",
+        "LLVM_PROFILE_FILE",
+        "NGTEAMS_WINDOWS_VM_SANDBOX",
+        "UI_SANDBOX_DIR",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            child.env(name, value);
+        }
+    }
+    child
+        .env(CHILD, "1")
+        .env("LOCALAPPDATA", root.path())
+        .kill_on_drop(true);
+    child.args([
+        "--exact",
+        "main_windows::tests::native_commands_run_only_with_private_inputs",
+        "--nocapture",
+    ]);
+    let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn native_commands() {
+    let locations = LabLocations::from_env().unwrap();
+    let target = auth::NativeTarget::windows_alias("synthetic-cli").unwrap();
+    assert_eq!(
+        auth::NativeTarget::from_env(Alias::A).unwrap().root(),
+        locations.data_dir.parent().unwrap().join("ngteams-lab/a")
+    );
+    run(Command::Browser).await.unwrap();
+    let text = ["a", "b", "c"]
+        .map(|alias| format!("[[accounts]]\nalias='{alias}'\nupn='synthetic-{alias}@example.test'\n"))
+        .join("\n");
+    std::fs::write(&locations.config_file, text).unwrap();
+    target
+        .save(
+            &teams_auth::id_token::Account {
+                username: "synthetic-another@example.test".into(),
+                object_id: "00000000-0000-4000-8000-00000000000a".into(),
+                tenant: "00000000-0000-4000-8000-000000000001".into(),
+                display_name: None,
+            },
+            None,
+        )
+        .unwrap();
+    proto_lab::private::atomic(
+        &accounts_file(&locations),
+        br#"[{"profile":"a","email":"synthetic-a@example.test","password":"synthetic-only"}]"#,
+    )
+    .unwrap();
+    for command in [
+        Command::Auth {
+            alias: Alias::A,
+            native_alias: Some("synthetic-cli".into()),
+            timeout: 1,
+        },
+        Command::Login {
+            alias: Alias::A,
+            native_alias: Some("synthetic-cli".into()),
+            timeout: 1,
+        },
+        Command::Refresh {
+            alias: Alias::A,
+            native_alias: Some("synthetic-cli".into()),
+        },
+        Command::Reach {
+            alias: Alias::A,
+            native_alias: Some("synthetic-cli".into()),
+            chats: vec!["synthetic-ab".into()],
+        },
+    ] {
+        assert!(run(command).await.is_err());
+    }
+    // All entry paths released their live lock after refusal; no token read or browser navigation occurred.
+    drop(proto_lab::private::exclusive(&locations.data_dir.join("live.lock")).unwrap());
+}

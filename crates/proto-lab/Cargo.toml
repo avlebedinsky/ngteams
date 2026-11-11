@@ -50,6 +50,7 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 # The harness mock origins are enabled only for its tests; normal binaries refuse this build.
 proto-lab = { path = ".", features = ["test-support"] }
+teams-proto = { workspace = true, features = ["test-support"] }
 # a local HTTPS server: Chrome uploads Reporting API reports only over a secure connection
 rcgen.workspace = true
 # a local websocket server for the CDP client tests
