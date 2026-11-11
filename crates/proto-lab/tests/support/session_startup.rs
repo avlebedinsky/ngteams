@@ -273,3 +273,32 @@ async fn queued_capture_messages_stay_local(session: &mut LabSession) {
             .all(|request| request.method == "GET")
     );
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn missing_edge_is_a_browser_error_before_any_profile_or_target_evidence() {
+    const MARKER: &str = "PROTO_LAB_SYNTHETIC_NO_EDGE";
+    if std::env::var_os(MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session::startup_tests::missing_edge_is_a_browser_error_before_any_profile_or_target_evidence",
+                "--nocapture",
+            ])
+            .env(MARKER, "1")
+            .env_remove("ProgramFiles(x86)")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("unopened");
+    match LabSession::open(&LabPaths::new(data.clone()), Alias::A).await {
+        Err(SessionError::NoEdge(source)) => assert!(source.to_string().contains("ProgramFiles(x86)")),
+        Err(other) => panic!("Edge discovery was misclassified: {other}"),
+        Ok(_) => panic!("missing Edge unexpectedly opened a browser"),
+    }
+    assert!(!data.exists(), "discovery failure must precede profile creation");
+}
