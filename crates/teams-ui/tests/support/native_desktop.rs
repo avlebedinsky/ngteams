@@ -141,6 +141,18 @@ async fn overlay_lifecycle_contract(tray: &tray::NativeTray) {
     tray::NativeTray::test_button_ready(reopened);
     assert_eq!(tray.test_overlay_count().await, before + 1);
     println!("TaskbarButtonCreated on the recreated main HWND reapplied its unchanged unread overlay");
+    if let Some(directory) = std::env::var_os("NGTEAMS_NATIVE_TASKBAR_SHOT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::write(directory.join("overlay-ready"), std::process::id().to_string()).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !directory.join("overlay-shot").exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "taskbar screenshot was not captured"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }
 async fn activation_contract(
     server: &toasts::Notifications,
