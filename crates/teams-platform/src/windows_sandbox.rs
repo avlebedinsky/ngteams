@@ -46,7 +46,7 @@ fn console_allowed(
 /// Validate this process before opening a lab/read-only/test window. No display or media is opened by this check.
 ///
 /// # Errors
-/// Native session lookup failed, or [`console_allowed`] refused the environment/session.
+/// Native session lookup failed, or the VM environment/session was refused.
 pub fn window_allowed_here() -> io::Result<()> {
     let mut process_session = 0;
     // SAFETY: the current PID is valid, and process_session is a live output buffer.

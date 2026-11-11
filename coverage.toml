@@ -172,7 +172,7 @@ sha256 = "0b84326451184dcaf00369ec66504d88bc3db9729394cab56353e90cb489ed79"
 reason = "Windows-only selective native process/handle transfer; exercised with real synthetic subprocesses and measured by the Windows portability gate."
 
 [unmapped_sources."crates/teams-platform/src/windows_sandbox.rs"]
-sha256 = "bb772aa856e1fa7d2f046085fdb2ee293ec6e14e3e4340b26b91b22dced7a66e"
+sha256 = "a39d69f4637d68ceda40cf93cb0ba0cf42a2d06d5cb3aeee6f671d6dc5e93d8d"
 reason = "Windows-only authorized VM console guard; native session queries and refusal contracts are measured by the Windows portability gate without opening a GUI."
 
 [unmapped_sources."crates/teams-auth/src/broker/windows_pair.rs"]
