@@ -309,7 +309,7 @@ sha256 = "8f7c503fbad2b0316d4d1c955f653cb4cb9a8e07098b0637e34992c249baa246"
 reason = "Windows-only protected lab outputs, atomic publication and exclusive lifetime locks; no Linux LLVM mapping. Native input/redaction/output and real provisioning contracts exercise these boundaries."
 
 [unmapped_sources."crates/proto-lab/src/main_windows.rs"]
-sha256 = "3408813a9fa676dcd7a909e14b67d002cfb66589b2eddc3117806a0a8c017da0"
+sha256 = "b6c1d196c3968a63d060fc70212110d8c9f9650eee9b757b864d8330e6ee37e8"
 reason = "Windows-only restricted lab CLI; no Linux LLVM mapping. Offline test-support refusal and VM console browser, native authorization and reach audit commands validate the entry point."
 
 [unmapped_sources."crates/proto-lab/src/commands/reach_windows.rs"]

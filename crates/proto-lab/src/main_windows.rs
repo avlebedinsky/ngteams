@@ -209,3 +209,7 @@ fn failure(error: &(dyn std::error::Error + 'static)) -> String {
         _ => "lab command failed (private input, browser, service or output); raw error data withheld".into(),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/cli_windows.rs"]
+mod tests;

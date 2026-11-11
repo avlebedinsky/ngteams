@@ -5,11 +5,11 @@
 //!
 //! Nothing here touches a lab profile, the real accounts file or the network beyond 127.0.0.1.
 
-// The full Linux browser/scenario harness is outside the Windows provisioning command set.
-#![cfg(unix)]
-
 mod common;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::Duration;
@@ -25,6 +25,7 @@ use proto_lab::commands::login::{
     Action, Clicks, LOGIN_CAPTURE, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe,
     session_options,
 };
+#[cfg(unix)]
 use proto_lab::commands::status::{AccountStatus, account_status};
 use proto_lab::config::Alias;
 use proto_lab::session::{Identity, REFUSAL_GRACE, SessionState, SessionWatch, Settling};
@@ -54,6 +55,7 @@ fn accounts_json(password_field: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 fn write_file(dir: &Path, text: &str, mode: u32) -> TestResult<std::path::PathBuf> {
     let file = dir.join("accounts.json");
     std::fs::write(&file, text)?;
@@ -129,6 +131,7 @@ fn the_email_has_to_be_the_lab_accounts_upn() -> TestResult {
 }
 
 #[test]
+#[cfg(unix)]
 fn the_file_must_not_be_readable_by_group_or_others() -> TestResult {
     let dir = tempfile::tempdir()?;
     let text = accounts_json(&format!(r#""password": "{SECRET}""#));
@@ -153,6 +156,35 @@ fn the_file_must_not_be_readable_by_group_or_others() -> TestResult {
         .err()
         .ok_or("loaded nothing")?;
     assert!(matches!(missing, AccountsError::Read { .. }));
+    Ok(())
+}
+
+#[test]
+#[cfg(windows)]
+fn the_account_file_requires_a_private_native_acl() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("accounts.json");
+    std::fs::write(&file, accounts_json(&format!(r#""password": "{SECRET}""#)))?;
+    teams_platform::private::restrict_file(&file)?;
+    privacy::assert_private(&file, false);
+    let accounts = AccountsFile::load(&file, no_env)?;
+    assert_eq!(accounts.for_alias(Alias::A, UPN_A)?.password().expose(), SECRET);
+    // Change only this synthetic file's DACL. Set-Acl can also request SACL privileges unavailable to the normal
+    // Limited Interactive console token; broadening the reader grant requires no such privilege.
+    let changed = std::process::Command::new("icacls.exe")
+        .arg(&file)
+        .args(["/grant", "*S-1-5-11:(R)"])
+        .output()?;
+    assert!(changed.status.success());
+    let error = AccountsFile::load(&file, no_env).unwrap_err();
+    assert!(
+        matches!(error, AccountsError::Read { ref source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied)
+    );
+    assert!(!shown(&error).contains(SECRET));
+    assert!(matches!(
+        AccountsFile::load(&dir.path().join("missing"), no_env),
+        Err(AccountsError::Read { .. })
+    ));
     Ok(())
 }
 
@@ -647,6 +679,7 @@ fn a_main_frame_anywhere_else_is_reported_by_host() {
 }
 
 #[test]
+#[cfg(unix)]
 fn status_reports_each_state_in_words() {
     let timeout = Duration::from_secs(60);
     let words = |state: &SessionState, authz: Option<u16>| account_status(state, timeout, authz).to_string();
@@ -918,7 +951,7 @@ fn the_status_file_is_private_and_replaced_on_each_state() -> TestResult {
     status.write("starting", &json!({}))?;
     status.write("failed", &json!({"error": "the password was rejected"}))?;
     let file = dir.path().join("status-b.json");
-    assert_eq!(std::fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
+    privacy::assert_private(&file, false);
     let record: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
     assert_eq!(record["alias"], "b");
     assert_eq!(record["state"], "failed");

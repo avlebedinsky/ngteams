@@ -700,6 +700,5 @@ impl LabSession {
 mod tests;
 
 #[cfg(test)]
-#[cfg(unix)]
 #[path = "../tests/support/session_startup.rs"]
 mod startup_tests;
