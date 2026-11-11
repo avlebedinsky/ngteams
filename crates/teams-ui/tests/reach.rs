@@ -703,6 +703,14 @@ fn creates_a_chat_as_offered(path: &Path, text: &str) -> bool {
         assert!(text.contains("ComposeEvent::Start"));
         return true;
     }
+    if path.ends_with("teams-ui/src/profile_card.rs") {
+        // made only by the card's quick message to someone without a 1:1 chat, never on the account's own card nor in
+        // the read-only mode
+        assert_eq!(text.matches("core.write(Action::CreateChat").count(), 1);
+        assert!(text.contains("!self.own() && !self.core.read_only()"));
+        assert!(text.contains("|| !self.writes() ||"));
+        return true;
+    }
     if path.ends_with("ngteams/src/ctl/writes.rs") {
         // `ngteamsctl new-chat`, the user's own explicit command: the action handed to the engine's write, never in
         // the read-only mode

@@ -127,7 +127,7 @@ context = { "crates/proto-lab/src/action_targets.rs" = "91c1449f912a12df45289bb1
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "909df35e897a2669555420ad24f34094b1c62b2efe007ea18651d547be12b144"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "e731a43008ea456b2d167ec1dfe8c6689acf39bf4b6849b512d784db0875bcc3" }
+context = { "crates/teams-proto/src/http.rs" = "5bb39bacb992e312b9f204f9cb4820856d8b99b1753ddb9bc303635d8ef38d67" }
 
 [unmapped_sources."crates/teams-core/src/attachments_tests.rs"]
 sha256 = "9dd845ed73f53a7a32137d505c45018d56bf8529060c3cfdee1ebe7059968e96"

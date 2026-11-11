@@ -29,6 +29,7 @@ const TROUTER_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests
 const CSA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/csa");
 const CALL_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/calling/chat");
 const ECHO_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/calling/echo");
+const LOKI_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/loki");
 
 fn oid(mri: &str) -> &str {
     mri.trim_start_matches("8:orgid:")
@@ -1403,14 +1404,22 @@ fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
                         || include.starts_with("../../../tests/fixtures/trouter/")
                         || include.starts_with("../../../tests/fixtures/csa/")
                         || include.starts_with("../../../tests/fixtures/calling/chat/")
-                        || include.starts_with("../../../tests/fixtures/calling/echo/"),
+                        || include.starts_with("../../../tests/fixtures/calling/echo/")
+                        || include.starts_with("../../../tests/fixtures/loki/"),
                     "{}: {include:.60}",
                     path.display()
                 );
             }
         }
     }
-    for dir in [FIXTURES, TROUTER_FIXTURES, CSA_FIXTURES, CALL_FIXTURES, ECHO_FIXTURES] {
+    for dir in [
+        FIXTURES,
+        TROUTER_FIXTURES,
+        CSA_FIXTURES,
+        CALL_FIXTURES,
+        ECHO_FIXTURES,
+        LOKI_FIXTURES,
+    ] {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let text = std::fs::read_to_string(&path)?;
