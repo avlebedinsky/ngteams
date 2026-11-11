@@ -49,6 +49,8 @@ class WindowsRelease(unittest.TestCase):
             names = set(archive.namelist())
             self.assertIn("ngteams/bin/ngteams-webview.exe", names)
             self.assertIn("ngteams/Install.ps1", names)
+            self.assertIn("ngteams/LICENSE-MIT", names)
+            self.assertIn("ngteams/LICENSE-APACHE", names)
             self.assertIn("ngteams/share/licenses/ngteams/dependencies/license.txt", names)
             for path in self.args.output.rglob("*"):
                 if path.is_file():

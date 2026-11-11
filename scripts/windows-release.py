@@ -50,11 +50,11 @@ def check(root: Path, reader: Path, version: str | None = None, commit: str | No
     if manifest["files"] != inventory(root):
         raise ValueError("package file inventory or hashes differ")
     required = {f"bin/{name}" for name in BINARIES} | {
-        "Install.ps1", "Unregister.ps1", "README.txt", "MEDIA-MANIFEST.json",
+        "Install.ps1", "Unregister.ps1", "README.txt", "MEDIA-MANIFEST.json", "LICENSE-MIT", "LICENSE-APACHE",
         "share/licenses/ngteams/THIRD-PARTY.txt",
     }
     if not required.issubset(manifest["files"]):
-        raise ValueError("package is missing an executable, setup script or notice")
+        raise ValueError("package is missing an executable, setup script, licence or notice")
     for relative in manifest["files"]:
         path = PurePosixPath(relative)
         if path.is_absolute() or ".." in path.parts or "\\" in relative or ":" in relative:
@@ -90,8 +90,8 @@ def stage(args: argparse.Namespace, reader: Path) -> None:
             shutil.copy2(binary, args.output / "bin" / binary.name)
         for name in ("Install.ps1", "Unregister.ps1", "README.txt"):
             shutil.copy2(REPO / "packaging/windows" / name, args.output / name)
-        if (REPO / "LICENSE").is_file():
-            shutil.copy2(REPO / "LICENSE", args.output / "LICENSE")
+        for name in ("LICENSE-MIT", "LICENSE-APACHE"):
+            shutil.copy2(REPO / name, args.output / name)
         notices = args.output / "share/licenses/ngteams"
         notices.mkdir(parents=True)
         shutil.copytree(args.notices, notices / "dependencies")
