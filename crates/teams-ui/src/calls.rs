@@ -205,10 +205,11 @@ pub struct DeviceCheck {
     pub connected: bool,
     /// The microphone picked up sound ([`CallView::hearing`], or the account speaking).
     pub heard: bool,
-    /// The microphone went away for good during the call ([`teams_core::Event::AudioClosed`]): whatever it picked up
-    /// before, it doesn't work now.
+    /// The microphone went away during the call ([`teams_core::Event::AudioClosed`]): whatever it picked up before,
+    /// it stays muted until an unmute opens it again.
     pub microphone_lost: bool,
-    /// The speaker went away for good during the call.
+    /// The speaker went away during the call ([`teams_core::Event::AudioClosed`]). The engine reopens it about once
+    /// a second and playback resumes, but a speaker that dropped out is still a problem the check reports.
     pub speaker_lost: bool,
     /// The far end's audio played on the speaker (a participant speaking: the echo's greeting, the playback).
     pub played: bool,
