@@ -694,6 +694,7 @@ async fn others_presence_is_handed_on_as_delivered_and_never_answered() {
                 "availability": availability,
                 "activity": availability,
                 "deviceType": "Web",
+                "lastActiveTime": "1970-01-01T00:00:03.000Z",
             },
         }]})
     };
@@ -709,6 +710,8 @@ async fn others_presence_is_handed_on_as_delivered_and_never_answered() {
     assert_eq!(delivered.presences.len(), 1);
     assert_eq!(delivered.presences[0].mri, Mri::new(LAB_A));
     assert_eq!(delivered.presences[0].availability.as_deref(), Some("Offline"));
+    assert_eq!(delivered.presences[0].last_active_ms, Some(3000));
+    assert_eq!(delivered.presences[0].out_of_office, Some(false));
 
     // a change, then a replay of an older one (stored): both handed on, told apart
     lab.trouter.deliver_presence(LAB_B, &presence("Busy"), false);

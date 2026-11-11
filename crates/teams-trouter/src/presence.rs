@@ -2,7 +2,8 @@
 //! once the account's endpoint subscribed to someone's presence (`teams_proto::PresenceSubscription`), UPS delivers
 //! each change of theirs to the messaging stack's socket at `/v4/f/<endpoint>/unifiedPresenceService`, first a
 //! snapshot of everyone a subscription named. The body is `{"presence": [{"mri", "presence": {"availability",
-//! "activity", …}, …}, …]}`, `"isSnapshot": true` beside the list on a snapshot.
+//! "activity", "lastActiveTime", "calendarData": {"isOutOfOffice"}, …}, …}, …]}`, `"isSnapshot": true` beside the
+//! list on a snapshot.
 //!
 //! A presence delivery is never answered, as no delivery but a call's is: the lab's captures show UPS's deliveries
 //! going on for the whole of a run without answers (up to 49 minutes), and the ones left unanswered
@@ -24,7 +25,8 @@ pub struct PresenceDelivery {
     pub stored: bool,
     /// The snapshot that follows a subscription (`isSnapshot`).
     pub snapshot: bool,
-    /// Each person's presence as given: an availability or activity of another form than text is none.
+    /// Each person's presence as given ([`UserPresence::of_pushed`]): a field of another form than the captured one is
+    /// none.
     pub presences: Vec<UserPresence>,
 }
 
@@ -56,12 +58,10 @@ fn read_body(body: &str) -> Option<(Vec<UserPresence>, bool)> {
         .as_array()?
         .iter()
         .map(|item| {
-            let text = |key: &str| item["presence"][key].as_str().map(str::to_owned);
-            Some(UserPresence {
-                mri: Mri::new(item.get("mri")?.as_str()?),
-                availability: text("availability"),
-                activity: text("activity"),
-            })
+            Some(UserPresence::of_pushed(
+                Mri::new(item.get("mri")?.as_str()?),
+                &item["presence"],
+            ))
         })
         .collect::<Option<Vec<_>>>()?;
     Some((presences, snapshot))

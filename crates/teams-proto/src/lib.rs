@@ -7,6 +7,7 @@ pub use call_state::CallState;
 pub use chat_members::chat_members;
 mod ids;
 mod log_shape;
+pub mod loki;
 
 mod call_operation;
 pub use call_operation::CallOperation;
@@ -84,6 +85,10 @@ pub use http::{
     Failure, FileBody, GIPHY_HOST, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY,
     MAX_PICTURE_BODY, MAX_RETRY_WAIT, MAX_SEGMENT_BODY, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, PROVISIONING_AUDIENCE,
     RELAY_HOST, REQUEST_TIMEOUT, Refusal, STREAM_TIMEOUT, TROUTER_HOST,
+};
+pub use loki::{
+    ClockTime, FreeBusyStatus, LOKI_AUDIENCE, LokiAnswerError, LokiConfiguration, LokiOrganization, LokiOutOfOffice,
+    LokiPerson, LokiSchedule, LokiWorkingWith, Organization, OutOfOfficeState, PersonDetails, PersonaRef, Schedule,
 };
 pub use meeting::{MeetingCode, MeetingDetails, MeetingThread};
 #[cfg(feature = "test-support")]

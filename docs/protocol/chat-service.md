@@ -145,7 +145,8 @@ The first run that let it through (`ab-chat` of 2026-10-22) sent 14 of them, eac
 was 200 and named only the accounts asked for: a list of one item per MRI (`mri`, `presence` with `sourceNetwork`
 (`Self` for the account's own, `SameEnterprise` for another), `calendarData` (`isOutOfOffice`), `capabilities`,
 `availability`, `activity`, `lastActiveTime`, and `source` when asked with it), `etagMatch`, `etag`, and the item's
-`status` `20000`) ([trouter.md](trouter.md#others-presence)).
+`status` `20000`) ([trouter.md](trouter.md#others-presence)). `PresenceRead` reads `availability`, `activity`,
+`lastActiveTime` (as ms; `0001-01-01T00:00:00Z`, never active, as none) and `calendarData.isOutOfOffice`.
 
 ### The native client's reads by POST
 

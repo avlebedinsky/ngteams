@@ -160,6 +160,9 @@ async fn a_presence_read_goes_out_in_its_captured_shape_and_its_answer_is_read()
             assert_eq!(presence.mri.as_str(), *mri, "{name}");
             assert_eq!(presence.availability.as_deref(), Some("Offline"), "{name}");
             assert_eq!(presence.activity.as_deref(), Some("Offline"), "{name}");
+            // `0001-01-01T00:00:00Z`: never active
+            assert_eq!(presence.last_active_ms, None, "{name}");
+            assert_eq!(presence.out_of_office, Some(false), "{name}");
         }
         assert_eq!(setup.tokens.audiences(), [PRESENCE_AUDIENCE], "{name}");
         assert_eq!(PRESENCE_AUDIENCE, "https://presence.teams.microsoft.com/");
@@ -459,4 +462,38 @@ fn an_item_without_the_captured_success_gives_no_availability_and_unseen_words_a
         assert_eq!(presences[0].availability.as_deref(), availability);
         assert_eq!(presences[0].activity.as_deref(), activity);
     }
+}
+
+#[test]
+fn when_someone_was_last_active_and_whether_they_are_out_of_office_are_read_in_their_captured_forms() {
+    let read = read_of(&[LAB_B]);
+    let answer = |presence: Value| {
+        let body = serde_json::to_vec(&json!([{"mri": LAB_B, "status": 20000, "presence": presence}])).unwrap();
+        read.read_answer(&body).unwrap().remove(0)
+    };
+    let seen = answer(json!({
+        "availability": "Offline",
+        "lastActiveTime": "1970-01-01T00:00:02.500Z",
+        "calendarData": {"isOutOfOffice": true},
+    }));
+    assert_eq!(seen.last_active_ms, Some(2500));
+    assert_eq!(seen.out_of_office, Some(true));
+    let other_forms = answer(json!({"lastActiveTime": 7, "calendarData": {"isOutOfOffice": "yes"}}));
+    assert_eq!((other_forms.last_active_ms, other_forms.out_of_office), (None, None));
+    let missing = answer(json!({"availability": "Away"}));
+    assert_eq!((missing.last_active_ms, missing.out_of_office), (None, None));
+    let failed = serde_json::to_vec(
+        &json!([{"mri": LAB_B, "status": 40400, "presence": {"calendarData": {"isOutOfOffice": true}}}]),
+    )
+    .unwrap();
+    assert_eq!(read.read_answer(&failed).unwrap()[0].out_of_office, None);
+
+    let pushed = UserPresence::of_pushed(
+        Mri::new(LAB_B),
+        &json!({"availability": "Busy", "activity": "InACall", "lastActiveTime": "0001-01-01T00:00:00Z",
+                "calendarData": {"isOutOfOffice": false}}),
+    );
+    assert_eq!(pushed.availability.as_deref(), Some("Busy"));
+    assert_eq!(pushed.activity.as_deref(), Some("InACall"));
+    assert_eq!((pushed.last_active_ms, pushed.out_of_office), (None, Some(false)));
 }

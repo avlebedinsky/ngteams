@@ -595,9 +595,9 @@ impl PostRead for PresenceRead {
 /// The per-item `status` every captured answer's items carried: the account's presence was read.
 const PRESENCE_READ: i64 = 20_000;
 
-/// One item of UPS's answer, as captured: `{"mri", "presence": {"availability", "activity", …}, "status", …}` (also
-/// `etag`, `etagMatch`, and `presence`'s `sourceNetwork`, `calendarData`, `capabilities`, `lastActiveTime`, which
-/// aren't read).
+/// One item of UPS's answer, as captured: `{"mri", "presence": {"availability", "activity", "lastActiveTime",
+/// "calendarData": {"isOutOfOffice"}, …}, "status", …}` (also `etag`, `etagMatch`, and `presence`'s `sourceNetwork`
+/// and `capabilities`, which aren't read).
 #[derive(Deserialize)]
 struct RawUserPresence {
     #[serde(deserialize_with = "mri")]
@@ -609,31 +609,80 @@ struct RawUserPresence {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RawPresence {
     #[serde(default)]
     availability: Option<String>,
     #[serde(default)]
     activity: Option<String>,
+    /// Read leniently: a value of another form is none.
+    #[serde(default)]
+    last_active_time: Option<Value>,
+    #[serde(default)]
+    calendar_data: Option<Value>,
 }
 
-/// One account's presence as UPS gave it: its availability (`Offline`, `Available`, …) and activity, each a word as
-/// given; `None` when the answer gave none for them, or gave its item a status other than the captured success.
+/// One account's presence as UPS gave it, in a read's answer or a push: its availability (`Offline`, `Available`, …)
+/// and activity, each a word as given, when they were last active and whether their calendar says they are out of
+/// office; each `None` when the answer gave none for it (or one of another form), or gave its item a status other
+/// than the captured success.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserPresence {
     pub mri: Mri,
     pub availability: Option<String>,
     pub activity: Option<String>,
+    /// `lastActiveTime`, ms since the epoch; `None` for `0001-01-01T00:00:00Z` (never: Teams shows "Offline", not
+    /// "Last seen").
+    pub last_active_ms: Option<i64>,
+    /// `calendarData.isOutOfOffice`.
+    pub out_of_office: Option<bool>,
+}
+
+impl UserPresence {
+    /// `mri`'s presence as a push gives it: `presence` is the item's `presence` object (`{"availability",
+    /// "activity", "lastActiveTime", "calendarData": {"isOutOfOffice"}, …}`); a field of another form than the
+    /// captured one is none.
+    #[must_use]
+    pub fn of_pushed(mri: Mri, presence: &Value) -> Self {
+        let word = |key: &str| presence.get(key).and_then(Value::as_str).map(str::to_owned);
+        Self {
+            mri,
+            availability: word("availability"),
+            activity: word("activity"),
+            last_active_ms: last_active(presence.get("lastActiveTime")),
+            out_of_office: out_of_office(presence.get("calendarData")),
+        }
+    }
+}
+
+/// A `lastActiveTime` as ms since the epoch (`0001-01-01…`: never).
+fn last_active(value: Option<&Value>) -> Option<i64> {
+    value.and_then(Value::as_str).and_then(crate::loki::utc_ms)
+}
+
+/// A `calendarData`'s `isOutOfOffice`.
+fn out_of_office(calendar: Option<&Value>) -> Option<bool> {
+    calendar?.get("isOutOfOffice")?.as_bool()
 }
 
 impl From<RawUserPresence> for UserPresence {
     fn from(raw: RawUserPresence) -> Self {
         let presence = raw.presence.filter(|_| raw.status == Some(PRESENCE_READ));
-        let (availability, activity) =
-            presence.map_or((None, None), |presence| (presence.availability, presence.activity));
+        let Some(presence) = presence else {
+            return Self {
+                mri: raw.mri,
+                availability: None,
+                activity: None,
+                last_active_ms: None,
+                out_of_office: None,
+            };
+        };
         Self {
             mri: raw.mri,
-            availability,
-            activity,
+            availability: presence.availability,
+            activity: presence.activity,
+            last_active_ms: last_active(presence.last_active_time.as_ref()),
+            out_of_office: out_of_office(presence.calendar_data.as_ref()),
         }
     }
 }

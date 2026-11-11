@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::{AFD_HOSTS, Mri, chat_service_path, path_shape};
@@ -20,6 +20,7 @@ use url::Url;
 use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
 use crate::file_content::{FileContentLink, MAX_RANGE, MAX_STREAM, StreamStart, is_content_link};
+use crate::loki::{CONFIGURATION_PATH, LOKI_AUDIENCE, LOKI_GLOBAL_HOST, parse_regional_base};
 use crate::own::OwnState;
 use crate::post_read::PostRead;
 use crate::read::Read;
@@ -196,6 +197,13 @@ pub enum Refusal {
     /// An MCPS read on a transport that wasn't given the account's MCPS base.
     #[error("no MCPS base")]
     NoMcps,
+    /// A Loki read on a transport that wasn't given Loki ([`HttpTransport::with_loki`]), or a regional one before the
+    /// account's region was set ([`HttpTransport::set_loki_region`]).
+    #[error("no Loki base")]
+    NoLoki,
+    /// A request to Loki that isn't a typed read, or a read on its global host of anything but its configuration.
+    #[error("only typed reads go to Loki")]
+    Loki,
     /// The URL built isn't on its service's base: another host, scheme or port, or a path or query other than the
     /// base's and the endpoint's exactly.
     #[error("the URL isn't on its service's base")]
@@ -265,6 +273,10 @@ pub enum BuildError {
     /// Not an MCPS base the transport accepts (see [`HttpTransport::with_mcps`]).
     #[error("not an MCPS base the transport accepts")]
     McpsBase,
+    /// Not a Loki regional base the transport accepts, another region than the one already set, or a transport not
+    /// given Loki (see [`HttpTransport::set_loki_region`]).
+    #[error("not a Loki regional base the transport accepts")]
+    LokiBase,
     /// Not a loopback `http` origin with a port.
     #[error("not a loopback http origin")]
     MockOrigin,
@@ -296,6 +308,9 @@ pub struct HttpTransport<C> {
     ams: Option<Url>,
     /// The MCPS base (`https://<AFD host>/api/mcps/<region>`, no trailing slash), once given.
     mcps: Option<Url>,
+    /// Loki, once given ([`HttpTransport::with_loki`]): its regional base (`https://<region>.loki.delve.office.com/`),
+    /// once the account's configuration named it ([`HttpTransport::set_loki_region`]).
+    loki: Option<OnceLock<Url>>,
     max_retry_wait: Duration,
     mock_origin: Option<Url>,
     /// Read-only ([`HttpTransport::read_only`]): only reads (a `GET`, a read by `POST` of the sealed list, a search) go
@@ -312,6 +327,7 @@ impl<C> fmt::Debug for HttpTransport<C> {
             .field("middle_tier", &self.middle_tier.as_ref().map(Url::as_str))
             .field("csa", &self.csa.as_ref().map(Url::as_str))
             .field("presence", &self.presence.as_ref().map(Url::as_str))
+            .field("loki", &self.loki.as_ref().and_then(OnceLock::get).map(Url::as_str))
             .field("max_retry_wait", &self.max_retry_wait)
             .field("read_only", &self.read_only)
             .finish_non_exhaustive()
@@ -389,6 +405,10 @@ impl<C: Credentials> HttpTransport<C> {
     async fn send_built(&self, request: BuiltRequest) -> Result<Response, HttpError> {
         if !request.routable {
             return Err(HttpError::NoRoute);
+        }
+        // Loki takes typed reads only (`Transport::read`)
+        if is_loki(request.service) {
+            return Err(HttpError::Refused(Refusal::Loki));
         }
         let url = match request.call {
             Some(url) if request.service == Service::Calling && on_calling_base(&url) => url,
@@ -525,6 +545,7 @@ impl<C: Credentials> HttpTransport<C> {
             presence: None,
             ams: None,
             mcps: None,
+            loki: None,
             max_retry_wait: MAX_RETRY_WAIT,
             mock_origin: None,
             read_only: false,
@@ -612,6 +633,43 @@ impl<C: Credentials> HttpTransport<C> {
     pub fn with_mcps(mut self, base: &str) -> Result<Self, BuildError> {
         self.mcps = Some(parse_service_base(base, is_mcps_path).ok_or(BuildError::McpsBase)?);
         Ok(self)
+    }
+
+    /// The transport with Loki, the persona card service: its configuration read on the fixed global base
+    /// (`https://loki.delve.office.com/`), and its person reads on the account's regional base once
+    /// [`Self::set_loki_region`] took it from the configuration's answer. Without it, every Loki read is refused
+    /// ([`Refusal::NoLoki`]).
+    #[must_use]
+    pub fn with_loki(mut self) -> Self {
+        self.loki = Some(OnceLock::new());
+        self
+    }
+
+    /// Whether the transport was given Loki ([`Self::with_loki`]).
+    #[must_use]
+    pub fn has_loki(&self) -> bool {
+        self.loki.is_some()
+    }
+
+    /// Sets the account's Loki regional base, as its configuration's `LokiUrl` names it
+    /// ([`crate::LokiConfiguration::read_answer`]): `https://<one label>.loki.delve.office.com/` exactly (the label
+    /// lowercase letters, digits and inner `-`; the trailing slash optional), no port, user info, path, query or
+    /// fragment. Taken once: setting the same base again is `Ok`, another one is refused and the first kept.
+    ///
+    /// # Errors
+    /// [`BuildError::LokiBase`] for a base of any other form, another region than the one set, or a transport not given
+    /// Loki.
+    pub fn set_loki_region(&self, base: &str) -> Result<(), BuildError> {
+        let slot = self.loki.as_ref().ok_or(BuildError::LokiBase)?;
+        let url = parse_regional_base(base).ok_or(BuildError::LokiBase)?;
+        let set = slot.get_or_init(|| url.clone());
+        if *set == url { Ok(()) } else { Err(BuildError::LokiBase) }
+    }
+
+    /// The account's Loki regional base, once set ([`Self::set_loki_region`]).
+    #[must_use]
+    pub fn loki_region(&self) -> Option<&str> {
+        self.loki.as_ref().and_then(OnceLock::get).map(Url::as_str)
     }
 
     /// Whether [`Self::with_mcps`] takes `base`.
@@ -801,6 +859,16 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Substrate => fixed(format!("https://{SUBSTRATE_HOST}/")),
             Service::Ams => self.ams.clone().ok_or(refused(Refusal::NoAms)),
             Service::Mcps => self.mcps.clone().ok_or(refused(Refusal::NoMcps)),
+            Service::LokiGlobal if self.loki.is_none() => Err(refused(Refusal::NoLoki)),
+            // the global host answers its configuration only (any other path is refused there)
+            Service::LokiGlobal if endpoint.segments() != CONFIGURATION_PATH => Err(refused(Refusal::Loki)),
+            Service::LokiGlobal => fixed(format!("https://{LOKI_GLOBAL_HOST}/")),
+            Service::Loki => self
+                .loki
+                .as_ref()
+                .and_then(OnceLock::get)
+                .cloned()
+                .ok_or(refused(Refusal::NoLoki)),
         }
     }
 
@@ -813,6 +881,9 @@ impl<C: Credentials> HttpTransport<C> {
     ) -> Result<Response, HttpError> {
         if service == Service::Substrate {
             return Err(HttpError::Refused(Refusal::Substrate));
+        }
+        if is_loki(service) {
+            return Err(HttpError::Refused(Refusal::Loki));
         }
         // Cloud operations must use the typed route's independent lab/read-only checks and one-attempt policy.
         if matches!(
@@ -1389,6 +1460,20 @@ const EMOTICONS_PATH: &str = "evergreen-assets/personal-expressions/v2/assets/em
 /// Giphy's media host ([`Service::Giphy`]).
 pub const GIPHY_HOST: &str = "media.giphy.com";
 
+/// The headers every Loki request carries, as the web client's persona card sends them (as real headers here, not in
+/// its simple request's body).
+const LOKI_HEADERS: &[(&str, &str)] = &[
+    ("x-clienttype", "Teams"),
+    ("x-clientfeature", "LivePersonaCard"),
+    ("x-clientarchitectureversion", "v2"),
+    ("x-hostappplatform", "Web"),
+];
+
+/// Whether `service` is Loki's, either base.
+const fn is_loki(service: Service) -> bool {
+    matches!(service, Service::Loki | Service::LokiGlobal)
+}
+
 /// The `Accept` a GIF is read with: a GIF, whose frames the views play (a browser's `Accept` would take a WebP, of
 /// which only the first frame is drawn).
 const GIF_ACCEPT: &str = "image/gif";
@@ -1407,6 +1492,7 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Workflows => Some(crate::workflow::WORKFLOW_AUDIENCE),
         Service::WorkflowConnections => Some(crate::workflow::CONNECTION_AUDIENCE),
         Service::WorkflowRuntime => Some(crate::workflow::RUNTIME_AUDIENCE),
+        Service::Loki | Service::LokiGlobal => Some(LOKI_AUDIENCE),
         Service::Trouter
         | Service::Calling
         | Service::Emoticons
@@ -1439,7 +1525,9 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::FileThumbnail
         | Service::FileContent
         | Service::Giphy
-        | Service::Substrate => "application/json",
+        | Service::Substrate
+        | Service::Loki
+        | Service::LokiGlobal => "application/json",
     };
     // a picture's view and a thumbnail answer an image, as a browser's `<img>` asks for one
     let accept = match service {
@@ -1463,7 +1551,9 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Calling
         | Service::Relay
         | Service::Emoticons
-        | Service::Substrate => "application/json",
+        | Service::Substrate
+        | Service::Loki
+        | Service::LokiGlobal => "application/json",
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), accept.to_owned())];
     if body {
@@ -1515,6 +1605,8 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
             ("user-agent", WEB_USER_AGENT),
             ("x-ms-client-version", crate::own::CLIENT_BUILD),
         ],
+        // the persona card's own: without the client type Loki answers 400 (`ClientTypeMissing`)
+        Service::Loki | Service::LokiGlobal => LOKI_HEADERS,
         Service::Trouter
         | Service::Graph
         | Service::Csa
@@ -1569,7 +1661,9 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::FileThumbnail
         | Service::FileContent
         | Service::Giphy
-        | Service::Substrate => true,
+        | Service::Substrate
+        | Service::Loki
+        | Service::LokiGlobal => true,
     };
     plain
         && url.host_str() == base.host_str()
