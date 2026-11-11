@@ -7,6 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+# Tests only, through dev-dependencies: hooks the app's UI tour reads (where a chat view last drew each sender's face,
+# `ChatView::face_bounds`). It also turns on teams-proto's test support, so ngteams refuses to run.
+test-support = ["teams-proto/test-support"]
+
 [dependencies]
 # a call's video frames wake the window from the media's threads
 async-channel.workspace = true

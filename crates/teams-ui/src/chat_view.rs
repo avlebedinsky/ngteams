@@ -194,6 +194,12 @@ const PILL: f32 = 28.0;
 const REACTIONS_OVERLAP: f32 = 6.0;
 /// The avatar beside someone else's messages, px: Teams' 32.
 const AVATAR: f32 = 32.0;
+
+/// Where each sender's face was drawn, by message: kept in a test build only ([`ChatView::face_bounds`]).
+#[cfg(feature = "test-support")]
+type FacesPlaced = Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>;
+#[cfg(not(feature = "test-support"))]
+type FacesPlaced = ();
 /// Between the avatar's column and the bubble, px.
 const AVATAR_GAP: f32 = 12.0;
 /// A bubble's text inset, px: the reactions start there too.
@@ -1003,9 +1009,10 @@ pub struct ChatView {
     /// The message whose hover bar is under the pointer: the bar floats over the message above its own, outside its
     /// row, so it keeps itself shown.
     bar_hovered: Option<String>,
-    /// Where each sender's face was last drawn, by message: a profile card opened for it is drawn beside it
-    /// ([`ChatView::face_bounds`]).
-    faces_placed: Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// Where each sender's face was drawn in the last frame, by message, in a test build only: the UI tour opens a
+    /// profile card beside one ([`ChatView::face_bounds`]). The card itself is placed by its anchor's own bounds.
+    #[cfg_attr(not(feature = "test-support"), expect(dead_code, reason = "a test build's hook"))]
+    faces_placed: FacesPlaced,
     selected: Option<String>,
     focus: FocusHandle,
     traced: Option<Vec<Traced>>,
@@ -1195,7 +1202,7 @@ impl ChatView {
             drawn: Vec::new(),
             hovered: None,
             bar_hovered: None,
-            faces_placed: Rc::default(),
+            faces_placed: FacesPlaced::default(),
             selected: None,
             focus: cx.focus_handle(),
             traced: None,
@@ -3453,19 +3460,27 @@ impl ChatView {
             ),
             None => avatar.into_any_element(),
         };
-        let (placed, at) = (Rc::clone(&self.faces_placed), item.id.clone());
-        column.pt(rems(HEADER_REMS)).child(
-            div()
-                .on_children_prepainted(move |children, _, _| {
-                    if let Some(bounds) = children.first() {
-                        placed.borrow_mut().insert(at.clone(), *bounds);
-                    }
-                })
-                .child(avatar),
-        )
+        #[cfg(feature = "test-support")]
+        let avatar = self.face_placed(item, avatar);
+        column.pt(rems(HEADER_REMS)).child(avatar)
     }
 
-    /// Where the face beside message `id` was last drawn, while it is.
+    /// `avatar`, its bounds recorded for [`Self::face_bounds`].
+    #[cfg(feature = "test-support")]
+    fn face_placed(&self, item: &MessageItem, avatar: AnyElement) -> AnyElement {
+        let (placed, at) = (Rc::clone(&self.faces_placed), item.id.clone());
+        div()
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(bounds) = children.first() {
+                    placed.borrow_mut().insert(at.clone(), *bounds);
+                }
+            })
+            .child(avatar)
+            .into_any_element()
+    }
+
+    /// Where the face beside message `id` was drawn in the last frame, if it was (the UI tour's).
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn face_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
         self.faces_placed.borrow().get(id).copied()
@@ -5126,6 +5141,8 @@ impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
         self.drawn.clear();
+        #[cfg(feature = "test-support")]
+        self.faces_placed.borrow_mut().clear();
         let more = self.more_overlay();
         let options = self.options_overlay(palette, window, cx);
         let selection_menu = self.selection_menu(palette, window, cx);

@@ -78,6 +78,8 @@ teams-media = { workspace = true, features = ["test-support"] }
 teams-mock = { workspace = true, features = ["media"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
+# where a chat view drew each sender's face, for the UI tour's profile cards (`ChatView::face_bounds`)
+teams-ui = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 wiremock.workspace = true
 # the updates' flow against a local fake release feed (`tests/support/update.rs`)
