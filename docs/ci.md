@@ -67,8 +67,8 @@ reporter tests alone are not a coverage measurement.
 The [Windows portability workflow](../.github/workflows/windows.yml) checks, lints and runs the offline tests of
 `teams-platform`, `teams-log`, `teams-store`, `teams-auth`, `teams-ctl` and `teams-runner` on Windows Server 2025
 (`windows-2025`) and Linux; local verification also runs on the Windows 11 VM.
-These are foundational stages of the native Windows port; the app and its release packages still require the remaining
-platform integrations. These jobs do not build or launch `ngteams` or access a tenant.
+These are the foundational-library gates. The complete native app has separate VM contracts and a hosted Windows
+release job. These portability jobs do not build or launch `ngteams` or access a tenant.
 
 `teams-platform::private` creates files and directories with Unix modes or native protected Windows ACLs.
 Windows tests inspect actual ACLs for files, log rotations, databases, WAL/SHM, run locks, picture caches and
@@ -167,7 +167,7 @@ removed before a child launches. The pair verifies both peers are the creating p
 fresh inheritable duplicates and passes an explicit handle whitelist to `CreateProcessW`; originals and working
 clones remain noninheritable. Synthetic subprocesses exercise quoted arguments, unwanted-handle exclusion, writable
 trace validation, failed restarts and successful broker/trace transfer across a restart. Windows restarts create the
-successor before exiting, so the future runner must track the entire app job, not only its first PID.
+successor before exiting, so the native runner tracks the entire app job, including every successor.
 
 Windows account locations resolve under `LOCALAPPDATA/ngteams/{config,data}` with an absolute
 `USERPROFILE/AppData/Local` fallback; lab aliases use the sibling `LOCALAPPDATA/ngteams-lab/<alias>` root. Snapshot
@@ -176,8 +176,8 @@ and UNC spellings, and conservatively treats trailing dots/spaces as aliases. Re
 working directory before interpreting `..`; an unresolved Windows drive-relative path cannot prove separation.
 The existing native coverage floors remain unchanged. Windows-only sources use the hash-checked Linux inventory.
 The explicit VM-console guard also checks the active interactive session; its tests open no window. These boundaries
-now supply the Windows runner. Native WebView2 and the complete media runtime have offline VM contracts; signed-in
-application validation and the Windows release package remain unfinished.
+supply the Windows runner. Native WebView2, the complete media runtime and the application have VM contracts;
+signed-in feature validation is separate from offline checks. The release workflow packages the Windows binaries.
 
 The app and UI all-target checks include real native handle, byte-pipe and file-privacy contracts, rather than
 compiling Unix-only test helpers on Windows. `scripts/test-windows-app.ps1` runs the synthetic application/startup,
@@ -199,13 +199,15 @@ Windows-only runner/job sources have hash-checked Linux inventory entries and ar
 
 The [release workflow](../.github/workflows/release.yml) runs on a push to `main` that changes what ends up in a
 package (its `paths` list: code, dependencies, packaging and release scripts, not docs, skills or CI settings) and on
-manual dispatch. It runs
-the full suite (the Coverage workflow above, called as its `tests` job, plus every `scripts/test_*.py`) and publishes
-only if that passes. A new push cancels any release still building or waiting, so only the newest commit is
-published. Each run makes a GitHub release tagged `v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version`
-and `github.run_number`, monotonic for package upgrades), marked latest, targeting the pushed commit, from Linux
-x86_64 builds on `ubuntu-24.04`: `.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage`, a portable `.tar.gz` and
-`SHA256SUMS`, with GitHub build-provenance attestations over every asset, including the runtime below.
+manual dispatch. It runs the full suite (the Coverage workflow above, called as its `tests` job, plus every
+`scripts/test_*.py`) and publishes only if that passes. A new push cancels any release still building or waiting, so
+only the newest commit is published. A successful `main` run makes a GitHub release tagged
+`v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version` and `github.run_number`, monotonic
+for package upgrades), marked latest, targeting the pushed commit. Linux x86_64 builds on `ubuntu-24.04` produce
+`.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage` and a portable `.tar.gz`; `windows-2025` produces
+`ngteams-<version>-windows-x86_64.zip`. `SHA256SUMS` and GitHub build-provenance attestations cover every asset,
+including the runtime below. Publishing requires the tests and both native build jobs and runs only on `main`; a
+manual branch dispatch builds artifacts without publishing.
 
 Packages carry no web engine: `ngteams-web` picks the system's WPE WebKit (2.54 or newer) or a downloaded runtime when
 it starts. Only `ngteams-web` and the sign-in extension link the engine; `scripts/check-linux-package.py` fails a tree
@@ -258,7 +260,7 @@ The Windows media backend uses GStreamer's WASAPI2 and Media Foundation provider
 picker for Windows Graphics Capture. Synthetic GStreamer sources exercise capture, playback queues, catalog
 changes, fallback and restoration without opening hardware or reaching a tenant. Hardware runs still need the
 explicit VM console sandbox; the Windows picker/D3D capture source cannot execute on Linux. Linux retains PipeWire
-and portal capture. This media boundary does not by itself complete the Windows application or release package.
+and portal capture. The complete application and release package have their own checks below.
 
 The pinned Windows libwebrtc archive uses the static MSVC runtime (`/MT`). `.cargo/config.toml` selects
 `target-feature=+crt-static` for Windows x64 so Rust and cc-rs' C++ bridge use that same ABI; mixing `/MD` bridge
@@ -269,8 +271,9 @@ setting. GStreamer continues using its DLLs and their own allocation/free APIs.
 Windows' native file-device relay contracts cover audio, camera video and screen sharing without a tenant. The
 `test-support` TURN fixture retains its loopback server; a Windows-only UDP adapter accepts only traffic from its
 own host address because Winsock rejects libwebrtc's interface-bound socket sending directly to 127/8 (10049).
-No production transport or ICE policy changes. The system-picker hardware contract is run explicitly in the
-win11 console against the runner's own dark-blue fixture window; it verifies BGRA contents and idle capture cleanup.
+No production transport or ICE policy changes. The ignored system-picker contract requires a solid dark-blue fixture window and an explicit picker selection.
+The automated fixture/driver is still missing ([backlog](backlog/windows-screen-picker-contract.md)); the ordinary
+native media gate does not execute that ignored case or establish BGRA/idle-cleanup coverage for the picker.
 
 
 The Windows portability workflow separately compiles/lints every `teams-signin` target and runs its display-free

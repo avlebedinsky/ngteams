@@ -182,11 +182,10 @@ its region. Passwords are handled by `proto-lab login`, never typed through the 
 
 ## Building
 
-The Windows port currently covers private files, logs, SQLite storage, authentication (including credential storage
-and private broker pairs), and control IPC. Offline tests also compile the app's actual native account paths,
-descriptor adoption and broker/trace restart transfer. Whole-app startup, interactive sign-in, devices and release
-packaging still require their platform integrations. The [Windows portability checks](ci.md#windows-portability)
-run these libraries on Linux and Windows. In a Windows checkout with the repository's Rust toolchain and MSVC C++
+The Windows client includes native startup, WebView2 sign-in, Credential Manager storage, private IPC and restart,
+WASAPI/Media Foundation devices, Windows Graphics Capture, and toast/tray/taskbar integration. The release workflow
+builds and packages the native x64 binaries alongside Linux. The [Windows portability checks](ci.md#windows-portability)
+exercise the foundational libraries on Linux and Windows. In a Windows checkout with the repository's Rust toolchain and MSVC C++
 build tools:
 
 ```powershell
@@ -196,7 +195,7 @@ cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth 
 
 For native Windows debugging, the dedicated `win11` VM's console is the Windows UI sandbox, as authorized for the
 port; lab/test GUIs must stay there, with isolated lab identities and the [Windows runner](#windows-vm-runner).
-The runner is available; the app still needs its remaining platform integrations. The Linux app continues to build and run through the runners below.
+The native runner isolates lab identities in that console. Linux builds and runs through the runners below.
 
 Agents build runnable `ngteams` only through the lab runner:
 
@@ -683,7 +682,7 @@ test alone to establish its cause; do not treat a lab-contact violation as a tim
 
 Windows lab builds use `pwsh -NoProfile -File scripts/run-lab.ps1 -BuildOnly`; a normal build always sets only the
 lab marker, never the personal install marker. The runner also builds the sibling `ngteams-webview.exe` sign-in worker.
-The Windows app/release port is still in progress. Prerequisites are the repository Rust toolchain, MSVC C++/Windows
+Prerequisites are the repository Rust toolchain, MSVC C++/Windows
 SDK and the native media development libraries. The display-free `teams-runner` helper has its own bounded build
 in `target/runner`; the normally built app goes to `target/lab`.
 
@@ -795,8 +794,7 @@ proxy tunnel counts, redirect-code redaction and profile/process cleanup. Synthe
 `target/windows-signin-smoke-*` directories. No account, credential or tenant is used.
 
 Display-free Windows checks use `cargo test -p teams-signin --lib --test classify --test gate --test native_worker`.
-The normal lab application builds and opens the native Microsoft sign-in page. The Windows port still needs its
-signed-in validation before it is ready to use.
+The normal lab application builds and opens the native Microsoft sign-in page. Signed-in feature validation is separate from these offline synthetic contracts.
 
 ### Windows application contracts
 
@@ -873,7 +871,9 @@ Windows’ COM `-Embedding` startup marker is filtered before argument parsing; 
 read-only runner requirements, still pass through the ordinary command line checks.
 
 The Windows tray offers Open Teams and Quit. Its icon and taskbar overlay follow the combined unread-chat count,
-including a main window reopened from the tray; the icon re-registers after Explorer restarts. Without a tray item,
+including a main window reopened from the tray; the icon re-registers after Explorer restarts.
+The main HWND also forwards `TaskbarButtonCreated` to the tray thread, which reapplies the current unread overlay
+when Explorer has recreated that button. Without a tray item,
 closing the main window retains the existing quit behavior. Read-only mode creates no tray item. Native shell work
 runs on dedicated threads and returns actions to GPUI; it builds no Teams requests.
 
@@ -914,7 +914,10 @@ are built, `scripts/package-release-windows.ps1 -Binaries target/release -Versio
 <full-commit>` assembles the verified media closure, collects notices from the resolved Windows Cargo graph and
 libwebrtc, and stages all three executables under `bin/`. `scripts/windows-release.py` checks every PE's ordinary
 and delay imports against that private tree. `PACKAGE-MANIFEST.json` hashes every shipped file, including the
-unchanged media manifest. Missing/extra/changed files, unresolved DLLs and stale plugin roots fail packaging;
+unchanged media manifest. By default the media closure uses a unique system temporary directory, removed after
+packaging, outside Cargo's `target/` tree. A restored rust-cache may contain an empty old `target/windows-media-release`
+directory; the packager never consults it. An explicit `-Runtime` remains a verified caller-owned input.
+Missing/extra/changed files, unresolved DLLs and stale plugin roots fail packaging;
 staging and the archive must fit above the existing 1.5 GiB disk guard.
 
 The zip contains Windows PowerShell 5.1-compatible `Install.ps1` and `Unregister.ps1`. Setup verifies the extracted

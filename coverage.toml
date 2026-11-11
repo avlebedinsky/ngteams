@@ -168,11 +168,11 @@ sha256 = "e2d8868d9c820bb4f17e6786d91f3b251df014786b1bc3a436a0d1c1b1d589bc"
 reason = "Windows-only app listener binding and cleanup; compiled and exercised by teams-ctl app_listener tests on Windows without the remaining GUI/media dependencies"
 
 [unmapped_sources."crates/teams-platform/src/windows_process.rs"]
-sha256 = "8c7f9bdc2459de58768f5b572eff5bb5b61fd51d75573ed258437e78ac7fccfc"
+sha256 = "0b84326451184dcaf00369ec66504d88bc3db9729394cab56353e90cb489ed79"
 reason = "Windows-only selective native process/handle transfer; exercised with real synthetic subprocesses and measured by the Windows portability gate."
 
 [unmapped_sources."crates/teams-platform/src/windows_sandbox.rs"]
-sha256 = "fed28dd7415b96e654de1ffea769aae32fce21463505bff46877f383610b2971"
+sha256 = "bb772aa856e1fa7d2f046085fdb2ee293ec6e14e3e4340b26b91b22dced7a66e"
 reason = "Windows-only authorized VM console guard; native session queries and refusal contracts are measured by the Windows portability gate without opening a GUI."
 
 [unmapped_sources."crates/teams-auth/src/broker/windows_pair.rs"]
@@ -188,7 +188,7 @@ sha256 = "b6827bc649d8189fb77ae73c441b51258158ac1ba34a21dda63ccb843e06954c"
 reason = "Windows-only app handle adoption, peer verification and writable-trace validation; the actual module is compiled and exercised by native app_descriptors tests, pending whole-app Windows integration."
 
 [unmapped_sources."crates/ngteams/src/restart/windows.rs"]
-sha256 = "51653625254c5a1ca9cf0dfea444201b3d52840d927e38c694570e98c41a4395"
+sha256 = "4d17bf1f5ab7f35841e4471512b8d3316ab6f420547aa67f55450bd65f0f4230"
 reason = "Windows-only app restart with explicit handle transfer and rewritten descriptor arguments; actual app_descriptors subprocess tests exercise success and failure on Windows, pending whole-app integration."
 
 [unmapped_sources."crates/teams-platform/src/windows_job.rs"]
@@ -196,11 +196,7 @@ sha256 = "a2cd8de50eb53c0a437fa5d5824ab9a736ba6e3fd3620ec7f6418c0eb8df9ea5"
 reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
 
 [unmapped_sources."crates/teams-runner/src/windows.rs"]
-sha256 = "7331b3bf5b25bf67f7997ab7c14f6a8e3c345e63fd18ca406fc93800773d28dd"
-reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
-
-[unmapped_sources."crates/teams-runner/src/windows/locks.rs"]
-sha256 = "292d8cd94c121d31739ef170056f2a5fdf9013d0b0697d296d2b9701b1679073"
+sha256 = "3122bb69012ebc547e8b46ec2e2847d9d2cc63937b53c5f9dfcf66244aff5a06"
 reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
 
 [unmapped_sources."crates/teams-runner/src/windows/supervisor.rs"]
@@ -269,7 +265,7 @@ sha256 = "84a44333c5707b3536c81a97b40132b1ac8bc008ab94402163954716be3735ee"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/registration.rs"]
-sha256 = "f8c88e838dddc3dc86fae8a9828c6f01bce6d1bbc64d2b1974c2b328ccb2a6a7"
+sha256 = "2d9947ba59d53b94bd258189c605789af95a0d26bdc31a09ef7f9a140800c702"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/toasts.rs"]
@@ -277,11 +273,11 @@ sha256 = "ff4db966dd3bd15054beafb18906a25b7dbae043d4a32d275f3b507c6b953c0c"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/tray.rs"]
-sha256 = "3c1936061db04371bf0286e001a691b9151c0c2e9daacab74747c359d39340b9"
+sha256 = "98fcd9d659848ba6b7fd456331414273b9797b9691a3624f069565a6aa9da383"
 reason = "Windows-only native shell message loop with no Linux LLVM mapping. The authorized VM synthetic GPUI fixture exercises sent restart broadcasts restoring a withdrawn icon, actual tray/menu input, window recreation and unread taskbar overlays. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/ngteams/src/app/windows.rs"]
-sha256 = "be760eeb94abba85797c9b03530df0d94145b194dd1cb75b39ce92b93d969d45"
+sha256 = "ad7e183a593d231b5c6ee1b7b8fd47928726e8a7ac67f7dd43688d7ed54d2962"
 reason = "Windows-only per-mode shell identity shared with native sign-in. Native namespace contracts and the authorized VM application/sign-in grouping checks cover the platform boundary. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/activation.rs"]
@@ -297,7 +293,7 @@ sha256 = "1d243bb4f73ed54c711dc49819a417cef8756e87b3afe923594b30b0caaa3d4a"
 reason = "Windows-only opened-handle ACL verification; no Linux LLVM mapping. Native private-file tests reject unsafe grants without repairing them, then verify restricted input succeeds."
 
 [unmapped_sources."crates/proto-lab/src/browser/windows.rs"]
-sha256 = "e139c19197e0709865192c7d748b3ceee1d850f7e664aaa1c7457615a3921ae8"
+sha256 = "ba4aa9259dc4c0caeccd5ea10124f8f356a285e9119fee38efbb3ba95e8c2e9d"
 reason = "Windows-only lab browser ownership in atomically assigned jobs; no Linux LLVM mapping. Native synthetic process teardown contracts and VM sign-in exercise cleanup."
 
 [unmapped_sources."crates/proto-lab/src/browser/windows_edge.rs"]
@@ -305,15 +301,15 @@ sha256 = "70bc92cb8f5f41512fc9477a4af98dea89f150a4f4a52231a05e4c5aad89c769"
 reason = "Windows-only installed Edge signature/product verification; no Linux LLVM mapping. VM console checks verify the fixed system browser before headless authorization."
 
 [unmapped_sources."crates/proto-lab/src/private.rs"]
-sha256 = "82a4e0cdea3b4069555f2ec0abfcdfd1c10574c8ad53962f8fb9f69d21b9e757"
+sha256 = "d137572dbbf7165e524b38276e0802701d17287f3807d96e2c9a6a33427a459a"
 reason = "Windows-only protected lab outputs, atomic publication and exclusive lifetime locks; no Linux LLVM mapping. Native input/redaction/output and real provisioning contracts exercise these boundaries."
 
 [unmapped_sources."crates/proto-lab/src/main_windows.rs"]
-sha256 = "b6c1d196c3968a63d060fc70212110d8c9f9650eee9b757b864d8330e6ee37e8"
+sha256 = "5f43eead030883ce6d73ad748d6bf76c5b8c9d242e0df03619bbb28b1f34600b"
 reason = "Windows-only restricted lab CLI; no Linux LLVM mapping. Offline test-support refusal and VM console browser, native authorization and reach audit commands validate the entry point."
 
 [unmapped_sources."crates/proto-lab/src/commands/reach_windows.rs"]
-sha256 = "091bc0407cd795823063f1aa277db76e1f9d7d4449698cb31af175b55e5043d4"
+sha256 = "8d357fbbe5d34c0139c9f424777ce0f26b48a404e0667a5c9b906321b0983cf4"
 reason = "Windows-only read-only operator reach evidence; no Linux LLVM mapping. Native synthetic tests keep incomplete rosters and unlisted humans unchecked; real checks precede every signed-in engine run."
 
 [unmapped_sources."crates/proto-lab/src/scenario/windows.rs"]
@@ -545,27 +541,27 @@ context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9
 [unmapped_sources_windows."crates/teams-signin/src/engine.rs"]
 sha256 = "4770ca42f017d9a03fe9782ba5b624a7eef7f67d8831178a0a3eb6cd0fd22c8b"
 reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
-context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
 
 [unmapped_sources_windows."crates/teams-signin/src/guard/server.rs"]
 sha256 = "6db2a483e4b1714357193e4d4d6dda5a49090c314152c951e9973b90be0e038e"
 reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
-context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697", "crates/teams-signin/src/guard.rs" = "fb9e3f45347654d7dabd1cd433d90006d68d7d76f54aa83ac47941140843bad0" }
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00", "crates/teams-signin/src/guard.rs" = "db526fdd32fc69bcac7f92d3785d3547b22f5244a832d32a80da9c4266dae7a9" }
 
 [unmapped_sources_windows."crates/teams-signin/src/input.rs"]
 sha256 = "93e5aeb74455a46851ba5ad692f32f342a46f8d9c419205891ba13cb0918a601"
 reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
-context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
 
 [unmapped_sources_windows."crates/teams-signin/src/view.rs"]
 sha256 = "6ac61fc211890f72da605cc4ad161ba01e5637623f0cc5d3fa3ceff6669fb2a3"
 reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
-context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
 
 [unmapped_sources_windows."crates/teams-signin/src/window.rs"]
 sha256 = "92f8e8f9180cf0eedc7496093005a4bd9708c8430fa5494d3224fbe2734207f4"
 reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
-context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
 
 [unmapped_sources_windows."crates/teams-ui/src/notify/linux.rs"]
 sha256 = "75e4b9c21cbc5bd38e1650aa1ebda84806b8369b8486de59304a9ad3557fc41f"

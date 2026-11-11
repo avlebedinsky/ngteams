@@ -11,6 +11,8 @@
 #                  item's metadata for the rich-text editor's paste (0001); immediate reads of local clipboard
 #                  writes, source generations, and validated private rich-copy recovery after a manager handoff (0002);
 #                  every form a clipboard offer holds read into one item: text, picture and uri-list files (0003)
+#   gpui-pre-windows our own: test-support `contains` on the DirectX atlas so atlas-inspection tests query
+#                  the real atlas (0001)
 #   libwebrtc      our own: `RtpTransceiver::set_direction`, which LiveKit's bindings leave out though `webrtc-sys`
 #                  binds it (0001): a group call's screen goes out on the mixer's sharing line, turned to send before
 #                  the answer (crates/teams-media/src/rtc.rs); preserve optional candidate-pair RTT (0002), so
