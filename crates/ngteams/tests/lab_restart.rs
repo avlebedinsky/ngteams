@@ -8,3 +8,6 @@ use ngteams::{descriptors, restart};
 #[cfg(windows)]
 #[path = "../../teams-auth/tests/support/app_restarts_windows.rs"]
 mod restarts;
+#[cfg(windows)]
+#[path = "support/restart_windows_errors.rs"]
+mod windows_errors;
