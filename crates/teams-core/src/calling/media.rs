@@ -462,8 +462,10 @@ pub(crate) enum MediaDone {
     Opened {
         call: CallId,
         result: Result<(), String>,
-        unmute: Option<super::Waiting>,
+        unmute: Option<(u64, super::Waiting)>,
     },
+    /// A missing speaker was retried without changing capture or mute state.
+    SpeakerOpened { call: CallId },
     /// The screen the user picked to share (or why there is none).
     ScreenPicked {
         call: CallId,
@@ -488,6 +490,12 @@ pub(crate) enum MediaDone {
     },
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum SpeakerRetry {
+    Waiting(Instant),
+    Opening,
+}
+
 /// A call's running media.
 pub(super) struct LiveMedia {
     pub(super) call: CallId,
@@ -503,6 +511,7 @@ pub(super) struct LiveMedia {
     closed: Option<Instant>,
     /// Its devices were asked to open ([`open_devices`]).
     pub(super) devices_opened: bool,
+    pub(super) speaker_retry: Option<SpeakerRetry>,
     /// Its camera, as the account last turned it, when it takes video (its video started); `None`: no
     /// video.
     pub(super) camera: Option<bool>,
@@ -570,6 +579,7 @@ impl LiveMedia {
             lost: None,
             closed: None,
             devices_opened: false,
+            speaker_retry: None,
         }
     }
 
@@ -647,7 +657,10 @@ impl LiveMedia {
                 .session
                 .microphone_missing()
                 .then_some(MediaChange::AudioClosed { microphone: true }),
-            SessionDevice::Speaker => Some(MediaChange::AudioClosed { microphone: false }),
+            SessionDevice::Speaker => self
+                .session
+                .speaker_missing()
+                .then_some(MediaChange::AudioClosed { microphone: false }),
             SessionDevice::Screen => self.shares.own.then_some(MediaChange::ScreenEnded),
         }
     }
@@ -707,13 +720,25 @@ impl Deadlines {
 pub(super) fn open_devices(
     live: &LiveMedia,
     devices: Arc<dyn Devices + Send + Sync>,
-    unmute: Option<super::Waiting>,
+    unmute: Option<(u64, super::Waiting)>,
 ) -> impl FnOnce() -> MediaDone + Send + use<> {
     let (call, session) = (live.call, Arc::clone(&live.session));
     move || MediaDone::Opened {
         call,
         result: session.open_devices(&*devices).map_err(|error| error.to_string()),
         unmute,
+    }
+}
+
+/// Retry playback independently; microphone recovery remains an explicit unmute action.
+pub(super) fn retry_speaker(
+    live: &LiveMedia,
+    devices: Arc<dyn Devices + Send + Sync>,
+) -> impl FnOnce() -> MediaDone + Send + use<> {
+    let (call, session) = (live.call, Arc::clone(&live.session));
+    move || {
+        session.retry_speaker(&*devices);
+        MediaDone::SpeakerOpened { call }
     }
 }
 

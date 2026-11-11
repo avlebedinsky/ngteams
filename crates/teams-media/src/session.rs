@@ -188,6 +188,7 @@ struct Shared {
     /// The microphone is muted: the capture thread sends silence in its place.
     muted: AtomicBool,
     microphone_missing: AtomicBool,
+    speaker_missing: AtomicBool,
     counters: Counters,
     events: SyncSender<SessionEvent>,
     video: VideoShared,
@@ -205,6 +206,7 @@ impl Shared {
             stop: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             microphone_missing: AtomicBool::new(false),
+            speaker_missing: AtomicBool::new(false),
             counters: Counters::default(),
             events,
             video: VideoShared::default(),
@@ -288,7 +290,7 @@ pub struct MediaSession {
     events: Mutex<Receiver<SessionEvent>>,
     /// Behind a lock so the devices open on a shared session ([`MediaSession::open_devices`]).
     threads: Mutex<Vec<JoinHandle<()>>>,
-    /// What the capture and playout threads take once the devices open; `None` once they did.
+    /// Which audio streams run and the shared speaker slot; missing devices can be retried.
     audio_devices: Mutex<AudioDevices>,
     /// The camera running now, and what it runs with once the video started.
     video: Mutex<video::SessionVideo>,
@@ -377,23 +379,7 @@ impl MediaSession {
         if !audio_devices.microphone || self.microphone_missing() {
             self.open_microphone(devices, &mut audio_devices)?;
         }
-        let missing_speaker = audio_devices
-            .speaker
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_none();
-        if missing_speaker {
-            // A native open can wait. Keep the playout lock free so incoming audio continues to be decoded.
-            match devices.speaker() {
-                Ok(opened) => {
-                    *audio_devices.speaker.lock().unwrap_or_else(PoisonError::into_inner) = Some(opened);
-                }
-                Err(error) => {
-                    log::warn!("the speaker could not open: {error}");
-                    self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
-                }
-            }
-        }
+        self.open_speaker(devices, &audio_devices);
         let mut threads = self.threads.lock().unwrap_or_else(PoisonError::into_inner);
         if !audio_devices.playout && !self.shared.stopping() {
             let playout = Playout {
@@ -409,6 +395,43 @@ impl MediaSession {
             audio_devices.playout = true;
         }
         Ok(())
+    }
+
+    /// Reopens a missing speaker without opening a microphone or changing its mute state.
+    pub fn retry_speaker(&self, devices: &dyn Devices) {
+        let audio_devices = self.audio_devices.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.shared.stopping() {
+            self.open_speaker(devices, &audio_devices);
+        }
+    }
+
+    /// Whether playback needs a device retry; querying this never waits on a native device open.
+    #[must_use]
+    pub fn speaker_missing(&self) -> bool {
+        self.shared.speaker_missing.load(Ordering::Relaxed)
+    }
+
+    fn open_speaker(&self, devices: &dyn Devices, audio_devices: &AudioDevices) {
+        let missing_speaker = audio_devices
+            .speaker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none();
+        if missing_speaker {
+            // A native open can wait. Keep the playout lock free so incoming audio continues to be decoded.
+            match devices.speaker() {
+                Ok(opened) => {
+                    *audio_devices.speaker.lock().unwrap_or_else(PoisonError::into_inner) = Some(opened);
+                    self.shared.speaker_missing.store(false, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    if !self.shared.speaker_missing.swap(true, Ordering::Relaxed) {
+                        log::warn!("the speaker could not open: {error}");
+                        self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
+                    }
+                }
+            }
+        }
     }
 
     fn open_microphone(&self, devices: &dyn Devices, audio_devices: &mut AudioDevices) -> Result<(), Error> {
@@ -1083,6 +1106,7 @@ impl Playout {
             log::warn!("the speaker stopped: {error}");
             self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
             *speaker = None;
+            self.shared.speaker_missing.store(true, Ordering::Relaxed);
             return true;
         }
         Shared::count(&self.shared.counters.frames_played, 1);

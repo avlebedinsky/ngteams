@@ -52,7 +52,7 @@ fn start(
             let result = pump(&devices, kind, &stopped, &ready, &mut make);
             if let Err(failure) = result {
                 let _ = ready.try_send(Err(failure.to_string()));
-                log::warn!("a Windows {} stream stopped", kind.key());
+                log::warn!("a Windows {} stream stopped: {failure}", kind.key());
             }
             close();
         })?;
@@ -158,7 +158,8 @@ fn healthy(pipeline: &gst::Pipeline) -> Result<(), DeviceError> {
     if let Some(bus) = pipeline.bus() {
         for message in bus.iter() {
             match message.view() {
-                gst::MessageView::Error(_) | gst::MessageView::Eos(_) => return Err(DeviceError::Closed),
+                gst::MessageView::Error(failure) => return Err(error(failure.error())),
+                gst::MessageView::Eos(_) => return Err(DeviceError::Closed),
                 _ => (),
             }
         }
@@ -358,4 +359,26 @@ pub(super) fn speaker(devices: WindowsDevices) -> Result<Box<dyn AudioSink>, Dev
         move || close.close(),
     )?;
     Ok(Box::new(Speaker { frames, _pump: pump }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_failure_retains_its_cause_while_eos_is_closed() {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        pipeline
+            .post_message(gst::message::Error::builder(gst::ResourceError::Read, "synthetic device vanished").build())
+            .unwrap();
+        assert!(
+            healthy(&pipeline)
+                .unwrap_err()
+                .to_string()
+                .contains("synthetic device vanished")
+        );
+        pipeline.post_message(gst::message::Eos::new()).unwrap();
+        assert!(matches!(healthy(&pipeline), Err(DeviceError::Closed)));
+    }
 }

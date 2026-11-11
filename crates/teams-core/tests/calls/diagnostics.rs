@@ -243,3 +243,174 @@ async fn an_audio_stream_disappearing_after_it_opened_is_reported_once_and_keeps
         assert_eq!(account.ended(call).await, End::HungUp);
     }
 }
+
+struct RecoveringDevices {
+    normal: FileDevices,
+    microphone_opens: std::sync::atomic::AtomicUsize,
+    speaker_opens: std::sync::atomic::AtomicUsize,
+    speaker_ready: AtomicBool,
+    speaker_lost: Arc<AtomicBool>,
+    played: Arc<std::sync::atomic::AtomicUsize>,
+    microphone_ready: AtomicBool,
+    retry_entered: AtomicBool,
+    retry_release: (Mutex<bool>, std::sync::Condvar),
+}
+impl RecoveringDevices {
+    fn new(microphone_ready: bool) -> Self {
+        Self {
+            normal: FileDevices {
+                input: AudioInput::Tone(A_TONE),
+                recording: None,
+                camera: PatternCamera::default(),
+                pacing: Pacing::RealTime,
+            },
+            microphone_opens: std::sync::atomic::AtomicUsize::default(),
+            speaker_opens: std::sync::atomic::AtomicUsize::default(),
+            speaker_ready: AtomicBool::new(false),
+            speaker_lost: Arc::new(AtomicBool::new(false)),
+            played: Arc::default(),
+            microphone_ready: AtomicBool::new(microphone_ready),
+            retry_entered: AtomicBool::new(false),
+            retry_release: (Mutex::new(false), std::sync::Condvar::new()),
+        }
+    }
+    fn release(&self) {
+        *self.retry_release.0.lock().unwrap() = true;
+        self.retry_release.1.notify_all();
+    }
+}
+struct RecoveringSink {
+    lost: Arc<AtomicBool>,
+    played: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl AudioSink for RecoveringSink {
+    fn play(&mut self, _: &teams_media::devices::AudioFrame) -> Result<(), DeviceError> {
+        if self.lost.load(Ordering::SeqCst) {
+            return Err(DeviceError::Closed);
+        }
+        self.played.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+impl Devices for RecoveringDevices {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        self.microphone_opens.fetch_add(1, Ordering::SeqCst);
+        if !self.microphone_ready.load(Ordering::SeqCst) {
+            return Err(DeviceError::Closed);
+        }
+        // Deterministically hold a retry while the engine processes a newer mute. The guard is bounded even if
+        // the assertion fails, so a failed test cannot leave the blocking device worker behind.
+        if self.microphone_opens.load(Ordering::SeqCst) > 1 {
+            self.retry_entered.store(true, Ordering::SeqCst);
+            let (_guard, timeout) = self
+                .retry_release
+                .1
+                .wait_timeout_while(self.retry_release.0.lock().unwrap(), super::support::WAIT, |released| {
+                    !*released
+                })
+                .unwrap();
+            assert!(!timeout.timed_out(), "device retry was not released");
+        }
+        self.normal.microphone()
+    }
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        self.speaker_opens.fetch_add(1, Ordering::SeqCst);
+        if !self.speaker_ready.load(Ordering::SeqCst) {
+            return Err(DeviceError::Closed);
+        }
+        Ok(Box::new(RecoveringSink {
+            lost: self.speaker_lost.clone(),
+            played: self.played.clone(),
+        }))
+    }
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.normal.camera()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_missing_and_lost_speaker_reopens_while_the_microphone_keeps_running() {
+    let lab = Lab::start().await;
+    let devices = Arc::new(RecoveringDevices::new(true));
+    let mut account = lab.account_with_devices(devices.clone()).await;
+    let requests = account.handle.requests();
+    let call = requests.call(test_call()).await.unwrap();
+    account.status(call, &CallStatus::Connected).await;
+    super::support::wait_until(|| devices.speaker_opens.load(Ordering::SeqCst) > 0).await;
+    devices.speaker_ready.store(true, Ordering::SeqCst);
+    super::support::wait_until(|| devices.played.load(Ordering::SeqCst) > 10).await;
+    assert_eq!(devices.microphone_opens.load(Ordering::SeqCst), 1);
+    devices.speaker_ready.store(false, Ordering::SeqCst);
+    devices.speaker_lost.store(true, Ordering::SeqCst);
+    let before = devices.speaker_opens.load(Ordering::SeqCst);
+    super::support::wait_until(|| devices.speaker_opens.load(Ordering::SeqCst) > before).await;
+    devices.speaker_lost.store(false, Ordering::SeqCst);
+    devices.speaker_ready.store(true, Ordering::SeqCst);
+    let played = devices.played.load(Ordering::SeqCst);
+    super::support::wait_until(|| devices.played.load(Ordering::SeqCst) > played + 10).await;
+    assert_eq!(devices.microphone_opens.load(Ordering::SeqCst), 1);
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(account.ended(call).await, End::HungUp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_recovery_never_replaces_a_newer_user_or_organizer_mute() {
+    use super::support::{B_TONE, TALK, heard, wait_until};
+    use teams_mock::{ABC_CHAT, LAB_B};
+    for organizer in [false, true] {
+        let lab = Lab::start().await;
+        let devices = Arc::new(RecoveringDevices::new(false));
+        devices.speaker_ready.store(true, Ordering::SeqCst);
+        let mut account = lab.account_with_devices(devices.clone()).await;
+        let mut other = lab.account_without_video(LAB_B, B_TONE).await;
+        let their_call = other
+            .handle
+            .requests()
+            .call(CallAction::Call { chat: ABC_CHAT.into() })
+            .await
+            .unwrap();
+        let ring = account.incoming().await;
+        let requests = account.handle.requests();
+        let call = requests.call(CallAction::Answer { call: ring.call }).await.unwrap();
+        account.status(call, &CallStatus::Connected).await;
+        other.status(their_call, &CallStatus::Connected).await;
+        wait_until(|| devices.microphone_opens.load(Ordering::SeqCst) == 1).await;
+        devices.microphone_ready.store(true, Ordering::SeqCst);
+        let unmute = requests.call(CallAction::Mute { call, muted: false });
+        wait_until(|| devices.retry_entered.load(Ordering::SeqCst)).await;
+        if organizer {
+            other
+                .handle
+                .requests()
+                .call(CallAction::MuteAll { call: their_call })
+                .await
+                .unwrap();
+            account
+                .next(|event| {
+                    matches!(event, teams_core::Event::CallMeeting { state, .. } if state.muted_by_organizer.is_some())
+                        .then_some(())
+                })
+                .await;
+        } else {
+            requests.call(CallAction::Mute { call, muted: true }).await.unwrap();
+        }
+        devices.release();
+        unmute.await.unwrap();
+        tokio::time::sleep(TALK).await;
+        requests.call(CallAction::HangUp { call }).await.unwrap();
+        account.ended(call).await;
+        let id = lab.last_call();
+        lab.mock.close_peer(&id, LAB_A).unwrap();
+        let recorded = lab.mock.peer_recording(&id, LAB_A).unwrap();
+        assert!(
+            heard(&recorded, A_TONE, std::time::Duration::from_secs(1)) < 0.005,
+            "a stale device completion unmuted capture (organizer={organizer})"
+        );
+        other
+            .handle
+            .requests()
+            .call(CallAction::HangUp { call: their_call })
+            .await
+            .unwrap();
+    }
+}
