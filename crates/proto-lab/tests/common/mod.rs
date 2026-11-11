@@ -6,10 +6,13 @@
 
 use std::path::PathBuf;
 
+#[cfg(unix)]
 use proto_lab::commands::chrome::ChromeBuild;
+#[cfg(unix)]
 use proto_lab::config::LabLocations;
 
 /// The Chrome to test with, if there is one.
+#[cfg(unix)]
 pub fn find_chrome() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PROTO_LAB_CHROME") {
         return Some(PathBuf::from(path));
@@ -24,6 +27,13 @@ pub fn find_chrome() -> Option<PathBuf> {
     };
     let executable = ChromeBuild::pinned().executable(&paths.chrome_dir());
     executable.is_file().then_some(executable)
+}
+
+/// The Windows driver uses the same verified system Edge as normal lab provisioning.
+#[cfg(windows)]
+pub fn find_chrome() -> Option<PathBuf> {
+    teams_platform::windows_sandbox::window_allowed_here().ok()?;
+    proto_lab::browser::installed_edge().ok()
 }
 
 /// The Chrome to test with; `None` (after a note on stderr) means the test is skipped.

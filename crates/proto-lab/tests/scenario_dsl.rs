@@ -2,8 +2,7 @@
 //! `data-tid` element, for a request matching a pattern, typing and pressing Enter; and a wait that runs out fails
 //! with an error naming its step. Also what a scenario expects of the fence (`DenyPolicy`) and `ab-chat`'s helpers.
 
-// The full Linux browser/scenario harness is outside the Windows provisioning command set.
-#![cfg(unix)]
+// Shared browser-driver contracts also exercise Windows sign-in; tenant scenarios remain Unix-only.
 
 mod common;
 #[path = "common/page.rs"]
@@ -16,10 +15,13 @@ use proto_lab::arming::ArmedBrowser;
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture_hold::CaptureHold;
 use proto_lab::cdp::{Cdp, CdpError, Event, RemoteError, SessionId};
+#[cfg(unix)]
 use proto_lab::scenario::ScenarioName;
+#[cfg(unix)]
 use proto_lab::scenario::ab_chat::{
-    self, HELD_MARKER, MESSAGE_POST, chat_link, chat_requests, chat_url, message_text, one_to_one_id,
+    self, HELD_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id,
 };
+#[cfg(unix)]
 use proto_lab::scenario::ab_chat_full::{self, Texts, Writes};
 use proto_lab::scenario::dsl::{self, Driver, Key, RequestPattern, SeenRequest, Selector, StepError};
 use serde_json::{Value, json};
@@ -261,6 +263,7 @@ async fn a_wait_runs_out_even_when_the_page_stops_answering() -> TestResult {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_chat_sends_and_a_stalled_page_fails_its_steps_in_time() -> TestResult {
     with_page(async |run| {
         run.driver
@@ -297,17 +300,20 @@ async fn ab_chat_sends_and_a_stalled_page_fails_its_steps_in_time() -> TestResul
 }
 
 /// A chat opened at its "last read" mark: the newest message shows only after "Jump to newest".
+#[cfg(unix)]
 const LAST_READ_PAGE: &str = r#"<!doctype html><html><body><div id="list">an older message</div>
 <button onclick="setTimeout(() => { document.getElementById('list').insertAdjacentHTML('beforeend',
 '<div>the newest message</div>'); this.remove(); }, 100)">Jump to newest</button></body></html>"#;
 
 /// The same chat with the web client's other pill, "New messages", a `role="button"` element with an icon.
+#[cfg(unix)]
 const NEW_MESSAGES_PAGE: &str = r#"<!doctype html><html><body><div id="list">an older message</div>
 <div role="button" onclick="setTimeout(() => { document.getElementById('list').insertAdjacentHTML('beforeend',
 '<div>the newest message</div>'); this.remove(); }, 100)"><svg width="8" height="8"></svg>
 New messages </div></body></html>"#;
 
 /// `wait_for_newest` on `page`: the newest message shows after the click, and a text that never shows times out.
+#[cfg(unix)]
 async fn jumps_to_the_newest_message(page: &'static str) -> TestResult {
     with_html(page, async |run| {
         assert!(!run.driver.shows_text("before", "the newest message").await?);
@@ -323,11 +329,13 @@ async fn jumps_to_the_newest_message(page: &'static str) -> TestResult {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_chat_jumps_to_the_newest_message_of_a_chat_opened_at_its_last_read_mark() -> TestResult {
     jumps_to_the_newest_message(LAST_READ_PAGE).await
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_chat_follows_the_new_messages_pill_too() -> TestResult {
     jumps_to_the_newest_message(NEW_MESSAGES_PAGE).await
 }
@@ -661,7 +669,7 @@ fn a_request_pattern_with_a_body_text_matches_only_a_body_holding_it() -> TestRe
 
 #[test]
 fn a_request_pattern_matches_method_and_url() -> TestResult {
-    let pattern = RequestPattern::new(Some("post"), MESSAGE_POST)?;
+    let pattern = RequestPattern::new(Some("post"), r"/v1/users/ME/conversations/[^/?]+/messages(\?|$)")?;
     let url = "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/19%3Aabc%40thread.v2/messages";
     assert!(pattern.matches("POST", url));
     assert!(pattern.matches("POST", &format!("{url}?x=1")));
@@ -672,11 +680,15 @@ fn a_request_pattern_matches_method_and_url() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 const LOW: &str = "8:orgid:0000000a-0000-4000-8000-000000000001";
+#[cfg(unix)]
 const HIGH: &str = "8:orgid:0000000B-0000-4000-8000-000000000002";
+#[cfg(unix)]
 const CHAT: &str = "19:0000000a-0000-4000-8000-000000000001_0000000b-0000-4000-8000-000000000002@unq.gbl.spaces";
 
 #[test]
+#[cfg(unix)]
 fn ab_chat_finds_the_one_to_one_chat_by_its_members() {
     let (low, high, chat) = (LOW, HIGH, CHAT);
     // the object ids sorted and lowercased, whichever account comes first
@@ -692,6 +704,7 @@ fn ab_chat_finds_the_one_to_one_chat_by_its_members() {
 }
 
 #[test]
+#[cfg(unix)]
 fn ab_chat_knows_the_chat_in_a_url() -> TestResult {
     let chat = CHAT;
     let opened = chat_requests(chat)?;
@@ -711,6 +724,7 @@ fn ab_chat_knows_the_chat_in_a_url() -> TestResult {
 }
 
 #[test]
+#[cfg(unix)]
 fn scenario_names_and_ab_chat_texts() {
     assert_eq!(ScenarioName::Load.as_str(), "load");
     assert_eq!(ScenarioName::AbChat.to_string(), "ab-chat");
@@ -723,6 +737,7 @@ fn scenario_names_and_ab_chat_texts() {
 /// hover bar that shows once the first is pointed at, with an edit action, a like and a more-options button whose menu
 /// holds delete; a hidden like ahead of the bar's; and a compose box. Each control says on the page what it did; the
 /// like posts too.
+#[cfg(unix)]
 const CHAT_PAGE: &str = r#"<!doctype html><html><body>
 <div id="out"></div>
 <button data-tid="message-actions-like" hidden>a hidden like</button>
@@ -741,6 +756,7 @@ document.getElementById('first').addEventListener('mouseover', () => { document.
 </script></body></html>"#;
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_chat_full_finds_the_oldest_message_holding_a_text_and_its_actions() -> TestResult {
     with_html(CHAT_PAGE, async |run| {
         let drive = &mut run.driver;
@@ -786,6 +802,7 @@ async fn ab_chat_full_finds_the_oldest_message_holding_a_text_and_its_actions() 
 
 /// An edit box like the web client's: ahead of the compose box, it rebuilds its element (a new one, same text, the
 /// focus moved to it) the first time it is focused, and Enter in it says what it saves.
+#[cfg(unix)]
 const EDIT_PAGE: &str = r#"<!doctype html><html><body>
 <div id="out"></div>
 <div id="slot"><div contenteditable="true" role="textbox" class="edit">lab full n1 first</div></div>
@@ -806,6 +823,7 @@ document.getElementById('slot').addEventListener('keydown', (event) => {
 </script></body></html>"#;
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_chat_full_rewrites_an_editor_that_rebuilds_itself_when_focused() -> TestResult {
     with_html(EDIT_PAGE, async |run| {
         let drive = &mut run.driver;
@@ -829,6 +847,7 @@ async fn ab_chat_full_rewrites_an_editor_that_rebuilds_itself_when_focused() -> 
     .await
 }
 
+#[cfg(unix)]
 fn seen(status: Option<u16>, failed: Option<&str>) -> SeenRequest {
     SeenRequest {
         session: None,
@@ -844,6 +863,7 @@ fn seen(status: Option<u16>, failed: Option<&str>) -> SeenRequest {
 }
 
 #[test]
+#[cfg(unix)]
 fn ab_chat_full_takes_only_a_2xx_answer_for_a_write_that_went_through() {
     assert!(ab_chat_full::answered("a write", &seen(Some(201), None)).is_ok());
     assert!(ab_chat_full::answered("a write", &seen(Some(200), None)).is_ok());
@@ -870,6 +890,7 @@ fn ab_chat_full_takes_only_a_2xx_answer_for_a_write_that_went_through() {
 }
 
 #[test]
+#[cfg(unix)]
 fn ab_chat_full_waits_for_the_writes_on_the_lab_chat_only() -> TestResult {
     let chat = one_to_one_id(
         "8:orgid:00000000-0000-4000-8000-00000000000a",
@@ -923,6 +944,7 @@ fn ab_chat_full_waits_for_the_writes_on_the_lab_chat_only() -> TestResult {
 }
 
 #[test]
+#[cfg(unix)]
 fn ab_chat_full_texts_are_this_runs_and_apart() {
     let texts = Texts::new("n1");
     let all = [&texts.first, &texts.edited, &texts.reply, &texts.doomed];
@@ -939,6 +961,7 @@ fn ab_chat_full_texts_are_this_runs_and_apart() {
 
 /// A compose box that, like the web client's editor, takes an image file handed to it (by a paste, or by a drop when
 /// `#mode` says `drop`) and shows it as an `img`, saying on the page the file's name, type and size.
+#[cfg(unix)]
 const IMAGE_PAGE: &str = r#"<!doctype html><html><body>
 <div id="out"></div>
 <div id="mode">paste</div>
@@ -959,6 +982,7 @@ compose.addEventListener('drop', (event) => { event.preventDefault(); take(event
 </script></body></html>"#;
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_image_hands_the_compose_box_its_test_image_by_paste_or_drop() -> TestResult {
     use proto_lab::scenario::ab_image::{compose_has_image, image_event, test_png};
     with_html(IMAGE_PAGE, async |run| {
@@ -1019,6 +1043,7 @@ async fn ab_image_hands_the_compose_box_its_test_image_by_paste_or_drop() -> Tes
 /// A compose box that, like the web client's, takes a file dropped on it (or pasted, when `#mode` says `paste`) and
 /// shows it as an attachment beside the box: a chip with the file's name apart from its extension, saying on the page
 /// the file's type and size. A chat message above names a file of another run.
+#[cfg(unix)]
 const FILE_PAGE: &str = r#"<!doctype html><html><body>
 <div data-tid="chat-pane-message"><span>lab-file-n0</span><span>.txt</span></div>
 <div id="out"></div>
@@ -1046,6 +1071,7 @@ compose.addEventListener('drop', (event) => { event.preventDefault(); take(event
 </script></body></html>"#;
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_file_hands_the_compose_box_its_file_by_drop_or_paste_and_sees_it_attached() -> TestResult {
     use proto_lab::scenario::ab_file::{file_event, shows_attachment, test_file};
     with_html(FILE_PAGE, async |run| {
@@ -1132,6 +1158,7 @@ async fn ab_file_hands_the_compose_box_its_file_by_drop_or_paste_and_sees_it_att
 /// A compose box whose attach button opens a menu, and whose upload item clicks a hidden file input, as a web client
 /// does; the input's chosen file is shown beside the box with its type and size. A profile button (whose label holds
 /// "file") and a send button stand first, so the attach button has to be told by its label.
+#[cfg(unix)]
 const PICKER_PAGE: &str = r#"<!doctype html><html><body>
 <button aria-label="Your profile, status Unknown">me</button>
 <div id="out"></div>
@@ -1162,6 +1189,7 @@ document.getElementById('attach').addEventListener('click', () => {
 </script></body></html>"#;
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_file_hands_the_file_to_the_attach_button_s_picker_without_a_dialog() -> TestResult {
     use proto_lab::scenario::ab_file::{
         CLICK_ATTACH, PAGE_NOTICES, PICK_UPLOAD, hand_file_to_pickers, shows_attachment, test_file,
@@ -1239,6 +1267,7 @@ async fn ab_file_hands_the_file_to_the_attach_button_s_picker_without_a_dialog()
 /// A chat with two messages naming this run's file (the newer by its chip's title only), and messages that must never
 /// be taken for one: another run's file, a message of text, and this run's file name in no message (the compose box's
 /// attachment).
+#[cfg(unix)]
 const FILES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
 <div data-tid="chat-pane-message" id="older"><p>lab-file-n1.txt</p></div>
 <div data-tid="chat-pane-message" id="newer"><div title="lab-file-n1.txt"><svg></svg></div></div>
@@ -1248,6 +1277,7 @@ const FILES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
 </body></html>"#;
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_file_marks_only_this_run_s_unsent_file() -> TestResult {
     use proto_lab::scenario::ab_file::mark_unsent_file;
     let mark = mark_unsent_file("lab-file-n1");
@@ -1358,6 +1388,7 @@ async fn a_navigation_the_page_holds_past_its_timeout_fails_in_time() -> TestRes
 /// A chat with two images of this run's left unsent (local previews with this run's caption), and messages that must
 /// never be taken for one: an image delivered from the media service (another caption, the newest), an image without a
 /// caption, an avatar (an image from a URL) on the other account's message, and this run's caption without an image.
+#[cfg(unix)]
 const IMAGES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
 <div data-tid="chat-pane-message" id="older"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><p>lab image n1 caption</p></div>
 <div data-tid="chat-pane-message" id="newer"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><p>lab image n1 caption</p></div>
@@ -1368,12 +1399,15 @@ const IMAGES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
 </body></html>"#;
 
 /// Whether exactly one message of the page is marked.
+#[cfg(unix)]
 const ONE_MARK: &str = "document.querySelectorAll('[data-lab-mark]').length === 1";
 
 /// Whether no message of the page is marked.
+#[cfg(unix)]
 const NO_MARK: &str = "document.querySelectorAll('[data-lab-mark]').length === 0";
 
 #[tokio::test]
+#[cfg(unix)]
 async fn ab_image_marks_only_this_run_s_unsent_image() -> TestResult {
     use proto_lab::scenario::ab_image::mark_unsent_image;
     let mark = mark_unsent_image("lab image n1 caption");
@@ -1473,6 +1507,7 @@ async fn shift_enter_is_a_line_break_and_not_a_send() -> TestResult {
 /// `message-hover-reactions` (one hidden), the same reaction again in the message's menu (`message-reaction`), and other
 /// actions; and a typing indicator that shows after 1.5 s, hides by `aria-hidden` at 2 s, shows again at 2.5 s and goes
 /// from the page at 3 s.
+#[cfg(unix)]
 const SHAPES_PAGE: &str = r#"<!doctype html><html><body>
 <div data-tid="chat-pane-message">
   <button data-tid="message-actions-like" data-inp="message-hover-reactions">like</button>
@@ -1495,6 +1530,7 @@ setTimeout(() => document.getElementById('typing').remove(), 3000);
 </script></body></html>"#;
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_shapes_reads_the_hover_bar_s_quick_reactions_once_each() -> TestResult {
     use proto_lab::scenario::chat_shapes::HOVER_REACTIONS;
     with_html(SHAPES_PAGE, async |run| {
@@ -1513,6 +1549,7 @@ async fn chat_shapes_reads_the_hover_bar_s_quick_reactions_once_each() -> TestRe
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn chat_shapes_records_when_the_typing_indicator_shows_and_goes() -> TestResult {
     use proto_lab::scenario::chat_shapes::TYPING_RECORDER;
     with_html(SHAPES_PAGE, async |run| {
