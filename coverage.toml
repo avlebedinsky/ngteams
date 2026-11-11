@@ -576,3 +576,13 @@ context = { "crates/teams-ui/src/lib.rs" = "4ce2a0490d4264f421f953549d8abdf7202f
 sha256 = "ceed6565f30d059be5e8b6c0901fcba714248fe4ba0998e40c912d90db539ade"
 reason = "Unix-only StatusNotifierItem, D-Bus menu and launcher unread transport; tray.rs selects this module only under cfg(unix), so it is absent from native Windows compilation and remains required on Linux"
 context = { "crates/teams-ui/src/lib.rs" = "4ce2a0490d4264f421f953549d8abdf7202f17382c73052a961c34fee168d58e", "crates/teams-ui/src/tray.rs" = "891e7b2b637aa563f5a90fc8bd3467d822687e99c07dbe74ec3c3e16b1a1dafd" }
+
+[unmapped_sources_windows."crates/ngteams/src/ctl/socket/unix.rs"]
+sha256 = "27a00f3aeb4ccdb71f5572acdf305e58551fa7b24dc9e8d8189ae07a56eae0e2"
+reason = "Unix-only control socket transport, stale-inode recovery and filesystem cleanup; listener.rs selects it only under cfg(unix). Native Windows uses the byte-pipe module and Linux still requires this source."
+context = { "crates/ngteams/src/ctl/listener.rs" = "1f80998bdb1842b78d3706aa8c2b3bd6f736246a5baf744fe25177db8f21f94a" }
+
+[unmapped_sources_windows."crates/ngteams/src/descriptors/unix.rs"]
+sha256 = "245b9f666ee6d0f3f5c89a02b6c4542c04c03718b98b81a7d20882409766aeeb"
+reason = "Unix-only inherited broker/trace descriptor adoption and close-on-exec validation; descriptors.rs selects it only under cfg(unix). Native Windows uses validated native handles and Linux still requires this source."
+context = { "crates/ngteams/src/descriptors.rs" = "ff2f75402e8094bbe216d8a47b9137b1bddc0a524f7347802b1d7e7ed9a6bc12" }
