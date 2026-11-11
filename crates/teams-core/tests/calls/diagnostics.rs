@@ -395,7 +395,15 @@ async fn device_recovery_never_replaces_a_newer_user_or_organizer_mute() {
             requests.call(CallAction::Mute { call, muted: true }).await.unwrap();
         }
         devices.release();
-        unmute.await.unwrap();
+        // told as not applied: a caller taking it as done would show the microphone unmuted while capture is muted
+        let superseded = unmute.await;
+        assert!(
+            matches!(
+                superseded,
+                Err(teams_core::EngineError::Call(teams_core::CallActionError::Superseded))
+            ),
+            "a superseded unmute must not answer as applied (organizer={organizer}): {superseded:?}"
+        );
         tokio::time::sleep(TALK).await;
         requests.call(CallAction::HangUp { call }).await.unwrap();
         account.ended(call).await;

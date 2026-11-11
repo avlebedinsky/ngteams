@@ -1725,6 +1725,8 @@ impl Calls {
                 }
                 cx.notify();
             }
+            // an unmute a newer mute overtook: that mute's state stands and nothing went wrong to tell
+            Err(EngineError::Call(CallActionError::Superseded)) => {}
             Err(error) => {
                 if let Some(start) = start {
                     // a start already given up on was said not to start: its refusal (the engine refuses it as late)
@@ -1761,6 +1763,7 @@ pub fn refusal_kind(error: &EngineError) -> &'static str {
         EngineError::Call(CallActionError::NoVideo) => "no-video",
         EngineError::Call(CallActionError::Media(_)) => "media",
         EngineError::Call(CallActionError::Late) => "late",
+        EngineError::Call(CallActionError::Superseded) => "superseded",
         EngineError::Call(CallActionError::Call(teams_core::CallError::NotJoinable)) => "not-joinable",
         EngineError::Call(CallActionError::Call(_)) => "refused",
         EngineError::Stopped => "stopped",

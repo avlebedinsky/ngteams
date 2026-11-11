@@ -1041,6 +1041,41 @@ fn a_refusal_during_a_call_shows_in_its_bar_and_its_end_replaces_it() {
     assert_eq!(calls, (None, Some(End::Declined)));
 }
 
+#[test]
+fn an_unmute_a_newer_mute_overtook_leaves_the_microphone_shown_muted_and_tells_nothing() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Connected);
+    cx.simulate_keystrokes("ctrl-shift-m");
+    cx.run_until_parked();
+    assert!(rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().muted));
+    // the engine skipped the unmute (its microphone reopened after a newer mute): capture stays muted
+    rig.core
+        .call_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(EngineError::Call(CallActionError::Superseded)));
+    cx.simulate_keystrokes("ctrl-shift-m");
+    cx.run_until_parked();
+    assert_eq!(
+        actions(&rig).last(),
+        Some(&CallAction::Mute {
+            call: call(1),
+            muted: false
+        })
+    );
+    assert!(
+        rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().muted),
+        "shown muted, as capture is"
+    );
+    assert!(!drawn(cx, "in-call-refused"), "nothing went wrong to tell");
+    let refused = lines(&written, "call", "refused");
+    assert_eq!(kinds(refused.last().unwrap()), ["mute", "superseded"]);
+}
+
 // --- video (M3 Task 18) ---
 
 #[test]

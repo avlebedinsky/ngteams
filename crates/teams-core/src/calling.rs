@@ -16,7 +16,10 @@
 //!   The microphone and the speaker open only once the start, the join or the answer was admitted and taken: when the
 //!   machine tells the call ringing at its callees, joining, or connected. An audio device that cannot open is told
 //!   as [`Event::AudioClosed`], without ending the call: a missing microphone stays muted, and received audio is
-//!   decoded even without a speaker. Unmute retries missing devices off the engine thread before it can send audio.
+//!   decoded even without a speaker. A missing speaker is reopened about once a second for the rest of the call,
+//!   playback resuming once it opens; a missing microphone only on an unmute, which retries it off the engine thread
+//!   before it can send audio. An unmute a newer mute (the user's or the organizer's) overtook meanwhile leaves the
+//!   microphone muted and is answered [`CallActionError::Superseded`], not as applied.
 //! - **The writes** go out through the outbox's call kind (`Outbox::try_call`), one in flight at a time: beside it the
 //!   machine's events and delivery responses go at once, its next writes wait in its own queue (so a call that ends
 //!   drops them); a write refused without being acted on goes again only within `CallRetries`' allowance and only if
@@ -32,7 +35,7 @@
 //!   (`491`) for the far end's (both cameras turned on together) gives way: the far end's is answered with our
 //!   camera's line only receiving, then that line is offered again as the camera goes. A camera that stops by itself
 //!   (its device gone) is off, told as [`Event::CameraOff`]; a microphone or speaker whose stream
-//!   ended for good (not moved) is told as [`Event::AudioClosed`], the call going on.
+//!   ended (not moved) is told as [`Event::AudioClosed`], the call going on (the speaker reopened, as above).
 //! - **The media's SDP steps run one at a time, in the order the signaling asked for them** (the far end's answer
 //!   applied, its renegotiation answered, our own offered): each waits for the one before, so an acceptance followed
 //!   at once by a renegotiation reaches the session in that order.
@@ -358,6 +361,10 @@ pub enum CallActionError {
     /// The service didn't take the change (a meeting option): it stays as it was.
     #[error("the change wasn't taken")]
     NotChanged,
+    /// An unmute that waited on its microphone to reopen was overtaken by a newer mute (the user's own, or the
+    /// organizer's Mute all): the microphone stays muted, as that newer mute left it.
+    #[error("a newer mute took its place")]
+    Superseded,
 }
 
 /// Where an action's answer goes.
@@ -1494,7 +1501,8 @@ where
                 if generation == self.mute_generation {
                     self.mute(call, false)
                 } else {
-                    Ok(call)
+                    // not `Ok`: the caller would show the microphone unmuted while capture stays muted
+                    Err(CallActionError::Superseded)
                 }
             });
             let _ = reply.send(result.map_err(Into::into));
