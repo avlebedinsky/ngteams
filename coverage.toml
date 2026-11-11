@@ -205,7 +205,7 @@ reason = "Windows-only native runner/job implementation; measured by the Windows
 
 [unmapped_sources."crates/teams-media/src/devices/native/screen.rs"]
 sha256 = "299a4bec8ffeef7583f8f289c3a772674efa8e650c434944165afbb04061a4d5"
-reason = "Windows-only system picker and Windows Graphics Capture adapter; exercised by the explicit VM console hardware contract on a synthetic window; absent from Linux compilation"
+reason = "Windows-only system picker and Windows Graphics Capture adapter; its ignored hardware contract has no fixture window or runner yet, so nothing automated exercises it (docs/backlog/windows-screen-picker-contract.md); absent from Linux compilation"
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests.rs"]
 sha256 = "c7b1d443fd4a4824058099b65eed8ba9a3adfc72069019e54003f233dd85c4a4"
@@ -302,7 +302,7 @@ reason = "Windows-only installed Edge signature/product verification; no Linux L
 
 [unmapped_sources."crates/proto-lab/src/private.rs"]
 sha256 = "d137572dbbf7165e524b38276e0802701d17287f3807d96e2c9a6a33427a459a"
-reason = "Windows-only protected lab outputs, atomic publication and exclusive lifetime locks; no Linux LLVM mapping. Native input/redaction/output and real provisioning contracts exercise these boundaries."
+reason = "Windows-only protected lab outputs and atomic publication; no Linux LLVM mapping. Native input/redaction/output and real provisioning contracts exercise these boundaries."
 
 [unmapped_sources."crates/proto-lab/src/main_windows.rs"]
 sha256 = "5f43eead030883ce6d73ad748d6bf76c5b8c9d242e0df03619bbb28b1f34600b"
