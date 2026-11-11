@@ -626,7 +626,11 @@ impl CallStage {
         let Some(active) = self.live(cx) else { return };
         let people = self.attendance(&active);
         let bytes = attendance_list(&people);
-        let folder = crate::picture_viewer::downloads();
+        let Ok(folder) = crate::picture_viewer::downloads() else {
+            self.trace
+                .record(&TraceLine::new("call-attendance", "saved").kind("failed"));
+            return;
+        };
         let chosen = cx.prompt_for_new_path(&folder, Some(ATTENDANCE_FILE));
         let trace = Arc::clone(&self.trace);
         cx.spawn(async move |_, cx: &mut AsyncApp| {

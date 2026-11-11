@@ -160,6 +160,7 @@ zbus.workspace = true
 ui-sandbox.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+dirs.workspace = true
 # Native desktop shell and WinRT toasts; no optional logging features.
 windows = { workspace = true, features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Accessibility", "Win32_UI_Notifications", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
 windows-core.workspace = true

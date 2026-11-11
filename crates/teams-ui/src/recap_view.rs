@@ -735,7 +735,7 @@ impl RecapView {
         let Some((link, name)) = self.downloadable(cx) else {
             return;
         };
-        let folder = crate::picture_viewer::downloads();
+        let Some(folder) = self.download_folder(cx) else { return };
         let chosen = cx.prompt_for_new_path(&folder, Some(&name));
         cx.spawn(async move |this, cx| {
             let target = match chosen.await {
@@ -746,6 +746,17 @@ impl RecapView {
             let _ = this.update(cx, |this, cx| this.save_recording(link, target, cx));
         })
         .detach();
+    }
+
+    fn download_folder(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        match crate::picture_viewer::downloads() {
+            Ok(folder) => Some(folder),
+            Err(error) => {
+                self.note = Some(format!("Couldn't open Downloads: {error}").into());
+                cx.notify();
+                None
+            }
+        }
     }
 
     /// Downloads the recording whose sharing link is `link` to `target`, its progress shown under the top row.
@@ -772,7 +783,7 @@ impl RecapView {
         };
         let vtt = Arc::clone(vtt);
         let name = transcript_file_name(&self.title);
-        let folder = crate::picture_viewer::downloads();
+        let Some(folder) = self.download_folder(cx) else { return };
         let chosen = cx.prompt_for_new_path(&folder, Some(&name));
         cx.spawn(async move |this, cx| {
             let target = match chosen.await {
