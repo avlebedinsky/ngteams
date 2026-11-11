@@ -13,11 +13,20 @@ public static class NgteamsSyntheticShot {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr window, ref Point point);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformation(
+        IntPtr desktop, int index, out int value, uint length, out uint needed);
+    public static bool IsInputDesktop() {
+        int input; uint needed;
+        // UOI_IO: a secure desktop can cover the frame while this desktop still reports its own foreground HWND.
+        return GetUserObjectInformation(GetThreadDesktop(GetCurrentThreadId()), 6, out input, 4, out needed) && input != 0;
+    }
 }
 '@
     }
     $handle=$Process.MainWindowHandle
-    if ([NgteamsSyntheticShot]::GetForegroundWindow() -ne $handle) { return $false }
+    if (![NgteamsSyntheticShot]::IsInputDesktop() -or [NgteamsSyntheticShot]::GetForegroundWindow() -ne $handle) { return $false }
     $rect=[NgteamsSyntheticShot+Rect]::new()
     $point=[NgteamsSyntheticShot+Point]::new()
     if (![NgteamsSyntheticShot]::GetClientRect($handle,[ref]$rect) -or
@@ -28,7 +37,7 @@ public static class NgteamsSyntheticShot {
     try {
         $graphics.CopyFromScreen($point.X,$point.Y,0,0,$bitmap.Size)
         # Recheck focus before retaining pixels; no full-desktop file is ever created.
-        if ([NgteamsSyntheticShot]::GetForegroundWindow() -ne $handle) { return $false }
+        if (![NgteamsSyntheticShot]::IsInputDesktop() -or [NgteamsSyntheticShot]::GetForegroundWindow() -ne $handle) { return $false }
         $bitmap.Save($OutputFile,[Drawing.Imaging.ImageFormat]::Png)
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
     return $true

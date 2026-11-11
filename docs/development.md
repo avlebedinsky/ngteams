@@ -819,8 +819,9 @@ and after cancellation. The Trouter production-dependency contract uses Git's `u
 300-second child deadline as Linux. Windows privacy assertions inspect actual ACL grants, and publication-failure tests use
 native file-sharing rules. Chat list, notes, meetings, recap, channels, workflows and font-style scenes share their
 real rendering code in `tests/support/scenes/`; their small fixture boundary selects the private compositor or native Windows window capture
-and close. Windows snapshots verify the child executable and console session, crop only its foreground client area
-and retain its process tree until cleanup. Font checks use native installed families, one family per short Windows
+and close. Windows snapshots verify the child executable and console session, refuse an overlaid secure desktop,
+crop only the foreground client area and retain its process tree until cleanup. Font checks use native installed
+families, one family per short Windows
 window to keep shell overlays outside the measured pixels. The Wayland drag, portal, D-Bus and Linux app-runner
 harnesses stay in `tests/support/linux/`; Windows has native desktop/shell/video fixtures. Shared model/view tests
 remain available on both platforms. These offline gates do not establish signed-in feature behavior or physical devices.
