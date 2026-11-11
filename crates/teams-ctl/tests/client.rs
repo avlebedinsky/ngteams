@@ -352,10 +352,14 @@ fn nothing_listening_is_not_running() {
         assert!(error.to_string().starts_with("no ngteams is running on "), "{error}");
         // a path too long for a socket address
         let long = dir.path().join("x".repeat(200));
-        assert!(matches!(
-            Client::connect(&long, quick()),
-            Err(ClientError::NotRunning { .. })
-        ));
+        let expected = teams_ctl::transport::connect(&long, quick().connect).unwrap_err();
+        match Client::connect(&long, quick()) {
+            Err(ClientError::Codec(codec::CodecError::Io(error))) => {
+                assert_eq!(error.kind(), expected.kind());
+                assert_eq!(error.raw_os_error(), expected.raw_os_error());
+            }
+            other => panic!("invalid socket address lost its native error: {other:?}"),
+        }
     }
 }
 
@@ -518,4 +522,19 @@ fn zero_io_timeouts_are_refused_before_hello_and_when_changed_later() {
     ));
     drop(events);
     server.thread.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn permission_errors_remain_errors_instead_of_implying_no_running_app() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ctl.sock");
+    let _listener = UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = teams_ctl::client::connect_stream(&path, quick().connect);
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(result, Err(ClientError::Codec(codec::CodecError::Io(error))) if error.kind() == std::io::ErrorKind::PermissionDenied)
+    );
 }

@@ -288,14 +288,12 @@ impl Iterator for Events {
 /// [`ClientError::NotRunning`] when nothing listens there (its `source` says why: refused, no such file, …),
 /// [`ClientError::Timeout`] when the backlog stays full, or the socket's own error.
 pub fn connect_stream(path: &Path, timeout: Duration) -> Result<Stream, ClientError> {
-    transport::connect(path, timeout).map_err(|source| {
-        if matches!(source.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) {
-            ClientError::Timeout
-        } else {
-            ClientError::NotRunning {
-                path: path.to_owned(),
-                source,
-            }
-        }
+    transport::connect(path, timeout).map_err(|source| match source.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => ClientError::Timeout,
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ClientError::NotRunning {
+            path: path.to_owned(),
+            source,
+        },
+        _ => ClientError::from(source),
     })
 }
