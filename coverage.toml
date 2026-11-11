@@ -566,3 +566,13 @@ context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c
 sha256 = "92f8e8f9180cf0eedc7496093005a4bd9708c8430fa5494d3224fbe2734207f4"
 reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
 context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+
+[unmapped_sources_windows."crates/teams-ui/src/notify/linux.rs"]
+sha256 = "75e4b9c21cbc5bd38e1650aa1ebda84806b8369b8486de59304a9ad3557fc41f"
+reason = "Unix-only freedesktop notification D-Bus transport; notify.rs selects this module only under cfg(unix), so it is absent from native Windows compilation and remains required on Linux"
+context = { "crates/teams-ui/src/lib.rs" = "4ce2a0490d4264f421f953549d8abdf7202f17382c73052a961c34fee168d58e", "crates/teams-ui/src/notify.rs" = "abbc869e3aebf136ebea1970ba6905867c2f294c99ada827c921cc9e3a6bb26b" }
+
+[unmapped_sources_windows."crates/teams-ui/src/tray/linux.rs"]
+sha256 = "ceed6565f30d059be5e8b6c0901fcba714248fe4ba0998e40c912d90db539ade"
+reason = "Unix-only StatusNotifierItem, D-Bus menu and launcher unread transport; tray.rs selects this module only under cfg(unix), so it is absent from native Windows compilation and remains required on Linux"
+context = { "crates/teams-ui/src/lib.rs" = "4ce2a0490d4264f421f953549d8abdf7202f17382c73052a961c34fee168d58e", "crates/teams-ui/src/tray.rs" = "891e7b2b637aa563f5a90fc8bd3467d822687e99c07dbe74ec3c3e16b1a1dafd" }
