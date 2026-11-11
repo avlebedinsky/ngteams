@@ -135,6 +135,12 @@ async fn overlay_lifecycle_contract(tray: &tray::NativeTray) {
     tray.set_window(Some(reopened));
     tray.set_unread(12).await;
     assert!(tray.test_overlay().await, "overlay follows a recreated window");
+    let before = tray.test_overlay_count().await;
+    // The early Explorer broadcast may race the new taskbar button. The later main-window notification must
+    // reapply the unchanged unread overlay, independently of any unread or window update.
+    tray::NativeTray::test_button_ready(reopened);
+    assert_eq!(tray.test_overlay_count().await, before + 1);
+    println!("TaskbarButtonCreated on the recreated main HWND reapplied its unchanged unread overlay");
 }
 async fn activation_contract(
     server: &toasts::Notifications,

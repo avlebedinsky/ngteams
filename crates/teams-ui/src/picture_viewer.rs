@@ -693,7 +693,7 @@ pub fn file_name(time: i64, format: PastedFormat) -> String {
 /// # Errors
 /// Windows could not resolve the current user's native Downloads folder.
 #[cfg(windows)]
-pub fn downloads() -> std::io::Result<PathBuf> {
+pub(crate) fn downloads() -> std::io::Result<PathBuf> {
     dirs::download_dir()
         .filter(|path| path.is_absolute())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Windows Downloads folder is unavailable"))
@@ -1084,4 +1084,42 @@ fn note_card(note: &SharedString, fine: bool, palette: Palette) -> AnyElement {
                 .child(div().truncate().child(note.clone())),
         )
         .into_any_element()
+}
+
+#[cfg(all(test, windows))]
+mod native_downloads {
+    /// Windows resolves its known Downloads folder even without HOME and with an unrelated XDG override.
+    #[cfg(windows)]
+    #[test]
+    fn windows_downloads_uses_the_shell_folder_without_unix_homes() {
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+        const CHILD: &str = "NGTEAMS_TEST_NATIVE_DOWNLOADS";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "picture_viewer::native_downloads::windows_downloads_uses_the_shell_folder_without_unix_homes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("HOME")
+                .env("XDG_DOWNLOAD_DIR", "relative-unix-override")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        // SAFETY: this reads the current user's shell configuration and returns an owned COM allocation.
+        let native = unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None) }.unwrap();
+        // SAFETY: SHGetKnownFolderPath returned a live NUL-terminated string.
+        let expected = std::path::PathBuf::from(unsafe { native.to_string() }.unwrap());
+        // SAFETY: release the API's allocation exactly once, after copying it.
+        unsafe { CoTaskMemFree(Some(native.0.cast())) };
+        let folder = super::downloads().unwrap();
+        assert!(folder.is_absolute());
+        assert_eq!(folder, expected);
+    }
 }

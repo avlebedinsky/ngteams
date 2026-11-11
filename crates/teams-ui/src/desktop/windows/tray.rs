@@ -21,15 +21,16 @@ use windows_sys::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Shell::{
-            NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETFOCUS, NIM_SETVERSION,
-            NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+            DefSubclassProc, GetWindowSubclass, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
+            NIM_MODIFY, NIM_SETFOCUS, NIM_SETVERSION, NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+            RemoveWindowSubclass, SetWindowSubclass, Shell_NotifyIconW,
         },
         WindowsAndMessaging::{
             AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
             DestroyWindow, DispatchMessageW, EndMenu, GetCursorPos, GetMessageW, HICON, InSendMessageEx, MF_STRING,
             MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetMenuDefaultItem,
-            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_NULL,
-            WNDCLASSW, WS_EX_TOOLWINDOW,
+            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_NCDESTROY,
+            WM_NULL, WNDCLASSW, WS_EX_TOOLWINDOW,
         },
     },
 };
@@ -51,15 +52,78 @@ fn taskbar_created() -> u32 {
     })
 }
 
+fn taskbar_button_created() -> u32 {
+    static MESSAGE: OnceLock<u32> = OnceLock::new();
+    *MESSAGE.get_or_init(|| {
+        // SAFETY: fixed terminated system message name; IDs are shared with Explorer.
+        unsafe { RegisterWindowMessageW(wide("TaskbarButtonCreated").as_ptr()) }
+    })
+}
+
+struct OverlayWake {
+    commands: mpsc::Sender<Command>,
+    tray: usize,
+}
+
+// Called on the main window's GPUI thread, since comctl32 forbids cross-thread subclass installation.
+fn watch_taskbar_button(hwnd: HWND, commands: mpsc::Sender<Command>, tray: usize) -> io::Result<()> {
+    let mut existing = 0;
+    // SAFETY: queries only our static subclass callback and ID on a live process-owned window.
+    if unsafe { GetWindowSubclass(hwnd, Some(overlay_proc), 1, &raw mut existing) } != 0 {
+        return Ok(());
+    }
+    let wake = Box::into_raw(Box::new(OverlayWake { commands, tray }));
+    // SAFETY: the subclass owns wake until WM_NCDESTROY; the procedure is static for this image's lifetime.
+    if unsafe { SetWindowSubclass(hwnd, Some(overlay_proc), 1, wake as usize) } == 0 {
+        // SAFETY: installation failed, so Windows never took this allocation.
+        drop(unsafe { Box::from_raw(wake) });
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+unsafe extern "system" fn overlay_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    id: usize,
+    data: usize,
+) -> LRESULT {
+    if message != 0 && message == taskbar_button_created() {
+        // SAFETY: successful subclass installation owns this allocation until WM_NCDESTROY below.
+        let wake = unsafe { &*(data as *const OverlayWake) };
+        if wake.commands.send(Command::OverlayReady(hwnd as usize)).is_ok() {
+            // SAFETY: the live receiver owns its hidden window; no pointers are carried in the message.
+            unsafe {
+                PostMessageW(wake.tray as HWND, WAKE, 0, 0);
+            }
+        }
+    }
+    if message == WM_NCDESTROY {
+        // SAFETY: this is our installed subclass and ID, removed on its owning thread before releasing its data.
+        unsafe {
+            RemoveWindowSubclass(hwnd, Some(overlay_proc), id);
+        }
+        // SAFETY: this is the one allocation installed above, and no callback can use it after removal.
+        drop(unsafe { Box::from_raw(data as *mut OverlayWake) });
+    }
+    // SAFETY: preserve GPUI's complete window procedure and unchanged message parameters.
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
 pub(crate) enum Event {
     Asked(TrayEvent),
     Hosted(bool),
 }
 enum Command {
     #[cfg(test)]
-    TestWindow(oneshot::Sender<usize>),
+    TestWindow(mpsc::Sender<Command>, oneshot::Sender<usize>),
     #[cfg(test)]
     TestOverlay(oneshot::Sender<bool>),
+    #[cfg(test)]
+    TestOverlayCount(oneshot::Sender<u64>),
+    OverlayReady(usize),
     Unread(u64),
     Window(Option<usize>),
     Stop,
@@ -114,6 +178,11 @@ impl NativeTray {
         }
     }
     pub(crate) fn set_window(&self, hwnd: Option<usize>) {
+        if let Some(hwnd) = hwnd
+            && let Err(error) = watch_taskbar_button(hwnd as HWND, self.commands.clone(), self.hwnd)
+        {
+            log::warn!("taskbar button notifications could not be attached: {error}");
+        }
         self.send(Command::Window(hwnd));
     }
 }
@@ -186,6 +255,8 @@ struct State {
     hosted: bool,
     #[cfg(test)]
     test_windows: Vec<HWND>,
+    #[cfg(test)]
+    overlay_count: std::cell::Cell<u64>,
 }
 impl State {
     fn new(app: String, events: async_channel::Sender<Event>) -> io::Result<Self> {
@@ -209,6 +280,8 @@ impl State {
             hosted: false,
             #[cfg(test)]
             test_windows: Vec::new(),
+            #[cfg(test)]
+            overlay_count: std::cell::Cell::new(0),
         };
         state.install(NIM_ADD);
         if !state.hosted {
@@ -276,6 +349,10 @@ impl State {
                 windows::core::PCWSTR(description.as_ptr()),
             )
         };
+        #[cfg(test)]
+        if result.is_ok() {
+            self.overlay_count.set(self.overlay_count.get() + 1);
+        }
         if let Err(error) = &result {
             log::warn!("taskbar overlay failed ({:#x})", error.code().0);
         }
@@ -315,7 +392,7 @@ impl State {
         while let Ok(command) = queue.try_recv() {
             match command {
                 #[cfg(test)]
-                Command::TestWindow(reply) => {
+                Command::TestWindow(commands, reply) => {
                     // SAFETY: borrowed module handle for the current process.
                     let module = unsafe { GetModuleHandleW(std::ptr::null()) };
                     // SAFETY: a synthetic top-level window owned and pumped by this thread; no account or media.
@@ -335,12 +412,22 @@ impl State {
                             std::ptr::null(),
                         )
                     };
+                    watch_taskbar_button(hwnd, commands, self.hwnd as usize).unwrap();
                     self.test_windows.push(hwnd);
                     let _ = reply.send(hwnd as usize);
                 }
                 #[cfg(test)]
                 Command::TestOverlay(reply) => {
                     let _ = reply.send(self.overlay().is_ok());
+                }
+                #[cfg(test)]
+                Command::TestOverlayCount(reply) => {
+                    let _ = reply.send(self.overlay_count.get());
+                }
+                Command::OverlayReady(hwnd) => {
+                    if self.window == Some(hwnd) {
+                        let _ = self.overlay();
+                    }
                 }
                 Command::Stop => return false,
                 Command::Unread(unread) => match Icon::new(unread) {
@@ -520,7 +607,7 @@ impl NativeTray {
     /// The owned tray loop stopped before answering the fixture.
     pub async fn test_window(&self) -> usize {
         let (reply, result) = oneshot::channel();
-        self.send(Command::TestWindow(reply));
+        self.send(Command::TestWindow(self.commands.clone(), reply));
         result.await.unwrap()
     }
     /// Whether the shell accepted this fixture's most recent overlay update.
@@ -531,6 +618,17 @@ impl NativeTray {
         let (reply, result) = oneshot::channel();
         self.send(Command::TestOverlay(reply));
         result.await.unwrap()
+    }
+    pub async fn test_overlay_count(&self) -> u64 {
+        let (reply, result) = oneshot::channel();
+        self.send(Command::TestOverlayCount(reply));
+        result.await.unwrap()
+    }
+    pub fn test_button_ready(hwnd: usize) {
+        // SAFETY: fixture supplies its own synthetic window, never an Explorer window.
+        unsafe {
+            SendMessageW(hwnd as HWND, taskbar_button_created(), 0, 0);
+        }
     }
     pub fn test_callback(&self, event: u32) {
         // SAFETY: the fixture targets only the HWND this object created.
