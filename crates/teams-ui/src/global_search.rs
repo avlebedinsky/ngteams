@@ -350,12 +350,12 @@ impl GlobalSearch {
         }
     }
 
-    /// From now on a message found in a translated chat shows in the chat's language, through `previews`.
     /// A person found opens their compact card when the pointer rests on their face, asked of `cards`.
     pub fn set_cards(&mut self, cards: Entity<CardAsks>) {
         self.cards = Some(cards);
     }
 
+    /// From now on a message found in a translated chat shows in the chat's language, through `previews`.
     pub fn set_previews(&mut self, previews: Entity<Previews>, cx: &mut Context<Self>) {
         let observing = cx.observe(&previews, |_: &mut Self, _, cx| cx.notify());
         self.previews = Some((previews, observing));
