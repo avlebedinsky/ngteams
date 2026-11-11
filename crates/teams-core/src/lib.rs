@@ -48,6 +48,7 @@ pub mod outbox;
 pub mod own_presence;
 pub mod pictures;
 pub mod presence;
+pub mod profile_card;
 pub mod profiles;
 mod recap;
 pub mod search;
@@ -83,6 +84,7 @@ pub use presence::subscription::{SUBSCRIPTION_PRUNE, SUBSCRIPTION_RENEWAL, SUBSC
 pub use presence::{
     Availability, MAX_NAMED, MAX_WATCHED, PRESENCE_MIN_GAP, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, has_presence,
 };
+pub use profile_card::{CardOrganization, CardPerson, CardPresence, ProfileCard};
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
 pub use search::{Backfill, INDEX_BATCH, search_text};
 pub use service_search::{SearchAnswer, SearchScope};

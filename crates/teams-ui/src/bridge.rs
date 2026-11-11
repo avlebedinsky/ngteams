@@ -473,6 +473,13 @@ pub trait Core: Send + Sync + 'static {
         let _ = subject;
         Reply::ready(Err(teams_core::EngineError::MeetingUnread))
     }
+    /// The profile card of the person `mri` names, read now (`teams_core::profile_card`): what Teams' card shows of them
+    /// (names and addresses, presence, schedule, organization, the people they work with), each section `None` when its
+    /// read failed. A fake core has none ([`teams_core::EngineError::ProfileUnread`]).
+    fn profile_card(&self, mri: String) -> Reply<teams_core::ProfileCard> {
+        let _ = mri;
+        Reply::ready(Err(teams_core::EngineError::ProfileUnread))
+    }
 }
 
 impl Core for EngineRequests {
@@ -791,6 +798,10 @@ impl Core for EngineRequests {
 
     fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
         EngineRequests::meeting_contents(self, thread)
+    }
+
+    fn profile_card(&self, mri: String) -> Reply<teams_core::ProfileCard> {
+        EngineRequests::profile_card(self, mri)
     }
 
     fn meeting_transcript(&self, location: String) -> Reply<String> {

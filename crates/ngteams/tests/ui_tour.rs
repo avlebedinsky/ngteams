@@ -45,7 +45,8 @@ use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDir
 use teams_media::devices::pattern::TestPattern;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C,
-    MIDDLE_TIER_BASE, OUTSIDER, PRESENCE_BASE, PROVISIONING_BASE, TEAM_CHANNEL, TrouterMock, USER_PROFILE_BASE,
+    LokiCard, MIDDLE_TIER_BASE, OUTSIDER, PRESENCE_BASE, PROVISIONING_BASE, TEAM_CHANNEL, TrouterMock,
+    USER_PROFILE_BASE,
 };
 use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
@@ -3412,6 +3413,7 @@ impl MockLab {
         seed_mentions(&mock)?;
         seed_forwards(&mock, &runtime)?;
         seed_cards(&mock)?;
+        seed_profile_cards(&mock, &runtime);
         let dir = tempfile::tempdir()?;
         let tokens = Arc::new(Tokens {
             token: mock.token(LAB_A).ok_or("the mock's token for a")?,
@@ -3442,7 +3444,8 @@ impl MockLab {
                     .with_csa(CSA_BASE)?
                     .with_user_profile(USER_PROFILE_BASE)?
                     .with_provisioning(PROVISIONING_BASE)?
-                    .with_middle_tier(MIDDLE_TIER_BASE)?,
+                    .with_middle_tier(MIDDLE_TIER_BASE)?
+                    .with_loki(),
             )),
             outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter_client)),
@@ -3457,6 +3460,23 @@ impl MockLab {
         };
         Ok((lab, engine))
     }
+}
+
+/// b's and c's profile cards on the mock's Loki (`ChatServiceMock::serve_loki`): made-up names and addresses, each
+/// working with the other, the fixture's schedule; their presence is `seed_group`'s.
+fn seed_profile_cards(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) {
+    runtime.block_on(mock.serve_loki(&[
+        LokiCard {
+            mri: LAB_B,
+            name: "Lab Bee",
+            email: "bot-b@lab.example.test",
+        },
+        LokiCard {
+            mri: LAB_C,
+            name: "Lab Sea",
+            email: "bot-c@lab.example.test",
+        },
+    ]));
 }
 
 /// c's message in the a–b–c chat, then b's mention of everyone, before b's other messages; the mock's UPS answering b as away (as the "chat" step tells it) and c

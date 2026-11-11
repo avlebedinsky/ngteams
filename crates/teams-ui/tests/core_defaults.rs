@@ -306,6 +306,7 @@ fn the_calendar_is_empty_and_nothing_is_scheduled() {
         ),
         ("people_calendars", empty(core.people_calendars(vec![attendee()], 0, 1))),
         ("meet_now", refused(core.meet_now("Made-up".into()), "MeetingUnread")),
+        ("profile_card", refused(core.profile_card(ME.into()), "ProfileUnread")),
     ]);
 }
 
