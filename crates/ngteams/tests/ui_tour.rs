@@ -14,7 +14,8 @@
 //! Teams Dark and Light; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, its Call health, beside the main window
 //! with its in-call strip, and in Teams Dark; a group call with Raise and React, its People pane, its speaker view and
 //! its chat, its organizer's Mute all, People added to the chat and Controls, an attendee's greyed controls and
-//! "You've been muted", in Teams Light and Dark) and says
+//! "You've been muted", in Teams Light and Dark; a person's profile card, compact beside a group chat's and a channel
+//! post's face and full on each of its tabs, in Teams Light and Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
 //! the app, never by screen coordinates.
 //!
@@ -59,6 +60,7 @@ use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
 use teams_ui::global_search::{Mode as SearchMode, Tab};
 use teams_ui::new_chat::{NewChat, Recipient, Suggested};
+use teams_ui::profile_card::{CardOf, CardTab, Form};
 use teams_ui::settings::VideoEffect;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
@@ -187,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 262] = [
+const STEPS: [Step; 5 + 272] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1580,9 +1582,42 @@ const STEPS: [Step; 5 + 262] = [
             model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
         });
     }),
+    // a person's profile card (`seed_profile_cards`), in Teams Dark then Light: the compact card beside c's face in
+    // the a–b–c chat, the full card's Overview, Profile and Organization, and the compact card beside b's channel post
+    ("profile-card-compact-dark", |shell, window, cx| {
+        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        compact_card_in_group(shell, window, cx);
+    }),
+    ("profile-card-full-dark", |shell, window, cx| {
+        full_card(shell, CardTab::Overview, window, cx);
+    }),
+    ("profile-card-full-profile-dark", |shell, window, cx| {
+        card_tab(shell, CardTab::Profile, window, cx);
+    }),
+    ("profile-card-full-organization-dark", |shell, window, cx| {
+        card_tab(shell, CardTab::Organization, window, cx);
+    }),
+    ("profile-card-channel-dark", compact_card_in_channel),
+    ("profile-card-compact", |shell, window, cx| {
+        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        compact_card_in_group(shell, window, cx);
+    }),
+    ("profile-card-full", |shell, window, cx| {
+        full_card(shell, CardTab::Overview, window, cx);
+    }),
+    ("profile-card-full-profile", |shell, window, cx| {
+        card_tab(shell, CardTab::Profile, window, cx);
+    }),
+    ("profile-card-full-organization", |shell, window, cx| {
+        card_tab(shell, CardTab::Organization, window, cx);
+    }),
+    ("profile-card-channel", compact_card_in_channel),
     // a call b made and a answered, as the engine would tell it (`fake_call`: the mock's engine has no calls): its
     // own window over the main one (niri gives it the screen), b speaking on its video, the controls in its header
-    ("call-window", |shell, _, cx| fake_call(shell, cx)),
+    ("call-window", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.close_card(window, cx));
+        fake_call(shell, cx);
+    }),
     // its participants' pane open from People
     ("call-window-people", |_, _, cx| {
         with_stage(cx, |stage, cx| stage.show_roster(true, cx));
@@ -2026,6 +2061,71 @@ const STEPS: [Step; 5 + 262] = [
         group_controls(shell, (false, true), muted, cx);
     }),
 ];
+
+/// The a–b–c chat with the compact card of the last of b's or c's messages drawn with a face open beside that face, as
+/// a rest of the pointer on it opens it.
+fn compact_card_in_group(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    shell.update(cx, |shell, cx| {
+        shell.close_card(window, cx);
+        shell.open_chat(ABC_CHAT.to_owned(), window, cx);
+    });
+    card_beside_face(shell.clone(), window, 10, |shell, cx| {
+        let chat = shell.read(cx).chat()?.clone();
+        let chat = chat.read(cx);
+        chat.items().iter().rev().find_map(|item| match item {
+            Item::Message(message) if message.header && !message.own => {
+                let mri = message
+                    .sender
+                    .clone()
+                    .filter(|mri| [LAB_B, LAB_C].contains(&mri.as_str()))?;
+                let face = chat.face_bounds(&message.id)?;
+                Some((CardOf::new(mri, Some(message.sender_name.clone())), face))
+            }
+            _ => None,
+        })
+    });
+}
+
+/// Whose card and which face, once the view drew it.
+type FindFace = fn(&Entity<Shell>, &App) -> Option<(CardOf, gpui::Bounds<gpui::Pixels>)>;
+
+/// Opens the compact card `find` names beside the face it names, once it was drawn: tried again on the next frames,
+/// `tries` times, while the view hasn't drawn it yet.
+fn card_beside_face(shell: Entity<Shell>, window: &mut Window, tries: usize, find: FindFace) {
+    after_frames(window, 2, move |window, cx| match find(&shell, cx) {
+        Some((of, face)) => shell.update(cx, |shell, cx| {
+            shell.open_card(of, (Form::Compact, CardTab::Overview), face, window, cx);
+        }),
+        None if tries > 0 => card_beside_face(shell, window, tries - 1, find),
+        None => {}
+    });
+}
+
+/// c's full card on `tab`.
+fn full_card(shell: &Entity<Shell>, tab: CardTab, window: &mut Window, cx: &mut App) {
+    shell.update(cx, |shell, cx| {
+        let of = CardOf::new(LAB_C, None);
+        shell.open_card(of, (Form::Full, tab), gpui::Bounds::default(), window, cx);
+    });
+}
+
+/// The card open on `tab`.
+fn card_tab(shell: &Entity<Shell>, tab: CardTab, window: &mut Window, cx: &mut App) {
+    if let Some(card) = shell.read(cx).profile_card().cloned() {
+        card.update(cx, |card, cx| card.show_tab(tab, window, cx));
+    }
+}
+
+/// The team's channel with b's compact card open beside the face of b's post.
+fn compact_card_in_channel(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    shell.update(cx, |shell, cx| shell.close_card(window, cx));
+    let list = shell.read(cx).list().clone();
+    list.update(cx, |list, cx| list.open(TEAM_CHANNEL.to_owned(), cx));
+    card_beside_face(shell.clone(), window, 10, |shell, cx| {
+        let face = channel_posts(shell, cx)?.read(cx).face_bounds(CHANNEL_POST)?;
+        Some((CardOf::new(LAB_B, None), face))
+    });
+}
 
 /// The app in Teams Dark (`Some` of its key), or back to following the system's light or dark (`None`).
 fn fixed_theme(shell: &Entity<Shell>, key: Option<&'static str>, cx: &mut App) {

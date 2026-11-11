@@ -131,6 +131,7 @@ use crate::meeting_recap::{self, RecapCard};
 use crate::models::Models;
 use crate::people::{Face, Shown};
 use crate::picture_viewer::{self, OpenPicture, Viewed, Viewing};
+use crate::profile_card;
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use crate::reactions;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -1002,6 +1003,9 @@ pub struct ChatView {
     /// The message whose hover bar is under the pointer: the bar floats over the message above its own, outside its
     /// row, so it keeps itself shown.
     bar_hovered: Option<String>,
+    /// Where each sender's face was last drawn, by message: a profile card opened for it is drawn beside it
+    /// ([`ChatView::face_bounds`]).
+    faces_placed: Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>,
     selected: Option<String>,
     focus: FocusHandle,
     traced: Option<Vec<Traced>>,
@@ -1151,7 +1155,6 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let list = Self::following_list(cx);
         let subscriptions = Self::subscriptions(&parts.models, &compose, window, cx);
         let writes_to = writes_to(&conversation, &place);
         let (seen, people_seen) = Self::seen_at(&parts.models, [&conversation, &writes_to], cx);
@@ -1181,7 +1184,7 @@ impl ChatView {
             layouts: 0,
             parses: 0,
             items: Vec::new(),
-            list,
+            list: Self::following_list(cx),
             loading: None,
             window_due: true,
             older_due: false,
@@ -1192,6 +1195,7 @@ impl ChatView {
             drawn: Vec::new(),
             hovered: None,
             bar_hovered: None,
+            faces_placed: Rc::default(),
             selected: None,
             focus: cx.focus_handle(),
             traced: None,
@@ -3430,16 +3434,41 @@ impl ChatView {
                 .into_any_element()
         };
         let id = item.id.clone();
+        let avatar = div()
+            .debug_selector(move || format!("avatar-{id}"))
+            .relative()
+            .size(px(AVATAR))
+            // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
+            // the initials half its width, too narrow for two)
+            .child(face)
+            .children(badge);
+        // a click on the face opens their full card, a rest on it the compact one, as Teams' does
+        let avatar = match card_of(item) {
+            Some(of) => profile_card::anchor(
+                format!("profile-card-from-avatar-{}", item.id),
+                of,
+                profile_card::Click::Full,
+                &self.models.cards,
+                avatar,
+            ),
+            None => avatar.into_any_element(),
+        };
+        let (placed, at) = (Rc::clone(&self.faces_placed), item.id.clone());
         column.pt(rems(HEADER_REMS)).child(
             div()
-                .debug_selector(move || format!("avatar-{id}"))
-                .relative()
-                .size(px(AVATAR))
-                // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
-                // the initials half its width, too narrow for two)
-                .child(face)
-                .children(badge),
+                .on_children_prepainted(move |children, _, _| {
+                    if let Some(bounds) = children.first() {
+                        placed.borrow_mut().insert(at.clone(), *bounds);
+                    }
+                })
+                .child(avatar),
         )
+    }
+
+    /// Where the face beside message `id` was last drawn, while it is.
+    #[must_use]
+    pub fn face_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
+        self.faces_placed.borrow().get(id).copied()
     }
 
     /// A message's column: its header, its bubble (with the "mentions you" mark beside it and its hover bar over its
@@ -3462,7 +3491,10 @@ impl ChatView {
         let cycle = clock::cycle(cx);
         // Teams' translation mark stands beside the time, or under the bubble when there is no header to hold it
         let mut mark = translation_mark(item, palette, cx);
-        let header = item.header.then(|| header_line(item, palette, cycle, mark.take()));
+        let cards = &self.models.cards;
+        let header = item
+            .header
+            .then(|| header_line(item, (palette, cycle), mark.take(), cards));
         column
             .children(header)
             .child(bubble_line(
@@ -4514,14 +4546,40 @@ fn new_messages_row(palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
+/// Whom a message's face and name open the card of: its sender, as the message shows them; none for the account's
+/// own and an app's.
+fn card_of(item: &MessageItem) -> Option<profile_card::CardOf> {
+    let sender = item.sender.as_deref().filter(|_| !item.own)?;
+    let name = item.face.named.then(|| item.sender_name.clone());
+    Some(profile_card::CardOf::new(sender, name).with_picture(item.face.picture.clone()))
+}
+
 /// A message's header, Teams' way: the sender's name (none on the account's own) and its time (on `cycle`'s clock),
 /// both muted, over the bubble's left edge, then "Edited" once edited. The time's test selector is
 /// `message-time-<id> <time>`.
-fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle, mark: Option<AnyElement>) -> AnyElement {
+fn header_line(
+    item: &MessageItem,
+    (palette, cycle): (Palette, HourCycle),
+    mark: Option<AnyElement>,
+    cards: &Entity<profile_card::CardAsks>,
+) -> AnyElement {
     let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let id = &item.id;
     let time = div().debug_selector(|| format!("message-time-{id} {time}")).child(time);
-    let name = (!item.own).then(|| div().child(item.sender_name.clone()));
+    // the name opens the sender's compact card, on a click or a rest, as Teams' does
+    let name = (!item.own).then(|| {
+        let name = div().child(item.sender_name.clone());
+        match card_of(item) {
+            Some(of) => profile_card::anchor(
+                format!("profile-card-from-name-{id}"),
+                of,
+                profile_card::Click::Compact,
+                cards,
+                name,
+            ),
+            None => name.into_any_element(),
+        }
+    });
     div()
         .h(rems(HEADER_REMS))
         .flex()

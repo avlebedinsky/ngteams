@@ -240,6 +240,8 @@ pub struct Models {
     /// The account's calls as the engine told them ([`crate::calls`]); shown only by a build that asked for them
     /// ([`Models::with_calls`]).
     pub calls: Entity<Calls>,
+    /// The views' asks for a person's profile card ([`crate::profile_card`]), which the shell of their window opens.
+    pub cards: Entity<crate::profile_card::CardAsks>,
 }
 
 impl Models {
@@ -271,6 +273,7 @@ impl Models {
             feed: cx.new(|_| Feed),
             presence: cx.new(|_| Presences::default()),
             calls: cx.new(|_| calls),
+            cards: cx.new(|_| crate::profile_card::CardAsks),
         }
     }
 

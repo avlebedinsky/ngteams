@@ -86,6 +86,28 @@ impl Shell {
         self.finish_opening_new_chat(window, cx);
     }
 
+    /// New message to `person` alone (a profile card's Chat, or a chat's people, with someone the account has no 1:1
+    /// chat with): its To: line holding them, its box taking the keyboard ([`NewChat::start_with`]); one whose first
+    /// message is on its way is shown as it is instead, and nothing opens in the read-only mode.
+    pub fn open_new_chat_with(&mut self, person: Recipient, window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.read_only() {
+            return;
+        }
+        if self
+            .new_chat
+            .as_ref()
+            .is_some_and(|(view, _)| !view.read(cx).keeps_going())
+        {
+            self.new_chat = None;
+        }
+        let fresh = self.new_chat.is_none();
+        let view = self.show_new_chat(window, cx);
+        if fresh {
+            view.update(cx, |view, cx| view.start_with(person, window, cx));
+        }
+        self.finish_opening_new_chat(window, cx);
+    }
+
     /// New message made or kept, put in the conversation pane's place.
     fn show_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<NewChat> {
         self.hide_calendar(window, cx);

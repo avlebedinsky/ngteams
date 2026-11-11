@@ -101,6 +101,7 @@ mod channel_management;
 mod chat_people;
 mod meeting_tabs;
 mod new_chat;
+mod profile_card;
 mod title_bar;
 mod workflows;
 
@@ -350,6 +351,8 @@ pub struct Shell {
     new_chat: new_chat::Open,
     /// The chat header's people flyout, while it is open, and where its button was last drawn.
     people: chat_people::State,
+    /// The window's profile card, while one is open, and the pointer's way over faces and names.
+    cards: profile_card::State,
     _subscriptions: [Subscription; 12],
 }
 
@@ -390,8 +393,8 @@ impl Shell {
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, &settings, cx);
         let (focus, chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx);
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
-        search_box.update(cx, |search, cx| search.set_previews(previews, cx));
         Self {
+            cards: Self::card_host(&models, (&search_box, previews), window, cx),
             core,
             models,
             settings,
@@ -2849,7 +2852,9 @@ impl Shell {
         let tabs = self.meeting_tab_bar(id, palette, cx);
         // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
         // presence, the call on the right
-        let header = pane_header(face, name, palette)
+        let header = self
+            .partner_header(id, &name, palette, cx)
+            .unwrap_or_else(|| pane_header(face, name, palette))
             .children(tabs)
             .children(presence)
             .child(div().flex_1())
@@ -2972,6 +2977,22 @@ pub(crate) fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, 
 
 /// [`pane_header`] led by any element in the face's place: a channel's team tile.
 pub(crate) fn pane_header_led(lead: Option<AnyElement>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
+    pane_header_titled(lead, pane_title(title).into_any_element(), palette)
+}
+
+/// A pane header's title: semibold, on one line, ellipsized.
+pub(crate) fn pane_title(title: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .text_lg()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .child(title.into())
+}
+
+/// [`pane_header_led`] with its title drawn by the caller: a 1:1 chat's name, which opens the partner's card.
+pub(crate) fn pane_header_titled(lead: Option<AnyElement>, title: AnyElement, palette: Palette) -> gpui::Div {
     div()
         .h(px(48.0))
         .flex_none()
@@ -2983,15 +3004,7 @@ pub(crate) fn pane_header_led(lead: Option<AnyElement>, title: impl Into<SharedS
         .border_b_1()
         .border_color(rgb(palette.border))
         .children(lead)
-        .child(
-            div()
-                .text_lg()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(title.into()),
-        )
+        .child(title)
 }
 
 impl Shell {
@@ -3032,6 +3045,7 @@ impl Render for Shell {
         let team_dialog = self.team_dialog_view();
         let toast = self.toast_view(palette);
         let more_apps = self.more_apps_view(palette, cx);
+        let card = self.card_layer(window, cx);
         let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
             div()
                 .absolute()
@@ -3075,6 +3089,7 @@ impl Render for Shell {
             .children(channel_dialog)
             .children(team_dialog)
             .children(more_apps)
+            .children(card)
             .children(toast)
             .children(first_run)
     }

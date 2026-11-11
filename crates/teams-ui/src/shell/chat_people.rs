@@ -62,6 +62,7 @@ impl Shell {
             trace: Arc::clone(&self.trace),
             list: self.list.clone(),
             presence: self.models.presence.clone(),
+            cards: self.models.cards.clone(),
             button: self.people.button.clone(),
         };
         let chat = id.clone();
@@ -93,6 +94,11 @@ impl Shell {
             ChatPeopleEvent::StartGroup(people) => {
                 self.people.open = None;
                 self.start_group(people, window, cx);
+            }
+            // a person's row: their 1:1 chat, else New message to them alone, as Teams opens it
+            ChatPeopleEvent::OpenChat(person) => {
+                self.people.open = None;
+                self.open_chat_with(person, window, cx);
             }
             // a new group chat's own flyout is New message's
             ChatPeopleEvent::AddToDraft(_) => {}

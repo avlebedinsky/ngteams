@@ -29,6 +29,7 @@ built for the Linux desktop instead of a web page in a wrapper.
 - One-on-one and group chats, with formatting, emoji, @mentions, replies, reactions, edits and deletes
 - Drop in files, or paste screenshots and pictures straight into a message
 - Search messages and people, and keep unread counts in sync with your other devices
+- Click or hover anyone's picture or name for their profile card, as in Teams: their availability, work hours and local time, contact details, who they work with and their org chart, with Chat, a quick message, and video and audio calls right there
 - Drafts stay put while you move around
 
 **Teams and channels**

@@ -126,6 +126,7 @@ pub mod picture_viewer;
 pub mod prejoin;
 pub mod presence;
 pub mod presence_badge;
+pub mod profile_card;
 pub mod reaction_picker;
 pub mod reactions;
 pub mod recap;

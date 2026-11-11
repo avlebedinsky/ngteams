@@ -50,6 +50,7 @@ use crate::icons::{Glyph, selected_by};
 use crate::new_chat::Recipient;
 use crate::people::{self, Picture, Shown};
 use crate::presence::Presences;
+use crate::profile_card::{self, CardAsks, CardOf};
 use crate::sending::settled_row;
 use crate::switcher::matches;
 use crate::theme::{self, Palette};
@@ -175,6 +176,8 @@ pub enum ChatPeopleEvent {
     StartGroup(Vec<Recipient>),
     /// A new group chat's "Add people": these join its people.
     AddToDraft(Vec<Recipient>),
+    /// A person's row clicked: the chat with them alone, as Teams opens it.
+    OpenChat(Recipient),
 }
 
 /// The flyout and its picker (see the module docs).
@@ -183,6 +186,7 @@ pub struct ChatPeople {
     trace: Arc<ViewTrace>,
     list: Entity<ChatList>,
     presence: Entity<Presences>,
+    cards: Entity<CardAsks>,
     /// The chat (empty for a new group chat not made yet).
     chat: String,
     of: PeopleOf,
@@ -262,6 +266,8 @@ pub struct ChatPeopleParts {
     pub trace: Arc<ViewTrace>,
     pub list: Entity<ChatList>,
     pub presence: Entity<Presences>,
+    /// Where a person's face asks for their profile card.
+    pub cards: Entity<CardAsks>,
     /// Where the button that opens it is drawn.
     pub button: Placed,
 }
@@ -301,6 +307,7 @@ impl ChatPeople {
             trace: parts.trace,
             list: parts.list,
             presence: parts.presence,
+            cards: parts.cards,
             chat,
             of,
             members: Vec::new(),
@@ -817,7 +824,7 @@ impl ChatPeople {
 
     // --- drawing ---
 
-    fn member_row(&self, at: usize, person: &Person, palette: Palette, cx: &gpui::App) -> AnyElement {
+    fn member_row(&self, at: usize, person: &Person, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let me = person.mri == self.core.me();
         let availability = self.presence.read(cx).of(&person.mri);
         let badge = crate::presence_badge::badge(&availability, 12.0, palette)
@@ -834,7 +841,19 @@ impl ChatPeople {
                 .size(px(FACE)),
             )
             .children(badge);
+        // a rest on the face opens their compact card, as Teams' does
+        let of = CardOf::new(person.mri.clone(), person.named.then(|| person.name.clone()))
+            .with_picture(person.picture.clone());
+        let face = profile_card::anchor(
+            format!("profile-card-from-people-{at}"),
+            of,
+            profile_card::Click::Hover,
+            &self.cards,
+            face,
+        );
+        let recipient = person.recipient();
         div()
+            .id(("chat-people-member", at))
             .debug_selector(move || format!("chat-people-member-{at}"))
             .w_full()
             .min_h(px(48.0))
@@ -842,6 +861,15 @@ impl ChatPeople {
             .flex()
             .items_center()
             .gap_3()
+            .rounded_md()
+            // another's row opens the chat with them alone
+            .when(!me, |row| {
+                row.cursor_pointer()
+                    .hover(move |row| row.bg(rgb(palette.hover)))
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(ChatPeopleEvent::OpenChat(recipient.clone()));
+                    }))
+            })
             .child(face)
             .child(
                 div()

@@ -19,6 +19,8 @@ impl Glyph {
     pub const TIMER: Self = Self(include_bytes!("../assets/icons/timer.svg"));
     pub const ACTIVITY: Self = Self(include_bytes!("../assets/icons/activity.svg"));
     pub const ARROW_DOWN: Self = Self(include_bytes!("../assets/icons/arrow-down.svg"));
+    /// Back (a profile card's "Back to {name}").
+    pub const ARROW_LEFT: Self = Self(include_bytes!("../assets/icons/arrow-left.svg"));
     pub const ARROW_RIGHT: Self = Self(include_bytes!("../assets/icons/arrow-right.svg"));
     pub const ARROW_UP: Self = Self(include_bytes!("../assets/icons/arrow-up.svg"));
     pub const BAN: Self = Self(include_bytes!("../assets/icons/ban.svg"));
@@ -128,6 +130,12 @@ impl Glyph {
     pub const LOADING: Self = Self(include_bytes!("../assets/icons/loader-circle.svg"));
     pub const LOG_OUT: Self = Self(include_bytes!("../assets/icons/log-out.svg"));
     pub const MAP_PIN: Self = Self(include_bytes!("../assets/icons/map-pin.svg"));
+    /// A profile card's Chat, Teams' round chat bubble.
+    pub const CHAT: Self = Self(include_bytes!("../assets/icons/message-circle-more.svg"));
+    /// A profile card's org chart.
+    pub const ORG_CHART: Self = Self(include_bytes!("../assets/icons/network.svg"));
+    /// A job title.
+    pub const BRIEFCASE: Self = Self(include_bytes!("../assets/icons/briefcase.svg"));
     pub const MESSAGE: Self = Self(include_bytes!("../assets/icons/message-square-text.svg"));
     /// Teams' two speech bubbles: a channel post's "Reply in thread".
     pub const THREAD: Self = Self(include_bytes!("../assets/icons/messages-square.svg"));
