@@ -388,7 +388,7 @@ impl Shell {
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, &settings, cx);
-        let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
+        let (focus, chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx);
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
         search_box.update(cx, |search, cx| search.set_previews(previews, cx));
         Self {
@@ -424,7 +424,7 @@ impl Shell {
             main: selected.map_or(Main::Nothing, Main::Chat),
             before_settings: Main::Nothing,
             panes: cx.new(|_| ResizableState::default()),
-            focus: Self::focused(window, cx),
+            focus,
             own_presence: None,
             status_menu: false,
             status_anchor: MenuAnchor::Rail,
@@ -559,21 +559,25 @@ impl Shell {
         (teams, [channel_opened, kept_channel])
     }
 
-    /// The chat view of `selected`, the chat the settings kept, opened again and taking what is typed, and what it tells
-    /// followed ([`Shell::follow_chat`]).
+    /// The shell's focus, then the chat view of `selected`, the chat the settings kept, opened again and taking what is
+    /// typed from the shell, and what it tells followed ([`Shell::follow_chat`]). In that order: the focus made last
+    /// would take the keyboard from the compose box.
     fn kept_chat(
         parts: ShellParts,
         selected: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<(Entity<ChatView>, Subscription)> {
-        let id = selected?;
+    ) -> (FocusHandle, Option<Entity<ChatView>>, Option<Subscription>) {
+        let focus = Self::focused(window, cx);
+        let Some(id) = selected else {
+            return (focus, None, None);
+        };
         parts.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
         let chat = cx.new(|cx| ChatView::new(parts, id, window, cx));
         let compose = chat.read(cx).compose().clone();
         compose.update(cx, |compose, cx| compose.focus(window, cx));
         let events = Self::follow_chat(&chat, window, cx);
-        Some((chat, events))
+        (focus, Some(chat), Some(events))
     }
 
     /// The settings view of the account `core` is, offering the test call as the shell says

@@ -455,8 +455,16 @@ fn a_session_s_health_is_libwebrtc_s_own_statistics_with_rates_between_reads() {
     let sent = first.audio.sent.clone().expect("a sends audio");
     assert!(sent.packets > 0 && sent.bitrate_kbps.is_none(), "{first:?}");
     assert_eq!(sent.codec.as_deref(), Some("opus"), "{first:?}");
-    std::thread::sleep(Duration::from_secs(1));
-    let second = a.health();
+    // a round trip is measured once RTCP or a consent check comes back: later on a slow (instrumented) runner, so
+    // each read a second after the last until it has one
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let second = loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let health = a.health();
+        if health.network.round_trip_ms.is_some() || Instant::now() > deadline {
+            break health;
+        }
+    };
     let (sent, received) = (
         second.audio.sent.clone().unwrap(),
         second.audio.received.clone().unwrap(),

@@ -52,7 +52,8 @@ fn versions_are_four_numbers_compared_in_order() {
     }
     // the build here is no release
     assert_eq!(Version::current(), None);
-    assert!(!crate::test_support_enabled());
+    // on wherever a workspace-wide build unifies in a dependent's `test-support` (ngteams' dev-dependency)
+    assert_eq!(crate::test_support_enabled(), cfg!(feature = "test-support"));
 }
 
 #[test]

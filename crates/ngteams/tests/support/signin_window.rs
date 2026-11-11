@@ -1,6 +1,5 @@
-//! Only invalid redirect requests reach the mock foreground service; it fails before starting a page engine.
-
-use std::time::{Duration, Instant};
+//! Bound windows refuse what no page could answer (a foreign authorize URL, an unusable redirect URI, a data dir that
+//! can't be made) before resolving a page engine or reaching the foreground service.
 
 use gpui::TestAppContext;
 
@@ -41,19 +40,13 @@ fn bound_windows_refuse_foreign_pages_and_report_data_failures_before_the_servic
 }
 
 #[test]
-fn a_bound_request_is_answered_by_the_service_without_loading_an_invalid_redirect() {
+fn a_bound_request_with_an_unusable_redirect_is_refused_before_any_engine() {
     let root = tempfile::tempdir().unwrap();
     let (setup, _) = crate::app::tests::setup(root.path(), 2);
     let cx = TestAppContext::single();
     let windows = cx.update(super::windows);
-    let ask = window(&setup, &windows);
-    let replying = std::thread::spawn(move || ask(request("https://login.microsoftonline.com/authorize")));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !replying.is_finished() {
-        cx.run_until_parked();
-        assert!(Instant::now() < deadline, "foreground service did not answer");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert!(matches!(replying.join().unwrap(), SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
+    // no worker beside the test binary: resolving an engine would fail on that instead
+    let refused = window(&setup, &windows)(request("https://login.microsoftonline.com/authorize"));
+    assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
     assert_eq!(cx.update(|cx| cx.windows().len()), 0);
 }

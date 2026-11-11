@@ -17,9 +17,9 @@ help: the trait `teams_proto::write::Prepared` is not implemented for `RawPost`
              AcknowledgeAcceptance
              AcknowledgeMediaAnswer
              AddChannelMembers
+             AddChatMembers
              AddToCall
              AnswerMedia
-             AttachCall
            and $N others
    = note: required for `RawPost` to implement `teams_proto::Request`
 note: required by a bound in `send`
@@ -42,9 +42,9 @@ error[E0277]: the trait bound `&RawPost: teams_proto::Request` is not satisfied
              AcknowledgeAcceptance
              AcknowledgeMediaAnswer
              AddChannelMembers
+             AddChatMembers
              AddToCall
              AnswerMedia
-             AttachCall
            and $N others
    = note: required for `&RawPost` to implement `teams_proto::Request`
 note: required by a bound in `deliver`

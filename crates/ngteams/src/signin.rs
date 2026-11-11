@@ -35,6 +35,7 @@ use crate::accounts_file::{PersonalAccount, PersonalError};
 use gpui::{App, Global};
 use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region};
 use teams_auth::pkce::PkceError;
+use teams_auth::redirect::RedirectUri;
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{SecretError, SecretStore};
 use teams_auth::signin::{SignInAnswer, SignInRequest, WindowError, WindowSignInError, sign_in_with};
@@ -113,7 +114,7 @@ impl SignInClients {
 /// The sign-in window for `account`, opened through `windows`: bound to Entra's sign-in hosts and the identity
 /// provider's hosts its `accounts.toml` entry names ([`SignInHosts::entra_with`]), its decisions in the app's
 /// diagnostic log, its web process extension the one beside this binary. A request whose authorize URL isn't on that
-/// bound opens no window.
+/// bound, or whose redirect URI isn't usable, opens no window and starts no engine.
 ///
 /// # Errors
 /// [`SignInError::Hosts`] for an `idp_hosts` entry the bound refuses, [`SignInError::NoWindow`] when the running
@@ -139,6 +140,10 @@ fn bound_window(setup: &Setup, hosts: Arc<SignInHosts>, windows: &Windows, exten
         }
         if let Err(error) = paths.make_dirs() {
             return SignInAnswer::Failed(format!("the personal data dir: {error}"));
+        }
+        // before the engine: a request no page could answer never starts, or downloads, one
+        if RedirectUri::parse(&request.redirect_uri).is_err() {
+            return SignInAnswer::Failed("the redirect URI isn't usable".into());
         }
         let engine = match windows.engine_source(paths.data_dir()) {
             Ok(engine) => engine,
