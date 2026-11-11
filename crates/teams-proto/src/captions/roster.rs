@@ -156,5 +156,7 @@ fn join_order(metadata: &Value) -> Option<(String, u32)> {
     Some((seconds.to_owned(), format!("{fraction:0<9}").parse().ok()?))
 }
 
+// Keep this module in LLVM's source inventory: cargo-llvm-cov filters files named tests.rs.
 #[cfg(test)]
+#[path = "roster/cases.rs"]
 mod tests;

@@ -1,6 +1,9 @@
 //! The machine on its own, fed by hand: what each delivery, outcome and action makes it do (the whole flows on the
 //! mock are `tests/mock.rs`).
 
+#[path = "../../tests/support/caption_logging.rs"]
+mod caption_logging;
+
 #[path = "../../tests/support/controls.rs"]
 mod controls;
 
