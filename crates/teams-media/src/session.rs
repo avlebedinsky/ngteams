@@ -236,6 +236,15 @@ impl Shared {
         }
     }
 
+    /// The speaker in `slot` failed: emptied and marked missing before it is reported, as the microphone is. The
+    /// engine tells [`SessionEvent::DeviceClosed`] only while [`Session::speaker_missing`] holds, so a report read
+    /// before the mark would be dropped.
+    fn speaker_lost(&self, slot: &mut Option<Box<dyn AudioSink>>) {
+        *slot = None;
+        self.speaker_missing.store(true, Ordering::Relaxed);
+        self.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
+    }
+
     /// Reports that the session failed with `why` and stops it: the other threads end at their next turn.
     fn fail(&self, why: String) {
         self.report(SessionEvent::Failed(why));
@@ -1107,9 +1116,7 @@ impl Playout {
         }
         if let Err(error) = output.play(frame) {
             log::warn!("the speaker stopped: {error}");
-            self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
-            *speaker = None;
-            self.shared.speaker_missing.store(true, Ordering::Relaxed);
+            self.shared.speaker_lost(&mut speaker);
             return true;
         }
         Shared::count(&self.shared.counters.frames_played, 1);
@@ -1120,6 +1127,55 @@ impl Playout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lost speaker whose drop checks whether its loss was reported before the speaker was marked missing.
+    struct Watched {
+        shared: Arc<Shared>,
+        events: Arc<Mutex<Receiver<SessionEvent>>>,
+        early: Arc<AtomicBool>,
+    }
+
+    impl AudioSink for Watched {
+        fn play(&mut self, _: &AudioFrame) -> Result<(), crate::devices::DeviceError> {
+            Err(crate::devices::DeviceError::Closed)
+        }
+    }
+
+    impl Drop for Watched {
+        fn drop(&mut self) {
+            let reported = self
+                .events
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .try_recv()
+                .is_ok();
+            if reported && !self.shared.speaker_missing.load(Ordering::Relaxed) {
+                self.early.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn a_lost_speaker_is_marked_missing_before_it_is_reported() {
+        let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE);
+        let shared = Arc::new(Shared::new(sender));
+        let events = Arc::new(Mutex::new(receiver));
+        let early = Arc::new(AtomicBool::new(false));
+        let mut slot: Option<Box<dyn AudioSink>> = Some(Box::new(Watched {
+            shared: Arc::clone(&shared),
+            events: Arc::clone(&events),
+            early: Arc::clone(&early),
+        }));
+        shared.speaker_lost(&mut slot);
+        assert!(slot.is_none());
+        assert!(
+            !early.load(Ordering::Relaxed),
+            "reported before it was marked missing: the engine would drop it"
+        );
+        let told = events.lock().unwrap_or_else(PoisonError::into_inner).try_recv();
+        assert_eq!(told, Ok(SessionEvent::DeviceClosed(SessionDevice::Speaker)));
+        assert!(shared.speaker_missing.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn a_frame_level_is_its_rms() {
