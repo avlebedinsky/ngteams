@@ -12,35 +12,15 @@ use windows::core::{Interface as _, Result};
 
 pub(super) fn install(webview: &ICoreWebView2) -> Result<()> {
     let mut token = 0;
-    let certificate = ClientCertificateRequestedEventHandler::create(Box::new(|_, args| {
-        if let Some(args) = args {
-            // SAFETY: the event owns its arguments, and cancellation is synchronous.
-            unsafe { args.SetCancel(true) }?;
-            // SAFETY: suppress the default certificate picker as well.
-            unsafe { args.SetHandled(true) }?;
-        }
-        Ok(())
-    }));
+    let certificate = certificate_handler();
     let certificates = webview.cast::<ICoreWebView2_5>()?;
     // SAFETY: all registrations occur on the view's owning STA before navigation.
     unsafe { certificates.add_ClientCertificateRequested(&certificate, &raw mut token) }?;
-    let authentication = BasicAuthenticationRequestedEventHandler::create(Box::new(|_, args| {
-        if let Some(args) = args {
-            // SAFETY: the live challenge is cancelled before any ambient authentication can proceed.
-            unsafe { args.SetCancel(true) }?;
-        }
-        Ok(())
-    }));
+    let authentication = authentication_handler();
     let authentication_view = webview.cast::<ICoreWebView2_10>()?;
     // SAFETY: registration on the view's owning STA.
     unsafe { authentication_view.add_BasicAuthenticationRequested(&authentication, &raw mut token) }?;
-    let external = LaunchingExternalUriSchemeEventHandler::create(Box::new(|_, args| {
-        if let Some(args) = args {
-            // SAFETY: the live event is cancelled, so no default application may open.
-            unsafe { args.SetCancel(true) }?;
-        }
-        Ok(())
-    }));
+    let external = external_handler();
     let external_view = webview.cast::<ICoreWebView2_18>()?;
     // SAFETY: registration on the view's owning STA.
     unsafe { external_view.add_LaunchingExternalUriScheme(&external, &raw mut token) }?;
@@ -76,3 +56,42 @@ fn tls(webview: &ICoreWebView2) -> Result<()> {
     // SAFETY: registration occurs on the owning STA before any network load.
     unsafe { certificates.add_ServerCertificateErrorDetected(&handler, &raw mut token) }
 }
+
+fn certificate_handler()
+-> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ClientCertificateRequestedEventHandler {
+    ClientCertificateRequestedEventHandler::create(Box::new(|_, args| {
+        if let Some(args) = args {
+            // SAFETY: the event owns its arguments, and cancellation is synchronous.
+            unsafe { args.SetCancel(true) }?;
+            // SAFETY: suppress the default certificate picker as well.
+            unsafe { args.SetHandled(true) }?;
+        }
+        Ok(())
+    }))
+}
+
+fn authentication_handler()
+-> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2BasicAuthenticationRequestedEventHandler {
+    BasicAuthenticationRequestedEventHandler::create(Box::new(|_, args| {
+        if let Some(args) = args {
+            // SAFETY: the live challenge is cancelled before any ambient authentication can proceed.
+            unsafe { args.SetCancel(true) }?;
+        }
+        Ok(())
+    }))
+}
+
+fn external_handler()
+-> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2LaunchingExternalUriSchemeEventHandler {
+    LaunchingExternalUriSchemeEventHandler::create(Box::new(|_, args| {
+        if let Some(args) = args {
+            // SAFETY: the live event is cancelled, so no default application may open.
+            unsafe { args.SetCancel(true) }?;
+        }
+        Ok(())
+    }))
+}
+
+#[cfg(test)]
+#[path = "../../tests/support/native_refusals.rs"]
+mod tests;

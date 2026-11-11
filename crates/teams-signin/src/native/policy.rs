@@ -11,7 +11,13 @@ pub(super) fn check() -> Result<(), String> {
     if std::env::vars_os().any(|(key, _)| key.to_string_lossy().to_ascii_uppercase().starts_with("WEBVIEW2_")) {
         return Err("WebView2 environment overrides are incompatible with guarded sign-in".into());
     }
-    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+    check_roots(&[HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE])
+}
+
+// Keeping the read-only registry walk separate lets offline tests use a disposable application key as their
+// root. They exercise native registry results without creating or changing any Windows/Edge policy.
+fn check_roots(roots: &[HKEY]) -> Result<(), String> {
+    for &root in roots {
         for view in [KEY_WOW64_32KEY, KEY_WOW64_64KEY] {
             for name in [
                 "AdditionalBrowserArguments",
@@ -94,3 +100,7 @@ fn populated(root: HKEY, path: &str, view: REG_SAM_FLAGS) -> Result<bool, String
     }
     Ok(values != 0)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/native_policy.rs"]
+mod tests;

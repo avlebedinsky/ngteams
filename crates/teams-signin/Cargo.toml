@@ -50,6 +50,7 @@ path = "src/bin/ngteams-webview.rs"
 [target.'cfg(windows)'.dev-dependencies]
 rcgen.workspace = true
 tokio-rustls.workspace = true
+windows-core.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # Retained Linux offscreen engine and compositor tests.
@@ -87,4 +88,8 @@ workspace = true
 
 [[test]]
 name = "native_window"
+harness = false
+
+[[test]]
+name = "native_protocol"
 harness = false

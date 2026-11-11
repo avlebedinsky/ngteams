@@ -16,6 +16,8 @@ use teams_signin::{
 
 pub fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|a| a == "--guarded-signin") {
+        #[cfg(coverage)]
+        profiling::worker();
         window::worker();
         return ExitCode::SUCCESS;
     }
@@ -103,6 +105,7 @@ fn verify(server: &Server, log: &std::path::Path) -> Result<(), Box<dyn std::err
         ("GET", "/report?locked=1"),
         ("POST", "/own"),
         ("GET", "/sync"),
+        ("GET", "/profile-ready"),
     ] {
         if !saw(method, path) {
             return Err(format!("missing synthetic request: {method} {path}; negative main probe: {}; negative frame probe: {}; main reports: {}; frame reports: {}",
@@ -238,6 +241,10 @@ fn serve(mut stream: impl std::io::Read + std::io::Write, requests: &Mutex<Vec<(
         }
     }
     let _ = reader.take(length).read_to_end(&mut Vec::new());
+    #[cfg(coverage)]
+    if path == "/profile-ready" {
+        profiling::snapshot();
+    }
     requests
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -293,6 +300,54 @@ const PAGE: &str = r"<!doctype html><html><body><h1>Synthetic sign-in</h1><p>Off
  const xhr=new XMLHttpRequest(); xhr.open('GET','/sync',false); try{xhr.send();}catch(_){}
  new Image().src='http://192.0.2.1/no-egress';
  window.open('/popup');
- setTimeout(()=>location.href='https://login.microsoftonline.com/common/oauth2/nativeclient?code=synthetic-code&state=synthetic-state',3000);
+ setTimeout(async()=>{await fetch('/profile-ready');location.href='https://login.microsoftonline.com/common/oauth2/nativeclient?code=synthetic-code&state=synthetic-state'},3000);
 })()
 </script></body></html>";
+
+// The real parent deliberately kills its worker tree after catching the redirect. Windows cannot use Linux's
+// continuous counters, so this offline fixture requests one LLVM snapshot after the page's guard probes finish,
+// before returning its redirect. __llvm_profile_dump marks the image dumped and prevents a duplicate exit write.
+// https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/profile/InstrProfilingFile.c
+#[cfg(coverage)]
+mod profiling {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    fn directory() -> PathBuf {
+        PathBuf::from(std::env::var_os("UI_SANDBOX_DIR").expect("private fixture directory"))
+    }
+
+    pub(super) fn worker() {
+        let directory = directory();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !directory.join("profile-request").exists() {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            unsafe extern "C" {
+                fn __llvm_profile_dump() -> i32;
+            }
+            // SAFETY: LLVM supplies this instrumentation-runtime function in coverage builds. This is the only
+            // explicit dump in this image, after all synthetic page probes, and no profiler reset is performed.
+            let status = unsafe { __llvm_profile_dump() };
+            std::fs::write(directory.join("profile-result"), status.to_string()).unwrap();
+        });
+    }
+
+    pub(super) fn snapshot() {
+        let directory = directory();
+        std::fs::write(directory.join("profile-request"), b"snapshot").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(status) = std::fs::read_to_string(directory.join("profile-result")) {
+                assert_eq!(status, "0", "LLVM worker profile write failed");
+                return;
+            }
+            assert!(Instant::now() < deadline, "worker profile snapshot deadline");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}

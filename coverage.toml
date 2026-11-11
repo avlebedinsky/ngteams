@@ -221,7 +221,7 @@ sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"
 reason = "Windows-only host-local adapter for the test-support TURN fixture; exercised by native audio, video and screen-share relay contracts; absent from Linux compilation and production builds"
 
 [unmapped_sources."crates/teams-signin/src/native/browser.rs"]
-sha256 = "2f00a6da1dba8a8655a0710e2682d90fd8a507b2068a99cb21da9bb501f5db5f"
+sha256 = "9d4c329da2e8ddc358e4d130bd09448405068bfe1cc0c67dccde0a28313dd3e5"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/mod.rs"]
@@ -229,7 +229,7 @@ sha256 = "41b95ab12c632ef1088b64dada09165074a6c8f9b426c086c31acb6d78d7bcaa"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/policy.rs"]
-sha256 = "1304d50e70808654fe97b5f5f868f4f54289a90b85605ef63fde070ff6c85dc2"
+sha256 = "383b0ead223643bf97ce70b859535162a178e6f4b3ef93b2b900b0cfa49adba1"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/profile.rs"]
@@ -237,7 +237,7 @@ sha256 = "b3f4c1fdc4f0e5bb663e591e716655868e74121f2eb0ebe89048510fe21433a6"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/refusals.rs"]
-sha256 = "ee545f9c0eb28038c3de6a699fcc552e89205d76bc87ca4e1a64d77bfb47073c"
+sha256 = "8fe598cd65385a7aad4a60ab6c908e7ce80bdea1a2bffb0d7a4a0d1d0b532d18"
 reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
 
 [unmapped_sources."crates/teams-signin/src/native/wire.rs"]
@@ -541,3 +541,28 @@ context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9
 sha256 = "0bfffc1309a9cea78bdcdfd4d00e8847097a758fa6fc3b87dff8ea8b2b0e9b44"
 reason = "Linux-only D-Bus camera and screen-cast portal boundary, selected by cfg(target_os = \"linux\") in devices.rs; absent from native Windows compilation and still required by the Linux inventory."
 context = { "crates/teams-media/src/devices.rs" = "80a60c3511c43f829e6501d6011d9a66d1cad9ecd3ab0a5b028ac76d8f1d1c5b" }
+
+[unmapped_sources_windows."crates/teams-signin/src/engine.rs"]
+sha256 = "4770ca42f017d9a03fe9782ba5b624a7eef7f67d8831178a0a3eb6cd0fd22c8b"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+
+[unmapped_sources_windows."crates/teams-signin/src/guard/server.rs"]
+sha256 = "6db2a483e4b1714357193e4d4d6dda5a49090c314152c951e9973b90be0e038e"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697", "crates/teams-signin/src/guard.rs" = "fb9e3f45347654d7dabd1cd433d90006d68d7d76f54aa83ac47941140843bad0" }
+
+[unmapped_sources_windows."crates/teams-signin/src/input.rs"]
+sha256 = "93e5aeb74455a46851ba5ad692f32f342a46f8d9c419205891ba13cb0918a601"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+
+[unmapped_sources_windows."crates/teams-signin/src/view.rs"]
+sha256 = "6ac61fc211890f72da605cc4ad161ba01e5637623f0cc5d3fa3ceff6669fb2a3"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }
+
+[unmapped_sources_windows."crates/teams-signin/src/window.rs"]
+sha256 = "92f8e8f9180cf0eedc7496093005a4bd9708c8430fa5494d3224fbe2734207f4"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "e51ee9e45ea9be278e0155221295843c501cce97e50021b62ac9fc2d7d4ab697" }

@@ -280,6 +280,14 @@ sources are hash-audited in the Linux inventory; native whole-application covera
 gates. Wry's optional tracing features are disabled, the app logger filters third-party targets, and the worker's
 stderr goes to NUL. Only fixed Chromium error codes are forwarded; guard decisions are logged in the parent.
 
+Native sign-in coverage runs the real offline window as well as synthetic private-worker conversations and COM
+event objects. Registry tests write only below a disposable application key, never the actual Edge policy roots.
+In a coverage build, the offline page requests one LLVM profile dump after its guard probes finish and waits for
+the worker's acknowledgement before redirecting. The parent intentionally kills that worker tree after catching
+the redirect, so waiting until process exit would lose its counters. This hook lives only in the test fixture;
+it neither changes the shipped worker nor resets counters, and a failed dump fails the fixture. Hash-reviewed
+Unix-only sign-in sources remain required in the Linux inventory; every mapped Windows gap still counts.
+
 Windows desktop shell contracts require visible message/call toasts and actual body/Answer/Decline COM activation,
 reject stale/foreign arguments and use real WinRT history (replacement, withdrawal and shutdown cleanup),
 Shell_NotifyIcon and ITaskbarList3 in the authorized VM console. The native transport sources are hash-audited in

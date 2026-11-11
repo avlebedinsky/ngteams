@@ -342,44 +342,12 @@ fn requests(
 }
 
 fn failures(webview: &ICoreWebView2, failed: &Rc<Cell<Option<&'static str>>>) -> ComResult<()> {
-    let failure = Rc::clone(failed);
-    let process = ProcessFailedEventHandler::create(Box::new(move |_, _| {
-        failure.set(Some(
-            "The WebView2 browser process stopped during sign-in. Close it and try again.",
-        ));
-        // SAFETY: callbacks run on the worker's GUI thread, whose message loop receives the quit.
-        unsafe {
-            PostQuitMessage(0);
-        }
-        Ok(())
-    }));
+    let process = process_handler(Rc::clone(failed));
     let mut token = 0;
     // SAFETY: registration on the view's owning STA.
     unsafe { webview.add_ProcessFailed(&process, &raw mut token) }?;
-    let download = DownloadStartingEventHandler::create(Box::new(|_, args| {
-        if let Some(args) = args {
-            // SAFETY: the event is still live and no download may proceed.
-            unsafe { args.SetCancel(true) }?;
-            // SAFETY: prevent the default download UI as well.
-            unsafe { args.SetHandled(true) }?;
-        }
-        Ok(())
-    }));
-    let loaded = NavigationCompletedEventHandler::create(Box::new(|_, args| {
-        let Some(args) = args else {
-            return Ok(());
-        };
-        let mut success = windows::core::BOOL::default();
-        // SAFETY: the event's live arguments supply the final main-frame load status.
-        unsafe { args.IsSuccess(&raw mut success) }?;
-        if !success.as_bool() {
-            let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
-            // SAFETY: status is a writable output for the live event.
-            unsafe { args.WebErrorStatus(&raw mut status) }?;
-            let _ = wire::send(&mut std::io::stdout().lock(), &Event::LoadFailed(status.0));
-        }
-        Ok(())
-    }));
+    let download = download_handler();
+    let loaded = loaded_handler();
     // SAFETY: registration on the owning STA before navigation.
     unsafe { webview.add_NavigationCompleted(&loaded, &raw mut token) }?;
     let downloads = webview.cast::<ICoreWebView2_4>()?;
@@ -479,3 +447,52 @@ fn network_diagnostics(webview: &ICoreWebView2) -> ComResult<()> {
     // SAFETY: registration on this receiver's owning STA before navigation.
     unsafe { receiver.add_DevToolsProtocolEventReceived(&handler, &raw mut token) }
 }
+
+fn process_handler(
+    failure: Rc<Cell<Option<&'static str>>>,
+) -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ProcessFailedEventHandler {
+    ProcessFailedEventHandler::create(Box::new(move |_, _| {
+        failure.set(Some(
+            "The WebView2 browser process stopped during sign-in. Close it and try again.",
+        ));
+        // SAFETY: callbacks run on the worker's GUI thread, whose message loop receives the quit.
+        unsafe {
+            PostQuitMessage(0);
+        }
+        Ok(())
+    }))
+}
+
+fn download_handler() -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2DownloadStartingEventHandler {
+    DownloadStartingEventHandler::create(Box::new(|_, args| {
+        if let Some(args) = args {
+            // SAFETY: the event is still live and no download may proceed.
+            unsafe { args.SetCancel(true) }?;
+            // SAFETY: prevent the default download UI as well.
+            unsafe { args.SetHandled(true) }?;
+        }
+        Ok(())
+    }))
+}
+
+fn loaded_handler() -> webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2NavigationCompletedEventHandler {
+    NavigationCompletedEventHandler::create(Box::new(|_, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut success = windows::core::BOOL::default();
+        // SAFETY: the event's live arguments supply the final main-frame load status.
+        unsafe { args.IsSuccess(&raw mut success) }?;
+        if !success.as_bool() {
+            let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+            // SAFETY: status is a writable output for the live event.
+            unsafe { args.WebErrorStatus(&raw mut status) }?;
+            let _ = wire::send(&mut std::io::stdout().lock(), &Event::LoadFailed(status.0));
+        }
+        Ok(())
+    }))
+}
+
+#[cfg(test)]
+#[path = "../../tests/support/native_browser.rs"]
+mod tests;
