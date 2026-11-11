@@ -121,7 +121,8 @@ fn endpoint_names_are_local_bounded_and_preserve_unicode_units() {
     );
     assert!(matches!(
         teams_ctl::Client::connect(Path::new("relative"), teams_ctl::Timeouts::default()),
-        Err(teams_ctl::ClientError::NotRunning { .. })
+        Err(teams_ctl::ClientError::Codec(teams_ctl::codec::CodecError::Io(error)))
+            if error.kind() == std::io::ErrorKind::InvalidInput
     ));
     assert!(pipe_name(Path::new("C:\\bad\0name")).is_err());
 }
