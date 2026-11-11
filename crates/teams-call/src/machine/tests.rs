@@ -2406,6 +2406,12 @@ fn the_caption_service_from_another_region_serves_captions_and_recording_and_sta
             "processingModes":{"closedCaptions":{"state":captions},
             "realTimeTranscript":{"state":"Active","userId":"8:orgid:synthetic"}}}}}}}})
     };
+    // Participant versions belong to each MRI: an earlier invited leg must not suppress the alternate leg.
+    let invited = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_MRI: {
+        "version": 20, "state": "disconnected"
+    }}});
+    calls.on_delivery(&delivery(&roster, &invited), Observed::Nothing, now);
+    let _ = effects(&mut calls);
     calls.on_delivery(&delivery(&roster, &bot(1, "Inactive")), Observed::Nothing, now);
     let told = events(&effects(&mut calls));
     assert!(told.iter().any(|event| matches!(
@@ -2418,6 +2424,13 @@ fn the_caption_service_from_another_region_serves_captions_and_recording_and_sta
     assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_some());
     calls.on_delivery(&delivery(&roster, &bot(2, "Active")), Observed::Nothing, now);
     assert_eq!(calls.caption_service(call).unwrap().state, "Active");
+    let stale = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_MRI: {
+        "version": 19, "state": "disconnected"
+    }}});
+    calls.on_delivery(&delivery(&roster, &stale), Observed::Nothing, now);
+    calls.on_delivery(&delivery(&roster, &bot(1, "Inactive")), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().state, "Active");
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_some());
     assert!(
         calls
             .call

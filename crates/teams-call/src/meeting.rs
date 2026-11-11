@@ -12,6 +12,8 @@
 //! it (its main audio `serverMuted`, Mute all's). The organizer mutes everyone else at the conversation's `mute` link
 //! ([`Calls::mute_all`]).
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 use teams_proto::{
     MeetingJoinInfo, MeetingTimer, Mri, MuteParticipants, TimerUpdate, UpdateMeetingSettings, UpdateMeetingStates,
@@ -21,12 +23,6 @@ use super::{CallError, CallEvent, CallId, Calls, up};
 use crate::agent::Kind;
 use crate::call::Step;
 use crate::{CallWrite, Delivery};
-
-/// Microsoft's recording bot: in the call's roster while a recording or a transcription runs (seen 2026-11-06,
-/// `ab-call --call steps`); Teams hides it from the people in the call. It is the live caption service
-/// ([`teams_proto::captions::CAPTION_SERVICE_MRI`]), and joins from another region as
-/// [`teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI`].
-pub const RECORDER_MRI: &str = "28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5";
 
 /// A meeting's shared state as last told ([`CallEvent::Meeting`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -101,7 +97,8 @@ pub(crate) struct Meeting {
     pub(crate) state: MeetingState,
     timer: Option<TimerUpdate>,
     settings: u64,
-    recorder_version: Option<u64>,
+    // The recording service's two MRIs have separate participant version sequences.
+    recorder_versions: BTreeMap<&'static str, u64>,
     own_version: Option<u64>,
 }
 
@@ -128,9 +125,9 @@ struct ConversationUpdate {
 /// The recording bot's entry in a roster update (`body`): its version, whether it records and whether it transcribes
 /// now, each with who started it (`userId`, which stays once it stopped: its `state` tells whether it runs); `None`
 /// when the update doesn't list it.
-fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>, Option<Transcription>)> {
+fn recorder(body: &[u8]) -> Option<(&'static str, u64, Option<Recording>, Option<Transcription>)> {
     let body: Value = serde_json::from_slice(body).ok()?;
-    let (_, entry) = teams_proto::captions::service_entry(&body)?;
+    let (mri, entry) = teams_proto::captions::service_entry(&body)?;
     let version = entry.get("version")?.as_u64()?;
     let active = entry.get("state").and_then(Value::as_str) == Some("active");
     let running = |name: &str| {
@@ -155,7 +152,7 @@ fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>, Option<Transcription
         audio_only: mode.pointer("/properties/recordVideo").and_then(Value::as_str) == Some("False"),
     });
     let transcribing = running("realTimeTranscript").map(|mode| Transcription { by: by(mode) });
-    Some((version, recording, transcribing))
+    Some((mri, version, recording, transcribing))
 }
 
 impl Meeting {
@@ -209,13 +206,13 @@ impl Meeting {
 
     /// Takes what a roster update `body` tells of the recording bot; whether the state changed.
     pub(crate) fn roster(&mut self, body: &[u8]) -> bool {
-        let Some((version, recording, transcribing)) = recorder(body) else {
+        let Some((mri, version, recording, transcribing)) = recorder(body) else {
             return false;
         };
-        if self.recorder_version.is_some_and(|told| told >= version) {
+        if self.recorder_versions.get(mri).is_some_and(|told| *told >= version) {
             return false;
         }
-        self.recorder_version = Some(version);
+        self.recorder_versions.insert(mri, version);
         let changed = self.state.recording != recording || self.state.transcribing != transcribing;
         self.state.recording = recording;
         self.state.transcribing = transcribing;

@@ -890,6 +890,7 @@ fn captions_allow_the_newest_endpoint_of_the_service_from_another_region() {
     assert!(tracker.connected(CONNECTION, PUSH_ROOT));
     let pending = caption_seed(&tracker);
     tracker.answered(pending, &Response::new(200, answer("caption")));
+    tracker.observe_delivery(&caption_roster(20, "disconnected", "invalid"));
     let start = caption_start(&caption_actor());
     let older = CAPTION_COMMAND.replace("000000000001", "000000000002");
     let endpoint = |command: &str, joined: &str| {
@@ -911,6 +912,15 @@ fn captions_allow_the_newest_endpoint_of_the_service_from_another_region() {
         &teams_proto::one_to_one_id(LAB_A, LAB_B).unwrap(),
     )
     .unwrap();
+    assert!(!tracker.caption_allowed(&stale));
+    // Switching MRIs does not forget the invited leg's version, or accept older alternate-leg state.
+    tracker.observe_delivery(&caption_roster(19, "active", &older));
+    let mut stale_roster = roster;
+    let entry = &mut stale_roster["participants"][teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI];
+    entry["version"] = json!(1);
+    entry["state"] = json!("disconnected");
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, stale_roster.to_string().into_bytes()));
+    assert!(tracker.caption_allowed(&start));
     assert!(!tracker.caption_allowed(&stale));
 }
 fn assert_invalid_reply_envelopes_are_refused(tracker: &Tracker, envelope: &Value) {

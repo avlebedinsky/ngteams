@@ -322,8 +322,8 @@ async fn a_busy_invitation_and_a_failed_start_command_fail_captions_with_why() {
 }
 
 /// The service invited as the commercial recorder joins from another region, under Teams' alternate MRI, with an
-/// older endpoint beside the one it hands over to: captions start through the newest endpoint and come on, where a
-/// client waiting for the invited MRI alone stayed on "Starting" until it timed out.
+/// older endpoint beside the one it hands over to and a lower participant version than the invited leg: captions
+/// start through the newest endpoint and come on, without waiting for that leg's version to catch up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn captions_start_when_the_service_joins_from_another_region() {
     let (lab, mut a, call) = connected().await;
@@ -337,6 +337,8 @@ async fn captions_start_when_the_service_joins_from_another_region() {
     phase(&mut a, call, CaptionPhase::Starting).await;
     lab.wait_attempts("addParticipant", 1).await;
     let path = callback(&lab, "rosterUpdate").await;
+    let invited = json!({"participants": {CAPTION_SERVICE_MRI: {"version": 20, "state": "disconnected"}}});
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &invited);
     let older = COMMAND.replace("000000000001", "000000000002");
     let roster = |version: u64, state: &str| {
         let endpoint = |command: &str, joined: &str, state: &str| {

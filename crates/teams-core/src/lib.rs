@@ -94,7 +94,7 @@ pub use team_admin::{TeamChange, TeamMember, TeamWritten};
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
-pub use teams_call::{MeetingState, RECORDER_MRI, Recording, Transcription};
+pub use teams_call::{MeetingState, Recording, Transcription};
 pub use teams_proto::{
     Attendee, CalendarEvent, ChannelEventRef, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventResponse,
     EventShowAs, EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails, MeetingInfo,

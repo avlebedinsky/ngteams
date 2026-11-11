@@ -1,7 +1,7 @@
 //! Account, callback and caption metadata on the canonical tracked call entries.
 use super::{Delivery, Observed, State, Tracker, offer::OfferState};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use teams_proto::captions::{CaptionService, CaptionWrite, CaptionWriteKind, service_entry};
 use teams_proto::{CallState, Mri};
 
@@ -12,7 +12,8 @@ pub(super) struct Context {
     conversation: Option<String>,
     caption_add: Option<String>,
     caption_service: Option<CaptionService>,
-    caption_version: Option<u64>,
+    // Participant versions are independent even when both MRIs represent the caption service.
+    caption_versions: BTreeMap<&'static str, u64>,
     callbacks: BTreeSet<String>,
 }
 impl Context {
@@ -123,10 +124,10 @@ impl Context {
             return;
         };
         if let Some(version) = entry.get("version").and_then(Value::as_u64) {
-            if self.caption_version.is_some_and(|old| version <= old) {
+            if self.caption_versions.get(mri).is_some_and(|old| version <= *old) {
                 return;
             }
-            self.caption_version = Some(version);
+            self.caption_versions.insert(mri, version);
         }
         // the same service, and endpoint, the call machine follows (`Calls::caption_roster`)
         self.caption_service = CaptionService::updated(self.caption_service.as_ref(), mri, entry);

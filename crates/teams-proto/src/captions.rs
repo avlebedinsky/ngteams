@@ -109,14 +109,6 @@ pub struct CaptionService {
 }
 
 impl CaptionService {
-    /// Reads a roster delta naming the built-in service. `None` does not change a previously read service.
-    #[must_use]
-    pub fn from_roster(body: &[u8]) -> Option<Self> {
-        let body: Value = serde_json::from_slice(body).ok()?;
-        let (mri, entry) = service_entry(&body)?;
-        Self::from_entry(mri, entry)
-    }
-
     /// Reads the service `mri`'s roster `entry` in full: of its endpoints that carry a command link and a caption
     /// state, the one that joined last, as Teams' web client follows a handover to the service's newest endpoint.
     /// `None` when the entry isn't active or names no such endpoint.
@@ -150,12 +142,16 @@ impl CaptionService {
             .max_by_key(Self::join_order)
     }
 
-    /// `previous` as the service `mri`'s roster `entry` leaves it: `None` once the service isn't active; an endpoint
+    /// `previous` as the service `mri`'s roster `entry` leaves it: `None` once the followed MRI isn't active; an endpoint
     /// read in full that joined no earlier than `previous`'s takes its place; otherwise the fields the delta repeats
     /// for `previous`'s endpoint (the language, the caption state, the command link) are updated, and the ones it
     /// leaves out stay. A delta naming the other region's MRI only replaces a service read in full.
     #[must_use]
     pub fn updated(previous: Option<&Self>, mri: &'static str, entry: &Value) -> Option<Self> {
+        let current = Self::from_entry(mri, entry);
+        if previous.is_some_and(|previous| previous.mri != mri) {
+            return current.or_else(|| previous.cloned());
+        }
         if entry
             .get("state")
             .and_then(Value::as_str)
@@ -163,12 +159,16 @@ impl CaptionService {
         {
             return None;
         }
-        let previous = previous.filter(|previous| previous.mri == mri);
-        if let Some(service) = Self::from_entry(mri, entry)
+        if let Some(mut service) = current
             && previous.is_none_or(|previous| {
                 service.endpoint_id == previous.endpoint_id || service.join_order() >= previous.join_order()
             })
         {
+            if service.joined.is_none()
+                && let Some(previous) = previous.filter(|previous| previous.endpoint_id == service.endpoint_id)
+            {
+                service.joined.clone_from(&previous.joined);
+            }
             return Some(service);
         }
         let mut service = previous?.clone();
@@ -548,14 +548,16 @@ mod tests {
                 "commandUrl":COMMAND,"spokenLanguage":"en-us", "processingModes":{"closedCaptions":{"state":"Inactive"}}
             }}}
         }}});
-        let service = CaptionService::from_roster(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let (mri, entry) = service_entry(&body).unwrap();
+        let service = CaptionService::from_entry(mri, entry).unwrap();
         assert_eq!(service.spoken_language, "en-us");
         assert_eq!(service.state, "Inactive");
         let mut invalid = body.clone();
         invalid["participants"][CAPTION_SERVICE_MRI]["state"] = json!("disconnected");
-        assert!(CaptionService::from_roster(&serde_json::to_vec(&invalid).unwrap()).is_none());
+        let (mri, entry) = service_entry(&invalid).unwrap();
+        assert!(CaptionService::from_entry(mri, entry).is_none());
         let invalid = json!({"participants":{"28:00000000-0000-4000-8000-000000000001":body["participants"][CAPTION_SERVICE_MRI]}});
-        assert!(CaptionService::from_roster(&serde_json::to_vec(&invalid).unwrap()).is_none());
+        assert!(service_entry(&invalid).is_none());
     }
 
     /// A synthetic endpoint of the service, `joined` at that time (`None`: no `joinTime`), its link ending in `n`.
@@ -577,7 +579,8 @@ mod tests {
         assert!(!is_caption_service("28:00000000-0000-4000-8000-000000000001"));
         let entry = |state| json!({"state": state, "endpoints": {"synthetic": endpoint(1, None, "Inactive")}});
         let alternate = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: entry("active")}});
-        let service = CaptionService::from_roster(&serde_json::to_vec(&alternate).unwrap()).unwrap();
+        let (mri, alternate_entry) = service_entry(&alternate).unwrap();
+        let service = CaptionService::from_entry(mri, alternate_entry).unwrap();
         assert_eq!(service.mri, CAPTION_SERVICE_ALTERNATE_MRI);
         assert_eq!(service.state, "Inactive");
         // both named: the active one, the invited one first
@@ -630,7 +633,10 @@ mod tests {
         let newer = json!({"state": "active", "endpoints": {"synthetic-b": endpoint(3, Some("2026-01-01T00:00:02Z"), "Inactive")}});
         let handed = CaptionService::updated(Some(&first), mri, &newer).unwrap();
         assert_eq!(handed.endpoint_id, "synthetic-b");
-        // the older endpoint told again in full stays behind; a delta of the followed one still lands
+        // A full read without joinTime keeps the followed endpoint's ordering, so the old one stays behind.
+        let without_joined = json!({"state": "active", "endpoints": {"synthetic-b": endpoint(3, None, "Inactive")}});
+        let handed = CaptionService::updated(Some(&handed), mri, &without_joined).unwrap();
+        assert_eq!(handed.joined.as_deref(), Some("2026-01-01T00:00:02Z"));
         assert_eq!(CaptionService::updated(Some(&handed), mri, &older).unwrap(), handed);
         let delta = json!({"state": "active", "endpoints": {"synthetic-b": {"endpointMetadata": {
             "spokenLanguage": "en-gb", "processingModes": {"closedCaptions": {"state": "Active"}}
@@ -646,7 +652,17 @@ mod tests {
         // the other region's service replaces a followed one only when read in full
         let other =
             json!({"state": "active", "endpoints": {"synthetic-b": {"endpointMetadata": {"spokenLanguage": "fr-fr"}}}});
-        assert!(CaptionService::updated(Some(&handed), CAPTION_SERVICE_ALTERNATE_MRI, &other).is_none());
+        for other in [
+            other,
+            json!({"state": "disconnected"}),
+            json!({"state": "connecting"}),
+            json!({"version": 9}),
+        ] {
+            assert_eq!(
+                CaptionService::updated(Some(&handed), CAPTION_SERVICE_ALTERNATE_MRI, &other).unwrap(),
+                handed
+            );
+        }
         let other = CaptionService::updated(Some(&handed), CAPTION_SERVICE_ALTERNATE_MRI, &older).unwrap();
         assert_eq!(other.mri, CAPTION_SERVICE_ALTERNATE_MRI);
         assert!(CaptionService::updated(Some(&handed), mri, &json!({"state": "disconnected"})).is_none());

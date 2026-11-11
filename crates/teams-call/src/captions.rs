@@ -106,10 +106,10 @@ impl Calls {
             return;
         };
         if let Some(version) = entry.get("version").and_then(serde_json::Value::as_u64) {
-            if call.caption_version.is_some_and(|old| version <= old) {
+            if call.caption_versions.get(mri).is_some_and(|old| version <= *old) {
                 return;
             }
-            call.caption_version = Some(version);
+            call.caption_versions.insert(mri, version);
         }
 
         let service = CaptionService::updated(call.caption_service.as_ref(), mri, entry);

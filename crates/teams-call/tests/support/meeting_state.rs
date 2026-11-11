@@ -11,7 +11,7 @@ const FIXTURE: &str = include_str!("../../../../tests/fixtures/calling/meeting/s
 /// The fixture, its placeholders filled in: the recording bot, a, and a made-up meeting code, join key and thread.
 fn fixture() -> Value {
     let filled = FIXTURE
-        .replace("<mri:recorder>", crate::RECORDER_MRI)
+        .replace("<mri:recorder>", teams_proto::captions::CAPTION_SERVICE_MRI)
         .replace("<mri:a>", A)
         .replace("<code:1>", "1112223334445")
         .replace("<key:1>", "SyntheticJoinKey01")
