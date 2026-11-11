@@ -1014,7 +1014,8 @@ the web client sends each change with the other two timers as last told and, aft
 carry `meetingDetails.invitation`: the meeting's invitation, form-encoded HTML, whose anchors
 `meet_invite_block.action.join_link`, `…help` and `…join_link_compatibility` and its "Meeting ID:" and "Passcode:"
 lines are what Meeting info shows (its join link's `p` is not the passcode). A recording shows in the roster:
-Microsoft's recording bot (`28:bdd75849-…`, no display name) joins, its endpoint's
+Microsoft's recording bot (`28:bdd75849-…`, or its other region's MRI: [live-captions.md](live-captions.md#which-participant-and-endpoint-is-the-service); no display
+name) joins, its endpoint's
 `endpointMetadata.processingModes.recording` `{"state": "Active", "userId": <who started it>}` while it records
 (`Inactive`, `userId` empty once stopped), and `meetingStates.cloudRecording.value.State` says the same.
 

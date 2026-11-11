@@ -881,6 +881,38 @@ fn captions_follow_current_actor_call_roster_version_and_connection() {
     assert!(!tracker.caption_allowed(&invite));
     assert!(!tracker.caption_allowed(&start));
 }
+/// The service joining from another region, with an older endpoint whose key sorts first: the command allowed is the
+/// newest endpoint's, as the call machine follows it.
+#[test]
+fn captions_allow_the_newest_endpoint_of_the_service_from_another_region() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    let pending = caption_seed(&tracker);
+    tracker.answered(pending, &Response::new(200, answer("caption")));
+    let start = caption_start(&caption_actor());
+    let older = CAPTION_COMMAND.replace("000000000001", "000000000002");
+    let endpoint = |command: &str, joined: &str| {
+        json!({"endpointMetadata": {"commandUrl": command, "joinTime": joined, "spokenLanguage": "en-us",
+            "processingModes": {"closedCaptions": {"state": "Inactive"}}}})
+    };
+    let roster = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 2, "state": "active", "endpoints": {
+            "a-older": endpoint(&older, "2026-01-01T00:00:01.5Z"),
+            "b-newer": endpoint(CAPTION_COMMAND, "2026-01-01T00:00:02Z"),
+        }
+    }}});
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, roster.to_string().into_bytes()));
+    assert!(tracker.caption_allowed(&start));
+    let stale = teams_proto::captions::CaptionWrite::start(
+        &teams_proto::CallContext::new(CHAIN_ID),
+        &teams_proto::captions::CaptionCommandLink::parse(&older).unwrap(),
+        &caption_actor(),
+        &teams_proto::one_to_one_id(LAB_A, LAB_B).unwrap(),
+    )
+    .unwrap();
+    assert!(!tracker.caption_allowed(&stale));
+}
 fn assert_invalid_reply_envelopes_are_refused(tracker: &Tracker, envelope: &Value) {
     use teams_proto::CallState as _;
     for field in [

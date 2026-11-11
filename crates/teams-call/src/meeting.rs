@@ -23,7 +23,9 @@ use crate::call::Step;
 use crate::{CallWrite, Delivery};
 
 /// Microsoft's recording bot: in the call's roster while a recording or a transcription runs (seen 2026-11-06,
-/// `ab-call --call steps`); Teams hides it from the people in the call.
+/// `ab-call --call steps`); Teams hides it from the people in the call. It is the live caption service
+/// ([`teams_proto::captions::CAPTION_SERVICE_MRI`]), and joins from another region as
+/// [`teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI`].
 pub const RECORDER_MRI: &str = "28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5";
 
 /// A meeting's shared state as last told ([`CallEvent::Meeting`]).
@@ -128,7 +130,7 @@ struct ConversationUpdate {
 /// when the update doesn't list it.
 fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>, Option<Transcription>)> {
     let body: Value = serde_json::from_slice(body).ok()?;
-    let entry = body.get("participants")?.get(RECORDER_MRI)?;
+    let (_, entry) = teams_proto::captions::service_entry(&body)?;
     let version = entry.get("version")?.as_u64()?;
     let active = entry.get("state").and_then(Value::as_str) == Some("active");
     let running = |name: &str| {

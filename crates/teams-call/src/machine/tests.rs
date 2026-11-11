@@ -2385,6 +2385,51 @@ fn a_recording_starts_alone_beside_a_running_transcription_and_its_stop_stops_bo
     }
 }
 
+/// Invited as the commercial recorder, the service can join from another region under Teams' alternate MRI: it is
+/// still the call's caption and recording service, and never a person in the call.
+#[test]
+fn the_caption_service_from_another_region_serves_captions_and_recording_and_stays_hidden() {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, RecordCommand};
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let bot = |version: u64, captions: &str| {
+        json!({"participants":{CAPTION_SERVICE_ALTERNATE_MRI:{"state":"active","version":version,
+            "endpoints":{"synthetic":{"endpointMetadata":{"commandUrl":command,"spokenLanguage":"en-us",
+            "processingModes":{"closedCaptions":{"state":captions},
+            "realTimeTranscript":{"state":"Active","userId":"8:orgid:synthetic"}}}}}}}})
+    };
+    calls.on_delivery(&delivery(&roster, &bot(1, "Inactive")), Observed::Nothing, now);
+    let told = events(&effects(&mut calls));
+    assert!(told.iter().any(|event| matches!(
+        event,
+        CallEvent::CaptionService { call: of, service: Some(service) }
+            if *of == call && service.mri == CAPTION_SERVICE_ALTERNATE_MRI && service.state == "Inactive"
+    )));
+    assert!(calls.caption_command(call, None).is_ok());
+    assert!(calls.record_command(call, &RecordCommand::StopTranscription).is_ok());
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_some());
+    calls.on_delivery(&delivery(&roster, &bot(2, "Active")), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().state, "Active");
+    assert!(
+        calls
+            .call
+            .as_ref()
+            .unwrap()
+            .roster
+            .participants()
+            .iter()
+            .all(|person| !teams_proto::captions::is_caption_service(person.mri.as_str()))
+    );
+}
+
 #[test]
 fn mixer_explicitly_marks_only_the_initial_caption_media_fork_as_a_new_session() {
     let mut content =

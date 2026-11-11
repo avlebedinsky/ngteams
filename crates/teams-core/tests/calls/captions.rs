@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use teams_core::{CallAction, CallCaptions, CallId, CallStatus, CaptionPhase, End, Event};
 use teams_media::mcp::{MIXER_RECIPIENT, Packetizer};
 use teams_mock::{ABC_CHAT, LAB_A};
-use teams_proto::captions::CAPTION_SERVICE_MRI;
+use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
 
 use super::support::{A_TONE, Account, Lab, WAIT, jwt, wait_until};
 
@@ -317,6 +317,54 @@ async fn a_busy_invitation_and_a_failed_start_command_fail_captions_with_why() {
         .call(CallAction::Mute { call, muted: true })
         .await
         .unwrap();
+    a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+}
+
+/// The service invited as the commercial recorder joins from another region, under Teams' alternate MRI, with an
+/// older endpoint beside the one it hands over to: captions start through the newest endpoint and come on, where a
+/// client waiting for the invited MRI alone stayed on "Starting" until it timed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn captions_start_when_the_service_joins_from_another_region() {
+    let (lab, mut a, call) = connected().await;
+    lab.mock.answer_next("POST", "/addParticipant", 200, &json!({})).await;
+    lab.mock.answer_next("POST", COMMAND_END, 200, &json!({})).await;
+    a.handle
+        .requests()
+        .call(CallAction::Captions { call, enabled: true })
+        .await
+        .unwrap();
+    phase(&mut a, call, CaptionPhase::Starting).await;
+    lab.wait_attempts("addParticipant", 1).await;
+    let path = callback(&lab, "rosterUpdate").await;
+    let older = COMMAND.replace("000000000001", "000000000002");
+    let roster = |version: u64, state: &str| {
+        let endpoint = |command: &str, joined: &str, state: &str| {
+            json!({"endpointMetadata": {"commandUrl": command, "joinTime": joined, "spokenLanguage": "en-us",
+                "processingModes": {"closedCaptions": {"state": state}}}})
+        };
+        json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {"state": "active", "version": version, "endpoints": {
+            "synthetic-a-older": endpoint(&older, "2026-01-01T00:00:01.25Z", "Inactive"),
+            "synthetic-b-newer": endpoint(COMMAND, "2026-01-01T00:00:02.5Z", state),
+        }}}})
+    };
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &roster(1, "Inactive"));
+    lab.wait_attempts("00000000-0000-4000-8000-000000000001", 1).await;
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &roster(2, "Active"));
+    let on = phase(&mut a, call, CaptionPhase::On).await;
+    assert!(on.error.is_none());
+    assert_eq!(on.spoken_language, "en-us");
+    assert_eq!(lab.attempts("00000000-0000-4000-8000-000000000002").await, 0);
+    let start: Value = lab
+        .mock
+        .received_requests()
+        .await
+        .iter()
+        .find(|request| request.url.path().ends_with(COMMAND_END))
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .unwrap();
+    assert_eq!(start["action"], "start");
+    assert_eq!(start["processingModes"], json!(["closedCaptions"]));
     a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
 }

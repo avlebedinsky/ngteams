@@ -28,10 +28,47 @@ transcription identity (`CAPTION_SERVICE_MRI` in `teams-proto::captions`). This 
 The success callback's `participants` is an array of operation results, not a call roster.
 
 A real `rosterUpdate` has a participant map. The exact service's active endpoint metadata supplies `commandUrl`,
-`spokenLanguage`, and `processingModes.closedCaptions.state` (`Inactive` then `Active`). It can also name other
-processing modes; captions never start those. The service joining causes a media fork and a data channel. Its initial offer explicitly has `newOffer: true` and
+`spokenLanguage`, `joinTime`, and `processingModes.closedCaptions.state` (`Inactive` then `Active`). It can also name other
+processing modes (`realTimeTranscript`, `recording`, `ephemeralTranscript`, `faceStream`, `copilot` were listed,
+all `Inactive`); captions never start those. The service joining causes a media fork and a data channel. Its initial offer explicitly has `newOffer: true` and
 `fromMixer: true`, so the native media creates a fresh peer and preserves mute, camera and participants. Later offers
 have `newOffer: false` and renegotiate the established peer; recreating it would lose the existing ICE connection.
+
+### Which participant and endpoint is the service
+
+The invitation always names the commercial recorder MRI, but the service that answers it can serve the call from
+another region and then joins the roster as a second MRI, `CAPTION_SERVICE_ALTERNATE_MRI`. The current web client's
+calling configuration lists it for the commercial cloud (`recordingBotMrisFromAlternateRegions`), and the client
+watches both participants as the one recording/caption service. The native client does the same
+(`teams_proto::captions::service_entry`): either MRI's active entry is the call's service, its command URL is
+trusted on the same terms, and neither is ever shown as a person. A client that only looks for the invited MRI sees an
+accepted invitation and a successful `addParticipantSuccess`, then never learns the command URL or the `Active`
+state, so captions stay "Starting" until they time out. The lab tenant was always served from its own region
+(every command URL seen was an `aks-prod-us…` allocation), so lab runs never showed the alternate MRI.
+
+A participant entry's `endpoints` can hold more than one endpoint. The web client treats a later one as a handover:
+it follows the endpoint with the latest `endpointMetadata.joinTime`, whatever its key, and takes that endpoint's
+command URL, language and states. The native client does the same, and a roster update that repeats an older
+endpoint never takes it back there. Key order in the JSON object means nothing.
+
+### Side by side with the web client (2026-11-11)
+
+Lab a and b in their 1:1 call, the web client (`ab-call --call steps`) and the native client (a ↔ b, a group call
+in the a/b/c chat, a Meet now with only a, the callee turning captions on first, cameras on, and a transcription
+already running) each turned captions on, with a public-domain speech recording as the far end's microphone in the
+native runs. Both sent the same two requests:
+
+1. `addParticipant` answered `202` at once. The web client's `botData.spokenLanguage` was the call's caption
+   language (`en-us`); the native client sends it empty, and the service still chose `en-us`.
+2. About 4–6 seconds later `addParticipantSuccess` (naming the service's endpoint and participant IDs) and a
+   `rosterUpdate` with the service's entry arrive together; the `start` command follows at once and answers `200`.
+3. The next `rosterUpdate` (well under a second later) says `closedCaptions: Active`. Browser Teams then opens the
+   pane with "Captions will be shown in English (US)." and fills it as data-ID-3 results arrive; the native pane
+   shows "Starting live captions…" until this point, then the same line, then the words.
+
+The native start was within 7 seconds in every case. Its 60-second limit fails it with "Live captions took too long
+to start", and the `info` log then names what it was still waiting for (the invitation's answer, the service to
+join, or the service's captions to turn on).
 
 ## Commands
 

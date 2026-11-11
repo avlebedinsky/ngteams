@@ -202,6 +202,16 @@ where
 
     pub(super) fn caption_check(&mut self, now: Instant) {
         if self.captions.deadline.is_some_and(|deadline| deadline <= now) {
+            // what it waited for, so that an `info` log tells a timeout's cause
+            let waiting = match (self.captions.writing.as_ref(), self.captions.call) {
+                (Some((operation, _)), _) => format!("the answer to its {operation:?}"),
+                (None, Some(call)) => match self.calls.caption_service(call) {
+                    None => "the caption service to join the call".to_owned(),
+                    Some(service) => format!("the service's captions to turn on (they are {})", service.state),
+                },
+                (None, None) => "nothing".to_owned(),
+            };
+            log::info!("captions took too long to start: waited for {waiting}");
             self.caption_fail("Live captions took too long to start. Try again.");
         }
     }
