@@ -39,16 +39,14 @@
 //! What it does is traced: `window opened` (the root view's), `window closed`, `tray open`/`quit`, `tray
 //! registered`/`gone` (the item up or down), and the notifier's and the tray's own lines.
 
-#[cfg(unix)]
-use gpui::WeakEntity;
 use std::rc::Rc;
 use std::sync::Arc;
 
 #[cfg(unix)]
 use futures_util::StreamExt as _;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, Task, Window,
-    WindowHandle, WindowId,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, Task, WeakEntity,
+    Window, WindowHandle, WindowId,
 };
 #[cfg(unix)]
 use tokio::sync::mpsc;
