@@ -8,6 +8,8 @@ function Initialize-NgteamsShellAutomation {
 using System;
 using System.Runtime.InteropServices;
 public static class NgteamsShellInput {
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr window, IntPtr dc);
     [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr target, int x, int y, int width, int height, IntPtr source, int sx, int sy, uint operation);
@@ -121,6 +123,28 @@ function Open-NgteamsShellMenu([Diagnostics.Process]$Process, [string]$Directory
     }
 }
 
+function Close-NgteamsOwnedOverflow([Diagnostics.Process]$Process, [string]$Directory) {
+    if (!(Test-Path (Join-Path $Directory 'expand.captured'))) { return }
+    $Process.Refresh()
+    $handle=$Process.MainWindowHandle
+    # The fixture already asserted that tray Open recreated its window and retained its account/theme. Require
+    # that window to be in front before clearing the Explorer overflow this driver opened, so cleanup cannot
+    # conceal an activation failure. Click only the verified window's nonclient caption, never its app controls.
+    if ($Process.HasExited -or $Process.MainWindowTitle -ne 'NGTEAMS SYNTHETIC SHELL' -or !$handle -or
+        ![NgteamsSyntheticShot]::IsInputDesktop() -or [NgteamsSyntheticShot]::GetForegroundWindow() -ne $handle) {
+        throw 'Tray Open did not foreground the owned synthetic window.'
+    }
+    $window=[NgteamsShellInput+Rect]::new();$client=[NgteamsSyntheticShot+Rect]::new();$point=[NgteamsSyntheticShot+Point]::new()
+    if (![NgteamsShellInput]::GetWindowRect($handle,[ref]$window) -or
+        ![NgteamsSyntheticShot]::GetClientRect($handle,[ref]$client) -or
+        ![NgteamsSyntheticShot]::ClientToScreen($handle,[ref]$point) -or $point.Y-$window.Top -lt 16) {
+        throw 'Synthetic window has no verified native caption.'
+    }
+    $x=$point.X+[int]($client.Right/2);$y=$point.Y-8
+    Invoke-NgteamsShellRectangle @{left=$x-1;right=$x+1;top=$y-1;bottom=$y+1}
+    Set-Content (Join-Path $Directory 'overflow.closed') 'clicked verified owned caption after tray recreation'
+}
+
 function Invoke-NgteamsSyntheticShell([Diagnostics.Process]$Process, [string]$Directory) {
     [IO.File]::AppendAllText((Join-Path $Directory 'driver.log'), 'initializing'+[Environment]::NewLine)
     Initialize-NgteamsShellAutomation
@@ -150,8 +174,13 @@ function Invoke-NgteamsSyntheticShell([Diagnostics.Process]$Process, [string]$Di
             Open-NgteamsShellMenu $Process $Directory
             Start-Sleep -Milliseconds 400
         } else {
+            if ($step -eq 'reopened') { Close-NgteamsOwnedOverflow $Process $Directory }
             [IO.File]::AppendAllText((Join-Path $Directory 'driver.log'), 'client shot'+[Environment]::NewLine)
-            if (!(Save-NgteamsSyntheticShot $Process 'NGTEAMS SYNTHETIC SHELL' (Join-Path $Directory ($step+'.png')))) {
+            do {
+                $captured=Save-NgteamsSyntheticShot $Process 'NGTEAMS SYNTHETIC SHELL' (Join-Path $Directory ($step+'.png'))
+                if (!$captured) { Start-Sleep -Milliseconds 50 }
+            } while (!$captured -and [DateTime]::UtcNow -lt $deadline)
+            if (!$captured) {
                 throw "Cannot capture foreground synthetic GPUI window: $step"
             }
             if ($step -in @('plain','active','unread','read','reopened')) {

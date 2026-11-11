@@ -883,14 +883,24 @@ impl RecapView {
         let body = if recorded {
             let player = self.player(cx);
             div()
+                .id("recap-content")
+                .debug_selector(|| "recap-content".to_owned())
                 .flex_1()
                 .min_h_0()
                 .flex()
+                .flex_wrap()
+                .overflow_y_scroll()
                 .gap_2()
                 .child(recording_card(player, palette))
-                .child(side.w(px(400.0)).flex_none())
+                .child(side.w(px(400.0)).flex_none().max_w_full())
         } else {
-            div().flex_1().min_h_0().flex().flex_col().child(side.flex_1())
+            div()
+                .id("recap-content")
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(side.flex_1())
         };
         div()
             .size_full()
@@ -947,16 +957,25 @@ impl RecapView {
         let session = self.session();
         let tabs = (session.len() > 1).then(|| self.part_tabs(&session, palette, cx));
         div()
-            .h(px(48.0))
+            .min_h(px(48.0))
             .flex_none()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_3()
             .child(self.session_menu(palette, cx))
             .children(tabs)
             .children(self.shows_saved().then(|| local::saved_mark(palette)))
             .child(div().flex_1())
-            .children(self.actions(cx))
+            .child(
+                div()
+                    .flex_none()
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children(self.actions(cx)),
+            )
             .into_any_element()
     }
 
@@ -981,6 +1000,8 @@ impl RecapView {
             })
             .collect();
         let face = div()
+            .debug_selector(|| "recap-session-face".to_owned())
+            .w_full()
             .min_w_0()
             .flex()
             .items_center()
@@ -990,6 +1011,7 @@ impl RecapView {
         let view = cx.entity().downgrade();
         let menu = Button::new("recap-session")
             .outline()
+            .w_full()
             .min_w_0()
             .flex_shrink(1.0)
             .max_w(px(SESSION_WIDTH))
@@ -1005,8 +1027,9 @@ impl RecapView {
             });
         selected_by("recap-session", menu)
             .flex()
-            .flex_shrink(1.0)
+            .flex_none()
             .min_w(px(160.0))
+            .max_w(px(SESSION_WIDTH))
             .bg(rgb(palette.surface))
             .into_any_element()
     }
@@ -1613,7 +1636,11 @@ fn recording_card(player: Option<Entity<VideoPlayer>>, palette: Palette) -> AnyE
         .debug_selector(|| "recap-recording".to_owned())
         .self_start()
         .flex_1()
-        .min_w_0()
+        // A narrow recap wraps its transcript below the picture rather than clipping the player's controls and
+        // 300 px settings panels. Both cards can still grow to the full row on a small window.
+        .flex_basis(px(380.0))
+        .min_w(px(380.0))
+        .max_w_full()
         .overflow_hidden()
         .children(player)
         .into_any_element()

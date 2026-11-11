@@ -166,6 +166,10 @@ fn child(mode: &str) -> SandboxResult {
         let core: Arc<dyn Core> = core;
         let channel = team.channels[0].clone();
         let options = WindowOptions {
+            window_bounds: Some(teams_ui::window::initial_bounds(
+                gpui::size(gpui::px(1100.0), gpui::px(720.0)),
+                cx,
+            )),
             #[cfg(windows)]
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some("NGTEAMS SYNTHETIC WORKFLOW".into()),
