@@ -79,7 +79,8 @@ pub fn is_caption_service(mri: &str) -> bool {
 }
 
 /// The service's entry among a roster update's `participants`, with the MRI it joined as: the active one when the
-/// update names both (the invited one first), else the one it names. `None` when it names neither.
+/// update names both, following the newest full endpoint read (the invited one first on a tie), else the one it
+/// names. `None` when it names neither.
 #[must_use]
 pub fn service_entry(roster: &Value) -> Option<(&'static str, &Value)> {
     let participants = roster.get("participants")?.as_object()?;
@@ -87,11 +88,20 @@ pub fn service_entry(roster: &Value) -> Option<(&'static str, &Value)> {
         .iter()
         .filter_map(|mri| participants.get(*mri).map(|entry| (*mri, entry)))
         .collect();
-    named
+    let newest = named
         .iter()
-        .find(|(_, entry)| entry.get("state").and_then(Value::as_str) == Some("active"))
-        .or_else(|| named.first())
-        .copied()
+        .filter_map(|(mri, entry)| {
+            CaptionService::from_entry(mri, entry).map(|service| ((*mri, *entry), service.join_order()))
+        })
+        .reduce(|kept, next| if next.1 > kept.1 { next } else { kept })
+        .map(|(entry, _)| entry);
+    newest.or_else(|| {
+        named
+            .iter()
+            .find(|(_, entry)| entry.get("state").and_then(Value::as_str) == Some("active"))
+            .or_else(|| named.first())
+            .copied()
+    })
 }
 
 /// The service endpoint's current state, read only from this call's bot roster entry.
@@ -145,12 +155,14 @@ impl CaptionService {
     /// `previous` as the service `mri`'s roster `entry` leaves it: `None` once the followed MRI isn't active; an endpoint
     /// read in full that joined no earlier than `previous`'s takes its place; otherwise the fields the delta repeats
     /// for `previous`'s endpoint (the language, the caption state, the command link) are updated, and the ones it
-    /// leaves out stay. A delta naming the other region's MRI only replaces a service read in full.
+    /// leaves out stay. Across MRIs, only a full read with a join no earlier than the followed service replaces it.
     #[must_use]
     pub fn updated(previous: Option<&Self>, mri: &'static str, entry: &Value) -> Option<Self> {
         let current = Self::from_entry(mri, entry);
-        if previous.is_some_and(|previous| previous.mri != mri) {
-            return current.or_else(|| previous.cloned());
+        if let Some(previous) = previous.filter(|previous| previous.mri != mri) {
+            return current
+                .filter(|service| service.join_order() >= previous.join_order())
+                .or_else(|| Some(previous.clone()));
         }
         if entry
             .get("state")
@@ -599,6 +611,25 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_naming_both_regions_selects_the_newest_service_join() {
+        let entry =
+            |joined| json!({"state": "active", "endpoints": {"synthetic": endpoint(1, Some(joined), "Active")}});
+        let body = |invited, alternate| {
+            json!({"participants": {
+                CAPTION_SERVICE_MRI: entry(invited), CAPTION_SERVICE_ALTERNATE_MRI: entry(alternate)
+            }})
+        };
+        let earlier = "2026-01-01T00:00:01.9999999Z";
+        let later = "2026-01-01T00:00:02.5Z";
+        assert_eq!(
+            service_entry(&body(earlier, later)).unwrap().0,
+            CAPTION_SERVICE_ALTERNATE_MRI
+        );
+        assert_eq!(service_entry(&body(later, earlier)).unwrap().0, CAPTION_SERVICE_MRI);
+        assert_eq!(service_entry(&body(later, later)).unwrap().0, CAPTION_SERVICE_MRI);
+    }
+
+    #[test]
     fn of_the_service_endpoints_the_last_one_joined_is_followed_whatever_its_key() {
         // the older endpoint sorts first; the newer one writes a shorter fraction
         let entry = json!({"state": "active", "endpoints": {
@@ -663,8 +694,18 @@ mod tests {
                 handed
             );
         }
-        let other = CaptionService::updated(Some(&handed), CAPTION_SERVICE_ALTERNATE_MRI, &older).unwrap();
+        assert_eq!(
+            CaptionService::updated(Some(&handed), CAPTION_SERVICE_ALTERNATE_MRI, &older).unwrap(),
+            handed
+        );
+        let other = CaptionService::updated(Some(&handed), CAPTION_SERVICE_ALTERNATE_MRI, &newer).unwrap();
         assert_eq!(other.mri, CAPTION_SERVICE_ALTERNATE_MRI);
+        // Endpoint keys are scoped to the MRI: an equal key must still obey cross-region join ordering.
+        let old_same_key = json!({"state": "active", "endpoints": {"synthetic-b": endpoint(2, Some("2026-01-01T00:00:01Z"), "Inactive")}});
+        assert_eq!(
+            CaptionService::updated(Some(&other), mri, &old_same_key).unwrap(),
+            other
+        );
         assert!(CaptionService::updated(Some(&handed), mri, &json!({"state": "disconnected"})).is_none());
         assert_eq!(
             CaptionService::updated(Some(&handed), mri, &json!({"version": 9})).unwrap(),

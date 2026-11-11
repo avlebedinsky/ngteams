@@ -2443,6 +2443,73 @@ fn the_caption_service_from_another_region_serves_captions_and_recording_and_sta
     );
 }
 
+/// Both region identities describe one service; unrelated or older entries cannot stop its recording.
+#[test]
+fn recording_and_captions_follow_the_same_regional_service_and_endpoint() {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let bot = |mri: &str, version: u64, joined: &str, state: &str| {
+        json!({"participants": {mri: {"version": version, "state": "active", "endpoints": {
+            "synthetic": {"endpointMetadata": {"commandUrl": command, "joinTime": joined,
+                "processingModes": {"closedCaptions": {"state": state},
+                    "recording": {"state": state}, "realTimeTranscript": {"state": state}}}}
+        }}}})
+    };
+    let newer = bot(CAPTION_SERVICE_ALTERNATE_MRI, 1, "2026-01-01T00:00:02Z", "Active");
+    calls.on_delivery(&delivery(&roster, &newer), Observed::Nothing, now);
+    let expected = calls.call.as_ref().unwrap().meeting.state.clone();
+    assert!(expected.recording.is_some() && expected.transcribing.is_some());
+    let service = calls.caption_service(call).unwrap().clone();
+    let _ = effects(&mut calls);
+    for entry in [
+        json!({"version": 21, "state": "disconnected"}),
+        json!({"version": 22, "state": "connecting"}),
+        json!({"version": 23}),
+        json!({"version": 24, "state": "active"}),
+    ] {
+        let other = json!({"participants": {CAPTION_SERVICE_MRI: entry}});
+        calls.on_delivery(&delivery(&roster, &other), Observed::Nothing, now);
+        assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+        assert_eq!(calls.caption_service(call), Some(&service));
+        assert!(
+            !events(&effects(&mut calls))
+                .iter()
+                .any(|event| matches!(event, CallEvent::Meeting { .. }))
+        );
+    }
+    // A full but older active entry must not take either state back, even with the same endpoint key.
+    let older = bot(CAPTION_SERVICE_MRI, 25, "2026-01-01T00:00:01Z", "Inactive");
+    calls.on_delivery(&delivery(&roster, &older), Observed::Nothing, now);
+    assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+    assert_eq!(calls.caption_service(call), Some(&service));
+    // The same selection applies when both full entries arrive together.
+    let mut both = newer;
+    both["participants"][CAPTION_SERVICE_ALTERNATE_MRI]["version"] = json!(2);
+    both["participants"][CAPTION_SERVICE_MRI] = older["participants"][CAPTION_SERVICE_MRI].clone();
+    calls.on_delivery(&delivery(&roster, &both), Observed::Nothing, now);
+    assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+    assert_eq!(calls.caption_service(call), Some(&service));
+    // A genuinely newer join hands over all modes, and its own departure clears them.
+    let newest = bot(CAPTION_SERVICE_MRI, 26, "2026-01-01T00:00:03Z", "Active");
+    calls.on_delivery(&delivery(&roster, &newest), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().mri, CAPTION_SERVICE_MRI);
+    assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+    let departed = json!({"participants": {CAPTION_SERVICE_MRI: {"version": 27, "state": "disconnected"}}});
+    calls.on_delivery(&delivery(&roster, &departed), Observed::Nothing, now);
+    assert!(calls.caption_service(call).is_none());
+    assert!(calls.call.as_ref().unwrap().meeting.state.recording.is_none());
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_none());
+}
+
 #[test]
 fn mixer_explicitly_marks_only_the_initial_caption_media_fork_as_a_new_session() {
     let mut content =

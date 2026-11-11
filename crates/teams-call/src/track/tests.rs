@@ -913,6 +913,15 @@ fn captions_allow_the_newest_endpoint_of_the_service_from_another_region() {
     )
     .unwrap();
     assert!(!tracker.caption_allowed(&stale));
+    // A newer participant version for the other MRI cannot rebind commands to an older join.
+    let older_entry = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_MRI: {
+        "version": 21, "state": "active", "endpoints": {
+            "b-newer": endpoint(&older, "2026-01-01T00:00:01.5Z")
+        }
+    }}});
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, older_entry.to_string().into_bytes()));
+    assert!(tracker.caption_allowed(&start));
+    assert!(!tracker.caption_allowed(&stale));
     // Switching MRIs does not forget the invited leg's version, or accept older alternate-leg state.
     tracker.observe_delivery(&caption_roster(19, "active", &older));
     let mut stale_roster = roster;

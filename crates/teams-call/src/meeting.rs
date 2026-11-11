@@ -99,6 +99,9 @@ pub(crate) struct Meeting {
     settings: u64,
     // The recording service's two MRIs have separate participant version sequences.
     recorder_versions: BTreeMap<&'static str, u64>,
+    recorder_mri: Option<&'static str>,
+    // Use the same handover rule as captions and the transport binding, including across MRIs.
+    recorder_service: Option<teams_proto::captions::CaptionService>,
     own_version: Option<u64>,
 }
 
@@ -122,13 +125,9 @@ struct ConversationUpdate {
     options: Option<teams_proto::MeetingOptions>,
 }
 
-/// The recording bot's entry in a roster update (`body`): its version, whether it records and whether it transcribes
-/// now, each with who started it (`userId`, which stays once it stopped: its `state` tells whether it runs); `None`
-/// when the update doesn't list it.
-fn recorder(body: &[u8]) -> Option<(&'static str, u64, Option<Recording>, Option<Transcription>)> {
-    let body: Value = serde_json::from_slice(body).ok()?;
-    let (mri, entry) = teams_proto::captions::service_entry(&body)?;
-    let version = entry.get("version")?.as_u64()?;
+/// Whether the bot records and transcribes now, each with who started it (`userId`, which stays once it stopped:
+/// its `state` tells whether it runs). Read only the followed endpoint, when the service has named one.
+fn recorder(entry: &Value, endpoint_id: Option<&str>) -> (Option<Recording>, Option<Transcription>) {
     let active = entry.get("state").and_then(Value::as_str) == Some("active");
     let running = |name: &str| {
         let pointer = format!("/endpointMetadata/processingModes/{name}");
@@ -136,8 +135,9 @@ fn recorder(body: &[u8]) -> Option<(&'static str, u64, Option<Recording>, Option
             .get("endpoints")
             .and_then(Value::as_object)
             .into_iter()
-            .flat_map(|endpoints| endpoints.values())
-            .filter_map(|endpoint| endpoint.pointer(&pointer))
+            .flat_map(|endpoints| endpoints.iter())
+            .filter(|(id, _)| endpoint_id.is_none_or(|followed| followed == id.as_str()))
+            .filter_map(|(_, endpoint)| endpoint.pointer(&pointer))
             .find(|mode| mode.get("state").and_then(Value::as_str) == Some("Active"))
             .filter(|_| active)
     };
@@ -152,7 +152,7 @@ fn recorder(body: &[u8]) -> Option<(&'static str, u64, Option<Recording>, Option
         audio_only: mode.pointer("/properties/recordVideo").and_then(Value::as_str) == Some("False"),
     });
     let transcribing = running("realTimeTranscript").map(|mode| Transcription { by: by(mode) });
-    Some((mri, version, recording, transcribing))
+    (recording, transcribing)
 }
 
 impl Meeting {
@@ -206,13 +206,43 @@ impl Meeting {
 
     /// Takes what a roster update `body` tells of the recording bot; whether the state changed.
     pub(crate) fn roster(&mut self, body: &[u8]) -> bool {
-        let Some((mri, version, recording, transcribing)) = recorder(body) else {
+        let Ok(body) = serde_json::from_slice::<Value>(body) else {
+            return false;
+        };
+        let Some((mri, entry)) = teams_proto::captions::service_entry(&body) else {
+            return false;
+        };
+        let Some(version) = entry.get("version").and_then(Value::as_u64) else {
             return false;
         };
         if self.recorder_versions.get(mri).is_some_and(|told| *told >= version) {
             return false;
         }
         self.recorder_versions.insert(mri, version);
+        self.recorder_service =
+            teams_proto::captions::CaptionService::updated(self.recorder_service.as_ref(), mri, entry);
+        if let Some(service) = &self.recorder_service
+            && (service.mri != mri
+                || entry
+                    .get("endpoints")
+                    .and_then(|endpoints| endpoints.get(&service.endpoint_id))
+                    .and_then(|endpoint| endpoint.get("endpointMetadata"))
+                    .is_none())
+        {
+            return false;
+        }
+        let active = entry.get("state").and_then(Value::as_str) == Some("active");
+        if self.recorder_mri.is_some_and(|followed| followed != mri) && !active {
+            return false;
+        }
+        if active {
+            self.recorder_mri = Some(mri);
+        }
+        let endpoint = self
+            .recorder_service
+            .as_ref()
+            .map(|service| service.endpoint_id.as_str());
+        let (recording, transcribing) = recorder(entry, endpoint);
         let changed = self.state.recording != recording || self.state.transcribing != transcribing;
         self.state.recording = recording;
         self.state.transcribing = transcribing;

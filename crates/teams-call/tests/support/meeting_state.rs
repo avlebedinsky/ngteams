@@ -157,6 +157,37 @@ fn the_recording_bot_is_told_as_a_recording_never_as_a_person() {
 }
 
 #[test]
+fn another_region_keeps_recording_when_the_invited_leg_leaves_before_caption_metadata_arrives() {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
+    let now = Instant::now();
+    let (mut calls, call) = up(now);
+    let roster = callback(&calls, "rosterUpdate");
+    // This recording-only fixture carries no caption state or command URL.
+    let active = json!({"participants": {
+        CAPTION_SERVICE_ALTERNATE_MRI: fixture()["recording_roster"]["participants"][CAPTION_SERVICE_MRI]
+    }});
+    calls.on_delivery(&delivery(&roster, &active), Observed::Nothing, now);
+    assert!(calls.caption_service(call).is_none());
+    let told = meeting_told(&effects(&mut calls));
+    let expected = calls.call.as_ref().unwrap().meeting.state.clone();
+    assert_eq!(told, vec![expected.clone()]);
+    assert!(expected.recording.is_some() && expected.transcribing.is_some());
+    for (version, state) in [(22, "disconnected"), (23, "connecting")] {
+        let other = json!({"participants": {CAPTION_SERVICE_MRI: {"version": version, "state": state}}});
+        calls.on_delivery(&delivery(&roster, &other), Observed::Nothing, now);
+        assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+        assert!(meeting_told(&effects(&mut calls)).is_empty());
+    }
+    let stopped = json!({"participants": {
+        CAPTION_SERVICE_ALTERNATE_MRI: fixture()["recording_stopped_roster"]["participants"][CAPTION_SERVICE_MRI]
+    }});
+    calls.on_delivery(&delivery(&roster, &stopped), Observed::Nothing, now);
+    let told = meeting_told(&effects(&mut calls));
+    assert_eq!(told.len(), 1);
+    assert!(told[0].recording.is_none() && told[0].transcribing.is_none());
+}
+
+#[test]
 fn a_transcription_alone_an_audio_recording_and_their_stop_are_told_by_their_state() {
     let now = Instant::now();
     let (mut calls, _) = up(now);
