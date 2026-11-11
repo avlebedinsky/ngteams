@@ -421,7 +421,10 @@ impl MediaSession {
             // A native open can wait. Keep the playout lock free so incoming audio continues to be decoded.
             match devices.speaker() {
                 Ok(opened) => {
-                    *audio_devices.speaker.lock().unwrap_or_else(PoisonError::into_inner) = Some(opened);
+                    // Publish the slot and its status together. Playout can fail immediately after taking the
+                    // slot; an unlocked status store could otherwise overwrite that newer missing indication.
+                    let mut speaker = audio_devices.speaker.lock().unwrap_or_else(PoisonError::into_inner);
+                    *speaker = Some(opened);
                     self.shared.speaker_missing.store(false, Ordering::Relaxed);
                 }
                 Err(error) => {

@@ -141,6 +141,10 @@ async fn overlay_lifecycle_contract(tray: &tray::NativeTray) {
     tray::NativeTray::test_button_ready(reopened);
     assert_eq!(tray.test_overlay_count().await, before + 1);
     println!("TaskbarButtonCreated on the recreated main HWND reapplied its unchanged unread overlay");
+    wait_for_overlay_shot().await;
+}
+
+async fn wait_for_overlay_shot() {
     if let Some(directory) = std::env::var_os("NGTEAMS_NATIVE_TASKBAR_SHOT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::write(directory.join("overlay-ready"), std::process::id().to_string()).unwrap();
