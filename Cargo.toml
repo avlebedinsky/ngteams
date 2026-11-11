@@ -349,6 +349,7 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # LiveKit's libwebrtc bindings, the pinned 0.3.55 plus build/patches/libwebrtc (scripts/vendor-crates.sh):
 # `RtpTransceiver::set_direction`, which webrtc-sys binds and the safe API leaves out (0.4.0 too). A group call's screen
 # goes out on the mixer's sharing line, turned to send before the answer (crates/teams-media/src/rtc.rs). Only the Rust
-# crate is patched: webrtc-sys and its prebuilt libwebrtc stay crates.io's. Drop this, vendor/libwebrtc and its patch
-# once a LiveKit release exposes it.
+# crate is patched: webrtc-sys and its prebuilt libwebrtc stay crates.io's. Candidate-pair RTT also preserves field
+# presence, so a measured zero differs from an absent statistic. Keep the patches until upstream exposes direction
+# and preserves optional RTT values.
 libwebrtc = { path = "vendor/libwebrtc" }

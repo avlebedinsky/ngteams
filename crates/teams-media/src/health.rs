@@ -427,7 +427,11 @@ fn network(index: &Index<'_>, rates: &Rates<'_>) -> NetworkHealth {
         .fold(None, larger);
     let pair = index.pair.map(|pair| &pair.candidate_pair);
     NetworkHealth {
-        round_trip_ms: pair.and_then(|pair| ms(pair.current_round_trip_time)),
+        // The SDK preserves field presence: a reported zero is valid, while a missing RTT stays unknown.
+        round_trip_ms: pair
+            .and_then(|pair| pair.current_round_trip_time)
+            .map(|seconds| seconds * 1000.0)
+            .filter(|milliseconds| milliseconds.is_finite() && *milliseconds >= 0.0),
         received_loss_percent: loss_percent(received),
         received_jitter_ms: jitter,
         sent_loss_percent: sent_loss,
@@ -479,7 +483,7 @@ mod tests {
         let mut pair = CandidatePairStats::default();
         pair.rtc.id = id.to_owned();
         pair.candidate_pair.nominated = nominated;
-        pair.candidate_pair.current_round_trip_time = rtt;
+        pair.candidate_pair.current_round_trip_time = Some(rtt);
         pair.candidate_pair.available_outgoing_bitrate = 1_500_000.0;
         RtcStats::CandidatePair(pair)
     }
@@ -641,6 +645,29 @@ mod tests {
         assert_eq!((video.resolution, video.frame_rate), (Some((1280, 720)), Some(15.0)));
         assert_eq!(video.codec, None, "no codec report");
         assert_eq!(health.network.round_trip_ms, Some(50.0), "the nominated pair");
+    }
+
+    #[test]
+    fn candidate_rtt_preserves_absence_and_a_reported_zero_without_guessing() {
+        // Synthetic getStats records cover the field's absence, zero, positive and invalid values.
+        for (value, expected) in [
+            (None, None),
+            (Some(0.0), Some(0.0)),
+            (Some(0.025), Some(25.0)),
+            (Some(-1.0), None),
+        ] {
+            let mut record = serde_json::json!({"type":"candidate-pair","id":"P","nominated":true});
+            if let Some(value) = value {
+                record["currentRoundTripTime"] = serde_json::json!(value);
+            }
+            let stats: RtcStats = serde_json::from_value(record).unwrap();
+            let health = HealthReader::default().read(&[stats], &Lines::default(), Instant::now());
+            assert_eq!(health.network.round_trip_ms, expected);
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::MAX] {
+            let health = HealthReader::default().read(&[pair("P", value, true)], &Lines::default(), Instant::now());
+            assert_eq!(health.network.round_trip_ms, None);
+        }
     }
 
     #[test]

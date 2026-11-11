@@ -13,8 +13,9 @@
 #                  every form a clipboard offer holds read into one item: text, picture and uri-list files (0003)
 #   libwebrtc      our own: `RtpTransceiver::set_direction`, which LiveKit's bindings leave out though `webrtc-sys`
 #                  binds it (0001): a group call's screen goes out on the mixer's sharing line, turned to send before
-#                  the answer (crates/teams-media/src/rtc.rs). Drop it, and this crate here, once a LiveKit release
-#                  exposes it (0.4.0 doesn't).
+#                  the answer (crates/teams-media/src/rtc.rs); preserve optional candidate-pair RTT (0002), so
+#                  absent values remain unknown and a measured zero is retained. Keep these patches until upstream
+#                  supports both (0.4.0 still leaves out set_direction).
 #
 # Each source is the crates.io archive of the crate's VERSION, verified against SHA256 below (the release's crates.io
 # checksum: the `cksum` of its line in https://index.crates.io/<prefix>/<crate>, also what Cargo.lock recorded for the
