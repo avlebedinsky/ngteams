@@ -37,7 +37,7 @@ $previousIncremental = $env:CARGO_INCREMENTAL
 Push-Location $root
 try {
     $env:CARGO_INCREMENTAL = '0'
-    $build = Start-Process (Get-Command cargo -CommandType Application).Source -NoNewWindow -PassThru `
+    $build = Start-Process (Get-Command cargo -CommandType Application | Select-Object -First 1).Source -NoNewWindow -PassThru `
         -ArgumentList @('build','--locked','-p','proto-lab','--bin','proto-lab','--target-dir','target/lab','-j1')
     $buildDeadline = [DateTime]::UtcNow.AddMinutes(30)
     while (!$build.WaitForExit(250)) {
@@ -52,7 +52,7 @@ $code = '& ' + (ConvertTo-NgteamsLiteral $PSCommandPath) + ' -Serve -Command ' +
 if ($NativeAlias) { $code += ' -NativeAlias ' + (ConvertTo-NgteamsLiteral $NativeAlias) }
 if ($Chat.Count -gt 0) { $code += ' -Chat @(' + (($Chat | ForEach-Object { ConvertTo-NgteamsLiteral $_ }) -join ',') + ')' }
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
-$action = New-ScheduledTaskAction -Execute (Get-Command pwsh -CommandType Application).Source `
+$action = New-ScheduledTaskAction -Execute (Get-Command pwsh -CommandType Application | Select-Object -First 1).Source `
     -Argument "-NoProfile -NonInteractive -EncodedCommand $encoded" -WorkingDirectory $root
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
     -LogonType Interactive -RunLevel Limited
