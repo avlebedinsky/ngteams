@@ -132,6 +132,9 @@ async fn pause(cx: &AsyncApp) {
 }
 
 async fn exercise(window: WindowHandle<Fixture>, cx: &mut AsyncApp) -> Result<(), String> {
+    window
+        .update(cx, |_, window, _| window.activate_window())
+        .map_err(|e| e.to_string())?;
     clipped_frame(window, cx).await?;
     let mut previous: Option<Arc<gpui::RenderImage>> = None;
     for serial in 1..=100 {

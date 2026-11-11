@@ -14,24 +14,30 @@ if ($Serve) {
     if ($HoldForShot) { $env:NGTEAMS_NATIVE_VIDEO_HOLD = '1' }
     $process = Start-Process $Executable -NoNewWindow -PassThru `
         -RedirectStandardOutput (Join-Path $RunDirectory 'test.out') -RedirectStandardError (Join-Path $RunDirectory 'test.err')
-    $deadline=[DateTime]::UtcNow.AddSeconds(90)
-    if ($env:NGTEAMS_NATIVE_VIDEO_HOLD -eq '1') {
-        $shot=$false
-        do {
-            Start-Sleep -Milliseconds 100
-            $process.Refresh()
-            if ($process.HasExited) { break }
-            $ready=Select-String -LiteralPath (Join-Path $RunDirectory 'test.out') -Pattern 'synthetic video ready' -Quiet
-            if ($ready) {
-                $shot=Save-NgteamsSyntheticShot $process 'NGTEAMS SYNTHETIC VIDEO' (Join-Path $RunDirectory 'frame.png')
-            }
-        } while (!$shot -and [DateTime]::UtcNow -lt $deadline)
-        if (!$shot) { Write-Output 'No foreground synthetic client-area screenshot was captured.' }
+    try {
+        $deadline=[DateTime]::UtcNow.AddSeconds(90)
+        if ($env:NGTEAMS_NATIVE_VIDEO_HOLD -eq '1') {
+            $shot=$false
+            do {
+                Start-Sleep -Milliseconds 100
+                $process.Refresh()
+                if ($process.HasExited) { break }
+                $ready=Select-String -LiteralPath (Join-Path $RunDirectory 'test.out') -Pattern 'synthetic video ready' -Quiet
+                if ($ready) {
+                    $shot=Save-NgteamsSyntheticShot $process 'NGTEAMS SYNTHETIC VIDEO' (Join-Path $RunDirectory 'frame.png')
+                }
+            } while (!$shot -and [DateTime]::UtcNow -lt $deadline)
+            if (!$shot) { throw 'Native video did not capture its requested foreground client-area screenshot.' }
+        }
+        $remaining=[Math]::Max(1,[int]($deadline-[DateTime]::UtcNow).TotalMilliseconds)
+        if (!$process.WaitForExit($remaining)) { throw 'Native video test deadline expired.' }
+        if ($process.ExitCode -ne 0) { throw "Native video test failed ($($process.ExitCode)); evidence: $RunDirectory" }
+        Set-Content -LiteralPath (Join-Path $RunDirectory 'passed') -Value 'native video contract passed'
+    } finally {
+        $process.Refresh()
+        if (!$process.HasExited) { $process.Kill($true); $process.WaitForExit() }
+        $process.Dispose()
     }
-    $remaining=[Math]::Max(1,[int]($deadline-[DateTime]::UtcNow).TotalMilliseconds)
-    if (!$process.WaitForExit($remaining)) { $process.Kill($true); throw 'Native video test deadline expired.' }
-    if ($process.ExitCode -ne 0) { throw "Native video test failed ($($process.ExitCode)); evidence: $RunDirectory" }
-    Set-Content -LiteralPath (Join-Path $RunDirectory 'passed') -Value 'native video contract passed'
     exit 0
 }
 Push-Location $root
