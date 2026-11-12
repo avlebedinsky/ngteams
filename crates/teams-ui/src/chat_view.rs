@@ -110,6 +110,7 @@ use gpui::{
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_component::kbd::Kbd;
+use gpui_component::shimmer::ShimmerText;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError, NOTES};
@@ -4609,8 +4610,38 @@ fn header_line(
         .into_any_element()
 }
 
+/// How faded a message's text is while its translation comes.
+const WAITING_OPACITY: f32 = 0.6;
+/// What a message waiting for its translation says beside its time.
+pub const TRANSLATING: &str = "Translating…";
+
+/// A message waiting for its translation: Teams' translation mark and "Translating…", a light sweeping over it while
+/// animations play.
+fn translating_mark(id: &str, palette: Palette, cx: &App) -> AnyElement {
+    let selector = format!("translation-mark-{id}");
+    let label: AnyElement = if crate::motion::on(cx) {
+        ShimmerText::new(TRANSLATING)
+            .id(SharedString::from(format!("translating-{id}")))
+            .highlight_color(rgb(palette.brand))
+            .into_any_element()
+    } else {
+        div().child(TRANSLATING).into_any_element()
+    };
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap_1()
+        .p(px(2.0))
+        .text_xs()
+        .text_color(rgb(palette.muted_foreground))
+        .child(Glyph::LANGUAGES.icon().size(px(14.0)))
+        .child(label)
+        .into_any_element()
+}
+
 /// Teams' translation mark of a message of a translated chat: a click shows it as sent, and back; while its
-/// translation comes, a dimmed mark; one that couldn't be translated, a mark that says so.
+/// translation comes, "Translating…" ([`translating_mark`]); one that couldn't be translated, a mark that says so.
 fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
     use chat_translate::Mark;
     let mark = item.translation.as_ref()?;
@@ -4618,7 +4649,7 @@ fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatV
     let (tip, color, toggles): (SharedString, u32, bool) = match mark {
         Mark::Translated { tip } => (tip.clone(), palette.muted_foreground, true),
         Mark::Original { tip } => (tip.clone(), palette.brand, true),
-        Mark::Waiting => ("Translating…".into(), palette.border, false),
+        Mark::Waiting => return Some(translating_mark(&id, palette, cx)),
         Mark::Failed => ("This message couldn't be translated".into(), theme::DANGER, false),
     };
     let selector = format!("translation-mark-{id}");
@@ -4803,7 +4834,13 @@ fn bubble_content(
             if let Some(quoted) = chat.quoted.clone() {
                 scope = scope.quoting(quoted);
             }
-            rich_text::render_selectable(id, &text.0, palette, forward, Some(&scope))
+            let drawn = rich_text::render_selectable(id, &text.0, palette, forward, Some(&scope));
+            // while its translation comes it shows as written, faded, as Teams fades a message being translated
+            if item.translation == Some(chat_translate::Mark::Waiting) {
+                div().opacity(WAITING_OPACITY).child(drawn).into_any_element()
+            } else {
+                drawn
+            }
         }
         Body::Deleted => muted(DELETED, palette),
         Body::Cards(cards) => {

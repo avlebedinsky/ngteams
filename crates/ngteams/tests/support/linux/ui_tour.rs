@@ -189,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 272] = [
+const STEPS: [Step; 5 + 274] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -288,9 +288,18 @@ const STEPS: [Step; 5 + 272] = [
         with_compose(shell, cx, |compose, cx| compose.send(window, cx));
     }),
     ("chat-picture-sent", |shell, _, cx| fixed_theme(shell, None, cx)),
+    // German picked, the made-up tool ([`STAGED_CHAT_CLAUDE`]) not answering yet: the header's button spins and each
+    // message waits in place, faded, "Translating…" beside its time
+    ("chat-translating", |shell, _, cx| {
+        staged_chat_tools(cx);
+        translate_chat(shell, Some("de"), cx);
+    }),
+    // half the batch written: those messages show their translation, the rest still wait
+    ("chat-translating-partial", |_, _, _| release_staged(1)),
     // the chat translated into German on this computer (a made-up tool, [`FAKE_CHAT_CLAUDE`]): the header's language
     // picker lit, each message translated with Teams' translation mark beside its time
     ("chat-translated", |shell, _, cx| {
+        release_staged(2);
         chat_tools(FAKE_CHAT_CLAUDE, cx);
         translate_chat(shell, Some("de"), cx);
         translate_another_chat(shell, Some("de"), cx);
@@ -2553,6 +2562,52 @@ while IFS= read -r line; do
   printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$body"
 done
 "#;
+
+/// A made-up Claude Code translating a chat as [`FAKE_CHAT_CLAUDE`] does, but streaming its answer a message at a time
+/// and in stages: nothing until the gate's first file exists, then the first half of the batch's answers, then the rest
+/// once its second file exists (each wait a minute at most). `__GATE__` is the gate's path ([`staged_chat_tools`]).
+const STAGED_CHAT_CLAUDE: &str = r#"#!/bin/bash
+gate="__GATE__"
+delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s\\n"}}}\n' "$1"; }
+hold() { for _ in $(seq 1200); do [ -e "$gate-$1" ] && return; sleep 0.05; done; }
+while IFS= read -r line; do
+  echo '{"type":"system","subtype":"init"}'
+  body=""
+  case "$line" in
+    *'<translate>'*)
+      body=$(printf '%s' "$line" | sed 's/.*<translate>\\n//; s/\\n<\/translate>.*//')
+      body=$(printf '%s' "$body" | sed 's/\(<m id=\\"[0-9]*\\"\) from=\\"[^\\]*\\">\(<x[0-9]*>\)\{0,1\}/\1 lang=\\"en\\">\2Übersetzt: /g')
+      mapfile -t answers < <(printf '%s' "$body" | sed 's/\\n/\n/g')
+      half=$(( (${#answers[@]} + 1) / 2 ))
+      echo '{"type":"stream_event","event":{"type":"message_start"}}'
+      hold 1
+      for answer in "${answers[@]:0:$half}"; do delta "$answer"; done
+      hold 2
+      for answer in "${answers[@]:$half}"; do delta "$answer"; done
+      ;;
+  esac
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$body"
+done
+"#;
+
+/// The gate [`STAGED_CHAT_CLAUDE`] waits on, in the temporary directory.
+fn staged_gate() -> PathBuf {
+    std::env::temp_dir().join(format!("tour-chat-gate-{}", std::process::id()))
+}
+
+/// [`STAGED_CHAT_CLAUDE`] as the AI tool the app finds, its gate closed.
+fn staged_chat_tools(cx: &mut App) {
+    let gate = staged_gate();
+    for stage in [1, 2] {
+        let _ = fs::remove_file(format!("{}-{stage}", gate.display()));
+    }
+    chat_tools(&STAGED_CHAT_CLAUDE.replace("__GATE__", &gate.display().to_string()), cx);
+}
+
+/// Lets [`STAGED_CHAT_CLAUDE`] go on to its next `stage`.
+fn release_staged(stage: u8) {
+    let _ = fs::write(format!("{}-{stage}", staged_gate().display()), "");
+}
 
 /// A made-up Claude Code that isn't signed in.
 const SIGNED_OUT_CLAUDE: &str = "#!/bin/bash\necho 'Invalid API key. Please run /login' >&2\nexit 1\n";

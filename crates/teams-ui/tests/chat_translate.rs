@@ -8,7 +8,6 @@
 #![cfg(test)]
 
 #[path = "support/fake_tool.rs"]
-#[expect(dead_code, reason = "the shared fake CLI helper serves several test harnesses")]
 mod fake_tool;
 
 #[expect(dead_code, reason = "the shared stand-ins hold more than this test uses")]
@@ -24,7 +23,8 @@ use futures_util::FutureExt as _;
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_proto::chat::RichText;
 use teams_store::{Message, SentOriginal, TranslationKind};
-use teams_ui::chat_translate::{ChatTranslation, Limits, Mark, SendFailure, Status, language_name};
+use teams_ui::chat_translate::picker::tip_of;
+use teams_ui::chat_translate::{ChatTranslation, Limits, Mark, Progress, SendFailure, Status, language_name};
 use teams_ui::local_ai::{Backend, Failure, Tools};
 use teams_ui::settings::{Settings, SettingsModel};
 
@@ -493,4 +493,149 @@ fn a_tool_that_fails_stops_the_reading_and_a_send_says_why() {
     assert_eq!(language_name("en-US"), Some("English"));
     assert_eq!(language_name("xx"), None);
     assert!(SendFailure::Unknown.message().contains("language isn't known"));
+}
+
+/// A fake Claude Code that streams its answer (`--include-partial-messages`): the first message's translation, half of
+/// the second's, then it waits for a `go` file beside itself before it writes the rest. It logs its process id.
+const STREAMING: &str = r#"#!/bin/bash
+dir="$(dirname "$0")"
+echo "$$" > "$dir/pid"
+delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; }
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$dir/received.log"
+  case "$line" in
+    *'<translate>'*)
+      echo '{"type":"stream_event","event":{"type":"message_start"}}'
+      delta '<m id=\"1\" lang=\"en\">DE one</m>'
+      delta '\n<m id=\"2\" lang=\"en\">DE tw'
+      for _ in $(seq 400); do [ -e "$dir/go" ] && break; sleep 0.05; done
+      delta 'o</m>\n<m id=\"3\" lang=\"en\">DE three</m>'
+      printf '{"type":"result","is_error":false,"result":"%s"}\n' '<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\" lang=\"en\">DE two</m>\n<m id=\"3\" lang=\"en\">DE three</m>'
+      ;;
+  esac
+done
+"#;
+
+fn three() -> Vec<Message> {
+    vec![
+        message("1", 1, LAB_B, "one"),
+        message("2", 2, LAB_B, "two"),
+        message("3", 3, LAB_B, "three"),
+    ]
+}
+
+/// The three messages followed and German picked, the streaming fake holding after the first message's answer.
+fn streaming_halfway(rig: &mut Rig) -> (Entity<ChatTranslation>, Vec<Message>) {
+    let messages = three();
+    let translation = rig.open();
+    rig.follow(&translation, &messages);
+    rig.app.run_until_parked();
+    translation.read_with(&rig.app, |translation, _| {
+        assert!(!translation.busy(), "off: nothing under way");
+        assert_eq!(translation.progress(), None);
+        assert_eq!(tip_of(translation), "Translate chat");
+    });
+    translation.update(&mut rig.app, |translation, cx| translation.set_language(Some("de"), cx));
+    // busy at once, before the tool said anything
+    translation.read_with(&rig.app, |translation, _| {
+        assert!(translation.busy());
+        assert_eq!(translation.progress(), Some(Progress { done: 0, total: 3 }));
+        assert_eq!(tip_of(translation), "Translating into German… 0 of 3");
+    });
+    rig.until(&translation, |translation| {
+        shown_text(translation, &messages[0]).is_some()
+    });
+    (translation, messages)
+}
+
+#[test]
+fn a_chat_being_translated_shows_its_progress_and_each_message_as_it_comes() {
+    let mut rig = Rig::new(STREAMING);
+    let (translation, messages) = streaming_halfway(&mut rig);
+    translation.read_with(&rig.app, |translation, _| {
+        // the first message came on its own; the second, half written, still waits, as does the third
+        assert_eq!(shown_text(translation, &messages[0]).as_deref(), Some("DE one"));
+        let shown = translation.shown();
+        assert_eq!(shown.mark_of(&messages[1]), Some(Mark::Waiting));
+        assert_eq!(shown.mark_of(&messages[2]), Some(Mark::Waiting));
+        assert_eq!(shown_text(translation, &messages[1]), None);
+        assert!(translation.busy());
+        assert_eq!(translation.progress(), Some(Progress { done: 1, total: 3 }));
+        assert_eq!(tip_of(translation), "Translating into German… 1 of 3");
+    });
+    assert_eq!(rig.core.translations.lock().unwrap().len(), 1, "kept as it came");
+    // picking the language again starts nothing new
+    translation.update(&mut rig.app, |translation, cx| translation.set_language(Some("de"), cx));
+    rig.app.run_until_parked();
+    translation.read_with(&rig.app, |translation, _| {
+        assert_eq!(translation.batches(), 1);
+        assert_eq!(translation.progress(), Some(Progress { done: 1, total: 3 }));
+    });
+
+    fs::write(rig.dir.path().join("go"), "").unwrap();
+    rig.until(&translation, |translation| !translation.busy());
+    translation.read_with(&rig.app, |translation, _| {
+        assert_eq!(shown_text(translation, &messages[1]).as_deref(), Some("DE two"));
+        assert_eq!(shown_text(translation, &messages[2]).as_deref(), Some("DE three"));
+        assert_eq!(translation.progress(), Some(Progress { done: 3, total: 3 }));
+        assert_eq!(translation.batches(), 1);
+        assert_eq!(tip_of(translation), "Chat translated into German");
+    });
+    assert_eq!(questions(rig.dir.path()).len(), 1);
+    assert_eq!(rig.core.translations.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn turning_translation_off_mid_run_stops_the_tool_and_drops_what_it_still_writes() {
+    let mut rig = Rig::new(STREAMING);
+    let (translation, messages) = streaming_halfway(&mut rig);
+    let pid = fs::read_to_string(rig.dir.path().join("pid")).unwrap();
+    let pid = pid.trim();
+    assert!(fake_tool::running(pid));
+
+    translation.update(&mut rig.app, |translation, cx| translation.set_language(None, cx));
+    translation.read_with(&rig.app, |translation, _| {
+        assert_eq!(translation.status(), &Status::Off);
+        assert!(!translation.busy());
+        assert_eq!(translation.progress(), None);
+        assert_eq!(translation.shown().mark_of(&messages[1]), None);
+        assert_eq!(shown_text(translation, &messages[0]), None);
+    });
+    // the tool is stopped, and what it would still have written goes nowhere
+    for _ in 0..500 {
+        if !fake_tool::running(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!fake_tool::running(pid), "the tool was stopped");
+    fs::write(rig.dir.path().join("go"), "").unwrap();
+    for _ in 0..20 {
+        rig.app.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    translation.read_with(&rig.app, |translation, _| {
+        assert_eq!(translation.status(), &Status::Off);
+        assert_eq!(shown_text(translation, &messages[1]), None);
+    });
+    assert_eq!(rig.core.translations.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_failure_ends_the_busy_state_and_says_how_to_try_again() {
+    let mut rig = Rig::new(SIGNED_OUT);
+    let messages = three();
+    let translation = rig.open();
+    rig.follow(&translation, &messages);
+    translation.update(&mut rig.app, |translation, cx| translation.set_language(Some("de"), cx));
+    translation.read_with(&rig.app, |translation, _| assert!(translation.busy()));
+    rig.until(&translation, |translation| {
+        matches!(translation.status(), Status::Failed(_))
+    });
+    translation.read_with(&rig.app, |translation, _| {
+        assert!(!translation.busy());
+        assert_eq!(translation.progress(), None);
+        assert_eq!(translation.shown().mark_of(&messages[0]), None);
+        assert_eq!(tip_of(translation), "Translating into German stopped");
+    });
 }

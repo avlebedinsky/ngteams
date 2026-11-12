@@ -11,7 +11,7 @@
 //! - **Reading**: every text message the view holds (history, new ones, edits, replies with their quotes) is shown in
 //!   the language, as Teams shows a translated message: its translation, with Teams' translation mark beside its time
 //!   ([`Mark`]: "See original message" shows it as written, and back). One already in the language is shown as it is,
-//!   unmarked. Until its translation comes it shows as written, marked as translating; the view never waits.
+//!   unmarked. Until its translation comes it shows as written, faded, "Translating…" beside its time; the view never waits.
 //! - **Kept in the store** (`teams-store`'s schema 20): each translation by the message's id, version and the
 //!   language, so reopening the chat, or a later run, shows it at once and asks the tool only for what is new, edited
 //!   or never translated. The chat view reads them for the messages it holds before anything goes to the tool.
@@ -27,6 +27,11 @@
 //!   the one write path. The user keeps seeing it as written: kept in memory at once and in the store by its
 //!   `clientmessageid` (or `edit:<id>`), and bound to the message as its translation once it is stored. A send whose
 //!   translation fails sends nothing: the box keeps it and says why, with Try again and Send without translating.
+//! - **Progress**: from the moment a language is picked until every message the view holds has its translation, the
+//!   header's button spins and says how far it has come ([`ChatTranslation::progress`]), and each message still
+//!   waiting says "Translating…" in place ([`Mark::Waiting`]). Translations show a message at a time as the tool writes
+//!   them ([`session::Outcome::Partial`]), the newest batch first. Turning translation off (or picking another language)
+//!   mid-run stops the tool at once and drops what it was still writing.
 //! - **Failures** stop the reading ([`Status::Failed`]: the tool missing, signed out, too slow, or stopped): the chat
 //!   shows a notice saying why, with Try again, and its messages as written.
 //! - **Outside the view** ([`Previews`]): the chat list's preview, a new message's notification and the search's cards
@@ -267,10 +272,21 @@ impl SendFailure {
 /// What a translated send gives back: the text to send, or `None` to send it as written (it is in the chat's language).
 pub type Outgoing = Result<Option<RichText>, SendFailure>;
 
-/// A batch the tool is working on: each message's number, id, version and markers.
+/// A message of a batch the tool is working on: its number, id, version and markers.
+type RunningItem = (usize, String, i64, Shells);
+
+/// A batch the tool is working on: its messages not answered yet.
 struct Running {
     id: u64,
-    items: Vec<(usize, String, i64, Shells)>,
+    items: Vec<RunningItem>,
+}
+
+/// How far reading a chat in its language has come: of the text messages the view holds, how many show their
+/// translation (or are known to need none, or couldn't be translated).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub done: usize,
+    pub total: usize,
 }
 
 /// One chat's translation (see the module docs): a GPUI entity its view feeds with the messages it holds.
@@ -383,6 +399,30 @@ impl ChatTranslation {
     #[must_use]
     pub fn batches(&self) -> u64 {
         self.batches
+    }
+
+    /// Whether the chat's messages are being translated now: a language is picked, nothing failed, and a message the
+    /// view holds still waits for its translation. The header's button shows it from the moment a language is picked.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.progress().is_some_and(|progress| progress.done < progress.total)
+    }
+
+    /// How far the reading has come, while the chat is translated (`None`: off or failed).
+    #[must_use]
+    pub fn progress(&self) -> Option<Progress> {
+        if self.status != Status::On || self.language.is_none() {
+            return None;
+        }
+        let done = self
+            .sources
+            .iter()
+            .filter(|source| self.entry_of(source).is_some())
+            .count();
+        Some(Progress {
+            done,
+            total: self.sources.len(),
+        })
     }
 
     /// The header's language menu, once drawn ([`picker::picker_of`]).
@@ -800,12 +840,21 @@ impl ChatTranslation {
 
     fn received(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
         match outcome {
+            Outcome::Partial { id, answers } => {
+                let Some(mut running) = self.running.take_if(|running| running.id == id) else {
+                    return;
+                };
+                running.items = self.answered(running.items, &answers, false);
+                self.running = Some(running);
+            }
             Outcome::Batch { id, answers } => {
                 let Some(running) = self.running.take_if(|running| running.id == id) else {
                     return;
                 };
                 match answers {
-                    Ok(answers) => self.answered(running, &answers),
+                    Ok(answers) => {
+                        self.answered(running.items, &answers, true);
+                    }
                     Err(failure) => self.status = Status::Failed(failure),
                 }
                 self.pump(cx);
@@ -820,15 +869,24 @@ impl ChatTranslation {
         cx.notify();
     }
 
-    /// A batch's answers: each kept, in memory and in the store; one left out is asked again, up to [`ATTEMPTS`].
-    fn answered(&mut self, running: Running, answers: &HashMap<usize, Answer>) {
-        let Some(language) = self.language else { return };
+    /// A batch's answers, those so far (`whole`: all of them): each kept, in memory and in the store. The items not
+    /// answered yet are given back while the batch runs; once it is done, one left out is asked again, up to
+    /// [`ATTEMPTS`].
+    fn answered(&mut self, items: Vec<RunningItem>, answers: &HashMap<usize, Answer>, whole: bool) -> Vec<RunningItem> {
+        let Some(language) = self.language else {
+            return Vec::new();
+        };
         let mut kept = Vec::new();
+        let mut waiting = Vec::new();
         let entries = Arc::make_mut(&mut self.entries);
-        for (n, id, version, shells) in running.items {
+        for (n, id, version, shells) in items {
             let Some(source) = self.sources.iter().find(|source| source.id == id) else {
                 continue;
             };
+            if !whole && !answers.contains_key(&n) {
+                waiting.push((n, id, version, shells));
+                continue;
+            }
             let entry = match answers.get(&n) {
                 Some(Answer::Translated { text, source }) => Entry::Translated {
                     version,
@@ -856,6 +914,7 @@ impl ChatTranslation {
         if !kept.is_empty() {
             self.keep(kept);
         }
+        waiting
     }
 
     /// Keeps `rows` in the store (nothing waits on it).

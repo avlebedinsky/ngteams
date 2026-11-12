@@ -451,3 +451,63 @@ fn the_picker_s_filter_matches_names_and_codes() {
     assert!(matching("written").contains(&(None, AS_WRITTEN)));
     assert!(matching("zzz").is_empty());
 }
+
+/// A fake Claude Code that answers nothing until a `go` file is beside it, then each message of a batch as `DE <n>`.
+const HOLDING: &str = r#"#!/bin/bash
+dir="$(dirname "$0")"
+while IFS= read -r line; do
+  for _ in $(seq 400); do [ -e "$dir/go" ] && break; sleep 0.05; done
+  ans=""
+  for n in $(printf '%s' "$line" | grep -o '<m id=\\"[0-9]*\\"' | grep -o '[0-9]*'); do
+    ans="$ans<m id=\\\"$n\\\" lang=\\\"en\\\">DE $n</m>"
+  done
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$ans"
+done
+"#;
+
+#[test]
+fn a_chat_being_translated_spins_its_button_and_says_translating_on_each_message() {
+    use teams_ui::chat_translate::Mark;
+    let rig = Rig::start();
+    let dir = tempfile::tempdir().unwrap();
+    let fake = tool(dir.path(), "claude", HOLDING);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, fake)])));
+    let (view, cx) = translated_chat(&rig);
+    let model = translation(&view, cx);
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let header = model.clone();
+    let (_, header_cx) = app.add_window_view(|_, _| Header(header));
+    header_cx.simulate_resize(size(px(400.0), px(300.0)));
+    draw(cx);
+    draw(header_cx);
+    // under way: the button spins (and still opens its menu), each message says so in place
+    assert!(header_cx.debug_bounds("chat-translate-busy").is_some());
+    assert_eq!(mark_of(&view, cx, "1001"), Some(Mark::Waiting));
+    assert!(cx.debug_bounds("translation-mark-1001").is_some());
+    cx.update(|_, cx| {
+        let translation = model.read(cx);
+        assert!(translation.busy());
+        assert_eq!(
+            teams_ui::chat_translate::picker::tip_of(translation),
+            "Translating into German… 0 of 3"
+        );
+    });
+    let button = header_cx.debug_bounds("chat-translate").unwrap();
+    header_cx.simulate_click(button.center(), Modifiers::none());
+    draw(header_cx);
+    assert!(
+        header_cx.debug_bounds("chat-translate-off").is_some(),
+        "the menu still opens"
+    );
+    header_cx.simulate_keystrokes("escape");
+    draw(header_cx);
+
+    fs::write(dir.path().join("go"), "").unwrap();
+    until(cx, |cx| {
+        matches!(mark_of(&view, cx, "1001"), Some(Mark::Translated { .. }))
+    });
+    draw(header_cx);
+    assert!(header_cx.debug_bounds("chat-translate-busy").is_none());
+    assert!(header_cx.debug_bounds("chat-translate").is_some());
+}

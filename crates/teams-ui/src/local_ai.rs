@@ -5,10 +5,12 @@
 //! started as a child process with nothing of the user's setup that could act on what it is given:
 //!
 //! - **Claude Code** runs as `claude -p --input-format stream-json --output-format stream-json`: one user message per
-//!   question in one conversation, its `result` line the answer. No tools, MCP servers, slash commands, settings files
-//!   (so no hooks) or saved session.
+//!   question in one conversation, its `result` line the answer (a chat's translation also reads its text as it
+//!   streams, `--include-partial-messages`). No tools, MCP servers, slash commands, settings files (so no hooks) or
+//!   saved session.
 //! - **Codex** runs as `codex app-server` (JSON-RPC over stdio): `initialize`, one ephemeral read-only thread whose
-//!   base instructions are ours, then one `turn/start` per question, its last agent message the answer. Hooks, apps,
+//!   base instructions are ours, then one `turn/start` per question, its last agent message the answer (its deltas
+//!   the text so far). Hooks, apps,
 //!   plugins, MCP servers, tools and project docs are turned off for it.
 //!
 //! The models each tool offers are listed from what it reports itself ([`catalog`]), never from a list of ours.
@@ -193,6 +195,10 @@ impl Backend {
                 let mut args = vec!["-p".to_owned()];
                 if let Some(model) = self.model_of(work, model) {
                     args.extend(["--model".to_owned(), model]);
+                }
+                // a chat's translations show as each message's comes, not once the whole batch is done
+                if work == Work::Chat {
+                    args.push("--include-partial-messages".to_owned());
                 }
                 args.extend(
                     [
@@ -674,23 +680,50 @@ impl Tool {
     /// # Errors
     /// The tool refused, stopped, took longer than `wait`, or `stop` was set.
     pub fn ask(&mut self, message: &str, wait: Duration, stop: &AtomicBool) -> Result<String, Failure> {
+        self.ask_streaming(message, wait, stop, &mut |_| {})
+    }
+
+    /// [`Self::ask`], telling `partial` the answer's text so far each time more of it comes (when the tool streams it:
+    /// Claude Code started for [`Work::Chat`], and Codex), before the whole answer is given back.
+    ///
+    /// # Errors
+    /// As [`Self::ask`].
+    pub fn ask_streaming(
+        &mut self,
+        message: &str,
+        wait: Duration,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
         let deadline = Instant::now() + wait;
         self.turns += 1;
         self.chars += message.len();
         let text = match self.backend {
-            Backend::Claude => self.ask_claude(message, deadline, stop),
-            Backend::Codex => self.ask_codex(message, deadline, stop),
+            Backend::Claude => self.ask_claude(message, deadline, stop, partial),
+            Backend::Codex => self.ask_codex(message, deadline, stop, partial),
         }?;
         self.answered = true;
         Ok(text.trim().to_owned())
     }
 
-    fn ask_claude(&mut self, message: &str, deadline: Instant, stop: &AtomicBool) -> Result<String, Failure> {
+    fn ask_claude(
+        &mut self,
+        message: &str,
+        deadline: Instant,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
         self.write(&json!({"type": "user", "message": {"role": "user", "content": message}}))?;
+        let mut so_far = String::new();
         loop {
             let line = self.next_message(deadline, stop)?;
-            if line.get("type").and_then(Value::as_str) != Some("result") {
-                continue;
+            match line.get("type").and_then(Value::as_str) {
+                Some("stream_event") => {
+                    stream_event(&line, &mut so_far, partial);
+                    continue;
+                }
+                Some("result") => {}
+                _ => continue,
             }
             let said = line.get("result").and_then(Value::as_str);
             if line.get("is_error").and_then(Value::as_bool) == Some(true) {
@@ -700,7 +733,13 @@ impl Tool {
         }
     }
 
-    fn ask_codex(&mut self, message: &str, deadline: Instant, stop: &AtomicBool) -> Result<String, Failure> {
+    fn ask_codex(
+        &mut self,
+        message: &str,
+        deadline: Instant,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
         let thread = self.thread.clone().unwrap_or_default();
         let id = self.request(
             "turn/start",
@@ -711,6 +750,8 @@ impl Tool {
             }),
         )?;
         let (mut text, mut error) = (None::<String>, None::<String>);
+        // the agent message being written: its item and its text so far
+        let (mut item, mut so_far) = (String::new(), String::new());
         loop {
             let line = self.next_message(deadline, stop)?;
             self.refuse_request(&line)?;
@@ -721,6 +762,15 @@ impl Tool {
             }
             let params = line.get("params").unwrap_or(&Value::Null);
             match line.get("method").and_then(Value::as_str) {
+                Some("item/agentMessage/delta") => {
+                    let of = params.get("itemId").and_then(Value::as_str).unwrap_or_default();
+                    if of != item {
+                        of.clone_into(&mut item);
+                        so_far.clear();
+                    }
+                    so_far.push_str(params.get("delta").and_then(Value::as_str).unwrap_or_default());
+                    partial(&so_far);
+                }
                 Some("item/completed") if params.pointer("/item/type") == Some(&json!("agentMessage")) => {
                     text = params.pointer("/item/text").and_then(Value::as_str).map(str::to_owned);
                 }
@@ -814,6 +864,20 @@ impl Tool {
             thread::sleep(Duration::from_millis(20));
         }
         self.child.stop();
+    }
+}
+
+/// Claude Code's streamed event `line` (`--include-partial-messages`): a text delta adds to `so_far`, told to `partial`;
+/// a new message starts it over.
+fn stream_event(line: &Value, so_far: &mut String, partial: &mut dyn FnMut(&str)) {
+    let event = line.get("event").unwrap_or(&Value::Null);
+    match event.get("type").and_then(Value::as_str) {
+        Some("message_start") => so_far.clear(),
+        Some("content_block_delta") if event.pointer("/delta/type") == Some(&json!("text_delta")) => {
+            so_far.push_str(event.pointer("/delta/text").and_then(Value::as_str).unwrap_or_default());
+            partial(so_far);
+        }
+        _ => {}
     }
 }
 

@@ -4,6 +4,7 @@
 
 use crate::fake_tool;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -172,4 +173,133 @@ fn a_failure_is_told_with_its_job_and_the_next_job_starts_the_tool_anew() {
         not_a_translation(Backend::Codex).message(),
         "The Codex CLI stopped: its answer wasn't a translation."
     );
+}
+
+/// A fake Claude Code that streams a batch's answer (`--include-partial-messages`), logging its arguments: the first
+/// message's answer, the second's cut mid-way, then the rest; a new message starting over what came before.
+const STREAMING_CLAUDE: &str = r#"#!/bin/bash
+printf 'args %s\n' "$*" >> "$(dirname "$0")/received.log"
+delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; }
+while IFS= read -r line; do
+  echo '{"type":"stream_event","event":{"type":"message_start"}}'
+  delta '<m id=\"1\" lang=\"en\">DE one</m>'
+  delta '\n<m id=\"2\" lang=\"e'
+  echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}}'
+  delta 'n\">DE two</m><m id=\"3\" lang=\"de\" same/>'
+  printf '{"type":"result","is_error":false,"result":"%s"}\n' '<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\" lang=\"en\">DE two</m><m id=\"3\" lang=\"de\" same/>'
+done
+"#;
+
+/// A fake Codex app server that streams a turn's agent message as deltas.
+const STREAMING_CODEX: &str = r#"#!/bin/bash
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  delta() { printf '{"method":"item/agentMessage/delta","params":{"itemId":"%s","delta":"%s"}}\n' "$1" "$2"; }
+  case "$line" in
+    *'"method":"initialize"'*) echo "{\"id\":$id,\"result\":{}}";;
+    *'"method":"thread/start"'*) echo "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"synthetic-thread\"}}}";;
+    *'"method":"turn/start"'*)
+      echo "{\"id\":$id,\"result\":{\"turn\":{}}}"
+      delta b '<m id=\"1\" lang=\"en\">DE one</m>'
+      delta b '<m id=\"2\" lang=\"en\">DE two</m>'
+      echo '{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"<m id=\"1\" lang=\"en\">DE one</m><m id=\"2\" lang=\"en\">DE two</m>"}}}'
+      echo '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}';;
+  esac
+done
+"#;
+
+fn three_items() -> Job {
+    Job::Batch {
+        id: 7,
+        context: Vec::new(),
+        items: (1..=3)
+            .map(|n| Item {
+                n,
+                from: "Lab B".to_owned(),
+                text: format!("message {n}"),
+            })
+            .collect(),
+    }
+}
+
+/// The session's outcomes until the batch's whole answer, its partial answers' numbers in the order they came.
+fn partials_then_batch(session: &Session) -> (Vec<Vec<usize>>, HashMap<usize, Answer>) {
+    let mut partials = Vec::new();
+    loop {
+        match next(session) {
+            Outcome::Partial { id: 7, answers } => {
+                let mut numbers: Vec<usize> = answers.keys().copied().collect();
+                numbers.sort_unstable();
+                partials.push(numbers);
+            }
+            Outcome::Batch { id: 7, answers } => return (partials, answers.unwrap()),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+fn quick() -> Limits {
+    Limits {
+        turns: 100,
+        chars: 1_000_000,
+        first: Duration::from_secs(10),
+        turn: Duration::from_secs(10),
+    }
+}
+
+#[test]
+fn claude_s_batch_answers_come_a_message_at_a_time_as_it_writes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(Spec {
+        backend: Backend::Claude,
+        program: fake_tool::write(dir.path(), "claude", STREAMING_CLAUDE),
+        model: Model::Recommended,
+        language: "German",
+        limits: quick(),
+    });
+    session.send(three_items());
+    let (partials, whole) = partials_then_batch(&session);
+    // the second came only once it was closed, the third with it
+    assert_eq!(partials, [vec![1], vec![2, 3]]);
+    assert_eq!(whole.len(), 3);
+    assert_eq!(
+        whole.get(&3),
+        Some(&Answer::Same {
+            source: Some("de".to_owned())
+        })
+    );
+    let log = fs::read_to_string(dir.path().join("received.log")).unwrap();
+    assert!(log.contains("--include-partial-messages"), "{log}");
+}
+
+#[test]
+fn codex_s_batch_answers_come_from_its_message_deltas() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(Spec {
+        backend: Backend::Codex,
+        program: fake_tool::write(dir.path(), "codex", STREAMING_CODEX),
+        model: Model::Recommended,
+        language: "German",
+        limits: quick(),
+    });
+    session.send(three_items());
+    let (partials, whole) = partials_then_batch(&session);
+    assert_eq!(partials, [vec![1], vec![2]]);
+    assert_eq!(whole.len(), 2);
+}
+
+#[test]
+fn only_closed_answers_are_fresh_and_each_once() {
+    let mut told = HashSet::new();
+    assert!(fresh_answers("<m id=\"1\" lang=\"en\">DE o", &mut told).is_empty());
+    assert!(fresh_answers("<m id=\"1\" lang=\"en", &mut told).is_empty());
+    let first = fresh_answers("<m id=\"1\" lang=\"en\">DE one</m>", &mut told);
+    assert_eq!(first.keys().copied().collect::<Vec<_>>(), [1]);
+    // still open after the first: nothing new
+    assert!(fresh_answers("<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\">D", &mut told).is_empty());
+    let second = fresh_answers(
+        "<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\" lang=\"en\" same/>\n",
+        &mut told,
+    );
+    assert_eq!(second.keys().copied().collect::<Vec<_>>(), [2]);
 }
