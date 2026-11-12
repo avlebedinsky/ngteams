@@ -24,7 +24,7 @@ $Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPat
 if ($SignCommand -and ($SignCommand -notmatch '\$f' -or $SignCommand.Contains('"'))) {
     throw 'The sign command needs $f for the file, and $q rather than a double quote.'
 }
-# The top-level names ngteams.iss's [InstallDelete] knows: an upgrade removes exactly these before installing.
+# The top-level names ngteams.iss knows: an upgrade replaces exactly its ProgramItems, and leaves out the zip's own files.
 $installerNames = @('bin', 'lib', 'libexec', 'share', 'MEDIA-MANIFEST.json', 'LICENSE-MIT', 'LICENSE-APACHE',
     'Install.ps1', 'Unregister.ps1', 'README.txt', 'PACKAGE-MANIFEST.json')
 
@@ -36,7 +36,7 @@ function Invoke-NgteamsSigning([string]$File) {
 
 function New-NgteamsInstaller([string]$Stage) {
     $unknown = @(Get-ChildItem -LiteralPath $Stage -Force | Where-Object { $installerNames -notcontains $_.Name })
-    if ($unknown) { throw "Add these to ngteams.iss [InstallDelete] and this script: $($unknown.Name -join ', ')" }
+    if ($unknown) { throw "Add these to ngteams.iss ProgramItems and this script: $($unknown.Name -join ', ')" }
     # What the installed app's updater reads (crates/teams-update MARKER and IDENTITY), installed under share/ngteams.
     $markers = Join-Path ([IO.Path]::GetTempPath()) ('ngteams-installer-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory $markers | Out-Null

@@ -246,11 +246,14 @@ component authoring.
 
 It installs under `%LOCALAPPDATA%\Programs\ngteams` with a Start menu shortcut carrying the app's notification
 identity, an Add/Remove programs entry and the `msteams:` handler offered under Default apps, all in `HKCU`. An upgrade
-first removes the previous version's program folders (only in a folder an earlier ngteams installer marked; the
-packaging script refuses a stage with a top-level name `[InstallDelete]` doesn't list). Uninstall removes those and
-the app's own notification registration, and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's
-updater runs the installer with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades,
-and starts it again (the previous one if the upgrade fails). The `windows` job installs and uninstalls it on the
+first moves the previous version's program folders aside into `previous-version` inside the installation (only in a
+folder an earlier ngteams installer marked; the packaging script refuses a stage with a top-level name the script's
+`ProgramItems` doesn't list), removes them once the new version is in, and puts them back when it fails; it stops
+before moving anything while a process runs from the installation. An older installer is refused unless run with
+`/ALLOWDOWNGRADE`, and one installer runs at a time. Uninstall removes the program and the app's own notification
+registration, and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's updater runs the installer with
+`/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades, and starts it again, the previous
+version when the upgrade fails. The `windows` job installs and uninstalls it on the
 runner with `scripts/test-windows-installer.ps1` (never starting the app) and checks every installed program file
 against the zip's `PACKAGE-MANIFEST.json`.
 

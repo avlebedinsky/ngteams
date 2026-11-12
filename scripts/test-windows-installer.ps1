@@ -13,7 +13,9 @@ param(
     # The unzipped release's ngteams folder: every installed program file must match its PACKAGE-MANIFEST.json hash.
     [string]$Package,
     # Upgrade the way the app's updater does (/UPDATEPID): waits for a stand-in process, then starts the installed
-    # ngteams.exe. Only for lab-built installers (a lab build refuses to start without --lab); never in CI.
+    # ngteams.exe. Before it, three updater runs that fail (a program still running from bin; a file held open in bin;
+    # a late failure, the uninstaller held open) must leave the previous version whole and start it again. Only for lab-built installers (a lab build
+    # refuses to start without --lab); never in CI.
     [switch]$UpdateRelaunch,
     [string]$Logs = (Join-Path ([IO.Path]::GetTempPath()) ('ngteams-installer-test-' + [Guid]::NewGuid().ToString('N')))
 )
@@ -79,6 +81,52 @@ function Assert-Installed([string]$Version) {
     Assert-That ((Get-RegistryValue 'HKCU:\Software\Classes\ngteams.msteams\shell\open\command' '(default)') -eq "`"$exe`" `"%1`"") 'the msteams: handler opens the installed app'
 }
 
+# The time Setup logged a line matching $Pattern at, from its log.
+function Get-LogTime([string]$Log, [string]$Pattern) {
+    $line = Select-String -LiteralPath $Log -Pattern $Pattern | Select-Object -First 1
+    if (!$line -or $line.Line -notmatch '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})') { throw "FAILED: no '$Pattern' in $Log" }
+    return [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+# Whether Setup's log shows it starting the installed ngteams.exe: a [Run] entry, or the fallback after a failure.
+function Test-Restarted([string]$Log) {
+    $text = Get-Content -Raw -LiteralPath $Log
+    $run = "-- Run entry --(\r?\n.*){1,3}\r?\n.*Filename: $([regex]::Escape($exe))\r?\n"
+    return ($text -match $run) -or ($text -match "Starting ngteams again: $([regex]::Escape($exe))")
+}
+
+# An updater run of -Installer over $Older that fails while $Hold is held open (read sharing only, as a program
+# using it), or with no $Hold while a program runs from bin: it must exit non-zero, leave $Older whole with nothing set
+# aside, and start it again.
+function Assert-FailedUpdate([string]$Name, [string]$Hold, [string]$Older, [string]$Expected) {
+    $standIn = Start-Process pwsh -ArgumentList '-NoProfile', '-Command', 'exit' -PassThru -Wait -WindowStyle Hidden
+    if ($Hold) {
+        $held = [IO.File]::Open($Hold, 'Open', 'Read', 'Read')
+    } else {
+        $runner = Join-Path $app 'bin\stand-in.exe'
+        Copy-Item (Join-Path $env:SystemRoot 'System32\timeout.exe') $runner
+        $held = Start-Process $runner -ArgumentList '/t', '300', '/nobreak' -PassThru -WindowStyle Hidden
+    }
+    try {
+        $code = (Invoke-Setup $Installer $Name @("/UPDATEPID=$($standIn.Id)", '/SP-', "/DIR=`"$app`""))[-1]
+    } finally {
+        if ($Hold) {
+            $held.Close()
+        } else {
+            Stop-Process -Id $held.Id -Force
+            $held.WaitForExit()
+            Remove-Item -LiteralPath $runner
+        }
+    }
+    $log = Join-Path $Logs "$Name.log"
+    Assert-That ($code -ne 0) "$Name fails"
+    Assert-That ((Get-Content -Raw -LiteralPath $log) -match $Expected) "$Name failed where it was meant to ($Expected)"
+    Assert-Installed $Older
+    Assert-That (Test-Path -LiteralPath (Join-Path $app 'bin\previous-only.dll')) "$Name left the previous version's files"
+    Assert-That (!(Test-Path -LiteralPath (Join-Path $app 'previous-version'))) "$Name left nothing set aside"
+    Assert-That (Test-Restarted $log) "$Name started the previous ngteams.exe again"
+}
+
 function Assert-Package {
     if (!$Package) { return }
     $manifest = Get-Content -Raw (Join-Path $Package 'PACKAGE-MANIFEST.json') | ConvertFrom-Json
@@ -106,20 +154,31 @@ if ($Previous) {
     # A file only the previous version had: the upgrade must not leave it.
     Set-Content (Join-Path $app 'bin\previous-only.dll') 'stale'
     if ($UpdateRelaunch) {
+        # Stopped before anything moved: a program still runs from bin, or a file in it is in use.
+        Assert-FailedUpdate "update-running-$version" '' $older 'ngteams is still running'
+        Assert-FailedUpdate "update-held-$version" (Join-Path $app 'bin\previous-only.dll') $older 'is in use'
+        # Failed after the previous version was moved aside and the new one copied: Setup can't replace the
+        # uninstaller, rolls back, and the previous version goes back.
+        Assert-FailedUpdate "update-late-$version" (Join-Path $app 'unins000.exe') $older 'Put the previous version''s bin back'
         # The updater's run: the installer waits for the app (a stand-in here) to exit, then starts the installed app.
         $standIn = Start-Process pwsh -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 8' -PassThru -WindowStyle Hidden
-        $started = Get-Date
-        $code = (Invoke-Setup $Installer "update-$version" @("/UPDATEPID=$($standIn.Id)", '/CLOSEAPPLICATIONS', '/SP-', "/DIR=`"$app`""))[-1]
+        $code = (Invoke-Setup $Installer "update-$version" @("/UPDATEPID=$($standIn.Id)", '/SP-', "/DIR=`"$app`""))[-1]
+        $log = Join-Path $Logs "update-$version.log"
         Assert-That ($code -eq 0) "the updater's run of $version succeeds"
-        Assert-That ($standIn.HasExited -and ((Get-Date) - $started).TotalSeconds -ge 7) 'it waited for the app to exit'
-        Assert-That ((Get-Content -Raw (Join-Path $Logs "update-$version.log")) -match [regex]::Escape($exe)) 'it started the installed ngteams.exe again'
+        Assert-That ($standIn.HasExited -and (Get-LogTime $log 'Starting the installation process') -ge $standIn.ExitTime) 'it waited for the app to exit before installing'
+        Assert-That (Test-Restarted $log) 'it started the installed ngteams.exe again'
     } else {
         Assert-That ((Invoke-Setup $Installer "upgrade-$version")[-1] -eq 0) "ngteams $older upgrades to $version in place"
     }
     Assert-That (!(Test-Path -LiteralPath (Join-Path $app 'bin\previous-only.dll'))) "the previous version's files are gone"
+    Assert-That (!(Test-Path -LiteralPath (Join-Path $app 'previous-version'))) 'nothing is left set aside'
     Assert-Installed $version
     Assert-That (@(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | Where-Object { (Get-ItemProperty $_.PSPath).PSObject.Properties.Name -contains 'DisplayName' -and (Get-ItemProperty $_.PSPath).DisplayName -eq 'ngteams' }).Count -eq 1) 'Add/Remove programs has one ngteams'
     Assert-That ((Invoke-Setup $Previous "downgrade-$older")[-1] -ne 0) "the older $older doesn't replace $version"
+    Assert-Installed $version
+    Assert-That ((Invoke-Setup $Previous "allowed-downgrade-$older" @('/ALLOWDOWNGRADE'))[-1] -eq 0) "/ALLOWDOWNGRADE puts $older back"
+    Assert-Installed $older
+    Assert-That ((Invoke-Setup $Installer "reupgrade-$version")[-1] -eq 0) "ngteams $older upgrades to $version again"
     Assert-Installed $version
 } else {
     Assert-That ((Invoke-Setup $Installer "install-$version")[-1] -eq 0) "ngteams $version installs"

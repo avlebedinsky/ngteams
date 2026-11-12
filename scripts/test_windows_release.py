@@ -123,11 +123,12 @@ def iss_setup(name):
 class WindowsInstallerScript(unittest.TestCase):
     """packaging/windows/ngteams.iss agrees with the packaging script, the app and the updater."""
 
-    def test_an_upgrade_removes_exactly_what_the_installer_ships(self):
+    def test_an_upgrade_replaces_exactly_what_the_installer_ships(self):
         excluded = re.search(r'Excludes: "([^"]*)"', SCRIPT).group(1).replace("\\", "").split(",")
-        removed = re.findall(r'^Type: (?:files|filesandordirs); Name: "\{app\}\\([^"]+)"; Check: UpgradingHere$',
-                             SCRIPT, re.M)
-        self.assertEqual(sorted(removed + excluded), sorted(installer_names()))
+        replaced = iss_define("ProgramItems").split("|")
+        self.assertEqual(sorted(replaced + excluded), sorted(installer_names()))
+        # nothing is deleted before the previous version is safely aside
+        self.assertNotIn("[InstallDelete]", SCRIPT)
         self.assertEqual(set(excluded), {"Install.ps1", "Unregister.ps1", "README.txt", "PACKAGE-MANIFEST.json"})
 
     def test_its_names_and_ids_are_the_apps(self):

@@ -114,9 +114,10 @@ impl Prepared {
     /// The installer's arguments for an unattended upgrade of this installation, once it is checked to be still the
     /// verified download (its stage is in the user's own folder, as writable as the installer itself).
     ///
-    /// `/UPDATEPID` makes it wait for this process to exit, then start the installed app once it is done (or the
-    /// previous one, when it fails); `/DIR` is the installation detected, never a folder the installer guesses; its
-    /// log stays in the stage.
+    /// `/UPDATEPID` makes it wait for this process to exit, upgrade, and start the app again: the new version, or
+    /// when the upgrade fails the previous one, which it keeps aside until the new one is in and puts back otherwise.
+    /// A process still running from the installation after the wait stops the upgrade before anything changes.
+    /// `/DIR` is the installation detected, never a folder the installer guesses; its log stays in the stage.
     fn setup_arguments(&self, stage: &Path) -> Result<Vec<OsString>, Error> {
         if file_sha256(&self.candidate)? != self.sha256 {
             return Err(error(
@@ -132,7 +133,6 @@ impl Prepared {
             "/VERYSILENT".into(),
             "/SUPPRESSMSGBOXES".into(),
             "/NORESTART".into(),
-            "/CLOSEAPPLICATIONS".into(),
             "/SP-".into(),
             format!("/UPDATEPID={}", std::process::id()).into(),
             directory,

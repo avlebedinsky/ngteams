@@ -10,10 +10,12 @@
 ;   current default (Microsoft Teams, say) until they change it.
 ; - WebView2 Runtime missing: Microsoft's Evergreen bootstrapper is downloaded, its Microsoft signature checked, then
 ;   run, as Install.ps1 does.
-; - An upgrade replaces the previous version's program folders in place; an uninstall removes the program, its
-;   shortcut and registrations, and keeps the accounts and data in %LOCALAPPDATA%\ngteams and Credential Manager.
+; - An upgrade replaces the previous version's program folders in place, keeping them aside until it has succeeded and
+;   putting them back when it fails; an uninstall removes the program, its shortcut and registrations, and keeps the
+;   accounts and data in %LOCALAPPDATA%\ngteams and Credential Manager.
 ; - The app's own updater (crates/teams-update) runs this installer with /VERYSILENT /UPDATEPID=<pid> /DIR=<folder>:
-;   it waits for that process to exit, upgrades the folder and starts ngteams again.
+;   it waits for that process to exit, upgrades the folder and starts ngteams again, the previous version when the
+;   upgrade fails.
 
 #ifndef AppVersion
   #error Pass /DAppVersion=MAJOR.MINOR.PATCH.RUN
@@ -35,6 +37,11 @@
 ; (activator_id in crates/teams-ui/src/desktop/windows/registration.rs).
 #define ToastActivator "81B7D32D-75F7-6DB4-6A45-99728BC2AF17"
 #define AppUserModelId "com.nickalie.ngteams"
+; The program's top-level items, which an upgrade replaces (MovePreviousAside). Only in a folder an earlier ngteams
+; installer marked; scripts/package-release-windows.ps1 refuses a stage with any other top-level name.
+#define ProgramItems "bin|lib|libexec|share|MEDIA-MANIFEST.json|LICENSE-MIT|LICENSE-APACHE"
+; Where an upgrade keeps them until it has succeeded, inside the installation.
+#define PreviousFolder "previous-version"
 
 [Setup]
 AppId={{#AppGuid}
@@ -75,6 +82,8 @@ CloseApplications=yes
 RestartApplications=no
 ChangesAssociations=yes
 ShowLanguageDialog=no
+; One installer at a time for this user: a second one waiting on its welcome page can't overwrite the first one's work.
+SetupMutex=ngteams-setup-1150C52E-F222-4AA3-B1D0-EB09F8BBBFF7
 #ifdef SignTool
 SignTool={#SignTool}
 SignedUninstaller=yes
@@ -86,17 +95,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
-; The previous version's program folders, so nothing it shipped and this one doesn't stays behind. Only in a folder an
-; earlier ngteams installer marked; scripts/package-release-windows.ps1 refuses a stage with any other top-level name.
-[InstallDelete]
-Type: filesandordirs; Name: "{app}\bin"; Check: UpgradingHere
-Type: filesandordirs; Name: "{app}\lib"; Check: UpgradingHere
-Type: filesandordirs; Name: "{app}\libexec"; Check: UpgradingHere
-Type: filesandordirs; Name: "{app}\share"; Check: UpgradingHere
-Type: files; Name: "{app}\MEDIA-MANIFEST.json"; Check: UpgradingHere
-Type: files; Name: "{app}\LICENSE-MIT"; Check: UpgradingHere
-Type: files; Name: "{app}\LICENSE-APACHE"; Check: UpgradingHere
-
 [Files]
 ; The zip's own setup, removal and README aren't part of an installed copy; its manifest lists them.
 Source: "{#StageDir}\*"; DestDir: "{app}"; Excludes: "\Install.ps1,\Unregister.ps1,\README.txt,\PACKAGE-MANIFEST.json"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -104,32 +102,35 @@ Source: "{#StageDir}\*"; DestDir: "{app}"; Excludes: "\Install.ps1,\Unregister.p
 Source: "{#MarkerDir}\update-format"; DestDir: "{app}\share\ngteams"; Flags: ignoreversion
 Source: "{#MarkerDir}\release"; DestDir: "{app}\share\ngteams"; Flags: ignoreversion
 
+; The shortcuts and registrations below are removed by the uninstaller's own code (RemoveInstallerRegistrations), not
+; by Inno's uninstall log: a failed upgrade's rollback replays that log, and would remove the previous version's too.
 [Icons]
 ; The app's toast notifications need its shortcut to carry its identity; the app sets the same on its first start.
-Name: "{autoprograms}\ngteams"; Filename: "{app}\bin\ngteams.exe"; WorkingDir: "{app}\bin"; Comment: "ngteams"; AppUserModelID: "{#AppUserModelId}"; AppUserModelToastActivatorCLSID: "{#ToastActivator}"
-Name: "{autodesktop}\ngteams"; Filename: "{app}\bin\ngteams.exe"; WorkingDir: "{app}\bin"; Comment: "ngteams"; Tasks: desktopicon
+Name: "{autoprograms}\ngteams"; Filename: "{app}\bin\ngteams.exe"; WorkingDir: "{app}\bin"; Comment: "ngteams"; AppUserModelID: "{#AppUserModelId}"; AppUserModelToastActivatorCLSID: "{#ToastActivator}"; Flags: uninsneveruninstall
+Name: "{autodesktop}\ngteams"; Filename: "{app}\bin\ngteams.exe"; WorkingDir: "{app}\bin"; Comment: "ngteams"; Tasks: desktopicon; Flags: uninsneveruninstall
 
 ; The msteams: handler offered under Default apps, as Install.ps1 registers it. The msteams scheme itself and the
 ; user's choice for it are left alone.
 [Registry]
-Root: HKA; Subkey: "Software\Classes\ngteams.msteams"; ValueType: string; ValueData: "ngteams Teams meeting link"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\ngteams.msteams"; ValueType: string; ValueData: "ngteams Teams meeting link"
 Root: HKA; Subkey: "Software\Classes\ngteams.msteams"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\ngteams.msteams\DefaultIcon"; ValueType: string; ValueData: """{app}\bin\ngteams.exe"",0"
 Root: HKA; Subkey: "Software\Classes\ngteams.msteams\shell\open\command"; ValueType: string; ValueData: """{app}\bin\ngteams.exe"" ""%1"""
-Root: HKA; Subkey: "Software\ngteams"; Flags: uninsdeletekeyifempty
-Root: HKA; Subkey: "Software\ngteams\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "ngteams"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\ngteams\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "ngteams"
 Root: HKA; Subkey: "Software\ngteams\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "ngteams: chats, calls and meetings"
 Root: HKA; Subkey: "Software\ngteams\Capabilities\URLAssociations"; ValueType: string; ValueName: "msteams"; ValueData: "ngteams.msteams"
-Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "ngteams"; ValueData: "Software\ngteams\Capabilities"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "ngteams"; ValueData: "Software\ngteams\Capabilities"
 
 [Run]
 Filename: "{app}\bin\ngteams.exe"; Description: "Open ngteams"; Flags: nowait postinstall skipifsilent
 ; The updater's run: the app it replaced starts again, as on Linux.
 Filename: "{app}\bin\ngteams.exe"; Flags: nowait; Check: Updating
 
-; Update downloads only: the accounts, settings and logs beside them stay.
+; Update downloads only: the accounts, settings and logs beside them stay. A previous version an interrupted upgrade
+; kept goes too.
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\ngteams\data\updates"
+Type: filesandordirs; Name: "{app}\{#PreviousFolder}"
 
 [Code]
 const
@@ -137,9 +138,12 @@ const
   WebView2Bootstrapper = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
   SYNCHRONIZE = $00100000;
   WAIT_FOR_EXIT = 60000;
+  { How this copy was installed (crates/teams-update MARKER); [Files] installs it after the program files. }
+  Marker = 'share\ngteams\update-format';
 
 var
-  Upgrading: Boolean;
+  { The previous version's program items are in {#PreviousFolder} until this run ends. }
+  MovedAside: Boolean;
   Installed: Boolean;
 
 function OpenProcess(Access: DWORD; Inherit: BOOL; ProcessId: DWORD): THandle;
@@ -160,13 +164,26 @@ begin
   Result := UpdatePid <> '';
 end;
 
-function UpgradingHere: Boolean;
+{ Whether the command line has the switch /Name, bare or with a value; a param constant sees only /Name=value. }
+function SwitchGiven(const Name: String): Boolean;
+var
+  I: Integer;
+  Argument: String;
 begin
-  Result := Upgrading;
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    Argument := Uppercase(ParamStr(I));
+    if (Argument = '/' + Name) or (Pos('/' + Name + '=', Argument) = 1) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
 end;
 
-{ Waits for the updating app to exit, so its files can be replaced. Past the deadline, Restart Manager's close of the
-  applications holding them (/CLOSEAPPLICATIONS) takes over. }
+{ Waits for the updating app to exit, so its files can be replaced. Past the deadline, a process still running from
+  the installation stops the upgrade before anything is changed (PrepareToInstall). }
 procedure WaitForUpdatingApp;
 var
   Process: THandle;
@@ -190,11 +207,16 @@ var
   PreviousVersion, ThisVersion: Int64;
 begin
   Result := False;
-  if ExpandConstant('{param:ALLOWDOWNGRADE|}') <> '' then
+  if SwitchGiven('ALLOWDOWNGRADE') then
     Exit;
   if RegQueryStringValue(HKA, '{#UninstallKey}', 'DisplayVersion', Previous) and
     StrToVersion(Previous, PreviousVersion) and StrToVersion('{#AppVersion}', ThisVersion) then
     Result := ComparePackedVersion(PreviousVersion, ThisVersion) > 0;
+end;
+
+function DowngradeRefused: String;
+begin
+  Result := 'A newer ngteams is installed already. To go back to version {#AppVersion}, uninstall ngteams first; your accounts and data are kept.';
 end;
 
 function InitializeSetup: Boolean;
@@ -203,8 +225,7 @@ begin
   WaitForUpdatingApp;
   if OlderThanInstalled then
   begin
-    SuppressibleMsgBox('A newer ngteams is installed already. To go back to version {#AppVersion}, uninstall ngteams first; your accounts and data are kept.',
-      mbError, MB_OK, IDOK);
+    SuppressibleMsgBox(DowngradeRefused, mbError, MB_OK, IDOK);
     Result := False;
   end;
 end;
@@ -257,12 +278,176 @@ begin
   DeleteFile(Bootstrapper);
 end;
 
-function PrepareToInstall(var NeedsRestart: Boolean): String;
+{ Whether a process runs from a folder inside Folder (bin, libexec, a previous version kept aside), or with Executable
+  given, from that file; the uninstaller's own first phase, in Folder itself, doesn't count. }
+function Running(const Folder, Executable: String): Boolean;
+var
+  Locator, Service, Processes, Process: Variant;
+  Prefix, Path: String;
+  I: Integer;
 begin
-  Upgrading := FileExists(ExpandConstant('{app}\share\ngteams\update-format'));
+  Result := False;
+  Prefix := Lowercase(AddBackslash(Folder));
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    Processes := Service.ExecQuery('SELECT ExecutablePath FROM Win32_Process');
+    for I := 0 to Processes.Count - 1 do
+    begin
+      Process := Processes.ItemIndex(I);
+      if not VarIsNull(Process.ExecutablePath) then
+      begin
+        Path := Lowercase(Process.ExecutablePath);
+        if ((Executable = '') and (Pos(Prefix, Path) = 1) and (Pos('\', Copy(Path, Length(Prefix) + 1, Length(Path))) > 0)) or
+          ((Executable <> '') and (CompareText(Path, Executable) = 0)) then
+        begin
+          Result := True;
+          Exit;
+        end;
+      end;
+    end;
+  except
+    Result := False;
+  end;
+end;
+
+function RunningFrom(const Folder: String): Boolean;
+begin
+  Result := Running(Folder, '');
+end;
+
+{ The program's top-level items ({#ProgramItems}). }
+function ProgramItems: TArrayOfString;
+var
+  Rest: String;
+  Bar, Count: Integer;
+begin
+  Rest := '{#ProgramItems}|';
+  Count := 0;
+  while Rest <> '' do
+  begin
+    Bar := Pos('|', Rest);
+    SetArrayLength(Result, Count + 1);
+    Result[Count] := Copy(Rest, 1, Bar - 1);
+    Count := Count + 1;
+    Rest := Copy(Rest, Bar + 1, Length(Rest));
+  end;
+end;
+
+function InstalledItem(const Item: String): String;
+begin
+  Result := ExpandConstant('{app}\') + Item;
+end;
+
+function PreviousItem(const Item: String): String;
+begin
+  Result := ExpandConstant('{app}\{#PreviousFolder}\') + Item;
+end;
+
+function ItemExists(const Path: String): Boolean;
+begin
+  Result := FileExists(Path) or DirExists(Path);
+end;
+
+{ Puts the previous version's items kept in {#PreviousFolder} back in place, over whatever a failed upgrade left
+  there, and removes that folder once it is empty. }
+procedure PutPreviousBack;
+var
+  Items: TArrayOfString;
+  I: Integer;
+begin
+  Items := ProgramItems;
+  for I := GetArrayLength(Items) - 1 downto 0 do
+    if ItemExists(PreviousItem(Items[I])) then
+    begin
+      if DirExists(InstalledItem(Items[I])) then
+        DelTree(InstalledItem(Items[I]), True, True, True)
+      else if FileExists(InstalledItem(Items[I])) then
+        DeleteFile(InstalledItem(Items[I]));
+      if RenameFile(PreviousItem(Items[I]), InstalledItem(Items[I])) then
+        Log('Put the previous version''s ' + Items[I] + ' back.')
+      else
+        Log('The previous version''s ' + Items[I] + ' could not be put back; it is in ' + PreviousItem(Items[I]) + '.');
+    end;
+  RemoveDir(ExpandConstant('{app}\{#PreviousFolder}'));
+end;
+
+{ An upgrade that was cut short (Setup killed, the power cut) left the previous version aside: it goes back when the
+  installation holds no complete version of its own (no marker), and goes otherwise. }
+procedure RecoverInterruptedUpgrade;
+var
+  Folder: String;
+begin
+  Folder := ExpandConstant('{app}\{#PreviousFolder}');
+  if not DirExists(Folder) then
+    Exit;
+  Log('Found the previous version an interrupted upgrade kept in ' + Folder + '.');
+  if not FileExists(InstalledItem(Marker)) and FileExists(PreviousItem(Marker)) then
+    PutPreviousBack;
+  DelTree(Folder, True, True, True);
+end;
+
+{ Moves the previous version's program items into {#PreviousFolder}, by renames on one disk, where they stay until the
+  upgrade has succeeded (DeinitializeSetup); nothing is deleted. The reason they couldn't be, with everything put
+  back, or ''. }
+function MovePreviousAside: String;
+var
+  Items: TArrayOfString;
+  I: Integer;
+begin
   Result := '';
+  { its files can be moved, but a process still running from them would go on running the previous version }
+  if RunningFrom(ExpandConstant('{app}')) then
+  begin
+    Result := 'ngteams is still running.';
+    Exit;
+  end;
+  if not CreateDir(ExpandConstant('{app}\{#PreviousFolder}')) then
+  begin
+    Result := ExpandConstant('{app}\{#PreviousFolder}') + ' could not be created.';
+    Exit;
+  end;
+  MovedAside := True;
+  Items := ProgramItems;
+  for I := 0 to GetArrayLength(Items) - 1 do
+    if ItemExists(InstalledItem(Items[I])) then
+      if not RenameFile(InstalledItem(Items[I]), PreviousItem(Items[I])) then
+      begin
+        Result := 'A file in ' + InstalledItem(Items[I]) + ' is in use.';
+        PutPreviousBack;
+        MovedAside := False;
+        Exit;
+      end;
+  Log('Moved the previous version aside into ' + ExpandConstant('{app}\{#PreviousFolder}') + '.');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Reason: String;
+begin
+  Result := '';
+  { checked again: another installer may have put a newer version in since this one started }
+  if OlderThanInstalled then
+  begin
+    Result := DowngradeRefused;
+    Exit;
+  end;
   if not WebView2Installed then
+  begin
     Result := InstallWebView2;
+    if Result <> '' then
+      Exit;
+  end;
+  RecoverInterruptedUpgrade;
+  { an upgrade only in a folder an earlier ngteams installer marked }
+  if not FileExists(InstalledItem(Marker)) then
+    Exit;
+  repeat
+    Reason := MovePreviousAside;
+  until (Reason = '') or (SuppressibleMsgBox(Reason + ' Quit ngteams (including from the notification area) and close any of its files that are open, then choose Retry.',
+    mbError, MB_RETRYCANCEL, IDCANCEL) <> IDRETRY);
+  if Reason <> '' then
+    Result := Reason + ' Quit ngteams (including from the notification area) and close any of its files that are open, then run setup again. The installed version is unchanged.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -271,54 +456,45 @@ begin
     Installed := True;
 end;
 
-{ A failed update still leaves the user an app: the previous one starts again when it is there. }
+{ The installation folder, also when Setup stopped before it was settled (the updater's /DIR then). }
+function InstallationFolder: String;
+begin
+  try
+    Result := ExpandConstant('{app}');
+  except
+    Result := RemoveQuotes(ExpandConstant('{param:DIR|}'));
+  end;
+end;
+
+{ A failed upgrade still leaves the user an app: the previous version kept aside goes back in place (a complete new
+  version, its marker installed, stays even past a late failure; anything less was rolled back), and the updater's
+  run starts it again. }
 procedure DeinitializeSetup;
 var
   Executable: String;
   ResultCode: Integer;
 begin
-  if not Updating or Installed then
-    Exit;
-  try
-    Executable := ExpandConstant('{app}\bin\ngteams.exe');
-  except
-    Exit;
+  if MovedAside then
+  begin
+    if Installed or FileExists(InstalledItem(Marker)) then
+      DelTree(ExpandConstant('{app}\{#PreviousFolder}'), True, True, True)
+    else
+      PutPreviousBack;
   end;
-  if FileExists(Executable) then
+  if not Updating or Installed or (InstallationFolder = '') then
+    Exit;
+  Executable := AddBackslash(InstallationFolder) + 'bin\ngteams.exe';
+  if FileExists(Executable) and not Running(InstallationFolder, Executable) then
+  begin
+    Log('Starting ngteams again: ' + Executable);
     ExecAsOriginalUser(Executable, '', ExtractFileDir(Executable), SW_SHOWNORMAL, ewNoWait, ResultCode);
-end;
-
-{ Whether a process runs from this installation's program folder. }
-function AppRunning: Boolean;
-var
-  Locator, Service, Processes, Process: Variant;
-  Folder: String;
-  I: Integer;
-begin
-  Result := False;
-  Folder := Lowercase(AddBackslash(ExpandConstant('{app}\bin')));
-  try
-    Locator := CreateOleObject('WbemScripting.SWbemLocator');
-    Service := Locator.ConnectServer('.', 'root\CIMV2');
-    Processes := Service.ExecQuery('SELECT ExecutablePath FROM Win32_Process');
-    for I := 0 to Processes.Count - 1 do
-    begin
-      Process := Processes.ItemIndex(I);
-      if not VarIsNull(Process.ExecutablePath) and (Pos(Folder, Lowercase(Process.ExecutablePath)) = 1) then
-      begin
-        Result := True;
-        Exit;
-      end;
-    end;
-  except
-    Result := False;
   end;
 end;
 
 function InitializeUninstall: Boolean;
 begin
   Result := True;
-  while Result and AppRunning do
+  while Result and RunningFrom(ExpandConstant('{app}')) do
     Result := SuppressibleMsgBox('ngteams is running. Quit it (including from the notification area), then choose Retry.',
       mbError, MB_RETRYCANCEL, IDCANCEL) = IDRETRY;
 end;
@@ -340,8 +516,22 @@ begin
   end;
 end;
 
+{ What [Icons] and [Registry] made: the shortcuts, the msteams: handler and the Default apps entry. }
+procedure RemoveInstallerRegistrations;
+begin
+  DeleteFile(ExpandConstant('{autoprograms}\ngteams.lnk'));
+  DeleteFile(ExpandConstant('{autodesktop}\ngteams.lnk'));
+  RegDeleteKeyIncludingSubkeys(HKA, 'Software\Classes\ngteams.msteams');
+  RegDeleteKeyIncludingSubkeys(HKA, 'Software\ngteams\Capabilities');
+  RegDeleteKeyIfEmpty(HKA, 'Software\ngteams');
+  RegDeleteValue(HKA, 'Software\RegisteredApplications', 'ngteams');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
+  begin
+    RemoveInstallerRegistrations;
     RemoveAppRegistrations;
+  end;
 end;
