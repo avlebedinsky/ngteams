@@ -131,6 +131,12 @@ name = "meeting_window"
 harness = false
 
 [[test]]
+# the faces of people whose camera is off in a call (their pictures, else their initials): 1:1 and group calls over the
+# fake engine in the UI sandbox, screenshotted under `target/ui-shots/call-faces-*.png`
+name = "call_faces_window"
+harness = false
+
+[[test]]
 # a meeting chat's tabs (its Recap, with two recordings, their transcripts searched, a meeting transcribed only, and its
 # Shared tab) over the fake engine in the UI sandbox, screenshotted under `target/ui-shots/recap-*.png`
 name = "recap_window"

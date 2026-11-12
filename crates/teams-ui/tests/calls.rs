@@ -15,6 +15,9 @@
 mod fake_tool;
 
 pub mod common;
+/// The faces a call shows: pictures, else initials.
+#[path = "calls/faces.rs"]
+mod faces;
 /// The Call health pane, from More → Settings.
 #[path = "calls/health.rs"]
 mod health;

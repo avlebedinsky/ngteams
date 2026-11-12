@@ -20,8 +20,14 @@ use crate::theme::Palette;
 /// How wide the card is drawn, px.
 const CARD_WIDTH: f32 = 320.0;
 
-/// The lobby's card over the stage, while anyone waits; `None` otherwise.
-pub(crate) fn card(active: &ActiveCall, palette: Palette, cx: &mut Context<CallStage>) -> Option<AnyElement> {
+/// The lobby's card over the stage, while anyone waits; `None` otherwise. `picture_of` gives a person's picture, once
+/// read (else they show their initials).
+pub(crate) fn card(
+    active: &ActiveCall,
+    picture_of: impl Fn(&str) -> Option<people::Picture>,
+    palette: Palette,
+    cx: &mut Context<CallStage>,
+) -> Option<AnyElement> {
     if active.lobby.is_empty() {
         return None;
     }
@@ -29,7 +35,7 @@ pub(crate) fn card(active: &ActiveCall, palette: Palette, cx: &mut Context<CallS
         .lobby
         .iter()
         .enumerate()
-        .map(|(index, person)| row(index, person, palette, cx))
+        .map(|(index, person)| row(index, (person, picture_of(person.mri.as_str())), palette, cx))
         .collect();
     let heading = div()
         .flex()
@@ -83,8 +89,13 @@ pub(crate) fn card(active: &ActiveCall, palette: Palette, cx: &mut Context<CallS
     )
 }
 
-/// One person waiting: their avatar and name, then Deny and Admit.
-fn row(index: usize, person: &LobbyPerson, palette: Palette, cx: &mut Context<CallStage>) -> AnyElement {
+/// One person waiting: their avatar (their picture, else their initials) and name, then Deny and Admit.
+fn row(
+    index: usize,
+    (person, picture): (&LobbyPerson, Option<people::Picture>),
+    palette: Palette,
+    cx: &mut Context<CallStage>,
+) -> AnyElement {
     let name: SharedString = person.name.clone().unwrap_or_else(|| "Someone".to_owned()).into();
     let (deny_id, admit_id) = (
         SharedString::from(format!("call-lobby-deny-{index}")),
@@ -136,7 +147,11 @@ fn row(index: usize, person: &LobbyPerson, palette: Palette, cx: &mut Context<Ca
                 .items_center()
                 .gap_2()
                 .min_w_0()
-                .child(people::avatar(Some(&name), None, gpui_component::Size::Small))
+                .child(people::avatar(
+                    Some(&name),
+                    picture.as_ref(),
+                    gpui_component::Size::Small,
+                ))
                 .child(
                     div()
                         .text_sm()
