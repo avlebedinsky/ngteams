@@ -6,5 +6,3 @@ captures/
 .env*
 .claude/settings.local.json
 .dispatch/
-.agents/skills/task-dispatch/
-.claude/skills/task-dispatch
