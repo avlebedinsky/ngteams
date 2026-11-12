@@ -9,8 +9,11 @@ mod setup;
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 pub(super) use crate::fakes::tree;
-use crate::{Format, Installation, Places, Version};
+#[cfg(unix)]
+use crate::Installation;
+use crate::{Format, Places, Version};
 
 pub(super) fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
