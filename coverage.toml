@@ -156,7 +156,7 @@ sha256 = "b82f8babf1f6097107ebd061f21f4d48281a45b2ab89f62ad5c78c9b5303c562"
 reason = "cfg-selected module declarations and re-exports only; no executable items"
 
 [unmapped_sources."crates/teams-ctl/src/transport/windows.rs"]
-sha256 = "7c13f06a46489b09c16498f7a8780d64c6692a2b8814256aa0bae1fe89d44554"
+sha256 = "fa805cddc44b9d528bfc07230af2c3756a1cc83e0513b214f7a4a2b8e78c0179"
 reason = "Windows-only native control pipe transport; measured natively by the Windows portability gate, including ACLs, timeouts, shutdown, CLI and the actual app listener"
 
 [unmapped_sources."crates/teams-platform/src/windows_security.rs"]
