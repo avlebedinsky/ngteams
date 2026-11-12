@@ -353,3 +353,8 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # presence, so a measured zero differs from an absent statistic. Keep the patches until upstream exposes direction
 # and preserves optional RTT values.
 libwebrtc = { path = "vendor/libwebrtc" }
+# burn-tch, Burn's LibTorch backend, swapped for an empty stub (vendor/burn-tch): burn-dispatch names it only in weak
+# features (`burn-tch?/std`), which Cargo still writes into Cargo.lock (rust-lang/cargo#10801), and with it tch 0.22 and
+# torch-sys 0.22's zip 0.6.6 (GHSA zip cloaking, AES HMAC bypass), though no build enables the backend. The stub keeps
+# the vulnerable zip out of the lockfile. Remove it with the move to burn 0.23, which drops burn-tch.
+burn-tch = { path = "vendor/burn-tch" }
