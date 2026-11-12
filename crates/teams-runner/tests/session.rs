@@ -137,6 +137,17 @@ fn preparation_and_personal_snapshot_cleanup_use_only_the_synthetic_fixture() {
 }
 
 #[test]
+fn a_missing_run_directory_is_refused_before_anything_is_created_in_its_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let absent = dir.path().join("absent");
+    // Refused before any lock, stop marker, snapshot or process: the executable is never looked up.
+    for (alias, account) in [(Some("a"), None), (None, Some("synthetic@example.test"))] {
+        assert!(supervise(&dir.path().join("unused.exe"), &absent, alias, account, Duration::ZERO).is_err());
+        assert!(!absent.exists());
+    }
+}
+
+#[test]
 fn console_dispatch_requires_the_guard_directory_and_preserves_app_failures() {
     let dir = tempfile::tempdir().unwrap();
     let app = fixture(dir.path());
