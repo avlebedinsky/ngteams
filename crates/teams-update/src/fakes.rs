@@ -160,23 +160,31 @@ pub fn publish(feed: &Feed, tag: &str, asset: &str, bytes: &[u8]) {
     feed.serve(&format!("/download/{tag}/SHA256SUMS"), Reply::ok(sums));
 }
 
-/// A release tree as `scripts/package-release.sh` lays one out, at `root`, made as `version` and marked `format`.
+/// A release tree as `scripts/package-release.sh` lays one out (or, for [`Format::WindowsSetup`], as the Windows
+/// installer does), at `root`, made as `version` and marked `format`.
 ///
 /// # Errors
 /// The files can't be written.
 pub fn tree(root: &Path, version: &str, format: Format) -> std::io::Result<()> {
-    for program in [
-        "AppRun",
-        "usr/bin/ngteams",
-        "usr/bin/ngteams-web",
-        "usr/bin/ngteamsctl",
-        "usr/bin/libteams_signin_extension.so",
-    ] {
+    let programs: &[&str] = if format == Format::WindowsSetup {
+        &["bin/ngteams.exe", "bin/ngteams-webview.exe", "bin/ngteamsctl.exe"]
+    } else {
+        &[
+            "AppRun",
+            "usr/bin/ngteams",
+            "usr/bin/ngteams-web",
+            "usr/bin/ngteamsctl",
+            "usr/bin/libteams_signin_extension.so",
+        ]
+    };
+    for program in programs {
         let file = root.join(program);
         fs::create_dir_all(file.parent().unwrap_or(root))?;
         fs::write(&file, format!("{program} {version}"))?;
     }
-    fs::create_dir_all(root.join("usr/share/ngteams"))?;
+    for path in [MARKER, IDENTITY] {
+        fs::create_dir_all(root.join(path).parent().unwrap_or(root))?;
+    }
     fs::write(root.join(MARKER), format!("{}\n", format.marker()))?;
     fs::write(root.join(IDENTITY), format!("{version}\n"))
 }

@@ -1,6 +1,8 @@
 //! The translating tool's session against fake `claude` and `codex` scripts (synthetic captions only): what reaches
 //! the tool, the call's context included, and how each failure ends it.
 
+use crate::fake_tool;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -55,17 +57,7 @@ done
 /// A script `name` in `dir`, put there by a child: written by this process, it couldn't be run (`ETXTBSY`) while
 /// another test's child, forked before the write's descriptor closed, hadn't reached its own `exec`.
 fn fake(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let source = dir.join(format!("{name}.source"));
-    fs::write(&source, format!("#!/bin/bash\n{body}")).unwrap();
-    let path = dir.join(name);
-    let installed = std::process::Command::new("install")
-        .args(["-m", "755"])
-        .arg(&source)
-        .arg(&path)
-        .status()
-        .unwrap();
-    assert!(installed.success(), "{name} installed");
-    path
+    fake_tool::write(dir, name, body)
 }
 
 fn spec(backend: Backend, program: PathBuf, limits: Limits) -> Spec {
@@ -405,9 +397,13 @@ fn dropping_the_session_ends_its_process() {
         .find_map(|line| line.strip_prefix("start "))
         .unwrap()
         .to_owned();
+    assert!(
+        fake_tool::running(&pid),
+        "the fake process is alive before cancellation"
+    );
     drop(session);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Path::new(&format!("/proc/{pid}")).exists() {
+    while fake_tool::running(&pid) {
         assert!(Instant::now() < deadline, "the tool still runs");
         thread::sleep(Duration::from_millis(20));
     }

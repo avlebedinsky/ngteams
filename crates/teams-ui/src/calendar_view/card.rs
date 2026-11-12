@@ -322,7 +322,7 @@ impl CalendarView {
             return None;
         }
         match (&event.meeting_chat, &event.meeting) {
-            (Some(chat), Some(meeting)) => Some(JoinTarget::Call(MeetingToJoin {
+            (Some(chat), Some(meeting)) => Some(JoinTarget::Call(MeetingToJoin::Chat {
                 chat: chat.clone(),
                 meeting: meeting.clone(),
                 title: shown.title(),

@@ -1,5 +1,7 @@
 //! The models each tool reports, read from synthetic catalogs and fake tools (no tool here asks a model anything).
 
+use crate::fake_tool;
+
 use std::fs;
 
 use gpui::TestAppContext;
@@ -39,17 +41,7 @@ fn listed(id: &str, name: &str, latest: bool) -> Listed {
 /// A script `name` in `dir`, put there by a child: written by this process, it couldn't be run (`ETXTBSY`) while
 /// another test's child, forked before the write's descriptor closed, hadn't reached its own `exec`.
 fn fake(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let source = dir.join(format!("{name}.source"));
-    fs::write(&source, format!("#!/bin/bash\n{body}")).unwrap();
-    let path = dir.join(name);
-    let installed = std::process::Command::new("install")
-        .args(["-m", "755"])
-        .arg(&source)
-        .arg(&path)
-        .status()
-        .unwrap();
-    assert!(installed.success(), "{name} installed");
-    path
+    fake_tool::write(dir, name, body)
 }
 
 #[test]

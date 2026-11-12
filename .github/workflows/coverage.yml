@@ -27,6 +27,9 @@ jobs:
           persist-credentials: false
       - name: ELF tools for the packaging script tests
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends patchelf zstd
+      - name: LLVM's PE reader for the Windows media closure tests
+        # rust-toolchain.toml selects the pinned toolchain; its llvm-readobj reads the PE fixtures.
+        run: rustup component add llvm-tools-preview
       - name: Script tests (coverage reporter, lab runner, packaging)
         run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
 

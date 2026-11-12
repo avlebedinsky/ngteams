@@ -10,7 +10,7 @@
 
 mod support;
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use support::{
@@ -26,6 +26,135 @@ use teams_media::session::{SdpAnswer, SdpOffer, SessionDevice, SessionEvent, Ses
 use teams_media::test_signal::{rms, samples, speech_like};
 use teams_media::test_turn::{Impairment, TurnServer};
 use teams_media::tone::decibels;
+
+/// A real device-open failure, before any capture thread exists.
+struct TestAudioDevices {
+    files: FileDevices,
+    microphone: AtomicBool,
+    speaker: AtomicBool,
+    opened: AtomicUsize,
+}
+
+impl TestAudioDevices {
+    fn new(files: FileDevices, microphone: bool, speaker: bool) -> Self {
+        Self {
+            files,
+            microphone: AtomicBool::new(microphone),
+            speaker: AtomicBool::new(speaker),
+            opened: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Devices for TestAudioDevices {
+    fn microphone(&self) -> Result<Box<dyn teams_media::devices::AudioSource>, teams_media::devices::DeviceError> {
+        if self.microphone.load(Ordering::Relaxed) {
+            self.opened.fetch_add(1, Ordering::Relaxed);
+            self.files.microphone()
+        } else {
+            Err(teams_media::devices::DeviceError::Closed)
+        }
+    }
+
+    fn speaker(&self) -> Result<Box<dyn teams_media::devices::AudioSink>, teams_media::devices::DeviceError> {
+        if self.speaker.load(Ordering::Relaxed) {
+            self.files.speaker()
+        } else {
+            Err(teams_media::devices::DeviceError::Closed)
+        }
+    }
+
+    fn camera(&self) -> Result<Box<dyn teams_media::devices::VideoSource>, teams_media::devices::DeviceError> {
+        self.files.camera()
+    }
+}
+
+#[test]
+fn a_missing_microphone_does_not_prevent_receiving_the_call() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let heard = recording(dir.path(), "receive-only");
+    let a = start(&turn, &TestAudioDevices::new(file_devices(A_TONE, &heard), false, true));
+    let b = start(&turn, &file_devices(B_TONE, &recording(dir.path(), "b")));
+    wait_for(&a, &SessionEvent::DeviceClosed(SessionDevice::Microphone), CONNECT_WAIT);
+    assert!(a.is_muted());
+    negotiate(&a, &b);
+    wait_for(&a, &SessionEvent::Connected, CONNECT_WAIT);
+    wait_for(&b, &SessionEvent::Connected, CONNECT_WAIT);
+    let limit = Instant::now() + TALK;
+    while a.stats().frames_played < 100 && Instant::now() < limit {
+        std::thread::sleep(FRAME_DURATION);
+    }
+    let stats = a.close();
+    let _ = b.close();
+    assert_eq!(stats.encoded, 0, "no substitute microphone is sent");
+    assert!(stats.frames_played >= 100, "{stats:?}");
+    let samples = teams_media::devices::wav::read(&heard).unwrap();
+    assert!(teams_media::tone::amplitude_at(&samples, B_TONE.hz) > 0.2);
+}
+
+#[test]
+fn missing_outputs_keep_decoding_real_audio_without_claiming_playback() {
+    for microphone in [true, false] {
+        let turn = TurnServer::start().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let devices = TestAudioDevices::new(file_devices(A_TONE, &recording(dir.path(), "a")), microphone, false);
+        let a = start(&turn, &devices);
+        let b = start(&turn, &file_devices(B_TONE, &recording(dir.path(), "b")));
+        negotiate(&a, &b);
+        wait_for(&a, &SessionEvent::Connected, CONNECT_WAIT);
+        wait_for(&b, &SessionEvent::Connected, CONNECT_WAIT);
+        let limit = Instant::now() + TALK;
+        while a.stats().received < 80 && Instant::now() < limit {
+            std::thread::sleep(FRAME_DURATION);
+        }
+        assert_eq!(a.is_muted(), !microphone);
+        let stats = a.close();
+        let _ = b.close();
+        assert!(stats.received >= 80, "{stats:?}");
+        assert_eq!(stats.frames_played, 0);
+        assert_eq!(stats.encoded == 0, !microphone);
+    }
+}
+
+#[test]
+fn missing_audio_devices_can_be_retried_without_duplicating_running_streams() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let a_path = recording(dir.path(), "a");
+    let b_path = recording(dir.path(), "b");
+    let devices = TestAudioDevices::new(file_devices(A_TONE, &a_path), false, false);
+    let a = start(&turn, &devices);
+    let b = start(&turn, &file_devices(B_TONE, &b_path));
+    wait_for(&a, &SessionEvent::DeviceClosed(SessionDevice::Microphone), CONNECT_WAIT);
+    wait_for(&a, &SessionEvent::DeviceClosed(SessionDevice::Speaker), CONNECT_WAIT);
+    a.open_devices(&devices).unwrap();
+    while let Some(event) = a.next_event(Duration::from_millis(100)) {
+        assert_ne!(event, SessionEvent::DeviceClosed(SessionDevice::Microphone));
+    }
+    negotiate(&a, &b);
+    wait_for(&a, &SessionEvent::Connected, CONNECT_WAIT);
+    wait_for(&b, &SessionEvent::Connected, CONNECT_WAIT);
+    devices.microphone.store(true, Ordering::Relaxed);
+    devices.speaker.store(true, Ordering::Relaxed);
+    a.open_devices(&devices).unwrap();
+    assert!(a.is_muted(), "opening a new microphone does not unmute it");
+    a.set_muted(false);
+    for _ in 0..3 {
+        a.open_devices(&devices).unwrap();
+    }
+    assert_eq!(devices.opened.load(Ordering::Relaxed), 1);
+    let limit = Instant::now() + TALK;
+    while (a.stats().frames_played < 100 || b.stats().received < 80) && Instant::now() < limit {
+        std::thread::sleep(FRAME_DURATION);
+    }
+    let (a, b) = (a.close(), b.close());
+    assert!(a.frames_played >= 100 && b.received >= 80, "{a:?} {b:?}");
+    for (path, tone) in [(a_path, B_TONE), (b_path, A_TONE)] {
+        let heard = teams_media::devices::wav::read(&path).unwrap();
+        assert!(teams_media::tone::amplitude_at(&heard, tone.hz) > 0.2);
+    }
+}
 
 /// How long the media runs once connected.
 const TALK: Duration = Duration::from_secs(3);
@@ -455,8 +584,16 @@ fn a_session_s_health_is_libwebrtc_s_own_statistics_with_rates_between_reads() {
     let sent = first.audio.sent.clone().expect("a sends audio");
     assert!(sent.packets > 0 && sent.bitrate_kbps.is_none(), "{first:?}");
     assert_eq!(sent.codec.as_deref(), Some("opus"), "{first:?}");
-    std::thread::sleep(Duration::from_secs(1));
-    let second = a.health();
+    // a round trip is measured once RTCP or a consent check comes back: later on a slow (instrumented) runner, so
+    // each read a second after the last until it has one
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let second = loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let health = a.health();
+        if health.network.round_trip_ms.is_some() || Instant::now() > deadline {
+            break health;
+        }
+    };
     let (sent, received) = (
         second.audio.sent.clone().unwrap(),
         second.audio.received.clone().unwrap(),

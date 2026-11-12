@@ -1,9 +1,11 @@
 //! Real browser lifecycle in a private subprocess, fresh synthetic lab config and blank pages only.
 use super::*;
-use std::os::unix::fs::{PermissionsExt as _, symlink};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 const CHILD: &str = "PROTO_LAB_SYNTHETIC_SESSION_STARTUP";
 
+#[cfg(unix)]
 fn installed_chrome() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PROTO_LAB_CHROME") {
         return Some(path.into());
@@ -15,9 +17,29 @@ fn installed_chrome() -> Option<PathBuf> {
     chrome.is_file().then_some(chrome)
 }
 
+#[cfg(windows)]
+fn installed_chrome() -> Option<PathBuf> {
+    teams_platform::windows_sandbox::window_allowed_here().ok()?;
+    crate::browser::installed_edge().ok()
+}
+
 fn private_environment(command: &mut tokio::process::Command, root: &Path) {
     command.env_clear();
-    for name in ["PATH", "LLVM_PROFILE_FILE"] {
+    for name in [
+        "PATH",
+        "LLVM_PROFILE_FILE",
+        "SystemRoot",
+        "WINDIR",
+        "COMSPEC",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+        "TEMP",
+        "TMP",
+        "NGTEAMS_WINDOWS_VM_SANDBOX",
+        "UI_SANDBOX_DIR",
+        "PROTO_LAB_REQUIRE_CHROME",
+    ] {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
@@ -31,8 +53,14 @@ fn private_environment(command: &mut tokio::process::Command, root: &Path) {
     ] {
         let directory = root.join(subdir);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        teams_platform::private::restrict_dir(&directory).unwrap();
         command.env(name, directory);
+    }
+    #[cfg(windows)]
+    {
+        let local = root.join("local");
+        teams_platform::private::create_dir_all(&local).unwrap();
+        command.env("LOCALAPPDATA", local);
     }
     command.env(CHILD, "1");
     command.env(
@@ -42,23 +70,52 @@ fn private_environment(command: &mut tokio::process::Command, root: &Path) {
 }
 
 fn prepare(root: &Path, chrome: &Path) {
+    #[cfg(unix)]
     let config_file = root.join("config/teams-lab/lab.toml");
+    #[cfg(windows)]
+    let config_file = root.join("local/teams-lab/lab.toml");
     std::fs::create_dir(config_file.parent().unwrap()).unwrap();
     let config=["a","b","c"].map(|alias|format!("[[accounts]]\nalias='{alias}'\nupn='synthetic-{alias}@example.test'\nmri='8:orgid:00000000-0000-4000-8000-00000000000{alias}'\n")).join("\n");
-    std::fs::write(config_file, config).unwrap();
+    std::fs::write(&config_file, config).unwrap();
+    teams_platform::private::restrict_file(&config_file).unwrap();
+    #[cfg(unix)]
+    install_test_chrome(root, chrome);
+    #[cfg(windows)]
+    assert!(chrome.is_file(), "verified installed Edge");
+}
+
+#[cfg(unix)]
+fn install_test_chrome(root: &Path, chrome: &Path) {
     let paths = LabPaths::new(root.join("data/teams-lab"));
     let executable = ChromeBuild::pinned().executable(&paths.chrome_dir());
     std::fs::create_dir_all(executable.parent().unwrap().parent().unwrap()).unwrap();
     symlink(chrome.parent().unwrap(), executable.parent().unwrap()).unwrap();
 }
 
+async fn blank_holds(session: &LabSession) {
+    session.hold(Hold::new("POST", "^http://127\\.0\\.0\\.1/").unwrap());
+    assert!(session.held_requests().is_empty());
+    let frames = FrameHold::new("^ws://127\\.0\\.0\\.1:")
+        .unwrap()
+        .with_text_containing("synthetic")
+        .labelled("synthetic-startup");
+    assert!(frames.matches("ws://127.0.0.1:1234/", "synthetic-frame"));
+    assert!(!frames.matches("ws://foreign.example/", "synthetic-frame"));
+    session.hold_frames(frames).await.unwrap();
+    session.clear_holds();
+}
+
 async fn startup_matrix() {
     let locations = crate::config::LabLocations::from_env().unwrap();
     let paths = locations.lab_paths().unwrap();
+    #[cfg(unix)]
     assert!(paths.data_dir().starts_with(std::env::var_os("XDG_DATA_HOME").unwrap()));
+    #[cfg(windows)]
+    assert!(paths.data_dir().starts_with(std::env::var_os("LOCALAPPDATA").unwrap()));
     let mut session = LabSession::open(&paths, Alias::A).await.unwrap();
     assert_eq!(session.watch().state(), SessionState::Loading);
     assert!(session.capture_dir().is_none());
+    blank_holds(&session).await;
     queued_capture_messages_stay_local(&mut session).await;
     let (report, _) = close_after_arming(session, &paths).await;
     assert_clean(&report);
@@ -215,4 +272,33 @@ async fn queued_capture_messages_stay_local(session: &mut LabSession) {
             .iter()
             .all(|request| request.method == "GET")
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn missing_edge_is_a_browser_error_before_any_profile_or_target_evidence() {
+    const MARKER: &str = "PROTO_LAB_SYNTHETIC_NO_EDGE";
+    if std::env::var_os(MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session::startup_tests::missing_edge_is_a_browser_error_before_any_profile_or_target_evidence",
+                "--nocapture",
+            ])
+            .env(MARKER, "1")
+            .env_remove("ProgramFiles(x86)")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("unopened");
+    match LabSession::open(&LabPaths::new(data.clone()), Alias::A).await {
+        Err(SessionError::NoEdge(source)) => assert!(source.to_string().contains("ProgramFiles(x86)")),
+        Err(other) => panic!("Edge discovery was misclassified: {other}"),
+        Ok(_) => panic!("missing Edge unexpectedly opened a browser"),
+    }
+    assert!(!data.exists(), "discovery failure must precede profile creation");
 }

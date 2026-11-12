@@ -105,6 +105,17 @@ pub enum Service {
     /// ([`crate::SubstrateSearch`], `search/api/v1/suggestions` and `searchservice/api/v2/query`), reads by `POST`
     /// sent only by [`crate::HttpTransport::search`]; a read or a plain request naming this service is refused.
     Substrate,
+    /// Loki, Microsoft's persona card service (Delve's live persona card, which Teams' profile card reads), on its
+    /// fixed global base `https://loki.delve.office.com/`, with the account's token for
+    /// `https://loki.delve.office.com` ([`crate::loki::LOKI_AUDIENCE`]): only its configuration read
+    /// ([`crate::loki::LokiConfiguration`]), whose answer names the account's regional base ([`Service::Loki`]); the
+    /// global host refuses every other path. Reads only, on a transport given Loki (`HttpTransport::with_loki`).
+    LokiGlobal,
+    /// Loki at the account's regional base (`https://<region>.loki.delve.office.com/`), which the transport takes once
+    /// at run time from the configuration's answer (`HttpTransport::set_loki_region`), with the same token: a person's
+    /// card ([`crate::loki::LokiPerson`] and the other reads of [`crate::loki`]). Reads only; a read before the region
+    /// was set is refused.
+    Loki,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

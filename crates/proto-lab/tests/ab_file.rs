@@ -2,6 +2,9 @@
 //! any path, and every write naming a lab file, and no read; its deny policy expects those and the probes only; its
 //! texts and file are its own.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use proto_lab::capture_hold::{HeldRequest, PausedRequest};
 use proto_lab::scenario::ScenarioName;
 use proto_lab::scenario::ab_file::{self, FILE_MARKER, FILE_MESSAGE, FILE_WRITE, Texts, file_rules, test_file};

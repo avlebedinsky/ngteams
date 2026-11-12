@@ -6,6 +6,9 @@
 //! created once"); the mock's answer is not that shape but a made-up reader listing, kept to show that the outline
 //! names lab ids for what they are and hides every other value.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

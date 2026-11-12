@@ -17,7 +17,11 @@ The client also stages dropped files as private attachments, pastes pictures int
 browser's copied image, picture files a file manager copied) and sends them inline as Teams does, retains compose
 drafts while sends are pending,
 opens people search results as chats, starts chats with one person or several from New message (Ctrl+N: a To: line
-of people, an optional group name, the chat those people already have shown under it), and keeps unread badges in sync with read receipts. Editing message text
+of people, an optional group name, the chat those people already have shown under it), opens a person's profile card
+from their picture or name (a message's sender in a chat or a channel, a 1:1 chat's header, a chat's people, people
+search results: the compact card on a rest or a name's click, the full card with its Overview, Profile and
+Organization tabs on a picture's click; Chat, a quick message through the outbox and 1:1 audio and video calls from it;
+`crates/teams-ui/src/profile_card.rs`), and keeps unread badges in sync with read receipts. Editing message text
 keeps its existing file references and cards. Channel menus provide management, notification and section
 preferences, email and workflow actions. Calls and meetings support Teams
 live captions and spoken-language controls (Alt+Shift+C); caption text stays in memory and clears on hide or call
@@ -51,7 +55,7 @@ notification waits at most a few seconds for its translation); the language menu
 | `crates/teams-ui` | GPUI views/models over `Core`, rich-text editor/rendering, accounts, calendar, notifications and call windows |
 | `crates/teams-ctl` | `ngteamsctl` and the control socket's protocol, socket paths, line codec and client (no GPUI); the app's server is `crates/ngteams/src/ctl/` |
 | `crates/teams-log` | private rotated diagnostic files, full debug HTTP/frame records and logger-owned credential redaction |
-| `crates/teams-platform` | native private-file creation and permissions: Unix modes and Windows protected ACLs |
+| `crates/teams-platform` | native private-file creation/permissions, Windows identity, selective process-handle transfer and VM-console guard |
 | `crates/teams-signin`, `crates/teams-signin-extension` | in-process host-gated WPE sign-in window and its web-process request guard |
 | `crates/teams-wpe`, `crates/wpe-*-sys` | the WPE WebKit engine, its `ngteams-web` worker and generated bindings |
 | `crates/teams-wpe-client`, `crates/teams-web-engine` | the app's side of that worker (no WebKit linked) and the choice or download of the engine |
@@ -178,20 +182,20 @@ its region. Passwords are handled by `proto-lab login`, never typed through the 
 
 ## Building
 
-The Windows port currently covers private files, logs, SQLite storage and the authentication libraries (including
-credential storage and broker streams); app startup, interactive sign-in, devices and release
-packaging still require their platform integrations. The [Windows portability checks](ci.md#windows-portability)
-run these libraries on Linux and Windows. In a Windows checkout with the repository's Rust toolchain and MSVC C++
+The Windows client includes native startup, WebView2 sign-in, Credential Manager storage, private IPC and restart,
+WASAPI/Media Foundation devices, Windows Graphics Capture, and toast/tray/taskbar integration. The release workflow
+builds and packages the native x64 binaries alongside Linux. The [Windows portability checks](ci.md#windows-portability)
+exercise the foundational libraries on Linux and Windows. In a Windows checkout with the repository's Rust toolchain and MSVC C++
 build tools:
 
 ```powershell
-cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth --all-targets
-cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth
+cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl --all-targets
+cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl
 ```
 
 For native Windows debugging, the dedicated `win11` VM's console is the Windows UI sandbox, as authorized for the
-port; lab/test GUIs must stay there, with isolated lab identities and the Windows lab runner once ported. No Windows
-app runner is available at this stage. The Linux app continues to build and run through the runners below.
+port; lab/test GUIs must stay there, with isolated lab identities and the [Windows runner](#windows-vm-runner).
+The native runner isolates lab identities in that console. Linux builds and runs through the runners below.
 
 Agents build runnable `ngteams` only through the lab runner:
 
@@ -480,6 +484,8 @@ tool and its provider. It is kept per recording, copied as Markdown, or sent to 
 meeting's chat after a preview. Settings control appearance, notifications, privacy,
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.
+The focused Linux calendar layout check is `GPUI_SMOKE_REQUIRE=1 cargo test -p teams-ui --test calendar_window`;
+it saves synthetic day/work-week shots at 1024px and 1280px in both themes under `target/ui-shots/calendar-*.png`.
 
 Calls open a separate window; closing it leaves the call. Its toolbar follows Teams': Transfer and Hold (1:1 calls;
 Resume while held), Chat (the call's chat beside the stage), People, Raise and React (group calls and meetings), View (Gallery or
@@ -670,3 +676,262 @@ page or network service is used. Coverage explicitly requires browser and sandbo
 
 Chrome startup and `browser::a_browser_that_exits_early_is_reported` can fail on timing under load. Rerun the failed
 test alone to establish its cause; do not treat a lab-contact violation as a timing flake.
+
+
+### Windows VM runner
+
+Windows lab builds use `pwsh -NoProfile -File scripts/run-lab.ps1 -BuildOnly`; a normal build always sets only the
+lab marker, never the personal install marker. The runner also builds the sibling `ngteams-webview.exe` sign-in worker.
+Prerequisites are the repository Rust toolchain, MSVC C++/Windows
+SDK and the native media development libraries. The display-free `teams-runner` helper has its own bounded build
+in `target/runner`; the normally built app goes to `target/lab`.
+
+The media SDK is the official GStreamer MSVC x64 build pinned in
+`packaging/windows/media-pins.json`. Install it with `/CURRENTUSER /VERYSILENT /NORESTART /TYPE=devel` into
+`windows-deps/gstreamer`, checking the pin's SHA-256 first. Also install the repository toolchain's
+`llvm-tools-preview` component and Python 3. The lab build then runs `scripts/package-windows-media.ps1` to assemble
+`target/windows-media-runtime`; an existing runtime is verified, never silently replaced. To rebuild it after a
+policy/SDK change, retain the old directory for diagnosis and package to a new output directory.
+
+`packaging/windows/gstreamer-plugins.txt` records the production plugin roots. The packager reads normal **and delay**
+PE imports with LLVM, copies every non-OS dependency recursively, and refuses anything unresolved. Only the declared
+Windows 11 components/API sets remain external; the MSVC CRT comes from VS's x64 redistributable directory. SDK
+licenses, exact component versions, the hash-verified Microsoft runtime license and a per-file SHA-256 manifest are
+included. The standard `bin`, `lib/gstreamer-1.0` and `libexec/gstreamer-1.0` layout also works when the SDK is absent.
+Lab launches use that private runtime with a per-alias registry. The lab-contact rule still applies to live runs.
+
+The Windows decoder equivalents are libav for AAC/HEVC and dav1d/libav for AV1; WASAPI2 and Media Foundation provide
+the native devices. Hardware video decoding remains unranked by the player on both platforms. The Linux WPE
+manifest additionally serves WebKit's Web Audio/WebCodecs/MediaRecorder; Windows sign-in uses WebView2. The client's
+inline player is for video attachments and recordings. Call RTP, screen capture and background segmentation use
+libwebrtc, Windows Graphics Capture and the embedded Rust CPU/wgpu model respectively, with no extra GStreamer
+device/effects runtime to install.
+
+`python scripts/make-media-samples.py <directory>` creates 21 disposable FFmpeg test-pattern/tone samples, with no
+captured input. Copy that directory into the VM and run
+`pwsh -NoProfile -File scripts/test-windows-media.ps1 -Samples <directory>`. This offline console gate checks the
+default runtime layout without SDK paths, a fresh complete plugin scan/blacklist, each plugin's actual path, native
+device and decoder factories, every generated container/codec, and the real player's MP4/fragmented-recording and
+background-effects tests. It does not capture a physical microphone/camera or reach a tenant. Each process has a
+deadline and the build/run stops below 1.5 GiB free; diagnostics remain in the private `target/windows-media-smoke-*`
+directory. Targets link sequentially using `cargo rustc --profile test`; only their final links omit the large
+native PDBs. Dependencies retain their normal debug settings and compiled/static caches. Run
+`python -B scripts/test_windows_media_closure.py` for the display-free PE packaging contracts.
+
+The only Windows UI sandbox authorized for agents is the **win11 VM's interactive console**. After the lab-contact
+check, `scripts/run-lab.ps1 a` builds then schedules a Limited InteractiveToken action for the already logged-in
+user, without a password. The native console guard refuses an SSH/session-zero window. Provision exactly one lab
+account in `%LOCALAPPDATA%/ngteams-lab/a/accounts.toml` first, as on Linux. `-Status` and `-Stop` inspect/stop that
+alias; `-TimeoutSeconds 1800` sets its deadline. The VM's normal screenshot/input tools operate its console; never
+enter credentials with a typing helper. Use only the authorized VM, never a physical Windows desktop.
+
+`pwsh scripts/provision-lab.ps1 -Command Browser` checks the installed system Edge's Microsoft signature and product
+identity. The Windows `proto-lab` command set contains only lab browser verification, native login/provisioning and
+read-only reach evidence; Linux keeps its full capture/scenario CLI. Both reuse our CDP connection, login decisions,
+redirect catcher, PKCE, identity checks and token publication. Windows launches Edge headless in a separate protected
+`%LOCALAPPDATA%/teams-lab/profiles/<a|b|c>` profile, in an atomically assigned kill-on-close job. It never enables
+password/debugging input in the shipped WebView2 worker.
+
+After the lab-contact check, prepare `%LOCALAPPDATA%/teams-lab` privately (`teams-runner prepare --directory <path>`),
+place the approved roster in `lab.toml`, and transfer only the required lab account entries as `accounts.json` over
+scp, never as command text or a password argument. Protect the input file's owner and DACL for the console user and
+SYSTEM before transfer; the loader checks the opened handle and refuses broad grants, a different owner or an
+unmatched roster email without repairing it. Remove that password input from the VM when validation ends.
+`pwsh scripts/provision-lab.ps1 -Command Login -Alias a -NativeAlias <runner-alias>` runs the dedicated one-password
+state machine on Microsoft's native authorization page, stops for MFA/rejection, checks the redirect/state/ID token,
+and publishes native account/region files and tokens in the VM's `ngteams-lab` Credential Manager namespace. It
+never opens the Teams web client. `-Command Auth` instead reuses an already authenticated browser profile without
+typing a password. `-Command Refresh` instead completes authz and region publication from a stored refresh token,
+after matching the previously verified native identity against the roster; it opens no browser. Tokens remain in the VM.
+The scheduled console action is bounded, uses the existing interactive user, owns its browser descendants and holds the same exclusive live lock used by Windows capture tools.
+
+Before starting a signed-in engine, run `-Command Reach -Alias a -NativeAlias <runner-alias> -Chat <checked-chat-id>` under a fresh lab-contact
+check. It follows every conversation page and reads actual member lists through the production GET transport;
+`reach-a.json` privately records roster completeness and allowed actor labels separately. Only explicitly selected
+targets gate the run: incomplete rosters or unlisted people on a selected target fail the operator check. A visible
+channel outside the allowed set remains inventory, never a target to open or act in. Review that evidence and any
+intended meeting/call participants before
+using `run-lab.ps1`; the installed client has the ordinary Teams feature policy.
+
+The runner retains a kernel sharing lock per alias and a shared `%LOCALAPPDATA%/teams-lab/live.lock` for its entire
+lifetime and cleanup. Windows capture tools must open the latter with read/write access and no sharing for their
+exclusive lock; Linux `flock` and Windows file-sharing locks are separate OS domains. Global alias paths make
+worktrees contend for the same lock. It creates the broker pair itself, transfers only the required endpoint and
+trace into each child, and keeps its original endpoints alive across restarts. App and broker have private unnamed
+kill-on-close Job Objects. Job assignment is atomic with process creation; app restart images and WebView workers
+remain in the app job. Cleanup waits until its jobs contain no processes before releasing locks. `holder.log` and
+`trace.jsonl` are private and retained; they are never repository artifacts.
+
+For an **already installed** personal Windows executable, `scripts/run-personal-read-only.ps1 <upn> -App C:/path/to/ngteams/bin/ngteams.exe` uses the same VM console, the app's consistent snapshot and its get-only broker. It does
+not build, install or sign in the personal client. Snapshot data is under `%LOCALAPPDATA%/ngteams-read-only/run/`,
+removed after orderly completion or `-Stop`; a failed/crashed run retains diagnostic evidence until stopped.
+It uses the installed package's adjacent media runtime and manifest.
+
+Offline lifecycle tests use a tiny synthetic native executable, no GUI, network or credentials:
+`cargo test -p teams-runner` and `scripts/test-windows-runner.ps1 -Runner <absolute-helper.exe>`. The latter adds
+actual CLI dispatch and console scheduling in the VM; `-SkipConsole` checks only the display-free paths on hosted CI.
+
+
+### Windows sign-in checks
+
+`teams-signin` selects native WebView2 on Windows; Linux retains the offscreen WPE worker. The native worker uses
+private standard-stream pipes to the same in-process guard, starts in a private kill-on-close job, and receives
+neither the broker nor view-trace handles. Its private, InPrivate browser profile is deleted after every browser
+process exits, including readonly Chromium cache metadata. Environment and registry overrides that could change
+the browser or proxy are refused. Request filters cover every document/worker source; response interception adds
+CSP restrictions, and document-created scripts remove unguarded network constructors in every frame. Proxy
+settings remove Chromium's implicit loopback bypass. TLS errors, ambient HTTP authentication, client certificates,
+external protocols, permissions, popups and downloads are refused in production.
+
+The Windows lab runner still requires the authorized VM console and the usual contact check for a live app run.
+For an offline native sign-in check, run `pwsh -NoProfile -File scripts/test-windows-signin.ps1` in that VM. It
+builds the test harness, then schedules its GUI in the existing Limited InteractiveToken console. `-HoldForShot`
+keeps the synthetic page visible longer for a VM screenshot. It uses only a self-signed numerical-loopback HTTPS
+fixture: the test-support worker permits that certificate alone, without changing Windows trust. The production
+proxy configuration is used even for loopback. Assertions cover per-request logging, allowed and denied POSTs,
+synchronous/POST redirects, main/frame/immediate-about-blank constructor restrictions, immutable restrictions,
+proxy tunnel counts, redirect-code redaction and profile/process cleanup. Synthetic evidence stays in the ignored
+`target/windows-signin-smoke-*` directories. No account, credential or tenant is used.
+
+Display-free Windows checks use `cargo test -p teams-signin --lib --test classify --test gate --test native_worker`.
+The normal lab application builds and opens the native Microsoft sign-in page. Signed-in feature validation is separate from these offline synthetic contracts.
+
+### Windows application contracts
+
+`pwsh -NoProfile -File scripts/test-windows-app.ps1` builds and executes the synthetic app and UI contracts in the
+authorized win11 console. `-Group app`, `-Group ui` or `-Group scenes` selects app contracts, shared model/view contracts
+or real rendered scenes. `-Only` accepts exact inventory keys such as `ngteams-test-descriptors` or
+`teams-ui-scene-font_styles` to rerun failed targets. The app and UI groups discover their shared integration tests
+from each crate's test directory, including calls, calendar and control events; Linux compositor/bus harnesses and
+the separately driven native Windows fixtures are excluded from that discovery. It checks actual native descriptor
+ownership/inheritance and restart, account/sign-in persistence, read-only and lab broker behavior, startup, control
+IPC and handoff, settings privacy and the translation/correction/recap models and views. All identities and services
+are synthetic; no installed AI tool or tenant is reached. Its evidence and executable inventory stay under a private
+`target/windows-app-smoke-*` directory. Builds retain dependency debugging and omit only each selected test image's
+final PDB; deadlines, the 1.5 GiB free-space guard and scheduled-task cleanup cover each run.
+
+Fake CLI protocols use the same scripts on both platforms. Windows launches them through native `.cmd` shims, with
+Git for Windows' `Program Files/Git/bin/bash.exe` interpreting the synthetic protocol. This exercises the app's actual
+prompt-file adaptation and process-tree cancellation; process liveness is checked in Bash's PID namespace before
+and after cancellation. The Trouter production-dependency contract uses Git's `usr/bin/timeout.exe` for the same
+300-second child deadline as Linux. Windows privacy assertions inspect actual ACL grants, and publication-failure tests use
+native file-sharing rules. Chat list, notes, meetings, recap, channels, workflows and font-style scenes share their
+real rendering code in `tests/support/scenes/`; their small fixture boundary selects the private compositor or native Windows window capture
+and close. Windows snapshots verify the child executable and console session, refuse an overlaid secure desktop,
+use physical DPI coordinates and reject client areas clipped by the work area or covered by another input window.
+They crop only the foreground client area and retain its process tree until cleanup. `RECAP_PAGES=settings,caption-settings,speed`
+selects those recap scene pages on both platforms; the Windows driver passes that selection into its console task.
+Font checks use native installed
+families, one family per short Windows
+window to keep shell overlays outside the measured pixels. The Wayland drag, portal, D-Bus and Linux app-runner
+harnesses stay in `tests/support/linux/`; Windows has native desktop/shell/video fixtures. Shared model/view tests
+remain available on both platforms. These offline gates do not establish signed-in feature behavior or physical devices.
+
+### Windows video and local tools
+
+`pwsh -NoProfile -File scripts/test-windows-video.ps1` runs a synthetic GPUI video fixture in the authorized win11
+console. It uses numerical BGRA quadrants without an account, device or network. It checks that each replacement
+uploads one image, repainting reuses it, fully clipped frames submit nothing, and both replacement and hiding evict the previous atlas entry. `-HoldForShot`
+keeps the final synthetic frame visible briefly and saves its foreground client area as `frame.png` in the private run directory. The pinned Windows GPUI crate has a test-support atlas inspection patch, verified by `scripts/vendor-crates.sh --check`, so these checks query the actual DirectX atlas. Linux retains its persistent external
+surface and GPU completion trace; Windows records `video-tile submitted` after a successful image paint because
+GPUI's image API has no GPU-completion callback. Neither means a remote participant received a frame.
+
+Local AI tools are discovered as native executables or Windows npm `.cmd`/`.bat` shims. Their arguments use the
+standard library's native escaping. Each command starts suspended, enters a private non-breakaway job, then resumes;
+closing the owner terminates its descendants even after the first process exits. Model caches use `USERPROFILE`
+on Windows. Claude batch shims receive multiline instructions through its documented `--system-prompt-file` option
+in a private temporary directory, removed after its process tree exits. Settings, recap summaries and print pages use the platform's private file creation/restriction helpers;
+print links use encoded file URLs, including Windows drive paths.
+
+Both GUI executables embed the application icon, share an explicit Windows taskbar identity and use the Windows
+GUI subsystem. The complete debug application exceeds MSVC's PDB debug-record limit (LNK1140) with the full media/AI
+and UI dependencies even with line tables only. Its Windows final link omits the PDB; runtime diagnostic logging
+is unchanged. Linux and dependency/test debugging retain their usual settings. Release builds already omit debug
+information. Signed-in application flows remain a separate gate; release packaging is described below.
+
+The initial sign-in installs the same private diagnostic logger before opening its page. Chromium rejects an
+explicitly empty response phrase when a paused response's headers are continued; HTTP/2 can supply that empty
+field. The response policy omits it and lets Chromium supply the status's standard phrase, preserving the original
+status and headers plus the additional restrictions. The native HTTPS contract includes an empty-phrase response.
+
+Windows desktop integration uses WinRT toasts and the native notification area rather than a session bus.
+The same notifier handles mentions, collapsed messages, translations, focused-chat suppression and notification
+settings on both platforms. Notification IDs are shared across accounts; activations are handed to the existing account/chat/channel and
+explicit Answer/Decline handlers. Windows receives fixed action names, opaque per-run/per-notice keys and numeric
+tags, with escaped plain display text; notification content never enters the view trace. The unpackaged app registers
+its name/icon, matching Start-menu shortcut and COM activation class under its per-user AppUserModelID. COM callbacks
+queue only arguments; the notification thread validates the identity, notice generation and fixed action before
+routing it. Replaced, withdrawn, foreign and unknown activations are ignored.
+Lab and read-only processes use distinct temporary identities and shortcuts, so concurrent runners do not share a
+COM endpoint or alter the installed client's shell registration. Those temporary registrations are removed on
+shutdown. The same selected identity groups the main window and its native sign-in worker, including the first
+sign-in before a main window exists. Message sounds follow Windows notification preferences; the app's ringer owns call audio.
+The running app owns its toasts and withdraws them on normal shutdown. A fresh run never accepts an old call action.
+Windows’ COM `-Embedding` startup marker is filtered before argument parsing; other arguments, including all lab and
+read-only runner requirements, still pass through the ordinary command line checks.
+
+The Windows tray offers Open Teams and Quit. Its icon and taskbar overlay follow the combined unread-chat count,
+including a main window reopened from the tray; the icon re-registers after Explorer restarts.
+The main HWND also forwards `TaskbarButtonCreated` to the tray thread, which reapplies the current unread overlay
+when Explorer has recreated that button. Without a tray item,
+closing the main window retains the existing quit behavior. Read-only mode creates no tray item. Native shell work
+runs on dedicated threads and returns actions to GPUI; it builds no Teams requests.
+
+`scripts/test-windows-desktop.ps1` runs account-free toast/history, native toast action, tray callback and taskbar contracts in the
+explicitly authorized win11 console. It never signs in or opens a microphone or camera. Like the other native fixture
+runners, it creates only a Limited InteractiveToken task and removes that task when the bounded run ends.
+
+The shell fixture requires visible synthetic message and incoming-call toasts: body, Answer and Decline each invoke
+the native shell control and must return the exact notification ID/action through COM. UI Automation examines only
+immediate desktop children to locate toast roots, then searches their trees for the exact synthetic title. It waits
+for visible controls and stable geometry before the console helper captures that verified rectangle. A history entry
+alone cannot pass. The fixture also tests stale/foreign COM arguments, history replacement and withdrawal, tray
+callbacks and taskbar APIs.
+
+`scripts/test-windows-shell.ps1` exercises the production GPUI Desktop over two synthetic accounts in that console.
+It checks real window activation after minimizing, close to tray, the visible native tray/menu's Open Teams action,
+window recreation with its selected account and theme, account-specific settings/chat routing, and combined unread
+counts. It withdraws only its own tray icon and sends `TaskbarCreated` synchronously to its own HWND, requiring the
+icon to return before it can open the menu. Explorer itself is never restarted. The window procedure queues sent
+shell callbacks/broadcasts as well as posted ones: `GetMessage` dispatches sent messages without returning them to
+the outer loop. The fixture saves the visible tray/menu rectangles, app taskbar button before/after unread changes
+and recreation, and the foreground synthetic client in Light/Dark. UI Automation uses bounded provider calls and
+known shell HWNDs, with a unique per-run synthetic icon label; capture includes Explorer's layered windows.
+Pass `-Executable <absolute-native_shell-test.exe>` to rerun an already-built fixture. Its GUI subsystem prevents a
+driver console from taking focus away from the popup. Signed-in application flows remain a separate Windows gate.
+
+
+### Windows release packaging
+
+The Windows job in `.github/workflows/release.yml` builds the install-marked app, `ngteams-webview.exe` and
+`ngteamsctl.exe` on `windows-2025`, using the same workspace-version/run-number and source commit as Linux.
+Both build jobs have read-only permissions. The publish job requires both artifacts and runs only for
+`refs/heads/main`; a branch dispatch builds artifacts without publishing. The Windows zip joins the Linux assets
+in the release's checksums and build-provenance attestation. No agent builds the install-marked client locally.
+
+`scripts/release-windows-deps.ps1` installs the hash-pinned GStreamer development SDK. After the hosted binaries
+are built, `scripts/package-release-windows.ps1 -Binaries target/release -Version <major.minor.patch.run> -Commit
+<full-commit>` assembles the verified media closure, collects notices from the resolved Windows Cargo graph and
+libwebrtc, and stages all three executables under `bin/`. `scripts/windows-release.py` checks every PE's ordinary
+and delay imports against that private tree. `PACKAGE-MANIFEST.json` hashes every shipped file, including the
+unchanged media manifest. By default the media closure uses a unique system temporary directory, removed after
+packaging, outside Cargo's `target/` tree. A restored rust-cache may contain an empty old `target/windows-media-release`
+directory; the packager never consults it. An explicit `-Runtime` remains a verified caller-owned input.
+Missing/extra/changed files, unresolved DLLs and stale plugin roots fail packaging;
+staging and the archive must fit above the existing 1.5 GiB disk guard.
+
+The zip contains Windows PowerShell 5.1-compatible `Install.ps1` and `Unregister.ps1`. Setup verifies the extracted
+tree, copies it to a versioned per-user program directory, creates a Start shortcut and registers an available
+MSTeams handler through Windows Default Apps capabilities. It does not replace the current default or start the
+client. The first normal startup adds the shortcut's notification properties and COM registration. Setup detects
+WebView2 using Microsoft's documented per-user/per-machine registry values; if missing it downloads the official
+Evergreen bootstrapper, checks its Microsoft Authenticode signature and runs its bounded per-user installation.
+Unregister removes only metadata still pointing at that package version and retains account files/credentials.
+See the [Microsoft deployment guide](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution).
+
+`python -B scripts/test_windows_release.py` exercises real x64 PE delayed/transitive dependencies, archive contents,
+metadata, corruption, missing binaries, existing-output protection and the disk guard. The workflow also unpacks
+and verifies its zip, checks build identity and CLI help, and runs `Install.ps1 -VerifyOnly`. No GUI, account,
+installer execution or tenant access is needed for these checks. Agents can package normally built lab binaries
+with the same scripts and `-Runtime target/windows-media-runtime`; they never install or start them as a personal
+client. The signed-in VM checks and physical device/GPU limits remain separate from package integrity.

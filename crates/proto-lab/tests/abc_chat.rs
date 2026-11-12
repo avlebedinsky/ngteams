@@ -1,6 +1,9 @@
 //! The `abc-chat` scenario's offline parts: its deep links, how it finds the group chat a first message went to, its
 //! forced-deny labels and how it judges denies. Every id here is made up.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use proto_lab::capture_hold::{HeldRequest, PausedRequest};
 use proto_lab::config::LabChats;
 use proto_lab::config::LabPaths;

@@ -1,6 +1,9 @@
 //! The `ab-image` scenario's offline parts: its test image is a well-formed PNG it makes itself, its forced denies take
 //! every write to an AMS object on any host and no read, and its deny policy expects those and the probes only.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::io::Read as _;
 
 use proto_lab::capture_hold::{HeldRequest, PausedRequest};

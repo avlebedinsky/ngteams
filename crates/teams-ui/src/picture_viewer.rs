@@ -607,7 +607,13 @@ impl PictureViewer {
         };
         let bytes = Arc::clone(bytes);
         let name = file_name(current.time, bytes.format);
-        let folder = downloads();
+        let folder = match downloads() {
+            Ok(folder) => folder,
+            Err(error) => {
+                self.say((format!("Couldn't open Downloads: {error}").into(), false), cx);
+                return;
+            }
+        };
         let chosen = cx.prompt_for_new_path(&folder, Some(&name));
         cx.spawn(async move |this, cx| {
             let target = match chosen.await {
@@ -682,17 +688,30 @@ pub fn file_name(time: i64, format: PastedFormat) -> String {
     format!("Image {at}.{extension}")
 }
 
-/// The user's downloads folder: `XDG_DOWNLOAD_DIR` (from the environment, else `user-dirs.dirs`), else `~/Downloads`.
-pub(crate) fn downloads() -> PathBuf {
+/// The user's downloads folder, including a redirected Windows known folder.
+///
+/// # Errors
+/// Windows could not resolve the current user's native Downloads folder.
+#[cfg(windows)]
+pub(crate) fn downloads() -> std::io::Result<PathBuf> {
+    dirs::download_dir()
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Windows Downloads folder is unavailable"))
+}
+
+/// `XDG_DOWNLOAD_DIR` (from the environment, else `user-dirs.dirs`), else `~/Downloads`.
+#[cfg(not(windows))]
+#[expect(clippy::unnecessary_wraps, reason = "the native Windows folder lookup can fail")]
+pub(crate) fn downloads() -> std::io::Result<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR") {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
     }
     let config = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from);
-    std::fs::read_to_string(config.join("user-dirs.dirs"))
+    Ok(std::fs::read_to_string(config.join("user-dirs.dirs"))
         .ok()
         .and_then(|dirs| user_dir(&dirs, "XDG_DOWNLOAD_DIR", &home))
-        .unwrap_or_else(|| home.join("Downloads"))
+        .unwrap_or_else(|| home.join("Downloads")))
 }
 
 /// The folder `user-dirs.dirs` (its text `dirs`) names by `key`, `$HOME` in it standing for `home`.
@@ -1065,4 +1084,42 @@ fn note_card(note: &SharedString, fine: bool, palette: Palette) -> AnyElement {
                 .child(div().truncate().child(note.clone())),
         )
         .into_any_element()
+}
+
+#[cfg(all(test, windows))]
+mod native_downloads {
+    /// Windows resolves its known Downloads folder even without HOME and with an unrelated XDG override.
+    #[cfg(windows)]
+    #[test]
+    fn windows_downloads_uses_the_shell_folder_without_unix_homes() {
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+        const CHILD: &str = "NGTEAMS_TEST_NATIVE_DOWNLOADS";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "picture_viewer::native_downloads::windows_downloads_uses_the_shell_folder_without_unix_homes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("HOME")
+                .env("XDG_DOWNLOAD_DIR", "relative-unix-override")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        // SAFETY: this reads the current user's shell configuration and returns an owned COM allocation.
+        let native = unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None) }.unwrap();
+        // SAFETY: SHGetKnownFolderPath returned a live NUL-terminated string.
+        let expected = std::path::PathBuf::from(unsafe { native.to_string() }.unwrap());
+        // SAFETY: release the API's allocation exactly once, after copying it.
+        unsafe { CoTaskMemFree(Some(native.0.cast())) };
+        let folder = super::downloads().unwrap();
+        assert!(folder.is_absolute());
+        assert_eq!(folder, expected);
+    }
 }

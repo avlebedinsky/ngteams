@@ -446,8 +446,10 @@ pub enum Event {
     /// couldn't be offered again): nothing more is sent on it until the account turns it on again
     /// ([`CallAction::Camera`]).
     CameraOff { call: CallId },
-    /// The microphone (`microphone`) or the speaker of the account's call went away for good (its stream ended, not
-    /// moved to another device): the call goes on, nothing recorded or played on it.
+    /// The microphone (`microphone`) or the speaker of the account's call went away or couldn't open (its stream
+    /// ended, not moved to another device): the call goes on. A lost microphone stays muted, nothing recorded, until
+    /// an unmute ([`CallAction::Mute`]) opens it again; a lost speaker is reopened by the engine about once a second,
+    /// and the far end's audio plays again once it opens (received audio is decoded meanwhile).
     AudioClosed { call: CallId, microphone: bool },
     /// Who is in the account's call besides it, whose video each line shows, and who is speaking ([`CallView`]):
     /// told whenever that changed.
@@ -586,6 +588,10 @@ pub enum EngineError {
     /// A meeting's recap (what it left, or a transcript) couldn't be read ([`crate::recap`]).
     #[error("the meeting's recap couldn't be read")]
     RecapUnread,
+    /// A profile card couldn't be read: none of its reads gave anything, or the MRI isn't a directory user's
+    /// ([`crate::profile_card`]).
+    #[error("the profile card couldn't be read")]
+    ProfileUnread,
     /// A meeting's chat couldn't be read for the meeting it is ([`crate::calendar`]).
     #[error("the meeting couldn't be read")]
     MeetingUnread,
@@ -637,6 +643,7 @@ impl EngineError {
             Self::CalendarUnread => "calendar unread",
             Self::MeetingUnread => "meeting unread",
             Self::RecapUnread => "recap unread",
+            Self::ProfileUnread => "profile unread",
             Self::EventNotSaved { .. } => "event not saved",
             Self::ChannelNotCreated { .. } => "channel not created",
             Self::TeamNotChanged { .. } => "team not changed",
@@ -715,6 +722,8 @@ enum Request {
     UploadFile(PathBuf, Responder<teams_proto::UploadedFile>),
     /// A picture pasted into a message in a conversation, sent into an object only it may read: the object's id.
     UploadPicture(String, teams_proto::PastedPicture, Responder<String>),
+    /// A person's profile card, by their MRI ([`crate::profile_card`]).
+    ProfileCard(String, Responder<crate::ProfileCard>),
     /// What a meeting left, by its chat ([`crate::recap`]).
     MeetingContents(String, Responder<Vec<teams_proto::MeetingContent>>),
     /// A meeting transcript's `WebVTT`, by its address on its item ([`crate::recap`]).
@@ -1635,6 +1644,15 @@ impl EngineRequests {
         })
     }
 
+    /// The profile card of the person `mri` names (`8:orgid:<object id>`), read now ([`crate::profile_card`]): Loki's
+    /// person, schedule, out-of-office, organization and working-with, their presence and their short profile, read
+    /// at once; a section whose read failed is `None`. [`EngineError::ProfileUnread`] when every read failed or the MRI
+    /// isn't a directory user's. Nothing is sent but reads, and nothing is stored.
+    pub fn profile_card(&self, mri: impl Into<String>) -> Reply<crate::ProfileCard> {
+        let mri = mri.into();
+        self.ask(|reply| Request::ProfileCard(mri, reply))
+    }
+
     /// What the meeting whose chat is `thread` left (its recordings and transcripts), as its recap lists it, read now
     /// ([`crate::recap`]): [`EngineError::RecapUnread`] when it can't be read.
     pub fn meeting_contents(&self, thread: impl Into<String>) -> Reply<Vec<teams_proto::MeetingContent>> {
@@ -1917,6 +1935,7 @@ struct Core<C, T> {
     thumbnails: Thumbnails<C>,
     files: FileContents<C>,
     recaps: crate::recap::Recaps<C>,
+    profile_cards: crate::profile_card::ProfileCards<C>,
     uploads: crate::attachments::Uploads<C, T>,
     calendar: Calendar<C, T>,
     channels: Channels<C, T>,
@@ -1980,6 +1999,7 @@ where
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let files = FileContents::new(Arc::clone(&parts.client));
         let recaps = crate::recap::Recaps::new(Arc::clone(&parts.client));
+        let profile_cards = crate::profile_card::ProfileCards::new(Arc::clone(&parts.client));
         let uploads = crate::attachments::Uploads::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let calendar = Calendar::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let channels = Channels::new(Arc::clone(&parts.client), Arc::clone(&outbox));
@@ -2008,6 +2028,7 @@ where
             thumbnails,
             files,
             recaps,
+            profile_cards,
             uploads,
             calendar,
             channels,
@@ -2286,9 +2307,15 @@ where
         }
     }
 
-    /// Other people's calendars read, or a meeting of the account's own made now (Meet now): the calendar's.
-    fn on_meeting(&mut self, request: Request) {
+    /// A person (their stored profile, or their profile card read now), other people's calendars read, or a meeting of
+    /// the account's own made now (Meet now).
+    fn on_more_lookups(&mut self, request: Request) {
         match request {
+            Request::ProfileCard(mri, reply) => self.profile_cards.card(mri, reply),
+            Request::Person(mri, reply) => {
+                let person = self.profiles.person(&self.store, &mri);
+                let _ = reply.send(person.map_err(EngineError::from));
+            }
             Request::PeopleCalendars {
                 people,
                 start_ms,
@@ -2347,7 +2374,10 @@ where
                 meeting_minutes,
                 reply,
             } => self.calendar.availability(attendees, start_ms, meeting_minutes, reply),
-            request @ (Request::PeopleCalendars { .. } | Request::MeetNow { .. }) => self.on_meeting(request),
+            request @ (Request::PeopleCalendars { .. }
+            | Request::MeetNow { .. }
+            | Request::ProfileCard(..)
+            | Request::Person(..)) => self.on_more_lookups(request),
             Request::Invitable { query, reply } => match self.store.profiles_named(&query, INVITABLE) {
                 Ok(named) => self.calendar.invitable(named, reply),
                 Err(error) => {
@@ -2367,10 +2397,6 @@ where
                 reply,
             } => self.files.stream(&share_url, offset, len, reply),
             Request::FileSize(share_url, reply) => self.files.size(&share_url, reply),
-            Request::Person(mri, reply) => {
-                let person = self.profiles.person(&self.store, &mri);
-                let _ = reply.send(person.map_err(EngineError::from));
-            }
             Request::Presence(mri, reply) => self.presence_asked(&mri, reply),
             Request::Teams(reply) => {
                 let teams = self.teams.teams(&self.store);
@@ -3222,6 +3248,7 @@ fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActi
             Act::JoinChannel(chat, Arc::default())
         }
         CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
+        CallAction::JoinMeetingCode(code) => Act::Place(Placement::MeetingCode(code)),
         CallAction::MeetNow { channel } => Act::Place(Placement::Channel { channel }),
         CallAction::JoinChannel { channel } => Act::JoinChannel(channel, Arc::default()),
         CallAction::Answer { call } => Act::Answer(call),
@@ -3348,6 +3375,14 @@ mod start_within {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("store.db")).unwrap();
         call_act(&store, ME, action)
+    }
+
+    #[test]
+    fn a_meeting_code_is_resolved_by_the_service_without_a_chat_lookup() {
+        let code = teams_proto::MeetingCode::typed("123456789012", "MadeUp").unwrap();
+        let action = CallAction::JoinMeetingCode(code.clone());
+        assert!(action.starts());
+        assert!(matches!(resolved(action), Ok(Act::Place(Placement::MeetingCode(found))) if found == code));
     }
 
     #[test]

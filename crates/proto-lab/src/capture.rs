@@ -38,8 +38,11 @@
 //! The directory is made `0700` and the file `0600`.
 
 use std::collections::HashMap;
-use std::fs::{DirBuilder, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{DirBuilder, File};
 use std::io::{self, Write as _};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -170,19 +173,29 @@ impl Recorder {
             return Err(CaptureError::BadScenario(scenario.to_owned()));
         }
         let parent = captures_dir.join(scenario);
+        #[cfg(unix)]
         DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&parent)
             .map_err(io_at(&parent))?;
+        #[cfg(windows)]
+        {
+            teams_platform::private::create_dir_all(&parent).map_err(io_at(&parent))?;
+            teams_platform::private::restrict_dir(&parent).map_err(io_at(&parent))?;
+        }
         let dir = unique_dir(&parent, &capture_dir_name(SystemTime::now()))?;
         let path = dir.join(EVENTS_FILE);
+        #[cfg(unix)]
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&path)
             .map_err(io_at(&path))?;
+        #[cfg(windows)]
+        let file =
+            teams_platform::private::open(&path, teams_platform::private::Open::NewAppend).map_err(io_at(&path))?;
         Ok(Self {
             dir,
             writer: Mutex::new(Writer {
@@ -252,7 +265,10 @@ impl Recorder {
 
 /// Makes `<parent>/<name>`, or `<name>-2`, `<name>-3`, … when it exists.
 fn unique_dir(parent: &Path, name: &str) -> Result<PathBuf, CaptureError> {
-    let mut builder = DirBuilder::new();
+    let builder = DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
+    #[cfg(unix)]
     builder.mode(0o700);
     for attempt in 1..=1000_u32 {
         let dir = match attempt {

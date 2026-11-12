@@ -406,9 +406,10 @@ pub(crate) fn music_on_hold(body: &[u8]) -> Option<(u64, bool)> {
 }
 
 fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
-    // The built-in caption service, the music on hold and the recording bot are hidden in Teams: never a person in
-    // the gallery (the music would make a held 1:1 call look like a group call's; a recording shows as its notice).
-    if mri == teams_proto::captions::CAPTION_SERVICE_MRI || mri == MUSIC_ON_HOLD_MRI || mri == crate::RECORDER_MRI {
+    // The built-in caption service (the recording bot, from any region) and the music on hold are hidden in Teams:
+    // never a person in the gallery (the music would make a held 1:1 call look like a group call's; a recording
+    // shows as its notice).
+    if teams_proto::captions::is_caption_service(mri) || mri == MUSIC_ON_HOLD_MRI {
         return None;
     }
     let version = entry.get("version")?.as_u64()?;

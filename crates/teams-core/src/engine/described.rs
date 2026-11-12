@@ -54,6 +54,7 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::Call { chat } => format!("a call from {chat}"),
         CallAction::TestCall { echo } => format!("the test call of {echo}"),
         CallAction::Join { chat } => format!("a join of the call in {chat}"),
+        CallAction::JoinMeetingCode(_) => "a join by meeting ID".to_owned(),
         CallAction::JoinMeeting { chat, .. } => format!("a join of the meeting in {chat}"),
         CallAction::MeetNow { channel } => format!("a new meeting in {channel}"),
         CallAction::JoinChannel { channel } => format!("a join of the meeting running in {channel}"),

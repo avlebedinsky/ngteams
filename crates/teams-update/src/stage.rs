@@ -42,12 +42,30 @@ pub(crate) fn cleanup(parent: &Path) -> usize {
                 .and_then(|text| text.trim().parse::<u32>().ok());
             owner.is_some_and(|pid| pid == std::process::id() || !alive(pid))
                 && !work.join(RECOVERY).exists()
-                && fs::remove_dir_all(&work).is_ok()
+                && remove(&work).is_ok()
         })
         .count()
 }
 
+/// Removes the stage `work` with its owner file last, so a stage a file of which is still held (Windows' installer
+/// runs from its stage until it exits) keeps its owner and is removed by a later start.
+fn remove(work: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(work)? {
+        let entry = entry?;
+        if entry.file_name() == OWNER {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    fs::remove_dir_all(work)
+}
+
 /// Whether process `pid` runs; one that can't be asked counts as running.
+#[cfg(unix)]
 pub(crate) fn alive(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return true;
@@ -58,4 +76,27 @@ pub(crate) fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks that the process exists; nothing is sent to it.
     let sent = unsafe { libc::kill(pid, 0) };
     sent == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Whether process `pid` runs; one that can't be asked counts as running.
+#[cfg(windows)]
+pub(crate) fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // the idle process, never an owner
+    if pid == 0 {
+        return true;
+    }
+    // SAFETY: a query-only handle to `pid`, closed below; nothing else is done with it.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        // SAFETY: reads this thread's last error, set by the failed OpenProcess above.
+        return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+    }
+    let mut code = 0;
+    // SAFETY: the handle opened above and a writable exit code.
+    let asked = unsafe { GetExitCodeProcess(process, &raw mut code) };
+    // SAFETY: the one handle OpenProcess returned.
+    unsafe { CloseHandle(process) };
+    asked == 0 || code == STILL_ACTIVE.cast_unsigned()
 }

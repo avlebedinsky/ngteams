@@ -429,6 +429,30 @@ impl StartCall {
         Self::start(context, parts, body, Expect::ChatStart, None)
     }
 
+    /// Join by the code and passcode from an invitation. The service resolves the meeting; no chat or
+    /// organizer is inferred from the account's sidebar. This is the short-link start with media.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the code or passcode is not valid input.
+    pub fn by_code(
+        context: &CallContext,
+        parts: &StartParts,
+        code: &crate::MeetingCode,
+    ) -> Result<Self, CallWriteError> {
+        if crate::MeetingCode::typed(&code.id, &code.passcode).as_ref() != Some(code) {
+            return Err(CallWriteError::Unmapped);
+        }
+        let mut body = start_body(parts, None, &[], Value::Null);
+        body["conversationRequest"]["suppressDialout"] = json!(true);
+        body["meetingData"] = json!({
+            "meetingCode": code.id,
+            "passcode": code.passcode,
+            "meetingUrl": format!("https://teams.microsoft.com/meet/{}?p={}", code.id, code.passcode),
+        });
+        body["meetingPreferences"] = json!({"shouldResurrect": "resurrect"});
+        Self::start(context, parts, body, Expect::ChatStart, None)
+    }
+
     /// The subscription to a new meeting in the channel `channel` (a team's channel thread), its Meet now (see the
     /// type's docs). Of `parts` it sends who subscribes, the conversation's callbacks and the client's capabilities;
     /// it carries no call and pends nothing in the call registry.

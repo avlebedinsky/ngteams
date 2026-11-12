@@ -1,10 +1,9 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! `ngteams`: desktop, read-only and lab startup. Build refusals come before anything is read or opened; application
 //! mode is checked after the internal sign-in page worker has had its chance to serve.
 
 use std::cell::Cell;
 use std::ffi::OsString;
-use std::os::fd::RawFd;
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::rc::Rc;
@@ -12,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser as _;
-use gpui::{App, AppContext as _, AsyncApp, Entity, WindowingModes};
+use gpui::{App, AppContext as _, AsyncApp, Entity};
 #[cfg(not(test))]
 use ngteams::accounts::{self, Runner, StartFailed, Started};
 use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
@@ -21,19 +20,20 @@ use ngteams::app;
 use ngteams::app::{Launch, SignInAgain};
 use ngteams::calling::CallDevices;
 use ngteams::cli::{Cli, Command as Subcommand, LabMode, ReadOnlyMode};
-use ngteams::descriptors::{adopt_socket, adopt_trace};
+use ngteams::descriptors::{RawDescriptor, adopt_socket, adopt_trace};
 use ngteams::forget::Forgot;
 use ngteams::handoff::{self, HandOff};
 use ngteams::setup::Setup;
 use ngteams::{KEYRING_APPLICATION, lab, read_only, secrets, snapshot};
 use teams_auth::secrets::LazyKeyring;
 use teams_core::CallFloor;
-use teams_media::devices::pipewire::Reach;
+use teams_media::devices::Reach;
 #[cfg(not(test))]
 use teams_ui::account_prompt;
 use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
 use teams_ui::window::PERSONAL_APP_ID;
 use teams_ui::{SettingsFile, ViewTrace};
+use teams_update::Restart;
 
 #[cfg(test)]
 #[path = "../tests/support/lab_startup.rs"]
@@ -44,7 +44,25 @@ mod startup_tests;
 #[cfg(test)]
 use startup_tests::accounts::{self, Runner, StartFailed, Started};
 #[cfg(test)]
-use startup_tests::{app, platform as gpui_platform, prompt as account_prompt, window_runner};
+use startup_tests::{app, platform, prompt as account_prompt, window_runner};
+
+// Keep the native backend choice at startup; lab/read-only sandbox checks run before constructing it.
+#[cfg(not(test))]
+mod platform {
+    pub fn application() -> gpui::Application {
+        #[cfg(windows)]
+        {
+            if let Err(error) = teams_platform::windows_desktop::set_app_id(crate::PERSONAL_APP_ID) {
+                log::warn!("Windows app identity: {error}");
+            }
+            gpui_platform::application()
+        }
+        #[cfg(unix)]
+        {
+            gpui_platform::linux(gpui::WindowingModes::WAYLAND)
+        }
+    }
+}
 
 #[cfg(not(test))]
 fn window_runner(runner: Runner) -> Runner {
@@ -61,10 +79,11 @@ enum Outcome {
     },
     /// Lab sign-in keeps the broker and trace available for this same process's next image.
     LabRestart(ngteams::restart::RestartDescriptors),
-    /// An update is in (`ngteams::update`): the process runs `executable`, its new version, with this run's arguments
-    /// (the link it `opened` left out, as for [`Outcome::Restart`]).
+    /// An update is in (`ngteams::update`): the process runs what `restart` names, its new version with this run's
+    /// arguments (the link it `opened` left out, as for [`Outcome::Restart`]), or on Windows the installer that puts
+    /// the new version in place once this process has exited and starts it.
     Update {
-        executable: PathBuf,
+        restart: Restart,
         opened: Option<String>,
     },
 }
@@ -75,10 +94,15 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     // the sign-in window's engine worker, held from here so an update replacing the files can't swap it under this run
+    #[cfg(unix)]
     if let Err(error) = teams_wpe_client::worker::pin_worker() {
         eprintln!("teams: {error}");
     }
-    let cli = Cli::parse();
+    #[cfg(windows)]
+    if let Err(error) = teams_signin::window::pin_worker() {
+        eprintln!("teams: {error}");
+    }
+    let cli = Cli::parse_from(ngteams::cli::shell_arguments(std::env::args_os()));
     if cli.build_identity {
         println!("{}", env!("CARGO_PKG_VERSION"));
         println!("{}", option_env!("NGTEAMS_BUILD_COMMIT").unwrap_or(""));
@@ -113,14 +137,10 @@ fn main() -> ExitCode {
     match outcome {
         Ok(Outcome::Quit) => ExitCode::SUCCESS,
         Ok(Outcome::Restart { opened }) => restarted(&mut |command| {
-            command
-                .args(restart_args(std::env::args_os().skip(1), opened.as_deref()))
-                .exec()
+            ngteams::restart::exec(command.args(restart_args(std::env::args_os().skip(1), opened.as_deref())))
         }),
-        Ok(Outcome::Update { executable, opened }) => updated(&executable, &mut |command| {
-            command
-                .args(restart_args(std::env::args_os().skip(1), opened.as_deref()))
-                .exec()
+        Ok(Outcome::Update { restart, opened }) => updated(restart, opened.as_deref(), &mut |command| {
+            ngteams::restart::exec(command)
         }),
         Ok(Outcome::LabRestart(descriptors)) => {
             restarted(&mut |command| descriptors.exec(command.args(std::env::args_os().skip(1))))
@@ -133,6 +153,7 @@ fn main() -> ExitCode {
 }
 
 /// Installs a sign-in engine runtime from a file, under the same checks a download gets.
+#[cfg(unix)]
 fn install_web_engine(archive: &std::path::Path) -> ExitCode {
     let installed = (|| {
         let pins = teams_web_engine::Pins::compiled()
@@ -151,6 +172,14 @@ fn install_web_engine(archive: &std::path::Path) -> ExitCode {
     }
 }
 
+#[cfg(windows)]
+fn install_web_engine(_archive: &std::path::Path) -> ExitCode {
+    failed(
+        "install-web-engine",
+        &"Windows uses Microsoft's installed WebView2 Runtime; install or repair it through Windows Settings",
+    )
+}
+
 /// This process run again by `exec` (which returns only when it couldn't).
 fn restarted(exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
     let mut command = Command::new(std::env::current_exe().unwrap_or_else(|_| "ngteams".into()));
@@ -159,17 +188,23 @@ fn restarted(exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// The new version run by `exec` once an update is in, without the AppImage runtime's variables (the new AppImage's
-/// runtime sets them again); `exec` returns only when it couldn't.
-fn updated(executable: &Path, exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
-    let mut command = Command::new(executable);
+/// What `restart` names run by `exec` once an update is in: the new version with this run's arguments (the link it
+/// `opened` left out), without the AppImage runtime's variables (the new AppImage's runtime sets them again), or the
+/// Windows installer with its own; `exec` returns only when it couldn't.
+fn updated(restart: Restart, opened: Option<&str>, exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
+    let mut command = Command::new(&restart.program);
+    match restart.arguments {
+        Some(arguments) => command.args(arguments),
+        None => command.args(restart_args(std::env::args_os().skip(1), opened)),
+    };
+    #[cfg(unix)]
     for variable in ngteams::update::APPIMAGE_ENV {
         command.env_remove(variable);
     }
     let error = exec(&mut command);
     eprintln!(
-        "teams: the update is installed, but it can't start ({error}): start {} yourself",
-        executable.display()
+        "teams: the update is ready, but {} can't start ({error}): start it yourself",
+        restart.program.display()
     );
     ExitCode::FAILURE
 }
@@ -255,12 +290,15 @@ fn run_setup(
     setup: Setup,
     trace: ViewTrace,
     ctl: Option<PathBuf>,
-    updater: Option<ngteams::update::Updater>,
+    updater: Option<Updater>,
 ) -> Result<Outcome, String> {
     if let Some(upn) = cli.forget.as_deref() {
         forget(&setup, upn)?;
         return Ok(Outcome::Quit);
     }
+    // The first sign-in needs the same credential-redacted guard diagnostics as an already signed-in account.
+    let file = SettingsFile::new(setup.paths.settings_file());
+    let diagnostics = app::install_log(setup.paths.log_dir(), file.load().settings.log_level);
     if let Some(asked) = cli.account.as_deref() {
         // the shortcut: that account, through the sign-in window at once when it isn't signed in
         let account = setup.ask_for(asked).map_err(|error| error.to_string())?;
@@ -276,9 +314,7 @@ fn run_setup(
         }
         return ask_account(setup, unready.first().map(|account| account.upn.clone()));
     }
-    let file = SettingsFile::new(setup.paths.settings_file());
-    let diagnostics = app::install_log(setup.paths.log_dir(), file.load().settings.log_level);
-    // the selected PipeWire, shared by every account; without it the app runs without calls
+    // the native devices, shared by every account; without them the app runs without calls
     let devices = match CallDevices::open(reach) {
         Ok(devices) => Some(devices),
         Err(error) => {
@@ -303,7 +339,7 @@ fn run_setup(
     let update_in_app = Rc::clone(&update);
     // a link this launch was given with no app to hand it to (only the personal app takes one: `Cli`)
     let link = cli.url.clone();
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         let (again_setup, again_restart) = (setup.clone(), Rc::clone(&restart_in_app));
         let launch = Launch {
@@ -342,9 +378,9 @@ fn run_setup(
 }
 
 /// How a run that opened its window ended: into an update's new version, signed in again, or quit.
-fn ended(restart: bool, update: Option<PathBuf>, opened: Option<String>) -> Outcome {
+fn ended(restart: bool, update: Option<Restart>, opened: Option<String>) -> Outcome {
     match (update, restart) {
-        (Some(executable), _) => Outcome::Update { executable, opened },
+        (Some(restart), _) => Outcome::Update { restart, opened },
         (None, true) => Outcome::Restart { opened },
         (None, false) => Outcome::Quit,
     }
@@ -371,9 +407,9 @@ fn launched_or_said<S: teams_auth::secrets::SecretStore + 'static>(
 /// The app's updates (`ngteams::update`) for the window `launched`: its restart waits on the desktop's calls and
 /// drafts, and its program goes to `restart_into` before the app quits.
 fn start_updates(
-    updater: ngteams::update::Updater,
+    updater: Updater,
     launched: &ngteams::app::Launched,
-    restart_into: Rc<Cell<Option<PathBuf>>>,
+    restart_into: Rc<Cell<Option<Restart>>>,
     cx: &mut App,
 ) {
     ngteams::update::start(
@@ -388,10 +424,13 @@ fn start_updates(
     );
 }
 
+/// What checks for and installs this copy's updates (`ngteams::update`).
+type Updater = ngteams::update::Updater;
+
 /// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
 /// socket taken over first, before anything opens a descriptor of its own; `get` only, of an account
 /// `accounts.toml` holds.
-fn broker(upn: &str, fd: RawFd) -> ExitCode {
+fn broker(upn: &str, fd: RawDescriptor) -> ExitCode {
     let socket = match adopt_socket(fd) {
         Ok(socket) => socket,
         Err(error) => return failed("secrets", &error),
@@ -473,7 +512,7 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
 
 /// The alias's one account in its lab namespace. It may still be pending: the broker must be available for its first
 /// sign-in as well as token refresh and forget.
-fn lab_broker(alias: &str, fd: RawFd) -> ExitCode {
+fn lab_broker(alias: &str, fd: RawDescriptor) -> ExitCode {
     let socket = match adopt_socket(fd) {
         Ok(socket) => socket,
         Err(error) => return failed("secrets", &error),
@@ -533,7 +572,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     let failed = Rc::new(Cell::new(false));
     let failed_in_app = Rc::clone(&failed);
     let ctl = mode.ctl_socket.clone();
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         let launch = Launch {
             first,
@@ -611,7 +650,7 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
     let restart = Rc::new(Cell::new(false));
     let failed = Rc::new(Cell::new(false));
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         match account_prompt::open(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref()) {
             Ok((_, prompt)) => cx
@@ -646,7 +685,7 @@ fn sign_in_from_prompt(
     restart: Rc<Cell<bool>>,
     cx: &mut App,
 ) {
-    let windows = ngteams::signin::windows(cx);
+    let windows = ngteams::signin::windows_for(&setup, cx);
     let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
     cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
         Ok(_) => {
@@ -669,11 +708,11 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
     let restart = Rc::new(Cell::new(false));
     let failure = Rc::new(std::cell::RefCell::new(None));
     let (restart_in_app, failure_in_app) = (Rc::clone(&restart), Rc::clone(&failure));
-    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
         // the sign-in window is the only one: closing it mustn't quit before the sign-in is done
         cx.set_quit_mode(gpui::QuitMode::Explicit);
-        let windows = ngteams::signin::windows(cx);
+        let windows = ngteams::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move {
             if setup.secrets().application() == lab::LAB_KEYRING_APPLICATION {
                 accounts::sign_in(&setup, &account, &windows)
@@ -709,7 +748,7 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
 fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>) -> SignInAgain {
     Rc::new(move |cx: &mut App| {
         let (setup, account, restart) = (setup.clone(), account.clone(), Rc::clone(&restart));
-        let windows = ngteams::signin::windows(cx);
+        let windows = ngteams::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move { accounts::sign_in(&setup, &account, &windows) });
         cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
             Ok(_) => {

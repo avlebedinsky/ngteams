@@ -1,0 +1,68 @@
+{
+  "_synthetic": "Made up, in the shape of the persona card service's (Loki's) answers to browser Teams' profile card reads of a lab account in the lab capture of 2026-11-11, and to the same reads sent as plain GETs with a lab account's native token (read locally; docs/protocol/loki.md). The configuration from the global host (only LokiUrl is read; its other keys trimmed), then, on the regional base with the query teamsMri=8:orgid:<oid>&aadObjectId=<oid>&personaType=User: person, organization (empty, as every capture had it), workingwith (limit=12), schedule and oofstatus, each HTTP 200 application/json. Names, addresses, times and ids are made up; <guid:tenant> is the tenant, <guid:a> the account asked about and <guid:c> someone it works with, tests fill them in.",
+  "content_type": "application/json; charset=utf-8",
+  "configuration": {
+    "path": "/api/v1/livepersonacard/configuration",
+    "answer": {
+      "DataBoundary": "None",
+      "LokiUrl": "https://nam.loki.delve.office.com/",
+      "TenantAadObjectId": "<guid:tenant>",
+      "UserAadObjectId": "<guid:a>",
+      "Workload": "Teams"
+    }
+  },
+  "person": {
+    "path": "/api/v2/person",
+    "answer": {
+      "person": {
+        "names": [{"value": {"displayName": "Lab Account A", "givenName": "Lab", "surname": ""}, "source": "Organisation"}],
+        "emailAddresses": [{"value": {"name": "lab-a@lab.example.com", "address": "lab-a@lab.example.com", "type": "Main"}, "source": "Organisation"}],
+        "imAddresses": [{"value": {"displayText": "lab-a@lab.example.com", "url": "sip:lab-a@lab.example.com"}, "source": "Organisation"}],
+        "workDetails": [{"value": {}, "source": "Organisation"}],
+        "enhancedWorkDetails": {},
+        "userPrincipalName": "lab-a@lab.example.com",
+        "aadObjectId": "<guid:a>",
+        "isContact": false,
+        "userType": "Member",
+        "recipientType": "UserMailbox",
+        "recipientTypeDetails": "UserMailbox",
+        "isAgenticUser": false
+      }
+    }
+  },
+  "organization": {
+    "path": "/api/v1/organization",
+    "answer": {"managers": [], "directs": [], "dottedLineManagers": []}
+  },
+  "workingwith": {
+    "path": "/api/v1/workingwith",
+    "answer": {
+      "value": [
+        {
+          "aadObjectId": "<guid:c>",
+          "fullName": "Lab Account C",
+          "email": "lab-c@lab.example.com",
+          "userPrincipalName": "lab-c@lab.example.com",
+          "profilePictureUrl": "https://nam.loki.delve.office.com/api/v2/personaphoto?made-up",
+          "permanentEntryId": "made-up-entry-id"
+        }
+      ]
+    }
+  },
+  "schedule": {
+    "path": "/api/v1/schedule",
+    "answer": {
+      "nextAvailability": {"utcDateTime": "0001-01-01T00:00:00", "currentStatus": "Free", "nextStatus": "Free"},
+      "workingHoursCalendar": {
+        "daysOfWeek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+        "startTime": "08:00:00.0000000",
+        "endTime": "17:00:00.0000000",
+        "timeZone": {"offset": 3.0, "name": "GMT+03:00", "odataType": "#microsoft.graph.customTimeZone"}
+      }
+    }
+  },
+  "oofstatus": {
+    "path": "/api/v1/oofstatus",
+    "answer": {"outOfOfficeState": "Disabled", "externalAudience": "Unknown", "emailAddress": "LAB-A@lab.example.com"}
+  }
+}

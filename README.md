@@ -4,10 +4,10 @@
 
 # ngteams
 
-**A native Microsoft Teams app for Linux.**
+**A native Microsoft Teams app for Linux and Windows.**
 
 Chats, channels, calendar, calls and meetings for your work account,
-built for the Linux desktop instead of a web page in a wrapper.
+built for your desktop instead of a web page in a wrapper.
 
 [Install](#install) · [Features](#what-you-can-do) · [Shortcuts](#keyboard-shortcuts) · [Privacy](#your-data) · [Good to know](#good-to-know)
 
@@ -29,6 +29,7 @@ built for the Linux desktop instead of a web page in a wrapper.
 - One-on-one and group chats, with formatting, emoji, @mentions, replies, reactions, edits and deletes
 - Drop in files, or paste screenshots and pictures straight into a message
 - Search messages and people, and keep unread counts in sync with your other devices
+- Click or hover anyone's picture or name for their profile card, as in Teams: their availability, work hours and local time, contact details, who they work with and their org chart, with Chat, a quick message, and video and audio calls right there
 - Drafts stay put while you move around
 
 **Teams and channels**
@@ -87,15 +88,17 @@ Translation, corrections and summaries use your own [Claude Code](https://claude
 
 **You'll need:**
 
-- A Linux desktop running on **Wayland**
+- A Linux desktop running on **Wayland**, or **Windows 11 x64**
 - A Microsoft 365 **work or school** account with Teams (personal Microsoft accounts aren't supported)
-- A desktop keyring, such as GNOME Keyring, to hold your sign-in
-- PipeWire for calls, which most current desktops already use
+- On Linux, a desktop keyring, such as GNOME Keyring, to hold your sign-in
+- On Linux, PipeWire for calls, which most current desktops already use
 
-Every release is on the [releases page](https://github.com/nickalie/ngteams/releases/latest). Linux x86_64 only.
+Every release is on the [releases page](https://github.com/nickalie/ngteams/releases/latest). Linux x86_64 and Windows x64.
 
 | On | Download | Install with |
 |---|---|---|
+| Windows 11 x64 | `ngteams-*-windows-x86_64-setup.exe` | run it (see below) |
+| | `ngteams-*-windows-x86_64.zip` | extract, then run `Install.ps1` in PowerShell |
 | Debian 13+, Ubuntu 24.04+ | `ngteams_*_amd64.deb` | `sudo apt install ./ngteams_*_amd64.deb` |
 | Fedora, RHEL-likes | `ngteams-*.x86_64.rpm` | `sudo dnf install ./ngteams-*.x86_64.rpm` |
 | openSUSE | `ngteams-*.x86_64.rpm` | `sudo zypper install --allow-unsigned-rpm ./ngteams-*.x86_64.rpm` |
@@ -103,9 +106,25 @@ Every release is on the [releases page](https://github.com/nickalie/ngteams/rele
 | Anything with glibc 2.39 or newer | `ngteams-*-linux-x86_64.AppImage` | `chmod +x` it and run it |
 | | `ngteams-*-linux-x86_64.tar.gz` | unpack it and run `ngteams/AppRun` |
 
-**Updates**: ngteams checks for a newer release once an hour. When there is one, **Install update** appears in its title bar: select it and ngteams downloads the release, checks it against the release's `SHA256SUMS`, installs it and restarts. A `.deb`, `.rpm` or Arch package asks for your password first. If a call is going on or you have a message you haven't sent, the restart waits until you select **Restart to update**. To update by hand, install the newer package the same way. The unpacked `.tar.gz` (or an extracted AppImage) updates itself only while it stays in its own folder named `ngteams`.
+**Updates**: ngteams checks for a newer release once an hour. When there is one, **Install update** appears in its title bar: select it and ngteams downloads the release, checks it against the release's `SHA256SUMS`, installs it and restarts. A `.deb`, `.rpm` or Arch package asks for your password first; on Windows, ngteams closes and the new installer upgrades it and opens it again. If a call is going on or you have a message you haven't sent, the restart waits until you select **Restart to update**. To update by hand, install the newer package the same way. The unpacked `.tar.gz` (or an extracted AppImage) updates itself only while it stays in its own folder named `ngteams`; the Windows zip doesn't update itself.
 
-**The sign-in window** runs on WPE WebKit 2.54 or newer. If your system has it (the Arch package installs it, Debian testing and openSUSE Tumbleweed have it), ngteams uses it. Otherwise it downloads a verified copy of about 120 MB once, the first time you sign in.
+**On Windows**, run `ngteams-*-windows-x86_64-setup.exe` as your ordinary user: it needs no administrator rights.
+It installs ngteams for you alone under `%LOCALAPPDATA%\Programs\ngteams`, adds it to Start and to Settings → Apps →
+Installed apps, and installs Microsoft's WebView2 Runtime if it is missing (downloaded from Microsoft and checked to
+be signed by Microsoft). To open Teams links here, choose ngteams for MSTeams in Settings → Apps → Default apps;
+setup offers it there but never changes your current choice. Running a newer installer upgrades ngteams in place.
+Uninstalling it from Installed apps removes the program and keeps your accounts and data
+(`%LOCALAPPDATA%\ngteams`, and the sign-ins in Credential Manager).
+
+The installer and the app aren't code-signed yet, so **Windows SmartScreen** may say it "protected your PC" from an
+unrecognized app: check the download against the release's `SHA256SUMS` (or `gh attestation verify <file> --repo
+nickalie/ngteams`), then choose **More info → Run anyway**.
+
+Without the installer, extract the zip, open PowerShell in its `ngteams` folder and run
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1` as your ordinary user. The archive's
+`README.txt` covers portable use, verification and removal.
+
+**On Linux, the sign-in window** runs on WPE WebKit 2.54 or newer. If your system has it (the Arch package installs it, Debian testing and openSUSE Tumbleweed have it), ngteams uses it. Otherwise it downloads a verified copy of about 120 MB once, the first time you sign in.
 
 **On Ubuntu 24.04 and later, prefer the `.deb`.** Those systems restrict the sandbox the sign-in window needs, and the `.deb` installs the AppArmor profile that allows it. To run an AppImage there, extract it to a permanent place and install the profile it carries:
 
@@ -183,9 +202,22 @@ The [full command list](docs/development.md#ngteamsctl) covers chats, calls, the
 
 - **ngteams is an independent, unofficial project.** It isn't affiliated with or endorsed by Microsoft. Microsoft Teams is a trademark of Microsoft.
 - **Things can break.** ngteams relies on Teams' internal services, which Microsoft can change at any time.
-- **Your organization's rules still apply.** If your company only allows sign-in from managed devices, sign-in will be refused and ngteams won't work around it. Security keys, device-bound sign-in and client certificates aren't supported. Your administrators can see the sign-in as a Teams desktop client on Linux, so check with IT if you're unsure.
+- **Your organization's rules still apply.** If your company only allows sign-in from managed devices, sign-in will be refused and ngteams won't work around it. Security keys, device-bound sign-in and client certificates aren't supported. Your administrators can see the sign-in as a Teams desktop client, so check with IT if you're unsure.
 - **It's early.** ngteams is at version 0.1 and under active development.
 
 ## For developers
 
 Architecture, building, testing and the protocol notes are in the [development guide](docs/development.md).
+
+## License
+
+ngteams is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option. Some parts carry their own licences: code taken from other projects and the `vendor/` sources keep
+theirs, as their crates and licence files state.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as
+defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

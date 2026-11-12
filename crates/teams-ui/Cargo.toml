@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
+
+[features]
+# Tests only, through dev-dependencies: hooks the app's UI tour reads (where a chat view last drew each sender's face,
+# `ChatView::face_bounds`). It also turns on teams-proto's test support, so ngteams refuses to run.
+test-support = ["teams-proto/test-support"]
 
 [dependencies]
 # a call's video frames wake the window from the media's threads
@@ -13,6 +19,8 @@ async-channel.workspace = true
 chrono.workspace = true
 # the scheduling form's start and end time zones
 chrono-tz.workspace = true
+# the scheduling form's desktop zone on both native platforms
+iana-time-zone.workspace = true
 # the bridge's drain: the engine's next event or the stop, whichever comes first
 futures-util.workspace = true
 gpui-pre.workspace = true
@@ -44,18 +52,16 @@ teams-store.workspace = true
 teams-media.workspace = true
 # the diagnostic log's level in the settings (changed live) and the "copy diagnostics" text; never installed here
 teams-log.workspace = true
+teams-platform.workspace = true
+url.workspace = true
 # the settings file's problems
 thiserror.workspace = true
-# the local AI tools' processes (caption translation, recap summaries): each one's whole process group ended with it
-rustix = { workspace = true, features = ["process"] }
 # the bridge's stop signal to its drain task (a runtime-free oneshot)
 tokio = { workspace = true, features = ["sync"] }
 # the settings file
 toml.workspace = true
 # a sound pack the user imports as an archive (deflate only; entries read by name, never unpacked by their paths)
 zip.workspace = true
-# the notifications and the tray item, on the bus the app is given (async-io, as GPUI's own)
-zbus.workspace = true
 
 [dev-dependencies]
 # a synthetic card message's Swift payload (`tests/chat_view/cards.rs`)
@@ -67,7 +73,7 @@ gpui-pre = { workspace = true, features = ["test-support"] }
 # the kit's widgets on GPUI's test context
 gpui-component = { workspace = true, features = ["test-support"] }
 # the kit's text area on the real platform, in the UI sandbox: GPUI's Linux platform, Wayland only
-gpui-pre-platform.workspace = true
+gpui-pre-platform = { workspace = true, features = ["test-support"] }
 # the settings file, in a directory of its own per test
 tempfile.workspace = true
 # compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens, the mock chat service and
@@ -78,8 +84,6 @@ teams-proto = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
 # the push channel's events the fake engine hands the bridge; the mock's Trouter for compose's two-account test
 teams-trouter = { workspace = true, features = ["test-support"] }
-# the compositor, private bus and virtual keyboard the kit window test runs in
-ui-sandbox.workspace = true
 
 [[test]]
 # the kit's text area and the theme in the UI sandbox: its own `main` (GPUI runs on the main thread), which runs
@@ -127,6 +131,12 @@ name = "meeting_window"
 harness = false
 
 [[test]]
+# the faces of people whose camera is off in a call (their pictures, else their initials): 1:1 and group calls over the
+# fake engine in the UI sandbox, screenshotted under `target/ui-shots/call-faces-*.png`
+name = "call_faces_window"
+harness = false
+
+[[test]]
 # a meeting chat's tabs (its Recap, with two recordings, their transcripts searched, a meeting transcribed only, and its
 # Shared tab) over the fake engine in the UI sandbox, screenshotted under `target/ui-shots/recap-*.png`
 name = "recap_window"
@@ -148,10 +158,47 @@ harness = false
 name = "workflows_app_window"
 harness = false
 
+[target.'cfg(unix)'.dependencies]
+zbus.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+# Linux compositor, private bus and virtual keyboard; Windows uses the authorized VM console.
+ui-sandbox.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+dirs.workspace = true
+# Native desktop shell and WinRT toasts; no optional logging features.
+windows = { workspace = true, features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Accessibility", "Win32_UI_Notifications", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
+windows-core.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+raw-window-handle.workspace = true
+# Claude's npm shim cannot receive multiline arguments; keep its private prompt file until the job exits.
+tempfile.workspace = true
+
 [lints]
 workspace = true
 
 [[test]]
 # Real sandbox rendering of channel management over synthetic data, in light and dark themes.
 name = "channel_window"
+harness = false
+
+[[test]]
+# Native Windows video upload/eviction contract, synthetic pixels only; run by the explicit VM console helper.
+name = "native_video"
+harness = false
+
+[[test]]
+# The calendar toolbar at desktop widths, in the private Linux sandbox with synthetic data.
+name = "calendar_window"
+harness = false
+
+[[test]]
+# Account-free Windows shell notifications, tray and taskbar integration in the VM console.
+name = "native_desktop"
+harness = false
+
+[[test]]
+# Real GPUI Desktop over two synthetic accounts, with native tray and taskbar in the VM console.
+name = "native_shell"
 harness = false

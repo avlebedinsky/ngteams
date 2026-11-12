@@ -16,7 +16,9 @@
 //!
 //! **The answer**: [`ErrorCode::NoCalling`] in an app that shows no calls (its devices couldn't be opened). An ask the
 //! calls' model refused, or the engine did, is its error: [`ErrorCode::Busy`], [`ErrorCode::NoCall`],
-//! [`ErrorCode::NotRinging`], [`ErrorCode::NoVideo`], or [`ErrorCode::Engine`] with what the call view would say.
+//! [`ErrorCode::NotRinging`], [`ErrorCode::NoVideo`], or [`ErrorCode::Engine`] with what the call view would say. An
+//! unmute a newer mute or unmute overtook while the microphone reopened ([`Answered::Superseded`]) is
+//! [`ErrorCode::Engine`] saying so: the newer one decides, and the call view tells nothing of it.
 //! Otherwise, once the engine took it and the app shows the call as it moved on (a start's or an answer's call told,
 //! a declined or left one gone), the call's row ([`Response::Call`]; one that ended says `ended`). All of it within
 //! [`CALL_ANSWER`], past which [`ErrorCode::Timeout`].
@@ -27,7 +29,7 @@ use std::sync::Arc;
 use gpui::{App, AsyncApp, Entity, WeakEntity};
 use teams_core::CallId;
 use teams_ctl::protocol::{CALL_ANSWER, CallRow, CtlError, ErrorCode, Request, Response, Toggle};
-use teams_ui::calls::{self, Ask, Ended, Refused};
+use teams_ui::calls::{self, Answered, Ask, Ended, Refused};
 use teams_ui::{Accounts, Bridge, Calls, ViewTrace};
 use tokio::sync::oneshot;
 
@@ -247,11 +249,12 @@ async fn asked(target: &Target, request: &Request, cx: &mut AsyncApp) -> Result<
         },
         _ => return Err(CtlError::new(ErrorCode::BadRequest, "not a call command")),
     };
-    let (settle, taken) = cx.update(|cx| ask_now(target, ask, cx))?;
-    if !taken.await.unwrap_or(false) {
-        return Err(cx.update(|cx| refusal(target.calls.read(cx).refused())));
+    let (settle, answered) = cx.update(|cx| ask_now(target, ask, cx))?;
+    match answered.await.unwrap_or(Answered::Refused) {
+        Answered::Taken => settled(target, settle, cx).await,
+        Answered::Superseded => Err(superseded()),
+        Answered::Refused => Err(cx.update(|cx| refusal(target.calls.read(cx).refused()))),
     }
-    settled(target, settle, cx).await
 }
 
 /// Which switch of the call `mute` and `camera` set.
@@ -282,8 +285,8 @@ fn switched(target: &Target, op: Toggle, switch: Switch, cx: &App) -> Option<Res
     })
 }
 
-/// `ask` asked of `target`'s calls, as the shell asks it: what its answer waits for, and whether the engine took it.
-fn ask_now(target: &Target, ask: Ask, cx: &mut App) -> Result<(Settle, oneshot::Receiver<bool>), CtlError> {
+/// `ask` asked of `target`'s calls, as the shell asks it: what its answer waits for, and how the engine answered it.
+fn ask_now(target: &Target, ask: Ask, cx: &mut App) -> Result<(Settle, oneshot::Receiver<Answered>), CtlError> {
     let (told, taken) = oneshot::channel();
     let calls = &target.calls;
     let settle = {
@@ -306,11 +309,28 @@ fn ask_now(target: &Target, ask: Ask, cx: &mut App) -> Result<(Settle, oneshot::
         calls::refuse_here(calls, &target.trace, &ask, "another-account", cx);
         return Err(refusal(calls.read(cx).refused()));
     }
-    calls::ask_then(calls, &target.account.core, &target.trace, ask, cx, move |taken, _| {
-        // the command's connection may be gone meanwhile: nobody to tell
-        let _ = told.send(taken);
-    });
+    calls::ask_then(
+        calls,
+        &target.account.core,
+        &target.trace,
+        ask,
+        cx,
+        move |answered, _| {
+            // the command's connection may be gone meanwhile: nobody to tell
+            let _ = told.send(answered);
+        },
+    );
     Ok((settle, taken))
+}
+
+/// The error of an unmute a newer mute or unmute overtook while the microphone reopened: not a refusal, so the calls
+/// keep none (an earlier one may still be there, about something else).
+fn superseded() -> CtlError {
+    CtlError::new(
+        ErrorCode::Engine,
+        "a newer mute or unmute took this unmute's place while the microphone reopened: `ngteamsctl calls` shows the \
+         microphone as that one left it",
+    )
 }
 
 fn no_call() -> CtlError {

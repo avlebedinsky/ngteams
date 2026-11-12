@@ -14,8 +14,12 @@
 //!   that only went away until then looked like nothing happened); a setup that fails ends that call
 //!   (`End::Failed("setup")`), a hang-up meanwhile drops it unsent, and a mute meanwhile holds once its media runs.
 //!   The microphone and the speaker open only once the start, the join or the answer was admitted and taken: when the
-//!   machine tells the call ringing at its callees, joining, or connected. Devices that can't be opened then fail the
-//!   call (`End::Failed("media")`).
+//!   machine tells the call ringing at its callees, joining, or connected. An audio device that cannot open is told
+//!   as [`Event::AudioClosed`], without ending the call: a missing microphone stays muted, and received audio is
+//!   decoded even without a speaker. A missing speaker is reopened about once a second for the rest of the call,
+//!   playback resuming once it opens; a missing microphone only on an unmute, which retries it off the engine thread
+//!   before it can send audio. An unmute a newer mute (the user's or the organizer's) overtook meanwhile leaves the
+//!   microphone muted and is answered [`CallActionError::Superseded`], not as applied.
 //! - **The writes** go out through the outbox's call kind (`Outbox::try_call`), one in flight at a time: beside it the
 //!   machine's events and delivery responses go at once, its next writes wait in its own queue (so a call that ends
 //!   drops them); a write refused without being acted on goes again only within `CallRetries`' allowance and only if
@@ -31,7 +35,7 @@
 //!   (`491`) for the far end's (both cameras turned on together) gives way: the far end's is answered with our
 //!   camera's line only receiving, then that line is offered again as the camera goes. A camera that stops by itself
 //!   (its device gone) is off, told as [`Event::CameraOff`]; a microphone or speaker whose stream
-//!   ended for good (not moved) is told as [`Event::AudioClosed`], the call going on.
+//!   ended (not moved) is told as [`Event::AudioClosed`], the call going on (the speaker reopened, as above).
 //! - **The media's SDP steps run one at a time, in the order the signaling asked for them** (the far end's answer
 //!   applied, its renegotiation answered, our own offered): each waits for the one before, so an acceptance followed
 //!   at once by a renegotiation reaches the session in that order.
@@ -193,6 +197,8 @@ pub enum CallAction {
     /// The account goes into the call of the meeting whose chat is `chat`: it starts the call when nobody has yet, and
     /// joins it when it runs.
     JoinMeeting { chat: String, meeting: MeetingInfo },
+    /// Join an invitation by ID and passcode, resolved by the calling service.
+    JoinMeetingCode(teams_proto::MeetingCode),
     /// A new meeting in the channel `channel` (a team's channel thread), its header's Meet now: the account starts it
     /// and organizes it, and the service posts it to the channel.
     MeetNow { channel: String },
@@ -269,6 +275,7 @@ impl CallAction {
                 | Self::TestCall { .. }
                 | Self::Join { .. }
                 | Self::JoinMeeting { .. }
+                | Self::JoinMeetingCode(_)
                 | Self::MeetNow { .. }
                 | Self::JoinChannel { .. }
         )
@@ -354,6 +361,10 @@ pub enum CallActionError {
     /// The service didn't take the change (a meeting option): it stays as it was.
     #[error("the change wasn't taken")]
     NotChanged,
+    /// An unmute that waited on its microphone to reopen was overtaken by a newer mute (the user's own, or the
+    /// organizer's Mute all): the microphone stays muted, as that newer mute left it.
+    #[error("a newer mute took its place")]
+    Superseded,
 }
 
 /// Where an action's answer goes.
@@ -558,6 +569,8 @@ pub(crate) struct Calling<C, T> {
     held_mute: Option<(CallId, bool)>,
     /// The organizer's latest mute of the account (Mute all) the microphone took: its call and its version.
     organizer_mute: Option<(CallId, u64)>,
+    /// Invalidates asynchronous unmute requests when a newer user or organizer mute arrives.
+    mute_generation: u64,
     media_steps: JoinSet<MediaDone>,
     /// The SDP steps waiting for the one running to finish, in the order the signaling asked for them.
     sdp_steps: VecDeque<Box<dyn FnOnce() -> MediaDone + Send>>,
@@ -627,6 +640,7 @@ where
             told_placing: None,
             held_mute: None,
             organizer_mute: None,
+            mute_generation: 0,
             making: None,
             transfer_to: None,
             media_steps: JoinSet::new(),
@@ -1213,7 +1227,7 @@ where
         live.devices_opened = true;
         log::info!("call {}: its devices open", call.get());
         self.media_steps
-            .spawn_blocking(media::open_devices(live, Arc::clone(&self.media.devices)));
+            .spawn_blocking(media::open_devices(live, Arc::clone(&self.media.devices), None));
     }
 
     fn media_connected(&self, call: CallId) -> bool {
@@ -1445,9 +1459,10 @@ where
                 };
                 let _ = reply.send(renegotiated.map(|()| call).map_err(EngineError::from));
             }
-            MediaDone::Opened { call, result } => {
-                if let Err(why) = result {
-                    self.media_failed(call, &why, now);
+            MediaDone::Opened { call, result, unmute } => self.devices_opened(call, result, unmute, now),
+            MediaDone::SpeakerOpened { call } => {
+                if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
+                    live.speaker_retry = Some(media::SpeakerRetry::Waiting(now + Duration::from_secs(1)));
                 }
             }
             MediaDone::Camera {
@@ -1471,6 +1486,28 @@ where
             done @ (MediaDone::ScreenPicked { .. } | MediaDone::GroupShared { .. } | MediaDone::Shared { .. }) => {
                 self.share_step_done(done, now);
             }
+        }
+    }
+
+    fn devices_opened(
+        &mut self,
+        call: CallId,
+        result: Result<(), String>,
+        unmute: Option<(u64, Waiting)>,
+        now: Instant,
+    ) {
+        if let Some((generation, reply)) = unmute {
+            let result = result.map_err(CallActionError::Media).and_then(|()| {
+                if generation == self.mute_generation {
+                    self.mute(call, false)
+                } else {
+                    // not `Ok`: the caller would show the microphone unmuted while capture stays muted
+                    Err(CallActionError::Superseded)
+                }
+            });
+            let _ = reply.send(result.map_err(Into::into));
+        } else if let Err(why) = result {
+            self.media_failed(call, &why, now);
         }
     }
 
@@ -1546,6 +1583,25 @@ where
         self.calls.fail_media(call, now);
     }
 
+    /// Playback may disappear independently of capture. Retry it off-thread at most once a second, also picking
+    /// up a newly selected device when no old stream remains to follow the directory. Never opens a microphone.
+    fn retry_speaker(&mut self, now: Instant) {
+        let Some(live) = self.live.as_mut().filter(|live| {
+            live.devices_opened
+                && live.session.speaker_missing()
+                && match live.speaker_retry {
+                    Some(media::SpeakerRetry::Opening) => false,
+                    Some(media::SpeakerRetry::Waiting(due)) => now >= due,
+                    None => true,
+                }
+        }) else {
+            return;
+        };
+        live.speaker_retry = Some(media::SpeakerRetry::Opening);
+        self.media_steps
+            .spawn_blocking(media::retry_speaker(live, Arc::clone(&self.media.devices)));
+    }
+
     fn look_at_media(&mut self, now: Instant) {
         self.caption_check(now);
         self.record_check(now);
@@ -1569,7 +1625,14 @@ where
                     log::warn!("call {}: its camera went off", call.get());
                     self.emit(Event::CameraOff { call });
                 }
-                MediaChange::AudioClosed { microphone } => self.emit(Event::AudioClosed { call, microphone }),
+                MediaChange::AudioClosed { microphone } => {
+                    if microphone {
+                        let _ = self.mute(call, true);
+                    } else if let Some(live) = self.live.as_mut() {
+                        live.speaker_retry = Some(media::SpeakerRetry::Waiting(now + Duration::from_secs(1)));
+                    }
+                    self.emit(Event::AudioClosed { call, microphone });
+                }
                 MediaChange::ScreenEnded => self.screen_ended(call),
                 MediaChange::Captions(lines) => self.caption_received(call, lines),
                 MediaChange::Speakers(speakers) => {
@@ -1591,6 +1654,7 @@ where
                 }
             }
         }
+        self.retry_speaker(now);
         // who speaks, as the levels and the mixer told it
         if let Some(live) = self.live.as_mut()
             && let Some(view) = live.gallery.changed(now)
@@ -1634,15 +1698,7 @@ where
             Act::Place(_) | Act::Join(_) | Act::JoinChannel(..) | Act::Answer(_) => return self.set_up(act, reply),
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),
             Act::HangUp(call) => self.hang_up(call, now),
-            Act::Mute(call, muted) => match self.preparing.as_mut().filter(|preparing| preparing.told == Some(call)) {
-                Some(preparing) => {
-                    // held until the call's media runs
-                    preparing.muted = muted;
-                    log::info!("call {}: muted {muted} (once its media is set up)", call.get());
-                    Ok(call)
-                }
-                None => self.mute(call, muted),
-            },
+            Act::Mute(call, muted) => return self.mute_action(call, muted, reply),
             Act::Lobby(call, waiting, admit) => self
                 .calls
                 .decide_lobby(call, &waiting, admit)
@@ -1733,12 +1789,52 @@ where
         Ok(call)
     }
 
+    /// Device reopening may wait on a native backend, so an explicit unmute retries it off this thread.
+    fn mute_action(&mut self, call: CallId, muted: bool, reply: Waiting) {
+        if self.live.as_ref().is_some_and(|live| live.call == call)
+            || self
+                .preparing
+                .as_ref()
+                .is_some_and(|preparing| preparing.told == Some(call))
+        {
+            self.mute_generation = self.mute_generation.wrapping_add(1);
+        }
+        let result = if let Some(preparing) = self.preparing.as_mut().filter(|preparing| preparing.told == Some(call)) {
+            preparing.muted = muted;
+            log::info!("call {}: muted {muted} (once its media is set up)", call.get());
+            Ok(call)
+        } else {
+            if !muted
+                && let Some(live) = self
+                    .live
+                    .as_ref()
+                    .filter(|live| live.call == call && live.session.microphone_missing())
+            {
+                self.media_steps.spawn_blocking(media::open_devices(
+                    live,
+                    Arc::clone(&self.media.devices),
+                    Some((self.mute_generation, reply)),
+                ));
+                return;
+            }
+            self.mute(call, muted)
+        };
+        let _ = reply.send(result.map_err(Into::into));
+        self.drive(Instant::now());
+    }
+
     fn mute(&mut self, call: CallId, muted: bool) -> Result<CallId, CallActionError> {
         let live = self
             .live
             .as_ref()
             .filter(|live| live.call == call)
             .ok_or(CallActionError::NoMedia)?;
+        if !muted && live.session.microphone_missing() {
+            return Err(CallActionError::Media(
+                "No microphone is available. Connect one and try again.".into(),
+            ));
+        }
+        self.mute_generation = self.mute_generation.wrapping_add(1);
         match self.held_mute.as_mut().filter(|(of, _)| *of == call) {
             // held: the microphone stays silent, the mute asked given back once the call resumes
             Some((_, wanted)) => *wanted = muted,
@@ -1774,12 +1870,8 @@ where
             }
             _ if busy || self.calls.current().is_some() => return refuse(reply, CallActionError::Busy),
             Act::Join(chat) if !self.calls.joinable(chat) => return refuse(reply, CallError::NotJoinable.into()),
-            Act::Place(
-                Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. } | Placement::Transferred { .. },
-            ) => (None, None, VideoKind::OneToOne),
-            Act::Place(Placement::Chat { .. } | Placement::Meeting { .. } | Placement::Channel { .. })
-            | Act::Join(_)
-            | Act::JoinChannel(..) => (None, None, VideoKind::Group),
+            Act::Place(placement) => (None, None, placement_video(placement)),
+            Act::Join(_) | Act::JoinChannel(..) => (None, None, VideoKind::Group),
             // only a start, a join or an answer sets its media up
             _ => return refuse(reply, CallError::NotNow.into()),
         };
@@ -1903,6 +1995,18 @@ where
         if let Some(call) = told {
             self.told_placing = None;
             self.ended(call, End::Failed("setup"));
+        }
+    }
+}
+
+/// A meeting uses the mixer's receiving lines even when its invitation has no local chat yet.
+fn placement_video(placement: &Placement) -> VideoKind {
+    match placement {
+        Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. } | Placement::Transferred { .. } => {
+            VideoKind::OneToOne
+        }
+        Placement::Chat { .. } | Placement::Meeting { .. } | Placement::MeetingCode(_) | Placement::Channel { .. } => {
+            VideoKind::Group
         }
     }
 }

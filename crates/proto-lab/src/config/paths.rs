@@ -11,6 +11,11 @@ pub(super) const PERSONAL_DIR: &str = "ngteams";
 #[must_use]
 pub(crate) fn overlapping(one: &Path, other: &Path) -> bool {
     let (one, other) = (resolved(one), resolved(other));
+    #[cfg(windows)]
+    let (one, other) = (
+        PathBuf::from(one.to_string_lossy().to_lowercase()),
+        PathBuf::from(other.to_string_lossy().to_lowercase()),
+    );
     one.starts_with(&other) || other.starts_with(&one)
 }
 
@@ -37,6 +42,7 @@ fn resolved(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::overlapping;
 

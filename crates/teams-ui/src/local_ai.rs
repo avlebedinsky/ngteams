@@ -5,10 +5,12 @@
 //! started as a child process with nothing of the user's setup that could act on what it is given:
 //!
 //! - **Claude Code** runs as `claude -p --input-format stream-json --output-format stream-json`: one user message per
-//!   question in one conversation, its `result` line the answer. No tools, MCP servers, slash commands, settings files
-//!   (so no hooks) or saved session.
+//!   question in one conversation, its `result` line the answer (a chat's translation also reads its text as it
+//!   streams, `--include-partial-messages`). No tools, MCP servers, slash commands, settings files (so no hooks) or
+//!   saved session.
 //! - **Codex** runs as `codex app-server` (JSON-RPC over stdio): `initialize`, one ephemeral read-only thread whose
-//!   base instructions are ours, then one `turn/start` per question, its last agent message the answer. Hooks, apps,
+//!   base instructions are ours, then one `turn/start` per question, its last agent message the answer (its deltas
+//!   the text so far). Hooks, apps,
 //!   plugins, MCP servers, tools and project docs are turned off for it.
 //!
 //! The models each tool offers are listed from what it reports itself ([`catalog`]), never from a list of ours.
@@ -18,20 +20,22 @@
 //! signed out, too slow, or stopped in its own words. Nothing here logs what is asked or answered, or the tool's output.
 
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+use teams_platform::command::Tree;
 
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub mod catalog;
+#[cfg(windows)]
+mod windows_prompt;
 
 pub use catalog::{Catalog, Listed};
 
@@ -191,6 +195,10 @@ impl Backend {
                 let mut args = vec!["-p".to_owned()];
                 if let Some(model) = self.model_of(work, model) {
                     args.extend(["--model".to_owned(), model]);
+                }
+                // a chat's translations show as each message's comes, not once the whole batch is done
+                if work == Work::Chat {
+                    args.push("--include-partial-messages".to_owned());
                 }
                 args.extend(
                     [
@@ -368,7 +376,7 @@ impl Tools {
             .into_iter()
             .filter_map(|backend| {
                 std::env::split_paths(&path)
-                    .map(|dir| dir.join(backend.program()))
+                    .flat_map(|dir| program_paths(&dir, backend.program()))
                     .find(|candidate| executable(candidate))
                     .map(|program| (backend, program))
             })
@@ -418,10 +426,34 @@ impl Tools {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+pub(crate) fn executable(path: &Path) -> bool {
+    path.is_file()
+        && path.extension().is_some_and(|extension| {
+            ["exe", "com", "cmd", "bat"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
+fn program_paths(dir: &Path, program: &str) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        vec![dir.join(program)]
+    }
+    #[cfg(windows)]
+    {
+        ["exe", "com", "cmd", "bat"]
+            .map(|extension| dir.join(format!("{program}.{extension}")))
+            .to_vec()
+    }
 }
 
 /// Why a tool's work ended.
@@ -486,7 +518,7 @@ pub struct Tool {
     work: Work,
     /// The model asked for, `None`: the tool's default.
     model: Option<String>,
-    child: Child,
+    child: Tree,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     stderr: Arc<Mutex<String>>,
@@ -498,6 +530,9 @@ pub struct Tool {
     chars: usize,
     /// It answered once: later answers may get a shorter wait.
     answered: bool,
+    // Dropped after the process tree: a tool may read its prompt after startup.
+    #[cfg(windows)]
+    _prompt: Option<tempfile::TempDir>,
 }
 
 impl Tool {
@@ -507,16 +542,18 @@ impl Tool {
     /// The tool couldn't start, refused, or took longer than [`Launch::first`].
     pub fn start(launch: &Launch, stop: &AtomicBool) -> Result<Self, Failure> {
         let backend = launch.backend;
+        let args = backend.args(launch.work, &launch.model, &launch.instructions);
+        #[cfg(windows)]
+        let (args, prompt) = windows_prompt::prepare(launch, args)
+            .map_err(|error| Failure::Stopped(backend, Some(error.to_string())))?;
         let mut command = Command::new(&launch.program);
         command
-            .args(backend.args(launch.work, &launch.model, &launch.instructions))
+            .args(args)
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // its own group, so whatever it starts ends with it
-            .process_group(0);
-        let mut child = command.spawn().map_err(|error| match error.kind() {
+            .stderr(Stdio::piped());
+        let mut child = Tree::spawn(&mut command).map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => Failure::NotInstalled(Some(backend)),
             _ => Failure::Stopped(backend, Some(error.to_string())),
         })?;
@@ -547,6 +584,8 @@ impl Tool {
             turns: 0,
             chars: 0,
             answered: false,
+            #[cfg(windows)]
+            _prompt: prompt,
         };
         if backend == Backend::Codex
             && let Err(failure) = tool.codex_thread(&launch.instructions, launch.first, stop)
@@ -641,23 +680,50 @@ impl Tool {
     /// # Errors
     /// The tool refused, stopped, took longer than `wait`, or `stop` was set.
     pub fn ask(&mut self, message: &str, wait: Duration, stop: &AtomicBool) -> Result<String, Failure> {
+        self.ask_streaming(message, wait, stop, &mut |_| {})
+    }
+
+    /// [`Self::ask`], telling `partial` the answer's text so far each time more of it comes (when the tool streams it:
+    /// Claude Code started for [`Work::Chat`], and Codex), before the whole answer is given back.
+    ///
+    /// # Errors
+    /// As [`Self::ask`].
+    pub fn ask_streaming(
+        &mut self,
+        message: &str,
+        wait: Duration,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
         let deadline = Instant::now() + wait;
         self.turns += 1;
         self.chars += message.len();
         let text = match self.backend {
-            Backend::Claude => self.ask_claude(message, deadline, stop),
-            Backend::Codex => self.ask_codex(message, deadline, stop),
+            Backend::Claude => self.ask_claude(message, deadline, stop, partial),
+            Backend::Codex => self.ask_codex(message, deadline, stop, partial),
         }?;
         self.answered = true;
         Ok(text.trim().to_owned())
     }
 
-    fn ask_claude(&mut self, message: &str, deadline: Instant, stop: &AtomicBool) -> Result<String, Failure> {
+    fn ask_claude(
+        &mut self,
+        message: &str,
+        deadline: Instant,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
         self.write(&json!({"type": "user", "message": {"role": "user", "content": message}}))?;
+        let mut so_far = String::new();
         loop {
             let line = self.next_message(deadline, stop)?;
-            if line.get("type").and_then(Value::as_str) != Some("result") {
-                continue;
+            match line.get("type").and_then(Value::as_str) {
+                Some("stream_event") => {
+                    stream_event(&line, &mut so_far, partial);
+                    continue;
+                }
+                Some("result") => {}
+                _ => continue,
             }
             let said = line.get("result").and_then(Value::as_str);
             if line.get("is_error").and_then(Value::as_bool) == Some(true) {
@@ -667,7 +733,13 @@ impl Tool {
         }
     }
 
-    fn ask_codex(&mut self, message: &str, deadline: Instant, stop: &AtomicBool) -> Result<String, Failure> {
+    fn ask_codex(
+        &mut self,
+        message: &str,
+        deadline: Instant,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
         let thread = self.thread.clone().unwrap_or_default();
         let id = self.request(
             "turn/start",
@@ -678,6 +750,8 @@ impl Tool {
             }),
         )?;
         let (mut text, mut error) = (None::<String>, None::<String>);
+        // the agent message being written: its item and its text so far
+        let (mut item, mut so_far) = (String::new(), String::new());
         loop {
             let line = self.next_message(deadline, stop)?;
             self.refuse_request(&line)?;
@@ -688,6 +762,15 @@ impl Tool {
             }
             let params = line.get("params").unwrap_or(&Value::Null);
             match line.get("method").and_then(Value::as_str) {
+                Some("item/agentMessage/delta") => {
+                    let of = params.get("itemId").and_then(Value::as_str).unwrap_or_default();
+                    if of != item {
+                        of.clone_into(&mut item);
+                        so_far.clear();
+                    }
+                    so_far.push_str(params.get("delta").and_then(Value::as_str).unwrap_or_default());
+                    partial(&so_far);
+                }
                 Some("item/completed") if params.pointer("/item/type") == Some(&json!("agentMessage")) => {
                     text = params.pointer("/item/text").and_then(Value::as_str).map(str::to_owned);
                 }
@@ -780,10 +863,21 @@ impl Tool {
         while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        let group = rustix::process::Pid::from_child(&self.child);
-        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.stop();
+    }
+}
+
+/// Claude Code's streamed event `line` (`--include-partial-messages`): a text delta adds to `so_far`, told to `partial`;
+/// a new message starts it over.
+fn stream_event(line: &Value, so_far: &mut String, partial: &mut dyn FnMut(&str)) {
+    let event = line.get("event").unwrap_or(&Value::Null);
+    match event.get("type").and_then(Value::as_str) {
+        Some("message_start") => so_far.clear(),
+        Some("content_block_delta") if event.pointer("/delta/type") == Some(&json!("text_delta")) => {
+            so_far.push_str(event.pointer("/delta/text").and_then(Value::as_str).unwrap_or_default());
+            partial(so_far);
+        }
+        _ => {}
     }
 }
 

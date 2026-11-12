@@ -126,6 +126,7 @@ pub mod picture_viewer;
 pub mod prejoin;
 pub mod presence;
 pub mod presence_badge;
+pub mod profile_card;
 pub mod reaction_picker;
 pub mod reactions;
 pub mod recap;
@@ -158,6 +159,7 @@ pub mod tray;
 pub mod update;
 pub mod video;
 pub mod video_player;
+mod video_surface;
 pub mod view;
 pub mod window;
 pub mod workflow_dialog;
@@ -194,3 +196,7 @@ pub use trace::{TraceId, TraceLine, ViewTrace};
 pub use tray::{Tray, TrayEvent, TrayIcon};
 pub use video::{Tiles, VideoFeed};
 pub use view::Root;
+
+#[cfg(test)]
+#[path = "../tests/support/fake_tool.rs"]
+mod fake_tool;

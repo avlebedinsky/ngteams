@@ -1,33 +1,38 @@
 //! The socket's side of the server: the bind, a listener thread accepting connections, and a thread per connection
 //! reading its request lines, handing each to GPUI's foreground ([`Job`]) and writing back its answer.
 //!
-//! **The bind.** The socket's directory is made `0700` when missing ([`teams_ctl::prepare_dir`]) and the socket is
+//! **The Unix bind.** The socket's directory is made `0700` when missing ([`teams_ctl::prepare_dir`]) and the socket is
 //! `0600`: only the user's own processes reach it. A socket file already there is asked whether anyone is behind it:
 //! one that answers the connect is another app running ([`BindError::AlreadyRunning`]); one that refuses it was left by
 //! an app that didn't quit (a crash, a kill), so it is removed and bound afresh. Anything there that isn't a socket is
 //! left alone ([`BindError::NotASocket`]).
+//!
+//! Windows uses a local-only named pipe with a protected current-user DACL, integrity label and peer identity
+//! checks (`teams_ctl::transport`); its logical path names no filesystem socket, and closing it leaves no stale file.
 //!
 //! **The stop** ([`Listener::stop`]): every connection is shut down (each thread ends at its next read or write), the
 //! listening socket too (its blocked `accept` returns), the listener thread is joined, and the socket file is removed
 //! when it is still the one bound here.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io::{self, BufReader};
-use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use teams_ctl::transport::Stream as UnixStream;
 
 use teams_ctl::codec::{self, CodecError, LineReader};
 use teams_ctl::protocol::{CtlError, CtlEvent, ErrorCode, EventLine, Outcome, RequestLine, ResponseLine};
-use teams_ctl::{ClientError, connect_stream};
 use tokio::sync::oneshot;
 
-/// How long the bind waits for a socket file's app to take its connect.
-const PROBE: Duration = Duration::from_millis(500);
+#[cfg(unix)]
+#[path = "socket/unix.rs"]
+mod socket;
+#[cfg(windows)]
+#[path = "socket/windows.rs"]
+mod socket;
+use socket::Socket;
 
 /// How long an answer's write may wait on a client that doesn't read.
 const WRITE: Duration = Duration::from_secs(10);
@@ -63,66 +68,18 @@ pub enum BindError {
     Io { path: PathBuf, source: io::Error },
 }
 
-/// The socket bound, not served yet ([`Bound::serve`]).
+/// The private socket bound, not served yet ([`Bound::serve`]).
 #[derive(Debug)]
 pub struct Bound {
-    listener: UnixListener,
-    path: PathBuf,
-    /// The socket file's device and inode: the stop removes the file only while it is this one.
-    file: (u64, u64),
+    socket: Socket,
 }
 
-/// Bind the socket at `path` (see the module docs).
+/// Bind a native private endpoint at `path`.
 ///
 /// # Errors
-/// [`BindError::AlreadyRunning`] when an app answers there, [`BindError::NotASocket`] when something else is there, or
-/// the directory, the stale file's removal or the bind failed.
+/// Another app serves there, a non-socket file occupies a Unix path, or native binding failed.
 pub fn bind(path: &Path) -> Result<Bound, BindError> {
-    let failed = |source: io::Error| BindError::Io {
-        path: path.to_owned(),
-        source,
-    };
-    teams_ctl::prepare_dir(path).map_err(failed)?;
-    match fs::symlink_metadata(path) {
-        Ok(found) if !found.file_type().is_socket() => return Err(BindError::NotASocket(path.to_owned())),
-        Ok(_) => remove_stale(path)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(failed(error)),
-    }
-    let listener = UnixListener::bind(path).map_err(failed)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(failed)?;
-    let bound = fs::symlink_metadata(path).map_err(failed)?;
-    Ok(Bound {
-        listener,
-        path: path.to_owned(),
-        file: (bound.dev(), bound.ino()),
-    })
-}
-
-/// The socket file at `path`, asked whether an app is behind it: removed when nobody is.
-fn remove_stale(path: &Path) -> Result<(), BindError> {
-    let failed = |source: io::Error| BindError::Io {
-        path: path.to_owned(),
-        source,
-    };
-    match connect_stream(path, PROBE) {
-        // a busy app (its backlog full) is running all the same
-        Ok(_) | Err(ClientError::Timeout) => Err(BindError::AlreadyRunning(path.to_owned())),
-        Err(ClientError::NotRunning { source, .. }) => match source.kind() {
-            io::ErrorKind::ConnectionRefused => {
-                log::info!("the control socket was left by an app that didn't quit: it is replaced");
-                match fs::remove_file(path) {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(failed(error)),
-                }
-            }
-            // gone meanwhile
-            io::ErrorKind::NotFound => Ok(()),
-            _ => Err(failed(source)),
-        },
-        Err(error) => Err(failed(io::Error::other(error.to_string()))),
-    }
+    socket::bind(path).map(|socket| Bound { socket })
 }
 
 impl Bound {
@@ -131,18 +88,17 @@ impl Bound {
     /// # Errors
     /// The listener's thread couldn't be started (the socket is closed again and its file removed).
     pub fn serve(self, jobs: async_channel::Sender<Job>) -> io::Result<Listener> {
-        let Self { listener, path, file } = self;
+        let socket = Arc::new(self.socket);
         let connections = Arc::new(Mutex::new(Connections::default()));
         let mut stopping = Listener {
-            socket: listener.try_clone()?,
-            path,
-            file,
+            path: socket.path.clone(),
+            socket: Arc::clone(&socket),
             connections: Arc::clone(&connections),
             thread: None,
         };
         let thread = thread::Builder::new()
             .name("ctl-listener".to_owned())
-            .spawn(move || accept(&listener, &jobs, &connections));
+            .spawn(move || accept(&socket, &jobs, &connections));
         match thread {
             Ok(thread) => {
                 stopping.thread = Some(thread);
@@ -171,9 +127,8 @@ fn lock(connections: &Mutex<Connections>) -> MutexGuard<'_, Connections> {
 /// The socket served (see the module docs); stopped when dropped.
 pub struct Listener {
     /// The listening socket, for its shutdown (the thread holds it too).
-    socket: UnixListener,
+    socket: Arc<Socket>,
     path: PathBuf,
-    file: (u64, u64),
     connections: Arc<Mutex<Connections>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -197,15 +152,11 @@ impl Listener {
                 let _ = stream.shutdown(std::net::Shutdown::Both);
             }
         }
-        // a listening socket shut down wakes its blocked `accept` with an error
-        let _ = rustix::net::shutdown(&self.socket, rustix::net::Shutdown::Both);
+        self.socket.wake();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let ours = fs::symlink_metadata(&self.path).is_ok_and(|found| (found.dev(), found.ino()) == self.file);
-        if ours && let Err(error) = fs::remove_file(&self.path) {
-            log::warn!("the control socket's file wasn't removed: {error}");
-        }
+        self.socket.cleanup();
         log::info!("the control socket is closed");
     }
 }
@@ -217,12 +168,19 @@ impl Drop for Listener {
 }
 
 /// The listener thread: each connection accepted is served on a thread of its own, until the stop.
-fn accept(listener: &UnixListener, jobs: &async_channel::Sender<Job>, connections: &Arc<Mutex<Connections>>) {
+fn accept(listener: &Socket, jobs: &async_channel::Sender<Job>, connections: &Arc<Mutex<Connections>>) {
     loop {
+        if lock(connections).stopped {
+            return;
+        }
         let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
+            Ok(stream) => stream,
             Err(_) if lock(connections).stopped => return,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             Err(error) => {
                 // out of descriptors, say: tried again a little later rather than spun on
                 log::warn!("the control socket didn't accept a connection: {error}");
@@ -325,20 +283,24 @@ fn write_events(events: &async_channel::Receiver<EventLine>, writer: &UnixStream
             log::warn!("a subscriber's hang-up isn't watched: its stream ends at its next event: {error}");
         }
         let mut writer = writer;
+        let mut deadline = Instant::now() + WRITE;
         while let Ok(line) = events.recv_blocking() {
             let last = line.event == CtlEvent::Lagged;
+            deadline = Instant::now() + WRITE;
             if codec::write_line(&mut writer, &line).is_err() || last {
                 break;
             }
         }
-        // wakes the watch: a socket shut down both ways is hung up
-        let _ = writer.shutdown(std::net::Shutdown::Both);
+        // DisconnectNamedPipe discards unread bytes, including the final lagged line. Drain within the last write's
+        // existing deadline before disconnecting; stop still forces shutdown and wakes both this and the watch.
+        let _ = teams_ctl::transport::finish_writes(writer, deadline);
     });
 }
 
 /// Waits until `stream` is hung up (`true`): the client closed it (or shut it down both ways), or it was shut down
 /// here. A client that only stops writing hasn't hung up, and what it writes is never read. `false`: the watch failed,
 /// and the stream ends at its next event, as without one.
+#[cfg(unix)]
 fn hung_up(stream: &UnixStream) -> bool {
     use rustix::event::{PollFd, PollFlags, poll};
 
@@ -351,6 +313,20 @@ fn hung_up(stream: &UnixStream) -> bool {
             Err(rustix::io::Errno::INTR) => {}
             Err(error) => {
                 log::warn!("a subscriber's hang-up isn't watched: its stream ends at its next event: {error}");
+                return false;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn hung_up(stream: &UnixStream) -> bool {
+    loop {
+        match stream.peer_closed() {
+            Ok(true) => return true,
+            Ok(false) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                log::warn!("a subscriber's hang-up isn't watched: {error}");
                 return false;
             }
         }

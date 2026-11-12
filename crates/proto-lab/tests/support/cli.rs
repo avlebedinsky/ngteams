@@ -205,6 +205,8 @@ fn commands_stop_at_missing_config_before_credentials_or_browser_start() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+        "the isolated CLI contract must actually run: {}", String::from_utf8_lossy(&output.stdout));
 }
 
 #[tokio::test]
@@ -378,6 +380,9 @@ async fn status_checks_default_accounts_and_propagates_refusals_breaches_and_err
 
 async fn valid_config_child() {
     let locations = LabLocations::from_env().unwrap();
+    let native = auth::NativeTarget::from_env(Alias::A).unwrap();
+    assert_eq!(native.root(), locations.personal_data_dir.parent().unwrap().join(KEYRING_APPLICATION).join("a"));
+    assert!(!native.root().exists(), "resolving native paths must not provision an account");
     std::fs::create_dir_all(locations.config_file.parent().unwrap()).unwrap();
     let mut text = format!("data_dir = {:?}\n", locations.data_dir.to_string_lossy());
     for alias in ["a", "b", "c"] {

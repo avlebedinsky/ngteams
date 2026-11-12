@@ -881,6 +881,113 @@ fn captions_follow_current_actor_call_roster_version_and_connection() {
     assert!(!tracker.caption_allowed(&invite));
     assert!(!tracker.caption_allowed(&start));
 }
+#[test]
+fn an_answered_incoming_call_authorizes_only_its_current_regional_caption_service() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_B));
+    let root = "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/";
+    assert!(tracker.connected(CONNECTION, root));
+    let (_, _, fixture) = bound_offer(&tracker);
+    let input = &fixture["cases"][1]["body"]["additionalActions"][0]["input"];
+    let own = &input["participants"]["from"];
+    let actor = teams_proto::CallParticipant {
+        mri: Mri::new(LAB_B),
+        display_name: None,
+        endpoint_id: own["endpointId"].as_str().unwrap().into(),
+        participant_id: Some(own["participantId"].as_str().unwrap().into()),
+        language_id: None,
+    };
+    let start = caption_start(&actor);
+    assert!(
+        !tracker.caption_allowed(&start),
+        "a ringing offer cannot start captions"
+    );
+    let pending = tracker.before(&fixture_write(&fixture, 4));
+    tracker.answered(pending, &Response::new(200, fixture["accept_answer"].to_string()));
+    assert!(!tracker.caption_allowed(&start), "the service has not joined yet");
+    let callback = Url::parse(input["conversationRequest"]["roster"]["rosterUpdate"].as_str().unwrap()).unwrap();
+    let mut roster = caption_roster(1, "active", CAPTION_COMMAND);
+    roster.path = callback.path().into();
+    roster.body = String::from_utf8(roster.body)
+        .unwrap()
+        .replace(
+            teams_proto::captions::CAPTION_SERVICE_MRI,
+            teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI,
+        )
+        .into_bytes();
+    tracker.observe_delivery(&roster);
+    assert!(tracker.caption_allowed(&start));
+    let mut departed: Value = serde_json::from_slice(&roster.body).unwrap();
+    let service = &mut departed["participants"][teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI];
+    service["version"] = json!(2);
+    service["state"] = json!("disconnected");
+    roster.body = departed.to_string().into_bytes();
+    tracker.observe_delivery(&roster);
+    assert!(!tracker.caption_allowed(&start), "departure revokes the command");
+}
+
+/// The service joining from another region, with an older endpoint whose key sorts first: the command allowed is the
+/// newest endpoint's, as the call machine follows it.
+#[test]
+fn captions_allow_the_newest_endpoint_of_the_service_from_another_region() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    let pending = caption_seed(&tracker);
+    tracker.answered(pending, &Response::new(200, answer("caption")));
+    tracker.observe_delivery(&caption_roster(20, "disconnected", "invalid"));
+    let start = caption_start(&caption_actor());
+    let older = CAPTION_COMMAND.replace("000000000001", "000000000002");
+    let endpoint = |command: &str, joined: &str| {
+        json!({"endpointMetadata": {"commandUrl": command, "joinTime": joined, "spokenLanguage": "en-us",
+            "processingModes": {"closedCaptions": {"state": "Inactive"}}}})
+    };
+    let roster = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 2, "state": "active", "endpoints": {
+            "a-older": endpoint(&older, "2026-01-01T00:00:01.5Z"),
+            "b-newer": endpoint(CAPTION_COMMAND, "2026-01-01T00:00:02Z"),
+        }
+    }}});
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, roster.to_string().into_bytes()));
+    assert!(tracker.caption_allowed(&start));
+    let stale = teams_proto::captions::CaptionWrite::start(
+        &teams_proto::CallContext::new(CHAIN_ID),
+        &teams_proto::captions::CaptionCommandLink::parse(&older).unwrap(),
+        &caption_actor(),
+        &teams_proto::one_to_one_id(LAB_A, LAB_B).unwrap(),
+    )
+    .unwrap();
+    assert!(!tracker.caption_allowed(&stale));
+    // A newer participant version for the other MRI cannot rebind commands to an older join.
+    let older_entry = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_MRI: {
+        "version": 21, "state": "active", "endpoints": {
+            "b-newer": endpoint(&older, "2026-01-01T00:00:01.5Z")
+        }
+    }}});
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, older_entry.to_string().into_bytes()));
+    assert!(tracker.caption_allowed(&start));
+    assert!(!tracker.caption_allowed(&stale));
+    // Switching MRIs does not forget the invited leg's version, or accept older alternate-leg state.
+    tracker.observe_delivery(&caption_roster(19, "active", &older));
+    let mut stale_roster = roster;
+    let entry = &mut stale_roster["participants"][teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI];
+    entry["version"] = json!(1);
+    entry["state"] = json!("disconnected");
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, stale_roster.to_string().into_bytes()));
+    assert!(tracker.caption_allowed(&start));
+    assert!(!tracker.caption_allowed(&stale));
+    // Process the followed MRI's departure even beside the other MRI's older full read.
+    let mut both = older_entry;
+    both["participants"][teams_proto::captions::CAPTION_SERVICE_MRI]["version"] = json!(22);
+    both["participants"][teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI] =
+        json!({"version": 3, "state": "disconnected"});
+    tracker.observe_delivery(&delivery(30, ROSTER_PATH, both.to_string().into_bytes()));
+    assert!(
+        !tracker.caption_allowed(&start),
+        "departed endpoint loses command authorization"
+    );
+    assert!(tracker.caption_allowed(&stale), "still-active older region takes over");
+}
 fn assert_invalid_reply_envelopes_are_refused(tracker: &Tracker, envelope: &Value) {
     use teams_proto::CallState as _;
     for field in [

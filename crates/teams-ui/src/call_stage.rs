@@ -11,14 +11,15 @@
 //!   devices the settings list, Share (a 1:1 call's, [`share`]: "Share content", its screen picked at the desktop;
 //!   a red Stop sharing while it shares), and Leave in Teams' red (a meeting's organizer's with End meeting beside it,
 //!   which asks first). Each control's tooltip names it and its key.
-//! - **The stage** ([`gallery`]): before anyone is in the call, the callee's avatar with the call's state, as Teams
-//!   shows it while it rings; once the call's roster told who is in it, a tile per participant (its video when a line
-//!   shows it, else its initials; its name with its microphone muted and its hand raised; a border in the brand colour
+//! - **The stage** ([`gallery`]): before anyone is in the call, the callee's avatar (a 1:1 call's other one's picture)
+//!   with the call's state, as Teams shows it while it rings; once the call's roster told who is in it, a tile per
+//!   participant (its video when a line shows it, else its person's picture, or their initials, centred and sized to
+//!   the tile: [`faces`]; its name with its microphone muted and its hand raised; a border in the brand colour
 //!   while it speaks, Teams' gold while its hand is up) in the gallery, or the one who speaks (or the one pinned) large
 //!   over a strip of the others; each tile's More options pins it for the account alone. The account's own tile floats
-//!   at the stage's bottom right, as Teams' self view does, unless View hid it; live reactions float up from the
-//!   stage's bottom. The far end's shared screen takes the stage, the people's tiles in a strip on its right (View's
-//!   Focus on content: the share alone).
+//!   at the stage's bottom right, as Teams' self view does (the account's own picture while its camera is off), unless
+//!   View hid it; live reactions float up from the stage's bottom. The far end's shared screen takes the stage, the
+//!   people's tiles in a strip on its right (View's Focus on content: the share alone).
 //! - **The People pane** ([`people_pane`]): a meeting's Share invite (its link copied), who waits in its lobby (Admit
 //!   all, Admit and Deny each), and who is in the call, the account first, with whether they speak, are muted or have
 //!   their hand up (numbered in the order the hands went up, the avatar ringed in gold), and "Organizer" under the
@@ -49,6 +50,7 @@
 mod captions;
 mod chat_pane;
 mod controls;
+mod faces;
 mod gallery;
 mod health;
 pub use health::HEALTH_REFRESH;
@@ -110,8 +112,9 @@ const PANE_WIDTH: f32 = 320.0;
 const CHAT_WIDTH: f32 = 360.0;
 /// The window's width under which the toolbar's controls show their icons alone, px.
 const COMPACT_BELOW: f32 = 860.0;
-/// The avatar of the one the call rings (or ended with) and of a tile without video: the kit's large one (80 px),
-/// whose initials it sizes and centres (a custom size leaves them small, at its top left).
+/// The avatar of the one the call rings, holds or ended with: the kit's large one (80 px), whose initials it sizes and
+/// centres (a custom size leaves them small, at its top left). A tile without video sizes its face to the tile
+/// ([`faces::face_side`], `CallStage::tile_face`).
 const BIG_AVATAR: Size = Size::Large;
 /// [`BIG_AVATAR`]'s side, px (the kit's large avatar).
 const BIG_AVATAR_PX: f32 = 80.0;
@@ -232,7 +235,7 @@ pub struct CallStage {
     self_hidden: bool,
     /// View's Show videos first: the tiles whose camera is on lead.
     videos_first: bool,
-    /// View's Turn off other videos: the others' tiles show their initials, not their video.
+    /// View's Turn off other videos: the others' tiles show their pictures (or initials), not their video.
     others_off: bool,
     /// Who has a hand up, in the order they raised it (the account by its own MRI): the People pane numbers them.
     hands: Vec<String>,
@@ -282,6 +285,8 @@ pub struct CallStage {
     with: Option<SharedString>,
     /// The account's own name, as its profile gives it: People names it so, as Teams does.
     own_name: Option<SharedString>,
+    /// The call's people's pictures ([`faces`]).
+    faces: faces::Faces,
     /// The call's end was shown (and traced).
     end_shown: bool,
     /// The end closing by itself, while it is due.
@@ -290,6 +295,9 @@ pub struct CallStage {
     ticking: Option<Task<()>>,
     _waking: Option<Task<()>>,
     _observing: [Subscription; 4],
+    /// Profiles read in the background (the account's chats' model, when the window has its shell's parts): the
+    /// faces read again.
+    _profiles: Option<Subscription>,
 }
 
 impl EventEmitter<CallStageEvent> for CallStage {}
@@ -333,6 +341,13 @@ impl CallStage {
         let feed = calls.read(cx).video().cloned();
         let waking = feed.as_ref().map(|feed| wake_on_frames(feed, cx));
         let tiles = feed.map(|feed| Tiles::new(feed, Arc::clone(&trace)));
+        // profile changes before the stage asked about anyone change nothing it read
+        let seen = shell.as_ref().map_or(0, |shell| shell.models.chats.read(cx).revision());
+        let profiles = shell.as_ref().map(|shell| {
+            cx.observe(&shell.models.chats, |this: &mut Self, chats, cx| {
+                this.profiles_changed(&chats, cx);
+            })
+        });
         let mut stage = Self {
             core,
             calls,
@@ -381,12 +396,14 @@ impl CallStage {
             translation,
             with: None,
             own_name: None,
+            faces: faces::Faces::seen_at(seen),
             end_shown: false,
             closing: None,
             focus: cx.focus_handle(),
             ticking: None,
             _waking: waking,
             _observing: observing,
+            _profiles: profiles,
         };
         stage.read_own_name(cx);
         stage.changed(cx);
@@ -403,12 +420,24 @@ impl CallStage {
                 .and_then(|person| person.name)
                 .filter(|name| !name.trim().is_empty());
             // a stage that is gone shows nobody
+            // none leaves a name the faces' later read gave
+            let Some(name) = name else { return };
             let _ = this.update(cx, |this, cx| {
-                this.own_name = name.map(SharedString::from);
+                this.own_name = Some(SharedString::from(name));
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// The picture of the one person the call is with (`call`'s, else the call's read last), when it is with one
+    /// person who has one: the ringing and the ended screens show it, as Teams does in a 1:1 call.
+    fn partner_picture(&self, call: Option<CallId>) -> Option<&people::Picture> {
+        let people = call.map_or_else(|| self.people.last(), |call| self.people.of(call));
+        match people {
+            [(mri, _)] => self.faces.picture(mri),
+            _ => None,
+        }
     }
 
     /// Opens or closes the participants' pane, as People does.
@@ -518,8 +547,15 @@ impl CallStage {
                 active,
                 (&core, echo.as_ref()),
                 cx,
-                (|stage| &mut stage.people, |_, cx| cx.notify()),
+                (
+                    |stage| &mut stage.people,
+                    |stage, cx| {
+                        stage.ask_faces(cx);
+                        cx.notify();
+                    },
+                ),
             );
+            self.ask_faces(cx);
             self.float_reactions(active, cx);
             self.order_hands(active);
             self.meeting_seen(active);
@@ -914,7 +950,7 @@ impl CallStage {
         match (ended, ended.and_then(|ended| ended.check)) {
             (Some(ended), Some(check)) => self.results_card(ended, check, palette, cx),
             (Some(ended), None) => self.end_view(ended, title, palette, cx),
-            (None, _) => calling(title, "Call ended", palette, Vec::new()),
+            (None, _) => calling((title, self.partner_picture(None)), "Call ended", palette, Vec::new()),
         }
     }
 
@@ -967,7 +1003,7 @@ impl CallStage {
             .gap_2()
             .p_4()
             .bg(rgb(palette.background))
-            .child(ended_avatar(title, palette))
+            .child(ended_avatar(title, self.partner_picture(None), palette))
             .child(
                 div()
                     .mt_2()
@@ -1197,8 +1233,14 @@ fn device_item(kind: DeviceKind, choice: DeviceChoice, model: &Entity<SettingsMo
     })
 }
 
-/// The screen while the call rings (or once it ended): its avatar, who it is with and its state, centred.
-fn calling(title: &SharedString, state: &str, palette: Palette, rings: Vec<AnyElement>) -> AnyElement {
+/// The screen while the call rings (or once it ended): its avatar (the picture of the one it is with, when it has one),
+/// who it is with and its state, centred.
+fn calling(
+    (title, picture): (&SharedString, Option<&people::Picture>),
+    state: &str,
+    palette: Palette,
+    rings: Vec<AnyElement>,
+) -> AnyElement {
     div()
         .debug_selector(|| "call-calling".to_owned())
         .size_full()
@@ -1212,7 +1254,12 @@ fn calling(title: &SharedString, state: &str, palette: Palette, rings: Vec<AnyEl
             div()
                 .relative()
                 .children(rings)
-                .child(people::avatar(Some(title), None, BIG_AVATAR)),
+                .child(
+                    people::avatar(Some(title), picture, BIG_AVATAR).debug_selector(move || {
+                        let shown = if picture.is_some() { "picture" } else { "initials" };
+                        format!("call-calling-{shown}")
+                    }),
+                ),
         )
         .child(
             div()
@@ -1228,11 +1275,17 @@ fn calling(title: &SharedString, state: &str, palette: Palette, rings: Vec<AnyEl
         .into_any_element()
 }
 
-/// The avatar of who an ended call was with, a red hung-up mark on it.
-fn ended_avatar(title: &SharedString, palette: Palette) -> gpui::Div {
+/// The avatar of who an ended call was with (their picture, when it was with one person who has one), a red hung-up
+/// mark on it.
+fn ended_avatar(title: &SharedString, picture: Option<&people::Picture>, palette: Palette) -> gpui::Div {
     div()
         .relative()
-        .child(people::avatar(Some(title), None, BIG_AVATAR))
+        .child(
+            people::avatar(Some(title), picture, BIG_AVATAR).debug_selector(move || {
+                let shown = if picture.is_some() { "picture" } else { "initials" };
+                format!("call-end-{shown}")
+            }),
+        )
         .child(
             div()
                 .absolute()

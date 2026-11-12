@@ -132,7 +132,7 @@ fn pointer(engine: &Engine, view: ViewId, kind: PointerKind, x: f64, y: f64) {
     );
 }
 
-fn click(engine: &mut Engine, view: ViewId, selector: &str, button: Button) -> Result {
+pub(super) fn click(engine: &mut Engine, view: ViewId, selector: &str, button: Button) -> Result {
     let script = format!(
         "(()=>{{const r=document.querySelector({}).getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2]}})()",
         serde_json::to_string(selector)?

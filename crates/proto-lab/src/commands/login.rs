@@ -430,6 +430,7 @@ impl StatusFile {
     /// When the file can't be written.
     pub fn write(&self, state: &str, extra: &Value) -> std::io::Result<()> {
         use std::io::Write as _;
+        #[cfg(unix)]
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
         let at = SystemTime::now()
@@ -439,6 +440,7 @@ impl StatusFile {
         if let (Some(record), Some(extra)) = (record.as_object_mut(), extra.as_object()) {
             record.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
         }
+        #[cfg(unix)]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -446,7 +448,10 @@ impl StatusFile {
             .mode(0o600)
             .open(&self.path)?;
         // a file left by another tool may be wider
+        #[cfg(unix)]
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        #[cfg(windows)]
+        let mut file = crate::private::replace(&self.path)?;
         file.write_all(format!("{record:#}\n").as_bytes())
     }
 }
@@ -668,3 +673,73 @@ impl Run<'_> {
 #[cfg(test)]
 #[path = "../../tests/support/commands/login.rs"]
 mod tests;
+
+/// Windows lab authorization uses the same one-submission login driver directly on Microsoft's native authorize
+/// page. It never loads the Teams web client (and therefore cannot open an unchecked chat before reach is audited).
+///
+/// # Errors
+/// Browser setup/cleanup, sign-in rejection/MFA, an unexpected host or the authorization deadline fails.
+#[cfg(windows)]
+pub async fn authorization_profile(
+    paths: &crate::config::LabPaths,
+    alias: Alias,
+    authorization: &teams_auth::token::Authorization,
+    credentials: &Credentials,
+    timeout: Duration,
+) -> Result<(teams_auth::secrets::Secret, SessionReport), LoginError> {
+    let entra = teams_auth::token::EntraConfig::teams_native();
+    let (catch, mut caught) =
+        crate::redirect_catch::RedirectCatch::new(&entra.authorize_endpoint(), entra.redirect_uri())
+            .map_err(|_| LoginError::CaptureFailed("cannot create native redirect catcher".into()))?;
+    let session = LabSession::open_catching(paths, alias, catch).await?;
+    let status = StatusFile::new(paths.data_dir(), alias);
+    authorization_session(session, authorization, credentials, &status, timeout, &mut caught).await
+}
+
+#[cfg(any(windows, test))]
+async fn authorization_session(
+    mut session: LabSession,
+    authorization: &teams_auth::token::Authorization,
+    credentials: &Credentials,
+    status: &StatusFile,
+    timeout: Duration,
+    caught: &mut tokio::sync::mpsc::UnboundedReceiver<teams_auth::secrets::Secret>,
+) -> Result<(teams_auth::secrets::Secret, SessionReport), LoginError> {
+    let run = Run {
+        upn: credentials.email(),
+        credentials,
+        status,
+        options: LoginOptions { timeout },
+    };
+    let outcome = tokio::time::timeout(timeout, async {
+        status.write("starting", &json!({})).map_err(LoginError::Status)?;
+        session.navigate(authorization.url()).await?;
+        let mut state = SignIn::default();
+        loop {
+            if let Ok(redirect) = caught.try_recv() {
+                return Ok(redirect);
+            }
+            match session.watch().state() {
+                SessionState::SignInShown => run.sign_in_step(&session, &mut state).await?,
+                SessionState::Elsewhere(host) => return Err(LoginError::UnexpectedHost(host)),
+                _ => {}
+            }
+            if !session.pump(TICK).await {
+                return Err(LoginError::CaptureFailed("authorization browser disconnected".into()));
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err(LoginError::Timeout { timeout, authz: None }));
+    let closed = session.close().await;
+    // The status file never carries a third-party browser error or a redirect/code.
+    status
+        .write(if outcome.is_ok() { "authorized" } else { "failed" }, &json!({}))
+        .map_err(LoginError::Status)?;
+    let redirect = outcome?;
+    let browser = closed?;
+    if browser.failed() {
+        return Err(LoginError::CaptureFailed(browser.summary()));
+    }
+    Ok((redirect, browser))
+}

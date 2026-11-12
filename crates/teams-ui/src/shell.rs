@@ -101,6 +101,7 @@ mod channel_management;
 mod chat_people;
 mod meeting_tabs;
 mod new_chat;
+mod profile_card;
 mod title_bar;
 mod workflows;
 
@@ -143,9 +144,6 @@ pub const LIST_MIN: f32 = 220.0;
 pub const LIST_MAX: f32 = 560.0;
 /// An account's avatar on the rail, px.
 const ACCOUNT_AVATAR: f32 = 36.0;
-/// How many of the account's meeting chats, newest first, Join with an ID reads for a meeting the calendar doesn't
-/// have ([`Shell::join_meeting_code`]).
-pub const MEETING_CHATS_LOOKED_THROUGH: usize = 40;
 /// How often a channel shown is read again for a meeting that runs in it (its header's Join): nothing the native
 /// client hears tells it.
 pub const CHANNEL_MEETUP_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
@@ -350,6 +348,8 @@ pub struct Shell {
     new_chat: new_chat::Open,
     /// The chat header's people flyout, while it is open, and where its button was last drawn.
     people: chat_people::State,
+    /// The window's profile card, while one is open, and the pointer's way over faces and names.
+    cards: profile_card::State,
     _subscriptions: [Subscription; 12],
 }
 
@@ -388,10 +388,10 @@ impl Shell {
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, &settings, cx);
-        let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
+        let (focus, chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx);
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
-        search_box.update(cx, |search, cx| search.set_previews(previews, cx));
         Self {
+            cards: Self::card_host(&models, (&search_box, previews), window, cx),
             core,
             models,
             settings,
@@ -424,7 +424,7 @@ impl Shell {
             main: selected.map_or(Main::Nothing, Main::Chat),
             before_settings: Main::Nothing,
             panes: cx.new(|_| ResizableState::default()),
-            focus: Self::focused(window, cx),
+            focus,
             own_presence: None,
             status_menu: false,
             status_anchor: MenuAnchor::Rail,
@@ -559,21 +559,25 @@ impl Shell {
         (teams, [channel_opened, kept_channel])
     }
 
-    /// The chat view of `selected`, the chat the settings kept, opened again and taking what is typed, and what it tells
-    /// followed ([`Shell::follow_chat`]).
+    /// The shell's focus, then the chat view of `selected`, the chat the settings kept, opened again and taking what is
+    /// typed from the shell, and what it tells followed ([`Shell::follow_chat`]). In that order: the focus made last
+    /// would take the keyboard from the compose box.
     fn kept_chat(
         parts: ShellParts,
         selected: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<(Entity<ChatView>, Subscription)> {
-        let id = selected?;
+    ) -> (FocusHandle, Option<Entity<ChatView>>, Option<Subscription>) {
+        let focus = Self::focused(window, cx);
+        let Some(id) = selected else {
+            return (focus, None, None);
+        };
         parts.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
         let chat = cx.new(|cx| ChatView::new(parts, id, window, cx));
         let compose = chat.read(cx).compose().clone();
         compose.update(cx, |compose, cx| compose.focus(window, cx));
         let events = Self::follow_chat(&chat, window, cx);
-        Some((chat, events))
+        (focus, Some(chat), Some(events))
     }
 
     /// The settings view of the account `core` is, offering the test call as the shell says
@@ -795,7 +799,7 @@ impl Shell {
                 Ok(Some(details)) => {
                     let title = title.or(details.title).unwrap_or_else(|| "Meeting".to_owned());
                     this.open_prejoin(
-                        MeetingToJoin {
+                        MeetingToJoin::Chat {
                             chat,
                             meeting: details.meeting,
                             title,
@@ -817,57 +821,11 @@ impl Shell {
         .detach();
     }
 
-    /// Join with an ID for a meeting the calendar doesn't have: the meeting is looked for among the account's meeting
-    /// chats (the newest [`MEETING_CHATS_LOOKED_THROUGH`] the list holds, shown or not), each one's thread read for its join link, and
-    /// the one whose short link carries `code` is joined by its chat, as its chat's Join joins it. A meeting whose chat
-    /// the account isn't in is refused: no read ties an ID to the people in its meeting, so nothing would let the join
-    /// be judged by them (`docs/protocol/calling.md`, "Joining a meeting").
-    pub fn join_meeting_code(&mut self, wanted: teams_core::MeetingCode, cx: &mut Context<Self>) {
-        let chats: Vec<String> = self
-            .list
-            .read(cx)
-            .all_rows()
-            .filter(|row| row.kind == crate::chat_list::RowKind::Meeting)
-            .map(|row| row.id.clone())
-            .take(MEETING_CHATS_LOOKED_THROUGH)
-            .collect();
+    /// Open the pre-join for an invitation. The service resolves its ID only after Join now; a meeting's
+    /// chat may hold a long link and cannot reliably be searched by numeric code.
+    pub fn join_meeting_code(&mut self, code: teams_core::MeetingCode, cx: &mut Context<Self>) {
         self.trace.record(&TraceLine::new("call", "meeting-code"));
-        let core = Arc::clone(&self.core);
-        cx.spawn(async move |this, cx| {
-            let mut found = None;
-            for chat in chats {
-                let Ok(Some(details)) = core.meeting(chat.clone()).await else {
-                    continue;
-                };
-                let carries = details
-                    .join_url
-                    .as_deref()
-                    .and_then(teams_core::MeetingCode::of_link)
-                    .is_some_and(|carried| carried == wanted);
-                if carries {
-                    found = Some((chat, details));
-                    break;
-                }
-            }
-            let _ = this.update(cx, |this, cx| {
-                if let Some((chat, details)) = found {
-                    let title = details.title.unwrap_or_else(|| "Meeting".to_owned());
-                    this.open_prejoin(
-                        MeetingToJoin {
-                            chat,
-                            meeting: details.meeting,
-                            title,
-                        },
-                        cx,
-                    );
-                } else {
-                    let ask = Ask::Join { chat: String::new() };
-                    let (calls, trace) = (this.models.calls.clone(), Arc::clone(&this.trace));
-                    calls::refuse_here(&calls, &trace, &ask, "no-meeting-code", cx);
-                }
-            });
-        })
-        .detach();
+        self.open_prejoin(MeetingToJoin::Code(code), cx);
     }
 
     /// The account's models the shell shows.
@@ -1063,7 +1021,7 @@ impl Shell {
                 .kind("meet-now"),
         );
         // nobody organizes the meeting before it starts: the account will, and the start names no organizer
-        let to_join = MeetingToJoin {
+        let to_join = MeetingToJoin::Chat {
             chat: channel,
             meeting: teams_proto::MeetingInfo {
                 organizer_id: String::new(),
@@ -1142,7 +1100,7 @@ impl Shell {
         };
         let title = self.channel_meeting_title(&channel, cx);
         self.open_prejoin(
-            MeetingToJoin {
+            MeetingToJoin::Chat {
                 chat: channel,
                 meeting: meetup.meeting,
                 title,
@@ -2845,7 +2803,9 @@ impl Shell {
         let tabs = self.meeting_tab_bar(id, palette, cx);
         // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
         // presence, the call on the right
-        let header = pane_header(face, name, palette)
+        let header = self
+            .partner_header(id, &name, palette, cx)
+            .unwrap_or_else(|| pane_header(face, name, palette))
             .children(tabs)
             .children(presence)
             .child(div().flex_1())
@@ -2968,6 +2928,22 @@ pub(crate) fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, 
 
 /// [`pane_header`] led by any element in the face's place: a channel's team tile.
 pub(crate) fn pane_header_led(lead: Option<AnyElement>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
+    pane_header_titled(lead, pane_title(title).into_any_element(), palette)
+}
+
+/// A pane header's title: semibold, on one line, ellipsized.
+pub(crate) fn pane_title(title: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .text_lg()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .child(title.into())
+}
+
+/// [`pane_header_led`] with its title drawn by the caller: a 1:1 chat's name, which opens the partner's card.
+pub(crate) fn pane_header_titled(lead: Option<AnyElement>, title: AnyElement, palette: Palette) -> gpui::Div {
     div()
         .h(px(48.0))
         .flex_none()
@@ -2979,15 +2955,7 @@ pub(crate) fn pane_header_led(lead: Option<AnyElement>, title: impl Into<SharedS
         .border_b_1()
         .border_color(rgb(palette.border))
         .children(lead)
-        .child(
-            div()
-                .text_lg()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(title.into()),
-        )
+        .child(title)
 }
 
 impl Shell {
@@ -3028,6 +2996,7 @@ impl Render for Shell {
         let team_dialog = self.team_dialog_view();
         let toast = self.toast_view(palette);
         let more_apps = self.more_apps_view(palette, cx);
+        let card = self.card_layer(window, cx);
         let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
             div()
                 .absolute()
@@ -3071,6 +3040,7 @@ impl Render for Shell {
             .children(channel_dialog)
             .children(team_dialog)
             .children(more_apps)
+            .children(card)
             .children(toast)
             .children(first_run)
     }

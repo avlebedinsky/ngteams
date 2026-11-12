@@ -22,10 +22,6 @@ use crate::agent::Kind;
 use crate::call::Step;
 use crate::{CallWrite, Delivery};
 
-/// Microsoft's recording bot: in the call's roster while a recording or a transcription runs (seen 2026-11-06,
-/// `ab-call --call steps`); Teams hides it from the people in the call.
-pub const RECORDER_MRI: &str = "28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5";
-
 /// A meeting's shared state as last told ([`CallEvent::Meeting`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MeetingState {
@@ -93,13 +89,14 @@ pub struct Transcription {
 
 /// The meeting-state part of a call the machine keeps: the state told, the timer as last delivered (its sequence and
 /// its JSON text, which the next change names and sends back), the settings changes the account made, and the
-/// recording bot's roster version.
+/// per-MRI recording/caption service roster that supplies both the recording modes and the caption command binding.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Meeting {
     pub(crate) state: MeetingState,
     timer: Option<TimerUpdate>,
     settings: u64,
-    recorder_version: Option<u64>,
+    // Captions and meeting modes read the same merged roster and endpoint selection.
+    pub(crate) services: teams_proto::captions::CaptionRoster,
     own_version: Option<u64>,
 }
 
@@ -123,24 +120,14 @@ struct ConversationUpdate {
     options: Option<teams_proto::MeetingOptions>,
 }
 
-/// The recording bot's entry in a roster update (`body`): its version, whether it records and whether it transcribes
-/// now, each with who started it (`userId`, which stays once it stopped: its `state` tells whether it runs); `None`
-/// when the update doesn't list it.
-fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>, Option<Transcription>)> {
-    let body: Value = serde_json::from_slice(body).ok()?;
-    let entry = body.get("participants")?.get(RECORDER_MRI)?;
-    let version = entry.get("version")?.as_u64()?;
-    let active = entry.get("state").and_then(Value::as_str) == Some("active");
+/// Whether the bot records and transcribes now, each with who started it (`userId`, which stays once it stopped:
+/// its `state` tells whether it runs). Read only the endpoint selected from the merged service roster.
+fn recorder(metadata: Option<&Value>) -> (Option<Recording>, Option<Transcription>) {
     let running = |name: &str| {
-        let pointer = format!("/endpointMetadata/processingModes/{name}");
-        entry
-            .get("endpoints")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(|endpoints| endpoints.values())
-            .filter_map(|endpoint| endpoint.pointer(&pointer))
-            .find(|mode| mode.get("state").and_then(Value::as_str) == Some("Active"))
-            .filter(|_| active)
+        metadata?
+            .get("processingModes")?
+            .get(name)
+            .filter(|mode| mode.get("state").and_then(Value::as_str) == Some("Active"))
     };
     let by = |mode: &Value| {
         mode.get("userId")
@@ -153,7 +140,7 @@ fn recorder(body: &[u8]) -> Option<(u64, Option<Recording>, Option<Transcription
         audio_only: mode.pointer("/properties/recordVideo").and_then(Value::as_str) == Some("False"),
     });
     let transcribing = running("realTimeTranscript").map(|mode| Transcription { by: by(mode) });
-    Some((version, recording, transcribing))
+    (recording, transcribing)
 }
 
 impl Meeting {
@@ -205,15 +192,15 @@ impl Meeting {
         self.state != before
     }
 
-    /// Takes what a roster update `body` tells of the recording bot; whether the state changed.
-    pub(crate) fn roster(&mut self, body: &[u8]) -> bool {
-        let Some((version, recording, transcribing)) = recorder(body) else {
-            return false;
-        };
-        if self.recorder_version.is_some_and(|told| told >= version) {
-            return false;
-        }
-        self.recorder_version = Some(version);
+    /// Merges a service roster and projects its recording modes; whether the meeting state changed.
+    pub(crate) fn roster(&mut self, body: &Value) -> bool {
+        self.services.update(body);
+        self.recorder_state()
+    }
+
+    /// Projects recording modes from the same endpoint that supplies the caption command binding.
+    fn recorder_state(&mut self) -> bool {
+        let (recording, transcribing) = recorder(self.services.followed().map(|service| service.metadata));
         let changed = self.state.recording != recording || self.state.transcribing != transcribing;
         self.state.recording = recording;
         self.state.transcribing = transcribing;
@@ -274,12 +261,11 @@ impl Calls {
         self.meeting_told(|meeting| meeting.conversation(&delivery.body));
     }
 
-    /// A roster update's word on the recording bot and on the account itself: the meeting's state told when it
-    /// changed.
-    pub(crate) fn recorder_told(&mut self, body: &[u8]) {
+    /// A roster update's word on the account itself: the meeting's state told when it changed.
+    pub(crate) fn own_roster_told(&mut self, body: &[u8]) {
         let me = self.identity.mri.clone();
         let entries = crate::read::roster(body).unwrap_or_default();
-        self.meeting_told(|meeting| meeting.roster(body) | meeting.own(&entries, &me));
+        self.meeting_told(|meeting| meeting.own(&entries, &me));
     }
 
     /// Why [`Calls::options_of`] names no options for `call`, in a few words (never an id): what the log says of a
@@ -343,7 +329,12 @@ impl Calls {
 
     /// A start's or a join's answer, as the conversation it is: what it tells of the meeting.
     pub(crate) fn meeting_answered(&mut self, body: &[u8]) {
-        self.meeting_told(|meeting| meeting.conversation(body) | meeting.roster_of_answer(body));
+        self.meeting_told(|meeting| meeting.conversation(body));
+        if let Ok(answer) = serde_json::from_slice::<Value>(body)
+            && let Some(roster) = answer.get("roster")
+        {
+            self.service_roster(roster);
+        }
     }
 
     fn meeting_told(&mut self, apply: impl FnOnce(&mut Meeting) -> bool) {
@@ -352,18 +343,22 @@ impl Calls {
             let (id, state) = (call.id, call.meeting.state.clone());
             self.out.event(CallEvent::Meeting { call: id, state });
         }
-    }
-}
-
-impl Meeting {
-    /// A start's answer's `roster` (as an update's): the recording bot in it.
-    fn roster_of_answer(&mut self, body: &[u8]) -> bool {
-        let Some(roster) = serde_json::from_slice::<Value>(body)
-            .ok()
-            .and_then(|body| body.get("roster").cloned())
-        else {
-            return false;
-        };
-        self.roster(roster.to_string().as_bytes())
+        // A code start initially knows no chat. The resolved invitation can name its exact thread, which
+        // captions, recording and organizer controls need; keep it unknown until that link is supplied.
+        if call.caption_thread.is_none()
+            && matches!(call.side, crate::call::Side::Meeting)
+            && let Some(chat) = call
+                .meeting
+                .state
+                .join
+                .as_ref()
+                .and_then(|join| join.reference_link.as_deref())
+                .filter(|link| link.starts_with("https://teams.microsoft.com/l/meetup-join/"))
+                .and_then(teams_proto::join_url_chat)
+                .filter(|chat| teams_proto::is_meeting_chat_id(chat))
+        {
+            call.caption_thread = Some(chat.clone());
+            self.out.event(CallEvent::GroupChat { call: call.id, chat });
+        }
     }
 }

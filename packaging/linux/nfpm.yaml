@@ -7,6 +7,7 @@ release: 1
 maintainer: Nick Alie <nickalie@users.noreply.github.com>
 description: Native Microsoft Teams client for Linux
 homepage: https://github.com/nickalie/ngteams
+license: MIT OR Apache-2.0
 # xz: nfpm's gzip default costs a large package several MB; every dpkg and rpm these packages install on reads xz.
 deb:
   compression: xz

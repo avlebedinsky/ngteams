@@ -88,6 +88,10 @@ pub struct FakeCore {
     pub pictures: Mutex<HashMap<String, PictureBytes>>,
     /// The thumbnails `file_thumbnail` answers, by the file's sharing link.
     pub thumbnails: Mutex<HashMap<String, PictureBytes>>,
+    /// What `profile_card` answers, by the person's MRI; anyone else's card can't be read (`ProfileUnread`).
+    pub profile_cards: Mutex<HashMap<String, teams_core::ProfileCard>>,
+    /// Every card asked for, by MRI, in order.
+    pub profile_cards_asked: Mutex<Vec<String>>,
     /// What `meeting_contents` answers, by the meeting's chat; any other chat's recap can't be read.
     pub meeting_contents: Mutex<HashMap<String, Vec<teams_proto::MeetingContent>>>,
     /// The `WebVTT` `meeting_transcript` answers, by the transcript's location; any other can't be read.
@@ -925,6 +929,13 @@ impl Core for FakeCore {
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
 
+    fn profile_card(&self, mri: String) -> Reply<teams_core::ProfileCard> {
+        locked(&self.asked).push("profile_card");
+        let card = locked(&self.profile_cards).get(&mri).cloned();
+        locked(&self.profile_cards_asked).push(mri);
+        Reply::ready(card.ok_or(EngineError::ProfileUnread))
+    }
+
     fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
         locked(&self.asked).push("meeting_contents");
         Reply::ready(
@@ -1204,7 +1215,8 @@ impl Core for FakeCore {
             | CallAction::Join { .. }
             | CallAction::MeetNow { .. }
             | CallAction::JoinChannel { .. }
-            | CallAction::JoinMeeting { .. } => CallId::for_tests(1),
+            | CallAction::JoinMeeting { .. }
+            | CallAction::JoinMeetingCode(_) => CallId::for_tests(1),
         };
         Reply::ready(locked(&self.call_answers).pop_front().unwrap_or(Ok(named)))
     }

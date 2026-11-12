@@ -1,6 +1,8 @@
 //! Public scenario admission in environment-cleared subprocesses. Every path is synthetic and temporary;
 //! the pinned browser is absent.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
 #![cfg(test)]
 
 use std::fmt::Write as _;

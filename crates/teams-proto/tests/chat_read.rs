@@ -1561,7 +1561,10 @@ fn an_ordered_and_a_bulleted_list_are_read_as_lists_of_items() {
             Node::Paragraph(vec![text_node("\u{a0}")]),
         ]
     );
-    assert_eq!(read.plain_text(), "Pick one:\nExternal API\nInternal API\ninner\n\u{a0}\n");
+    assert_eq!(
+        read.plain_text(),
+        "Pick one:\nExternal API\nInternal API\ninner\n\u{a0}\n"
+    );
     // an `ol`'s `start` numbers its first item; one that isn't digits, or a `ul`'s, is 1; an `li` in no list is a
     // paragraph
     let start = |html: &str| match &parse_html(html).nodes[..] {

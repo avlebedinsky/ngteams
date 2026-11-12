@@ -133,7 +133,7 @@ async fn to_join(target: &Target, chat: String, meeting: Option<MeetingInfo>) ->
         }
         (Err(error), None) => return Err(engine_error(&error)),
     };
-    Ok(MeetingToJoin {
+    Ok(MeetingToJoin::Chat {
         chat,
         meeting,
         title: title

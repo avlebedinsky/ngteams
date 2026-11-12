@@ -43,8 +43,8 @@ fn a_newer_release_is_offered_downloaded_verified_and_swapped_in() {
         fs::read_to_string(installation.root().join(IDENTITY)).unwrap(),
         "0.1.0.5\n"
     );
-    let executable = prepared.install().unwrap();
-    assert_eq!(executable, installation.root().join("usr/bin/ngteams"));
+    let restart = prepared.install().unwrap();
+    assert_eq!(restart.program, installation.root().join("usr/bin/ngteams"));
     assert_eq!(
         fs::read_to_string(installation.root().join(IDENTITY)).unwrap(),
         "0.1.0.7\n"
@@ -342,8 +342,8 @@ fn an_appimage_is_replaced_by_its_newer_file() {
     let source = Source::local(&feed.base);
     let release = source.check(&installation, version("0.1.0.5")).unwrap().unwrap();
     let mut prepared = source.prepare(&installation, &release, |_, _| {}).unwrap();
-    let executable = prepared.install().unwrap();
-    assert_eq!(executable, fs::canonicalize(&image).unwrap());
+    let restart = prepared.install().unwrap();
+    assert_eq!(restart.program, fs::canonicalize(&image).unwrap());
     assert_eq!(fs::read(&image).unwrap(), b"new image");
     assert_eq!(fs::metadata(&image).unwrap().permissions().mode() & 0o777, 0o755);
     // replaced meanwhile: its identity (inode, size, time) differs
@@ -357,6 +357,19 @@ fn an_appimage_is_replaced_by_its_newer_file() {
             .to_string()
             .contains("updated by something else")
     );
+}
+
+/// pkexec's part, faked: the root script run as this user, staging in `<home>/var-tmp` rather than `/var/tmp`, which a
+/// test can't count on writing (CI's container has it read-only).
+fn as_this_user(home: &std::path::Path) -> String {
+    assert!(crate::privileged::ROOT_SCRIPT.contains("mktemp -d /var/tmp/"));
+    let stage = home.join("var-tmp");
+    fs::create_dir_all(&stage).unwrap();
+    format!(
+        "shift; shell=$1; flag=$2; script=$(printf '%s\\n' \"$3\" | sed 's|/var/tmp/|{}/|'); shift 3; \
+         exec \"$shell\" \"$flag\" \"$script\" \"$@\"",
+        stage.display()
+    )
 }
 
 /// A package installation at `<home>/opt/ngteams`, its prompt the script `prompter` (a test's pkexec).
@@ -395,20 +408,21 @@ fn a_package_goes_to_the_package_manager_behind_the_password_prompt() {
         )
         .unwrap();
     }
-    // pkexec, faked: the root script run as this user, the package managers above found first
-    let pkexec = format!("shift; PATH='{}':\"$PATH\" exec \"$@\"", bin.display());
+    // the package managers above found first by the root script
+    let path = format!("PATH='{}':\"$PATH\"; export PATH", bin.display());
     for (format, manager) in [
         (Format::Deb, "apt-get"),
         (Format::Pacman, "pacman"),
         (Format::Rpm, "dnf"),
     ] {
         let case = tempfile::tempdir().unwrap();
+        let pkexec = format!("{path}; {}", as_this_user(case.path()));
         let installation = package_installation(case.path(), format, &pkexec);
         // a package's download waits in the app's own folder
         let (mut prepared, _feed) = package_prepared(&installation);
         assert!(prepared.candidate.starts_with(case.path().join("data/updates")));
-        let executable = prepared.install().unwrap();
-        assert_eq!(executable, installation.root().join("usr/bin/ngteams"));
+        let restart = prepared.install().unwrap();
+        assert_eq!(restart.program, installation.root().join("usr/bin/ngteams"));
         let installed = fs::read_to_string(&log).unwrap();
         let line = installed.lines().last().unwrap();
         assert!(line.starts_with(manager), "{line}");
@@ -455,18 +469,15 @@ fn a_closed_prompt_or_none_at_all_changes_nothing() {
 #[test]
 fn the_root_script_refuses_a_package_or_installation_changed_since_the_check() {
     let home = tempfile::tempdir().unwrap();
-    let pkexec = "shift; exec \"$@\"";
-    let installation = package_installation(home.path(), Format::Deb, pkexec);
+    let pkexec = as_this_user(home.path());
+    let installation = package_installation(home.path(), Format::Deb, &pkexec);
     let (mut prepared, _feed) = package_prepared(&installation);
     // the identity file changes once the app's own check has passed: the prompt's script still refuses
     let script = home.path().join("prompter-changing");
     let identity = installation.root().join(IDENTITY);
     program(
         &script,
-        &format!(
-            "#!/bin/sh\necho changed > '{}'\nshift; exec \"$@\"\n",
-            identity.display()
-        ),
+        &format!("#!/bin/sh\necho changed > '{}'\n{pkexec}\n", identity.display()),
     )
     .unwrap();
     prepared.installation.prompter = script;
@@ -478,7 +489,7 @@ fn the_root_script_refuses_a_package_or_installation_changed_since_the_check() {
     program(
         &script,
         &format!(
-            "#!/bin/sh\necho tampered > '{}'\nshift; exec \"$@\"\n",
+            "#!/bin/sh\necho tampered > '{}'\n{pkexec}\n",
             prepared.candidate.display()
         ),
     )
@@ -539,7 +550,7 @@ fn a_failed_swap_and_rollback_keep_the_previous_install_after_prepared_is_droppe
 fn a_package_changed_before_the_prompt_is_refused_against_the_verified_digest() {
     let home = tempfile::tempdir().unwrap();
     // The actual privileged script runs as this user and must refuse before any package manager runs.
-    let installation = package_installation(home.path(), Format::Deb, "shift; exec \"$@\"");
+    let installation = package_installation(home.path(), Format::Deb, &as_this_user(home.path()));
     let (mut prepared, _feed) = package_prepared(&installation);
     fs::write(&prepared.candidate, "replaced while waiting for a restart").unwrap();
     let error = prepared.install().unwrap_err();

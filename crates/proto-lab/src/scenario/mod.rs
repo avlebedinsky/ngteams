@@ -287,3 +287,7 @@ async fn run_call(
 #[cfg(test)]
 #[path = "../../tests/support/scenario/meeting_page.rs"]
 mod meeting_page;
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/process.rs"]
+pub(crate) mod test_process;

@@ -630,19 +630,15 @@ pub fn forget(key: &str, dir: Option<&Path>, cx: &mut App) {
 
 fn write_private(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
     if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
+        teams_platform::private::create_dir_all(dir)?;
+        teams_platform::private::restrict_dir(dir)?;
     }
     let part = file.with_extension("part");
-    let mut out = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&part)?;
+    let mut out = teams_platform::private::replace(&part)?;
     out.write_all(bytes)?;
     out.sync_all()?;
+    drop(out);
     std::fs::rename(part, file)
 }
 

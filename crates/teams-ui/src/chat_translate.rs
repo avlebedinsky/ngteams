@@ -11,7 +11,7 @@
 //! - **Reading**: every text message the view holds (history, new ones, edits, replies with their quotes) is shown in
 //!   the language, as Teams shows a translated message: its translation, with Teams' translation mark beside its time
 //!   ([`Mark`]: "See original message" shows it as written, and back). One already in the language is shown as it is,
-//!   unmarked. Until its translation comes it shows as written, marked as translating; the view never waits.
+//!   unmarked. Until its translation comes it shows as written, faded, "Translating…" beside its time; the view never waits.
 //! - **Kept in the store** (`teams-store`'s schema 20): each translation by the message's id, version and the
 //!   language, so reopening the chat, or a later run, shows it at once and asks the tool only for what is new, edited
 //!   or never translated. The chat view reads them for the messages it holds before anything goes to the tool.
@@ -27,6 +27,12 @@
 //!   the one write path. The user keeps seeing it as written: kept in memory at once and in the store by its
 //!   `clientmessageid` (or `edit:<id>`), and bound to the message as its translation once it is stored. A send whose
 //!   translation fails sends nothing: the box keeps it and says why, with Try again and Send without translating.
+//! - **Progress**: from the moment a language is picked until every message the view holds has its translation, the
+//!   header's button spins and says how far it has come ([`ChatTranslation::progress`]), and each message still
+//!   waiting says "Translating…" in place ([`Mark::Waiting`]). Translations show a message at a time as the tool writes
+//!   them ([`session::Outcome::Partial`]), the newest batch first and, within a batch, the newest message first (the
+//!   end of the chat the view shows fills in first). Turning translation off (or picking another language) mid-run
+//!   stops the tool at once and drops what it was still writing.
 //! - **Failures** stop the reading ([`Status::Failed`]: the tool missing, signed out, too slow, or stopped): the chat
 //!   shows a notice saying why, with Try again, and its messages as written.
 //! - **Outside the view** ([`Previews`]): the chat list's preview, a new message's notification and the search's cards
@@ -267,10 +273,23 @@ impl SendFailure {
 /// What a translated send gives back: the text to send, or `None` to send it as written (it is in the chat's language).
 pub type Outgoing = Result<Option<RichText>, SendFailure>;
 
-/// A batch the tool is working on: each message's number, id, version and markers.
+/// A message of a batch the tool is working on: its number, id, version and markers.
+type RunningItem = (usize, String, i64, Shells);
+
+/// A batch the tool is working on: its messages, and the answers applied so far by their numbers (a later answer that
+/// differs replaces one: the batch's whole answer wins over what streamed before it).
 struct Running {
     id: u64,
-    items: Vec<(usize, String, i64, Shells)>,
+    items: Vec<RunningItem>,
+    applied: HashMap<usize, Answer>,
+}
+
+/// How far reading a chat in its language has come: of the text messages the view holds, how many show their
+/// translation (or are known to need none, or couldn't be translated).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub done: usize,
+    pub total: usize,
 }
 
 /// One chat's translation (see the module docs): a GPUI entity its view feeds with the messages it holds.
@@ -383,6 +402,30 @@ impl ChatTranslation {
     #[must_use]
     pub fn batches(&self) -> u64 {
         self.batches
+    }
+
+    /// Whether the chat's messages are being translated now: a language is picked, nothing failed, and a message the
+    /// view holds still waits for its translation. The header's button shows it from the moment a language is picked.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.progress().is_some_and(|progress| progress.done < progress.total)
+    }
+
+    /// How far the reading has come, while the chat is translated (`None`: off or failed).
+    #[must_use]
+    pub fn progress(&self) -> Option<Progress> {
+        if self.status != Status::On || self.language.is_none() {
+            return None;
+        }
+        let done = self
+            .sources
+            .iter()
+            .filter(|source| self.entry_of(source).is_some())
+            .count();
+        Some(Progress {
+            done,
+            total: self.sources.len(),
+        })
     }
 
     /// The header's language menu, once drawn ([`picker::picker_of`]).
@@ -730,7 +773,11 @@ impl ChatTranslation {
         if let Some(session) = &self.session {
             session.send(session::Job::Batch { id, context, items });
             self.batches += 1;
-            self.running = Some(Running { id, items: running });
+            self.running = Some(Running {
+                id,
+                items: running,
+                applied: HashMap::new(),
+            });
         }
     }
 
@@ -800,12 +847,22 @@ impl ChatTranslation {
 
     fn received(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
         match outcome {
+            Outcome::Partial { id, answers } => {
+                let Some(mut running) = self.running.take_if(|running| running.id == id) else {
+                    return;
+                };
+                self.answered(&mut running, &answers);
+                self.running = Some(running);
+            }
             Outcome::Batch { id, answers } => {
-                let Some(running) = self.running.take_if(|running| running.id == id) else {
+                let Some(mut running) = self.running.take_if(|running| running.id == id) else {
                     return;
                 };
                 match answers {
-                    Ok(answers) => self.answered(running, &answers),
+                    Ok(answers) => {
+                        self.answered(&mut running, &answers);
+                        self.left_out(&running);
+                    }
                     Err(failure) => self.status = Status::Failed(failure),
                 }
                 self.pump(cx);
@@ -820,42 +877,60 @@ impl ChatTranslation {
         cx.notify();
     }
 
-    /// A batch's answers: each kept, in memory and in the store; one left out is asked again, up to [`ATTEMPTS`].
-    fn answered(&mut self, running: Running, answers: &HashMap<usize, Answer>) {
-        let Some(language) = self.language else { return };
+    /// Answers of the batch `running` (so far, or its whole answer): each one new, or differing from the one applied,
+    /// kept in memory and in the store.
+    fn answered(&mut self, running: &mut Running, answers: &HashMap<usize, Answer>) {
         let mut kept = Vec::new();
-        let entries = Arc::make_mut(&mut self.entries);
-        for (n, id, version, shells) in running.items {
-            let Some(source) = self.sources.iter().find(|source| source.id == id) else {
+        for (n, id, version, shells) in &running.items {
+            let Some(answer) = answers.get(n).filter(|answer| running.applied.get(n) != Some(*answer)) else {
                 continue;
             };
-            let entry = match answers.get(&n) {
-                Some(Answer::Translated { text, source }) => Entry::Translated {
-                    version,
-                    text: Arc::new(decode(text, &shells)),
+            let entry = match answer {
+                Answer::Translated { text, source } => Entry::Translated {
+                    version: *version,
+                    text: Arc::new(decode(text, shells)),
                     source: source.clone(),
                 },
-                Some(Answer::Same { source }) => Entry::Same {
-                    version,
+                Answer::Same { source } => Entry::Same {
+                    version: *version,
                     source: source.clone(),
                 },
-                None => {
-                    let tries = self.attempts.entry((id.clone(), version)).or_default();
-                    *tries += 1;
-                    if *tries < ATTEMPTS {
-                        continue;
-                    }
-                    Entry::Failed { version }
-                }
             };
-            if let Some(row) = row_of(source, language, &entry) {
-                kept.push(row);
-            }
-            entries.insert(id, entry);
+            running.applied.insert(*n, answer.clone());
+            kept.extend(self.learn(id, entry));
         }
         if !kept.is_empty() {
             self.keep(kept);
         }
+    }
+
+    /// The batch `running` is done: a message its answer left out is asked again, up to [`ATTEMPTS`], then shows as
+    /// written.
+    fn left_out(&mut self, running: &Running) {
+        for (n, id, version, _) in &running.items {
+            if running.applied.contains_key(n) {
+                continue;
+            }
+            let tries = self.attempts.entry((id.clone(), *version)).or_default();
+            *tries += 1;
+            if *tries >= ATTEMPTS {
+                self.learn(id, Entry::Failed { version: *version });
+            }
+        }
+    }
+
+    /// `entry` for the message `id`, when the view still holds it at the entry's version: kept in memory, and given back
+    /// as the store keeps it. An answer for a version since edited is dropped, never taken for the edit's: the edit is
+    /// asked for once the batch is done.
+    fn learn(&mut self, id: &str, entry: Entry) -> Option<StoredTranslation> {
+        let language = self.language?;
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id == id && source.version == entry.version())?;
+        let row = row_of(source, language, &entry);
+        Arc::make_mut(&mut self.entries).insert(id.to_owned(), entry);
+        row
     }
 
     /// Keeps `rows` in the store (nothing waits on it).

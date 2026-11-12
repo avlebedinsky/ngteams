@@ -34,10 +34,9 @@
 //! read).
 
 use std::collections::BTreeMap;
-use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
+use std::fs::{self, File};
 use std::io::{self, Read as _, Write as _};
 use std::ops::RangeInclusive;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -56,10 +55,6 @@ use crate::sounds::{self, PackInfo, SoundPlayer, SoundSettings, SoundSource};
 use crate::theme::{self, Appearance};
 use crate::translate;
 
-/// The settings file's mode.
-pub const FILE_MODE: u32 = 0o600;
-/// Its directory's mode.
-pub const DIR_MODE: u32 = 0o700;
 /// The idle times the settings take, in minutes.
 pub const IDLE_MINUTES: RangeInclusive<u32> = 1..=240;
 /// The idle time by default, in minutes.
@@ -1282,7 +1277,8 @@ impl SettingsFile {
     }
 }
 
-/// The file's text; `None` when there is no file. A file readable by others is tightened to [`FILE_MODE`] first.
+/// The file's text; `None` when there is no file. Access by others is removed before reading; Unix owner-only
+/// modes are preserved, and Windows uses the platform's protected DACL.
 fn read_private(path: &Path) -> Result<Option<String>, String> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -1293,9 +1289,16 @@ fn read_private(path: &Path) -> Result<Option<String>, String> {
     if !metadata.is_file() {
         return Err("it isn't a file".to_owned());
     }
-    if metadata.permissions().mode() & 0o077 != 0 {
-        file.set_permissions(Permissions::from_mode(FILE_MODE))
-            .map_err(|error| format!("it is readable by others and can't be made private: {error}"))?;
+    #[cfg(unix)]
+    let restrict = {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o077 != 0
+    };
+    #[cfg(windows)]
+    let restrict = true;
+    if restrict {
+        teams_platform::private::restrict_file(path)
+            .map_err(|error| format!("the settings file can't be made private: {error}"))?;
     }
     let mut text = String::new();
     file.take(MAX_FILE + 1)
@@ -1307,11 +1310,6 @@ fn read_private(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
-/// Makes a directory `builder` creates private, where the platform has modes.
-pub(crate) fn private_dir_mode(builder: &mut DirBuilder) {
-    builder.mode(DIR_MODE);
-}
-
 /// Writes `bytes` to `path` whole: the directory made (or kept) `0700`, a temporary file beside it `0600`, then
 /// renamed over it.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -1319,21 +1317,16 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the settings file has no directory"))?;
-    DirBuilder::new().recursive(true).mode(DIR_MODE).create(dir)?;
-    fs::set_permissions(dir, Permissions::from_mode(DIR_MODE))?;
+    teams_platform::private::create_dir_all(dir)?;
+    teams_platform::private::restrict_dir(dir)?;
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".{}.tmp", std::process::id()));
     let temporary = PathBuf::from(temporary);
     let written = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(FILE_MODE)
-            .open(&temporary)?;
-        file.set_permissions(Permissions::from_mode(FILE_MODE))?;
+        let mut file = teams_platform::private::replace(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
         fs::rename(&temporary, path)
     })();
     if written.is_err() {

@@ -45,6 +45,18 @@ use crate::calling::PersonalCalls;
 use crate::engine::display_name;
 use crate::secrets::AppSecrets;
 
+#[cfg(windows)]
+#[path = "app/windows.rs"]
+mod windows;
+
+#[cfg(windows)]
+pub(crate) use windows::shell_id;
+
+#[cfg(unix)]
+pub(crate) const fn shell_id(_: &crate::setup::Setup, _: bool, _: &App) -> &'static str {
+    PERSONAL_APP_ID
+}
+
 /// The window's title and the app's name on its notifications and tray item.
 pub const TITLE: &str = "ngteams";
 
@@ -174,6 +186,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         trace,
         ctl,
     } = launch;
+    let app_id = shell_id(&runner.setup, read_only, cx);
     let (hint, sign_in_again) = signing_out(read_only, sign_in_again);
     play_videos_on(runner.devices.as_ref(), cx);
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down
@@ -199,7 +212,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     let desktop = cx.new(|cx| {
         Desktop::new(
             DesktopParts {
-                app_id: PERSONAL_APP_ID,
+                app_id,
                 app_name: TITLE.into(),
                 title: TITLE.into(),
                 shell: parts,
@@ -480,7 +493,7 @@ impl Running {
             return;
         }
         let setup = self.runner.setup.clone();
-        let windows = crate::signin::windows(cx);
+        let windows = crate::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let signed = signing.await;

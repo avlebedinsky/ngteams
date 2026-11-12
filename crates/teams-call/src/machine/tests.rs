@@ -1,6 +1,9 @@
 //! The machine on its own, fed by hand: what each delivery, outcome and action makes it do (the whole flows on the
 //! mock are `tests/mock.rs`).
 
+#[path = "../../tests/support/caption_logging.rs"]
+mod caption_logging;
+
 #[path = "../../tests/support/controls.rs"]
 mod controls;
 
@@ -724,6 +727,48 @@ fn a_meeting_goes_from_its_start_to_joining_rings_nobody_and_connects_on_its_acc
         }],
         "nobody rings"
     );
+}
+
+#[test]
+fn a_meeting_code_start_uses_group_media_and_enters_without_ringing() {
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let code = teams_proto::MeetingCode::typed("123456789012", "MadeUp").unwrap();
+    let call = calls.place(&Placement::MeetingCode(code), media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let start = placed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Send { id, write } => Some((*id, write)),
+            _ => None,
+        })
+        .unwrap();
+    let body = body_of(start.1);
+    assert_eq!(
+        body["callInvitation"]["callModalities"],
+        json!(["Audio", "ScreenViewer"])
+    );
+    assert_eq!(body["meetingData"]["meetingCode"], "123456789012");
+    let chat = "19:meeting_SyntheticCode@thread.v2";
+    let reference = format!("https://teams.microsoft.com/l/meetup-join/{chat}/0");
+    let html = format!(
+        r#"<a id="meet_invite_block.action.join_link" href="https://teams.microsoft.com/meet/123456789012?p=MadeUp">Join</a><a id="meet_invite_block.action.join_link_compatibility" href="{reference}">System reference</a>"#
+    );
+    let invitation: String = url::form_urlencoded::byte_serialize(html.as_bytes()).collect();
+    let mut answer = conversation_answer();
+    answer["meetingDetails"] = json!({"invitation": invitation});
+    calls.on_outcome(start.0, &ok(&answer), now);
+    let told = events(&effects(&mut calls));
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, CallEvent::State { call: id, state: CallState::Joining } if *id == call))
+    );
+    assert!(
+        told.iter()
+            .any(|event| matches!(event, CallEvent::GroupChat { call: id, chat: at } if *id == call && at == chat))
+    );
+    assert_eq!(calls.call.as_ref().unwrap().caption_thread.as_deref(), Some(chat));
 }
 
 fn body_of(write: &crate::CallWrite) -> serde_json::Value {
@@ -2385,6 +2430,213 @@ fn a_recording_starts_alone_beside_a_running_transcription_and_its_stop_stops_bo
     }
 }
 
+/// Invited as the commercial recorder, the service can join from another region under Teams' alternate MRI: it is
+/// still the call's caption and recording service, and never a person in the call.
+#[test]
+fn the_caption_service_from_another_region_serves_captions_and_recording_and_stays_hidden() {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, RecordCommand};
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let bot = |version: u64, captions: &str| {
+        json!({"participants":{CAPTION_SERVICE_ALTERNATE_MRI:{"state":"active","version":version,
+            "endpoints":{"synthetic":{"endpointMetadata":{"commandUrl":command,"spokenLanguage":"en-us",
+            "processingModes":{"closedCaptions":{"state":captions},
+            "realTimeTranscript":{"state":"Active","userId":"8:orgid:synthetic"}}}}}}}})
+    };
+    // Participant versions belong to each MRI: an earlier invited leg must not suppress the alternate leg.
+    let invited = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_MRI: {
+        "version": 20, "state": "disconnected"
+    }}});
+    calls.on_delivery(&delivery(&roster, &invited), Observed::Nothing, now);
+    let _ = effects(&mut calls);
+    calls.on_delivery(&delivery(&roster, &bot(1, "Inactive")), Observed::Nothing, now);
+    let told = events(&effects(&mut calls));
+    assert!(told.iter().any(|event| matches!(
+        event,
+        CallEvent::CaptionService { call: of, service: Some(service) }
+            if *of == call && service.mri == CAPTION_SERVICE_ALTERNATE_MRI && service.state == "Inactive"
+    )));
+    assert!(calls.caption_command(call, None).is_ok());
+    assert!(calls.record_command(call, &RecordCommand::StopTranscription).is_ok());
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_some());
+    calls.on_delivery(&delivery(&roster, &bot(2, "Active")), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().state, "Active");
+    let stale = json!({"participants": {teams_proto::captions::CAPTION_SERVICE_MRI: {
+        "version": 19, "state": "disconnected"
+    }}});
+    calls.on_delivery(&delivery(&roster, &stale), Observed::Nothing, now);
+    calls.on_delivery(&delivery(&roster, &bot(1, "Inactive")), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().state, "Active");
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_some());
+    assert!(
+        calls
+            .call
+            .as_ref()
+            .unwrap()
+            .roster
+            .participants()
+            .iter()
+            .all(|person| !teams_proto::captions::is_caption_service(person.mri.as_str()))
+    );
+}
+
+/// An answer's roster announces the service immediately; later updates report only changed projections.
+#[test]
+fn an_answer_roster_reports_caption_and_recording_state_without_a_followup_update() {
+    use teams_proto::captions::CAPTION_SERVICE_ALTERNATE_MRI;
+    let now = Instant::now();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let initial = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 1, "state": "active", "endpoints": {"synthetic": {"endpointMetadata": {
+            "commandUrl": command, "spokenLanguage": "en-us", "processingModes": {
+                "closedCaptions": {"state": "Active"}, "recording": {"state": "Active"},
+                "realTimeTranscript": {"state": "Active"}
+            }
+        }}}
+    }}});
+    let (mut calls, call, told) = meeting_answered(initial.clone(), now);
+    let service = calls.caption_service(call).unwrap();
+    assert_eq!(service.mri, CAPTION_SERVICE_ALTERNATE_MRI);
+    assert_eq!(service.command.as_str(), command);
+    assert_eq!(
+        told.iter()
+            .filter(|event| matches!(event,
+                CallEvent::CaptionService { call: of, service: Some(told) } if *of == call && told == service
+            ))
+            .count(),
+        1
+    );
+    assert!(told.iter().any(|event| matches!(event,
+        CallEvent::Meeting { call: of, state }
+            if *of == call && state.recording.is_some() && state.transcribing.is_some()
+    )));
+    let path = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    calls.on_delivery(&delivery(&path, &initial), Observed::Nothing, now);
+    let repeated = events(&effects(&mut calls));
+    assert!(
+        !repeated
+            .iter()
+            .any(|event| matches!(event, CallEvent::CaptionService { .. } | CallEvent::Meeting { .. }))
+    );
+    // Recording can stop without changing the caption binding: it still needs its own meeting event.
+    let stopped = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 2, "endpoints": {"synthetic": {"endpointMetadata": {
+            "processingModes": {"closedCaptions": {"state": "Active"}}
+        }}}
+    }}});
+    calls.on_delivery(&delivery(&path, &stopped), Observed::Nothing, now);
+    let told = events(&effects(&mut calls));
+    assert!(
+        !told
+            .iter()
+            .any(|event| matches!(event, CallEvent::CaptionService { .. }))
+    );
+    assert!(told.iter().any(|event| matches!(event,
+        CallEvent::Meeting { call: of, state }
+            if *of == call && state.recording.is_none() && state.transcribing.is_none()
+    )));
+    let departed = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 3, "state": "disconnected"
+    }}});
+    calls.on_delivery(&delivery(&path, &departed), Observed::Nothing, now);
+    let told = events(&effects(&mut calls));
+    assert!(told.iter().any(|event| matches!(event,
+        CallEvent::CaptionService { call: of, service: None } if *of == call
+    )));
+    assert!(calls.caption_service(call).is_none());
+}
+
+/// Both region identities describe one service; unrelated or older entries cannot stop its recording.
+#[test]
+fn recording_and_captions_follow_the_same_regional_service_and_endpoint() {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let bot = |mri: &str, version: u64, joined: &str, state: &str| {
+        json!({"participants": {mri: {"version": version, "state": "active", "endpoints": {
+            "synthetic": {"endpointMetadata": {"commandUrl": command, "joinTime": joined,
+                "processingModes": {"closedCaptions": {"state": state},
+                    "recording": {"state": state}, "realTimeTranscript": {"state": state}}}}
+        }}}})
+    };
+    let newer = bot(CAPTION_SERVICE_ALTERNATE_MRI, 1, "2026-01-01T00:00:02Z", "Active");
+    calls.on_delivery(&delivery(&roster, &newer), Observed::Nothing, now);
+    let expected = calls.call.as_ref().unwrap().meeting.state.clone();
+    assert!(expected.recording.is_some() && expected.transcribing.is_some());
+    let service = calls.caption_service(call).unwrap().clone();
+    let _ = effects(&mut calls);
+    for entry in [
+        json!({"version": 21, "state": "disconnected"}),
+        json!({"version": 22, "state": "connecting"}),
+        json!({"version": 23}),
+        json!({"version": 24, "state": "active"}),
+    ] {
+        let other = json!({"participants": {CAPTION_SERVICE_MRI: entry}});
+        calls.on_delivery(&delivery(&roster, &other), Observed::Nothing, now);
+        assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+        assert_eq!(calls.caption_service(call), Some(&service));
+        assert!(
+            !events(&effects(&mut calls))
+                .iter()
+                .any(|event| matches!(event, CallEvent::Meeting { .. }))
+        );
+    }
+    // A full but older active entry must not take either state back, even with the same endpoint key.
+    let older = bot(CAPTION_SERVICE_MRI, 25, "2026-01-01T00:00:01Z", "Inactive");
+    calls.on_delivery(&delivery(&roster, &older), Observed::Nothing, now);
+    assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+    assert_eq!(calls.caption_service(call), Some(&service));
+    // The same selection applies when both full entries arrive together.
+    let mut both = newer;
+    both["participants"][CAPTION_SERVICE_ALTERNATE_MRI]["version"] = json!(2);
+    both["participants"][CAPTION_SERVICE_MRI] = older["participants"][CAPTION_SERVICE_MRI].clone();
+    calls.on_delivery(&delivery(&roster, &both), Observed::Nothing, now);
+    assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+    assert_eq!(calls.caption_service(call), Some(&service));
+    // A newer join hands over all modes; its departure hands back while the other region stays active.
+    let newest = bot(CAPTION_SERVICE_MRI, 26, "2026-01-01T00:00:03Z", "Active");
+    calls.on_delivery(&delivery(&roster, &newest), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().mri, CAPTION_SERVICE_MRI);
+    assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+    regional_departures(&mut calls, call, &roster, now, &expected);
+}
+
+fn regional_departures(calls: &mut Calls, call: CallId, roster: &str, now: Instant, expected: &crate::MeetingState) {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
+    let departed = json!({"participants": {CAPTION_SERVICE_MRI: {"version": 27, "state": "disconnected"}}});
+    calls.on_delivery(&delivery(roster, &departed), Observed::Nothing, now);
+    // The alternate endpoint is still active: the derived answer hands back to it.
+    assert_eq!(calls.caption_service(call).unwrap().mri, CAPTION_SERVICE_ALTERNATE_MRI);
+    assert_eq!(&calls.call.as_ref().unwrap().meeting.state, expected);
+    let departed = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {"version": 3, "state": "disconnected"}}});
+    calls.on_delivery(&delivery(roster, &departed), Observed::Nothing, now);
+    assert!(calls.caption_service(call).is_none());
+    assert!(calls.call.as_ref().unwrap().meeting.state.recording.is_none());
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_none());
+}
+
 #[test]
 fn mixer_explicitly_marks_only_the_initial_caption_media_fork_as_a_new_session() {
     let mut content =
@@ -2395,4 +2647,47 @@ fn mixer_explicitly_marks_only_the_initial_caption_media_fork_as_a_new_session()
     content["newOffer"] = json!(true);
     content["fromMixer"] = json!(false);
     assert!(!crate::read::media(&content).unwrap().new_mixer_session);
+}
+
+#[test]
+fn recording_without_a_caption_link_survives_another_mris_empty_active_entry() {
+    use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let recording = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {
+        "version": 1, "state": "active", "endpoints": {"synthetic": {"endpointMetadata": {
+            "processingModes": {"recording": {"state": "Active"}, "realTimeTranscript": {"state": "Active"}}
+        }}}
+    }}});
+    calls.on_delivery(&delivery(&roster, &recording), Observed::Nothing, now);
+    let expected = calls.call.as_ref().unwrap().meeting.state.clone();
+    assert!(expected.recording.is_some() && expected.transcribing.is_some());
+    assert!(calls.caption_service(call).is_none());
+    let _ = effects(&mut calls);
+    for entry in [
+        json!({"version": 21, "state": "disconnected"}),
+        json!({"version": 22, "state": "connecting"}),
+        json!({"version": 23}),
+        json!({"version": 24, "state": "active"}),
+    ] {
+        let other = json!({"participants": {CAPTION_SERVICE_MRI: entry}});
+        calls.on_delivery(&delivery(&roster, &other), Observed::Nothing, now);
+        assert_eq!(calls.call.as_ref().unwrap().meeting.state, expected);
+        assert!(
+            !events(&effects(&mut calls))
+                .iter()
+                .any(|event| matches!(event, CallEvent::Meeting { .. }))
+        );
+    }
+    let departed = json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {"version": 2, "state": "disconnected"}}});
+    calls.on_delivery(&delivery(&roster, &departed), Observed::Nothing, now);
+    assert!(calls.call.as_ref().unwrap().meeting.state.recording.is_none());
+    assert!(calls.call.as_ref().unwrap().meeting.state.transcribing.is_none());
 }

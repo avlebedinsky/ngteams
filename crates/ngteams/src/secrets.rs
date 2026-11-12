@@ -4,8 +4,8 @@
 //! sign-in and forget so each operation reaches the broker's one account in the lab namespace.
 
 use std::io;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use teams_auth::broker::BrokerStream;
 
 use teams_auth::broker::{BrokerScope, BrokerSecretStore};
 use teams_auth::secrets::{LazyKeyring, Secret, SecretError, SecretKey, SecretStore};
@@ -51,7 +51,7 @@ impl AppSecrets {
     ///
     /// # Errors
     /// The socket cannot be put in blocking mode.
-    pub fn lab(socket: UnixStream) -> io::Result<Self> {
+    pub fn lab(socket: BrokerStream) -> io::Result<Self> {
         Ok(Self {
             backend: Backend::Lab(Arc::new(BrokerSecretStore::new(socket, LAB_KEYRING_APPLICATION)?)),
         })

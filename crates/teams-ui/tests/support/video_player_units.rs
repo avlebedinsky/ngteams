@@ -2,6 +2,7 @@
 
 use super::*;
 use gpui::AppContext as _;
+use gpui::size;
 
 #[test]
 fn times_are_written_as_the_player_writes_them() {

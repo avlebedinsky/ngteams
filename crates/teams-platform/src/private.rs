@@ -9,10 +9,10 @@ use std::path::Path;
 
 #[cfg(unix)]
 #[path = "private/unix.rs"]
-mod platform;
+pub(crate) mod platform;
 #[cfg(windows)]
 #[path = "private/windows.rs"]
-mod platform;
+pub(crate) mod platform;
 
 /// How to open a private file; none of these truncate an existing file.
 #[derive(Clone, Copy, Debug)]
@@ -64,4 +64,47 @@ pub fn restrict_file(path: &Path) -> io::Result<()> {
 /// The file cannot be opened with the requested access or private creation permissions.
 pub fn open(path: &Path, access: Open) -> io::Result<File> {
     platform::open(path, access)
+}
+
+#[cfg(windows)]
+#[path = "private/windows_check.rs"]
+mod windows_check;
+
+/// Verifies that an opened file's owner and access grants are private, without changing them.
+///
+/// # Errors
+/// The file is not regular, not owned by the current user, or grants access to anyone but this user and SYSTEM.
+#[cfg(windows)]
+pub fn check_file(file: &File) -> io::Result<()> {
+    windows_check::check_file(file)
+}
+
+/// Opens a kernel sharing lock. Shared holders coexist; an exclusive holder excludes all other holders.
+/// The returned file owns the lock until it closes, including after a process crash.
+///
+/// # Errors
+/// A conflicting holder exists or the file cannot be privately created/opened.
+#[cfg(windows)]
+pub fn share_lock(path: &Path, shared: bool) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    if !path.try_exists()? {
+        drop(open(path, Open::Append)?);
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(!shared)
+        .share_mode(if shared { FILE_SHARE_READ } else { 0 })
+        .open(path)
+}
+
+/// Opens privately, removes other users' access, then truncates the file before any new bytes are written.
+///
+/// # Errors
+/// Opening, restricting or truncating the file fails.
+pub fn replace(path: &Path) -> io::Result<File> {
+    let file = open(path, Open::ReadWrite)?;
+    restrict_file(path)?;
+    file.set_len(0)?;
+    Ok(file)
 }

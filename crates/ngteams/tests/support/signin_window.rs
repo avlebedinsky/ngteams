@@ -1,6 +1,5 @@
-//! Only invalid redirect requests reach the mock foreground service; it fails before starting a page engine.
-
-use std::time::{Duration, Instant};
+//! Bound windows refuse what no page could answer (a foreign authorize URL, an unusable redirect URI, a data dir that
+//! can't be made) before resolving a page engine or reaching the foreground service.
 
 use gpui::TestAppContext;
 
@@ -27,8 +26,8 @@ fn bound_windows_refuse_foreign_pages_and_report_data_failures_before_the_servic
     let root = tempfile::tempdir().unwrap();
     let (setup, _) = crate::app::tests::setup(root.path(), 1);
     let cx = TestAppContext::single();
-    let windows = cx.update(super::windows);
-    let again = cx.update(super::windows);
+    let windows = cx.update(|cx| super::windows_for(&setup, cx));
+    let again = cx.update(|cx| super::windows_for(&setup, cx));
     let refused = window(&setup, &windows)(request("https://example.test/authorize"));
     assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("isn't on the sign-in window's hosts")));
     let mut broken = setup.clone();
@@ -41,19 +40,60 @@ fn bound_windows_refuse_foreign_pages_and_report_data_failures_before_the_servic
 }
 
 #[test]
-fn a_bound_request_is_answered_by_the_service_without_loading_an_invalid_redirect() {
+fn a_bound_request_with_an_unusable_redirect_is_refused_before_any_engine() {
     let root = tempfile::tempdir().unwrap();
     let (setup, _) = crate::app::tests::setup(root.path(), 2);
     let cx = TestAppContext::single();
-    let windows = cx.update(super::windows);
-    let ask = window(&setup, &windows);
-    let replying = std::thread::spawn(move || ask(request("https://login.microsoftonline.com/authorize")));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !replying.is_finished() {
-        cx.run_until_parked();
-        assert!(Instant::now() < deadline, "foreground service did not answer");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert!(matches!(replying.join().unwrap(), SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
+    let windows = cx.update(|cx| super::windows_for(&setup, cx));
+    // no worker beside the test binary: resolving an engine would fail on that instead
+    let refused = window(&setup, &windows)(request("https://login.microsoftonline.com/authorize"));
+    assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
     assert_eq!(cx.update(|cx| cx.windows().len()), 0);
+}
+
+#[test]
+fn region_persistence_keeps_existing_data_on_creation_or_publication_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let region = Region::default();
+    let path = root.path().join("region.json");
+    let staging = root.path().join(format!("region.json.{}.new", std::process::id()));
+    std::fs::write(&path, b"synthetic previous region").unwrap();
+    std::fs::write(&staging, b"synthetic existing staging file").unwrap();
+    assert!(matches!(save_region(&path, &region), Err(SignInError::Region { path: failed, .. }) if failed == path));
+    assert_eq!(std::fs::read(&path).unwrap(), b"synthetic previous region");
+    assert_eq!(std::fs::read(&staging).unwrap(), b"synthetic existing staging file");
+    std::fs::remove_file(&staging).unwrap();
+    save_region(&path, &region).unwrap();
+    let saved = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(Region::from_json(&saved), Some(region.clone()));
+    assert!(!staging.exists());
+    // Rename cannot publish over a nonempty directory; only our newly created staging file is removed.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("sentinel"), b"synthetic retained content").unwrap();
+    assert!(save_region(&path, &region).is_err());
+    assert_eq!(
+        std::fs::read(path.join("sentinel")).unwrap(),
+        b"synthetic retained content"
+    );
+    assert!(!staging.exists());
+    let blocked = root.path().join("blocked-parent");
+    std::fs::write(&blocked, b"synthetic obstruction").unwrap();
+    assert!(save_region(&blocked.join("region.json"), &region).is_err());
+    assert_eq!(std::fs::read(&blocked).unwrap(), b"synthetic obstruction");
+}
+
+#[test]
+fn a_bound_valid_request_without_a_foreground_service_fails_without_opening_a_page() {
+    let root = tempfile::tempdir().unwrap();
+    let (setup, _) = crate::app::tests::setup(root.path(), 2);
+    let cx = TestAppContext::single();
+    let windows = cx.update(|cx| super::windows_for(&setup, cx));
+    let ask = window(&setup, &windows);
+    drop(cx);
+    let answer = ask(SignInRequest {
+        authorize: "https://login.microsoftonline.com/authorize".into(),
+        redirect_uri: teams_auth::token::NATIVE_CLIENT_REDIRECT.into(),
+    });
+    assert!(matches!(answer, SignInAnswer::Failed(_)), "{answer:?}");
 }

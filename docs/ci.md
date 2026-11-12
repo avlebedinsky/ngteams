@@ -65,10 +65,10 @@ reporter tests alone are not a coverage measurement.
 ## Windows portability
 
 The [Windows portability workflow](../.github/workflows/windows.yml) checks, lints and runs the offline tests of
-`teams-platform`, `teams-log`, `teams-store` and `teams-auth` on Windows Server 2025 (`windows-2025`) and Linux; local verification
-also runs on the Windows 11 VM.
-These are foundational stages of the native Windows port; the app and its release packages still require the remaining
-platform integrations. These jobs do not build or launch `ngteams` or access a tenant.
+`teams-platform`, `teams-log`, `teams-store`, `teams-auth`, `teams-ctl` and `teams-runner` on Windows Server 2025
+(`windows-2025`) and Linux; local verification also runs on the Windows 11 VM.
+These are the foundational-library gates. The complete native app has separate VM contracts and a hosted Windows
+release job. These portability jobs do not build or launch `ngteams` or access a tenant.
 
 `teams-platform::private` creates files and directories with Unix modes or native protected Windows ACLs.
 Windows tests inspect actual ACLs for files, log rotations, databases, WAL/SHM, run locks, picture caches and
@@ -85,6 +85,16 @@ explicitly name the current user as owner. See [Windows object ownership](https:
 The Linux coverage inventory records the Windows-only filesystem source with the existing hash-checked
 `unmapped_sources` mechanism: it has no Linux LLVM mapping. Native Windows tests exercise that source in the VM
 and hosted job; this entry neither removes mapped counts nor changes any existing coverage floor.
+
+Native exports use the same source inventory and saved per-crate floors. When inspecting a VM export on another
+machine, run `python3 scripts/coverage-report.py report <export.json> --output <summary.json> --packages proto-lab
+--platform windows --source-root C:/src/ngteams-windows-port-3` (as one command). The explicit source root rebases
+only that checkout's filenames; counts stay unchanged. `unmapped_sources_windows` records individually hashed
+Unix-only lab sources and their cfg/module roots. These reviews apply only to the Windows audit: Linux still
+requires those sources, an edited source or module root invalidates its review, and any supplied LLVM mapping
+always counts, including zero-hit code. Missing compiled sources still fail the audit. The restricted Windows
+lab CLI does not compile the Unix capture/scenario command set; it retains only sign-in, provisioning and reach
+evidence plus their browser driver.
 Authentication uses Secret Service on Unix and Windows Credential Manager on Windows. The Windows backend selects
 its native store explicitly, persists only on this machine, and hashes length-delimited application/account/audience
 keys to avoid Credential Manager's case-insensitive-name collisions. Tests use unique synthetic namespaces and exact
@@ -93,10 +103,19 @@ them to fixed error categories and zeroes secret buffers. The keyring-core debug
 not values; the app logger ignores this third-party target. Interprocess is used only in byte mode (its message-mode
 receive diagnostic is unused and prints a mode number only).
 
+Windows Credential Manager limits an individual blob to 2,560 bytes; an authz skypetoken/region record can exceed
+that limit. The adapter retains legacy raw-item reads and stores new values as bounded pieces, under the same
+hashed application/account/audience namespace. One root write commits a random generation and a SHA-256 digest;
+readers never combine generations. A small pending journal recovers interrupted staging without enumerating any
+credentials, and the committed manifest retains the prior generation until cleanup can succeed. A per-key native
+file lock serializes distinct store instances/processes; its file contains no credential data. Synthetic tests cover
+native large/multibyte values, reopen, replacement, concurrent instances, corruption, missing pieces and interruption
+at every mutation of an update. The VM runs the native store tests only under its console token.
+
 Broker scope, get-only behavior, framing, closure and session contracts run unchanged over Unix sockets or Windows
-named pipes. The caller supplies the established stream and is responsible for endpoint permissions. The app's
-Windows broker launch/handle inheritance and isolated runner are still pending; this library support does not make
-Windows application startup available yet. Named pipes have no half-close, so malformed-request tests close the
+named pipes. The caller supplies the established stream and is responsible for endpoint permissions.
+The Windows runner now supervises broker handles and the complete app process tree. The normal lab app builds;
+signed-in validation remains a separate gate. Named pipes have no half-close, so malformed-request tests close the
 complete synthetic peer when testing truncation.
 
 The VM's SSH token cannot access Credential Manager (Windows error 1312); native credential tests and coverage run
@@ -110,18 +129,86 @@ with `cargo-llvm-cov` 0.9.1 and requires 90% in lines, functions and regions, in
 It also measures `teams-auth` natively and enforces that crate's existing floors: 96% lines, 96% functions and
 94% regions, including the Windows credential backend.
 
+Space-limited native measurements can build test targets individually without PDB files. Set
+`CARGO_TARGET_DIR` to the instrumented directory before applying `cargo llvm-cov show-env --pwsh`; its output is
+PowerShell code, with escaped environment values. Discover every enabled library, binary and integration test
+harness for the selected crate from `cargo metadata`. Build each using `cargo rustc --profile test` with `--lib`,
+`--bin` or `--test` and the final Rust arguments `-- -C link-arg=/DEBUG:NONE`. Accept only Cargo artifacts with
+`profile.test = true`, run every discovered harness, and retain their executables and profiles for the report.
+This changes only the test link's debug symbols: LLVM's coverage mappings remain in the executable. A native
+comparison exported byte-identical coverage summaries with and without the same test's PDB.
+
+Keep the usual workspace-artifact cleanup before a fresh measurement, the complete source audit and the saved
+per-crate floors. A resumed measurement must preserve successful harness results and profiles, run every remaining
+target, and reject a failed build or test even if its partial coverage is high enough. This technique does not
+build a runnable client or replace the lab runner.
+
+Control IPC uses Unix sockets or local-only byte pipes on Windows. Pipes are created with a protected DACL granting
+only the exact current user and SYSTEM full access; a mandatory label refuses lower-integrity access. Clients verify
+the server process's user before sending their first byte. Names hash the user's SID and the logical endpoint's
+UTF-16 path, preserving mode and profile separation without a lossy Unicode conversion. Windows client paths use
+`LOCALAPPDATA` for state/runtime and `USERPROFILE` for the home fallback; `NGTEAMS_CTL_SOCKET` still overrides the
+logical endpoint. The pipe name is never accepted from an untrusted remote hostname.
+
+Native tests inspect a live pipe's owner, grants and integrity label, exercise bounded connects/reads/writes,
+cloned shutdown, large transfers, protocol/CLI contracts and events. The GPUI-independent **actual app listener**
+is compiled directly by `teams-ctl/tests/app_listener.rs` and tested on both platforms, including subscription
+cleanup. This does not build or launch the GUI. Windows uses nonblocking byte operations and monotonic deadlines;
+writes are capped to the queried outgoing pipe quota so an oversized NOWAIT write cannot stall an empty pipe.
+`FlushFileBuffers` is never used in the control protocol, because it waits for the peer to read without a deadline.
+The native Windows gate also enforces the control crate's unchanged floors from `coverage.toml` (99% lines,
+100% functions, 98% regions). Platform-only sources use the same hash-checked Linux inventory mechanism above.
+
+
+The native offline gate also compiles the app's actual descriptor adoption and restart modules through
+`teams-auth/tests/app_descriptors.rs`, and its actual location/overlap module through
+`teams-platform/tests/app_paths.rs`. Broker pairs use protected, local-only byte pipes whose temporary listener is
+removed before a child launches. The pair verifies both peers are the creating process. A native transfer set owns
+fresh inheritable duplicates and passes an explicit handle whitelist to `CreateProcessW`; originals and working
+clones remain noninheritable. Synthetic subprocesses exercise quoted arguments, unwanted-handle exclusion, writable
+trace validation, failed restarts and successful broker/trace transfer across a restart. Windows restarts create the
+successor before exiting, so the native runner tracks the entire app job, including every successor.
+
+Windows account locations resolve under `LOCALAPPDATA/ngteams/{config,data}` with an absolute
+`USERPROFILE/AppData/Local` fallback; lab aliases use the sibling `LOCALAPPDATA/ngteams-lab/<alias>` root. Snapshot
+separation compares Windows components with native ordinal case-insensitivity, recognizes ordinary/verbatim drive
+and UNC spellings, and conservatively treats trailing dots/spaces as aliases. Relative paths resolve from the current
+working directory before interpreting `..`; an unresolved Windows drive-relative path cannot prove separation.
+The existing native coverage floors remain unchanged. Windows-only sources use the hash-checked Linux inventory.
+The explicit VM-console guard also checks the active interactive session; its tests open no window. These boundaries
+supply the Windows runner. Native WebView2, the complete media runtime and the application have VM contracts;
+signed-in feature validation is separate from offline checks. The release workflow packages the Windows binaries.
+
+The app and UI all-target checks include real native handle, byte-pipe and file-privacy contracts, rather than
+compiling Unix-only test helpers on Windows. `scripts/test-windows-app.ps1` runs the synthetic application/startup,
+IPC, account, settings and local-tool model/view suites in the authorized VM console; Git for Windows interprets
+only the fake CLI protocols behind native `.cmd` shims. Shared screenshot scenes also run against native Windows
+GPUI through a console/child-verified capture boundary.
+Wayland input, portal/D-Bus and Linux runner harnesses and the separate native Windows desktop/shell/video fixtures
+remain platform-specific. No coverage floor is changed.
+
+
+The native runner gate measures its Windows CLI, locks, snapshot cleanup, deadlines, broker/app failures and restart
+supervision with synthetic executables. Its non-console smoke opens no GUI or live client. The additional console
+scheduling smoke runs in the authorized win11 VM, also with a synthetic executable. `teams-platform` tests prove
+atomic job assignment, descendant retention after the original process exits, explicit termination and kill-on-close.
+Windows-only runner/job sources have hash-checked Linux inventory entries and are measured by the native gate.
+
 
 ## Releases
 
 The [release workflow](../.github/workflows/release.yml) runs on a push to `main` that changes what ends up in a
 package (its `paths` list: code, dependencies, packaging and release scripts, not docs, skills or CI settings) and on
-manual dispatch. It runs
-the full suite (the Coverage workflow above, called as its `tests` job, plus every `scripts/test_*.py`) and publishes
-only if that passes. A new push cancels any release still building or waiting, so only the newest commit is
-published. Each run makes a GitHub release tagged `v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version`
-and `github.run_number`, monotonic for package upgrades), marked latest, targeting the pushed commit, from Linux
-x86_64 builds on `ubuntu-24.04`: `.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage`, a portable `.tar.gz` and
-`SHA256SUMS`, with GitHub build-provenance attestations over every asset, including the runtime below.
+manual dispatch. It runs the full suite (the Coverage workflow above, called as its `tests` job, plus every
+`scripts/test_*.py`) and publishes only if that passes. A new push cancels any release still building or waiting, so
+only the newest commit is published. A successful `main` run makes a GitHub release tagged
+`v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version` and `github.run_number`, monotonic
+for package upgrades), marked latest, targeting the pushed commit. Linux x86_64 builds on `ubuntu-24.04` produce
+`.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage` and a portable `.tar.gz`; `windows-2025` produces
+`ngteams-<version>-windows-x86_64.zip` and the per-user installer `ngteams-<version>-windows-x86_64-setup.exe`, both
+from the same staged, hash-checked folder. `SHA256SUMS` and GitHub build-provenance attestations cover every asset,
+including the runtime below. Publishing requires the tests and both native build jobs and runs only on `main`; a
+manual branch dispatch builds artifacts without publishing.
 
 Packages carry no web engine: `ngteams-web` picks the system's WPE WebKit (2.54 or newer) or a downloaded runtime when
 it starts. Only `ngteams-web` and the sign-in extension link the engine; `scripts/check-linux-package.py` fails a tree
@@ -142,8 +229,46 @@ that exact file's URL, size and SHA-256 into the app, so a published archive is 
 The build compiles the release's version into the app (`NGTEAMS_RELEASE_VERSION`), and each package carries
 `usr/share/ngteams/release` (that version) and `usr/share/ngteams/update-format` (how it installs: `linux-archive`,
 `linux-appimage`, `linux-deb`, `linux-rpm`, `linux-pacman`). The installed app's updater (`crates/teams-update`) reads
-them to pick the asset of a newer release that replaces it. A Windows package adds its own format word and install
-step there.
+them to pick the asset of a newer release that replaces it. On Windows the installer writes `share/ngteams/release`
+and `share/ngteams/update-format` (`windows-setup`) under its folder; the zip carries neither, so a copy installed
+from it doesn't update itself.
+
+### The Windows installer
+
+`packaging/windows/ngteams.iss` is an [Inno Setup](https://jrsoftware.org/isinfo.php) 7 script, compiled by
+`scripts/package-release-windows.ps1 -InnoSetup <ISCC.exe>` after the zip's stage has passed `windows-release.py
+check`. The compiler is installed per user from the hash-pinned release in `packaging/windows/installer-pins.json`
+(`scripts/release-innosetup.ps1`); to update it, change the version, URL and SHA-256 there together. Inno Setup was
+chosen over an MSI because it installs per user without elevation natively, compares all four parts of our
+`MAJOR.MINOR.PATCH.RUN` version (an MSI ignores the fourth, the one every release bumps), upgrades in place by
+running the newer installer, and makes one compressed `.exe` from the ~2,000-file media runtime with no per-file
+component authoring.
+
+It installs under `%LOCALAPPDATA%\Programs\ngteams` with a Start menu shortcut carrying the app's notification
+identity, an Add/Remove programs entry and the `msteams:` handler offered under Default apps, all in `HKCU`. An upgrade
+first moves the previous version's program folders aside into `previous-version` inside the installation (only in a
+folder an earlier ngteams installer marked; the packaging script refuses a stage with a top-level name the script's
+`ProgramItems` doesn't list), removes them once the new version is in, and puts them back when it fails; it stops
+before moving anything while a process runs from the installation. The next run finishes an upgrade cut short, or a
+removal of the previous version that failed on a held file, from where the marker is, and refuses a folder holding a
+`previous-version` that neither it nor the installation marks. An older installer is refused unless run with
+`/ALLOWDOWNGRADE`, and one installer runs at a time. Uninstall removes the
+program, the app's own notification registration, and the shortcut and `msteams:` handler unless they now open
+another copy (a zip's), and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's updater runs the installer
+with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades, and starts it again, the previous
+version when the upgrade fails. The `windows` job installs and uninstalls it on the
+runner with `scripts/test-windows-installer.ps1` (never starting the app) and checks every installed program file
+against the zip's `PACKAGE-MANIFEST.json`.
+
+### Windows code signing
+
+Nothing is signed yet, so SmartScreen may warn on the installer and the app (the README says how to proceed). The
+hook is `scripts/package-release-windows.ps1 -SignCommand '<command>'`: an Inno Setup sign tool command line, `$f`
+for the quoted file and `$q` for a quote, for example `signtool.exe sign /fd sha256 /td sha256 /tr <timestamp URL>
+/f <certificate> $f`. It signs `ngteams.exe`, `ngteams-webview.exe` and `ngteamsctl.exe` before they are staged (so
+the manifest hashes the signed files), and Inno Setup signs the installer and its uninstaller (`SignTool`,
+`SignedUninstaller`). To turn it on, add a step that provides the certificate (an Azure Trusted Signing or HSM-backed
+`signtool`, say) from a secret available only to `main`, and pass `-SignCommand` in the workflow's packaging step.
 
 `build` runs the tests of the packaging scripts, builds, packages and smoke-tests: the build identity in the archive,
 the AppImage and the installed `.deb`, `--install-web-engine` into a private `XDG_DATA_HOME`, `ngteams-web --probe`
@@ -161,3 +286,67 @@ digest (the tag's anonymous registry answer's `Docker-Content-Digest`), and put 
 
 `scripts/test_web_engine_closure.py` and `scripts/test_check_linux_package.py` run under
 `python3 -B -m unittest discover -s scripts -p 'test_*.py'`; they need `cc`, `ldd`, `patchelf` and `zstd`.
+
+`scripts/test_windows_media_closure.py` builds tiny real PE fixtures with clang and Rust's LLD, and reads them with
+LLVM's `llvm-readobj` (`llvm-tools-preview`). It checks delay/transitive imports, Windows' case-insensitive DLL
+names, unresolved and ambiguous dependencies, architecture, and missing/corrupt/extra packaged files. The native
+runtime gate is `scripts/test-windows-media.ps1`, using the samples made by `scripts/make-media-samples.py` and the
+same manifest/plugin/DLL/license closure as packaging. It runs only in the authorized Windows VM console, with no
+account or physical capture. Signed-in flows and physical devices remain separate gates.
+
+
+The Windows media backend uses GStreamer's WASAPI2 and Media Foundation providers and `windows-capture`'s system
+picker for Windows Graphics Capture. Synthetic GStreamer sources exercise capture, playback queues, catalog
+changes, fallback and restoration without opening hardware or reaching a tenant. Hardware runs still need the
+explicit VM console sandbox; the Windows picker/D3D capture source cannot execute on Linux. Linux retains PipeWire
+and portal capture. The complete application and release package have their own checks below.
+
+The pinned Windows libwebrtc archive uses the static MSVC runtime (`/MT`). `.cargo/config.toml` selects
+`target-feature=+crt-static` for Windows x64 so Rust and cc-rs' C++ bridge use that same ABI; mixing `/MD` bridge
+objects with the archive fails the linker's runtime checks. An explicit replacement `RUSTFLAGS` must retain that
+setting. GStreamer continues using its DLLs and their own allocation/free APIs.
+
+
+Windows' native file-device relay contracts cover audio, camera video and screen sharing without a tenant. The
+`test-support` TURN fixture retains its loopback server; a Windows-only UDP adapter accepts only traffic from its
+own host address because Winsock rejects libwebrtc's interface-bound socket sending directly to 127/8 (10049).
+No production transport or ICE policy changes. The ignored system-picker contract requires a solid dark-blue fixture window and an explicit picker selection.
+The automated fixture/driver is still missing ([backlog](backlog/windows-screen-picker-contract.md)); the ordinary
+native media gate does not execute that ignored case or establish BGRA/idle-cleanup coverage for the picker.
+
+
+The Windows portability workflow separately compiles/lints every `teams-signin` target and runs its display-free
+classifier, host-gate and private-worker rejection contracts. Its WebView2/STA callbacks require the authorized VM
+console and are exercised by `scripts/test-windows-signin.ps1`, using synthetic HTTPS and no account. Windows-only
+sources are hash-audited in the Linux inventory; native whole-application coverage remains part of the final port
+gates. Wry's optional tracing features are disabled, the app logger filters third-party targets, and the worker's
+stderr goes to NUL. Only fixed Chromium error codes are forwarded; guard decisions are logged in the parent.
+
+Native sign-in coverage runs the real offline window as well as synthetic private-worker conversations and COM
+event objects. Registry tests write only below a disposable application key, never the actual Edge policy roots.
+In a coverage build, the offline page requests one LLVM profile dump after its guard probes finish and waits for
+the worker's acknowledgement before redirecting. The parent intentionally kills that worker tree after catching
+the redirect, so waiting until process exit would lose its counters. This hook lives only in the test fixture;
+it neither changes the shipped worker nor resets counters, and a failed dump fails the fixture. Hash-reviewed
+Unix-only sign-in sources remain required in the Linux inventory; every mapped Windows gap still counts.
+
+Windows desktop shell contracts require visible message/call toasts and actual body/Answer/Decline COM activation,
+reject stale/foreign arguments and use real WinRT history (replacement, withdrawal and shutdown cleanup),
+Shell_NotifyIcon and ITaskbarList3 in the authorized VM console. The native transport sources are hash-audited in
+the Linux coverage inventory because those APIs have no Linux mapping; native whole-application coverage remains
+a final Windows-port gate. Linux still measures and exercises the freedesktop notification/tray transports and the
+shared multi-account notification and unread models, with unchanged coverage floors.
+
+`scripts/test-windows-shell.ps1` adds the real GPUI Desktop over synthetic accounts in the authorized VM console:
+minimize/activation, native tray/menu input, close/reopen, selected account/theme, settings/chat routing and unread
+taskbar overlays. A fixture-owned icon is removed and restored through a synchronous `TaskbarCreated` message;
+no real Explorer restart or account is needed. The captures contain the verified native controls and synthetic
+window, including the app's taskbar button before/after the unread count changes and its window is recreated.
+
+
+The release workflow builds Windows and Linux artifacts under read-only tokens, and its main-only publish job
+checksums and attests both platforms before creating the release. Windows packaging uses the same verified media
+closure as the lab runner, with all three executables beside its DLLs and a full-package hash manifest. Real PE
+package tests and an unpacked-archive identity/manifest check run without an account or GUI. Local VM packaging
+uses lab binaries only; install-marked builds remain exclusive to the hosted release job and explicit personal
+install requests. A branch dispatch cannot publish a release.

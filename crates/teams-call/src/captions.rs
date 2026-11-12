@@ -36,7 +36,7 @@ impl Calls {
             .as_ref()
             .filter(|call| call.id == id && call.phase == Phase::Connected)
             .ok_or(CallError::NotNow)?;
-        let service = call.caption_service.as_ref().ok_or(CallError::NotNow)?;
+        let service = call.meeting.services.service().ok_or(CallError::NotNow)?;
         let thread = call.caption_thread.as_deref().ok_or(CallError::NotNow)?;
         match language {
             Some(language) => CaptionWrite::language(&call.context, &service.command, &call.me, thread, language),
@@ -58,7 +58,7 @@ impl Calls {
             .as_ref()
             .filter(|call| call.id == id && call.phase == Phase::Connected)
             .ok_or(CallError::NotNow)?;
-        let service = call.caption_service.as_ref().ok_or(CallError::NotNow)?;
+        let service = call.meeting.services.service().ok_or(CallError::NotNow)?;
         let thread = call.caption_thread.as_deref().ok_or(CallError::NotNow)?;
         let (link, me, context) = (&service.command, &call.me, &call.context);
         let recording = if call.meeting.state.transcribing.is_some() {
@@ -91,76 +91,42 @@ impl Calls {
         self.call
             .as_ref()
             .filter(|call| call.id == id)?
-            .caption_service
-            .as_ref()
+            .meeting
+            .services
+            .service()
     }
 
-    pub(super) fn caption_roster(&mut self, body: &[u8]) {
+    /// Applies either an answer roster or a roster update and reports both projections of the shared service state.
+    pub(super) fn service_roster(&mut self, body: &serde_json::Value) {
         let Some(call) = self.call.as_mut() else { return };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-            return;
-        };
-        if value
-            .get("participants")
-            .and_then(|p| p.get(CAPTION_SERVICE_MRI))
-            .is_none()
-        {
-            return;
+        let before = call.meeting.services.service().cloned();
+        let meeting_changed = call.meeting.roster(body);
+        let service = call.meeting.services.service().cloned();
+        if service != before {
+            log::info!(
+                "call {}: caption service {}",
+                call.id.get(),
+                service.as_ref().map_or_else(
+                    || "not in the call".to_owned(),
+                    |service| format!(
+                        "in the call{}, captions {}",
+                        if service.mri == CAPTION_SERVICE_MRI {
+                            ""
+                        } else {
+                            " from another region"
+                        },
+                        service.state
+                    ),
+                )
+            );
+            call.caption_inviting = false;
+            self.out.event(CallEvent::CaptionService { call: call.id, service });
         }
-        let entry = &value["participants"][CAPTION_SERVICE_MRI];
-        if let Some(version) = entry.get("version").and_then(serde_json::Value::as_u64) {
-            if call.caption_version.is_some_and(|old| version <= old) {
-                return;
-            }
-            call.caption_version = Some(version);
+        if meeting_changed {
+            self.out.event(CallEvent::Meeting {
+                call: call.id,
+                state: call.meeting.state.clone(),
+            });
         }
-
-        let service = updated_service(call.caption_service.as_ref(), entry, body);
-        if service == call.caption_service {
-            return;
-        }
-        call.caption_service.clone_from(&service);
-        call.caption_inviting = false;
-        self.out.event(CallEvent::CaptionService { call: call.id, service });
     }
-}
-
-fn updated_service(
-    previous: Option<&CaptionService>,
-    entry: &serde_json::Value,
-    body: &[u8],
-) -> Option<CaptionService> {
-    if entry
-        .get("state")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|state| state != "active")
-    {
-        return None;
-    }
-    if let Some(service) = CaptionService::from_roster(body) {
-        return Some(service);
-    }
-    let mut service = previous?.clone();
-    let Some(metadata) = entry
-        .get("endpoints")
-        .and_then(|endpoints| endpoints.get(&service.endpoint_id))
-        .and_then(|endpoint| endpoint.get("endpointMetadata"))
-    else {
-        return Some(service);
-    };
-    if let Some(language) = metadata.get("spokenLanguage").and_then(serde_json::Value::as_str) {
-        service.spoken_language = language.into();
-    }
-    if let Some(state) = metadata
-        .pointer("/processingModes/closedCaptions/state")
-        .and_then(serde_json::Value::as_str)
-    {
-        service.state = state.into();
-    }
-    if let Some(url) = metadata.get("commandUrl") {
-        service.command = url
-            .as_str()
-            .and_then(teams_proto::captions::CaptionCommandLink::parse)?;
-    }
-    Some(service)
 }

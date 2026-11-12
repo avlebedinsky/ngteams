@@ -48,6 +48,7 @@ pub mod outbox;
 pub mod own_presence;
 pub mod pictures;
 pub mod presence;
+pub mod profile_card;
 pub mod profiles;
 mod recap;
 pub mod search;
@@ -83,6 +84,7 @@ pub use presence::subscription::{SUBSCRIPTION_PRUNE, SUBSCRIPTION_RENEWAL, SUBSC
 pub use presence::{
     Availability, MAX_NAMED, MAX_WATCHED, PRESENCE_MIN_GAP, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, has_presence,
 };
+pub use profile_card::{CardOrganization, CardPerson, CardPresence, ProfileCard};
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
 pub use search::{Backfill, INDEX_BATCH, search_text};
 pub use service_search::{SearchAnswer, SearchScope};
@@ -94,7 +96,7 @@ pub use team_admin::{TeamChange, TeamMember, TeamWritten};
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
-pub use teams_call::{MeetingState, RECORDER_MRI, Recording, Transcription};
+pub use teams_call::{MeetingState, Recording, Transcription};
 pub use teams_proto::{
     Attendee, CalendarEvent, ChannelEventRef, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventResponse,
     EventShowAs, EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails, MeetingInfo,

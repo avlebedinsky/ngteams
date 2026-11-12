@@ -31,7 +31,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
+#[cfg(unix)]
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -303,11 +305,28 @@ impl LabLocations {
     /// # Errors
     /// [`ConfigError::NoHome`] when an XDG directory is unset and `HOME` is unset or relative.
     pub fn from_env() -> Result<Self, ConfigError> {
+        #[cfg(windows)]
+        return Self::windows(std::env::var_os("LOCALAPPDATA"));
+        #[cfg(unix)]
         Self::resolve(
             std::env::var_os("XDG_CONFIG_HOME"),
             std::env::var_os("XDG_DATA_HOME"),
             std::env::var_os("HOME"),
         )
+    }
+
+    /// Native Windows lab paths; browser profiles stay separate from native aliases.
+    ///
+    /// # Errors
+    /// LOCALAPPDATA is absent or relative.
+    #[cfg(windows)]
+    pub fn windows(local: Option<OsString>) -> Result<Self, ConfigError> {
+        let local = absolute(local).ok_or(ConfigError::NoHome)?;
+        Ok(Self {
+            config_file: local.join("teams-lab/lab.toml"),
+            data_dir: local.join("teams-lab"),
+            personal_data_dir: local.join(PERSONAL_DIR),
+        })
     }
 
     /// The XDG rules on explicit values: an empty or relative XDG directory is ignored in favour of the `HOME`
@@ -725,12 +744,16 @@ fn replace_file(path: &Path, text: &str) -> Result<(), ConfigError> {
         path: path.to_path_buf(),
         source,
     };
+    #[cfg(unix)]
     let mode = fs::metadata(path).map_err(write_error)?.permissions().mode() & 0o7777;
+    #[cfg(windows)]
+    let mode = 0o600;
     write_through_new_file(path, text, mode).map_err(write_error)
 }
 
 /// Writes `text` to `path` (made or replaced) through a new file beside it, `<path>.<pid>.new` with `mode`, renamed
 /// over it; when that fails, the new file is removed and `path` is untouched.
+#[cfg(unix)]
 fn write_through_new_file(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".{}.new", std::process::id()));
@@ -754,6 +777,11 @@ fn write_through_new_file(path: &Path, text: &str, mode: u32) -> std::io::Result
     written
 }
 
+#[cfg(windows)]
+fn write_through_new_file(path: &Path, text: &str, _mode: u32) -> std::io::Result<()> {
+    crate::private::atomic(path, text.as_bytes())
+}
+
 fn check_mri(mri: Option<&str>, owner: impl FnOnce() -> String) -> Result<(), ConfigError> {
     match mri {
         Some(mri) if mri.trim().is_empty() => Err(ConfigError::EmptyMri(owner())),
@@ -773,6 +801,10 @@ fn upn_domain(upn: &str) -> Result<String, ConfigError> {
     }
     Ok(domain.to_lowercase())
 }
+
+#[cfg(test)]
+#[path = "../tests/support/config_edit.rs"]
+mod edit_tests;
 
 #[cfg(test)]
 mod tests {

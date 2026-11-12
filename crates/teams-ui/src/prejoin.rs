@@ -97,8 +97,8 @@ impl PrejoinView {
         let waking = feed.as_ref().map(|feed| wake_on_frames(feed, cx));
         let tiles = feed.map(|feed| Tiles::new(feed, Arc::new(ViewTrace::off())));
         let mut shown = TraceLine::new("prejoin", "shown");
-        if let Some(prejoin) = calls.read(cx).prejoin() {
-            shown = shown.conversation(&prejoin.to_join.chat);
+        if let Some(chat) = calls.read(cx).prejoin().and_then(|prejoin| prejoin.to_join.chat()) {
+            shown = shown.conversation(chat);
         }
         trace.record(&shown);
         Self {
@@ -585,10 +585,10 @@ impl PrejoinView {
             .text_xl()
             .font_weight(gpui::FontWeight::SEMIBOLD);
         if prejoin.entry != calls::PrejoinEntry::MeetNow {
-            return heading.child(SharedString::from(prejoin.to_join.title.clone()));
+            return heading.child(SharedString::from(prejoin.to_join.title().to_owned()));
         }
         if self.subject.is_none() {
-            let title = prejoin.to_join.title.clone();
+            let title = prejoin.to_join.title().to_owned();
             let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
             let calls = self.calls.clone();
             let changed = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
@@ -600,7 +600,7 @@ impl PrejoinView {
             self.subject = Some((input, changed));
         }
         let Some((input, _)) = &self.subject else {
-            return heading.child(SharedString::from(prejoin.to_join.title.clone()));
+            return heading.child(SharedString::from(prejoin.to_join.title().to_owned()));
         };
         let input = input.clone();
         div()
@@ -631,7 +631,7 @@ impl Render for PrejoinView {
         let Some(prejoin) = self.calls.read(cx).prejoin().cloned() else {
             return div().id("prejoin").size_full().bg(rgb(palette.background));
         };
-        window.set_window_title(&prejoin.to_join.title);
+        window.set_window_title(prejoin.to_join.title());
         let refused = self.calls.read(cx).refused().map(|refused| {
             div()
                 .debug_selector(|| "prejoin-refused".to_owned())

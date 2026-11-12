@@ -376,6 +376,17 @@ async fn a_file_that_cant_be_read_is_not_uploaded() {
     let missing = requests.upload_file(dir.path().join("missing.txt")).await.unwrap_err();
     let folder = requests.upload_file(dir.path().to_path_buf()).await.unwrap_err();
     let nameless = requests.upload_file(PathBuf::from("/")).await.unwrap_err();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Exercise the open-failure directory classification on Unix too, using real filesystem permissions.
+        let denied = dir.path().join("denied-folder");
+        std::fs::create_dir(&denied).unwrap();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let error = requests.upload_file(denied.clone()).await.unwrap_err();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(why(error), "Choose a file, rather than a folder.");
+    }
     handle.shutdown();
 
     assert_eq!(

@@ -5,6 +5,8 @@
 //!
 //! The browser runs headless on a throwaway profile against a local mock server; see `common` for how Chrome is found.
 
+// Shared redirect contracts run against local stand-ins on both platforms.
+
 mod common;
 
 use std::path::Path;

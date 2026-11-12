@@ -2,8 +2,10 @@
 //! answered in order, the process renewed once worn, and a failure told with its job, the next job starting the tool
 //! anew.
 
+use crate::fake_tool;
+
+use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -26,10 +28,7 @@ done
 "#;
 
 fn fake(dir: &Path) -> PathBuf {
-    let path = dir.join("claude");
-    fs::write(&path, FAKE).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    fake_tool::write(dir, "claude", FAKE)
 }
 
 fn next(session: &Session) -> Outcome {
@@ -174,4 +173,200 @@ fn a_failure_is_told_with_its_job_and_the_next_job_starts_the_tool_anew() {
         not_a_translation(Backend::Codex).message(),
         "The Codex CLI stopped: its answer wasn't a translation."
     );
+}
+
+/// A fake Claude Code that streams a batch's answer (`--include-partial-messages`), logging its arguments: the first
+/// message's answer cut mid-way, a delta closing it and starting the second, then the rest; a new message starting
+/// over what came before.
+const STREAMING_CLAUDE: &str = r#"#!/bin/bash
+printf 'args %s\n' "$*" >> "$(dirname "$0")/received.log"
+delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; }
+while IFS= read -r line; do
+  echo '{"type":"stream_event","event":{"type":"message_start"}}'
+  delta '<m id=\"1\" lang=\"en\">DE o'
+  delta 'ne</m>\n<m id=\"2\" lang=\"en\">DE t'
+  echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}}'
+  delta 'wo</m><m id=\"3\" lang=\"de\" same/>'
+  printf '{"type":"result","is_error":false,"result":"%s"}\n' '<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\" lang=\"en\">DE two</m><m id=\"3\" lang=\"de\" same/>'
+done
+"#;
+
+/// A fake Codex app server that streams a turn's agent message as deltas.
+const STREAMING_CODEX: &str = r#"#!/bin/bash
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  delta() { printf '{"method":"item/agentMessage/delta","params":{"itemId":"%s","delta":"%s"}}\n' "$1" "$2"; }
+  case "$line" in
+    *'"method":"initialize"'*) echo "{\"id\":$id,\"result\":{}}";;
+    *'"method":"thread/start"'*) echo "{\"id\":$id,\"result\":{\"thread\":{\"id\":\"synthetic-thread\"}}}";;
+    *'"method":"turn/start"'*)
+      echo "{\"id\":$id,\"result\":{\"turn\":{}}}"
+      delta b '<m id=\"1\" lang=\"en\">DE one</m>'
+      delta b '<m id=\"2\" lang=\"en\">DE two</m>'
+      echo '{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"<m id=\"1\" lang=\"en\">DE one</m><m id=\"2\" lang=\"en\">DE two</m>"}}}'
+      echo '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}';;
+  esac
+done
+"#;
+
+fn three_items() -> Job {
+    Job::Batch {
+        id: 7,
+        context: Vec::new(),
+        items: (1..=3)
+            .map(|n| Item {
+                n,
+                from: "Lab B".to_owned(),
+                text: format!("message {n}"),
+            })
+            .collect(),
+    }
+}
+
+/// The session's outcomes until the batch's whole answer, its partial answers' numbers in the order they came.
+fn partials_then_batch(session: &Session) -> (Vec<Vec<usize>>, HashMap<usize, Answer>) {
+    let mut partials = Vec::new();
+    loop {
+        match next(session) {
+            Outcome::Partial { id: 7, answers } => {
+                let mut numbers: Vec<usize> = answers.keys().copied().collect();
+                numbers.sort_unstable();
+                partials.push(numbers);
+            }
+            Outcome::Batch { id: 7, answers } => return (partials, answers.unwrap()),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+fn quick() -> Limits {
+    Limits {
+        turns: 100,
+        chars: 1_000_000,
+        first: Duration::from_secs(10),
+        turn: Duration::from_secs(10),
+    }
+}
+
+#[test]
+fn claude_s_batch_answers_come_a_message_at_a_time_as_it_writes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(Spec {
+        backend: Backend::Claude,
+        program: fake_tool::write(dir.path(), "claude", STREAMING_CLAUDE),
+        model: Model::Recommended,
+        language: "German",
+        limits: quick(),
+    });
+    session.send(three_items());
+    let (partials, whole) = partials_then_batch(&session);
+    // the first came with the delta that closed it, though that delta ends mid-way through the second; the second
+    // only once it was closed, the third with it
+    assert_eq!(partials, [vec![1], vec![2, 3]]);
+    assert_eq!(whole.len(), 3);
+    assert_eq!(
+        whole.get(&3),
+        Some(&Answer::Same {
+            source: Some("de".to_owned())
+        })
+    );
+    let log = fs::read_to_string(dir.path().join("received.log")).unwrap();
+    assert!(log.contains("--include-partial-messages"), "{log}");
+}
+
+#[test]
+fn codex_s_batch_answers_come_from_its_message_deltas() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(Spec {
+        backend: Backend::Codex,
+        program: fake_tool::write(dir.path(), "codex", STREAMING_CODEX),
+        model: Model::Recommended,
+        language: "German",
+        limits: quick(),
+    });
+    session.send(three_items());
+    let (partials, whole) = partials_then_batch(&session);
+    assert_eq!(partials, [vec![1], vec![2]]);
+    assert_eq!(whole.len(), 2);
+}
+
+#[test]
+fn only_closed_answers_are_fresh_and_each_once_unless_answered_otherwise() {
+    let mut told = HashMap::new();
+    assert!(fresh_answers("<m id=\"1\" lang=\"en\">DE o", &mut told).is_empty());
+    assert!(fresh_answers("<m id=\"1\" lang=\"en", &mut told).is_empty());
+    // a delta that closes the first and starts the second: the first is fresh at once
+    let first = fresh_answers(
+        "<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\" lang=\"en\">DE t",
+        &mut told,
+    );
+    assert_eq!(first.keys().copied().collect::<Vec<_>>(), [1]);
+    // still open after the first: nothing new
+    assert!(fresh_answers("<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\">D", &mut told).is_empty());
+    let second = fresh_answers(
+        "<m id=\"1\" lang=\"en\">DE one</m>\n<m id=\"2\" lang=\"en\" same/>\n",
+        &mut told,
+    );
+    assert_eq!(second.keys().copied().collect::<Vec<_>>(), [2]);
+    // a later agent message answering the first otherwise: told again, the corrected one
+    let corrected = fresh_answers("<m id=\"1\" lang=\"en\">DE uno</m>", &mut told);
+    assert_eq!(
+        corrected,
+        HashMap::from([(
+            1,
+            Answer::Translated {
+                text: "DE uno".to_owned(),
+                source: Some("en".to_owned()),
+            }
+        )])
+    );
+    assert!(fresh_answers("<m id=\"1\" lang=\"en\">DE uno</m>", &mut told).is_empty());
+}
+
+/// A fake Claude Code that streams the first message's answer, then holds until a `go` file beside itself exists before
+/// it writes the rest. It logs its process id.
+const GATED_CLAUDE: &str = r#"#!/bin/bash
+dir="$(dirname "$0")"
+echo "$$" > "$dir/pid"
+delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$1"; }
+while IFS= read -r line; do
+  echo '{"type":"stream_event","event":{"type":"message_start"}}'
+  delta '<m id=\"1\" lang=\"en\">DE one</m>'
+  for _ in $(seq 400); do [ -e "$dir/go" ] && break; sleep 0.05; done
+  delta '<m id=\"2\" lang=\"en\">DE two</m>'
+  printf '{"type":"result","is_error":false,"result":"%s"}\n' '<m id=\"1\" lang=\"en\">DE one</m><m id=\"2\" lang=\"en\">DE two</m>'
+done
+"#;
+
+#[test]
+fn a_session_dropped_mid_batch_stops_its_tool_and_tells_nothing_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(Spec {
+        backend: Backend::Claude,
+        program: fake_tool::write(dir.path(), "claude", GATED_CLAUDE),
+        model: Model::Recommended,
+        language: "German",
+        limits: quick(),
+    });
+    session.send(three_items());
+    match next(&session) {
+        Outcome::Partial { id: 7, answers } => assert_eq!(answers.keys().copied().collect::<Vec<_>>(), [1]),
+        other => panic!("{other:?}"),
+    }
+    let outcomes = session.outcomes();
+    let pid = fs::read_to_string(dir.path().join("pid")).unwrap();
+    let pid = pid.trim();
+    // dropped, and the tool let go on at once: what it still writes comes too late to be told
+    drop(session);
+    fs::write(dir.path().join("go"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while fake_tool::running(pid) || !outcomes.is_closed() {
+        assert!(
+            Instant::now() < deadline,
+            "the tool or the session's thread is still running"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let late: Vec<Outcome> = std::iter::from_fn(|| outcomes.try_recv().ok()).collect();
+    assert!(late.is_empty(), "{late:?}");
 }

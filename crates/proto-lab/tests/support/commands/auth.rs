@@ -164,6 +164,212 @@ async fn code_exchange_refresh_all_audiences_and_authz_run_on_the_supplied_clien
     }
 }
 
+#[cfg(windows)]
+fn native_account() -> Account {
+    Account {
+        username: UPN.into(),
+        object_id: OID.into(),
+        tenant: "00000000-0000-4000-8000-000000000001".into(),
+        display_name: None,
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn native_refresh_requires_a_verified_matching_identity_and_a_stored_refresh() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let target = native_target(root.path());
+    let store = MemorySecretStore::new();
+    assert!(matches!(
+        refresh_native(&config, Alias::A, &store, &target).await,
+        Err(AuthError::Provision(_))
+    ));
+    target.save(&native_account(), None).unwrap();
+    assert!(matches!(
+        refresh_native(&config, Alias::A, &store, &target).await,
+        Err(AuthError::Token(TokenError::NotSignedIn { .. }))
+    ));
+    let wrong = Account {
+        object_id: "00000000-0000-4000-8000-00000000000b".into(),
+        ..native_account()
+    };
+    target.save(&wrong, None).unwrap();
+    assert!(matches!(
+        refresh_native(&config, Alias::A, &store, &target).await,
+        Err(AuthError::BadMri)
+    ));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn native_refresh_publishes_region_only_after_successful_authz() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let target = native_target(root.path());
+    target.save(&native_account(), None).unwrap();
+    let store = MemorySecretStore::new();
+    store
+        .put(
+            &teams_auth::refresh::refresh_token_key(UPN),
+            &Secret::new("synthetic-refresh"),
+        )
+        .await
+        .unwrap();
+    let tokens = tokens(UPN).await;
+    let client = TokenClient::new(EntraConfig::teams_native().with_authority(tokens.uri())).unwrap();
+    let authz = MockServer::start().await;
+    let authz_client = AuthzClient::with_endpoint(&format!("{}/authz", authz.uri())).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/authz"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&authz)
+        .await;
+    assert!(matches!(
+        refresh_native_with(&config, Alias::A, &store, &target, &client, &authz_client).await,
+        Err(AuthError::Token(_))
+    ));
+    assert!(!target.root().join("regions").exists());
+    authz.reset().await;
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../../tests/fixtures/auth/authz-ok.json")).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/authz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture["response"]["body"].clone()))
+        .expect(1)
+        .mount(&authz)
+        .await;
+    let skype = refresh_native_with(&config, Alias::A, &store, &target, &client, &authz_client)
+        .await
+        .unwrap();
+    assert_eq!(
+        Region::load(&target.root().join(format!("regions/{OID}.json"))).unwrap(),
+        skype.region
+    );
+    assert!(
+        store
+            .get(&teams_auth::authz::skypetoken_key(UPN))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(tokens.received_requests().await.unwrap().len(), 2);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn password_and_silent_authorization_refuse_foreign_aliases_before_opening_a_browser() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let target = native_target(root.path());
+    target
+        .save(
+            &Account {
+                username: "another@example.test".into(),
+                ..native_account()
+            },
+            None,
+        )
+        .unwrap();
+    let store = MemorySecretStore::new();
+    let options = AuthOptions {
+        timeout: Duration::from_secs(1),
+        skypetoken: true,
+        other_audiences: false,
+    };
+    assert!(matches!(
+        authorize_target(&config, Alias::A, &store, &options, target.clone()).await,
+        Err(AuthError::Provision(_))
+    ));
+    let accounts = crate::accounts::AccountsFile::parse(
+        r#"[{"profile":"a","email":"synthetic-a@example.test","password":"synthetic-only"},
+            {"profile":"b","email":"synthetic-b@example.test","password":"synthetic-only"}]"#,
+        |_| None,
+    )
+    .unwrap();
+    let wrong = accounts.for_alias(Alias::B, "synthetic-b@example.test").unwrap();
+    assert!(matches!(
+        authorize_password(&config, Alias::A, &store, &options, target.clone(), wrong).await,
+        Err(AuthError::Login(_))
+    ));
+    let right = accounts.for_alias(Alias::A, UPN).unwrap();
+    assert!(matches!(
+        authorize_password(&config, Alias::A, &store, &options, target, right).await,
+        Err(AuthError::Provision(_))
+    ));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn native_profile_authorization_catches_only_a_synthetic_loopback_grant_and_closes() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(root.path().join("lab"));
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/v2.0/authorize"))
+        .respond_with(|request: &Request| {
+            let state = request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "state")
+                .unwrap()
+                .1
+                .into_owned();
+            let mut redirect = url::Url::parse(NATIVE_CLIENT_REDIRECT).unwrap();
+            redirect
+                .query_pairs_mut()
+                .append_pair("code", "synthetic-local-code")
+                .append_pair("state", &state);
+            ResponseTemplate::new(302).insert_header("Location", redirect.as_str())
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let entra = EntraConfig::teams_native().with_authority(server.uri());
+    let authorization = Authorization::new(&entra, UPN, Scope::spaces()).unwrap();
+    let (redirect, report) =
+        redirect_through_profile(&paths, Alias::A, &entra, &authorization, Duration::from_secs(10))
+            .await
+            .unwrap();
+    assert!(!report.failed());
+    assert_eq!(
+        authorization.code_from_redirect(redirect.expose()).unwrap().expose(),
+        "synthetic-local-code"
+    );
+    let authorization = Authorization::new(&entra, UPN, Scope::spaces()).unwrap();
+    let accounts = crate::accounts::AccountsFile::parse(
+        r#"[{"profile":"a","email":"synthetic-a@example.test","password":"synthetic-unused"}]"#,
+        |_| None,
+    )
+    .unwrap();
+    let credentials = accounts.for_alias(Alias::A, UPN).unwrap();
+    let (redirect, report) = crate::commands::login::authorization_profile(
+        &paths,
+        Alias::B,
+        &authorization,
+        credentials,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert!(!report.failed());
+    assert_eq!(
+        authorization.code_from_redirect(redirect.expose()).unwrap().expose(),
+        "synthetic-local-code"
+    );
+    let status = std::fs::read_to_string(paths.data_dir().join("status-b.json")).unwrap();
+    assert!(!status.contains("synthetic-local-code"));
+    assert!(!status.contains("synthetic-unused"));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.url.path() == "/oauth2/v2.0/authorize")
+    );
+}
+
 #[tokio::test]
 async fn optional_grants_are_not_requested_and_a_refused_authz_is_a_reported_failure() {
     let root = tempfile::tempdir().unwrap();
@@ -408,4 +614,48 @@ async fn waiting_for_a_redirect_stops_on_foreign_hosts_expired_signin_and_lost_c
     let (_send, mut caught) = mpsc::unbounded_channel();
     let result = within(Duration::from_secs(2), wait_for_redirect(&mut session, &mut caught)).await;
     assert!(matches!(result, Err(AuthError::ConnectionLost)));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_native_target_without_browser_never_exchanges_tokens_or_publishes_files() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let target = native_target(root.path());
+    let store = MemorySecretStore::new();
+    let options = AuthOptions {
+        timeout: Duration::from_secs(1),
+        skypetoken: true,
+        other_audiences: false,
+    };
+    let error = authorize_target(&config, Alias::A, &store, &options, target.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AuthError::Session(SessionError::NoChrome(_))));
+    assert!(!target.root().exists(), "no native account/region was published");
+    assert!(
+        !config.paths().profile_dir(Alias::A).exists(),
+        "no browser profile was opened"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn native_account_reader_refuses_damaged_ids_before_they_can_become_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let target = native_target(root.path());
+    target.save(&native_account(), None).unwrap();
+    let path = target.root().join("accounts.toml");
+    let valid = std::fs::read_to_string(&path).unwrap();
+    for (field, damaged) in [("oid", "../outside"), ("oid", "not-a-guid"), ("tid", "../tenant")] {
+        let mut table: toml::Table = toml::from_str(&valid).unwrap();
+        table["account"].as_array_mut().unwrap()[0][field] = toml::Value::String(damaged.into());
+        std::fs::write(&path, toml::to_string(&table).unwrap()).unwrap();
+        assert!(target.account(&native_account().username).is_err());
+    }
+    std::fs::write(&path, valid).unwrap();
+    assert_eq!(
+        target.account(&native_account().username).unwrap().object_id,
+        native_account().object_id
+    );
 }

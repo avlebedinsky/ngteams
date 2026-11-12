@@ -36,13 +36,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::video_surface::{self, Frame as PixelFrame, Surface as PixelSurface};
 use gpui::prelude::FluentBuilder as _;
+
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity, ExternalSurface, FocusHandle, FontWeight,
-    FrameCompletion, Global, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PixelFrame, PixelRect, PixelSurface, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, WeakEntity, Window, anchored,
-    canvas, deferred, div, hsla, img, point, px, relative, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity, FocusHandle, FontWeight, Global,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Task, WeakEntity, Window, anchored, canvas, deferred, div, hsla, img, point, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -805,20 +806,7 @@ impl VideoPlayer {
         {
             return Some((Arc::clone(frame), shape));
         }
-        let frame = Arc::new(PixelFrame {
-            surface: Arc::clone(&self.surface),
-            serial: picture.serial,
-            width: picture.width,
-            height: picture.height,
-            pixels: Arc::clone(&picture.bgra),
-            damage: vec![PixelRect {
-                x: 0,
-                y: 0,
-                width: picture.width,
-                height: picture.height,
-            }],
-            completion: FrameCompletion::new(|_| {}),
-        });
+        let frame = video_surface::frame(&self.surface, picture.serial, shape, &picture.bgra, |_| {});
         self.drawn = Some((picture.serial, Arc::clone(&frame)));
         Some((frame, shape))
     }
@@ -907,8 +895,8 @@ impl VideoPlayer {
         if let Some((frame, (width, height))) = self.frame() {
             return canvas(
                 |_, _, _| (),
-                move |bounds, (), window, _| {
-                    window.paint_external_surface(fitted(bounds, width, height), ExternalSurface::Pixels(frame));
+                move |bounds, (), window, cx| {
+                    video_surface::paint(&frame, fitted(bounds, width, height), window, cx);
                 },
             )
             .size_full()
@@ -1490,20 +1478,7 @@ fn menu_item(what: &'static str, glyph: Glyph, label: &'static str) -> PopupMenu
 }
 
 /// `bounds` narrowed to a picture of `width` by `height` fitted inside it, centred, its aspect ratio kept.
-pub(crate) fn fitted(bounds: Bounds<Pixels>, width: u32, height: u32) -> Bounds<Pixels> {
-    let side = |pixels: u32| f32::from(u16::try_from(pixels).unwrap_or(u16::MAX)).max(1.0);
-    let (box_width, box_height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-    let scale = (box_width / side(width)).min(box_height / side(height));
-    let (drawn_width, drawn_height) = (side(width) * scale, side(height) * scale);
-    Bounds {
-        origin: point(
-            bounds.origin.x + px((box_width - drawn_width) / 2.0),
-            bounds.origin.y + px((box_height - drawn_height) / 2.0),
-        ),
-        size: size(px(drawn_width), px(drawn_height)),
-    }
-}
-
+pub(crate) use crate::video_surface::fitted;
 /// A time as the player writes it: `m:ss`, or `h:mm:ss` from an hour.
 #[must_use]
 pub fn clock(at: Duration) -> String {

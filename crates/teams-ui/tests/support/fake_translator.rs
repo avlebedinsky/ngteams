@@ -2,8 +2,11 @@
 //! translates each message of a batch as `DE <text>` (one that starts with "Guten" is German already) and an outgoing
 //! message as `EN <text>`. Never the real tool.
 
+#[path = "fake_tool.rs"]
+#[expect(dead_code, reason = "the shared fake CLI helper serves several test harnesses")]
+mod fake_tool;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 pub const FAKE_CLAUDE: &str = r#"#!/bin/bash
@@ -43,10 +46,7 @@ pub fn slow() -> String {
 
 /// Writes `body` as the fake `claude` in `dir`.
 pub fn fake(dir: &Path, body: &str) -> PathBuf {
-    let path = dir.join("claude");
-    fs::write(&path, body).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    fake_tool::write(dir, "claude", body)
 }
 
 /// The questions the fake in `dir` was asked so far.

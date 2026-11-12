@@ -2,7 +2,10 @@
 //! only): offered, made, played from, copied, previewed and sent to the meeting's chat, shown again without asking
 //! the tool; and why it can't be made.
 
-use std::os::unix::fs::PermissionsExt as _;
+#[path = "fake_tool.rs"]
+#[expect(dead_code, reason = "the shared fake CLI helper serves several test harnesses")]
+mod fake_tool;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,10 +26,7 @@ fn fake_summary() -> String {
 }
 
 fn script(dir: &Path, body: &str) -> PathBuf {
-    let path = dir.join("claude");
-    std::fs::write(&path, format!("#!/bin/bash\n{body}")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    fake_tool::write(dir, "claude", body)
 }
 
 /// A fake Claude Code, beside its log of starts: answers every message with the made-up summary.

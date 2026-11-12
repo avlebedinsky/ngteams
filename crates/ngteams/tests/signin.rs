@@ -14,7 +14,8 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -169,15 +170,8 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
         region.contains(CHAT_BASE) && !region.contains("made-up-skypetoken"),
         "{region}"
     );
-    assert_eq!(fs::metadata(&region_file).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(
-        fs::metadata(region_file.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o700
-    );
+    privacy::assert_private(&region_file, false);
+    privacy::assert_private(region_file.parent().unwrap(), false);
     assert!(signin::ready(&setup, &signed, &store).await.unwrap());
 
     // the engine uses the account store under the personal data dir; nothing is sent
@@ -234,10 +228,7 @@ fn an_account_given_is_the_one_held_and_another_is_added_after_it() {
     let pending = setup.ask_for(UPN).unwrap();
     assert_eq!(pending.upn, UPN);
     assert!(!pending.is_signed_in());
-    assert_eq!(
-        fs::metadata(setup.paths.accounts_file()).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    privacy::assert_private(&setup.paths.accounts_file(), false);
     // the same account again, case aside: the one held, not a second
     assert_eq!(setup.ask_for("SOMEONE@example.test").unwrap(), pending);
     assert_eq!(setup.accounts().unwrap(), vec![pending.clone()]);

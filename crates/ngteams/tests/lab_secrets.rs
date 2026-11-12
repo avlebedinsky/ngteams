@@ -2,8 +2,8 @@
 
 #![cfg(test)]
 
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use teams_auth::broker::{BrokerStream, private_pair};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -29,7 +29,7 @@ const UPN: &str = "lab-a@synthetic.example";
 const OID: &str = "00000000-0000-4000-8000-0000000000ff";
 const TENANT: &str = "00000000-0000-4000-8000-000000000001";
 
-fn serve(socket: UnixStream, store: Arc<MemorySecretStore>) -> tokio::task::JoinHandle<(bool, Vec<u8>)> {
+fn serve(socket: BrokerStream, store: Arc<MemorySecretStore>) -> tokio::task::JoinHandle<(bool, Vec<u8>)> {
     tokio::spawn(async move {
         let mut noted = Vec::new();
         let done = read_only::serve_broker(socket, &lab_broker_scope(UPN), &*store, &mut noted)
@@ -42,7 +42,7 @@ fn serve(socket: UnixStream, store: Arc<MemorySecretStore>) -> tokio::task::Join
 #[tokio::test]
 async fn lab_store_clones_share_writable_broker_and_refuse_other_accounts() {
     let backing = Arc::new(MemorySecretStore::new());
-    let (ours, theirs) = UnixStream::pair().unwrap();
+    let (ours, theirs) = private_pair().unwrap();
     let served = serve(theirs, Arc::clone(&backing));
     let store = AppSecrets::lab(ours).unwrap();
     let clone = store.clone();
@@ -72,7 +72,7 @@ async fn lab_store_clones_share_writable_broker_and_refuse_other_accounts() {
 #[tokio::test]
 async fn lab_broker_refuses_the_personal_namespace_without_touching_store() {
     let backing = Arc::new(MemorySecretStore::new());
-    let (ours, theirs) = UnixStream::pair().unwrap();
+    let (ours, theirs) = private_pair().unwrap();
     let served = serve(theirs, Arc::clone(&backing));
     let wrong = BrokerSecretStore::new(ours, ngteams::KEYRING_APPLICATION).unwrap();
     let key = refresh_token_key(UPN);
@@ -94,7 +94,7 @@ async fn lab_sign_in_refresh_readiness_and_forget_use_the_same_selected_broker()
     let root = tempfile::tempdir().unwrap();
     let paths = PersonalPaths::new(root.path().join("config"), root.path().join("data"));
     let backing = Arc::new(MemorySecretStore::new());
-    let (ours, theirs) = UnixStream::pair().unwrap();
+    let (ours, theirs) = private_pair().unwrap();
     let served = serve(theirs, Arc::clone(&backing));
     let store = AppSecrets::lab(ours).unwrap();
     let setup = Setup::new(paths).unwrap().with_secrets(store.clone());

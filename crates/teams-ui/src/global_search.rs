@@ -48,6 +48,7 @@ use crate::chat_translate::{Lookup, Previews};
 use crate::clock::{self, HourCycle};
 use crate::icons::Glyph;
 use crate::people::{self, Picture};
+use crate::profile_card::{self, CardAsks, CardOf, Click};
 use crate::search::{self, Hit, HitTarget};
 use crate::sending::settled_row;
 use crate::switcher::matches;
@@ -299,6 +300,8 @@ pub struct GlobalSearch {
     /// The stored messages of the hits in translated chats, by conversation and id, and the ones being read.
     found_messages: HashMap<(String, String), Message>,
     reading_messages: HashSet<(String, String)>,
+    /// Where a person found asks for their profile card ([`Self::set_cards`]).
+    cards: Option<Entity<CardAsks>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -342,8 +345,14 @@ impl GlobalSearch {
             previews: None,
             found_messages: HashMap::new(),
             reading_messages: HashSet::new(),
+            cards: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// A person found opens their compact card when the pointer rests on their face, asked of `cards`.
+    pub fn set_cards(&mut self, cards: Entity<CardAsks>) {
+        self.cards = Some(cards);
     }
 
     /// From now on a message found in a translated chat shows in the chat's language, through `previews`.
@@ -1546,7 +1555,7 @@ pub fn results_page(search: &Entity<GlobalSearch>, palette: Palette, cx: &App) -
             people
                 .iter()
                 .enumerate()
-                .map(|(at, person)| person_row(at, person, search, palette)),
+                .map(|(at, person)| person_row(at, person, (search, this.cards.as_ref()), palette)),
         );
     }
     let files = this.files();
@@ -1754,17 +1763,34 @@ fn message_card(hit: &Hit, search: &Entity<GlobalSearch>, palette: Palette, cycl
 }
 
 /// A person found: their name and job; a click opens their 1:1 chat.
-fn person_row(at: usize, person: &FoundPerson, search: &Entity<GlobalSearch>, palette: Palette) -> AnyElement {
+fn person_row(
+    at: usize,
+    person: &FoundPerson,
+    (search, cards): (&Entity<GlobalSearch>, Option<&Entity<CardAsks>>),
+    palette: Palette,
+) -> AnyElement {
     let name: SharedString = person.name.clone().into();
     let detail = person_detail(person);
     let mri = person.mri.clone();
     let search = search.clone();
+    let face = people::avatar(Some(&name), None, Size::Medium);
+    // a rest on the face opens their compact card, as Teams' results do; a click still opens their chat
+    let face = match (cards, mri.clone()) {
+        (Some(cards), Some(mri)) => profile_card::anchor(
+            format!("profile-card-from-search-{at}"),
+            CardOf::new(mri, Some(name.clone())),
+            Click::Hover,
+            cards,
+            face,
+        ),
+        _ => face.into_any_element(),
+    };
     card(format!("search-person-{at}"), palette)
         .flex_row()
         .items_center()
         .gap_3()
         .on_click(move |_, _, cx| search.update(cx, |this, cx| this.open_person(mri.as_deref(), cx)))
-        .child(people::avatar(Some(&name), None, Size::Medium))
+        .child(face)
         .child(two_lines(name, detail, palette))
         .into_any_element()
 }

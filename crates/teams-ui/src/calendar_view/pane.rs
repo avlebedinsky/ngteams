@@ -352,6 +352,7 @@ impl CalendarView {
     /// The toolbar over the grid.
     pub(super) fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let mode = self.mode;
+        let compact = self.compact_toolbar();
         let pane_tip = if self.toggles.on(Toggle::PaneHidden) {
             "Show the calendar pane"
         } else {
@@ -359,7 +360,9 @@ impl CalendarView {
         };
         let today = Button::new("calendar-today")
             .icon(Glyph::CALENDAR_TODAY.icon())
-            .label("Today")
+            .when(!compact, |button| button.label("Today"))
+            .tooltip("Go to today")
+            .accessibility_label("Go to today")
             .ghost()
             .on_click(cx.listener(|this, _, _, cx| this.today(cx)));
         let unit = if mode == Mode::Day && self.days > 1 {
@@ -375,26 +378,11 @@ impl CalendarView {
         .on_click(cx.listener(|this, _, _, cx| this.step(false, cx)));
         let next = icon_button("calendar-next", Glyph::CHEVRON_RIGHT, format!("Go to next {unit}"))
             .on_click(cx.listener(|this, _, _, cx| this.step(true, cx)));
-        let dates = Button::new("calendar-dates")
-            .ghost()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(self.title())
-                    .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.picker = match this.picker {
-                    Some(_) => None,
-                    None => Some(this.anchor.with_day(1).unwrap_or(this.anchor)),
-                };
-                cx.notify();
-            }));
         div()
             .debug_selector(|| "calendar-toolbar".to_owned())
+            .relative()
+            .w_full()
+            .min_w_0()
             .h(px(56.0))
             .flex_none()
             .px_3()
@@ -416,14 +404,69 @@ impl CalendarView {
             .child(selected_by("calendar-today", today))
             .child(selected_by("calendar-previous", previous))
             .child(selected_by("calendar-next", next))
-            .child(selected_by("calendar-dates", dates))
-            .child(div().flex_1())
+            .child(selected_by("calendar-dates", self.dates_button(cx)).flex_1().min_w_0())
             .child(self.mode_switcher(cx))
             .child(self.filter_menu(palette, cx))
             .child(Self::more_menu(cx))
             .child(separator(palette))
             .child(self.meet_now_button(palette, cx))
-            .child(Self::new_button(palette, cx))
+            .child(Self::new_button(palette, compact, cx))
+            .child(self.measure_toolbar(cx))
+    }
+
+    /// The date range keeps its full tooltip while its face shrinks beside the action buttons.
+    fn dates_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("calendar-dates")
+            .ghost()
+            .w_full()
+            .tooltip(self.title())
+            .accessibility_label(self.title())
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(div().min_w_0().text_ellipsis().child(self.title()))
+                    .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)).flex_none()),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.picker = match this.picker {
+                    Some(_) => None,
+                    None => Some(this.anchor.with_day(1).unwrap_or(this.anchor)),
+                };
+                cx.notify();
+            }))
+    }
+
+    /// Teams drops the toolbar's action labels when its calendar grid becomes narrow.
+    pub(super) fn compact_toolbar(&self) -> bool {
+        self.toolbar_width.get() < px(900.0)
+    }
+
+    fn measure_toolbar(&self, cx: &Context<Self>) -> AnyElement {
+        let width = self.toolbar_width.clone();
+        let view = cx.entity().downgrade();
+        gpui::canvas(
+            move |bounds, window, _| {
+                let previous = width.replace(bounds.size.width);
+                // Only crossing the label breakpoint changes the layout. Measure the allocated toolbar,
+                // never the window: this also works with the pane open and inside a narrower parent.
+                if (previous < px(900.0)) != (bounds.size.width < px(900.0)) {
+                    let view = view.clone();
+                    window.on_next_frame(move |_, cx| {
+                        let _ = view.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
     }
 
     /// The view switcher: its icon, the view's name and a menu of the views, as Teams' has it: Day (its 1–7 days in a
@@ -492,7 +535,7 @@ impl CalendarView {
     }
 
     /// The split New: the brand button and its menu's chevron.
-    pub(super) fn new_button(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn new_button(palette: Palette, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let part = |id: &'static str| {
             div()
                 .debug_selector(move || id.to_owned())
@@ -521,8 +564,11 @@ impl CalendarView {
                     .px_3()
                     .rounded_l_md()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .role(gpui::Role::Button)
+                    .aria_label("New event")
+                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("New event").build(window, cx))
                     .child(Glyph::CALENDAR_ADD.icon().size(px(16.0)))
-                    .child("New event")
+                    .when(!compact, |button| button.child("New event"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let slot = this.next_slot();
                         this.new_event(slot, false, cx);

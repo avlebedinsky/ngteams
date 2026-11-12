@@ -4,7 +4,7 @@
 //!    `nativeclient` redirect, PKCE, `login_hint`) is opened in the profile, whose Microsoft session signs it in
 //!    silently. The browser catches Entra's redirect to the registered redirect URI and fails it
 //!    ([`RedirectCatch`]); the code comes from that URL once its `state` is the request's. If Entra shows a page
-//!    instead (the session has expired, or it wants an interaction), the run stops: nothing is ever typed here.
+//!    instead (the session has expired, or it wants an interaction), the Auth run stops without typing. Windows Login instead submits the roster password once on the native authorize page.
 //! 2. **Code → tokens** in Rust ([`TokenClient::exchange_code`]): the refresh token is stored only once the ID token
 //!    names the account (and its object id from `lab.toml`).
 //! 3. **Refresh** for `api.spaces.skype.com`, proving the stored refresh token works; with `--audiences`, one refresh
@@ -13,19 +13,22 @@
 //!    persisted to `<data dir>/auth/<alias>.json` ([`save_region`]) for native HTTP probes and to the native client's
 //!    `ngteams-lab/<alias>/regions/<oid>.json`. Its verified identity is provisioned in that alias's `accounts.toml`.
 //!
-//! The CLI keeps the secrets in the Secret Service under the lab's own application attribute ([`KEYRING_APPLICATION`]);
+//! The CLI keeps secrets in Linux Secret Service or Windows Credential Manager under `ngteams-lab`
+//! ([`KEYRING_APPLICATION`]);
 //! tests pass a memory store. Nothing prints or logs a token, a code or the redirect URL: the report
 //! ([`AuthReport::lines`]) shows only each token's audience, expiry, scopes and tenant, and the skypetoken's expiry and
 //! region, or the refusal.
 
 use std::fmt::Write as _;
 use std::future::Future;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use serde_json::json;
-use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region, Skypetoken, unix_seconds};
+use teams_auth::authz::unix_seconds;
+use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region, Skypetoken};
 use teams_auth::claims::TokenSummary;
 use teams_auth::id_token::Account;
 use teams_auth::pkce::PkceError;
@@ -38,7 +41,7 @@ use crate::config::{Alias, LabConfig, LabPaths};
 use crate::redirect_catch::{CatchError, RedirectCatch};
 use crate::session::{LabSession, SessionError, SessionReport, SessionState};
 
-/// The native lab client's fixed Secret Service namespace. Browser profile files remain in `teams-lab`.
+/// The native lab client's fixed credential-store namespace. Browser profile files remain in `teams-lab`.
 pub const KEYRING_APPLICATION: &str = "ngteams-lab";
 
 pub use native::NativeTarget;
@@ -76,6 +79,9 @@ pub struct AuthOptions {
 /// Why native sign-in or account provisioning failed; tokens may already be stored.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    #[cfg(windows)]
+    #[error(transparent)]
+    Login(#[from] super::login::LoginError),
     #[error(transparent)]
     Session(#[from] SessionError),
     #[error("can't make the authorization request: {0}")]
@@ -159,6 +165,22 @@ pub async fn authorize<S: SecretStore>(
     options: &AuthOptions,
 ) -> Result<AuthReport, AuthError> {
     let target = NativeTarget::from_env(alias)?;
+    authorize_target(config, alias, store, options, target).await
+}
+
+/// Provisions a verified account into an explicitly selected isolated native target.
+///
+/// # Errors
+/// The same browser, identity, token and private-file failures as [`authorize`].
+pub async fn authorize_target<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    options: &AuthOptions,
+    target: NativeTarget,
+) -> Result<AuthReport, AuthError> {
+    #[cfg(windows)]
+    target.expect_account(&config.account(alias).upn)?;
     let entra = EntraConfig::teams_native();
     authorize_with(
         config,
@@ -175,6 +197,91 @@ pub async fn authorize<S: SecretStore>(
         },
     )
     .await
+}
+
+/// Windows lab provisioning, using the existing dedicated password state machine on the native authorize page.
+///
+/// # Errors
+/// Account mismatch, MFA/rejection, invalid redirect/identity, exchange, or private publication fails.
+#[cfg(windows)]
+pub async fn authorize_password<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    options: &AuthOptions,
+    target: NativeTarget,
+    credentials: &crate::accounts::Credentials,
+) -> Result<AuthReport, AuthError> {
+    let upn = &config.account(alias).upn;
+    if !credentials.email().eq_ignore_ascii_case(upn) {
+        return Err(super::login::LoginError::Accounts(crate::accounts::AccountsError::EmailMismatch(alias)).into());
+    }
+    target.expect_account(upn)?;
+    authorize_with(
+        config,
+        alias,
+        store,
+        options,
+        EntraConfig::teams_native(),
+        AuthSteps {
+            target,
+            redirect: async |authorization: &Authorization| {
+                super::login::authorization_profile(config.paths(), alias, authorization, credentials, options.timeout)
+                    .await
+                    .map_err(AuthError::from)
+            },
+            skype: async |tokens: &Tokens| skypetoken(store, upn, tokens).await,
+        },
+    )
+    .await
+}
+
+/// Completes Windows native provisioning from a refresh token whose account was already verified by code exchange.
+///
+/// # Errors
+/// Existing native/roster identity mismatch, refresh, authz or private publication fails.
+#[cfg(windows)]
+pub async fn refresh_native<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    target: &NativeTarget,
+) -> Result<SkypetokenSummary, AuthError> {
+    refresh_native_with(
+        config,
+        alias,
+        store,
+        target,
+        &TokenClient::new(EntraConfig::teams_native())?,
+        &AuthzClient::new().map_err(TokenError::from)?,
+    )
+    .await
+}
+
+#[cfg(windows)]
+async fn refresh_native_with<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    target: &NativeTarget,
+    client: &TokenClient,
+    authz: &AuthzClient,
+) -> Result<SkypetokenSummary, AuthError> {
+    let configured = config.account(alias);
+    let account = target.account(&configured.upn)?;
+    if !configured
+        .mri
+        .as_ref()
+        .is_some_and(|mri| mri.eq_ignore_ascii_case(&format!("8:orgid:{}", account.object_id)))
+    {
+        return Err(AuthError::BadMri);
+    }
+    let tokens = client.refresh(store, &configured.upn, &Scope::spaces()).await?;
+    let skype = skypetoken_with(store, &configured.upn, &tokens, authz)
+        .await
+        .map_err(TokenError::from)?;
+    target.save(&account, Some(&skype.region))?;
+    Ok(skype)
 }
 
 struct AuthSteps<D, K> {
@@ -349,21 +456,30 @@ pub fn region_file(paths: &LabPaths, alias: Alias) -> PathBuf {
     paths.region_file(alias)
 }
 
-/// Persists the account's region (`regionGtms` and all) and the skypetoken's expiry to [`region_file`]: the directory
-/// `0700`, the file `0600`, replaced by rename from a staging file of its own, so saves that run at once never share
-/// one (the last rename wins, whole). Not the token.
+/// Persists the account's region (`regionGtms` and all) and the skypetoken's expiry to [`region_file`], privately and
+/// atomically. Unix uses `0700`/`0600`; Windows uses the current user's protected DACL. Concurrent saves never share
+/// a staging file (the last rename wins, whole). Not the token.
 ///
 /// # Errors
 /// When the file can't be written.
 pub fn save_region(paths: &LabPaths, alias: Alias, skypetoken: &SkypetokenSummary) -> std::io::Result<PathBuf> {
     let file = region_file(paths, alias);
-    let dir = file.parent().unwrap_or(paths.data_dir());
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     let mut record = skypetoken.region.to_json();
     record["account"] = json!(alias.as_str());
     record["fetchedAt"] = json!(unix_seconds(SystemTime::now()));
     record["skypetokenExpiresAt"] = json!(unix_seconds(skypetoken.expires_at));
     let text = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
+    #[cfg(windows)]
+    crate::private::atomic(&file, text.as_bytes())?;
+    #[cfg(unix)]
+    save_region_text(paths, alias, &file, &text)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn save_region_text(paths: &LabPaths, alias: Alias, file: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let dir = file.parent().unwrap_or(paths.data_dir());
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     // a uniquely named staging file, removed if anything fails before the rename
     let mut staging = tempfile::Builder::new()
         .prefix(&format!(".{}.json.", alias.as_str()))
@@ -372,8 +488,8 @@ pub fn save_region(paths: &LabPaths, alias: Alias, skypetoken: &SkypetokenSummar
         .tempfile_in(dir)?;
     std::io::Write::write_all(&mut staging, text.as_bytes())?;
     staging.as_file().sync_all()?;
-    staging.persist(&file).map_err(|error| error.error)?;
-    Ok(file)
+    staging.persist(file).map_err(|error| error.error)?;
+    Ok(())
 }
 
 impl AuthReport {

@@ -180,7 +180,7 @@ impl Drop for Descriptor {
 }
 
 /// The current process's user SID in its string form (`S-1-5-21-…`).
-fn current_user_sid() -> io::Result<String> {
+pub(crate) fn current_user_sid() -> io::Result<String> {
     // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no closing and is always valid.
     let process = unsafe { GetCurrentProcess() };
     let token = open_token(process)?;
@@ -241,7 +241,7 @@ pub(crate) fn token_information(token: &OwnedHandle, class: TOKEN_INFORMATION_CL
 /// # Safety
 ///
 /// `text` is a NUL-terminated UTF-16 string allocated with `LocalAlloc` that the caller owns.
-unsafe fn take_local_string(text: *mut u16) -> String {
+pub(super) unsafe fn take_local_string(text: *mut u16) -> String {
     let mut len = 0;
     // SAFETY: the caller guarantees a NUL terminator, so every unit up to it is in bounds.
     while unsafe { *text.wrapping_add(len) } != 0 {

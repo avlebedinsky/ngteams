@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use teams_core::{CallAction, CallCaptions, CallId, CallStatus, CaptionPhase, End, Event};
 use teams_media::mcp::{MIXER_RECIPIENT, Packetizer};
 use teams_mock::{ABC_CHAT, LAB_A};
-use teams_proto::captions::CAPTION_SERVICE_MRI;
+use teams_proto::captions::{CAPTION_SERVICE_ALTERNATE_MRI, CAPTION_SERVICE_MRI};
 
 use super::support::{A_TONE, Account, Lab, WAIT, jwt, wait_until};
 
@@ -317,6 +317,135 @@ async fn a_busy_invitation_and_a_failed_start_command_fail_captions_with_why() {
         .call(CallAction::Mute { call, muted: true })
         .await
         .unwrap();
+    a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+}
+
+/// The service invited as the commercial recorder joins from another region, under Teams' alternate MRI, with an
+/// older endpoint beside the one it hands over to and a lower participant version than the invited leg: captions
+/// start through the newest endpoint and come on, without waiting for that leg's version to catch up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn captions_start_when_the_service_joins_from_another_region() {
+    let (lab, mut a, call) = connected().await;
+    lab.mock.answer_next("POST", "/addParticipant", 200, &json!({})).await;
+    lab.mock.answer_next("POST", COMMAND_END, 200, &json!({})).await;
+    a.handle
+        .requests()
+        .call(CallAction::Captions { call, enabled: true })
+        .await
+        .unwrap();
+    phase(&mut a, call, CaptionPhase::Starting).await;
+    lab.wait_attempts("addParticipant", 1).await;
+    let path = callback(&lab, "rosterUpdate").await;
+    let invited = json!({"participants": {CAPTION_SERVICE_MRI: {"version": 20, "state": "disconnected"}}});
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &invited);
+    let older = COMMAND.replace("000000000001", "000000000002");
+    let roster = |version: u64, state: &str| {
+        let endpoint = |command: &str, joined: &str, state: &str| {
+            json!({"endpointMetadata": {"commandUrl": command, "joinTime": joined, "spokenLanguage": "en-us",
+                "processingModes": {"closedCaptions": {"state": state}}}})
+        };
+        json!({"participants": {CAPTION_SERVICE_ALTERNATE_MRI: {"state": "active", "version": version, "endpoints": {
+            "synthetic-a-older": endpoint(&older, "2026-01-01T00:00:01.25Z", "Inactive"),
+            "synthetic-b-newer": endpoint(COMMAND, "2026-01-01T00:00:02.5Z", state),
+        }}}})
+    };
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &roster(1, "Inactive"));
+    lab.wait_attempts("00000000-0000-4000-8000-000000000001", 1).await;
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &roster(2, "Active"));
+    let on = phase(&mut a, call, CaptionPhase::On).await;
+    assert!(on.error.is_none());
+    assert_eq!(on.spoken_language, "en-us");
+    assert_eq!(lab.attempts("00000000-0000-4000-8000-000000000002").await, 0);
+    let start: Value = lab
+        .mock
+        .received_requests()
+        .await
+        .iter()
+        .find(|request| request.url.path().ends_with(COMMAND_END))
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .unwrap();
+    assert_eq!(start["action"], "start");
+    assert_eq!(start["processingModes"], json!(["closedCaptions"]));
+    a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+}
+
+fn regional_entry(version: u64, command: &str, joined: &str, state: &str) -> Value {
+    json!({"version": version, "state": "active", "endpoints": {"synthetic": {"endpointMetadata": {
+        "commandUrl": command, "joinTime": joined, "spokenLanguage": "en-us",
+        "processingModes": {"closedCaptions": {"state": state}}
+    }}}})
+}
+
+/// Start with both MRIs, then activate via a delta beside the older full read. A departure in the same body as
+/// that older read hands back to it; language commands and caption media continue on the connected call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn captions_start_and_survive_a_regional_handover_in_a_combined_roster() {
+    let (lab, mut a, call) = connected().await;
+    let other_command = COMMAND.replace("000000000001", "000000000002");
+    let other_end = "/oncommand/00000000-0000-4000-8000-000000000002";
+    lab.mock.answer_next("POST", "/addParticipant", 200, &json!({})).await;
+    lab.mock.answer_next("POST", COMMAND_END, 200, &json!({})).await;
+    a.handle
+        .requests()
+        .call(CallAction::Captions { call, enabled: true })
+        .await
+        .unwrap();
+    phase(&mut a, call, CaptionPhase::Starting).await;
+    lab.wait_attempts("addParticipant", 1).await;
+    let path = callback(&lab, "rosterUpdate").await;
+    let mut body = json!({"participants": {
+        CAPTION_SERVICE_MRI: regional_entry(20, &other_command, "2026-01-01T00:00:01Z", "Active"),
+        CAPTION_SERVICE_ALTERNATE_MRI: regional_entry(1, COMMAND, "2026-01-01T00:00:02Z", "Inactive")
+    }});
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &body);
+    lab.wait_attempts("00000000-0000-4000-8000-000000000001", 1).await;
+    body["participants"][CAPTION_SERVICE_MRI]["version"] = json!(21);
+    body["participants"][CAPTION_SERVICE_ALTERNATE_MRI] = json!({"version": 2, "endpoints": {
+        "synthetic": {"endpointMetadata": {"processingModes": {"closedCaptions": {"state": "Active"}}}}
+    }});
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &body);
+    assert!(phase(&mut a, call, CaptionPhase::On).await.error.is_none());
+    body["participants"][CAPTION_SERVICE_MRI]["version"] = json!(22);
+    body["participants"][CAPTION_SERVICE_ALTERNATE_MRI] = json!({"version": 3, "state": "disconnected"});
+    let _ = lab.trouter.deliver_call(LAB_A, &path, &body);
+    // Wait for a barrier delivered by the handover itself before asking for a command to the new binding.
+    let handover = a
+        .next(|event| match event {
+            Event::CallCaptions { call: of, captions } if *of == call && captions.phase == CaptionPhase::On => {
+                Some(captions.clone())
+            }
+            _ => None,
+        })
+        .await;
+    assert!(handover.error.is_none());
+    lab.mock.answer_next("POST", other_end, 200, &json!({})).await;
+    language(&a, call, "en-gb").await;
+    lab.wait_attempts("00000000-0000-4000-8000-000000000002", 1).await;
+    assert_eq!(lab.attempts("00000000-0000-4000-8000-000000000001").await, 1);
+    let mut packets = Packetizer::new(3);
+    assert!(lab.mock.send_call_data(
+        &lab.last_call(),
+        LAB_A,
+        packet(&mut packets, "Synthetic handover caption.", true)
+    ));
+    let on = a
+        .next(|event| match event {
+            Event::CallCaptions { call: of, captions }
+                if *of == call
+                    && captions
+                        .lines
+                        .last()
+                        .is_some_and(|line| line.text == "Synthetic handover caption.") =>
+            {
+                Some(captions.clone())
+            }
+            _ => None,
+        })
+        .await;
+    assert_eq!(on.phase, CaptionPhase::On);
+    assert!(on.error.is_none());
     a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
 }

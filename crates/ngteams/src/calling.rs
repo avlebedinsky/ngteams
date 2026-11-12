@@ -5,9 +5,9 @@
 //! ([`PersonalCalls`]: the ringtone on the same devices, the test call to the echo service, a call's video, the
 //! devices the settings choose among).
 //!
-//! - **The devices** are the PipeWire the caller selects at run time ([`Reach`]): the normal app takes the
-//!   desktop's, its camera through the desktop's camera portal; sandbox runs and tests select the sandbox's private
-//!   server. Read-only startup opens no devices. Without devices the app runs without calls: no call is shown, and
+//! - **The devices** are the native backend selected by [`Reach`]: PipeWire and the camera portal on Linux,
+//!   WASAPI/Media Foundation and the system screen picker on Windows. Sandbox reach selects Linux's private server
+//!   or validates the explicitly authorized Windows VM console. Read-only startup opens no devices. Without devices the app runs without calls: no call is shown, and
 //!   the engine has no calling socket.
 //! - **The test call** goes to the echo service by its MRI from the web bundle ([`echo`],
 //!   `teams_proto::TEAMS_ECHO_BOT_MRI`), never one taken from the network or the UI.
@@ -18,10 +18,10 @@
 use std::sync::Arc;
 
 use teams_core::account::{AccountCalls, account_calls, call_video};
-use teams_media::devices::catalog::DeviceDirectory;
+use teams_media::devices::Reach;
 #[cfg(not(test))]
-use teams_media::devices::pipewire::PipeWireDevices;
-use teams_media::devices::pipewire::Reach;
+use teams_media::devices::SystemDevices;
+use teams_media::devices::catalog::DeviceDirectory;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::player::PlayerSetup;
 use teams_proto::Mri;
@@ -32,7 +32,7 @@ use teams_ui::{Ringer, VideoFeed};
 #[path = "../tests/support/calling_devices.rs"]
 mod tests;
 #[cfg(test)]
-use tests::PipeWireDevices;
+use tests::SystemDevices;
 
 /// What the window's calls are made of.
 #[derive(Clone)]
@@ -91,10 +91,10 @@ pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, video: bool) -> (Acco
 }
 
 /// The calls' devices of the app, opened once and shared by every account (`docs/personal-build.md`, "Several
-/// accounts"): the PipeWire selected by the caller.
+/// accounts"): the native devices selected by the caller.
 #[derive(Clone)]
 pub struct CallDevices {
-    devices: Arc<PipeWireDevices>,
+    devices: Arc<SystemDevices>,
     /// The app's sounds, one board for every account: one setting, one ringtone at a time.
     sounds: Arc<SoundBoard>,
 }
@@ -106,12 +106,12 @@ impl std::fmt::Debug for CallDevices {
 }
 
 impl CallDevices {
-    /// The PipeWire selected by `reach` (see the module docs).
+    /// The native devices selected by `reach` (see the module docs).
     ///
     /// # Errors
-    /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
+    /// The devices are refused or can't be reached ([`SystemDevices::connect`]).
     pub fn open(reach: Reach) -> Result<Self, DeviceError> {
-        let devices = Arc::new(PipeWireDevices::connect(reach)?);
+        let devices = Arc::new(SystemDevices::connect(reach)?);
         let shared: Arc<dyn Devices + Send + Sync> = devices.clone();
         let sounds = Arc::new(SoundBoard::new(shared));
         Ok(Self { devices, sounds })
@@ -138,10 +138,10 @@ impl CallDevices {
     }
 }
 
-/// The engine's calling and the window's calls on the PipeWire selected by `reach` (see the module docs).
+/// The engine's calling and the window's calls on the native devices selected by `reach` (see the module docs).
 ///
 /// # Errors
-/// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
+/// The devices are refused or can't be reached ([`SystemDevices::connect`]).
 pub fn open(reach: Reach) -> Result<(AccountCalls, PersonalCalls), DeviceError> {
     CallDevices::open(reach).map(|devices| devices.for_account())
 }

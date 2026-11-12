@@ -206,8 +206,15 @@ fn read_file(path: &std::path::Path) -> Result<(String, Vec<u8>), EngineError> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| failed("The file's name can't be read."))?
         .to_owned();
-    let file = std::fs::File::open(path)
-        .map_err(|_| failed("The file can't be read. Check its permissions and choose it again."))?;
+    let file = std::fs::File::open(path).map_err(|_| {
+        // Windows cannot open a directory as a file. Classify that failure without weakening the opened-handle
+        // validation below; an error-path metadata check never makes an unreadable path eligible for upload.
+        if path.is_dir() {
+            failed("Choose a file, rather than a folder.")
+        } else {
+            failed("The file can't be read. Check its permissions and choose it again.")
+        }
+    })?;
     let metadata = file.metadata().map_err(|_| failed("The file can't be read."))?;
     if !metadata.is_file() {
         return Err(failed("Choose a file, rather than a folder."));

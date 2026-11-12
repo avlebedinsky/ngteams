@@ -2,6 +2,7 @@
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
+#![cfg(unix)]
 
 use std::ffi::OsString;
 use std::fs;

@@ -340,6 +340,13 @@ v1/presence/getpresence/`, a read the web client sends as a `POST`.
   `source` when asked with it), `etagMatch`, `etag` and the item's `status`, `20000`. Every lab account was
   `Offline`/`Offline` then (nothing sets their presence yet), `lastActiveTime` `0001-01-01T00:00:00Z`.
 - **Capture scope:** the early experiments restricted requests to lab MRIs. Current reads use the typed UPS entry with no participant-policy classifier ([chat-service.md](chat-service.md#the-presence-read)).
+- **Last seen and out of office** (lab capture of 2026-11-11, the profile card): `lastActiveTime` is an RFC 3339 UTC
+  time (`2026-11-11T14:15:38.438Z`) once the account has been active, `0001-01-01T00:00:00Z` for one never seen; the
+  web card's "Last seen 4 hours ago" is `Offline` with a `lastActiveTime` four hours back, and plain "Offline" with the
+  never value. `calendarData.isOutOfOffice` is a boolean (only `false` captured). Both come in the read's answer and
+  in every push alike; the native client reads them into `UserPresence::last_active_ms` (the never value as none) and
+  `UserPresence::out_of_office`, in the read and the push (`UserPresence::of_pushed`), and the profile card shows them
+  ([loki.md](loki.md#with-presence-and-the-short-profile)).
 - **The native client** sends it as `PresenceRead`, a typed `PostRead` through the protocol transport (debug wire logged), by
   MRI alone (`[{"mri": …}]`, never `source`), with the captured header values and its own non-CAE presence token,
   which UPS took (the retired native probe, 2026-10-23: two reads, `Offline` for b and c;
@@ -377,7 +384,8 @@ presence deliveries) and the web bundle `26260.1717.5229.7049` (read locally; no
   `0`; the body a JSON string of `{"presence": [{"mri", "etag", "source"?, "presence": {"sourceNetwork",
   "calendarData", "capabilities", "availability", "activity", "lastActiveTime"?, "deviceType"?}}]}`, with
   `"isSnapshot": true` on the snapshot UPS sends right after a subscription (everyone it named, as they are), and
-  without it on each change (`Available`, `Busy`/`InACall` during a call, `Offline`). The same change often came
+  without it on each change (`lastActiveTime` and `calendarData.isOutOfOffice` in the read's forms,
+  [above](#others-presence)) (`Available`, `Busy`/`InACall` during a call, `Offline`). The same change often came
   several times over within a run. The `etag` grows with time.
 - **No answer needed**: the web client answers every delivery (`3:::{"id",…,"status":200}`), but in the runs of
   2026-10-23 to 2026-10-26 the fence held back most of those answers (2764 of the 2971 deliveries went unanswered),

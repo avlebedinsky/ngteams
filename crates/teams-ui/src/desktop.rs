@@ -20,7 +20,8 @@
 //!   the main window's settings on their Calls page for its account. The app stays while it is open: the main window
 //!   closed without a tray item to stay in quits only once the call window is closed too.
 //! - [`Desktop::connect`] connects to the bus the app is given ([`crate::bus`]) and puts the notifications and the
-//!   tray item on it; without one, neither is there and nothing else is tried.
+//!   tray item on it; without one, neither is there and nothing else is tried. On Windows it instead connects to
+//!   the native shell in the current interactive session, without reading or reaching a D-Bus address.
 //!
 //! - **Several accounts** ([`Desktop::add_account`], [`Desktop::remove_account`]): each account has its own notifier,
 //!   call alert and own presence, all live at once, so every account notifies and rings whichever one the window
@@ -41,26 +42,38 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[cfg(unix)]
 use futures_util::StreamExt as _;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, Task, WeakEntity,
     Window, WindowHandle, WindowId,
 };
+#[cfg(unix)]
 use tokio::sync::mpsc;
+#[cfg(unix)]
 use zbus::Connection;
 
 use crate::accounts::{AccountParts, Accounts, AccountsEvent};
-use crate::bus::{self, BusError};
+#[cfg(unix)]
+use crate::bus;
+use crate::bus::BusError;
 use crate::call_alert::{CallAlert, CallAlertEvent};
 use crate::call_sounds::CallSounds;
 use crate::call_window::{AccountNamer, CallWindows, CallWindowsEvent};
-use crate::notify::{BusNotifications, DEFAULT_ACTION, NotificationServer, Notifier, NotifierEvent};
+#[cfg(unix)]
+use crate::notify::BusNotifications;
+use crate::notify::{DEFAULT_ACTION, NotificationServer, Notifier, NotifierEvent};
 use crate::own_presence::OwnPresence;
 use crate::ringtone::Ringer;
 use crate::settings_view::Page;
 use crate::shell::{Main, Shell, ShellParts};
 use crate::trace::{TraceLine, ViewTrace};
-use crate::tray::{BusTray, Hosted, Tray, TrayEvent};
+#[cfg(unix)]
+use crate::tray::{BusTray, Hosted};
+use crate::tray::{Tray, TrayEvent};
+
+#[cfg(windows)]
+mod windows;
 use crate::view::Root;
 use crate::window::{self, KitRoot};
 
@@ -148,13 +161,21 @@ pub struct Desktop {
     tray: Entity<Tray>,
     in_tray: bool,
     /// The connection to the bus the app is given, kept for the notifications and the tray item on it.
+    #[cfg(unix)]
     bus: Option<Connection>,
+    #[cfg(windows)]
+    native_tray: Option<Arc<windows::tray::NativeTray>>,
     /// The bus's notification server, for an account added once it is up.
     server: Option<Arc<dyn NotificationServer>>,
     /// The call's own window.
     call_windows: Entity<CallWindows>,
     _subscriptions: [Subscription; 3],
 }
+
+// Public only in the library's test image: the integration fixture compiles the same transport source and uses
+// these hooks. Reachability keeps the complete lib-test target lintable without suppressing unused test code.
+#[cfg(all(test, windows))]
+pub use windows::tray::NativeTray as NativeTrayTest;
 
 impl EventEmitter<DesktopEvent> for Desktop {}
 
@@ -229,7 +250,10 @@ impl Desktop {
             accounts,
             tray,
             in_tray: false,
+            #[cfg(unix)]
             bus: None,
+            #[cfg(windows)]
+            native_tray: None,
             server: None,
             call_windows,
             _subscriptions: [asking, closing, calling],
@@ -614,6 +638,8 @@ impl Desktop {
             .ok()
             .flatten()
             .map(|root| root.downgrade());
+        #[cfg(windows)]
+        self.sync_native_window(cx);
         cx.notify();
         Ok(window)
     }
@@ -697,6 +723,8 @@ impl Desktop {
         }
         self.window = None;
         self.root = None;
+        #[cfg(windows)]
+        self.sync_native_window(cx);
         self.parts.shell.trace.record(&TraceLine::new("window", "closed"));
         cx.notify();
         // a call's window keeps the app until it closes too
@@ -738,6 +766,7 @@ impl Desktop {
     /// Connects to the bus at `address` (the one the app is given, [`bus::address_from_env`]) and puts the
     /// notifications and the tray item on it. The task ends once both are up or have failed, with what failed (the
     /// app reports it); without an address nothing is connected to.
+    #[cfg(unix)]
     pub fn connect(&mut self, address: Result<String, BusError>, cx: &mut Context<Self>) -> Task<Vec<String>> {
         let app_id = self.parts.app_id;
         let app_name = self.parts.app_name.to_string();
@@ -758,6 +787,43 @@ impl Desktop {
             let _ = this.update(cx, |this, _| this.bus = Some(connection));
             problems
         })
+    }
+
+    /// Connects to Windows' shell in this process's interactive session. D-Bus addresses have no role here.
+    #[cfg(windows)]
+    pub fn connect(&mut self, address: Result<String, BusError>, cx: &mut Context<Self>) -> Task<Vec<String>> {
+        // A deterministic GPUI model test must never post into the machine's real shell. Native fixtures use
+        // their explicit VM-console runner and the actual shell transports instead.
+        if cx.is_test() {
+            let problem = address.err().map_or_else(
+                || "native desktop is not opened by a deterministic UI test".to_owned(),
+                |error| error.to_string(),
+            );
+            return cx.spawn(async move |_, _| vec![problem]);
+        }
+        let (app_id, app_name) = (self.parts.app_id.to_owned(), self.parts.app_name.to_string());
+        let with_tray = !self.parts.shell.core.read_only();
+        cx.spawn(async move |this, cx: &mut AsyncApp| windows::connect(this, app_id, app_name, with_tray, cx).await)
+    }
+
+    /// Keep the native taskbar target current when closing to tray and opening a new GPUI window.
+    #[cfg(windows)]
+    fn sync_native_window(&self, cx: &mut App) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let hwnd = self.window.and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| {
+                    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get().cast_unsigned()),
+                        _ => None,
+                    }
+                })
+                .ok()
+                .flatten()
+        });
+        if let Some(tray) = &self.native_tray {
+            tray.set_window(hwnd);
+        }
     }
 
     /// Hands a notification server (the bus's, once it is up; a test's fake) to every account's notifier and call
@@ -796,6 +862,7 @@ fn hand_server(slot: &Slot, server: &Arc<dyn NotificationServer>, cx: &mut App) 
 
 /// The notifications on `connection`: the server handed to every account's notifier and call alert, each activation
 /// to the call alert whose it is, else (its body's) to the notifier whose it is.
+#[cfg(unix)]
 async fn notifications(
     this: &WeakEntity<Desktop>,
     connection: &Connection,
@@ -821,6 +888,7 @@ async fn notifications(
 }
 
 /// The tray item on `connection`: shown the unread total, its asks handed to the desktop.
+#[cfg(unix)]
 async fn tray(
     this: &WeakEntity<Desktop>,
     connection: &Connection,

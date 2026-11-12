@@ -7,7 +7,7 @@
 
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, rgb,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
@@ -160,8 +160,9 @@ impl CalendarView {
         let face = Button::new("calendar-meet-now")
             .ghost()
             .icon(Glyph::VIDEO.icon())
-            .label("Meet now")
+            .when(!self.compact_toolbar(), |button| button.label("Meet now"))
             .tooltip("Start a meeting now")
+            .accessibility_label("Start a meeting now")
             .disabled(read_only)
             .on_click(cx.listener(|this, _, window, cx| this.open_meet_now(window, cx)));
         let more = Button::new("calendar-meet-now-more")

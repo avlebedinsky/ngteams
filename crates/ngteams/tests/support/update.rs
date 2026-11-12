@@ -9,7 +9,7 @@ use std::rc::Rc;
 use gpui::TestAppContext;
 use teams_ui::update::{self as button, UpdateStatus, Waiting};
 use teams_update::fakes::{Feed, Reply, archive_bytes, program, publish, tree};
-use teams_update::{Format, IDENTITY, Installation, Places, Source, Version};
+use teams_update::{Format, IDENTITY, Installation, Places, Restart, Source, Version};
 
 use super::{Started, Updater, check, percent, start, updating_build};
 
@@ -30,7 +30,7 @@ fn places(executable: PathBuf, home: &Path) -> Places {
 /// A test's app: the updater over `installation` and `feed`, what holds its restart up in `holds`, and what it asked
 /// of `main` and of the quit.
 struct App {
-    restart: Rc<Cell<Option<PathBuf>>>,
+    restart: Rc<Cell<Option<Restart>>>,
     quits: Rc<Cell<u32>>,
     holds: Rc<Cell<Option<Waiting>>>,
 }
@@ -104,7 +104,10 @@ fn a_newer_release_shows_the_button_whose_press_installs_it_and_restarts(cx: &mu
     assert_eq!(status(cx), UpdateStatus::Available("0.1.0.7".into()));
     assert_eq!(pressed(cx), None);
     assert_eq!(fs::read_to_string(root.join(IDENTITY)).unwrap(), "0.1.0.7\n");
-    assert_eq!(app.restart.take(), Some(root.join("usr/bin/ngteams")));
+    assert_eq!(
+        app.restart.take().map(|restart| restart.program),
+        Some(root.join("usr/bin/ngteams"))
+    );
     assert_eq!(app.quits.get(), 1, "the app quits for its restart");
     assert_eq!(status(cx), UpdateStatus::Installing("0.1.0.7".into()));
     // no check while the update is in
@@ -213,7 +216,7 @@ fn a_closed_password_prompt_keeps_the_download_for_the_next_press(cx: &mut TestA
     assert_eq!(pressed(cx), None);
     assert_eq!(app.quits.get(), 1);
     assert_eq!(
-        app.restart.take(),
+        app.restart.take().map(|restart| restart.program),
         Some(fs::canonicalize(root.join("usr/bin/ngteams")).unwrap())
     );
     // the package manager failing: said, nothing kept
@@ -311,7 +314,7 @@ fn a_hold_arriving_during_the_package_prompt_waits_for_a_restart_without_reinsta
         assert_eq!(pressed(cx), None);
         assert_eq!(app.quits.get(), 1, "a second press while quitting does nothing");
         assert_eq!(
-            app.restart.take(),
+            app.restart.take().map(|restart| restart.program),
             Some(fs::canonicalize(root.join("usr/bin/ngteams")).unwrap())
         );
     }

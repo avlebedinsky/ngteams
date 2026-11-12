@@ -2,6 +2,9 @@
 //! checksum): dropping the runtime would wait for it, with every later signal caught. A test binary of its own, since
 //! it signals its own process and another test listening for signals would hear it.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::time::{Duration, Instant};
 
 use proto_lab::stop::{Stopped, after_stop, until_stopped};

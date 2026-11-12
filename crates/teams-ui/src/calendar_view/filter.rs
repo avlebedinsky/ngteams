@@ -169,18 +169,21 @@ impl CalendarView {
                 .ghost()
                 .selected(hidden.any())
                 .tooltip(tip)
+                .accessibility_label(tip)
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
                         .child(Glyph::LIST_FILTER.icon().size(px(16.0)))
-                        .child("Filter")
+                        .when(!self.compact_toolbar(), |face| face.child("Filter"))
                         // "Filter applied" is told by its mark: the toolbar has no room for the longer words
                         .when(hidden.any(), |face| {
                             face.child(div().size(px(6.0)).rounded_full().bg(rgb(palette.brand)))
                         })
-                        .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                        .when(!self.compact_toolbar(), |face| {
+                            face.child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)))
+                        }),
                 )
                 .dropdown_menu(move |menu, _, _| filter_items(menu, &view, hidden, palette)),
         )

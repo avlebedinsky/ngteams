@@ -428,6 +428,47 @@ async fn a_meetings_start_targets_its_chat_names_nobody_and_carries_its_organize
 }
 
 #[tokio::test]
+async fn a_meeting_code_start_resolves_the_invitation_without_inventing_a_chat() {
+    // Synthetic invitation; this test sends only to the local mock.
+    let code = teams_proto::MeetingCode::typed("123456789012", "MadeUp").unwrap();
+    let parts = start_parts(PUSH_A, LAB_A, None);
+    let start = StartCall::by_code(&context(), &parts, &code).unwrap();
+    let lab = lab(LAB_A).await;
+    lab.answers("POST", CALL_START_URL, conversation_answer("SyntheticCode"))
+        .await;
+    let (_, request) = lab.send(start).await;
+    let sent: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(sent["participants"]["to"], json!([]));
+    assert_eq!(sent["conversationRequest"]["suppressDialout"], true);
+    assert_eq!(sent["groupChat"], Value::Null);
+    assert_eq!(sent["meetingInfo"], Value::Null);
+    assert_eq!(
+        sent["meetingData"],
+        json!({
+            "meetingCode": "123456789012", "passcode": "MadeUp",
+            "meetingUrl": "https://teams.microsoft.com/meet/123456789012?p=MadeUp",
+        })
+    );
+    assert_eq!(sent["meetingPreferences"], json!({"shouldResurrect":"resurrect"}));
+    assert_eq!(
+        sent["callInvitation"]["mediaContent"]["contentType"],
+        "application/sdp-ngc-1.0"
+    );
+    for invalid in [
+        teams_proto::MeetingCode {
+            id: "wrong".into(),
+            passcode: "MadeUp".into(),
+        },
+        teams_proto::MeetingCode {
+            id: code.id,
+            passcode: "a&b".into(),
+        },
+    ] {
+        assert!(StartCall::by_code(&context(), &parts, &invalid).is_err());
+    }
+}
+
+#[tokio::test]
 async fn a_channels_meet_now_subscribes_on_its_team_then_enters_as_its_organizer() {
     let parts = start_parts(PUSH_A, LAB_A, None);
     let subscribe = StartCall::meet_now(&context(), &parts, CHANNEL).unwrap();

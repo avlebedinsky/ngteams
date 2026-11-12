@@ -631,10 +631,7 @@ fn an_emoticon_keeps_its_place_in_the_text_and_a_pasted_picture_is_a_block() {
     assert_eq!(picture.fallback.links[0].href, link);
 
     let last = text_block(&rendered, 3);
-    assert_eq!(
-        last.text,
-        format!("7 made-up cards added{}", rich_text::EMOTICON_PLACE)
-    );
+    assert_eq!(last.text, format!("7 made-up cards added{}", rich_text::EMOTICON_PLACE));
     assert_eq!(last.emoticons.len(), 1);
     assert_eq!(last.emoticons[0].id, "speechless");
     assert_eq!(&last.text[last.emoticons[0].range.clone()], rich_text::EMOTICON_PLACE);

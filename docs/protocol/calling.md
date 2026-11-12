@@ -213,6 +213,13 @@ the mixer's control plane, the media descriptions and the bandwidth seed) and th
   module as the far end.
 - **The video switch**: the settings' "Video in calls" (on by default; off, a call starts no video).
 
+With no audio endpoints in the Windows VM, browser Teams reports an empty media-device list, starts a 1:1 call with
+the microphone muted, and continues to the callee's voicemail routing. The observed browser call later reported a
+lost connection; this establishes its initial device handling, not sustained connected media. The native session
+likewise opens audio devices independently: a microphone that cannot open sends no substitute audio and stays muted;
+a missing speaker does not stop decoding received audio or video, and decoded audio is never counted as played.
+An explicit unmute retries missing devices off the engine thread, preserving streams that are already running.
+
 ### Native video
 
 A 1:1 call's video in the native client (M3 Task 18), as the web client's camera-on flow above shows it:
@@ -394,18 +401,24 @@ A link with no thread or organizer (`https://teams.microsoft.com/meet/<code>?p=<
 page read `GET …/api/mt/part/<partition>/beta/meetings/identifiers?meetingId=&passcode=&link=` (it answered
 `{"tenantId": ""}`) and subscribed and started by `meetingData: {meetingCode, passcode, meetingUrl}` and
 `meetingPreferences: {shouldResurrect: "resurrect"}`, `groupChat` and `meetingInfo` both `null` (its start with media
-the same, with a `callInvitation`). The native client does not implement that direct short-link start: a calendar event with such a link names its chat (`skypeTeamsData`'s `cid`), and the meeting's chat's thread
-names its organizer and tenant (`GET chatsvc v1/threads/<chat>?view=msnp24Equivalent`, `properties.meeting`: a JSON
-object as text with `organizerId`, `tenantId`, `subject`, `meetingJoinUrl`, `meetingType`, `startTime`; seen
-2026-11-02, `meeting-steps`, and in `ab-meeting-join`'s web client, which reads the same batch form), so it joins by
-the chat as above (`teams_proto::MeetingThread`). The meeting chat's header does the same for its Join, as Teams'
-header has it whether the meeting started or not. "Join with an ID" finds the meeting among the calendar's events by
-the ID and passcode their short link carries (`MeetingCode`) and joins it so; an ID the calendar doesn't have is looked
-for among the account's meeting chats (the newest 40 the chat list holds), each one's thread read for its join link
-(`MeetingThread`'s `meetingJoinUrl`), then joined by its chat as above. Direct joining by `meetingData` alone is not
-implemented. A meeting that cannot be resolved through a calendar event or an account-visible meeting chat is not
-joined by this flow. The 2026-11-03 native probe found that scheduling-form meetings' threads name the long
-`meetup-join` link; only a thread naming a short link can be found by its numeric ID this way.
+the same, with a `callInvitation`). The native client uses the same short-link start with media when Join with an ID
+cannot identify a calendar entry: `StartCall::by_code`, through `CallAction::JoinMeetingCode` and the ordinary outbox. The pre-join sends no
+subscription or call; only its explicit Join now sends the start. `meetingData` carries the numeric `meetingCode`,
+`passcode` and short `meetingUrl`, `meetingPreferences.shouldResurrect` is `resurrect`, `groupChat` and `meetingInfo`
+are null, and `participants.to` is empty with `suppressDialout: true`. The call service resolves the invitation,
+returns its conversation and accepts media as for a chat-based meeting start. No organizer or chat is fabricated.
+Once the service supplies an invitation with its full reference link, the call binds that exact thread for captions,
+recording and organizer controls; the UI also recovers the reference link's organizer and tenant for meeting options
+and Rejoin.
+
+A calendar event with a short link can already name its chat (`skypeTeamsData`'s `cid`). That chat's thread names its
+organizer and tenant (`GET chatsvc v1/threads/<chat>?view=msnp24Equivalent`, `properties.meeting`: JSON as text with
+`organizerId`, `tenantId`, `subject`, `meetingJoinUrl` and `meetingType`). Those meetings and the chat header's Join
+keep using `StartCall::in_meeting`. Looking up a numeric ID by scanning chat links is insufficient: an inactive
+Meet now meeting's thread can carry a long `meetup-join` link, null `meetingData` and no live-state property. The
+short-link resolution capture reached that exact meeting's browser pre-join; its identifier read returned only an
+empty `tenantId`, while the code-based conversation subscription resolved its organizer, tenant and meeting data.
+The native route consequently does not require a matching short link in the sidebar.
 
 **A channel's meeting**: see [A channel's meeting](#a-channels-meeting).
 
@@ -1014,7 +1027,8 @@ the web client sends each change with the other two timers as last told and, aft
 carry `meetingDetails.invitation`: the meeting's invitation, form-encoded HTML, whose anchors
 `meet_invite_block.action.join_link`, `…help` and `…join_link_compatibility` and its "Meeting ID:" and "Passcode:"
 lines are what Meeting info shows (its join link's `p` is not the passcode). A recording shows in the roster:
-Microsoft's recording bot (`28:bdd75849-…`, no display name) joins, its endpoint's
+Microsoft's recording bot (`28:bdd75849-…`, or its other region's MRI: [live-captions.md](live-captions.md#which-participant-and-endpoint-is-the-service); no display
+name) joins, its endpoint's
 `endpointMetadata.processingModes.recording` `{"state": "Active", "userId": <who started it>}` while it records
 (`Inactive`, `userId` empty once stopped), and `meetingStates.cloudRecording.value.State` says the same.
 

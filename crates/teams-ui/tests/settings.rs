@@ -6,7 +6,8 @@
 #![cfg(test)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, TestAppContext};
@@ -15,16 +16,33 @@ use teams_media::video::effects::{Backdrop, Background};
 use teams_ui::local_ai::ToolChoice as TranslatorChoice;
 use teams_ui::local_ai::{AiChoice, Model};
 use teams_ui::settings::{
-    AccountSettings, DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications,
-    Problem, Settings, SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
+    AccountSettings, DEFAULT_IDLE_MINUTES, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings,
+    SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
 };
 use teams_ui::theme::{self, Appearance, THEMES};
 use teams_ui::translate::Backend;
 
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 
-fn mode(path: &Path) -> u32 {
-    fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+/// Give an unrelated user access so the application's load/save must tighten the native descriptor.
+fn loosen(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = if path.is_dir() { 0o755 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        // Change only the DACL: round-tripping Get-Acl's full descriptor can try to write the mandatory label
+        // and require SeSecurityPrivilege, unrelated to this synthetic access-grant contract.
+        let result = std::process::Command::new("icacls.exe")
+            .arg(path)
+            .args(["/grant", "*S-1-1-0:(F)", "/q"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
 }
 
 /// The settings file of lab account a under `dir`, as the lab app keeps it.
@@ -221,8 +239,8 @@ fn saved_settings_are_read_back_from_a_private_file_in_a_private_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (file, path) = file_in(&dir);
     file.save(&changed()).expect("saved");
-    assert_eq!(mode(&path), FILE_MODE);
-    assert_eq!(mode(path.parent().expect("dir")), DIR_MODE);
+    privacy::assert_private(&path, false);
+    privacy::assert_private(path.parent().expect("dir"), false);
     let loaded = file.load();
     assert_eq!(loaded.settings, changed());
     assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
@@ -320,10 +338,10 @@ fn a_file_readable_by_others_is_tightened_when_read() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (file, path) = file_in(&dir);
     file.save(&changed()).expect("saved");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("loosened");
+    loosen(&path);
     let loaded = file.load();
     assert_eq!(loaded.settings, changed());
-    assert_eq!(mode(&path), FILE_MODE);
+    privacy::assert_private(&path, false);
 }
 
 #[test]
@@ -332,9 +350,9 @@ fn a_save_tightens_a_directory_open_to_others() {
     let (file, path) = file_in(&dir);
     let parent = path.parent().expect("dir");
     fs::create_dir_all(parent).expect("dir");
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).expect("loosened");
+    loosen(parent);
     file.save(&Settings::default()).expect("saved");
-    assert_eq!(mode(parent), DIR_MODE);
+    privacy::assert_private(parent, false);
 }
 
 #[gpui::test]
@@ -367,11 +385,11 @@ fn the_model_writes_each_change_at_once_and_only_a_change(cx: &mut TestAppContex
 #[gpui::test]
 fn a_save_that_fails_is_reported_and_the_change_holds(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
-    // no file yet (the defaults, no problem), and its directory can't be made: the parent is read-only
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).expect("read-only");
+    // No file yet (defaults, no problem). A plain file then obstructs creation of the settings directory.
     let (file, path) = file_in(&dir);
     let model = cx.new(|_| SettingsModel::load(file));
     assert!(cx.read(|cx| model.read(cx).problems().is_empty()));
+    fs::write(path.parent().unwrap(), "synthetic obstruction").unwrap();
     cx.update(|cx| model.update(cx, |model, cx| model.change(|settings| settings.idle_minutes = 30, cx)));
     let unsaved = |model: &SettingsModel| {
         model
@@ -389,7 +407,7 @@ fn a_save_that_fails_is_reported_and_the_change_holds(cx: &mut TestAppContext) {
     cx.update(|cx| model.update(cx, |model, cx| model.change(|settings| settings.idle_minutes = 60, cx)));
     assert_eq!(cx.read(|cx| unsaved(model.read(cx))), 1);
     assert!(!path.exists());
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("writable again");
+    fs::remove_file(path.parent().unwrap()).unwrap();
 }
 
 #[gpui::test]
@@ -1026,4 +1044,18 @@ fn people_s_calendars_are_kept_by_account_and_a_bad_one_left_out() {
     assert_eq!(read.people_calendars[1].name, "riley@example.com");
     assert_eq!(parse(&render(&read)).unwrap().0.people_calendars, read.people_calendars);
     assert_eq!(parse("people_calendars = 3").unwrap().1.len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn reading_preserves_unix_modes_that_already_exclude_other_users() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (file, path) = file_in(&dir);
+    file.save(&changed()).unwrap();
+    for mode in [0o400, 0o600, 0o700] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(file.load().settings, changed());
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+    }
 }

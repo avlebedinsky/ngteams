@@ -4,13 +4,16 @@
 
 #![cfg(test)]
 
+#[path = "support/fake_tool.rs"]
+#[expect(dead_code, reason = "the shared fake CLI helper serves several test harnesses")]
+mod fake_tool;
+
 #[expect(dead_code, reason = "the shared stand-ins hold more than this test uses")]
 mod common;
 #[path = "common/parts.rs"]
 mod parts;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,14 +65,12 @@ impl Fake {
 
     fn with(body: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("claude");
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fake_tool::write(dir.path(), "claude", body);
         Self { dir }
     }
 
     fn program(&self) -> PathBuf {
-        self.dir.path().join("claude")
+        fake_tool::program(self.dir.path(), "claude")
     }
 
     fn install(&self, rig: &Rig) {

@@ -4,7 +4,7 @@
 import argparse
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import sys
 import tomllib
 
@@ -44,10 +44,15 @@ def percentage(counts):
     return 100 * counts["covered"] / counts["count"] if counts["count"] else None
 
 
-def reviewed_sources(config, expected):
+def reviewed_sources(config, expected, platform):
     """Accept only individually reviewed, unchanged sources with no LLVM mapping."""
     reviewed = {}
-    for relative, audit in config.get("unmapped_sources", {}).items():
+    audits = dict(config.get("unmapped_sources", {}))
+    for relative, audit in config.get(f"unmapped_sources_{platform}", {}).items():
+        if relative in audits:
+            raise ValueError(f"duplicate unmapped-source review: {relative}")
+        audits[relative] = audit
+    for relative, audit in audits.items():
         path = (ROOT / relative).resolve()
         if path not in expected:
             continue
@@ -62,11 +67,25 @@ def reviewed_sources(config, expected):
     return reviewed
 
 
-def collect(report, expected, metrics):
+def collect(report, expected, metrics, source_root=None, platform=None):
+    path_type = PureWindowsPath if platform == "windows" else PurePosixPath
+    if source_root and not path_type(source_root).is_absolute():
+        raise ValueError("LLVM source root must be absolute")
     files = {}
     for unit in report["data"]:
         for entry in unit["files"]:
-            path = Path(entry["filename"])
+            filename = entry["filename"]
+            if source_root:
+                # Rebase only an explicitly named checkout. Do not match a suffix from another crate/vendor.
+                remote = path_type(filename)
+                try:
+                    relative = remote.relative_to(path_type(source_root))
+                except ValueError:
+                    continue
+                if ".." in relative.parts:
+                    raise ValueError(f"parent traversal in LLVM source path: {filename}")
+                filename = ROOT.joinpath(*relative.parts)
+            path = Path(filename)
             path = (path if path.is_absolute() else ROOT / path).resolve()
             if path not in expected:
                 continue
@@ -90,12 +109,14 @@ def summarize(args, config, crates, selected):
         for name in selected
     }
     expected = {path for paths in inventory.values() for path in paths}
-    reviewed = reviewed_sources(config, expected)
+    platform = getattr(args, "platform", "windows" if sys.platform == "win32" else "linux")
+    reviewed = reviewed_sources(config, expected, platform)
     report = json.loads(args.report.read_text())
     if report.get("type") != "llvm.coverage.json.export":
         raise ValueError("expected LLVM coverage JSON export")
-    files = collect(report, expected, metrics)
-    result = {"target": config["target"], "packages": selected, "crates": {}, "gaps": []}
+    files = collect(report, expected, metrics, getattr(args, "source_root", None), platform)
+    result = {"target": config["target"], "platform": platform,
+              "packages": selected, "crates": {}, "gaps": []}
     failures = []
     for name in selected:
         totals = {metric: {"count": 0, "covered": 0} for metric in metrics}
@@ -164,6 +185,9 @@ def main():
     report.add_argument("--output", type=Path, required=True)
     report.add_argument("--packages", nargs="+", required=True)
     report.add_argument("--top", type=int, default=20)
+    report.add_argument("--platform", choices=["linux", "windows"],
+                        default="windows" if sys.platform == "win32" else "linux")
+    report.add_argument("--source-root", help="original checkout root when auditing an export on another machine")
     gate = report.add_mutually_exclusive_group()
     gate.add_argument("--no-gate", action="store_true")
     gate.add_argument("--require-target", action="store_true")

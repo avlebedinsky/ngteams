@@ -18,6 +18,7 @@
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
+#![cfg(unix)]
 
 use std::collections::HashMap;
 use std::os::unix::net::UnixListener;

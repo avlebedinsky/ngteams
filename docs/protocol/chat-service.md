@@ -40,7 +40,7 @@ policy. Lab reach is checked by the agent before a live run ([lab-rules.md](../l
 | `19:<id>@thread.v2` | a group chat; `19:meeting_<id>@thread.v2` is a meeting's chat |
 | `19:<id>@thread.tacv2`, `19:<id>@thread.skype` | a team's channel (the team's General channel has the team's id) |
 | `<channel id>;messageid=<root id>` | a reply chain in a channel (the client joins the root message id to the conversation id) |
-| `48:notes`, `48:…` | the user's own streams (notes, notifications, mentions, call logs) |
+| `48:notes`, `48:…` | the user's own streams (notes, notifications, mentions, call logs, thread index) |
 | `8:orgid:<oid>` | a work account's MRI; `28:<id>` a bot |
 
 `teams_proto` owns `Mri` and the chat/team/meeting ID helpers. A chat ID is either the 1:1 form naming two distinct
@@ -145,7 +145,8 @@ The first run that let it through (`ab-chat` of 2026-10-22) sent 14 of them, eac
 was 200 and named only the accounts asked for: a list of one item per MRI (`mri`, `presence` with `sourceNetwork`
 (`Self` for the account's own, `SameEnterprise` for another), `calendarData` (`isOutOfOffice`), `capabilities`,
 `availability`, `activity`, `lastActiveTime`, and `source` when asked with it), `etagMatch`, `etag`, and the item's
-`status` `20000`) ([trouter.md](trouter.md#others-presence)).
+`status` `20000`) ([trouter.md](trouter.md#others-presence)). `PresenceRead` reads `availability`, `activity`,
+`lastActiveTime` (as ms; `0001-01-01T00:00:00Z`, never active, as none) and `calendarData.isOutOfOffice`.
 
 ### The native client's reads by POST
 

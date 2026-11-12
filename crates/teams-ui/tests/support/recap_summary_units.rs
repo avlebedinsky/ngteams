@@ -1,8 +1,11 @@
 //! The recap's AI summary: its input, its sections, the answer read, the chat message and the clipboard's text, the
 //! cache's files, and whole summaries made by fake `claude` and `codex` scripts (synthetic transcripts only).
 
+use crate::fake_tool;
+#[path = "../../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -179,7 +182,7 @@ fn a_summarys_file_is_named_by_a_hash_and_read_back() {
     assert_eq!(name.len(), 64 + ".json".len());
     assert!(!name.contains("RECORDING"));
     write_private(&file, &serde_json::to_vec(&made()).unwrap()).unwrap();
-    assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    privacy::assert_private(&file, false);
     let read: Made = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert_eq!(read, made());
 }
@@ -206,10 +209,7 @@ while IFS= read -r line; do
 done
 "#
     );
-    let path = dir.join("claude");
-    fs::write(&path, body).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    fake_tool::write(dir, "claude", &body)
 }
 
 fn quick() -> Limits {
@@ -359,9 +359,7 @@ while IFS= read -r line; do
 done
 "#
     );
-    let program = dir.path().join("codex");
-    fs::write(&program, body).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let program = fake_tool::write(dir.path(), "codex", &body);
     let job = Summarizing::start(Request {
         backend: Backend::Codex,
         program,
@@ -394,12 +392,7 @@ done
 #[test]
 fn a_tool_signed_out_slow_or_gone_says_so() {
     let dir = tempfile::tempdir().unwrap();
-    let fake = |name: &str, body: &str| {
-        let path = dir.path().join(name);
-        fs::write(&path, format!("#!/bin/bash\n{body}")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    };
+    let fake = |name: &str, body: &str| fake_tool::write(dir.path(), name, body);
     let run = |program: PathBuf, limits: Limits| {
         let job = Summarizing::start(Request {
             backend: Backend::Claude,
@@ -434,13 +427,11 @@ fn a_tool_signed_out_slow_or_gone_says_so() {
 #[test]
 fn dropping_a_summary_being_made_ends_its_tool() {
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("claude");
-    fs::write(
-        &program,
-        "#!/bin/bash\necho \"$$\" > \"$(dirname \"$0\")/pid\"\nwhile read -r line; do :; done\n",
-    )
-    .unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let program = fake_tool::write(
+        dir.path(),
+        "claude",
+        "echo \"$$\" > \"$(dirname \"$0\")/pid\"\nwhile read -r line; do :; done\n",
+    );
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
         program,
@@ -456,8 +447,12 @@ fn dropping_a_summary_being_made_ends_its_tool() {
         assert!(Instant::now() < deadline, "the tool never started");
         thread::sleep(Duration::from_millis(10));
     };
+    assert!(
+        fake_tool::running(&pid),
+        "the fake process is alive before cancellation"
+    );
     drop(job);
-    while Path::new(&format!("/proc/{pid}")).exists() {
+    while fake_tool::running(&pid) {
         assert!(Instant::now() < deadline, "the tool still runs");
         thread::sleep(Duration::from_millis(20));
     }

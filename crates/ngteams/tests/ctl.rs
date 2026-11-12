@@ -12,12 +12,17 @@ mod ctl_support;
 use std::cell::Cell;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
+#[expect(dead_code, reason = "this transport fixture only binds inactive listeners")]
+#[path = "support/transport.rs"]
+mod transport;
 use std::path::Path;
 use std::rc::Rc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use transport::{Listener, Stream};
 
 use ctl_support::{UPN, WAIT, connect, launched, launched_with, pump_until_done, pumped, quit, socket_in};
 use gpui::TestAppContext;
@@ -42,7 +47,7 @@ fn status(cx: &TestAppContext, socket: &Path) -> teams_ctl::protocol::AppStatus 
 fn raw(cx: &TestAppContext, socket: &Path, lines: &'static [&'static str]) -> Vec<ResponseLine> {
     let socket = socket.to_owned();
     pumped(cx, move || {
-        let mut stream = UnixStream::connect(&socket).unwrap();
+        let mut stream = transport::connect(&socket).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         lines
@@ -65,9 +70,11 @@ fn hello_tells_the_app_s_version_and_another_protocol_is_refused() {
     let _launched = launched(&cx, dir.path(), &socket);
 
     // the socket is the user's alone: 0600 in a 0700 directory made for it
-    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&socket), 0o600);
-    assert_eq!(mode(socket.parent().unwrap()), 0o700);
+    #[cfg(unix)]
+    {
+        privacy::assert_private(&socket, false);
+        privacy::assert_private(socket.parent().unwrap(), false);
+    }
 
     let path = socket.clone();
     let hello = pumped(&cx, move || connect(&path).map(|client| client.hello().clone())).unwrap();
@@ -157,7 +164,7 @@ fn a_malformed_line_is_a_bad_request_and_the_connection_goes_on() {
 }
 
 /// The answer line the server writes next on `reader`.
-fn answer_on(reader: &mut BufReader<UnixStream>) -> ResponseLine {
+fn answer_on(reader: &mut BufReader<Stream>) -> ResponseLine {
     let mut answer = String::new();
     reader.read_line(&mut answer).unwrap();
     serde_json::from_str(&answer).unwrap()
@@ -172,7 +179,7 @@ fn a_line_not_utf8_or_over_the_cap_is_a_bad_request_from_the_listener() {
     let (jobs, asked) = async_channel::unbounded::<Job>();
     let mut listener = ngteams::ctl::bind(&socket).unwrap().serve(jobs).unwrap();
     assert_eq!(listener.path(), socket);
-    let mut client = UnixStream::connect(&socket).unwrap();
+    let mut client = transport::connect(&socket).unwrap();
     client.set_read_timeout(Some(WAIT)).unwrap();
     let mut reader = BufReader::new(client.try_clone().unwrap());
 
@@ -207,6 +214,7 @@ fn a_line_not_utf8_or_over_the_cap_is_a_bad_request_from_the_listener() {
 }
 
 /// A socket whose directory can't be made (a file stands where it would be) is an I/O error naming its path.
+#[cfg(unix)]
 #[test]
 fn a_socket_whose_directory_cant_be_made_isnt_bound() {
     let dir = tempfile::tempdir().unwrap();
@@ -226,8 +234,8 @@ fn a_stale_socket_is_replaced_and_a_live_one_refused() {
     let socket = socket_in(&dir);
     // an app that didn't quit left its socket file, nobody behind it
     fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    drop(UnixListener::bind(&socket).unwrap());
-    assert!(socket.exists());
+    drop(Listener::bind(&socket).unwrap());
+    assert_eq!(socket.exists(), cfg!(unix));
     let cx = TestAppContext::single();
     let _launched = launched(&cx, dir.path(), &socket);
     assert_eq!(status(&cx, &socket).accounts.len(), 1, "served afresh");
@@ -241,6 +249,7 @@ fn a_stale_socket_is_replaced_and_a_live_one_refused() {
     quit(&cx);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_file_that_is_no_socket_is_left_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -249,6 +258,54 @@ fn a_file_that_is_no_socket_is_left_alone() {
     fs::write(&socket, b"the user's").unwrap();
     assert!(matches!(ngteams::ctl::bind(&socket), Err(BindError::NotASocket(_))));
     assert_eq!(fs::read(&socket).unwrap(), b"the user's");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_socket_the_probe_may_not_reach_is_refused_with_its_own_error_kind() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = socket_in(&dir);
+    fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let _behind = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o000)).unwrap();
+    // root reaches it regardless: nothing to check there
+    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        return;
+    }
+    match ngteams::ctl::bind(&socket) {
+        Err(BindError::Io { path, source }) => {
+            assert_eq!(path, socket);
+            assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied, "{source}");
+            assert!(source.raw_os_error().is_some(), "the OS error kept: {source:?}");
+        }
+        other => panic!("bound over a socket it couldn't probe: {other:?}"),
+    }
+    assert!(socket.exists(), "left in place");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_native_endpoint_keeps_files_at_its_logical_path_and_can_be_rebound_after_quit() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("plain");
+    fs::write(&file, b"synthetic existing file").unwrap();
+    // Windows pipe names are derived from an absolute logical path. Neither a file there nor a parent which is
+    // a file is a kernel pipe, so binding must leave it alone while still serving the real application protocol.
+    for socket in [file.clone(), file.join("ctl.sock")] {
+        let cx = TestAppContext::single();
+        let _launched = launched(&cx, dir.path(), &socket);
+        assert_eq!(status(&cx, &socket).accounts.len(), 1);
+        assert_eq!(fs::read(&file).unwrap(), b"synthetic existing file");
+        assert!(matches!(ngteams::ctl::bind(&socket), Err(BindError::AlreadyRunning(_))));
+        quit(&cx);
+        assert_eq!(fs::read(&file).unwrap(), b"synthetic existing file");
+        drop(ngteams::ctl::bind(&socket).unwrap());
+    }
+    assert!(matches!(
+        ngteams::ctl::bind(Path::new("synthetic-relative-pipe")),
+        Err(BindError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidInput
+    ));
 }
 
 #[test]
@@ -308,7 +365,7 @@ fn a_subscriber_s_connection_ends_when_its_client_hangs_up_though_no_event_comes
     let socket = socket_in(&dir);
     let (jobs, asked) = async_channel::unbounded::<Job>();
     let mut listener = ngteams::ctl::bind(&socket).unwrap().serve(jobs).unwrap();
-    let mut client = UnixStream::connect(&socket).unwrap();
+    let mut client = transport::connect(&socket).unwrap();
     client.set_read_timeout(Some(WAIT)).unwrap();
     let subscribe = RequestLine {
         id: 1,

@@ -205,10 +205,11 @@ pub struct DeviceCheck {
     pub connected: bool,
     /// The microphone picked up sound ([`CallView::hearing`], or the account speaking).
     pub heard: bool,
-    /// The microphone went away for good during the call ([`teams_core::Event::AudioClosed`]): whatever it picked up
-    /// before, it doesn't work now.
+    /// The microphone went away during the call ([`teams_core::Event::AudioClosed`]): whatever it picked up before,
+    /// it stays muted until an unmute opens it again.
     pub microphone_lost: bool,
-    /// The speaker went away for good during the call.
+    /// The speaker went away during the call ([`teams_core::Event::AudioClosed`]). The engine reopens it about once
+    /// a second and playback resumes, but a speaker that dropped out is still a problem the check reports.
     pub speaker_lost: bool,
     /// The far end's audio played on the speaker (a participant speaking: the echo's greeting, the playback).
     pub played: bool,
@@ -492,6 +493,8 @@ pub enum Ask {
         chat: String,
         meeting: MeetingInfo,
     },
+    /// Join by invitation ID after the user confirms Join now.
+    JoinMeetingCode(teams_core::MeetingCode),
     /// Start a new meeting in the channel `channel` (its header's Meet now): the account organizes it.
     MeetNow {
         channel: String,
@@ -571,7 +574,7 @@ impl Ask {
             Self::Call { .. } => "call",
             Self::TestCall => "test-call",
             Self::Join { .. } => "join",
-            Self::JoinMeeting { .. } => "join-meeting",
+            Self::JoinMeeting { .. } | Self::JoinMeetingCode(_) => "join-meeting",
             Self::MeetNow { .. } => "meet-now",
             Self::Answer => "answer",
             Self::Decline => "decline",
@@ -613,6 +616,7 @@ impl Ask {
         match self {
             Self::Call { chat } => Some((CallKind::Chat, Some(chat.clone()))),
             Self::TestCall => Some((CallKind::TestCall, None)),
+            Self::JoinMeetingCode(_) => Some((CallKind::Meeting, None)),
             Self::Join { chat } => Some((CallKind::Join, Some(chat.clone()))),
             Self::JoinMeeting { chat, .. } | Self::MeetNow { channel: chat } => {
                 Some((CallKind::Meeting, Some(chat.clone())))
@@ -624,13 +628,54 @@ impl Ask {
 
 /// A meeting a user can go into, as its calendar event names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MeetingToJoin {
-    /// Its chat.
-    pub chat: String,
-    /// Its organizer and tenant.
-    pub meeting: MeetingInfo,
-    /// Its title.
-    pub title: String,
+pub enum MeetingToJoin {
+    /// A calendar or chat meeting with known organizer and tenant.
+    Chat {
+        chat: String,
+        meeting: MeetingInfo,
+        title: String,
+    },
+    /// An invitation resolved by the calling service on Join now.
+    Code(teams_core::MeetingCode),
+}
+
+impl MeetingToJoin {
+    /// The known chat, if the invitation has already been resolved.
+    #[must_use]
+    pub fn chat(&self) -> Option<&str> {
+        match self {
+            Self::Chat { chat, .. } => Some(chat),
+            Self::Code(_) => None,
+        }
+    }
+
+    /// The organizer and tenant, if already known.
+    #[must_use]
+    pub fn meeting(&self) -> Option<&MeetingInfo> {
+        match self {
+            Self::Chat { meeting, .. } => Some(meeting),
+            Self::Code(_) => None,
+        }
+    }
+
+    /// The heading without exposing the invitation's code or passcode.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Chat { title, .. } => title,
+            Self::Code(_) => "Meeting",
+        }
+    }
+
+    fn ask(&self) -> Ask {
+        match self {
+            Self::Chat { chat, meeting, .. } => Ask::JoinMeeting {
+                chat: chat.clone(),
+                meeting: meeting.clone(),
+            },
+            Self::Code(code) => Ask::JoinMeetingCode(code.clone()),
+        }
+    }
 }
 
 /// A meeting's pre-join while it shows: what it goes into, and what its switches say.
@@ -725,6 +770,8 @@ pub struct Calls {
     prejoin: Option<Prejoin>,
     /// The meeting last gone into: its call's title, and what a Rejoin goes into.
     meeting: Option<MeetingToJoin>,
+    /// The call that actually adopted that pre-join, so Rejoin cannot reuse a different meeting.
+    meeting_call: Option<CallId>,
     /// What the pre-join chose, until its call took it.
     choices: Option<Choices>,
     /// The pre-join was cancelled after its Join now went: the meeting's call that comes of it is hung up as soon as
@@ -959,9 +1006,10 @@ impl Calls {
     pub fn set_prejoin_title(&mut self, title: String, cx: &mut Context<Self>) {
         if let Some(prejoin) = &mut self.prejoin
             && prejoin.entry == PrejoinEntry::MeetNow
-            && prejoin.to_join.title != title
+            && let MeetingToJoin::Chat { title: current, .. } = &mut prejoin.to_join
+            && *current != title
         {
-            prejoin.to_join.title = title;
+            *current = title;
             cx.notify();
         }
     }
@@ -1010,14 +1058,8 @@ impl Calls {
     /// What goes into the meeting a call that ended was in once more, as its Rejoin.
     #[must_use]
     pub fn rejoin_of(&self, ended: &Ended) -> Option<Ask> {
-        let to_join = self
-            .meeting
-            .as_ref()
-            .filter(|to_join| ended.chat.as_deref() == Some(to_join.chat.as_str()))?;
-        Some(Ask::JoinMeeting {
-            chat: to_join.chat.clone(),
-            meeting: to_join.meeting.clone(),
-        })
+        let to_join = self.meeting.as_ref().filter(|_| self.meeting_call == Some(ended.id))?;
+        Some(to_join.ask())
     }
 
     /// The next of the pre-join's choices its call can take now: the microphone muted once the call's media is set up,
@@ -1222,6 +1264,37 @@ impl Calls {
             }
             _ => {}
         }
+        self.resolve_meeting();
+    }
+
+    /// Replace an unresolved invitation only when the service supplies its matching thread and organizer.
+    fn resolve_meeting(&mut self) {
+        let Some(active) = &self.call else { return };
+        if self.meeting_call != Some(active.id) || !matches!(self.meeting, Some(MeetingToJoin::Code(_))) {
+            return;
+        }
+        let Some(reference) = active
+            .meeting
+            .join
+            .as_ref()
+            .and_then(|join| join.reference_link.as_deref())
+        else {
+            return;
+        };
+        if !reference.starts_with("https://teams.microsoft.com/l/meetup-join/") {
+            return;
+        }
+        let Some(chat) = teams_proto::join_url_chat(reference).filter(|chat| active.chat.as_ref() == Some(chat)) else {
+            return;
+        };
+        let Some(meeting) = teams_proto::join_url_meeting(reference) else {
+            return;
+        };
+        self.meeting = Some(MeetingToJoin::Chat {
+            chat,
+            meeting,
+            title: active.title.clone().unwrap_or_else(|| "Meeting".to_owned()),
+        });
     }
 
     /// `who` (named `name`) was added to `call`: People lists them ringing until the roster has them in the call; one
@@ -1255,11 +1328,13 @@ impl Calls {
         }
     }
 
-    /// The microphone (`microphone`) or the speaker of `call` went away for good: its check fails.
+    /// The microphone (`microphone`) or the speaker of `call` went away: its check fails. The microphone shows muted,
+    /// as it stays until an unmute opens it again; the speaker is reopened by the engine about once a second.
     fn audio_closed(&mut self, call: CallId, microphone: bool) {
         if let Some(active) = self.call.as_mut().filter(|active| active.id == call) {
             if microphone {
                 active.check.microphone_lost = true;
+                active.muted = true;
             } else {
                 active.check.speaker_lost = true;
             }
@@ -1325,11 +1400,12 @@ impl Calls {
             let (kind, chat) = self.asked.take().unwrap_or((CallKind::Chat, None));
             (kind, chat, None, None)
         };
+        self.meeting_call = (kind == CallKind::Meeting && self.meeting.is_some()).then_some(call);
         let title = self
             .meeting
             .as_ref()
             .filter(|_| kind == CallKind::Meeting)
-            .map(|to_join| to_join.title.clone());
+            .map(|to_join| to_join.title().to_owned());
         ActiveCall {
             id: call,
             kind,
@@ -1392,7 +1468,12 @@ impl Calls {
             Ask::ToggleCaptions | Ask::Captions(_) | Ask::RecordCaptions(_) | Ask::CaptionLanguage(_) => {
                 self.caption_action(ask)
             }
-            Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } | Ask::JoinMeeting { .. } | Ask::MeetNow { .. }
+            Ask::Call { .. }
+            | Ask::TestCall
+            | Ask::Join { .. }
+            | Ask::JoinMeeting { .. }
+            | Ask::JoinMeetingCode(_)
+            | Ask::MeetNow { .. }
                 if busy =>
             {
                 Err("busy")
@@ -1408,6 +1489,7 @@ impl Calls {
                 .ok_or("no-echo"),
             Ask::Join { chat } if !self.joinable(chat) => Err("not-joinable"),
             Ask::Join { chat } => Ok(CallAction::Join { chat: chat.clone() }),
+            Ask::JoinMeetingCode(code) => Ok(CallAction::JoinMeetingCode(code.clone())),
             Ask::JoinMeeting { chat, meeting } => Ok(CallAction::JoinMeeting {
                 chat: chat.clone(),
                 meeting: meeting.clone(),
@@ -1645,6 +1727,8 @@ impl Calls {
                 }
                 cx.notify();
             }
+            // an unmute a newer mute overtook: that mute's state stands and nothing went wrong to tell
+            Err(EngineError::Call(CallActionError::Superseded)) => {}
             Err(error) => {
                 if let Some(start) = start {
                     // a start already given up on was said not to start: its refusal (the engine refuses it as late)
@@ -1681,6 +1765,7 @@ pub fn refusal_kind(error: &EngineError) -> &'static str {
         EngineError::Call(CallActionError::NoVideo) => "no-video",
         EngineError::Call(CallActionError::Media(_)) => "media",
         EngineError::Call(CallActionError::Late) => "late",
+        EngineError::Call(CallActionError::Superseded) => "superseded",
         EngineError::Call(CallActionError::Call(teams_core::CallError::NotJoinable)) => "not-joinable",
         EngineError::Call(CallActionError::Call(_)) => "refused",
         EngineError::Stopped => "stopped",
@@ -1711,9 +1796,6 @@ fn local_refusal_text(why: &str) -> String {
         "no-chat" => "no chat is open".to_owned(),
         "another-account" => "another account is in a call".to_owned(),
         "no-meeting" => "this meeting couldn't be found: try again in a moment".to_owned(),
-        "no-meeting-code" => {
-            "no meeting you were invited to has this ID: open the meeting's link to join it".to_owned()
-        }
         "no-video" => "calls here carry no video".to_owned(),
         "not-waiting" => "they aren't waiting in the lobby any more".to_owned(),
         "not-organizer" => "only the meeting's organizer can end it for everyone".to_owned(),
@@ -1731,18 +1813,42 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
     ask_then(calls, core, trace, ask, cx, |_, _| {});
 }
 
-/// [`ask`], and then `then` told whether the engine took it (`false`: refused here or by the engine, or no calls shown).
-/// `then` is told later, never while this runs, so a view may ask from within its own update.
+/// How an ask went, as [`ask_then`] tells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answered {
+    /// The engine took it (or the views did it themselves).
+    Taken,
+    /// Refused here or by the engine, or no calls shown.
+    Refused,
+    /// An unmute a newer mute or unmute overtook while its microphone reopened
+    /// ([`CallActionError::Superseded`]): the newer one decides, and nothing went wrong, so nothing is kept in
+    /// [`Calls::refused`].
+    Superseded,
+}
+
+impl Answered {
+    /// The engine's answer to an ask's action, as it goes.
+    fn of<T>(answer: &Result<T, EngineError>) -> Self {
+        match answer {
+            Ok(_) => Self::Taken,
+            Err(EngineError::Call(CallActionError::Superseded)) => Self::Superseded,
+            Err(_) => Self::Refused,
+        }
+    }
+}
+
+/// [`ask`], and then `then` told how it went ([`Answered`]). `then` is told later, never while this runs, so a view may
+/// ask from within its own update.
 pub fn ask_then(
     calls: &Entity<Calls>,
     core: &Arc<dyn Core>,
     trace: &Arc<ViewTrace>,
     ask: Ask,
     cx: &mut App,
-    then: impl FnOnce(bool, &mut App) + 'static,
+    then: impl FnOnce(Answered, &mut App) + 'static,
 ) {
     if !calls.read(cx).shows() {
-        cx.defer(move |cx| then(false, cx));
+        cx.defer(move |cx| then(Answered::Refused, cx));
         return;
     }
     let mut asked = TraceLine::new("call", "asked").kind(ask.name());
@@ -1753,7 +1859,7 @@ pub fn ask_then(
     log::info!("call: {} asked{}", ask.name(), logged_chat(&ask));
     // the caption pane shown or hidden here; the captions themselves only when they don't run for the saved transcript
     let Some(ask) = calls.update(cx, |calls, cx| calls.caption_pane_ask(ask, cx)) else {
-        cx.defer(move |cx| then(true, cx));
+        cx.defer(move |cx| then(Answered::Taken, cx));
         return;
     };
     let action = match calls.read(cx).action_for(&ask) {
@@ -1761,13 +1867,16 @@ pub fn ask_then(
         Err(why) => {
             refused(trace, &ask, why);
             calls.update(cx, |calls, cx| calls.refuse(&ask, why, local_refusal_text(why), cx));
-            cx.defer(move |cx| then(false, cx));
+            cx.defer(move |cx| then(Answered::Refused, cx));
             return;
         }
     };
     let start = ask.starts().map(|start| {
         // busy until its call is told or it is refused: the header's Call goes, and another start is refused meanwhile
         calls.update(cx, |calls, cx| {
+            if !matches!(ask, Ask::MeetNow { .. }) && calls.meeting.as_ref().is_some_and(|target| target.ask() != ask) {
+                calls.meeting = None;
+            }
             calls.asked = Some(start);
             calls.starts += 1;
             cx.notify();
@@ -1784,10 +1893,10 @@ pub fn ask_then(
         if let Err(error) = &answer {
             refused(&trace, &ask, refusal_kind(error));
         }
-        let taken = answer.is_ok();
+        let answered = Answered::of(&answer);
         // calls that are gone have nobody left to tell
         let _ = weak.update(cx, |calls, cx| calls.answered(&ask, start, &action, answer, cx));
-        cx.update(|cx| then(taken, cx));
+        cx.update(|cx| then(answered, cx));
     })
     .detach();
 }
@@ -1831,7 +1940,7 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
     join_now_then(calls, core, trace, cx, |_, _| {});
 }
 
-/// [`join_now`], and then `then` told whether the engine took its join, as [`ask_then`] tells it (`false` too when
+/// [`join_now`], and then `then` told whether the engine took its join ([`Answered::Taken`] of [`ask_then`]; `false` too when
 /// nothing was asked: no pre-join shows or its join is under way). `then` is told later, never while this runs.
 pub fn join_now_then(
     calls: &Entity<Calls>,
@@ -1854,15 +1963,14 @@ pub fn join_now_then(
         calls.meeting = Some(to_join.clone());
         cx.notify();
         // a Rejoin of a meeting started here goes into it as it runs (`Self::rejoin_of`)
-        Some(if starts {
-            Ask::MeetNow { channel: to_join.chat }
-        } else {
-            Ask::JoinMeeting {
-                chat: to_join.chat,
-                meeting: to_join.meeting,
+        let ask = if starts {
+            Ask::MeetNow {
+                channel: to_join.chat()?.to_owned(),
             }
-        })
-        .map(|asked| (asked, starts.then_some(to_join.title)))
+        } else {
+            to_join.ask()
+        };
+        Some((ask, starts.then(|| to_join.title().to_owned())))
     });
     let Some((asked, title)) = asked else {
         cx.defer(move |cx| then(false, cx));
@@ -1872,7 +1980,9 @@ pub fn join_now_then(
         (Ask::MeetNow { channel }, Some(title)) if !title.trim().is_empty() => Some((channel.clone(), title)),
         _ => None,
     };
-    ask_then(calls, core, trace, asked, cx, then);
+    ask_then(calls, core, trace, asked, cx, move |answered, cx| {
+        then(answered == Answered::Taken, cx);
+    });
     // as Teams' pre-join does: its subject titles the new meeting's post once the service posted it (the engine
     // looks for the post, and titles nothing when the meeting didn't start); a Meet now refused here asks nothing,
     // so no other meeting's post of the account's in that channel is titled
@@ -1894,15 +2004,16 @@ pub fn show_prejoin(
 ) -> bool {
     let busy = calls.read(cx).busy();
     if busy || busy_elsewhere {
-        let ask = Ask::JoinMeeting {
-            chat: to_join.chat,
-            meeting: to_join.meeting,
-        };
+        let ask = to_join.ask();
         let why = if busy { "busy" } else { "another-account" };
         refuse_here(calls, trace, &ask, why, cx);
         return false;
     }
-    trace.record(&TraceLine::new("call", "prejoin").conversation(&to_join.chat));
+    let mut shown = TraceLine::new("call", "prejoin");
+    if let Some(chat) = to_join.chat() {
+        shown = shown.conversation(chat);
+    }
+    trace.record(&shown);
     calls.update(cx, |calls, cx| calls.open_prejoin(to_join, cx));
     crate::call_window::raise(cx);
     calls.read(cx).prejoin().is_some()

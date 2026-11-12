@@ -29,6 +29,7 @@ const TROUTER_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests
 const CSA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/csa");
 const CALL_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/calling/chat");
 const ECHO_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/calling/echo");
+const LOKI_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/loki");
 
 fn oid(mri: &str) -> &str {
     mri.trim_start_matches("8:orgid:")
@@ -1383,9 +1384,14 @@ async fn a_channel_takes_a_post_and_a_reply_in_a_posts_thread_posted_to_its_chai
 #[test]
 fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for dir in ["src", "tests"] {
-        for file in std::fs::read_dir(crate_dir.join(dir))? {
+    let mut pending = vec![crate_dir.join("src"), crate_dir.join("tests")];
+    while let Some(dir) = pending.pop() {
+        for file in std::fs::read_dir(dir)? {
             let path = file?.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
             let source = std::fs::read_to_string(&path)?;
             // split, so this file doesn't name them itself
             let forbidden = [
@@ -1403,14 +1409,22 @@ fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
                         || include.starts_with("../../../tests/fixtures/trouter/")
                         || include.starts_with("../../../tests/fixtures/csa/")
                         || include.starts_with("../../../tests/fixtures/calling/chat/")
-                        || include.starts_with("../../../tests/fixtures/calling/echo/"),
+                        || include.starts_with("../../../tests/fixtures/calling/echo/")
+                        || include.starts_with("../../../tests/fixtures/loki/"),
                     "{}: {include:.60}",
                     path.display()
                 );
             }
         }
     }
-    for dir in [FIXTURES, TROUTER_FIXTURES, CSA_FIXTURES, CALL_FIXTURES, ECHO_FIXTURES] {
+    for dir in [
+        FIXTURES,
+        TROUTER_FIXTURES,
+        CSA_FIXTURES,
+        CALL_FIXTURES,
+        ECHO_FIXTURES,
+        LOKI_FIXTURES,
+    ] {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let text = std::fs::read_to_string(&path)?;
@@ -1713,3 +1727,6 @@ async fn the_calling_service_takes_the_accounts_skypetoken_alone_and_answers_a_s
     assert_eq!(missing.status, 404, "a link of no call");
     Ok(())
 }
+
+#[path = "support/helpers.rs"]
+mod helpers;

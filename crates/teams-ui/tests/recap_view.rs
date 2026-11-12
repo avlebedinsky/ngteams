@@ -16,7 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::Rig;
-use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
+use gpui::{
+    AppContext as _, Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+    point, px, size,
+};
 use teams_ui::ViewTrace;
 use teams_ui::recap_view::RecapView;
 use teams_ui::settings::{Settings, SettingsModel};
@@ -685,6 +688,67 @@ fn a_recap_that_held_nothing_is_read_again_when_shown_again() {
     click(cx, "chat-tab-chat");
     click(cx, "chat-tab-recap");
     assert_eq!(asked(&rig, "meeting_contents"), 2);
+}
+
+#[test]
+fn a_narrow_recap_keeps_the_player_controls_and_menus_inside_the_picture() {
+    let rig = rig(false);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chat_tab(ChatTab::Recap, window, cx)));
+    draw(cx);
+    for width in [1600.0, 1024.0, 1280.0] {
+        cx.simulate_resize(size(px(width), px(720.0)));
+        draw(cx);
+        let picture = cx.debug_bounds("video-screen-recap-0").expect("recording picture");
+        let content = cx.debug_bounds("recap-content").expect("recap content");
+        let session = cx.debug_bounds("recap-session-face").expect("session label");
+        let part = cx.debug_bounds("recap-part-0").expect("first part");
+        assert!(!session.intersects(&part), "session label overlaps its part at {width}");
+        assert!(content.contains(&picture.origin));
+        assert!(picture.right() <= content.right());
+        let files = cx.debug_bounds("recap-files").expect("shared files card");
+        assert!(files.size.width <= px(400.0), "wide recaps retain Teams' sidebar width");
+        for (button, menu) in [
+            ("video-speed-recap-0", "video-speed-menu"),
+            ("video-settings-recap-0", "video-settings-menu"),
+        ] {
+            let control = cx.debug_bounds(button).expect("player control");
+            assert!(picture.contains(&control.center()), "{button} reachable at {width}");
+            click(cx, button);
+            let panel = cx.debug_bounds(menu).expect("open player menu");
+            assert!(picture.contains(&panel.origin), "{menu} left/top at {width}");
+            assert!(panel.right() <= picture.right(), "{menu} right at {width}");
+            assert!(panel.bottom() <= picture.bottom(), "{menu} bottom at {width}");
+            click(cx, button);
+        }
+    }
+}
+
+#[test]
+fn a_narrow_recap_scrolls_to_the_transcript_below_the_recording() {
+    let rig = rig(false);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    cx.simulate_resize(size(px(1024.0), px(720.0)));
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chat_tab(ChatTab::Recap, window, cx)));
+    draw(cx);
+    let content = cx.debug_bounds("recap-content").expect("recap content");
+    cx.simulate_event(ScrollWheelEvent {
+        position: content.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-600.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    draw(cx);
+    let search = cx.debug_bounds("recap-search").expect("transcript search");
+    assert!(
+        content.contains(&search.center()),
+        "transcript search remains reachable"
+    );
+    let paragraph = cx.debug_bounds("recap-turn-0").expect("transcript paragraph");
+    assert!(
+        content.contains(&paragraph.center()),
+        "transcript text remains reachable"
+    );
 }
 
 #[test]

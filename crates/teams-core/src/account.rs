@@ -207,7 +207,9 @@ pub fn start<S: SecretStore + 'static>(
     let reads = with_channel_services(reads, |gtm| session.service_base(gtm))?;
     let reads = with_presence(reads, presence.as_deref())?;
     let reads = with_content_services(reads, |gtm| session.service_base(gtm))?;
-    let client = Arc::new(Client::new(reads));
+    // Loki (a person's profile card) on the reads' transport alone: its global base is fixed, and the regional one its
+    // configuration names is handed over by the engine at run time (`crate::profile_card`)
+    let client = Arc::new(Client::new(reads.with_loki()));
     let push = if push {
         Some(Push::new(Trouter::new(Arc::clone(&transport), Arc::clone(&session))?))
     } else {

@@ -572,7 +572,8 @@ pub mod dictionaries {
         pub last_packet_sent_timestamp: f64,
         pub last_packet_received_timestamp: f64,
         pub total_round_trip_time: f64,
-        pub current_round_trip_time: f64,
+        // An absent measurement differs from a round trip explicitly reported as zero.
+        pub current_round_trip_time: Option<f64>,
         pub available_outgoing_bitrate: f64,
         pub available_incoming_bitrate: f64,
         pub requests_received: u64,

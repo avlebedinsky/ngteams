@@ -71,7 +71,8 @@ fn entry(builder: &mut tar::Builder<Vec<u8>>, path: &str, kind: tar::EntryType, 
     header.set_entry_type(kind);
     header.set_mode(mode);
     header.set_size(if kind.is_file() { data.len() as u64 } else { 0 });
-    if kind.is_symlink() {
+    // An empty target leaves the link name field blank, as tar::Header::set_link_name refuses to.
+    if kind.is_symlink() && !data.is_empty() {
         header.set_link_name(std::str::from_utf8(data).unwrap()).unwrap();
     }
     header.set_cksum();
@@ -634,6 +635,26 @@ fn a_data_dir_that_is_no_directory_fails_both_installs_before_any_network() {
 }
 
 #[test]
+fn cache_file_paths_occupied_by_directories_fail_without_removing_their_contents() {
+    let bytes = archive(|_| {});
+    for name in [".install.lock", "fixture-key.download"] {
+        let state = tempfile::tempdir().unwrap();
+        let root = runtime_root(state.path());
+        let conflict = root.join(name);
+        fs::create_dir_all(&conflict).unwrap();
+        fs::write(conflict.join("keep"), b"existing data").unwrap();
+        let mut pins = pins(&bytes);
+        pins.url = "http://127.0.0.1:1/unused".to_owned();
+        let error = pins.download(state.path(), |_| {}).unwrap_err();
+        assert!(matches!(&error, crate::Error::Io(_)), "{error}");
+        assert!(error.to_string().contains(conflict.to_str().unwrap()), "{error}");
+        assert_eq!(fs::read(conflict.join("keep")).unwrap(), b"existing data");
+        assert!(!root.join("fixture-key").exists());
+        assert!(!root.join("fixture-key.partial").exists());
+    }
+}
+
+#[test]
 fn a_missing_offline_archive_is_an_error_and_publishes_nothing() {
     let state = tempfile::tempdir().unwrap();
     let bytes = archive(|_| {});
@@ -770,4 +791,108 @@ fn a_filesystem_failure_names_the_path_and_keeps_a_full_disks_raw_error() {
     assert!(failure.to_string().contains("absent.tar.zst"), "{failure}");
     let full = cache::located(std::io::Error::from_raw_os_error(libc::ENOSPC), Path::new("/x"));
     assert!(matches!(&full, crate::Error::Io(e) if e.raw_os_error() == Some(libc::ENOSPC)));
+}
+
+#[test]
+fn a_symlink_without_a_target_is_refused() {
+    let bytes = archive(|b| entry(b, "lib/empty-link", tar::EntryType::Symlink, b"", 0o777));
+    let state = tempfile::tempdir().unwrap();
+    let failure = offline(state.path(), &bytes).unwrap_err();
+    assert!(
+        matches!(&failure, crate::Error::Message(message) if message == "Missing symlink target."),
+        "{failure}"
+    );
+    assert!(!runtime_root(state.path()).join("fixture-key").exists());
+}
+
+#[test]
+fn a_lock_that_cannot_be_opened_names_its_path_before_any_install_or_cleanup() {
+    let state = tempfile::tempdir().unwrap();
+    let root = runtime_root(state.path());
+    fs::create_dir_all(root.join(".install.lock")).unwrap();
+    let bytes = archive(|_| {});
+    let input = state.path().join("input.tar.zst");
+    fs::write(&input, &bytes).unwrap();
+    let mut unreachable = pins(&bytes);
+    unreachable.url = "http://127.0.0.1:1/never".to_owned();
+    for failure in [
+        cleanup(state.path(), "fixture-key").unwrap_err(),
+        unreachable.download(state.path(), |_| {}).unwrap_err(),
+        pins(&bytes).install(state.path(), &input).unwrap_err(),
+    ] {
+        assert!(matches!(&failure, crate::Error::Io(_)), "{failure}");
+        assert!(failure.to_string().contains(".install.lock"), "{failure}");
+    }
+    assert!(!root.join("fixture-key").exists());
+}
+
+#[test]
+fn a_download_path_that_cannot_be_opened_names_it_and_sends_no_request() {
+    let bytes = archive(|_| {});
+    let state = tempfile::tempdir().unwrap();
+    let root = runtime_root(state.path());
+    fs::create_dir_all(root.join("fixture-key.download")).unwrap();
+    let mut unreachable = pins(&bytes);
+    unreachable.url = "http://127.0.0.1:1/never".to_owned();
+    let mut reported = Vec::new();
+    let failure = unreachable
+        .download(state.path(), |progress| reported.push(progress))
+        .unwrap_err();
+    assert!(matches!(&failure, crate::Error::Io(_)), "{failure}");
+    assert!(failure.to_string().contains("fixture-key.download"), "{failure}");
+    assert!(reported.is_empty());
+    assert!(!root.join("fixture-key").exists());
+}
+
+#[test]
+fn an_unreadable_archive_file_is_a_filesystem_error_not_a_broken_archive() {
+    let bytes = archive(|_| {});
+    let state = tempfile::tempdir().unwrap();
+    let input = state.path().join("input");
+    fs::write(&input, &bytes).unwrap();
+    let mut write_only = File::options().write(true).open(&input).unwrap();
+    assert!(matches!(
+        extraction::unpacked_size(&mut write_only),
+        Err(crate::Error::Io(e)) if e.raw_os_error() == Some(libc::EBADF)
+    ));
+    let output = state.path().join("output");
+    fs::create_dir(&output).unwrap();
+    assert!(matches!(
+        extraction::unpack(&mut write_only, &output, "fixture-key"),
+        Err(crate::Error::Io(e)) if e.raw_os_error() == Some(libc::EBADF)
+    ));
+    let mut readable = File::open(&input).unwrap();
+    assert!(extraction::unpacked_size(&mut readable).unwrap() > 0);
+}
+
+#[test]
+fn a_manifest_that_is_not_text_is_refused() {
+    let mut builder = tar::Builder::new(Vec::new());
+    entry(
+        &mut builder,
+        "MANIFEST",
+        tar::EntryType::Regular,
+        &[0xff, 0xfe, 0x00],
+        0o644,
+    );
+    let bytes = zstd::stream::encode_all(builder.into_inner().unwrap().as_slice(), 1).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let failure = offline(state.path(), &bytes).unwrap_err();
+    assert!(failure.to_string().contains("no valid MANIFEST"), "{failure}");
+    assert!(!runtime_root(state.path()).join("fixture-key").exists());
+}
+
+#[test]
+fn cleanup_passes_over_entries_whose_names_are_not_utf8() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let state = tempfile::tempdir().unwrap();
+    let root = runtime_root(state.path());
+    fs::create_dir_all(&root).unwrap();
+    let odd = root.join(std::ffi::OsStr::from_bytes(b"old-\xff.download"));
+    fs::write(&odd, b"prefix").unwrap();
+    fs::write(root.join("old.download"), b"prefix").unwrap();
+    assert_eq!(cleanup(state.path(), "fixture-key").unwrap(), 1);
+    assert!(odd.exists());
+    assert!(!root.join("old.download").exists());
 }

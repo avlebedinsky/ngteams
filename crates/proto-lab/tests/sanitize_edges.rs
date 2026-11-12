@@ -1,5 +1,8 @@
 //! Synthetic malformed and boundary capture values; no real identity, credential or capture is read.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use proto_lab::config::{Alias, LabConfig};
 use proto_lab::sanitize::{Identities, KnownAccount, KnownService, sanitize_events};
 use serde_json::{Value, json};

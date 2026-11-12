@@ -4,7 +4,9 @@
 use std::fmt;
 
 mod record;
+mod roster;
 pub use record::{Processing, RecordCommand, RecordStart};
+pub use roster::{CaptionRoster, FollowedService};
 
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
@@ -12,8 +14,14 @@ use url::Url;
 
 use crate::{CallContext, CallLink, CallParticipant};
 
-/// The commercial Teams built-in combined recording/transcription identity. Caption start selects only closed captions.
+/// The commercial Teams built-in combined recording/transcription identity: the one a caption start invites. Caption
+/// start selects only closed captions.
 pub const CAPTION_SERVICE_MRI: &str = "28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5";
+/// The same service when it serves the call from another region: invited as [`CAPTION_SERVICE_MRI`], it can join the
+/// roster as this one instead. Teams' web client follows both (its commercial `recordingBotMrisFromAlternateRegions`).
+pub const CAPTION_SERVICE_ALTERNATE_MRI: &str = "28:4b25d9f8-18f5-4d09-a582-cd0a28f63181";
+/// Every MRI the built-in service joins a call as, the invited one first.
+pub const CAPTION_SERVICE_MRIS: [&str; 2] = [CAPTION_SERVICE_MRI, CAPTION_SERVICE_ALTERNATE_MRI];
 /// The first-party recorder resource, with delegated `access_recorder_service` permission.
 pub const RECORDER_AUDIENCE: &str = "4580fd1d-e5a3-4f56-9ad1-aab0e3bf8f76";
 
@@ -64,46 +72,24 @@ impl fmt::Debug for CaptionCommandLink {
     }
 }
 
+/// Whether `mri` is the built-in service, joined from the call's region or from another one.
+#[must_use]
+pub fn is_caption_service(mri: &str) -> bool {
+    CAPTION_SERVICE_MRIS
+        .iter()
+        .any(|service| mri.eq_ignore_ascii_case(service))
+}
+
 /// The service endpoint's current state, read only from this call's bot roster entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptionService {
+    /// The MRI the service joined as ([`CAPTION_SERVICE_MRIS`]).
+    pub mri: &'static str,
     pub command: CaptionCommandLink,
     pub endpoint_id: String,
     pub spoken_language: String,
     /// The service's own processing state; unknown states are preserved rather than treated as active.
     pub state: String,
-}
-
-impl CaptionService {
-    /// Reads a roster delta naming the built-in service. `None` does not change a previously read service.
-    #[must_use]
-    pub fn from_roster(body: &[u8]) -> Option<Self> {
-        let body: Value = serde_json::from_slice(body).ok()?;
-        let service = body.get("participants")?.get(CAPTION_SERVICE_MRI)?;
-        if service.get("state")?.as_str()? != "active" {
-            return None;
-        }
-        service
-            .get("endpoints")?
-            .as_object()?
-            .iter()
-            .find_map(|(id, endpoint)| {
-                let metadata = endpoint.get("endpointMetadata")?;
-                Some(Self {
-                    command: CaptionCommandLink::parse(metadata.get("commandUrl")?.as_str()?)?,
-                    endpoint_id: id.clone(),
-                    spoken_language: metadata
-                        .get("spokenLanguage")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    state: metadata
-                        .pointer("/processingModes/closedCaptions/state")?
-                        .as_str()?
-                        .to_owned(),
-                })
-            })
-    }
 }
 
 /// A fixed caption operation. Its body contains no token until the native HTTP transport sends it.
@@ -438,22 +424,5 @@ mod tests {
         ] {
             assert!(CaptionCommandLink::parse(&invalid).is_none());
         }
-    }
-
-    #[test]
-    fn service_metadata_requires_exact_active_service_and_valid_command() {
-        let body = json!({"participants": {CAPTION_SERVICE_MRI: {
-            "state":"active", "endpoints":{"synthetic-service-endpoint":{"endpointMetadata":{
-                "commandUrl":COMMAND,"spokenLanguage":"en-us", "processingModes":{"closedCaptions":{"state":"Inactive"}}
-            }}}
-        }}});
-        let service = CaptionService::from_roster(&serde_json::to_vec(&body).unwrap()).unwrap();
-        assert_eq!(service.spoken_language, "en-us");
-        assert_eq!(service.state, "Inactive");
-        let mut invalid = body.clone();
-        invalid["participants"][CAPTION_SERVICE_MRI]["state"] = json!("disconnected");
-        assert!(CaptionService::from_roster(&serde_json::to_vec(&invalid).unwrap()).is_none());
-        let invalid = json!({"participants":{"28:00000000-0000-4000-8000-000000000001":body["participants"][CAPTION_SERVICE_MRI]}});
-        assert!(CaptionService::from_roster(&serde_json::to_vec(&invalid).unwrap()).is_none());
     }
 }

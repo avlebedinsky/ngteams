@@ -3,8 +3,12 @@
 //! `tests/auth_live.rs`.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[path = "support/directory_link.rs"]
+mod directory_link;
+#[path = "../../teams-platform/tests/support/privacy.rs"]
+mod privacy;
 
 use proto_lab::commands::auth::{
     AudienceOutcome, AuthError, AuthReport, NativeTarget, SkypetokenSummary, region_file, save_region, within,
@@ -39,12 +43,11 @@ fn native_account_and_region_are_private_atomic_and_keep_manual_same_account_set
     let identity = native_identity();
     let file = target.save(&identity, Some(&region())).unwrap();
     assert_eq!(file, dir.path().join(".local/share/ngteams-lab/b/accounts.toml"));
-    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(target.root()), 0o700);
-    assert_eq!(mode(&file), 0o600);
+    privacy::assert_private(target.root(), false);
+    privacy::assert_private(&file, false);
     let native_region = target.root().join(format!("regions/{}.json", identity.object_id));
-    assert_eq!(mode(native_region.parent().unwrap()), 0o700);
-    assert_eq!(mode(&native_region), 0o600);
+    privacy::assert_private(native_region.parent().unwrap(), false);
+    privacy::assert_private(&native_region, false);
     let mut saved: toml::Value = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(saved["account"][0]["name"].as_str(), Some("Synthetic Account"));
     saved["account"][0]["idp_hosts"] = toml::Value::Array(vec!["signin.example.test".into()]);
@@ -95,9 +98,72 @@ fn native_target_uses_xdg_data_and_rejects_personal_overlap_before_writing() {
     assert!(NativeTarget::resolve(Alias::A, Some("relative".into()), None, None).is_err());
     std::fs::create_dir_all(data.join("ngteams-lab")).unwrap();
     std::fs::create_dir_all(config.join("ngteams")).unwrap();
-    std::os::unix::fs::symlink(config.join("ngteams"), data.join("ngteams-lab/c")).unwrap();
+    directory_link::create(&config.join("ngteams"), &data.join("ngteams-lab/c"));
     assert!(target().is_err());
     assert!(std::fs::read_dir(config.join("ngteams")).unwrap().next().is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn native_alias_requires_exactly_one_matching_account_with_verified_guid_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = NativeTarget::resolve(Alias::A, None, None, Some(dir.path().as_os_str().to_owned())).unwrap();
+    let identity = native_identity();
+    assert!(target.expect_account(&identity.username).is_ok());
+    assert!(target.account(&identity.username).is_err());
+    let file = target.save(&identity, None).unwrap();
+    assert_eq!(
+        target.account(&identity.username.to_uppercase()).unwrap().object_id,
+        identity.object_id
+    );
+    assert!(target.expect_account("another@example.test").is_err());
+    assert_eq!(
+        target.account(&identity.username).unwrap().display_name,
+        identity.display_name
+    );
+    let saved = std::fs::read_to_string(&file).unwrap();
+    for text in [
+        "not valid toml = [".to_owned(),
+        "account = []".to_owned(),
+        saved.repeat(2),
+        saved.replace(&identity.object_id, "unverified-object"),
+        saved.replace(&identity.tenant, "unverified-tenant"),
+        saved
+            .lines()
+            .filter(|line| !line.starts_with("oid"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ] {
+        std::fs::write(&file, text).unwrap();
+        assert!(target.account(&identity.username).is_err());
+    }
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    assert!(target.expect_account(&identity.username).is_err());
+}
+
+#[test]
+fn invalid_native_identity_and_unreadable_existing_config_never_replace_an_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = NativeTarget::resolve(Alias::A, None, None, Some(dir.path().as_os_str().to_owned())).unwrap();
+    let identity = native_identity();
+    for bad in [
+        Account {
+            object_id: "bad".into(),
+            ..identity.clone()
+        },
+        Account {
+            tenant: "bad".into(),
+            ..identity.clone()
+        },
+    ] {
+        assert!(target.save(&bad, None).is_err());
+        assert!(!target.root().exists());
+    }
+    let file = target.save(&identity, None).unwrap();
+    std::fs::write(&file, "malformed = [").unwrap();
+    assert!(target.save(&identity, None).is_err());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "malformed = [");
 }
 
 fn spaces_summary() -> TokenSummary {
@@ -221,9 +287,8 @@ fn the_region_is_saved_privately_without_the_token() {
 
     assert_eq!(file, region_file(&paths, Alias::B));
     assert_eq!(file, dir.path().join("lab/auth/b.json"));
-    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&file), 0o600);
-    assert_eq!(mode(file.parent().unwrap()), 0o700);
+    privacy::assert_private(&file, false);
+    privacy::assert_private(file.parent().unwrap(), false);
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(Region::from_json(&saved), Some(region()));
     assert_eq!(saved["account"], "b");
@@ -281,6 +346,7 @@ fn saves_that_run_at_once_each_replace_the_file_whole() {
     });
 
     let file = region_file(&paths, Alias::C);
+    privacy::assert_private(&file, false);
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert!(
         expiries.contains(&saved["skypetokenExpiresAt"].as_u64().unwrap()),

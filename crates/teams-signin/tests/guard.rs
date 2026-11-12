@@ -2,15 +2,24 @@
 //! before the answer, the redirect caught and never let through, an unarmed page denied; and
 //! the guard's socket, as the extension talks to it.
 
+#[cfg(unix)]
 use std::io::{BufRead as _, BufReader, Write as _};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, mpsc};
+#[cfg(unix)]
+use std::sync::Arc;
+use std::sync::mpsc;
 
 use teams_auth::redirect::RedirectUri;
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
-use teams_signin::guard::{Decision, Guard, GuardEvent, GuardServer};
+#[cfg(unix)]
+use teams_signin::guard::GuardServer;
+use teams_signin::guard::{Decision, Guard, GuardEvent};
+#[cfg(unix)]
 use teams_signin_extension::client::GuardClient;
-use teams_signin_extension::protocol::{ALLOW, DENY, OK};
+use teams_signin_protocol::protocol::OK;
+#[cfg(unix)]
+use teams_signin_protocol::protocol::{ALLOW, DENY};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -233,6 +242,7 @@ fn a_loopback_only_guard_denies_everything_off_loopback() -> TestResult {
 }
 
 #[test]
+#[cfg(unix)]
 fn the_socket_answers_the_extension_line_by_line() -> TestResult {
     let lab = lab()?;
     let dir = tempfile::tempdir()?;
@@ -267,5 +277,34 @@ fn the_socket_answers_the_extension_line_by_line() -> TestResult {
     assert!(matches!(events.as_slice(), [GuardEvent::Armed { page: PAGE }]));
     // the four requests; a line that isn't one is answered, not logged
     assert_eq!(diagnostics::entries().len(), 4);
+    Ok(())
+}
+
+#[test]
+fn malformed_and_valid_protocol_requests_use_the_same_page_decisions() -> TestResult {
+    let lab = lab()?;
+    assert!(format!("{:?}", lab.guard).contains("Guard"));
+    assert_eq!(lab.guard.answer("not a command"), teams_signin_protocol::protocol::DENY);
+    armed(&lab);
+    assert_eq!(
+        lab.guard.answer(&format!("request {PAGE} GET https://example.test/")),
+        teams_signin_protocol::protocol::ALLOW
+    );
+    assert_eq!(
+        lab.guard.answer(&format!("request {PAGE} POST https://example.test/")),
+        teams_signin_protocol::protocol::DENY
+    );
+    Ok(())
+}
+
+#[test]
+fn typed_arming_uses_the_same_page_and_event_contract_as_the_wire() -> TestResult {
+    let lab = lab()?;
+    let url = "https://login.microsoftonline.com/";
+    assert_eq!(lab.guard.decide(PAGE, "GET", url), Decision::Deny);
+    lab.guard.arm(PAGE);
+    assert!(matches!(lab.events.recv()?, GuardEvent::Armed { page } if page == PAGE));
+    assert_eq!(lab.guard.decide(PAGE, "GET", url), Decision::Allow);
+    assert_eq!(lab.guard.decide(PAGE + 1, "GET", url), Decision::Deny);
     Ok(())
 }

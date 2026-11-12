@@ -2,7 +2,10 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
+#[cfg(unix)]
+use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
@@ -27,12 +30,95 @@ impl NativeTarget {
     /// # Errors
     /// The environment cannot resolve absolute paths, or the target overlaps personal app files.
     pub fn from_env(alias: Alias) -> io::Result<Self> {
+        #[cfg(windows)]
+        return Self::windows_alias(alias.as_str());
+        #[cfg(unix)]
         Self::resolve(
             alias,
             std::env::var_os("XDG_DATA_HOME"),
             std::env::var_os("XDG_CONFIG_HOME"),
             std::env::var_os("HOME"),
         )
+    }
+
+    /// Resolves a Windows runner alias, always in the isolated native lab namespace.
+    ///
+    /// # Errors
+    /// The alias or LOCALAPPDATA is invalid, or a link points into personal data.
+    #[cfg(windows)]
+    pub fn windows_alias(alias: &str) -> io::Result<Self> {
+        if alias.is_empty()
+            || alias.len() > 64
+            || !alias.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err(invalid("invalid native lab alias"));
+        }
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| invalid("LOCALAPPDATA must be absolute"))?;
+        let root = local.join(KEYRING_APPLICATION).join(alias);
+        if overlapping(&root, &local.join(PERSONAL_DIR)) {
+            return Err(invalid("native lab target overlaps personal Teams files"));
+        }
+        Ok(Self { root })
+    }
+
+    /// Verifies an existing Windows alias names the requested lab account before tokens or files change.
+    ///
+    /// # Errors
+    /// Existing account configuration is malformed or belongs to another identity.
+    #[cfg(windows)]
+    pub fn expect_account(&self, upn: &str) -> io::Result<()> {
+        let path = self.root.join("accounts.toml");
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let config: toml::Table =
+            toml::from_str(&text).map_err(|_| invalid("invalid native lab account configuration"))?;
+        let matches = config
+            .get("account")
+            .and_then(toml::Value::as_array)
+            .filter(|entries| entries.len() == 1)
+            .and_then(|entries| entries[0].get("upn"))
+            .and_then(toml::Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case(upn));
+        if !matches {
+            return Err(invalid("native lab alias belongs to another account"));
+        }
+        Ok(())
+    }
+
+    /// Reads a previously verified native identity, without opening its store or credentials.
+    ///
+    /// # Errors
+    /// The alias is not provisioned for this account or lacks valid identity IDs.
+    #[cfg(windows)]
+    pub fn account(&self, upn: &str) -> io::Result<Account> {
+        self.expect_account(upn)?;
+        let text = fs::read_to_string(self.root.join("accounts.toml"))?;
+        let config: toml::Table = toml::from_str(&text).map_err(|_| invalid("invalid native lab account"))?;
+        let entry = config
+            .get("account")
+            .and_then(toml::Value::as_array)
+            .and_then(|entries| entries.first())
+            .ok_or_else(|| invalid("missing native account"))?;
+        let id = |key| {
+            entry
+                .get(key)
+                .and_then(toml::Value::as_str)
+                .filter(|value| guid(&value.to_lowercase()))
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("native alias is not provisioned"))
+        };
+        Ok(Account {
+            username: upn.to_owned(),
+            object_id: id("oid")?,
+            tenant: id("tid")?,
+            display_name: entry.get("name").and_then(toml::Value::as_str).map(str::to_owned),
+        })
     }
 
     /// The XDG resolution on explicit values, for offline provisioning tests.
@@ -118,11 +204,13 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+#[cfg(unix)]
 fn private_dir(path: &Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
+#[cfg(unix)]
 fn atomic(path: &Path, text: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| invalid("native target has no parent"))?;
     let mut staging = tempfile::Builder::new()
@@ -176,4 +264,15 @@ fn guid(text: &str) -> bool {
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.chars().count() <= 256 && !name.chars().any(char::is_control)
+}
+
+#[cfg(windows)]
+fn private_dir(path: &Path) -> io::Result<()> {
+    teams_platform::private::create_dir_all(path)?;
+    teams_platform::private::restrict_dir(path)
+}
+
+#[cfg(windows)]
+fn atomic(path: &Path, text: &[u8]) -> io::Result<()> {
+    crate::private::atomic(path, text)
 }

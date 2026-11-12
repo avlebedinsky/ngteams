@@ -13,6 +13,7 @@ members = [
     "crates/teams-media",
     "crates/teams-mock",
     "crates/teams-platform",
+    "crates/teams-runner",
     "crates/teams-proto",
     "crates/teams-signin",
     "crates/teams-signin-extension",
@@ -43,6 +44,7 @@ default-members = [
     "crates/teams-media",
     "crates/teams-mock",
     "crates/teams-platform",
+    "crates/teams-runner",
     "crates/teams-proto",
     "crates/teams-signin",
     "crates/teams-signin-extension",
@@ -68,6 +70,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
 publish = false
+license = "MIT OR Apache-2.0"
 
 # Shared dependency versions; crates take them with `name.workspace = true`.
 [workspace.dependencies]
@@ -120,6 +123,10 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # the scheduling form's start and end time zones: the IANA zones and their offsets at a time (no logging of its own,
 # so nothing of it reaches the compile-time log cap)
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
+# The desktop's IANA zone on Windows and Unix; already used by Chrono. No runtime logging on either platform.
+iana-time-zone = "0.1.65"
+# Native known folders on Windows, including redirected Downloads. Already resolved by GPUI; no runtime logging.
+dirs = "6.0.0"
 clap ={ version = "4.6.7", features = ["derive"] }
 # `ngteamsctl completions`: the shells' completion scripts of its command line, for the clap the workspace takes
 # (no logging of its own, so nothing of it reaches the compile-time log cap)
@@ -253,8 +260,18 @@ wayland-client = "0.31.15"
 wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wiremock = "0.6.5"
+# Native Windows executable icon resources, sharing GPUI's existing build dependency.
+embed-resource = "3.0.12"
 # Native Windows filesystem security, with no logging of its own.
+widestring = "1.2.1"
 windows-sys = "0.61.2"
+windows = "0.62.2"
+windows-core = "0.62.2"
+webview2-com = "0.39.1"
+wry = { version = "0.57", default-features = false }
+raw-window-handle = "0.6"
+# Native screen/window picker and Windows Graphics Capture; MIT, no logging dependency.
+windows-capture = "=2.0.1"
 # Windows broker byte streams through maintained local named-pipe bindings.
 interprocess = { version = "2.4.6", default-features = false }
 # Native Windows Credential Manager, selected explicitly without a process-wide default keyring.
@@ -328,9 +345,16 @@ opt-level = 3
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # LiveKit's libwebrtc bindings, the pinned 0.3.55 plus build/patches/libwebrtc (scripts/vendor-crates.sh):
 # `RtpTransceiver::set_direction`, which webrtc-sys binds and the safe API leaves out (0.4.0 too). A group call's screen
 # goes out on the mixer's sharing line, turned to send before the answer (crates/teams-media/src/rtc.rs). Only the Rust
-# crate is patched: webrtc-sys and its prebuilt libwebrtc stay crates.io's. Drop this, vendor/libwebrtc and its patch
-# once a LiveKit release exposes it.
+# crate is patched: webrtc-sys and its prebuilt libwebrtc stay crates.io's. Candidate-pair RTT also preserves field
+# presence, so a measured zero differs from an absent statistic. Keep the patches until upstream exposes direction
+# and preserves optional RTT values.
 libwebrtc = { path = "vendor/libwebrtc" }
+# burn-tch, Burn's LibTorch backend, swapped for an empty stub (vendor/burn-tch): burn-dispatch names it only in weak
+# features (`burn-tch?/std`), which Cargo still writes into Cargo.lock (rust-lang/cargo#10801), and with it tch 0.22 and
+# torch-sys 0.22's zip 0.6.6 (GHSA zip cloaking, AES HMAC bypass), though no build enables the backend. The stub keeps
+# the vulnerable zip out of the lockfile. Remove it with the move to burn 0.23, which drops burn-tch.
+burn-tch = { path = "vendor/burn-tch" }

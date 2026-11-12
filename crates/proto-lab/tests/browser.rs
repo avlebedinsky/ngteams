@@ -6,19 +6,27 @@
 //! (lab.toml's `data_dir` when set); without either it says so on stderr and passes, unless
 //! `PROTO_LAB_REQUIRE_CHROME=1`.
 
+// Shared CDP and local-browser contracts also run on Windows; Unix process/install tests stay scoped below.
+
 mod common;
+#[cfg(unix)]
 #[path = "common/process.rs"]
 mod process;
 
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use proto_lab::browser::{BASE_ARGS, Browser, BrowserError, DevToolsEndpoint, Display, LaunchOptions, Media};
 use proto_lab::cdp::{Cdp, CdpError, Event, Events, Incoming, RemoteError, SessionId, encode_command, parse_incoming};
+#[cfg(unix)]
 use proto_lab::commands::chrome::{self, ChecksumError, ChromeBuild, InstallError, Installed};
 use proto_lab::config::{Alias, LabPaths};
 use serde_json::{Value, json};
@@ -43,7 +51,7 @@ fn a_profile_launches_headless_on_an_automatic_port_in_its_own_user_data_dir() {
     let args = strings(&options.args());
 
     assert_eq!(options.user_data_dir, PathBuf::from("/lab/data/profiles/b"));
-    assert!(args.contains(&"--user-data-dir=/lab/data/profiles/b".to_owned()));
+    assert!(args.contains(&format!("--user-data-dir={}", options.user_data_dir.display())));
     assert!(args.contains(&"--remote-debugging-port=0".to_owned()));
     assert!(args.contains(&"--headless=new".to_owned()));
     assert!(!args.iter().any(|arg| arg.contains("fake")));
@@ -181,6 +189,7 @@ fn a_partial_or_malformed_active_port_file_is_refused() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_missing_executable_is_reported() {
     let profile = tempfile::tempdir().unwrap();
     let missing = profile.path().join("no-chrome");
@@ -195,6 +204,7 @@ async fn a_missing_executable_is_reported() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_browser_that_exits_early_is_reported() {
     let profile = tempfile::tempdir().unwrap();
     let fake = profile.path().join("fake-chrome");
@@ -212,6 +222,7 @@ async fn a_browser_that_exits_early_is_reported() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_stale_active_port_file_is_not_trusted() {
     let profile = tempfile::tempdir().unwrap();
     let dir = profile.path().join("p");
@@ -228,6 +239,7 @@ async fn a_stale_active_port_file_is_not_trusted() {
 
 /// A stand-in browser: starts a helper process (as Chrome starts its crash handler), writes `DevToolsActivePort`,
 /// then waits.
+#[cfg(unix)]
 const FAKE_BROWSER: &str = r#"#!/bin/sh
 for arg; do case "$arg" in --user-data-dir=*) dir="${arg#--user-data-dir=}";; esac; done
 sleep 300 &
@@ -236,6 +248,7 @@ printf '40123\n/devtools/browser/fake\n' > "$dir/DevToolsActivePort"
 exec sleep 300
 "#;
 
+#[cfg(unix)]
 async fn launch_fake(root: &Path) -> TestResult<(Browser, u32)> {
     let fake = root.join("fake-chrome");
     std::fs::write(&fake, FAKE_BROWSER)?;
@@ -247,6 +260,7 @@ async fn launch_fake(root: &Path) -> TestResult<(Browser, u32)> {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn the_endpoint_is_read_from_the_profile_and_dropping_the_browser_kills_its_whole_group() {
     let root = tempfile::tempdir().unwrap();
     let (browser, helper) = launch_fake(root.path()).await.unwrap();
@@ -262,6 +276,7 @@ async fn the_endpoint_is_read_from_the_profile_and_dropping_the_browser_kills_it
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_browser_that_does_not_exit_gets_sigterm_and_its_group_goes_with_it() {
     use std::os::unix::process::ExitStatusExt as _;
 
@@ -276,14 +291,17 @@ async fn a_browser_that_does_not_exit_gets_sigterm_and_its_group_goes_with_it() 
 
 // --- checksum and install ---
 
+#[cfg(unix)]
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+#[cfg(unix)]
 fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> TestResult<PathBuf> {
     let path = dir.join(name);
     std::fs::write(&path, bytes)?;
     Ok(path)
 }
 
+#[cfg(unix)]
 fn sha256_of(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     use std::fmt::Write as _;
@@ -294,6 +312,7 @@ fn sha256_of(bytes: &[u8]) -> String {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_matching_checksum_passes_in_any_case() {
     let dir = tempfile::tempdir().unwrap();
     let empty = write_file(dir.path(), "empty", b"").unwrap();
@@ -304,6 +323,7 @@ fn a_matching_checksum_passes_in_any_case() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_mismatched_checksum_names_both_hashes() {
     let dir = tempfile::tempdir().unwrap();
     let abc = write_file(dir.path(), "abc", b"abc").unwrap();
@@ -322,6 +342,7 @@ fn a_mismatched_checksum_names_both_hashes() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_malformed_expected_hash_or_missing_file_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let abc = write_file(dir.path(), "abc", b"abc").unwrap();
@@ -339,6 +360,7 @@ fn a_malformed_expected_hash_or_missing_file_is_an_error() {
 }
 
 #[test]
+#[cfg(unix)]
 fn the_pinned_build_is_a_chrome_for_testing_linux64_zip_no_older_than_the_profiles() {
     let build = ChromeBuild::pinned();
     let chrome_dir = Path::new("/lab/data/chrome");
@@ -364,6 +386,7 @@ fn the_pinned_build_is_a_chrome_for_testing_linux64_zip_no_older_than_the_profil
 }
 
 /// A zip shaped like Chrome for Testing's: `chrome-linux64/chrome` (executable) and one data file.
+#[cfg(unix)]
 fn fake_chrome_zip(with_binary: bool) -> TestResult<Vec<u8>> {
     let mut bytes = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(&mut bytes);
@@ -379,6 +402,7 @@ fn fake_chrome_zip(with_binary: bool) -> TestResult<Vec<u8>> {
     Ok(bytes.into_inner())
 }
 
+#[cfg(unix)]
 async fn serve_zip(body: Vec<u8>, expected_downloads: u64) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -390,6 +414,7 @@ async fn serve_zip(body: Vec<u8>, expected_downloads: u64) -> MockServer {
     server
 }
 
+#[cfg(unix)]
 fn build_at(server: &MockServer, sha256: String) -> ChromeBuild {
     ChromeBuild {
         version: "999.0.0.1".to_owned(),
@@ -398,6 +423,7 @@ fn build_at(server: &MockServer, sha256: String) -> ChromeBuild {
     }
 }
 
+#[cfg(unix)]
 fn entries(dir: &Path) -> TestResult<Vec<String>> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -408,6 +434,7 @@ fn entries(dir: &Path) -> TestResult<Vec<String>> {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn install_downloads_verifies_and_unpacks_once() {
     let zip = fake_chrome_zip(true).unwrap();
     let server = serve_zip(zip.clone(), 1).await;
@@ -429,6 +456,7 @@ async fn install_downloads_verifies_and_unpacks_once() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_download_with_the_wrong_checksum_installs_nothing() {
     let server = serve_zip(fake_chrome_zip(true).unwrap(), 1).await;
     let build = build_at(&server, EMPTY_SHA256.to_owned());
@@ -451,6 +479,7 @@ async fn a_download_with_the_wrong_checksum_installs_nothing() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn a_zip_without_the_browser_binary_installs_nothing() {
     let zip = fake_chrome_zip(false).unwrap();
     let server = serve_zip(zip.clone(), 1).await;
@@ -471,6 +500,7 @@ async fn a_zip_without_the_browser_binary_installs_nothing() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn an_http_error_installs_nothing() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -490,6 +520,7 @@ async fn an_http_error_installs_nothing() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn an_unfinished_install_is_replaced() {
     let zip = fake_chrome_zip(true).unwrap();
     let server = serve_zip(zip.clone(), 1).await;

@@ -140,11 +140,15 @@ fn ready(format: Format, asset: &Path, work: &Path, version: Version) -> Result<
             Ok(candidate)
         }
         Format::AppImage => {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(asset, fs::Permissions::from_mode(0o755))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(asset, fs::Permissions::from_mode(0o755))?;
+            }
             Ok(asset.to_path_buf())
         }
-        Format::Deb | Format::Rpm | Format::Pacman => Ok(asset.to_path_buf()),
+        // kept as it is: its checksum was verified, and the installer checks the files it holds as it writes them
+        Format::Deb | Format::Rpm | Format::Pacman | Format::WindowsSetup => Ok(asset.to_path_buf()),
     }
 }
 
@@ -210,5 +214,12 @@ pub(crate) fn unwritable(error: std::io::Error, parent: &Path) -> Error {
 
 /// Whether `error` says the disk is full.
 fn full(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::StorageFull || error.raw_os_error() == Some(libc::ENOSPC)
+    #[cfg(unix)]
+    let codes = [libc::ENOSPC];
+    #[cfg(windows)]
+    let codes = {
+        use windows_sys::Win32::Foundation::{ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL};
+        [ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL].map(u32::cast_signed)
+    };
+    error.kind() == std::io::ErrorKind::StorageFull || error.raw_os_error().is_some_and(|code| codes.contains(&code))
 }

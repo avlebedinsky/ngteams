@@ -1,0 +1,20 @@
+ngteams third-party components
+
+The dependencies/ directory carries the Cargo dependency inventory and the
+upstream license/notice files from the exact package sources used by the build,
+plus libwebrtc's consolidated third-party notice. Build dependencies are included.
+
+The adjacent GStreamer license directories and ../../versions.txt record the shipped
+media components. MEDIA-MANIFEST.json records their hashes, versions and source
+recipe URL. These DLLs remain separately replaceable under their upstream terms.
+The Microsoft VC redistributable license is under ../microsoft-vc-runtime/.
+
+The Lucide icon, Fluent Emoji reaction and MediaPipe segmentation model notices
+are included under dependencies/assets/. The model is compiled into the app.
+
+Microsoft WebView2 is installed separately from Microsoft's Evergreen service,
+under Microsoft's terms. Its installer is downloaded only when the runtime is
+missing, and its Microsoft Authenticode signature is checked before execution.
+
+Source for ngteams: https://github.com/nickalie/ngteams
+The exact source commit is recorded in PACKAGE-MANIFEST.json.

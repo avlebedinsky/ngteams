@@ -1,6 +1,9 @@
 //! `chat-shapes`' helpers (M2 Task 10): its texts, the denies it expects, and how it reads typing posts, b's typing
 //! indicator and reaction bodies into its notes. The page scripts are tested on a page in `scenario_dsl.rs`.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use proto_lab::scenario::ab_chat::{HELD_MARKER, chat_in_url, one_to_one_id};
 use proto_lab::scenario::abc_chat::FIRST_MESSAGE_MARKER;
 use proto_lab::scenario::chat_shapes::{Texts, TypingRun, control_type, indicator_changes, reaction_key, typing_posts};

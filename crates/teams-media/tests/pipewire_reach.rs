@@ -4,6 +4,7 @@
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt as _, symlink};

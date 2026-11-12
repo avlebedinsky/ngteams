@@ -398,10 +398,10 @@ not whether the service accepts it. Rows marked *bundle* weren't seen on the wir
 | Office roaming settings | — | *bundle:* Entra | `https://api.office.net` |
 | Meeting artifacts, attendance, templates | `teams.microsoft.com/api/…` | **Capture:** the token is warmed, but no request used it | app ID `6bc3b958-689b-49f5-9006-36d165f30e00` |
 | App Studio / developer portal | — | *bundle:* Entra | `https://dev.teams.microsoft.com` |
+| Loki, the persona card service ([loki.md](loki.md): the profile card's reads) | fixed `loki.delve.office.com` (configuration), then the regional base its `LokiUrl` names (`<region>.loki.delve.office.com`) | **Capture** (2026-11-11): Entra, sent as a field of a `text/plain` POST body. **Live:** our native client's token, taken from the account's refresh token, sent as a real `Authorization` header on plain GETs; scopes `LLM.Read Organization.Read User.Read User.Read.All` | `https://loki.delve.office.com` (`/.default`); the token's `aud` is Loki's application ID (a GUID), not the URL |
 
-Not Teams' own, seen in the captures: Delve's live persona card (`loki.delve.office.com`) gets an Entra token whose
-audience is an application ID, and the Office shell's nav bar (`webshell.suite.office.com`) a bearer token that isn't
-a JWT. Neither matters for M0.
+Not Teams' own, seen in the captures: the Office shell's nav bar (`webshell.suite.office.com`) gets a bearer token that
+isn't a JWT; nothing native sends to it.
 
 ### CAE and token lifetimes
 

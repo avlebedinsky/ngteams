@@ -5,7 +5,9 @@
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
@@ -149,6 +151,7 @@ fn the_speaker_records_what_it_plays_and_the_recording_is_readable_while_written
     drop(speaker);
     let whole = wav::read(&path).unwrap();
     assert_eq!(whole.len(), 150 * FRAME_SAMPLES);
+    #[cfg(unix)]
     assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
 
     // without a recording, what is played goes nowhere

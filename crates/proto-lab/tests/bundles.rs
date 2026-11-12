@@ -2,6 +2,9 @@
 //! Microsoft code): the literal scanner, the index of URL templates, hosts, HTTP methods and routes, `bundles import`
 //! from a synthetic MSIX built at test time, and `bundles search`.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;

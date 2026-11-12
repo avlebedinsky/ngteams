@@ -110,6 +110,7 @@ use gpui::{
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_component::kbd::Kbd;
+use gpui_component::shimmer::ShimmerText;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError, NOTES};
@@ -131,6 +132,7 @@ use crate::meeting_recap::{self, RecapCard};
 use crate::models::Models;
 use crate::people::{Face, Shown};
 use crate::picture_viewer::{self, OpenPicture, Viewed, Viewing};
+use crate::profile_card;
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use crate::reactions;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -194,6 +196,12 @@ const PILL: f32 = 28.0;
 const REACTIONS_OVERLAP: f32 = 6.0;
 /// The avatar beside someone else's messages, px: Teams' 32.
 const AVATAR: f32 = 32.0;
+
+/// Where each sender's face was drawn, by message: kept in a test build only ([`ChatView::face_bounds`]).
+#[cfg(feature = "test-support")]
+type FacesPlaced = Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>;
+#[cfg(not(feature = "test-support"))]
+type FacesPlaced = ();
 /// Between the avatar's column and the bubble, px.
 const AVATAR_GAP: f32 = 12.0;
 /// A bubble's text inset, px: the reactions start there too.
@@ -1014,6 +1022,10 @@ pub struct ChatView {
     /// The message whose hover bar is under the pointer: the bar floats over the message above its own, outside its
     /// row, so it keeps itself shown.
     bar_hovered: Option<String>,
+    /// Where each sender's face was drawn in the last frame, by message, in a test build only: the UI tour opens a
+    /// profile card beside one ([`ChatView::face_bounds`]). The card itself is placed by its anchor's own bounds.
+    #[cfg_attr(not(feature = "test-support"), expect(dead_code, reason = "a test build's hook"))]
+    faces_placed: FacesPlaced,
     selected: Option<String>,
     focus: FocusHandle,
     traced: Option<Vec<Traced>>,
@@ -1168,7 +1180,7 @@ impl ChatView {
         let writes_to = writes_to(&conversation, &place);
         let (seen, people_seen) = Self::seen_at(&parts.models, [&conversation, &writes_to], cx);
         let (translation, observing_translation) = Self::translation_of(&parts, &conversation, &compose, cx);
-        let mut view = Self {
+        Self {
             core: parts.core,
             models: parts.models,
             trace: parts.trace,
@@ -1204,6 +1216,7 @@ impl ChatView {
             drawn: Vec::new(),
             hovered: None,
             bar_hovered: None,
+            faces_placed: FacesPlaced::default(),
             selected: None,
             focus: cx.focus_handle(),
             traced: None,
@@ -1241,17 +1254,17 @@ impl ChatView {
             seeking: None,
             quote: QuoteJump::default(),
             _subscriptions: subscriptions,
-        };
-        view.start(cx);
-        view
+        }
+        .start(cx)
     }
 
     /// A new view's first reads: its messages, who types, its notes' outbox and its saved call transcripts.
-    fn start(&mut self, cx: &mut Context<Self>) {
+    fn start(mut self, cx: &mut Context<Self>) -> Self {
         self.kick(cx);
         self.typing_changed(cx);
         self.sync_notes(cx);
         self.read_saved(cx);
+        self
     }
 
     /// The chat's translation, handed to its compose box too, and its observation: a change builds the rows again.
@@ -3450,16 +3463,49 @@ impl ChatView {
                 .into_any_element()
         };
         let id = item.id.clone();
-        column.pt(rems(HEADER_REMS)).child(
-            div()
-                .debug_selector(move || format!("avatar-{id}"))
-                .relative()
-                .size(px(AVATAR))
-                // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
-                // the initials half its width, too narrow for two)
-                .child(face)
-                .children(badge),
-        )
+        let avatar = div()
+            .debug_selector(move || format!("avatar-{id}"))
+            .relative()
+            .size(px(AVATAR))
+            // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
+            // the initials half its width, too narrow for two)
+            .child(face)
+            .children(badge);
+        // a click on the face opens their full card, a rest on it the compact one, as Teams' does
+        let avatar = match card_of(item) {
+            Some(of) => profile_card::anchor(
+                format!("profile-card-from-avatar-{}", item.id),
+                of,
+                profile_card::Click::Full,
+                &self.models.cards,
+                avatar,
+            ),
+            None => avatar.into_any_element(),
+        };
+        #[cfg(feature = "test-support")]
+        let avatar = self.face_placed(item, avatar);
+        column.pt(rems(HEADER_REMS)).child(avatar)
+    }
+
+    /// `avatar`, its bounds recorded for [`Self::face_bounds`].
+    #[cfg(feature = "test-support")]
+    fn face_placed(&self, item: &MessageItem, avatar: AnyElement) -> AnyElement {
+        let (placed, at) = (Rc::clone(&self.faces_placed), item.id.clone());
+        div()
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(bounds) = children.first() {
+                    placed.borrow_mut().insert(at.clone(), *bounds);
+                }
+            })
+            .child(avatar)
+            .into_any_element()
+    }
+
+    /// Where the face beside message `id` was drawn in the last frame, if it was (the UI tour's).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn face_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
+        self.faces_placed.borrow().get(id).copied()
     }
 
     /// A message's column: its header, its bubble (with the "mentions you" mark beside it and its hover bar over its
@@ -3482,7 +3528,10 @@ impl ChatView {
         let cycle = clock::cycle(cx);
         // Teams' translation mark stands beside the time, or under the bubble when there is no header to hold it
         let mut mark = translation_mark(item, palette, cx);
-        let header = item.header.then(|| header_line(item, palette, cycle, mark.take()));
+        let cards = &self.models.cards;
+        let header = item
+            .header
+            .then(|| header_line(item, (palette, cycle), mark.take(), cards));
         column
             .children(header)
             .child(bubble_line(
@@ -4534,14 +4583,40 @@ fn new_messages_row(palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
+/// Whom a message's face and name open the card of: its sender, as the message shows them; none for the account's
+/// own and an app's.
+fn card_of(item: &MessageItem) -> Option<profile_card::CardOf> {
+    let sender = item.sender.as_deref().filter(|_| !item.own)?;
+    let name = item.face.named.then(|| item.sender_name.clone());
+    Some(profile_card::CardOf::new(sender, name).with_picture(item.face.picture.clone()))
+}
+
 /// A message's header, Teams' way: the sender's name (none on the account's own) and its time (on `cycle`'s clock),
 /// both muted, over the bubble's left edge, then "Edited" once edited. The time's test selector is
 /// `message-time-<id> <time>`.
-fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle, mark: Option<AnyElement>) -> AnyElement {
+fn header_line(
+    item: &MessageItem,
+    (palette, cycle): (Palette, HourCycle),
+    mark: Option<AnyElement>,
+    cards: &Entity<profile_card::CardAsks>,
+) -> AnyElement {
     let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let id = &item.id;
     let time = div().debug_selector(|| format!("message-time-{id} {time}")).child(time);
-    let name = (!item.own).then(|| div().child(item.sender_name.clone()));
+    // the name opens the sender's compact card, on a click or a rest, as Teams' does
+    let name = (!item.own).then(|| {
+        let name = div().child(item.sender_name.clone());
+        match card_of(item) {
+            Some(of) => profile_card::anchor(
+                format!("profile-card-from-name-{id}"),
+                of,
+                profile_card::Click::Compact,
+                cards,
+                name,
+            ),
+            None => name.into_any_element(),
+        }
+    });
     div()
         .h(rems(HEADER_REMS))
         .flex()
@@ -4556,8 +4631,38 @@ fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle, mark: Opt
         .into_any_element()
 }
 
+/// How faded a message's text is while its translation comes.
+const WAITING_OPACITY: f32 = 0.6;
+/// What a message waiting for its translation says beside its time.
+pub const TRANSLATING: &str = "Translating…";
+
+/// A message waiting for its translation: Teams' translation mark and "Translating…", a light sweeping over it while
+/// animations play.
+fn translating_mark(id: &str, palette: Palette, cx: &App) -> AnyElement {
+    let selector = format!("translation-mark-{id}");
+    let label: AnyElement = if crate::motion::on(cx) {
+        ShimmerText::new(TRANSLATING)
+            .id(SharedString::from(format!("translating-{id}")))
+            .highlight_color(rgb(palette.brand))
+            .into_any_element()
+    } else {
+        div().child(TRANSLATING).into_any_element()
+    };
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap_1()
+        .p(px(2.0))
+        .text_xs()
+        .text_color(rgb(palette.muted_foreground))
+        .child(Glyph::LANGUAGES.icon().size(px(14.0)))
+        .child(label)
+        .into_any_element()
+}
+
 /// Teams' translation mark of a message of a translated chat: a click shows it as sent, and back; while its
-/// translation comes, a dimmed mark; one that couldn't be translated, a mark that says so.
+/// translation comes, "Translating…" ([`translating_mark`]); one that couldn't be translated, a mark that says so.
 fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
     use chat_translate::Mark;
     let mark = item.translation.as_ref()?;
@@ -4565,7 +4670,7 @@ fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatV
     let (tip, color, toggles): (SharedString, u32, bool) = match mark {
         Mark::Translated { tip } => (tip.clone(), palette.muted_foreground, true),
         Mark::Original { tip } => (tip.clone(), palette.brand, true),
-        Mark::Waiting => ("Translating…".into(), palette.border, false),
+        Mark::Waiting => return Some(translating_mark(&id, palette, cx)),
         Mark::Failed => ("This message couldn't be translated".into(), theme::DANGER, false),
     };
     let selector = format!("translation-mark-{id}");
@@ -4750,7 +4855,13 @@ fn bubble_content(
             if let Some(quoted) = chat.quoted.clone() {
                 scope = scope.quoting(quoted);
             }
-            rich_text::render_selectable(id, &text.0, palette, forward, Some(&scope))
+            let drawn = rich_text::render_selectable(id, &text.0, palette, forward, Some(&scope));
+            // while its translation comes it shows as written, faded, as Teams fades a message being translated
+            if item.translation == Some(chat_translate::Mark::Waiting) {
+                div().opacity(WAITING_OPACITY).child(drawn).into_any_element()
+            } else {
+                drawn
+            }
         }
         Body::Deleted => muted(DELETED, palette),
         Body::Cards(cards) => {
@@ -5099,6 +5210,8 @@ impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
         self.drawn.clear();
+        #[cfg(feature = "test-support")]
+        self.faces_placed.borrow_mut().clear();
         let more = self.more_overlay();
         let options = self.options_overlay(palette, window, cx);
         let selection_menu = self.selection_menu(palette, window, cx);

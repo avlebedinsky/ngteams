@@ -12,7 +12,13 @@ use teams_core::CallFloor;
 
 use super::{Outcome, run};
 
+#[path = "environment.rs"]
+pub(crate) mod environment;
+#[path = "handles.rs"]
+pub(crate) mod handles;
 mod startup_controls;
+#[path = "transport.rs"]
+mod transport;
 
 const CASE: &str = "NGTEAMS_STARTUP_TEST_CASE";
 const TID: &str = "00000000-0000-4000-8000-000000000001";
@@ -141,8 +147,7 @@ pub(super) mod app {
         let launched = ngteams::app::launch(cx, launch)?;
         // where the control socket was bound, if one was asked for, while the app runs
         if let Some(path) = ctl {
-            use std::os::unix::fs::FileTypeExt as _;
-            let bound = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_socket());
+            let bound = super::transport::connect(&path).is_ok();
             super::record(
                 if bound { "ctl-bound" } else { "ctl-unbound" },
                 &path.display().to_string(),
@@ -172,7 +177,7 @@ pub(super) mod prompt {
 pub(super) mod platform {
     use std::time::{Duration, Instant};
 
-    use gpui::{App, TestAppContext, WindowingModes};
+    use gpui::{App, TestAppContext};
     use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
     use teams_ui::window::KitRoot;
 
@@ -180,7 +185,7 @@ pub(super) mod platform {
         cx: TestAppContext,
     }
 
-    pub fn linux(_: WindowingModes) -> Platform {
+    pub fn application() -> Platform {
         Platform {
             cx: TestAppContext::single(),
         }
@@ -268,46 +273,49 @@ fn signed(setup: &Setup, upn: &str, suffix: u8, region: bool) -> PersonalAccount
     account
 }
 
+const STARTUP_CASES: &[&str] = &[
+    "command-invalid-env",
+    "command-invalid-account",
+    "command-error-files",
+    "command-no-ready",
+    "command-read-engine-error",
+    "command-read-bad-accounts",
+    "command-read-window-error",
+    "window-error",
+    "prompt-window-error",
+    "command-broker",
+    "command-snapshot",
+    "command-bootstrap-failures",
+    "command-read-refusal",
+    "command-read-missing",
+    "command-read-window",
+    "empty",
+    "pending",
+    "prompt-success",
+    "prompt-error",
+    "first-success",
+    "first-error",
+    "ready",
+    "ready-shortcut",
+    "first-unready-success",
+    "many",
+    "first-start-fails",
+    "broken-ready",
+    "again-success",
+    "again-error",
+    "forget-missing",
+    "forget-pending",
+    "forget-stored",
+    "forget-error",
+    "handoff",
+    "handoff-link",
+    "handoff-stale",
+    "handoff-starting",
+];
+
 #[test]
 fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
-    for case in [
-        "command-invalid-env",
-        "command-invalid-account",
-        "command-error-files",
-        "command-no-ready",
-        "command-read-engine-error",
-        "command-read-bad-accounts",
-        "command-read-window-error",
-        "window-error",
-        "prompt-window-error",
-        "command-broker",
-        "command-snapshot",
-        "command-read-refusal",
-        "command-read-missing",
-        "command-read-window",
-        "empty",
-        "pending",
-        "prompt-success",
-        "prompt-error",
-        "first-success",
-        "first-error",
-        "ready",
-        "ready-shortcut",
-        "first-unready-success",
-        "many",
-        "first-start-fails",
-        "broken-ready",
-        "again-success",
-        "again-error",
-        "forget-missing",
-        "forget-pending",
-        "forget-stored",
-        "forget-error",
-        "handoff",
-        "handoff-link",
-        "handoff-stale",
-        "handoff-starting",
-    ] {
+    for &case in STARTUP_CASES {
         let root = tempfile::tempdir().unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap());
         child
@@ -328,16 +336,25 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
                 .env("UI_SANDBOX_DIR", root.path().join("sandbox"))
                 .env("WAYLAND_DISPLAY", root.path().join("sandbox/synthetic-wayland"));
         }
+        for key in ["PATH", "LANG", "LD_LIBRARY_PATH", "LLVM_PROFILE_FILE"] {
+            if let Some(value) = std::env::var_os(key) {
+                child.env(key, value);
+            }
+        }
+        environment::isolate(
+            &mut child,
+            root.path(),
+            case == "command-invalid-env" || (case.starts_with("command-read-") && case != "command-read-refusal"),
+        );
         if case == "command-invalid-env" {
             child
                 .env("HOME", "relative")
                 .env("XDG_CONFIG_HOME", "relative")
                 .env("XDG_DATA_HOME", "relative");
         }
-        for key in ["PATH", "LANG", "LD_LIBRARY_PATH", "LLVM_PROFILE_FILE"] {
-            if let Some(value) = std::env::var_os(key) {
-                child.env(key, value);
-            }
+        #[cfg(windows)]
+        if case == "command-invalid-env" {
+            child.env("LOCALAPPDATA", "relative").env("USERPROFILE", "relative");
         }
         let output = child.output().unwrap();
         assert!(
@@ -410,7 +427,7 @@ fn child() {
     }
     let outcome = run(
         &ngteams::cli::Cli::try_parse_from(args).unwrap(),
-        teams_media::devices::pipewire::Reach::Sandbox,
+        teams_media::devices::Reach::Sandbox,
     );
     if let Err(error) = &outcome {
         eprintln!("synthetic startup {case}: {error}");
@@ -453,7 +470,9 @@ fn seen_after(case: &str) {
     let seen = calls().lock().unwrap();
     if case == "ready" {
         // the personal app's default: the runtime dir's socket
-        let personal = std::path::Path::new(&std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("ngteams/ctl.sock");
+        let personal = teams_ctl::Env::from_process()
+            .mode_path(&teams_ctl::Mode::Personal)
+            .unwrap();
         assert!(seen.contains(&format!("ctl-bound:{}", personal.display())), "{seen:?}");
         assert!(!personal.exists(), "the quit removes the socket");
     }
@@ -467,9 +486,9 @@ fn seen_after(case: &str) {
 
 /// A second launch: handed to the app the runtime dir's socket names, or started as usual when nobody is behind it.
 mod handoff {
+    use super::transport::Listener;
     use std::io::BufReader;
-    use std::os::unix::net::UnixListener;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
@@ -485,7 +504,9 @@ mod handoff {
     pub fn run(case: &str, setup: &Setup) {
         // an account that starts at once: a launch not handed off shows in `calls` as its start
         signed(setup, "ready@example.test", 2, true);
-        let socket = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("ngteams/ctl.sock");
+        let socket = teams_ctl::Env::from_process()
+            .mode_path(&teams_ctl::Mode::Personal)
+            .unwrap();
         teams_ctl::prepare_dir(&socket).unwrap();
         let mut args = vec!["ngteams".to_owned()];
         let server = match case {
@@ -509,12 +530,12 @@ mod handoff {
             }
             // the socket file an app that ended left: nobody behind it
             _ => {
-                drop(UnixListener::bind(&socket).unwrap());
+                drop(Listener::bind(&socket).unwrap());
                 None
             }
         };
         let cli = ngteams::cli::Cli::try_parse_from(args).unwrap();
-        let outcome = super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox);
+        let outcome = super::run(&cli, teams_media::devices::Reach::Sandbox);
         assert!(matches!(outcome, Ok(Outcome::Quit)), "{case}: {:?}", outcome.err());
         let started = calls().lock().unwrap().iter().any(|call| call.starts_with("start:"));
         if let Some(server) = server {
@@ -540,9 +561,9 @@ mod handoff {
     /// A running app's socket at `path` for one client: its `hello` answered, then what it asks next answered and
     /// handed back.
     fn serve_once(path: &Path) -> JoinHandle<Request> {
-        let listener = UnixListener::bind(path).unwrap();
+        let listener = Listener::bind(path).unwrap();
         thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = listener.accept().unwrap();
             let mut reader = LineReader::new(BufReader::new(stream.try_clone().unwrap()));
             let mut writer = stream;
             let mut answer = |id: u64, response| {

@@ -23,11 +23,14 @@
 //!   [`SHARING_LINE`] ([`MediaSession::set_sharing_lines`]).
 //!
 //! No thread waits on another's device: a stuck speaker only stops what is played, a stuck microphone only what is
-//! sent.
+//! captured. A missing audio device is reported independently and never prevents the other streams or the call's
+//! connection. Without a microphone nothing is generated, and the session stays muted; without a speaker received
+//! audio is decoded but is not counted as played or passed to the echo canceller. Retrying devices preserves already
+//! running streams and never unmutes by itself.
 //!
 //! A session may start without its devices ([`MediaSession::start_without_devices`]): libwebrtc makes and takes the
 //! SDP and connects the media, and the capture and playout threads start only once [`MediaSession::open_devices`]
-//! opened the microphone and the speaker (a call's devices open only once the call went).
+//! attempted its audio devices (a call's devices open only once the call went).
 //!
 //! SDP crosses as libwebrtc's standard SDP ([`SdpOffer`], [`SdpAnswer`]; `teams_media::sdp` converts it to and from
 //! Teams' dialect). [`MediaSession::close`] (or dropping the session) hangs up the peer and joins every thread. The
@@ -184,6 +187,8 @@ struct Shared {
     stop: AtomicBool,
     /// The microphone is muted: the capture thread sends silence in its place.
     muted: AtomicBool,
+    microphone_missing: AtomicBool,
+    speaker_missing: AtomicBool,
     counters: Counters,
     events: SyncSender<SessionEvent>,
     video: VideoShared,
@@ -200,6 +205,8 @@ impl Shared {
         Self {
             stop: AtomicBool::new(false),
             muted: AtomicBool::new(false),
+            microphone_missing: AtomicBool::new(false),
+            speaker_missing: AtomicBool::new(false),
             counters: Counters::default(),
             events,
             video: VideoShared::default(),
@@ -227,6 +234,15 @@ impl Shared {
         match self.events.try_send(event) {
             Ok(()) | Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {}
         }
+    }
+
+    /// The speaker in `slot` failed: emptied and marked missing before it is reported, as the microphone is. The
+    /// engine tells [`SessionEvent::DeviceClosed`] only while [`Session::speaker_missing`] holds, so a report read
+    /// before the mark would be dropped.
+    fn speaker_lost(&self, slot: &mut Option<Box<dyn AudioSink>>) {
+        *slot = None;
+        self.speaker_missing.store(true, Ordering::Relaxed);
+        self.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
     }
 
     /// Reports that the session failed with `why` and stops it: the other threads end at their next turn.
@@ -258,9 +274,12 @@ impl Shared {
     }
 }
 
-/// The capture and playout threads' parts, waiting for the devices: the processing they share.
-struct Unopened {
+/// Audio devices open independently: a missing microphone must not discard the speaker or end the call.
+struct AudioDevices {
     processing: Option<Arc<AudioProcessing>>,
+    microphone: bool,
+    playout: bool,
+    speaker: Arc<Mutex<Option<Box<dyn AudioSink>>>>,
 }
 
 /// What the event thread takes: libwebrtc's events and the caller's control plane commands.
@@ -280,8 +299,8 @@ pub struct MediaSession {
     events: Mutex<Receiver<SessionEvent>>,
     /// Behind a lock so the devices open on a shared session ([`MediaSession::open_devices`]).
     threads: Mutex<Vec<JoinHandle<()>>>,
-    /// What the capture and playout threads take once the devices open; `None` once they did.
-    unopened: Mutex<Option<Unopened>>,
+    /// Which audio streams run and the shared speaker slot; missing devices can be retried.
+    audio_devices: Mutex<AudioDevices>,
     /// The camera running now, and what it runs with once the video started.
     video: Mutex<video::SessionVideo>,
     /// One SDP step at a time: libwebrtc takes its descriptions in the order they are applied.
@@ -343,48 +362,120 @@ impl MediaSession {
             inputs,
             events: Mutex::new(event_rx),
             threads: Mutex::new(vec![handle]),
-            unopened: Mutex::new(Some(Unopened { processing })),
+            audio_devices: Mutex::new(AudioDevices {
+                processing,
+                microphone: false,
+                playout: false,
+                speaker: Arc::new(Mutex::new(None)),
+            }),
             video: Mutex::new(video::SessionVideo::default()),
             negotiation: Mutex::new(()),
             health: Mutex::new(crate::health::HealthReader::default()),
         })
     }
 
-    /// Opens the microphone and the speaker of `devices` and starts the capture and playout threads; nothing when
-    /// they are open already.
+    /// Opens each available audio device, retaining the call when either cannot open. Missing devices are reported
+    /// as [`SessionEvent::DeviceClosed`]; a missing microphone stays muted and produces no substitute audio.
+    /// Calling again retries missing devices without duplicating running streams.
     ///
     /// # Errors
-    /// [`Error::Device`] when a device can't be opened, [`Error::Io`] when a thread can't be spawned.
+    /// [`Error::Io`] when a thread can't be spawned.
     pub fn open_devices(&self, devices: &dyn Devices) -> Result<(), Error> {
-        let mut unopened = self.unopened.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(Unopened { processing }) = unopened.as_ref() else {
+        let mut audio_devices = self.audio_devices.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.shared.stopping() {
             return Ok(());
+        }
+        if !audio_devices.microphone || self.microphone_missing() {
+            self.open_microphone(devices, &mut audio_devices)?;
+        }
+        self.open_speaker(devices, &audio_devices);
+        let mut threads = self.threads.lock().unwrap_or_else(PoisonError::into_inner);
+        if !audio_devices.playout && !self.shared.stopping() {
+            let playout = Playout {
+                shared: Arc::clone(&self.shared),
+                speaker: Arc::clone(&audio_devices.speaker),
+                processing: audio_devices.processing.clone(),
+            };
+            threads.push(
+                thread::Builder::new()
+                    .name("teams-media-spk".into())
+                    .spawn(move || playout.run())?,
+            );
+            audio_devices.playout = true;
+        }
+        Ok(())
+    }
+
+    /// Reopens a missing speaker without opening a microphone or changing its mute state.
+    pub fn retry_speaker(&self, devices: &dyn Devices) {
+        let audio_devices = self.audio_devices.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.shared.stopping() {
+            self.open_speaker(devices, &audio_devices);
+        }
+    }
+
+    /// Whether playback needs a device retry; querying this never waits on a native device open.
+    #[must_use]
+    pub fn speaker_missing(&self) -> bool {
+        self.shared.speaker_missing.load(Ordering::Relaxed)
+    }
+
+    fn open_speaker(&self, devices: &dyn Devices, audio_devices: &AudioDevices) {
+        let missing_speaker = audio_devices
+            .speaker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none();
+        if missing_speaker {
+            // A native open can wait. Keep the playout lock free so incoming audio continues to be decoded.
+            match devices.speaker() {
+                Ok(opened) => {
+                    // Publish the slot and its status together. Playout can fail immediately after taking the
+                    // slot; an unlocked status store could otherwise overwrite that newer missing indication.
+                    let mut speaker = audio_devices.speaker.lock().unwrap_or_else(PoisonError::into_inner);
+                    *speaker = Some(opened);
+                    self.shared.speaker_missing.store(false, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    if !self.shared.speaker_missing.swap(true, Ordering::Relaxed) {
+                        log::warn!("the speaker could not open: {error}");
+                        self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_microphone(&self, devices: &dyn Devices, audio_devices: &mut AudioDevices) -> Result<(), Error> {
+        let microphone = match devices.microphone() {
+            Ok(microphone) => microphone,
+            Err(error) => {
+                log::warn!("the microphone could not open: {error}");
+                self.shared.muted.store(true, Ordering::Relaxed);
+                if !self.shared.microphone_missing.swap(true, Ordering::Relaxed) {
+                    self.shared
+                        .report(SessionEvent::DeviceClosed(SessionDevice::Microphone));
+                }
+                return Ok(());
+            }
         };
-        let microphone = devices.microphone()?;
-        let speaker = devices.speaker()?;
+        let mut threads = self.threads.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.shared.stopping() {
+            return Ok(());
+        }
         let capture = Capture {
             shared: Arc::clone(&self.shared),
             peer: Arc::clone(&self.peer),
             microphone,
-            processing: processing.clone(),
+            processing: audio_devices.processing.clone(),
         };
-        let playout = Playout {
-            shared: Arc::clone(&self.shared),
-            speaker,
-            processing: processing.clone(),
-        };
-        let mut threads = self.threads.lock().unwrap_or_else(PoisonError::into_inner);
+        self.shared.microphone_missing.store(false, Ordering::Relaxed);
         threads.push(
             thread::Builder::new()
                 .name("teams-media-mic".into())
                 .spawn(move || capture.run())?,
         );
-        threads.push(
-            thread::Builder::new()
-                .name("teams-media-spk".into())
-                .spawn(move || playout.run())?,
-        );
-        *unopened = None;
+        audio_devices.microphone = true;
         Ok(())
     }
 
@@ -653,7 +744,13 @@ impl MediaSession {
 
     #[must_use]
     pub fn is_muted(&self) -> bool {
-        self.shared.muted.load(Ordering::Relaxed)
+        self.shared.muted.load(Ordering::Relaxed) || self.microphone_missing()
+    }
+
+    /// The microphone failed to open or stopped. An explicit unmute can retry it through [`Self::open_devices`].
+    #[must_use]
+    pub fn microphone_missing(&self) -> bool {
+        self.shared.microphone_missing.load(Ordering::Relaxed)
     }
 
     /// Applies the far end's answer to our latest offer.
@@ -850,6 +947,8 @@ impl Capture {
                 }
                 Err(error) => {
                     log::warn!("the microphone stopped: {error}");
+                    self.shared.microphone_missing.store(true, Ordering::Relaxed);
+                    self.shared.muted.store(true, Ordering::Relaxed);
                     self.shared
                         .report(SessionEvent::DeviceClosed(SessionDevice::Microphone));
                     return;
@@ -933,7 +1032,7 @@ impl Pace {
 /// The playout thread: libwebrtc's audio of the far end to the speaker, and to the processing as the far end.
 struct Playout {
     shared: Arc<Shared>,
-    speaker: Box<dyn AudioSink>,
+    speaker: Arc<Mutex<Option<Box<dyn AudioSink>>>>,
     processing: Option<Arc<AudioProcessing>>,
 }
 
@@ -1004,16 +1103,21 @@ impl Playout {
         self.shared
             .far_level
             .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
+        let mut speaker = self.speaker.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(output) = speaker.as_mut() else {
+            // Decode received audio even without an output device; nothing is claimed as played or sent to AEC.
+            return true;
+        };
         if let Some(processing) = &self.processing
             && let Err(error) = processing.far_end(frame)
         {
             self.shared.fail(error.to_string());
             return false;
         }
-        if let Err(error) = self.speaker.play(frame) {
+        if let Err(error) = output.play(frame) {
             log::warn!("the speaker stopped: {error}");
-            self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
-            return false;
+            self.shared.speaker_lost(&mut speaker);
+            return true;
         }
         Shared::count(&self.shared.counters.frames_played, 1);
         true
@@ -1023,6 +1127,55 @@ impl Playout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lost speaker whose drop checks whether its loss was reported before the speaker was marked missing.
+    struct Watched {
+        shared: Arc<Shared>,
+        events: Arc<Mutex<Receiver<SessionEvent>>>,
+        early: Arc<AtomicBool>,
+    }
+
+    impl AudioSink for Watched {
+        fn play(&mut self, _: &AudioFrame) -> Result<(), crate::devices::DeviceError> {
+            Err(crate::devices::DeviceError::Closed)
+        }
+    }
+
+    impl Drop for Watched {
+        fn drop(&mut self) {
+            let reported = self
+                .events
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .try_recv()
+                .is_ok();
+            if reported && !self.shared.speaker_missing.load(Ordering::Relaxed) {
+                self.early.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn a_lost_speaker_is_marked_missing_before_it_is_reported() {
+        let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE);
+        let shared = Arc::new(Shared::new(sender));
+        let events = Arc::new(Mutex::new(receiver));
+        let early = Arc::new(AtomicBool::new(false));
+        let mut slot: Option<Box<dyn AudioSink>> = Some(Box::new(Watched {
+            shared: Arc::clone(&shared),
+            events: Arc::clone(&events),
+            early: Arc::clone(&early),
+        }));
+        shared.speaker_lost(&mut slot);
+        assert!(slot.is_none());
+        assert!(
+            !early.load(Ordering::Relaxed),
+            "reported before it was marked missing: the engine would drop it"
+        );
+        let told = events.lock().unwrap_or_else(PoisonError::into_inner).try_recv();
+        assert_eq!(told, Ok(SessionEvent::DeviceClosed(SessionDevice::Speaker)));
+        assert!(shared.speaker_missing.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn a_frame_level_is_its_rms() {

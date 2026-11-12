@@ -15,14 +15,14 @@
 //! - **Where**: a message post shows as a pending message of its own until its message is in the store; an edit, a
 //!   delete or a reaction shows on the message it acts on. Read receipts and a new chat's creation aren't shown.
 //! - **Waiting on one** ([`settled_row`]): a view that needs a write's outcome (a new chat made, people added) watches
-//!   its row until the outbox settles it, never writing it again.
+//!   its row until the outbox settles it, never writing it again; a watch no view owns ends once the engine stopped.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::BackgroundExecutor;
-use teams_core::{Command, Reply};
+use teams_core::{Command, EngineError, Reply};
 use teams_store::{OutboxEntry, OutboxKind, OutboxState};
 
 use crate::bridge::Core;
@@ -37,11 +37,32 @@ pub(crate) async fn settled_row(
     reply: Reply<OutboxEntry>,
     executor: &BackgroundExecutor,
 ) -> Option<OutboxEntry> {
+    settle(core, reply, executor, false).await
+}
+
+/// [`settled_row`] for a watch no view owns (a profile card's quick message, which outlives its card): it ends, with
+/// none, once the engine stopped, rather than watching a row nobody settles any more.
+pub(crate) async fn settled_row_unowned(
+    core: &dyn Core,
+    reply: Reply<OutboxEntry>,
+    executor: &BackgroundExecutor,
+) -> Option<OutboxEntry> {
+    settle(core, reply, executor, true).await
+}
+
+async fn settle(
+    core: &dyn Core,
+    reply: Reply<OutboxEntry>,
+    executor: &BackgroundExecutor,
+    until_stopped: bool,
+) -> Option<OutboxEntry> {
     let mut row = reply.await.ok()?;
     while matches!(row.state, OutboxState::Pending | OutboxState::Sending) {
         executor.timer(SETTLE_EVERY).await;
-        if let Ok(Some(updated)) = core.outbox_entry(row.id).await {
-            row = updated;
+        match core.outbox_entry(row.id).await {
+            Ok(Some(updated)) => row = updated,
+            Err(EngineError::Stopped) if until_stopped => return None,
+            Ok(None) | Err(_) => {}
         }
     }
     Some(row)

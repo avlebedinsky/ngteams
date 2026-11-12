@@ -11,10 +11,13 @@
 #                  item's metadata for the rich-text editor's paste (0001); immediate reads of local clipboard
 #                  writes, source generations, and validated private rich-copy recovery after a manager handoff (0002);
 #                  every form a clipboard offer holds read into one item: text, picture and uri-list files (0003)
+#   gpui-pre-windows our own: test-support `contains` on the DirectX atlas so atlas-inspection tests query
+#                  the real atlas (0001)
 #   libwebrtc      our own: `RtpTransceiver::set_direction`, which LiveKit's bindings leave out though `webrtc-sys`
 #                  binds it (0001): a group call's screen goes out on the mixer's sharing line, turned to send before
-#                  the answer (crates/teams-media/src/rtc.rs). Drop it, and this crate here, once a LiveKit release
-#                  exposes it (0.4.0 doesn't).
+#                  the answer (crates/teams-media/src/rtc.rs); preserve optional candidate-pair RTT (0002), so
+#                  absent values remain unknown and a measured zero is retained. Keep these patches until upstream
+#                  supports both (0.4.0 still leaves out set_direction).
 #
 # Each source is the crates.io archive of the crate's VERSION, verified against SHA256 below (the release's crates.io
 # checksum: the `cksum` of its line in https://index.crates.io/<prefix>/<crate>, also what Cargo.lock recorded for the
@@ -31,15 +34,17 @@ declare -A VERSION=(
   [gpui-pre]="0.3.9"
   [gpui-pre-wgpu]="0.3.9"
   [gpui-pre-linux]="0.3.9"
+  [gpui-pre-windows]="0.3.9"
   [libwebrtc]="0.3.55"
 )
 declare -A SHA256=(
   [gpui-pre]="34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
   [gpui-pre-wgpu]="5b1cdb26c1503bf9662ee8fbc5ab0b44b2deeee4b5c12dc67491ba6fb5fc544b"
   [gpui-pre-linux]="e28213c3fde6f13e91ba0b74b90cbaadec9373e36a031eda98561d31059870f3"
+  [gpui-pre-windows]="513d4f0fc7d596d3bdef2a73a524ffb83dabc95bf484f2855a698e7f431290a9"
   [libwebrtc]="c0399e372f69d3bb3ad8d51f6354f3090c57317de4f61521aa2f5a542c06fe1f"
 )
-CRATES=(gpui-pre gpui-pre-wgpu gpui-pre-linux libwebrtc)
+CRATES=(gpui-pre gpui-pre-wgpu gpui-pre-linux gpui-pre-windows libwebrtc)
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 

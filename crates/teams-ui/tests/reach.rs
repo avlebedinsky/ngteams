@@ -137,8 +137,12 @@ fn direct_dependencies(metadata: &Value, package: &str) -> Vec<String> {
 /// Every package `name` builds on through normal and build dependencies (proc macros and build scripts included),
 /// itself among them.
 fn closure<'a>(metadata: &'a Value, name: &str) -> Vec<&'a Value> {
+    closure_from(metadata, package_id(metadata, name))
+}
+
+fn closure_from(metadata: &Value, root: Value) -> Vec<&Value> {
     let mut seen: Vec<Value> = Vec::new();
-    let mut pending = vec![package_id(metadata, name)];
+    let mut pending = vec![root];
     while let Some(id) = pending.pop() {
         if seen.contains(&id) {
             continue;
@@ -289,6 +293,7 @@ fn the_kit_brings_no_network_client_and_only_licences_we_can_take() {
 }
 
 /// The PipeWire binding the device seam's backend takes (`teams-media`): the crate and the crates it binds through.
+#[cfg(target_os = "linux")]
 const PIPEWIRE_BINDING: [&str; 4] = ["pipewire", "libspa", "pipewire-sys", "libspa-sys"];
 
 /// The calls' media engine (`teams-media`): the safe binding of libwebrtc and the crate that binds and links the
@@ -319,13 +324,12 @@ const GSTREAMER_APP_BINDING: [&str; 4] = [
 fn audit_media_binding(binding: &[&str]) {
     let metadata = metadata();
     let root = binding[0];
-    assert!(
-        direct_dependencies(&metadata, "teams-media")
-            .iter()
-            .any(|name| name == root),
-        "teams-media takes {root}"
-    );
-    let tree = closure(&metadata, root);
+    // Select the dependency edge, since the workspace's spikes can resolve another version of the same binding.
+    let id = dependency_ids(&metadata, &package_id(&metadata, "teams-media"))
+        .into_iter()
+        .find(|id| package(&metadata, id)["name"] == root)
+        .unwrap_or_else(|| panic!("teams-media takes {root}"));
+    let tree = closure_from(&metadata, id);
     for name in binding {
         assert!(
             tree.iter().any(|found| found["name"] == *name),
@@ -344,19 +348,31 @@ fn audit_media_binding(binding: &[&str]) {
         .map(|found| format!("{} {} ({})", found["name"], found["version"], found["license"]))
         .collect();
     assert!(refused.is_empty(), "under a licence we can't take: {refused:?}");
-    for name in binding {
-        let loggers: Vec<String> = direct_dependencies(&metadata, name)
+    for found in tree
+        .iter()
+        .filter(|found| found["name"].as_str().is_some_and(|name| binding.contains(&name)))
+    {
+        let name = &found["name"];
+        let loggers: Vec<&str> = dependency_ids(&metadata, &found["id"])
             .into_iter()
-            .filter(|dependency| ["log", "tracing"].contains(&dependency.as_str()))
+            .filter_map(|id| package(&metadata, &id)["name"].as_str())
+            .filter(|dependency| ["log", "tracing"].contains(dependency))
             .collect();
         assert!(loggers.is_empty(), "{name} logs through {loggers:?}");
     }
 }
 
 /// libpipewire's own warnings go to stderr, not through `log`.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_media_s_pipewire_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
     audit_media_binding(&PIPEWIRE_BINDING);
+}
+
+#[cfg(windows)]
+#[test]
+fn the_media_s_windows_capture_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
+    audit_media_binding(&["windows-capture", "windows", "windows-core", "windows-future"]);
 }
 
 /// The ids of the package `id`'s direct normal dependencies (what links into a binary), as resolved.
@@ -450,6 +466,7 @@ fn the_media_s_gstreamer_bindings_bring_no_network_client_no_logger_and_only_lic
     audit_media_binding(&GSTREAMER_APP_BINDING);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_kit_s_default_gpui_features_give_linux_no_x11_backend() {
     let metadata = metadata();
@@ -474,6 +491,23 @@ fn the_kit_s_default_gpui_features_give_linux_no_x11_backend() {
         !platform.iter().any(|feature| feature == "x11"),
         "gpui-pre-platform: {platform:?}"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_kit_resolves_the_native_windows_backend_without_the_linux_backend() {
+    let metadata = metadata();
+    let dependencies = direct_dependencies(&metadata, "gpui-pre-platform");
+    assert!(
+        dependencies.iter().any(|name| name == "gpui-pre-windows"),
+        "{dependencies:?}"
+    );
+    assert!(
+        dependencies.iter().all(|name| name != "gpui-pre-linux"),
+        "{dependencies:?}"
+    );
+    let tree = closure(&metadata, "gpui-component");
+    assert!(tree.iter().all(|found| found["name"] != "gpui-pre-linux"));
 }
 
 /// Every `.rs` file under `dir`, with its text.
@@ -701,6 +735,14 @@ fn creates_a_chat_as_offered(path: &Path, text: &str) -> bool {
         assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
         assert!(text.contains("self.core.read_only()"));
         assert!(text.contains("ComposeEvent::Start"));
+        return true;
+    }
+    if path.ends_with("teams-ui/src/profile_card.rs") {
+        // made only by the card's quick message to someone without a 1:1 chat, never on the account's own card nor in
+        // the read-only mode
+        assert_eq!(text.matches("core.write(Action::CreateChat").count(), 1);
+        assert!(text.contains("!self.own() && !self.core.read_only()"));
+        assert!(text.contains("|| !self.writes() ||"));
         return true;
     }
     if path.ends_with("ngteams/src/ctl/writes.rs") {

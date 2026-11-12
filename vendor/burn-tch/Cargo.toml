@@ -1,0 +1,15 @@
+# Not a crates.io source: an empty stand-in for burn-tch 0.22.1, the workspace's `[patch.crates-io]` (see there).
+# burn-dispatch names burn-tch only in weak features (`burn-tch?/std`), so Cargo.lock lists it and its tch, torch-sys
+# and zip 0.6.6 though no build enables it. Its features are the real crate's, so burn-dispatch's names resolve.
+[package]
+name = "burn-tch"
+version = "0.22.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["std"]
+doc = []
+std = []
+tracing = []

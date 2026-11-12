@@ -1,8 +1,8 @@
 //! The app's one main window.
 
 use gpui::{
-    App, AppContext as _, Bounds, Entity, SharedString, Subscription, TitlebarOptions, WindowBounds, WindowHandle,
-    WindowOptions, px, size,
+    App, AppContext as _, Bounds, Entity, Pixels, SharedString, Size, Subscription, TitlebarOptions, WindowBounds,
+    WindowHandle, WindowOptions, px, size,
 };
 
 use crate::accounts::Accounts;
@@ -17,6 +17,21 @@ pub const PERSONAL_APP_ID: &str = "com.nickalie.ngteams";
 
 /// The window's size when it opens.
 const DEFAULT_SIZE: (f32, f32) = (1100.0, 720.0);
+
+/// Centers a new window, using native maximization when its client would fill a Windows work area. GPUI's centered
+/// bounds constrain the client alone; its native frame can otherwise push the bottom beneath the taskbar.
+#[must_use]
+pub fn initial_bounds(preferred: Size<Pixels>, cx: &App) -> WindowBounds {
+    let bounds = Bounds::centered(None, preferred, cx);
+    #[cfg(windows)]
+    if cx.primary_display().is_some_and(|display| {
+        let work = display.visible_bounds();
+        bounds.size.width >= work.size.width || bounds.size.height >= work.size.height
+    }) {
+        return WindowBounds::Maximized(bounds);
+    }
+    WindowBounds::Windowed(bounds)
+}
 
 /// The window's root: the UI kit's, holding our [`Root`] view. Each time it draws it applies the kit's theme to the
 /// window (the font size as the window's rem size, the font family, the background and text colours) and hosts the
@@ -40,9 +55,9 @@ pub fn init(cx: &mut App) {
 /// # Errors
 /// The platform can't open a window.
 pub fn open(cx: &mut App, app_id: &str, title: SharedString, parts: ShellParts) -> gpui::Result<WindowHandle<KitRoot>> {
-    let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
+    let bounds = initial_bounds(size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(bounds),
         titlebar: Some(TitlebarOptions {
             title: Some(title),
             ..TitlebarOptions::default()
@@ -85,9 +100,9 @@ pub fn open_accounts(
     rest: Vec<(ShellParts, Entity<OwnPresence>)>,
     accounts: &Entity<Accounts>,
 ) -> gpui::Result<WindowHandle<KitRoot>> {
-    let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
+    let bounds = initial_bounds(size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(bounds),
         titlebar: Some(TitlebarOptions {
             title: Some(title),
             ..TitlebarOptions::default()

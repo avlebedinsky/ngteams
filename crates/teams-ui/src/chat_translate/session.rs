@@ -7,6 +7,8 @@
 //!   [`Limits::turns`] questions or [`Limits::chars`] characters, or after a failure) loses nothing that matters.
 //! - **One job at a time**, in the order handed in: the model hands one batch at a time and an outgoing message at
 //!   once, so a send waits at most for the batch running.
+//! - **As it comes**: a batch's answers are told one message at a time as the tool writes them ([`Outcome::Partial`]),
+//!   so the chat shows each translation when it is ready rather than the batch's all at once.
 //! - **Failures** are told with the job they ended ([`Outcome`]); the process is closed and the next job starts a new
 //!   one. Nothing here logs a message, a translation or the tool's output.
 
@@ -81,6 +83,9 @@ pub enum Job {
 /// What a session tells the model.
 #[derive(Debug)]
 pub enum Outcome {
+    /// Answers of a batch still running, as the tool writes them: each message's once (again only when a later agent
+    /// message answers it otherwise), before the batch's [`Outcome::Batch`] (which holds them again).
+    Partial { id: u64, answers: HashMap<usize, Answer> },
     /// A batch's answers, by the messages' numbers; or why it failed.
     Batch {
         id: u64,
@@ -152,16 +157,11 @@ impl Worker {
     fn run(mut self) {
         while let Some(job) = self.next_job() {
             let outcome = match job {
-                Job::Batch { id, context, items } => {
-                    let answers = self
-                        .ask(&prompt::batch(&context, &items))
-                        .map(|text| prompt::read_batch(&text));
-                    Outcome::Batch { id, answers }
-                }
+                Job::Batch { id, context, items } => self.batch(id, &context, &items),
                 Job::Outgoing { id, context, to, text } => {
                     let backend = self.spec.backend;
                     let answer = self
-                        .ask(&prompt::outgoing(&context, to.as_deref(), &text))
+                        .ask(&prompt::outgoing(&context, to.as_deref(), &text), &mut |_| {})
                         .and_then(|text| prompt::read_outgoing(&text).ok_or_else(|| not_a_translation(backend)));
                     Outcome::Outgoing { id, answer }
                 }
@@ -173,6 +173,24 @@ impl Worker {
         if let Some(tool) = self.tool.take() {
             tool.close();
         }
+    }
+
+    /// A batch asked of the tool: each message's answer told as soon as it is written ([`Outcome::Partial`]), then the
+    /// whole answer.
+    fn batch(&mut self, id: u64, context: &[Said], items: &[Item]) -> Outcome {
+        let out = self.out.clone();
+        let stop = Arc::clone(&self.stop);
+        let mut told = HashMap::new();
+        let mut partial = |so_far: &str| {
+            let fresh = fresh_answers(so_far, &mut told);
+            if !fresh.is_empty() && !stop.load(Ordering::Relaxed) {
+                let _ = out.try_send(Outcome::Partial { id, answers: fresh });
+            }
+        };
+        let answers = self
+            .ask(&prompt::batch(context, items), &mut partial)
+            .map(|text| prompt::read_batch(&text));
+        Outcome::Batch { id, answers }
     }
 
     /// The next job, or `None` once the session was dropped.
@@ -189,8 +207,9 @@ impl Worker {
         }
     }
 
-    /// Asks `message` of the tool, started (or started anew once worn) first; a failure closes it.
-    fn ask(&mut self, message: &str) -> Result<String, Failure> {
+    /// Asks `message` of the tool, started (or started anew once worn) first, `partial` told the answer so far as it
+    /// comes; a failure closes it.
+    fn ask(&mut self, message: &str, partial: &mut dyn FnMut(&str)) -> Result<String, Failure> {
         let limits = self.spec.limits;
         if let Some(tool) = self
             .tool
@@ -213,7 +232,7 @@ impl Worker {
             )?,
         };
         let wait = if tool.answered() { limits.turn } else { limits.first };
-        match tool.ask(message, wait, &self.stop) {
+        match tool.ask_streaming(message, wait, &self.stop, partial) {
             Ok(text) => {
                 self.tool = Some(tool);
                 Ok(text)
@@ -224,6 +243,18 @@ impl Worker {
             }
         }
     }
+}
+
+/// The answers complete in a batch's answer `so_far` that weren't `told` yet, or were told otherwise (a later agent
+/// message correcting one), now told. An answer is complete once its element is closed, so a message cut mid-stream is
+/// never taken; a delta may close one and start the next, so every delta is read.
+fn fresh_answers(so_far: &str, told: &mut HashMap<usize, Answer>) -> HashMap<usize, Answer> {
+    let fresh: HashMap<usize, Answer> = prompt::read_batch(so_far)
+        .into_iter()
+        .filter(|(n, answer)| told.get(n) != Some(answer))
+        .collect();
+    told.extend(fresh.iter().map(|(n, answer)| (*n, answer.clone())));
+    fresh
 }
 
 /// What an answer that isn't a translation fails with.

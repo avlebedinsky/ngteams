@@ -30,7 +30,7 @@
 //! ([`PackError`]) say what is wrong in the app's own words, and never quote the pack.
 
 use std::collections::BTreeMap;
-use std::fs::{self, DirBuilder, File};
+use std::fs::{self, File};
 use std::io::{Read as _, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -345,10 +345,7 @@ impl Drop for Building {
 
 /// Makes `path` a private directory (and its parents).
 fn private_dir(path: &Path) -> Result<(), PackError> {
-    let mut builder = DirBuilder::new();
-    builder.recursive(true);
-    crate::settings::private_dir_mode(&mut builder);
-    builder.create(path).map_err(|_| PackError::Storage)
+    teams_platform::private::create_dir_all(path).map_err(|_| PackError::Storage)
 }
 
 /// A sound's samples brought to what is kept: at the device's rate, its peak at most [`MAX_PEAK`].

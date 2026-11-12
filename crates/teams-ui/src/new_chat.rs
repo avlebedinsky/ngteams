@@ -316,6 +316,23 @@ impl NewChat {
         cx.notify();
     }
 
+    /// New message to `person` alone, as if they were taken on the To: line (a profile card's Chat with someone the
+    /// account has no 1:1 chat with): the chat they are, else New message's own box, which takes the keyboard.
+    pub fn start_with(&mut self, person: Recipient, window: &mut Window, cx: &mut Context<Self>) {
+        self.kind = Kind::NewMessage;
+        self.naming = false;
+        self.suggesting = false;
+        self.people = vec![person];
+        self.to.update(cx, |to, cx| to.set_value("", window, cx));
+        self.found_people.clear();
+        self.highlighted = None;
+        self.resolve(window, cx);
+        let compose = self.compose(cx);
+        compose.update(cx, |compose, cx| compose.focus(window, cx));
+        cx.emit(NewChatEvent::DraftChanged);
+        cx.notify();
+    }
+
     /// Whether this is a new group chat from a 1:1 chat.
     #[must_use]
     pub fn drafting(&self) -> bool {
@@ -373,6 +390,7 @@ impl NewChat {
             trace: Arc::clone(&self.trace),
             list: self.list.clone(),
             presence: self.parts.models.presence.clone(),
+            cards: self.parts.models.cards.clone(),
             button: self.people_button.clone(),
         };
         let people = self.people.clone();
@@ -381,8 +399,17 @@ impl NewChat {
             &view,
             window,
             |this: &mut Self, _, event: &ChatPeopleEvent, window, cx| {
-                if let ChatPeopleEvent::AddToDraft(more) = event {
-                    this.add_to_draft(more, window, cx);
+                match event {
+                    ChatPeopleEvent::AddToDraft(more) => this.add_to_draft(more, window, cx),
+                    // a person's row: their 1:1 chat, else New message to them alone
+                    ChatPeopleEvent::OpenChat(person) => {
+                        let me = this.core.me().to_owned();
+                        match crate::profile_card::chat_with(this.list.read(cx), &me, &person.mri) {
+                            Some(chat) => cx.emit(NewChatEvent::Open(chat)),
+                            None => this.start_with(person.clone(), window, cx),
+                        }
+                    }
+                    ChatPeopleEvent::Close | ChatPeopleEvent::StartGroup(_) => {}
                 }
                 this.people_flyout = None;
                 cx.notify();

@@ -5,13 +5,10 @@
 //! ([`Events::set_read_timeout`]).
 
 use std::io::{self, BufReader};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use rustix::io::Errno;
-use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+use crate::transport::{self, Stream};
 
 use crate::codec::{self, CodecError, LineReader};
 use crate::protocol::{
@@ -83,8 +80,8 @@ impl From<io::Error> for ClientError {
 /// A connection to the app, past its `hello`.
 #[derive(Debug)]
 pub struct Client {
-    writer: UnixStream,
-    reader: LineReader<BufReader<UnixStream>>,
+    writer: Stream,
+    reader: LineReader<BufReader<Stream>>,
     next_id: u64,
     hello: Hello,
 }
@@ -252,7 +249,7 @@ impl From<Refused> for ResponseLine {
 /// A subscription's events, until the app closes the stream (after a `lagged` event, or when it quits).
 #[derive(Debug)]
 pub struct Events {
-    reader: LineReader<BufReader<UnixStream>>,
+    reader: LineReader<BufReader<Stream>>,
 }
 
 impl Events {
@@ -290,30 +287,13 @@ impl Iterator for Events {
 /// # Errors
 /// [`ClientError::NotRunning`] when nothing listens there (its `source` says why: refused, no such file, …),
 /// [`ClientError::Timeout`] when the backlog stays full, or the socket's own error.
-pub fn connect_stream(path: &Path, timeout: Duration) -> Result<UnixStream, ClientError> {
-    let not_running = |source: io::Error| ClientError::NotRunning {
-        path: path.to_owned(),
-        source,
-    };
-    let address = SocketAddrUnix::new(path).map_err(|errno| not_running(errno.into()))?;
-    let socket = rustix::net::socket_with(
-        AddressFamily::UNIX,
-        SocketType::STREAM,
-        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
-        None,
-    )
-    .map_err(io::Error::from)?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match rustix::net::connect(&socket, &address) {
-            Ok(()) => break,
-            Err(Errno::INTR) => {}
-            Err(Errno::AGAIN) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Err(Errno::AGAIN) => return Err(ClientError::Timeout),
-            Err(errno) => return Err(not_running(errno.into())),
-        }
-    }
-    let stream = UnixStream::from(socket);
-    stream.set_nonblocking(false)?;
-    Ok(stream)
+pub fn connect_stream(path: &Path, timeout: Duration) -> Result<Stream, ClientError> {
+    transport::connect(path, timeout).map_err(|source| match source.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => ClientError::Timeout,
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ClientError::NotRunning {
+            path: path.to_owned(),
+            source,
+        },
+        _ => ClientError::from(source),
+    })
 }

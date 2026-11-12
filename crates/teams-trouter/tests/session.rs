@@ -694,6 +694,7 @@ async fn others_presence_is_handed_on_as_delivered_and_never_answered() {
                 "availability": availability,
                 "activity": availability,
                 "deviceType": "Web",
+                "lastActiveTime": "1970-01-01T00:00:03.000Z",
             },
         }]})
     };
@@ -709,6 +710,8 @@ async fn others_presence_is_handed_on_as_delivered_and_never_answered() {
     assert_eq!(delivered.presences.len(), 1);
     assert_eq!(delivered.presences[0].mri, Mri::new(LAB_A));
     assert_eq!(delivered.presences[0].availability.as_deref(), Some("Offline"));
+    assert_eq!(delivered.presences[0].last_active_ms, Some(3000));
+    assert_eq!(delivered.presences[0].out_of_office, Some(false));
 
     // a change, then a replay of an older one (stored): both handed on, told apart
     lab.trouter.deliver_presence(LAB_B, &presence("Busy"), false);
@@ -989,6 +992,7 @@ async fn with_the_session_a_renewal_it_announces_reconnects_at_once() {
 #[derive(Default)]
 struct FlakyRegistrar {
     sent: Mutex<Vec<(String, Value)>>,
+    disconnect: AtomicBool,
 }
 
 #[cfg(test)]
@@ -1006,6 +1010,9 @@ impl teams_proto::Transport for FlakyRegistrar {
         &self,
         request: &R,
     ) -> impl Future<Output = Result<teams_proto::Response, io::Error>> + Send {
+        if self.disconnect.swap(false, Ordering::SeqCst) {
+            return future::ready(Err(io::Error::other("synthetic registrar connection lost")));
+        }
         let mut sent = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
         sent.push((
             request.endpoint().segments().join("/"),
@@ -1020,6 +1027,58 @@ impl teams_proto::Transport for FlakyRegistrar {
         _write: R,
     ) -> impl Future<Output = Result<teams_proto::Response, io::Error>> + Send {
         future::ready(Err(io::Error::other("the push channel writes nothing")))
+    }
+}
+
+#[tokio::test]
+async fn calling_registration_recovers_from_transport_and_http_failures_without_issuing_a_presence_endpoint() {
+    let lab = Lab::start().await;
+    let registrar = Arc::new(FlakyRegistrar {
+        disconnect: AtomicBool::new(true),
+        ..FlakyRegistrar::default()
+    });
+    let client = Trouter::with_mock_origin(Arc::clone(&registrar), Arc::clone(&lab.tokens), lab.trouter.origin())
+        .unwrap()
+        .with_options(Options {
+            registration: teams_trouter::RegistrationTimes {
+                retry_after: Duration::from_millis(100),
+                ..teams_trouter::RegistrationTimes::default()
+            },
+            ..options()
+        })
+        .for_calls(teams_trouter::CallStack::new(Arc::new(teams_call::Tracker::new(
+            Mri::new(LAB_B),
+        ))));
+    let epid = client.endpoint_id().to_owned();
+    let mut push = client.spawn();
+    let endpoint = connected(&mut push).await;
+    let mut reports = Vec::new();
+    while reports.len() < 3 {
+        reports.push(
+            next(&mut push, |event| match event {
+                PushEvent::Registration(report) => Some(report),
+                PushEvent::Registered(endpoint) => panic!("calling cannot issue a presence endpoint: {endpoint:?}"),
+                _ => None,
+            })
+            .await,
+        );
+    }
+    assert!(matches!(&reports[0], RegistrationReport::Failed(why) if why.contains("connection lost")));
+    assert!(matches!(&reports[1], RegistrationReport::Failed(why) if why.contains("503")));
+    assert_eq!(reports[2], RegistrationReport::Registered);
+    push.stop().await;
+    let sent = registrar.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2, "only the HTTP attempts reached the registrar");
+    for (path, body) in sent.iter() {
+        assert_eq!(path, "prod/V2/registrations");
+        assert_eq!(body["registrationId"], epid);
+        assert_eq!(body["clientDescription"]["appId"], "SkypeSpacesWeb");
+        assert!(
+            body["transports"]["TROUTER"][0]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("/v4/f/{endpoint}/"))
+        );
     }
 }
 

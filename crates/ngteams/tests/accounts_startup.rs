@@ -98,7 +98,7 @@ fn check_wrappers(root: &Path) {
 
 fn rejected_windows(setup: &Setup, account: &PersonalAccount) {
     let cx = TestAppContext::single();
-    let windows = cx.update(signin::windows);
+    let windows = cx.update(|cx| signin::windows_for(setup, cx));
     let mut invalid = account.clone();
     invalid.idp_hosts = vec!["NOT-A-DNS-NAME".to_owned()];
     let error = accounts::sign_in(setup, &invalid, &windows).unwrap_err();

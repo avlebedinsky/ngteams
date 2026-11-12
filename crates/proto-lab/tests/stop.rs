@@ -1,6 +1,9 @@
 //! A command stopped by SIGINT or SIGTERM is dropped, and with it what it owns (the lab browsers), before `proto-lab`
 //! exits. This test binary signals itself: its own process, with the signals taken over by `until_stopped`.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

@@ -6,9 +6,8 @@
 //! read while it is still being written (or after its writer was killed) holds everything up to the last update. The
 //! reader takes such a file: a `data` size of 0, `0xFFFFFFFF` or past the end is read to the end.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufWriter, Seek as _, SeekFrom, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 
 use super::{DeviceError, SAMPLE_RATE};
@@ -279,7 +278,7 @@ fn to_f32(value: f64) -> f32 {
     value as f32
 }
 
-/// A 16-bit PCM mono WAV recording at [`SAMPLE_RATE`], made `0600`.
+/// A 16-bit PCM mono WAV recording at [`SAMPLE_RATE`], private to the user (0600 on Unix, a protected DACL on Windows).
 pub struct WavWriter {
     file: BufWriter<File>,
     samples: u64,
@@ -292,12 +291,7 @@ impl WavWriter {
     /// # Errors
     /// The file can't be created or written.
     pub fn create(path: &Path) -> Result<Self, DeviceError> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
+        let file = teams_platform::private::replace(path)?;
         let mut writer = Self {
             file: BufWriter::new(file),
             samples: 0,

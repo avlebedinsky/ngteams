@@ -144,3 +144,74 @@ fn permissive_existing_files_and_directories_are_tightened() {
     privacy::assert_private(&path, false);
     assert_eq!(fs::read(&path).unwrap(), b"earlier bytes");
 }
+
+#[cfg(windows)]
+#[test]
+fn check_open_file_rejects_unsafe_acl_without_repairing_it() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("input.json");
+    let file = private::open(&path, Open::NewReadWrite).unwrap();
+    private::check_file(&file).unwrap();
+    let changed = std::process::Command::new("powershell.exe")
+        .env_remove("PSModulePath")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r"
+            $ErrorActionPreference = 'Stop'
+            # Change only the DACL: restoring unrelated audit/owner sections can require SeSecurityPrivilege
+            # in the Limited console even though this user owns the file and may change its access rules.
+            $sections = [Security.AccessControl.AccessControlSections]::Access
+            $acl = [IO.File]::GetAccessControl($env:NGTEAMS_TEST_FILE, $sections)
+            $everyone = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone, 'Read', 'Allow'))
+            [IO.File]::SetAccessControl($env:NGTEAMS_TEST_FILE, $acl)
+        ",
+        ])
+        .env("NGTEAMS_TEST_FILE", &path)
+        .output()
+        .unwrap();
+    assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stderr));
+    for _ in 0..2 {
+        assert_eq!(
+            private::check_file(&file).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    private::restrict_file(&path).unwrap();
+    private::check_file(&file).unwrap();
+}
+
+#[test]
+fn replacing_a_private_output_truncates_and_restricts_existing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("output");
+    private::replace(&path)
+        .unwrap()
+        .write_all(b"synthetic long output")
+        .unwrap();
+    std::fs::write(&path, b"earlier output").unwrap();
+    let mut file = private::replace(&path).unwrap();
+    privacy::assert_private(&path, false);
+    file.write_all(b"new").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert!(private::replace(dir.path()).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn shared_holders_exclude_exclusive_and_exclusive_excludes_every_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lock");
+    let first = private::share_lock(&path, true).unwrap();
+    let second = private::share_lock(&path, true).unwrap();
+    assert!(private::share_lock(&path, false).is_err());
+    drop((first, second));
+    let exclusive = private::share_lock(&path, false).unwrap();
+    assert!(private::share_lock(&path, false).is_err());
+    assert!(private::share_lock(&path, true).is_err());
+    drop(exclusive);
+    private::share_lock(&path, true).unwrap();
+    assert!(private::share_lock(&dir.path().join("absent/lock"), false).is_err());
+}

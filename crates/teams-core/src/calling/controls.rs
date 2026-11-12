@@ -133,6 +133,7 @@ where
         let Some(live) = self.live.as_ref().filter(|live| live.call == call) else {
             return;
         };
+        self.mute_generation = self.mute_generation.wrapping_add(1);
         match self.held_mute.as_mut().filter(|(of, _)| *of == call) {
             Some((_, wanted)) => *wanted = true,
             None => live.session.set_muted(true),

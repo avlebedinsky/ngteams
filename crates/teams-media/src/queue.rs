@@ -96,6 +96,7 @@ impl<T> Queue<T> {
     }
 
     /// Runs `take` over the entries, oldest first (the speaker's playback takes what it plays from the front).
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn with_items<R>(&self, take: impl FnOnce(&mut VecDeque<T>) -> R) -> R {
         take(&mut self.lock().items)
     }

@@ -1,0 +1,5 @@
+# LiveKit's pinned Windows libwebrtc archive uses /MT (MT_StaticRelease). Rust and the C++ bridge must select the
+# same CRT; mixing /MD objects with it fails MSVC's RuntimeLibrary ABI check and duplicates CRT symbols. GStreamer
+# remains a DLL with its own allocation/free API. This target-specific setting leaves Linux unchanged.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

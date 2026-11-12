@@ -9,11 +9,14 @@
 
 use std::ffi::OsString;
 use std::io::{BufReader, Read, Write as _};
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use teams_ctl::transport::Listener as UnixListener;
 
 use clap::Parser as _;
 use serde_json::json;
@@ -29,6 +32,37 @@ use teams_ctl::protocol::{
     SYNC_ANSWER, StatusChoice, SyncReport, Toggle, UiState, Unread, UnreadRow, View, WRITE_ANSWER, WRITE_WAIT,
     WindowOp, WindowState,
 };
+
+fn accept(listener: &UnixListener) -> teams_ctl::transport::Stream {
+    #[cfg(unix)]
+    {
+        listener.accept().unwrap().0
+    }
+    #[cfg(windows)]
+    loop {
+        match listener.accept() {
+            Ok(stream) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
+            Err(error) => panic!("accept: {error}"),
+        }
+    }
+}
+
+/// Windows uses the system time zone even with TZ=UTC; compute the expected local display of our one fixture time.
+fn expected_clock(text: &str) -> String {
+    #[cfg(windows)]
+    {
+        let time = chrono::DateTime::from_timestamp_millis(1_700_000_000_000)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        text.replace("2023-11-14 22:13", &time.format("%Y-%m-%d %H:%M").to_string())
+            .replace("22:13:20", &time.format("%H:%M:%S").to_string())
+    }
+    #[cfg(unix)]
+    {
+        text.to_owned()
+    }
+}
 
 /// What the fake server does with a request after the `hello`: lines to send back, then whether to read on.
 type Handler = dyn FnMut(&RequestLine) -> (Vec<String>, bool) + Send;
@@ -88,7 +122,7 @@ impl Server {
 
 /// Answer one connection on `listener`: its `hello`, then `handler`; the requests read.
 fn serve(listener: &UnixListener, handler: &mut Handler) -> Vec<RequestLine> {
-    let (stream, _) = listener.accept().unwrap();
+    let stream = accept(listener);
     let mut writer = stream.try_clone().unwrap();
     let mut lines = LineReader::new(BufReader::new(stream));
     let mut seen = Vec::new();
@@ -803,7 +837,11 @@ fn each_calendar_command_asks_its_request_and_prints_its_answer() {
         assert_eq!(request.request, case.request, "{args:?}");
         assert_eq!(request.account.as_deref(), case.account, "{args:?}");
         for shown in case.shows {
-            assert!(run.stdout.contains(shown), "{args:?}: {shown:?} not in\n{}", run.stdout);
+            assert!(
+                run.stdout.contains(&expected_clock(shown)),
+                "{args:?}: {shown:?} not in\n{}",
+                run.stdout
+            );
         }
         if case.shows.is_empty() {
             assert_eq!(run.stdout, "", "{args:?}");
@@ -1024,7 +1062,7 @@ fn each_command_asks_its_request_and_prints_its_answer() {
         let lines: Vec<&str> = run.stdout.lines().collect();
         for shown in case.shows {
             assert!(
-                lines.contains(shown),
+                lines.contains(&expected_clock(shown).as_str()),
                 "{:?}: {shown:?} not in\n{}",
                 case.args,
                 run.stdout
@@ -1233,9 +1271,11 @@ fn events_follow_prints_each_event_until_the_app_closes_the_stream() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "22:13:20 a@lab.invalid typing 19:lab@thread.v2 8:orgid:b on\n\
+        expected_clock(
+            "22:13:20 a@lab.invalid typing 19:lab@thread.v2 8:orgid:b on\n\
          22:13:20 a@lab.invalid typing 19:lab@thread.v2 8:orgid:b off\n\
          22:13:20 a@lab.invalid caught_up\n"
+        )
     );
     assert_eq!(request.account.as_deref(), Some("a@lab.invalid"));
     assert_eq!(
@@ -1318,7 +1358,7 @@ fn wait_prints_the_first_event_that_matches() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "22:13:20 a@lab.invalid message 19:lab@thread.v2 1 Lab B: deploy done\n"
+        expected_clock("22:13:20 a@lab.invalid message 19:lab@thread.v2 1 Lab B: deploy done\n")
     );
     let Request::Subscribe { filter } = request.request else {
         panic!("{request:?}");
@@ -1444,7 +1484,7 @@ fn silent() -> (tempfile::TempDir, PathBuf, JoinHandle<()>) {
     let path = dir.path().join("ctl.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let thread = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = accept(&listener);
         // read until the client hangs up
         let _ = std::io::copy(&mut stream, &mut std::io::sink());
     });
@@ -1546,9 +1586,9 @@ fn a_reader_gone_ends_quietly_and_another_write_error_is_an_error() {
 fn env(socket: Option<&str>) -> Env {
     Env {
         socket: socket.map(OsString::from),
-        runtime_dir: Some(OsString::from("/run/user/1000")),
-        state_home: Some(OsString::from("/home/u/.local/state")),
-        home: Some(OsString::from("/home/u")),
+        runtime_dir: Some(std::env::temp_dir().join("synthetic/runtime").into_os_string()),
+        state_home: Some(std::env::temp_dir().join("synthetic/state").into_os_string()),
+        home: Some(std::env::temp_dir().join("synthetic/home").into_os_string()),
     }
 }
 
@@ -1562,15 +1602,15 @@ fn the_socket_is_the_flag_then_the_variable_then_the_mode() {
     let plain = env(None);
     assert_eq!(
         chosen(&["status"], &plain),
-        Path::new("/run/user/1000/ngteams/ctl.sock")
+        PathBuf::from(plain.runtime_dir.as_ref().unwrap()).join("ngteams/ctl.sock")
     );
     assert_eq!(
         chosen(&["--lab", "a", "status"], &plain),
-        Path::new("/home/u/.local/state/ngteams-lab/a/ctl.sock")
+        PathBuf::from(plain.state_home.as_ref().unwrap()).join("ngteams-lab/a/ctl.sock")
     );
     assert_eq!(
         chosen(&["status", "--read-only"], &plain),
-        Path::new("/home/u/.local/state/ngteams-read-only/run/ctl.sock")
+        PathBuf::from(plain.state_home.as_ref().unwrap()).join("ngteams-read-only/run/ctl.sock")
     );
     let overridden = env(Some("/tmp/x/ctl.sock"));
     assert_eq!(
@@ -1595,4 +1635,42 @@ fn a_mode_without_a_path_exits_2_before_connecting() {
         String::from_utf8(err).unwrap(),
         "ngteamsctl: no socket to talk to: XDG_RUNTIME_DIR isn't set to an absolute path\n"
     );
+}
+
+#[test]
+fn regex_wait_matches_the_second_buffered_event_in_process() {
+    let server = streaming(
+        vec![event(said("not yet")), event(said("deploy done")), event(said("later"))],
+        true,
+    );
+    let mut out = Vec::new();
+    assert_eq!(
+        run_into(
+            server,
+            &["wait", "message", "--match", "deploy (done|failed)", "--timeout", "5"],
+            &mut out
+        ),
+        Exit::Ok
+    );
+    assert!(String::from_utf8(out).unwrap().contains("deploy done"));
+}
+
+#[test]
+fn buffered_message_events_keep_their_text_across_native_pipe_writes() {
+    let server = streaming(
+        vec![event(said("not yet")), event(said("deploy done")), event(said("later"))],
+        true,
+    );
+    let client = teams_ctl::Client::connect(&server.path, Timeouts::default()).unwrap();
+    let mut events = client.subscribe(None, EventFilter::default()).unwrap();
+    events.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    for expected in ["not yet", "deploy done", "later"] {
+        let actual = events.next_event().unwrap().unwrap();
+        let CtlEvent::Message { text, .. } = actual.event else {
+            panic!("not a message");
+        };
+        assert_eq!(text, expected);
+    }
+    drop(events);
+    server.requests();
 }

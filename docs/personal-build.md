@@ -85,9 +85,11 @@ deduplicates redeliveries, ignores ended rings and binds acceptance/media links.
 
 One call or ring is admitted at a time across the app's accounts (`teams-core::CallFloor`). Each calling delivery
 is answered only with its typed response on that delivery's connection. The camera starts off and only the user
-turns it on. The microphone/speaker open after an admitted start/join/answer succeeds. Desktop mode uses desktop
-PipeWire and the camera portal; lab/tests explicitly choose sandbox reach at run time. Without devices, the app
-runs without calls. "Make a test call" uses the Teams echo service constant from the web client.
+turns it on. The microphone/speaker open after an admitted start/join/answer succeeds. Linux desktop mode uses
+PipeWire and the camera portal; Windows uses WASAPI and Media Foundation, with its native picker for screen sharing.
+Lab/tests explicitly choose sandbox reach at run time. Without a microphone, calls connect muted; receiving media
+and sharing a screen remain available. The user can retry the microphone after connecting one. "Make a test call"
+uses the Teams echo service constant from the web client.
 
 Media uses relay-only ICE, Teams' captured SDP dialect, DTLS-SRTP, Opus and software H.264. The call window controls
 mute, camera, devices, background effects and leave; closing it leaves the call. The main window remains usable.

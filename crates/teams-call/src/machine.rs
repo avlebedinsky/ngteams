@@ -87,6 +87,8 @@ pub enum Placement {
     /// The call of the meeting whose chat is `chat`, whether it runs yet or not: nobody rings, and the service answers
     /// with the meeting's one conversation (`docs/protocol/calling.md`, "Joining a meeting").
     Meeting { chat: String, meeting: MeetingInfo },
+    /// An invitation code resolved by the calling service when the user explicitly joins.
+    MeetingCode(teams_proto::MeetingCode),
     /// A new meeting in the channel `channel` (its Meet now): nobody rings; the service answers with the meeting's
     /// conversation and posts the meeting to the channel (`docs/protocol/calling.md`, "A channel's meeting").
     Channel { channel: String },
@@ -596,7 +598,7 @@ impl Calls {
                 echo: Some(echo.clone()),
             },
             Placement::Chat { .. } | Placement::Transferred { .. } => Side::Placed { echo: None },
-            Placement::Meeting { .. } | Placement::Channel { .. } => Side::Meeting,
+            Placement::Meeting { .. } | Placement::MeetingCode(_) | Placement::Channel { .. } => Side::Meeting,
         };
         let mut call = self.new_call(side, now)?;
         call.caption_thread = match placement {
@@ -1936,8 +1938,10 @@ impl Calls {
 
     /// A roster update at the call's own callback: the participants told when they changed.
     fn roster_updated(&mut self, delivery: &Delivery) {
-        self.caption_roster(&delivery.body);
-        self.recorder_told(&delivery.body);
+        if let Ok(roster) = serde_json::from_slice::<serde_json::Value>(&delivery.body) {
+            self.service_roster(&roster);
+        }
+        self.own_roster_told(&delivery.body);
         let Some(update) = read::roster(&delivery.body) else {
             return;
         };
@@ -2304,4 +2308,4 @@ mod captions;
 #[path = "meeting.rs"]
 mod meeting;
 pub(crate) use meeting::Meeting;
-pub use meeting::{MeetingState, RECORDER_MRI, Recording, Transcription};
+pub use meeting::{MeetingState, Recording, Transcription};

@@ -3,6 +3,7 @@
 #![cfg(test)]
 
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::path::Path;
 
 use clap::Parser as _;
@@ -15,6 +16,7 @@ fn parse(args: &[&str]) -> Cli {
     Cli::try_parse_from(std::iter::once("ngteams").chain(args.iter().copied())).unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn lab_files_follow_the_xdg_data_home_and_use_one_alias_directory() {
     let mine = PersonalLocations::resolve(None, None, Some("/synthetic/home".into())).unwrap();
@@ -29,6 +31,20 @@ fn lab_files_follow_the_xdg_data_home_and_use_one_alias_directory() {
         lab::paths_for("b_2-test", &mine).unwrap().data_dir(),
         Path::new("/d/ngteams-lab/b_2-test")
     );
+    assert_ne!(lab::paths_for("b", &mine).unwrap(), lab::paths_for("c", &mine).unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn lab_files_use_one_alias_beside_the_personal_local_appdata_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let mine = PersonalLocations::windows(Some(dir.path().into()), None).unwrap();
+    let paths = lab::paths_for("a", &mine).unwrap();
+    let root = dir.path().join("ngteams-lab/a");
+    assert_eq!(paths.data_dir(), root);
+    assert_eq!(paths.config_dir(), root);
+    assert_eq!(paths.accounts_file(), root.join("accounts.toml"));
+    assert_eq!(lab::LAB_KEYRING_APPLICATION, "ngteams-lab");
     assert_ne!(lab::paths_for("b", &mine).unwrap(), lab::paths_for("c", &mine).unwrap());
 }
 
@@ -64,7 +80,10 @@ fn lab_paths_require_a_resolvable_data_home_parent() {
 #[test]
 fn lab_refuses_overlapping_personal_config_or_data_even_through_symlinks() {
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
     let mine = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("data/ngteams"));
+    #[cfg(windows)]
+    let mine = PersonalPaths::new(dir.path().join("ngteams/config"), dir.path().join("ngteams/data"));
     std::fs::create_dir_all(mine.config_dir()).unwrap();
     std::fs::create_dir_all(mine.data_dir()).unwrap();
     for own in [mine.config_dir(), mine.data_dir()] {
@@ -79,8 +98,21 @@ fn lab_refuses_overlapping_personal_config_or_data_even_through_symlinks() {
             assert!(lab::check_apart(&lab, &mine).is_err());
         }
     }
+    #[cfg(unix)]
     let link = dir.path().join("data/ngteams-lab");
+    #[cfg(windows)]
+    let link = dir.path().join("ngteams-lab");
+    #[cfg(unix)]
     std::os::unix::fs::symlink(mine.data_dir(), &link).unwrap();
+    #[cfg(windows)]
+    {
+        // A junction exercises native reparse-point resolution without requiring symlink privileges or a policy change.
+        let result = std::process::Command::new("powershell.exe").env_remove("PSModulePath")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:NGTEAMS_LINK -Target $env:NGTEAMS_TARGET | Out-Null"])
+            .env("NGTEAMS_LINK", &link).env("NGTEAMS_TARGET", mine.data_dir()).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
     let locations = PersonalLocations {
         config_dir: mine.config_dir().to_owned(),
         data_dir: mine.data_dir().to_owned(),
@@ -90,6 +122,7 @@ fn lab_refuses_overlapping_personal_config_or_data_even_through_symlinks() {
     lab::check_apart(&apart, &mine).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn a_lab_window_requires_the_sandbox_without_x11_fallback() {
     let socket = OsStr::new("/synthetic/sandbox/wayland-1");

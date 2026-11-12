@@ -6,11 +6,17 @@
 //! `0`; a fixed port would need the endpoint from `http://127.0.0.1:<port>/json/version` instead, so there is none.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::ExitStatus;
+#[cfg(unix)]
+use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group};
+#[cfg(unix)]
 use tokio::process::{Child, Command};
 
 use crate::config::{Alias, LabPaths};
@@ -191,12 +197,15 @@ pub enum BrowserError {
 const ACTIVE_PORT: &str = "DevToolsActivePort";
 const POLL: Duration = Duration::from_millis(50);
 /// How long a browser gets to exit on `SIGTERM` before it is killed.
+#[cfg(unix)]
 const TERM_GRACE: Duration = Duration::from_secs(5);
 
 /// The browser's process group: the browser leads its own, so its zygotes, renderers and crash handler go with it.
 /// Dropping it kills the whole group; a `SIGKILL` to the browser alone would leave the crash handler behind.
+#[cfg(unix)]
 struct Group(Option<Pid>);
 
+#[cfg(unix)]
 impl Group {
     fn signal(&self, signal: Signal) {
         if let Some(group) = self.0 {
@@ -206,6 +215,7 @@ impl Group {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Group {
     fn drop(&mut self) {
         self.signal(Signal::KILL);
@@ -213,12 +223,14 @@ impl Drop for Group {
 }
 
 /// A running browser. Dropping it kills the browser and every process it started.
+#[cfg(unix)]
 pub struct Browser {
     child: Child,
     group: Group,
     endpoint: DevToolsEndpoint,
 }
 
+#[cfg(unix)]
 impl Browser {
     /// Starts `executable` with `options` and waits up to `timeout` for its debugging endpoint.
     ///
@@ -314,6 +326,7 @@ impl Browser {
     }
 }
 
+#[cfg(unix)]
 async fn wait_for_endpoint(child: &mut Child, dir: &Path) -> Result<DevToolsEndpoint, BrowserError> {
     let file = dir.join(ACTIVE_PORT);
     loop {
@@ -331,5 +344,18 @@ async fn wait_for_endpoint(child: &mut Child, dir: &Path) -> Result<DevToolsEndp
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 #[path = "../tests/support/browser_process.rs"]
 mod test_process;
+
+#[cfg(windows)]
+#[path = "browser/windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::Browser;
+
+#[cfg(windows)]
+#[path = "browser/windows_edge.rs"]
+mod windows_edge;
+#[cfg(windows)]
+pub use windows_edge::{installed_edge, verify_installed_edge};

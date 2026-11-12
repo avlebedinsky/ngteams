@@ -1,5 +1,7 @@
 //! Units of what a draft's correction reads and writes (synthetic text only).
 
+use crate::fake_tool;
+
 use crate::chat_translate::prompt::Said;
 use crate::editor::doc::{Attrs, Block, Doc, Kind, Run};
 use crate::local_ai::{Backend, Failure, Model, Tools};
@@ -7,7 +9,6 @@ use crate::message_correct::diff::{Change, preview};
 use crate::message_correct::draft::encode;
 use crate::message_correct::prompt::{self, Answer};
 use crate::message_correct::{Correcting, Limits, Outcome, Proposal, Request, Unusable, read};
-use std::os::unix::fs::PermissionsExt as _;
 use teams_proto::chat::Marks;
 
 fn styled(text: &str, marks: Marks) -> Run {
@@ -336,9 +337,7 @@ fn outcome_of(script: &str) -> Outcome {
 
 fn outcome_with_limits(script: &str, limits: Limits) -> Outcome {
     let dir = tempfile::tempdir().unwrap();
-    let program = dir.path().join("claude");
-    std::fs::write(&program, script).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let program = fake_tool::write(dir.path(), "claude", script);
     let correcting = Correcting::start(Request {
         backend: Backend::Claude,
         program,

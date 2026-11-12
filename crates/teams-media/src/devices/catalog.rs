@@ -45,9 +45,9 @@ impl DeviceKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceInfo {
     pub kind: DeviceKind,
-    /// The backend's own name for it (PipeWire's `node.name`): what a choice keeps.
+    /// The backend's stable identifier (a PipeWire node name or Windows endpoint/device path): what a choice keeps.
     pub name: String,
-    /// What a person reads (PipeWire's `node.description`, else its name).
+    /// What a person reads: the device's friendly description, else its identifier.
     pub description: String,
 }
 

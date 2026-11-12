@@ -57,6 +57,9 @@
 //! naming an endpoint the account registered with the registrar here; answered `201` and `200` with no body, as UPS
 //! answered, and kept ([`ChatServiceMock::own_availability`]).
 //!
+//! **Loki** (`loki.rs`), on request ([`ChatServiceMock::serve_loki`]): the persona card service's configuration and
+//! the profile card's reads of the people a test gives cards, from `tests/fixtures/loki/persona-card.json`.
+//!
 //! **Calls** (`calling.rs`, M3 Task 13): the flight proxy's call requests under `/api/v2/` with the account's
 //! skypetoken ([`ChatServiceMock::skypetoken`]): the start, the callee's `attach`, `progress`, endpoint state, `accept`
 //! and `reject`, the acknowledgement, the endpoint metadata, `add`, `leave` and the join of a running call, each
@@ -93,6 +96,7 @@ mod channels;
 mod chatsvc;
 mod csa;
 mod fixtures;
+mod loki;
 #[cfg(feature = "media")]
 pub mod media;
 mod meeting_options;
@@ -117,6 +121,7 @@ use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
 pub use channels::{ChannelWrite, NOT_ADDED};
 pub use fixtures::FixtureError;
+pub use loki::{LOKI_REGION, LokiCard};
 pub use trouter::{CALLING_APP, MESSAGING_APP, REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
 pub use ups::{AvailabilityChange, OwnAvailability};
 
@@ -495,7 +500,8 @@ impl ChatServiceMock {
                     .and_then(|(first, last)| Some((first.parse::<usize>().ok()?, last.parse::<usize>().ok()?)));
                 match asked {
                     None => ResponseTemplate::new(200).set_body_raw(body.clone(), &content_type),
-                    Some((first, _)) if first >= total => ResponseTemplate::new(416),
+                    // A malformed reversed range must not panic the loopback server while slicing the body.
+                    Some((first, last)) if first >= total || last < first => ResponseTemplate::new(416),
                     Some((first, last)) => {
                         let last = last.min(total - 1);
                         ResponseTemplate::new(206)
@@ -555,6 +561,16 @@ impl ChatServiceMock {
             .with_priority(1)
             .mount(&self.server)
             .await;
+    }
+
+    /// Serves Loki, the persona card service (`loki.rs`), before the world sees it: its configuration (naming
+    /// [`LOKI_REGION`]) and, for each of `cards`, the person, organization, working-with, schedule and out-of-office
+    /// reads of their object id, in the shapes of `tests/fixtures/loki/persona-card.json` (the people each works with:
+    /// the other cards' people). A person without a card isn't served (the world
+    /// doesn't know the read). A test's stand-in: the world keeps no
+    /// one's card.
+    pub async fn serve_loki(&self, cards: &[LokiCard<'_>]) {
+        loki::mount(&self.server, cards).await;
     }
 
     /// Answers every presence subscription (`POST` of UPS's `v1/pubsub/subscriptions/<endpoint>` under

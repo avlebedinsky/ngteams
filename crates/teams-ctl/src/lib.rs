@@ -1,6 +1,6 @@
 //! `teams-ctl`: the control socket of the running `ngteams` (`docs/plans/20261106-ngteamsctl.md`).
 //!
-//! `ngteamsctl` drives the running app over a Unix socket speaking JSON lines. This crate holds what both ends share,
+//! `ngteamsctl` drives the running app over a private local connection speaking JSON lines. This crate holds what both ends share,
 //! and no GPUI: the server lives in the app (`crates/ngteams/src/ctl/`).
 //!
 //! - [`protocol`]: the requests, responses, error codes and events on the wire, and [`PROTOCOL_VERSION`]. They are
@@ -17,6 +17,7 @@ pub mod codec;
 pub mod path;
 pub mod protocol;
 pub mod render;
+pub mod transport;
 
 pub use client::{Client, ClientError, Events, Timeouts, connect_stream};
 pub use codec::{CodecError, LineReader, MAX_LINE};

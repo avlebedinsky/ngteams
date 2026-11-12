@@ -307,8 +307,9 @@ their typed protocol requests with the service's own credential.
   (`Outbox::try_calendar`): one attempt, with another only after a 401 or a short throttle,
   never after an unknown outcome. A Teams meeting's creation first makes its online meeting (`CreateOnlineMeeting`, a
   plain request) and carries it. The engine fills in the organizer (the account's MRI, its profile's address, its
-  name) and the time zone (`TimeZoneSettings`, from `TZ` or `/etc/localtime`), each kept once read (one that didn't
-  read is asked again at the next write; a change without the zone keeps the event's own).
+  name) and the time zone (`TimeZoneSettings`, from `TZ` or the OS's IANA zone through `iana-time-zone`, on Windows
+  and Unix), each kept once read (one that didn't read is asked again at the next write; a change without the zone
+  keeps the event's own).
 - A change sends the event as `EventRead` gave it with the form's fields over it, so what the form doesn't show goes
   back as it came; a Teams meeting stays one, an occurrence one and a series' master one.
 - **A series** (`crates/teams-ui/src/event_form/repeat.rs`, `teams-proto`'s `Recurrence`): the form's Series makes a
@@ -326,7 +327,8 @@ their typed protocol requests with the service's own credential.
 - It never sends the online meeting's delete.
 - **Meet now** (`crates/teams-ui/src/calendar_view/meet_now.rs`): the meeting made through the outbox (`MeetNow`, one
   attempt), then its pre-join (Start meeting) or its short link (Get a link to share).
-- **Time zones** (`crates/teams-ui/src/event_form/zones.rs`): the form's slot stays in the desktop's time; a start zone
+- **Time zones** (`crates/teams-ui/src/event_form/zones.rs`): the form resolves the desktop's IANA zone from a valid
+  `TZ` override or the OS on Windows and Unix, and its slot stays in the desktop's time; a start zone
   other than the desktop's is sent as the draft's `zone`, whose Exchange name the engine reads for `eventTimeZone`, and
   both times are written in it. A series' days are the start zone's (its weekday, its first and last days, the
   summary), written as that zone's midnights. Each zone picker searches its zones by city, region or offset, and

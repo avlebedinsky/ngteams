@@ -1,6 +1,9 @@
 //! The `own-presence-*` scenarios' set-up (`proto_lab::scenario::own_presence`): what each holds back with a forced deny,
 //! and which denies each expects. No browser: the live runs are the lab's (`docs/protocol/trouter.md`).
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use clap::ValueEnum;
 use proto_lab::capture_hold::{Hold as RequestHold, PausedRequest};
 use proto_lab::scenario::ScenarioName;

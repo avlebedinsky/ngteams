@@ -12,6 +12,7 @@ wpe-webkit-sys = "generated gir bindings"
 # Only measured crates belong here. Missing baselines fail the local gate.
 # Floors are measured with one `-p <crate>` alone; combined runs also count dependent crates' tests.
 [baselines]
+teams-runner = { lines = 90, functions = 90, regions = 90 }
 teams-platform = { lines = 90, functions = 90, regions = 90 }
 teams-store = { lines = 98, functions = 100, regions = 90 }
 teams-log = { lines = 94, functions = 94, regions = 93 }
@@ -21,9 +22,9 @@ teams-call = { lines = 95, functions = 96, regions = 91 }
 teams-auth = { lines = 96, functions = 96, regions = 94 }
 teams-proto = { lines = 94, functions = 93, regions = 92 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
-teams-wpe = { lines = 88, functions = 90, regions = 88 }
+teams-wpe = { lines = 93, functions = 96, regions = 93 }
 teams-wpe-client = { lines = 84, functions = 75, regions = 84 }
-teams-web-engine = { lines = 95, functions = 91, regions = 90 }
+teams-web-engine = { lines = 96, functions = 93, regions = 91 }
 teams-signin-protocol = { lines = 100, functions = 100, regions = 98 }
 ngteams = { lines = 92, functions = 91, regions = 90 }
 teams-core = { lines = 92, functions = 93, regions = 90 }
@@ -42,20 +43,20 @@ sha256 = "3ddd9f60071e796622a5fc4d5faa6bc432c207a89e014eac21b5d8b4aaa4ea1a"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-ctl/src/lib.rs"]
-sha256 = "ee70e2982c0c821acf624df7501c8702bc2227d5bc65a7338d86820b21860223"
+sha256 = "713e3237771cf1e69e5a92513c2efbd42d03fd36393d664e55061c69aa2c872e"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]
-sha256 = "20d23fa882c92b9b4989068f42e0c3b5b9b15fc6c53a21acc11e35a9031ca0c2"
+sha256 = "edae72eac4e6ae91a4c2ea2450ada9e42ae6b6dda30bc63772fe256618809b45"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/machine/tests.rs"]
-sha256 = "72f513feb942ec22e14029802b54d22cae32da59efe86b1063db381fc19b7aa8"
+sha256 = "b7352cdfaca8b9d0761a1be94c8fdda7d87f9b5cf067550dd5f0a712cad68b92"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/machine.rs" = "b2ca781be161d7634a9a28c7443591c2b55912246b661687a7bb8d03aeb17624" }
+context = { "crates/teams-call/src/machine.rs" = "fdf3a297772bbbf2d84433c9f1bde71dac4ff7469ebff655300603d9b37c75af" }
 
 [unmapped_sources."crates/teams-call/src/track/tests.rs"]
-sha256 = "5d4f7395cac539fe36fe06873a7b55575d84653672dbe56b11a4ca498ebf023c"
+sha256 = "ce721b5d547b9b4ad35940c57b34fcbeac86de03959e917bb2b843a292902c1b"
 reason = "unit-test module included only by track.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-call/src/track.rs" = "86ad639121b355dfd39f840cb5a41d410cfdd1ac69bf31d9f19e10b26ba1ae89" }
 
@@ -75,7 +76,7 @@ sha256 = "7bdd5ebbbf07a8daf3659fc52c93eb5866aa515311ff1a0b1b3e31fe7d38b9ee"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/lib.rs"]
-sha256 = "8814aecb4e9dcc4b39acfe6ac46223ef4f6e19bc46b66231e180a02762181d9e"
+sha256 = "3bfdfb03f94a1a463005794d1173e99ae86ecac00a38b55b033b32c6e7f41a82"
 reason = "module declarations, re-exports, documentation and a string constant only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/bundles.rs"]
@@ -83,15 +84,15 @@ sha256 = "91b8fa5c32139ecb8aa673323b8acb4ad0b80a1e4e2629854aeff0d6ee067e8e"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/commands.rs"]
-sha256 = "2eecebd31a3e9cbf23ddb16701b634f807043dbdd91aec1d52c77079bcc00d2f"
+sha256 = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "c79cc5b9a48a7063864c27589061ae7fd49cad8ff8a4d1b40af129e5f2b817b3"
+sha256 = "1aa217edee9d5728e2cffbb31d221bb819c3817673ba699bea053b69436efcb1"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
-sha256 = "89658cf4ef99ddf5c8fe1421dc8a85ebdf216842cf241e19d6d9362a2f272f8c"
+sha256 = "9c9c6cf673eaa941f3c88cd7f4b48eac44b827eedbdc7ebe58e09f06cc86dc86"
 reason = "module declarations and derived error type only; no authored executable bodies"
 
 [unmapped_sources."crates/teams-media/src/video.rs"]
@@ -99,7 +100,7 @@ sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "570dca96a5fc20b7697fa897bfd6ccf7498ba27d22a58ebeb67c3af3a661a552"
+sha256 = "32692f26d3b2b2755645acdc1cc80d063b9b9bd5e2079a5b768542aee7e624b0"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe-client/src/event.rs"]
@@ -122,30 +123,472 @@ reason = "trait declarations and documentation only; no default methods or execu
 [unmapped_sources."crates/proto-lab/src/action_targets/tests.rs"]
 sha256 = "df7bda12a7f0d1af686c5ddb95c1b968917f9b170d2cbf1bc6237d50b3eb925f"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/proto-lab/src/action_targets.rs" = "91c1449f912a12df45289bb1356b30350a841e933bfbf324972e978a8f215145" }
+context = { "crates/proto-lab/src/action_targets.rs" = "624e25a8a896080702107574e179c0497fe4fbb4b892bf8fdbd0c1eb951b6168" }
 
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "909df35e897a2669555420ad24f34094b1c62b2efe007ea18651d547be12b144"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "e731a43008ea456b2d167ec1dfe8c6689acf39bf4b6849b512d784db0875bcc3" }
+context = { "crates/teams-proto/src/http.rs" = "5bb39bacb992e312b9f204f9cb4820856d8b99b1753ddb9bc303635d8ef38d67" }
 
 [unmapped_sources."crates/teams-core/src/attachments_tests.rs"]
 sha256 = "9dd845ed73f53a7a32137d505c45018d56bf8529060c3cfdee1ebe7059968e96"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-core/src/attachments.rs" = "f5ddc5cec701324240acc8fd2743e1d5c8e548e99798a2776dee21735a4f3dca" }
+context = { "crates/teams-core/src/attachments.rs" = "3ee7063cb1767921d93a2dee5a6fcd56dbd6e8c6e72a09b8e5dc149980bef956" }
 
 [unmapped_sources."crates/teams-platform/src/lib.rs"]
-sha256 = "153bbafc813e95b1a9d8c580156543b9744c4da047cb5d0456eb35409d14091e"
+sha256 = "ac9a4480914f8b3230ee22fb73669594e7479dead4a541f364cccfb090523d62"
 reason = "module declaration and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-platform/src/private/windows.rs"]
-sha256 = "fcdc9ee01827c1f62f558ecd680c156c9a94f6ddb32b958adcd751f3450f481b"
+sha256 = "000c4c69f2bbc2fe6b50501e90afa52441f337ff7938fb62a119cf79871b97d3"
 reason = "Windows-only native ACL and creation APIs: absent from the Linux LLVM export; exercised by native private-file, log-rotation, SQLite and snapshot tests in the Windows VM and Windows portability workflow"
 
 [unmapped_sources."crates/teams-auth/src/secrets/windows.rs"]
-sha256 = "2706705ef13e524c953b2e4013f09ea6b73c1c551dcadb6c520ad1ead142b8fb"
-reason = "Windows-only Credential Manager adapter; no Linux LLVM mapping. Native synthetic-credential tests and coverage run in the Windows VM interactive logon session and the Windows portability job; raw third-party secret-bearing errors are redacted by construction."
+sha256 = "398105d0d707a02daae589f4270e98db58e7695d7ca2eae77eac22162630848c"
+reason = "Windows-only Credential Manager adapter and per-key file lock; no Linux LLVM mapping. The VM console runs synthetic native large-value, reopen, replacement, concurrent-store and secret-redaction contracts. Whole-task native coverage remains required."
 
 [unmapped_sources."crates/teams-media/src/sound_file_samples.rs"]
 sha256 = "7d31215be18d4133dbaecf624a19001f48d68e2f3df899657879e419ce994081"
 reason = "test-only synthetic encoded audio constants; no executable items"
+
+[unmapped_sources."crates/teams-ctl/src/transport.rs"]
+sha256 = "b82f8babf1f6097107ebd061f21f4d48281a45b2ab89f62ad5c78c9b5303c562"
+reason = "cfg-selected module declarations and re-exports only; no executable items"
+
+[unmapped_sources."crates/teams-ctl/src/transport/windows.rs"]
+sha256 = "fa805cddc44b9d528bfc07230af2c3756a1cc83e0513b214f7a4a2b8e78c0179"
+reason = "Windows-only native control pipe transport; measured natively by the Windows portability gate, including ACLs, timeouts, shutdown, CLI and the actual app listener"
+
+[unmapped_sources."crates/teams-platform/src/windows_security.rs"]
+sha256 = "a8a3b92c3ce8528b4608a403df28b7a97990084106a3780937387aa4befab5fa"
+reason = "Windows-only token identity and private pipe descriptor; exercised by native identity, live pipe ACL and application listener tests in the Windows gate"
+
+[unmapped_sources."crates/ngteams/src/ctl/socket/windows.rs"]
+sha256 = "e2d8868d9c820bb4f17e6786d91f3b251df014786b1bc3a436a0d1c1b1d589bc"
+reason = "Windows-only app listener binding and cleanup; compiled and exercised by teams-ctl app_listener tests on Windows without the remaining GUI/media dependencies"
+
+[unmapped_sources."crates/teams-platform/src/windows_process.rs"]
+sha256 = "0b84326451184dcaf00369ec66504d88bc3db9729394cab56353e90cb489ed79"
+reason = "Windows-only selective native process/handle transfer; exercised with real synthetic subprocesses and measured by the Windows portability gate."
+
+[unmapped_sources."crates/teams-platform/src/windows_sandbox.rs"]
+sha256 = "a39d69f4637d68ceda40cf93cb0ba0cf42a2d06d5cb3aeee6f671d6dc5e93d8d"
+reason = "Windows-only authorized VM console guard; native session queries and refusal contracts are measured by the Windows portability gate without opening a GUI."
+
+[unmapped_sources."crates/teams-auth/src/broker/windows_pair.rs"]
+sha256 = "301963ea9385e48b6556edfc23912ab51598fe35a895ebbdedfb93dbba05b5c0"
+reason = "Windows-only private runtime broker pair factory; native broker/session and app handle-adoption tests use this factory and its source is measured in the Windows portability gate."
+
+[unmapped_sources."crates/ngteams/src/descriptors.rs"]
+sha256 = "ff2f75402e8094bbe216d8a47b9137b1bddc0a524f7347802b1d7e7ed9a6bc12"
+reason = "cfg-selected native descriptor module declarations and re-exports only; no executable items"
+
+[unmapped_sources."crates/ngteams/src/descriptors/windows.rs"]
+sha256 = "b6827bc649d8189fb77ae73c441b51258158ac1ba34a21dda63ccb843e06954c"
+reason = "Windows-only app handle adoption, peer verification and writable-trace validation; the actual module is compiled and exercised by native app_descriptors tests, pending whole-app Windows integration."
+
+[unmapped_sources."crates/ngteams/src/restart/windows.rs"]
+sha256 = "4d17bf1f5ab7f35841e4471512b8d3316ab6f420547aa67f55450bd65f0f4230"
+reason = "Windows-only app restart with explicit handle transfer and rewritten descriptor arguments; actual app_descriptors subprocess tests exercise success and failure on Windows, pending whole-app integration."
+
+[unmapped_sources."crates/teams-platform/src/windows_job.rs"]
+sha256 = "a2cd8de50eb53c0a437fa5d5824ab9a736ba6e3fd3620ec7f6418c0eb8df9ea5"
+reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
+
+[unmapped_sources."crates/teams-runner/src/windows.rs"]
+sha256 = "3122bb69012ebc547e8b46ec2e2847d9d2cc63937b53c5f9dfcf66244aff5a06"
+reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
+
+[unmapped_sources."crates/teams-runner/src/windows/supervisor.rs"]
+sha256 = "67bd365ed59bf77cbadb266a4f825ffe1f1e3c2517f3e987fe7f60ac77c2a0d1"
+reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
+
+[unmapped_sources."crates/teams-media/src/devices/native/screen.rs"]
+sha256 = "299a4bec8ffeef7583f8f289c3a772674efa8e650c434944165afbb04061a4d5"
+reason = "Windows-only system picker and Windows Graphics Capture adapter; its ignored hardware contract has no fixture window or runner yet, so nothing automated exercises it (docs/backlog/windows-screen-picker-contract.md); absent from Linux compilation"
+
+[unmapped_sources."crates/teams-media/src/devices/native/tests.rs"]
+sha256 = "c7b1d443fd4a4824058099b65eed8ba9a3adfc72069019e54003f233dd85c4a4"
+reason = "unit-test module included only by native.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
+context = { "crates/teams-media/src/devices/native.rs" = "5ad43e89abb76b2a91cef7e1d092f8136aaec921bf38f14480cfdb271cb76c81" }
+
+[unmapped_sources."crates/teams-media/src/test_turn/windows.rs"]
+sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"
+reason = "Windows-only host-local adapter for the test-support TURN fixture; exercised by native audio, video and screen-share relay contracts; absent from Linux compilation and production builds"
+
+[unmapped_sources."crates/teams-signin/src/native/browser.rs"]
+sha256 = "e94bca6fba4c7d26e0be6644dbfea59704bcd251907ec75af7bac6f2efa4949e"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/mod.rs"]
+sha256 = "caf46521f627c51592ea8d5b2c8f3c98486ae30e3334b93bdebafb0b719ad95e"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/policy.rs"]
+sha256 = "383b0ead223643bf97ce70b859535162a178e6f4b3ef93b2b900b0cfa49adba1"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/profile.rs"]
+sha256 = "b3f4c1fdc4f0e5bb663e591e716655868e74121f2eb0ebe89048510fe21433a6"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/refusals.rs"]
+sha256 = "8fe598cd65385a7aad4a60ab6c908e7ce80bdea1a2bffb0d7a4a0d1d0b532d18"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-signin/src/native/wire.rs"]
+sha256 = "9605f6f0a4656e5a9696ee415cd716b3f8c54e11890c9d9e01d5376781521d91"
+reason = "Windows-only native sign-in worker, COM request/response restrictions, private IPC, policy checks and profile cleanup; no Linux LLVM mapping. Exercised by the authorized VM synthetic HTTPS channel/redirect/proxy/cleanup harness and offline native unit tests; native whole-task coverage is a final port gate."
+
+[unmapped_sources."crates/teams-platform/src/windows_command.rs"]
+sha256 = "a64e9b0de8a706b2798b270038c7fc23e5234b647be9747418f32d0e5149d510"
+reason = "Windows-only suspended command/job attachment and resume; native synthetic command tests exercise tree cleanup after parent exit and npm cmd argument transfer, without an account or GUI."
+
+[unmapped_sources."crates/teams-platform/src/windows_desktop.rs"]
+sha256 = "3ea6f905664080bfe9f8a97862c7d7ba75bbc1afc88e0590ada20eb3a906d456"
+reason = "Windows-only explicit taskbar identity; native application and synthetic WebView2 worker runs exercise it in the authorized VM console."
+
+[unmapped_sources."crates/teams-ui/src/video_surface/windows.rs"]
+sha256 = "ce4146044e927dcd6d27317a738f3c873c35bfc0ba0ea4bb366f35d02246821a"
+reason = "Windows-only BGRA image painting and bounded atlas lifetime; scripts/test-windows-video.ps1 exercises replacement, repeated drawing and element release in the authorized VM console with synthetic pixels."
+
+[unmapped_sources."crates/teams-ui/src/local_ai/windows_prompt.rs"]
+sha256 = "12e293514261be58d38d44d77a0ba0d3cc133f7797a40ffa83585fe4748ab6db"
+reason = "Windows-only Claude batch-shim private prompt-file adapter; native windows_local_ai exercises exact multiline instructions and prompt lifetime through a synthetic batch/PowerShell process tree without an account or network."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/apartment.rs"]
+sha256 = "bf41283c316a4b1a62472033aafcd035cecaef69ae73738f3b5f235a3f2d5c2d"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/mod.rs"]
+sha256 = "84a44333c5707b3536c81a97b40132b1ac8bc008ab94402163954716be3735ee"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/registration.rs"]
+sha256 = "2d9947ba59d53b94bd258189c605789af95a0d26bdc31a09ef7f9a140800c702"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/toasts.rs"]
+sha256 = "ff4db966dd3bd15054beafb18906a25b7dbae043d4a32d275f3b507c6b953c0c"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/tray.rs"]
+sha256 = "98fcd9d659848ba6b7fd456331414273b9797b9691a3624f069565a6aa9da383"
+reason = "Windows-only native shell message loop with no Linux LLVM mapping. The authorized VM synthetic GPUI fixture exercises sent restart broadcasts restoring a withdrawn icon, actual tray/menu input, window recreation and unread taskbar overlays. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/ngteams/src/app/windows.rs"]
+sha256 = "ad7e183a593d231b5c6ee1b7b8fd47928726e8a7ac67f7dd43688d7ed54d2962"
+reason = "Windows-only per-mode shell identity shared with native sign-in. Native namespace contracts and the authorized VM application/sign-in grouping checks cover the platform boundary. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-ui/src/desktop/windows/activation.rs"]
+sha256 = "cc7c9d8d2d739c0021178f2414a41ac742a998b88c2991453c4e939313663cd1"
+reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
+
+[unmapped_sources."crates/teams-auth/src/secrets/windows_parts.rs"]
+sha256 = "17ed3dcb6db7a85ba5ee833b6f3499a3b5b0b2ccdfcecca1bb064c873844cc83"
+reason = "Windows-only multipart credential protocol; no Linux LLVM mapping. Native/offline synthetic tests exercise complete-value reads, legacy compatibility, multibyte boundaries, corruption, missing pieces, interruption recovery and deletion; native coverage remains required."
+
+[unmapped_sources."crates/teams-platform/src/private/windows_check.rs"]
+sha256 = "1d243bb4f73ed54c711dc49819a417cef8756e87b3afe923594b30b0caaa3d4a"
+reason = "Windows-only opened-handle ACL verification; no Linux LLVM mapping. Native private-file tests reject unsafe grants without repairing them, then verify restricted input succeeds."
+
+[unmapped_sources."crates/proto-lab/src/browser/windows.rs"]
+sha256 = "ba4aa9259dc4c0caeccd5ea10124f8f356a285e9119fee38efbb3ba95e8c2e9d"
+reason = "Windows-only lab browser ownership in atomically assigned jobs; no Linux LLVM mapping. Native synthetic process teardown contracts and VM sign-in exercise cleanup."
+
+[unmapped_sources."crates/proto-lab/src/browser/windows_edge.rs"]
+sha256 = "70bc92cb8f5f41512fc9477a4af98dea89f150a4f4a52231a05e4c5aad89c769"
+reason = "Windows-only installed Edge signature/product verification; no Linux LLVM mapping. VM console checks verify the fixed system browser before headless authorization."
+
+[unmapped_sources."crates/proto-lab/src/private.rs"]
+sha256 = "d137572dbbf7165e524b38276e0802701d17287f3807d96e2c9a6a33427a459a"
+reason = "Windows-only protected lab outputs and atomic publication; no Linux LLVM mapping. Native input/redaction/output and real provisioning contracts exercise these boundaries."
+
+[unmapped_sources."crates/proto-lab/src/main_windows.rs"]
+sha256 = "5f43eead030883ce6d73ad748d6bf76c5b8c9d242e0df03619bbb28b1f34600b"
+reason = "Windows-only restricted lab CLI; no Linux LLVM mapping. Offline test-support refusal and VM console browser, native authorization and reach audit commands validate the entry point."
+
+[unmapped_sources."crates/proto-lab/src/commands/reach_windows.rs"]
+sha256 = "8d357fbbe5d34c0139c9f424777ce0f26b48a404e0667a5c9b906321b0983cf4"
+reason = "Windows-only read-only operator reach evidence; no Linux LLVM mapping. Native synthetic tests keep incomplete rosters and unlisted humans unchecked; real checks precede every signed-in engine run."
+
+[unmapped_sources."crates/proto-lab/src/scenario/windows.rs"]
+sha256 = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126"
+reason = "Windows sign-in module declarations only; no executable items"
+
+[unmapped_sources."crates/proto-lab/src/main.rs"]
+sha256 = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d"
+reason = "Linux entry point is included at the binary root from main_unix.rs to retain the existing isolated CLI test namespace; this file has only cfg/include declarations on Linux. The Windows entry forwards to the native lab CLI."
+
+# Windows compiles only the restricted lab sign-in tool. These sources remain required on Linux.
+# Hash the cfg/module roots too: adding a Windows inclusion requires reinspection.
+
+[unmapped_sources_windows."crates/proto-lab/src/bundles/import.rs"]
+sha256 = "a738f34d455c9d2e6e1ee3ddddb99759d59d4f36f80df8bedfc5d1c4a5680272"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/bundles/index.rs"]
+sha256 = "acd971e8a9a45de8c049c92512d7cf33575c56ec55f9916aa8efd30e19483212"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/bundles/literals.rs"]
+sha256 = "4eff376446156d0cc72ac3345709232e7f5ac1e0c61d0b8139139d7937ffea84"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/chrome.rs"]
+sha256 = "2380049a9574078298357cb7336ba90a6d07d6ae066e07236e6edad2051af5c1"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/export.rs"]
+sha256 = "f2ec0529a227314d301a6a02d28caedbeecbd653db33e93f2ced5d09cae2eb1a"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/object_probe.rs"]
+sha256 = "b8e955844ff9f2ceb38082d4d5ff0dde35fe0ca2378537b8daf261f6054be53f"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/probe.rs"]
+sha256 = "8a25ce59f8799568e5e5c183aeb5d5f57089e2b27fb1cbcf69f54aab0488dd96"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/profile_probe.rs"]
+sha256 = "d6d98a9e7edfb1855b7ae0f353e2ab2c9caac8311e6b4c1fc1a84cbe1aa8e973"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/status.rs"]
+sha256 = "2bfcbfa7316a466bcb53169e0650c39c9848c062da0ff5ed839af9db107a3141"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/teams_probe.rs"]
+sha256 = "019ca52c36c057fb6468d0fe18426602f647261a5597c28b889eb8ed5b6472a3"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/commands/thread_probe.rs"]
+sha256 = "0a895ec4dad695d902448671fd403fa2350cb30967a292d503176e779083cfe1"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/main_unix.rs"]
+sha256 = "6c96a97763110c2c2cfed037435d19c619c067f2d7545425d5a483de55d69270"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/sanitize/backstop.rs"]
+sha256 = "d1c0a5ca8a2eb80e95899fd94761302b97a173f181c2b6a0cfef6a3c8aa1a8e9"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/sanitize/layers.rs"]
+sha256 = "5bcfa116b853c89eac6a5cd5b47f6d47eb2b6844f1eca7bb154f49575fcbcac0"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/sanitize/meeting.rs"]
+sha256 = "72186da27b8e9d9e10a202c0f8d7492f7b4652a0dfb66618efc58b662b68d6e2"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/sanitize/words.rs"]
+sha256 = "fe4d66a14b74500d7cfe9e50deb74bdcf1f40de7c9b195686b687073a83a8e6d"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/sanitize.rs"]
+sha256 = "bb5ea10ab6d776be2ec5718ba8e00abdaa2ad1aba496db8045eaf2f14280acb1"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_call.rs"]
+sha256 = "7d87f8728f215c49a5cc26dfdb2543f7fca9fc5b274df87a8e104b0aaf4662ea"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_chat.rs"]
+sha256 = "82d50e2b8a3360ab737ad6fced0037315e6a2160a4224c821fcd0b857231eb6f"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_chat_full.rs"]
+sha256 = "dfeb7b6dd45d0a4c5928c87fb2866d9c0901b627bc678b0d0f4b12cffae8f2f1"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_file.rs"]
+sha256 = "a39aa04a884867b84186aedbf8cf9f6b9215b4628116c5e1c4970b88d23fcaf5"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_image.rs"]
+sha256 = "0764d98f4da3ab2b641d25e02de34e35ecb1f698a9433ffab797737a6dac610f"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_meeting.rs"]
+sha256 = "66348b850e15a049a8de4ef683a7921a7b38565b456795b3eb01f45c9d605b3b"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_meeting_join.rs"]
+sha256 = "d892f9ad9980131ba63ef17e523dd23208a6acf183e22e5363e4e017f558f123"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/ab_trouter.rs"]
+sha256 = "a71d466554b12ac2b6f6cff00f88ae1f817623dc63e21814d17adc70dc794b52"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/abc_call.rs"]
+sha256 = "247255e19f9790dbf91a59c9cf0c6f2371558fdd3ca97ba63c704216b276a415"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/abc_chat.rs"]
+sha256 = "b8c022238c6fae13bcdbc8716059cefb7edc3b61f3c7dfb20f3477323d5e812f"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/abc_everyone.rs"]
+sha256 = "23b16b414813acaa1e021377f26b6a43cc30ec9839f579b93651f3db4792dd9b"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/channel_create.rs"]
+sha256 = "3f08c09c2488637c3560333b1ba60ab016f72a6386f9f6c31ffaf86062fccac8"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/chat_shapes.rs"]
+sha256 = "54242de08e37d5da631cb0310bf37aa38234aca75ad49e0db2811b101d6779ab"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/echo_call.rs"]
+sha256 = "14037b66e90d607cf33e91819f2577660e8a9497401147338572dc95a28c0768"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/load.rs"]
+sha256 = "a9f3e379a146a76590322b2905cebb11378bff71466205ab9896c9103ac125e7"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/meeting_steps.rs"]
+sha256 = "963f04ba2c9cd51d5687e002b42c836d526ff9bc0790c4b3b2f45b14b8b44a00"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/mod.rs"]
+sha256 = "3d33d51bce4ec1d51ee7b299f117cd05965634d0d7c0093b2497830543adfe2f"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/own_presence.rs"]
+sha256 = "4aeb24893da894019b7e776546dcfc4493a5fbb38b2946ee359024d21db5b8b8"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/search.rs"]
+sha256 = "e9086b9d11c404a25d9196988856083a25ade3189ec1b390528b887ebbde2267"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/scenario/team_manage.rs"]
+sha256 = "5ee5fffc5f2cba8b9dd554a91d0e1dfd7a9285294ae2ade0a53b903f1d4d5026"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/proto-lab/src/stop.rs"]
+sha256 = "8044e3282259a087a638705fd58826e8e40b4b0f3c0e4bbdc649d87179d7a056"
+reason = "Unix-only lab command/scenario subtree, excluded by the cfg-selected module roots on Windows; remains in the Linux source inventory and coverage gate."
+context = { "crates/proto-lab/src/lib.rs" = "8d3871c865c472e3b5bcd76d93027c67ff8e8b7d7bece89c91673280a166e3d8", "crates/proto-lab/src/main.rs" = "66c96952c1c552b94f1cc1938cc7f595f9b1e1967f7d5c8e5ef5f48f58a90f2d", "crates/proto-lab/src/commands.rs" = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70", "crates/proto-lab/src/scenario/windows.rs" = "9a5966754730f2bd844f6ba5f094948287af7ab896b6030c33b2a104f16af126" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire.rs"]
+sha256 = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7"
+reason = "Linux-only PipeWire device and loop-thread backend, selected by the cfg(target_os = \"linux\") module in devices.rs; absent from native Windows compilation and still required by the Linux inventory."
+context = { "crates/teams-media/src/devices.rs" = "e3dfd8cf1acd760aac24f2a4b13a051b0225c5ddc24f6443f50a250b029c2e14" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire/listing.rs"]
+sha256 = "b8ad34b4f46e935c7ed2b28a92ee32dc8eed5cd564170b99ddf307ed0e8e30ea"
+reason = "Linux-only PipeWire registry and default-device watcher, reached through the Linux-selected pipewire module; both module roots are hash-pinned and Linux still requires this source."
+context = { "crates/teams-media/src/devices.rs" = "e3dfd8cf1acd760aac24f2a4b13a051b0225c5ddc24f6443f50a250b029c2e14", "crates/teams-media/src/devices/pipewire.rs" = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire/serve.rs"]
+sha256 = "f8dee682c0c58b16a9edb653a8fa6853bd17f4a14c974ccec8937f710e508781"
+reason = "Linux-only PipeWire loop-thread command handler, reached through the Linux-selected pipewire module; both module roots are hash-pinned and Linux still requires this source."
+context = { "crates/teams-media/src/devices.rs" = "e3dfd8cf1acd760aac24f2a4b13a051b0225c5ddc24f6443f50a250b029c2e14", "crates/teams-media/src/devices/pipewire.rs" = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/pipewire/streams.rs"]
+sha256 = "a2a5dd46a427243f8dbc3118088c34e489b0e7258c3d554e909ec9c59779d014"
+reason = "Linux-only PipeWire audio/video stream callbacks, reached through the Linux-selected pipewire module; both module roots are hash-pinned and Linux still requires this source."
+context = { "crates/teams-media/src/devices.rs" = "e3dfd8cf1acd760aac24f2a4b13a051b0225c5ddc24f6443f50a250b029c2e14", "crates/teams-media/src/devices/pipewire.rs" = "1fae171a9ed3d78a21dfa7244cc4f7156fcb3ae805d86c0dad35828bb1d321e7" }
+
+[unmapped_sources_windows."crates/teams-media/src/devices/portal.rs"]
+sha256 = "0bfffc1309a9cea78bdcdfd4d00e8847097a758fa6fc3b87dff8ea8b2b0e9b44"
+reason = "Linux-only D-Bus camera and screen-cast portal boundary, selected by cfg(target_os = \"linux\") in devices.rs; absent from native Windows compilation and still required by the Linux inventory."
+context = { "crates/teams-media/src/devices.rs" = "e3dfd8cf1acd760aac24f2a4b13a051b0225c5ddc24f6443f50a250b029c2e14" }
+
+[unmapped_sources_windows."crates/teams-signin/src/engine.rs"]
+sha256 = "4770ca42f017d9a03fe9782ba5b624a7eef7f67d8831178a0a3eb6cd0fd22c8b"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
+
+[unmapped_sources_windows."crates/teams-signin/src/guard/server.rs"]
+sha256 = "6db2a483e4b1714357193e4d4d6dda5a49090c314152c951e9973b90be0e038e"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00", "crates/teams-signin/src/guard.rs" = "db526fdd32fc69bcac7f92d3785d3547b22f5244a832d32a80da9c4266dae7a9" }
+
+[unmapped_sources_windows."crates/teams-signin/src/input.rs"]
+sha256 = "93e5aeb74455a46851ba5ad692f32f342a46f8d9c419205891ba13cb0918a601"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
+
+[unmapped_sources_windows."crates/teams-signin/src/view.rs"]
+sha256 = "6ac61fc211890f72da605cc4ad161ba01e5637623f0cc5d3fa3ceff6669fb2a3"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
+
+[unmapped_sources_windows."crates/teams-signin/src/window.rs"]
+sha256 = "92f8e8f9180cf0eedc7496093005a4bd9708c8430fa5494d3224fbe2734207f4"
+reason = "Unix-only WPE/GPUI sign-in source selected by the cfg(unix) module roots; absent from native Windows compilation and still required by the Linux source inventory."
+context = { "crates/teams-signin/src/lib.rs" = "de1bc498a7fce584ebe9994cca3f0fa7cd2290a182b772e3f6848e333044da00" }
+
+[unmapped_sources_windows."crates/teams-ui/src/notify/linux.rs"]
+sha256 = "75e4b9c21cbc5bd38e1650aa1ebda84806b8369b8486de59304a9ad3557fc41f"
+reason = "Unix-only freedesktop notification D-Bus transport; notify.rs selects this module only under cfg(unix), so it is absent from native Windows compilation and remains required on Linux"
+context = { "crates/teams-ui/src/lib.rs" = "32692f26d3b2b2755645acdc1cc80d063b9b9bd5e2079a5b768542aee7e624b0", "crates/teams-ui/src/notify.rs" = "14d6485a9f6171c8c6d60b708883806e43bc6b2b2bbe831f2101657115ecb95e" }
+
+[unmapped_sources_windows."crates/teams-ui/src/tray/linux.rs"]
+sha256 = "ceed6565f30d059be5e8b6c0901fcba714248fe4ba0998e40c912d90db539ade"
+reason = "Unix-only StatusNotifierItem, D-Bus menu and launcher unread transport; tray.rs selects this module only under cfg(unix), so it is absent from native Windows compilation and remains required on Linux"
+context = { "crates/teams-ui/src/lib.rs" = "32692f26d3b2b2755645acdc1cc80d063b9b9bd5e2079a5b768542aee7e624b0", "crates/teams-ui/src/tray.rs" = "891e7b2b637aa563f5a90fc8bd3467d822687e99c07dbe74ec3c3e16b1a1dafd" }
+
+[unmapped_sources_windows."crates/ngteams/src/ctl/socket/unix.rs"]
+sha256 = "dc2c4f49b225b6b9ec6abd79a07a60d22b32258f124dd4d2413a850699d57fdd"
+reason = "Unix-only control socket transport, stale-inode recovery and filesystem cleanup; listener.rs selects it only under cfg(unix). Native Windows uses the byte-pipe module and Linux still requires this source."
+context = { "crates/ngteams/src/ctl/listener.rs" = "1f80998bdb1842b78d3706aa8c2b3bd6f736246a5baf744fe25177db8f21f94a" }
+
+[unmapped_sources_windows."crates/ngteams/src/descriptors/unix.rs"]
+sha256 = "245b9f666ee6d0f3f5c89a02b6c4542c04c03718b98b81a7d20882409766aeeb"
+reason = "Unix-only inherited broker/trace descriptor adoption and close-on-exec validation; descriptors.rs selects it only under cfg(unix). Native Windows uses validated native handles and Linux still requires this source."
+context = { "crates/ngteams/src/descriptors.rs" = "ff2f75402e8094bbe216d8a47b9137b1bddc0a524f7347802b1d7e7ed9a6bc12" }
+
+[unmapped_sources_windows."crates/teams-platform/src/private/unix.rs"]
+sha256 = "fbc9482041833c601839adbf5b671c076d9e813b4f50b54ed65dcec8eca6c464"
+reason = "Unix-only private file creation and permission backend, selected by cfg(unix) in private.rs; absent from native Windows compilation. Linux continues to require its LLVM mapping."
+context = { "crates/teams-platform/src/private.rs" = "8a7f837c30e65f5b168acdfcb05c9b9a1c228d893740c44aa6d11f4caee413c3" }
+
+[unmapped_sources_windows."crates/teams-ctl/src/transport/unix.rs"]
+sha256 = "ad27e12873ffa495db29809fde0975b5a74221ced1285b4433b0c730e31e68ab"
+reason = "Unix-only domain socket transport, selected by cfg(unix) in transport.rs; absent from native Windows compilation. Linux continues to require its LLVM mapping."
+context = { "crates/teams-ctl/src/transport.rs" = "b82f8babf1f6097107ebd061f21f4d48281a45b2ab89f62ad5c78c9b5303c562" }

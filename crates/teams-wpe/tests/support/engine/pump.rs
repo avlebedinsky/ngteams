@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use teams_wpe::{Backend, Event, FrameContent, Host, HostConfig, Load, LoadEvent, PolicyKind, SchemeToken, ViewId};
+use teams_wpe::{
+    Backend, Event, FrameContent, Host, HostConfig, Load, LoadEvent, PolicyKind, PolicyToken, ReplyToken, SchemeToken,
+    ViewId,
+};
 
 use super::{Result, page};
 
@@ -26,6 +29,10 @@ pub(super) struct Engine {
     pub frames: BTreeMap<ViewId, Frames>,
     pub root: PathBuf,
     pub held: Vec<SchemeToken>,
+    /// Navigations to a URI ending `/hold-policy`, left unanswered.
+    pub held_policies: Vec<PolicyToken>,
+    /// Script messages whose action is `hold`, left unanswered.
+    pub held_replies: Vec<ReplyToken>,
     pub schemes: Vec<String>,
     pub policies: usize,
     pub replies: usize,
@@ -46,6 +53,8 @@ impl Engine {
             frames: BTreeMap::new(),
             root,
             held: Vec::new(),
+            held_policies: Vec::new(),
+            held_replies: Vec::new(),
             schemes: Vec::new(),
             policies: 0,
             replies: 0,
@@ -87,6 +96,10 @@ impl Engine {
                 self.host.frame_presented(frame.view, frame.buffer);
                 return Ok(());
             }
+            Event::Policy(request) if matches!(&request.kind, PolicyKind::Navigation { uri, .. } if uri.ends_with("/hold-policy")) =>
+            {
+                self.held_policies.push(request.token);
+            }
             Event::Policy(request) => {
                 let allow = match &request.kind {
                     PolicyKind::Navigation { uri, new_window, .. } => !new_window && page::allowed(uri),
@@ -108,6 +121,11 @@ impl Engine {
             }
             Event::ScriptMessage(message) => {
                 let body: Value = serde_json::from_str(message.body.as_deref().unwrap_or("null"))?;
+                if body["action"] == "hold" {
+                    self.held_replies.push(message.token);
+                    self.pending.push(event);
+                    return Ok(());
+                }
                 let reply = match body["action"].as_str() {
                     Some("reject") => Err("synthetic rejection".to_owned()),
                     Some("invalid-json") => Ok("synthetic invalid JSON".into()),

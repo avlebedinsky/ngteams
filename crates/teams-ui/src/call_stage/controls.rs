@@ -176,8 +176,8 @@ impl CallStage {
             &self.trace,
             Ask::MeetingOption(option),
             cx,
-            move |taken, cx| {
-                if !taken {
+            move |answered, cx| {
+                if answered != calls::Answered::Taken {
                     let _ = stage.update(cx, |stage, cx| stage.option_not_taken(call, option, cx));
                 }
             },

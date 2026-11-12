@@ -16,7 +16,8 @@ pub struct Places {
     pub appimage: Option<OsString>,
     /// `$APPDIR`: where that runtime mounted it.
     pub appdir: Option<OsString>,
-    /// Where a system package's download waits for the package manager (its own folder isn't the user's to write).
+    /// Where a system package's download waits for the package manager (its own folder isn't the user's to write), and
+    /// the Windows installer's for the app to quit and run it.
     pub stage_dir: PathBuf,
     /// The app's data and config directories: an update that would replace one of them is refused.
     pub protected: Vec<PathBuf>,
@@ -41,7 +42,8 @@ impl Places {
 /// A release installation the app can replace with a newer release ([`crate::Source::prepare`]).
 #[derive(Clone, Debug)]
 pub struct Installation {
-    /// What an update replaces: the archive's folder, the AppImage file, or a package's `/opt/ngteams`.
+    /// What an update replaces: the archive's folder, the AppImage file, a package's `/opt/ngteams`, or the Windows
+    /// installer's folder (holding `bin\ngteams.exe`).
     pub(crate) root: PathBuf,
     /// What a restart runs once the update is in.
     pub(crate) executable: PathBuf,
@@ -49,6 +51,7 @@ pub struct Installation {
     pub(crate) stage_dir: PathBuf,
     pub(crate) protected: Vec<PathBuf>,
     /// The password prompt that runs the package manager: `pkexec`, a test's own in tests.
+    #[cfg(unix)]
     pub(crate) prompter: PathBuf,
 }
 
@@ -61,6 +64,7 @@ impl Installation {
     /// # Errors
     /// Why this copy can't update itself: no marker (a source build), a moved or renamed archive folder, a user
     /// directory inside it, or a path that can't be read.
+    #[cfg(unix)]
     pub fn detect(places: &Places) -> Result<Self, Error> {
         let executable = fs::canonicalize(executable_on_disk(places.executable.clone()))?;
         if let (Some(image), Some(appdir)) = (&places.appimage, &places.appdir)
@@ -92,6 +96,29 @@ impl Installation {
         Self::made(places, root, executable, format)
     }
 
+    /// The installation `places` describe, when the Windows installer made it: `bin\ngteams.exe` in a folder whose
+    /// [`MARKER`] says so.
+    ///
+    /// # Errors
+    /// Why this copy can't update itself: no marker (a zip or source build), a user directory inside it, or a path
+    /// that can't be read.
+    #[cfg(windows)]
+    pub fn detect(places: &Places) -> Result<Self, Error> {
+        let executable = plain(fs::canonicalize(&places.executable)?);
+        let root = executable
+            .parent()
+            .filter(|bin| bin.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin")))
+            .and_then(Path::parent)
+            .ok_or_else(|| error(NOT_A_RELEASE))?;
+        let format = fs::read_to_string(root.join(MARKER))
+            .ok()
+            .and_then(|marker| Format::from_marker(&marker))
+            .filter(|format| *format == Format::WindowsSetup)
+            .ok_or_else(|| error(NOT_A_RELEASE))?;
+        let root = root.to_path_buf();
+        Self::made(places, root, executable, format)
+    }
+
     fn made(places: &Places, root: PathBuf, executable: PathBuf, format: Format) -> Result<Self, Error> {
         let installation = Self {
             root,
@@ -99,6 +126,7 @@ impl Installation {
             format,
             stage_dir: places.stage_dir.clone(),
             protected: places.protected.clone(),
+            #[cfg(unix)]
             prompter: PathBuf::from("pkexec"),
         };
         installation.validate()?;
@@ -106,7 +134,7 @@ impl Installation {
     }
 
     /// The installation with `prompter` in `pkexec`'s place, for tests of the package route.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(unix, any(test, feature = "test-support")))]
     #[must_use]
     pub fn with_prompter(mut self, prompter: PathBuf) -> Self {
         self.prompter = prompter;
@@ -143,6 +171,7 @@ impl Installation {
     /// What tells this installation's current contents apart: its release identity file, or the AppImage file's
     /// device, inode, size and modification time. An update compares it before replacing anything.
     pub(crate) fn identity(&self) -> std::io::Result<Vec<u8>> {
+        #[cfg(unix)]
         if self.format == Format::AppImage {
             use std::os::unix::fs::MetadataExt as _;
             let metadata = fs::metadata(&self.root)?;
@@ -160,9 +189,9 @@ impl Installation {
     }
 
     /// Where an update's stage goes: beside what it replaces (one filesystem, for the renames), or for a system
-    /// package the app's own directory.
+    /// package or the Windows installer the app's own directory.
     pub(crate) fn stage_parent(&self) -> PathBuf {
-        if self.format.system_package().is_some() {
+        if self.format.stages_in_app_folder() {
             return self.stage_dir.clone();
         }
         self.root.parent().map_or_else(|| self.root.clone(), Path::to_path_buf)
@@ -222,8 +251,19 @@ fn resolved(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+/// `path` without the `\\?\` prefix `canonicalize` gives on Windows, when it has a plain drive form: the installer
+/// is handed this folder, and it is shown to the user.
+#[cfg(windows)]
+fn plain(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') && !rest.contains('?') => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
 /// The executable's path as it is on disk: a package upgrade under a running app leaves `/proc/self/exe` saying
 /// ` (deleted)`.
+#[cfg(unix)]
 fn executable_on_disk(executable: PathBuf) -> PathBuf {
     use std::os::unix::ffi::OsStrExt as _;
     if !executable.exists()

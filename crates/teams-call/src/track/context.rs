@@ -2,7 +2,7 @@
 use super::{Delivery, Observed, State, Tracker, offer::OfferState};
 use serde_json::Value;
 use std::collections::BTreeSet;
-use teams_proto::captions::{CAPTION_SERVICE_MRI, CaptionService, CaptionWrite, CaptionWriteKind};
+use teams_proto::captions::{CaptionRoster, CaptionWrite, CaptionWriteKind};
 use teams_proto::{CallState, Mri};
 
 #[derive(Debug, Default)]
@@ -11,8 +11,7 @@ pub(super) struct Context {
     actor: Option<(String, String)>,
     conversation: Option<String>,
     caption_add: Option<String>,
-    caption_command: Option<String>,
-    caption_version: Option<u64>,
+    captions: CaptionRoster,
     callbacks: BTreeSet<String>,
 }
 impl Context {
@@ -71,6 +70,9 @@ impl Context {
             return;
         };
         self.answer_value(&value);
+        if let Some(roster) = value.get("roster") {
+            self.captions.update(roster);
+        }
     }
     fn answer_value(&mut self, body: &Value) {
         if self.conversation.is_none() {
@@ -119,30 +121,7 @@ impl Context {
         let Ok(value) = serde_json::from_slice::<Value>(body) else {
             return;
         };
-        let Some(entry) = value.get("participants").and_then(|p| p.get(CAPTION_SERVICE_MRI)) else {
-            return;
-        };
-        if let Some(version) = entry.get("version").and_then(Value::as_u64) {
-            if self.caption_version.is_some_and(|old| version <= old) {
-                return;
-            }
-            self.caption_version = Some(version);
-        }
-        let ended = entry
-            .get("state")
-            .and_then(Value::as_str)
-            .is_some_and(|state| state != "active");
-        let has_command = entry.get("endpoints").and_then(Value::as_object).is_some_and(|eps| {
-            eps.values()
-                .any(|ep| ep.pointer("/endpointMetadata/commandUrl").is_some())
-        });
-        if ended || has_command {
-            self.caption_command = if ended {
-                None
-            } else {
-                CaptionService::from_roster(body).map(|service| service.command.as_str().to_owned())
-            };
-        }
+        self.captions.update(&value);
     }
     fn owns_callback(&self, path: &str) -> bool {
         self.callbacks
@@ -158,10 +137,10 @@ impl Context {
             return false;
         }
         let expected = match write.kind() {
-            CaptionWriteKind::Invite => &self.caption_add,
-            _ => &self.caption_command,
+            CaptionWriteKind::Invite => self.caption_add.as_deref(),
+            _ => self.captions.service().map(|service| service.command.as_str()),
         };
-        if expected.as_deref() != Some(write.url().as_str()) {
+        if expected != Some(write.url().as_str()) {
             return false;
         }
         let roots: Vec<_> = roots.collect();

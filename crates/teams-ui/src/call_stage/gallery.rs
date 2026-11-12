@@ -52,33 +52,14 @@ impl CallStage {
             self.tiles_of(active)
         };
         let call = active.id.get();
-        let lobby = crate::call_lobby::card(active, palette, cx);
+        let faces = &self.faces;
+        let lobby = crate::call_lobby::card(active, |mri| faces.picture(mri).cloned(), palette, cx);
         // the far end's share fills the stage, the people beside it (the account's own tile among them)
         let shared = active.remote_share && active.held.is_none() && active.status != CallStatus::Lobby;
         let body = if shared {
             self.share_stage(active, tiles, title, palette, cx)
         } else if tiles.is_empty() {
-            let waiting = active.kind == CallKind::Meeting && active.status == CallStatus::Connected;
-            if let Some(since) = active.held {
-                // Teams' held call: who it is with, "On hold" and how long, no rings
-                let lasted = calls::duration_text(since.elapsed().as_secs());
-                calling(title, &format!("On hold {lasted}"), palette, Vec::new())
-            } else if active.held_by_far_end {
-                // Teams' held party: who holds it over "On hold", no duration, no rings
-                div()
-                    .debug_selector(|| "call-held-by-far-end".to_owned())
-                    .size_full()
-                    .child(calling(title, "On hold", palette, Vec::new()))
-                    .into_any_element()
-            } else {
-                let state = if waiting {
-                    "Waiting for others to join".to_owned()
-                } else {
-                    calls::status_text(active)
-                };
-                let rings = crate::motion::ripple("call-calling", palette.accent, BIG_AVATAR_PX, cx);
-                calling(title, &state, palette, rings)
-            }
+            self.nobody_shown(active, title, palette, cx)
         } else {
             let selector = if active.view.participants.is_empty() {
                 "call-people"
@@ -90,12 +71,9 @@ impl CallStage {
             let mut drawn: Vec<AnyElement> = tiles
                 .into_iter()
                 .map(|tile| {
-                    let video = tile
-                        .video
-                        .filter(|_| !self.others_off)
-                        .and_then(|line| self.tiles.as_mut()?.fill(line, call));
+                    let face = self.face_of(&tile, call, palette, cx);
                     let pinned = tile.mri.is_some() && tile.mri == self.pinned;
-                    tile_view(tile, video, (pinned, menus), palette, cx)
+                    tile_view(tile, face, (pinned, menus), palette, cx)
                 })
                 .collect();
             match focus {
@@ -109,8 +87,8 @@ impl CallStage {
         let own = if self.self_hidden || shared {
             None
         } else {
-            let video = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Own, call));
-            Some(self_view(active, video, true, palette, cx))
+            let face = self.own_face(call, palette, cx);
+            Some(self_view(active, face, true, palette, cx))
         };
         div()
             .debug_selector(|| "call-stage".to_owned())
@@ -125,6 +103,48 @@ impl CallStage {
             .children(self.reactions_shown(active, palette, cx))
             .children(lobby)
             .into_any_element()
+    }
+
+    /// The stage while nobody's tile shows: who the call is with and its state (on hold, or held by the far end), the
+    /// rings spreading from them while it rings or waits.
+    fn nobody_shown(
+        &self,
+        active: &ActiveCall,
+        title: &SharedString,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let waiting = active.kind == CallKind::Meeting && active.status == CallStatus::Connected;
+        if let Some(since) = active.held {
+            // Teams' held call: who it is with, "On hold" and how long, no rings
+            let lasted = calls::duration_text(since.elapsed().as_secs());
+            calling(
+                (title, self.partner_picture(Some(active.id))),
+                &format!("On hold {lasted}"),
+                palette,
+                Vec::new(),
+            )
+        } else if active.held_by_far_end {
+            // Teams' held party: who holds it over "On hold", no duration, no rings
+            div()
+                .debug_selector(|| "call-held-by-far-end".to_owned())
+                .size_full()
+                .child(calling(
+                    (title, self.partner_picture(Some(active.id))),
+                    "On hold",
+                    palette,
+                    Vec::new(),
+                ))
+                .into_any_element()
+        } else {
+            let state = if waiting {
+                "Waiting for others to join".to_owned()
+            } else {
+                calls::status_text(active)
+            };
+            let rings = crate::motion::ripple("call-calling", palette.accent, BIG_AVATAR_PX, cx);
+            calling((title, self.partner_picture(Some(active.id))), &state, palette, rings)
+        }
     }
 
     /// The far end's share large, its sharer named at its bottom left (its picture fitted in, or that it is coming),
@@ -163,16 +183,13 @@ impl CallStage {
         let mut strip: Vec<AnyElement> = tiles
             .into_iter()
             .map(|tile| {
-                let video = tile
-                    .video
-                    .filter(|_| !self.others_off)
-                    .and_then(|line| self.tiles.as_mut()?.fill(line, call));
-                tile_view(tile, video, (false, false), palette, cx)
+                let face = self.face_of(&tile, call, palette, cx);
+                tile_view(tile, face, (false, false), palette, cx)
             })
             .collect();
         if !self.self_hidden {
-            let video = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Own, call));
-            strip.push(self_view(active, video, false, palette, cx));
+            let face = self.own_face(call, palette, cx);
+            strip.push(self_view(active, face, false, palette, cx));
         }
         div()
             .debug_selector(|| "call-share-stage".to_owned())
@@ -197,6 +214,25 @@ impl CallStage {
                     ),
             )
             .into_any_element()
+    }
+
+    /// What `tile` shows: its video when a line shows it (and View didn't turn the others' video off), else its
+    /// person's face.
+    fn face_of(&mut self, tile: &StageTile, call: u64, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let video = tile
+            .video
+            .filter(|_| !self.others_off)
+            .and_then(|line| self.tiles.as_mut()?.fill(line, call));
+        video.unwrap_or_else(|| self.tile_face(&tile.selector, (tile.mri.as_deref(), Some(&tile.name)), palette, cx))
+    }
+
+    /// What the account's own tile shows: its self view while the camera sends, else its face.
+    fn own_face(&mut self, call: u64, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let video = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Own, call));
+        video.unwrap_or_else(|| {
+            let me = self.core.me().to_owned();
+            self.tile_face(SELF_TILE, (Some(&me), self.own_name.as_ref()), palette, cx)
+        })
     }
 
     /// Which tile the stage shows large, if any: the one pinned; in the speaker view the one who speaks, else who
@@ -314,7 +350,7 @@ impl CallStage {
         cx.notify();
     }
 
-    /// Shows the others' initials in place of their video, or their video again (View's Turn off other videos), as
+    /// Shows the others' pictures (or initials) in place of their video, or their video again (View's Turn off other videos), as
     /// Teams does to spare a slow connection or a busy screen. Only what this window draws changes.
     pub fn turn_off_other_videos(&mut self, off: bool, cx: &mut Context<Self>) {
         self.others_off = off;
@@ -417,12 +453,12 @@ fn speaker(selector: &'static str, main: AnyElement, others: Vec<AnyElement>, se
         .into_any_element()
 }
 
-/// One tile: its video when a line shows it, else its initials; its name with its microphone muted and a raised
+/// One tile: `face` (its video when a line shows it, else its person's picture or initials); its name with its microphone muted and a raised
 /// hand; a border in the brand colour while it speaks (Teams' gold while its hand is up); its menu on hover when the
 /// stage has more than one (`menus`), its pin while `pinned`.
 fn tile_view(
     tile: StageTile,
-    video: Option<AnyElement>,
+    face: AnyElement,
     (pinned, menus): (bool, bool),
     palette: Palette,
     cx: &mut Context<CallStage>,
@@ -436,15 +472,6 @@ fn tile_view(
         hand,
         ..
     } = tile;
-    let face = video.unwrap_or_else(|| {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(people::avatar(Some(&name), None, BIG_AVATAR))
-            .into_any_element()
-    });
     let glow_id = SharedString::from(format!("{selector}-speaking"));
     let group = SharedString::from(format!("{selector}-tile"));
     let menu = mri
@@ -601,21 +628,14 @@ fn share_content(picture: Option<AnyElement>, sharer: SharedString, palette: Pal
         .into_any_element()
 }
 
-/// The account's own tile: floating at the stage's bottom right (`floating`), else filling its place in a strip; its
-/// self view while the camera sends, else its mark; a border while it speaks; its microphone while muted and its hand
+/// The account's own tile's selector.
+const SELF_TILE: &str = "call-participant-self";
+
+/// The account's own tile: floating at the stage's bottom right (`floating`), else filling its place in a strip;
+/// `face` (its self view while the camera sends, else its picture or initials, as Teams shows them); a border while it speaks; its microphone while muted and its hand
 /// while raised.
-fn self_view(active: &ActiveCall, video: Option<AnyElement>, floating: bool, palette: Palette, cx: &App) -> AnyElement {
+fn self_view(active: &ActiveCall, face: AnyElement, floating: bool, palette: Palette, cx: &App) -> AnyElement {
     let speaking = active.view.speaking && !active.muted;
-    let face = video.unwrap_or_else(|| {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(rgb(palette.muted_foreground))
-            .child(Glyph::USER.icon().size(px(32.0)))
-            .into_any_element()
-    });
     let border = if active.hand_raised {
         HAND_COLOUR
     } else if speaking {
@@ -624,7 +644,7 @@ fn self_view(active: &ActiveCall, video: Option<AnyElement>, floating: bool, pal
         palette.border
     };
     let own = div()
-        .debug_selector(|| "call-participant-self".to_owned())
+        .debug_selector(|| SELF_TILE.to_owned())
         .when(floating, |own| {
             own.absolute()
                 .bottom_5()

@@ -152,6 +152,53 @@ class CoverageGateTests(unittest.TestCase):
         self.assertEqual(summary["crates"]["example"]["missing_source_files"],
                          ["crates/example/src/new.rs"])
 
+    def test_platform_reviews_apply_only_to_the_named_platform_and_keep_mapped_gaps(self):
+        self.args.platform = "linux"
+        relative = self.audit_declarations()
+        self.config["unmapped_sources_windows"] = self.config.pop("unmapped_sources")
+        self.entries.pop()
+        self.assertTrue(self.run_report()[0])
+        self.args.platform = "windows"
+        failed, summary = self.run_report()
+        self.assertFalse(failed)
+        self.assertEqual(summary["platform"], "windows")
+        self.assertEqual(summary["crates"]["example"]["audited_unmapped_files"][0]["file"], relative)
+        self.entries.append(self.entry(self.unused, 100, 0))
+        self.assertTrue(self.run_report()[0])
+        self.assertEqual(self.run_report()[1]["crates"]["example"]["audited_unmapped_files"], [])
+        self.entries.pop()
+        self.unused.write_text("pub fn changed() {}\n")
+        with self.assertRaisesRegex(ValueError, "review is stale"):
+            self.run_report()
+
+    def test_foreign_windows_checkout_is_explicit_and_cannot_match_another_tree(self):
+        self.args.platform = "windows"
+        self.args.source_root = "C:/src/checkout"
+        for entry, file in zip(self.entries, ["lib.rs", "unused.rs"]):
+            entry["filename"] = rf"c:\SRC\checkout\crates\example\src\{file}"
+        self.assertFalse(self.run_report()[0])
+        self.entries[1]["filename"] = r"C:\src\another\crates\example\src\unused.rs"
+        self.assertTrue(self.run_report()[0])
+        self.entries[1]["filename"] = r"C:\src\checkout\..\checkout\crates\example\src\unused.rs"
+        with self.assertRaisesRegex(ValueError, "parent traversal"):
+            self.run_report()
+
+    def test_foreign_posix_checkout_and_duplicate_mappings_are_checked(self):
+        self.args.platform = "linux"
+        self.args.source_root = "/remote/checkout"
+        for entry, file in zip(self.entries, ["lib.rs", "unused.rs"]):
+            entry["filename"] = f"/remote/checkout/crates/example/src/{file}"
+        self.assertFalse(self.run_report()[0])
+        self.entries.append(self.entries[0])
+        with self.assertRaisesRegex(ValueError, "duplicate file"):
+            self.run_report()
+
+    def test_foreign_checkout_requires_an_absolute_source_root(self):
+        for platform, root in [("windows", r"C:relative"), ("linux", "relative")]:
+            self.args.platform, self.args.source_root = platform, root
+            with self.assertRaisesRegex(ValueError, "must be absolute"):
+                self.run_report()
+
     def test_one_failing_metric_fails_the_gate(self):
         self.config["baselines"]["example"]["regions"] = 51
         self.assertTrue(self.run_report()[0])

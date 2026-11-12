@@ -83,7 +83,7 @@ impl Weekday {
     }
 
     /// The day a pattern's value names: its number, a number in a string, or its name.
-    fn read(value: &Value) -> Option<Self> {
+    pub(crate) fn read(value: &Value) -> Option<Self> {
         let number = number(value);
         Self::ALL.into_iter().find(|day| {
             number == Some(u64::from(day.number()))

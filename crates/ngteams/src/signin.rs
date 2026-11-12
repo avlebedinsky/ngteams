@@ -25,9 +25,8 @@
 //! that host to the entry's `idp_hosts` by hand and sign in again, which takes the entry up. Nothing adds a host by
 //! itself, and an entry no sign-in named never starts an engine.
 
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -35,13 +34,13 @@ use crate::accounts_file::{PersonalAccount, PersonalError};
 use gpui::{App, Global};
 use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region};
 use teams_auth::pkce::PkceError;
+use teams_auth::redirect::RedirectUri;
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{SecretError, SecretStore};
 use teams_auth::signin::{SignInAnswer, SignInRequest, WindowError, WindowSignInError, sign_in_with};
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
 use teams_signin::hosts::{HostRefused, SignInHosts};
 use teams_signin::window::{self, Bound, WindowConfig, Windows};
-use teams_ui::window::PERSONAL_APP_ID;
 
 use crate::setup::Setup;
 
@@ -54,12 +53,18 @@ struct SignInWindows(Windows);
 
 impl Global for SignInWindows {}
 
-/// The app's sign-in windows ([`Windows`], under the app's own app id), served from the first ask on.
-pub fn windows(cx: &mut App) -> Windows {
+/// The current account setup's shell identity also groups its sign-in worker. In particular a lab sign-in must
+/// never share the installed client's taskbar identity, even before its first signed-in main window exists.
+pub fn windows_for(setup: &Setup, cx: &mut App) -> Windows {
+    let app_id = crate::app::shell_id(setup, false, cx);
+    windows_under(app_id, cx)
+}
+
+fn windows_under(app_id: &str, cx: &mut App) -> Windows {
     if let Some(windows) = cx.try_global::<SignInWindows>() {
         return windows.0.clone();
     }
-    let windows = Windows::serve(PERSONAL_APP_ID, cx);
+    let windows = Windows::serve(app_id, cx);
     cx.set_global(SignInWindows(windows.clone()));
     windows
 }
@@ -113,7 +118,7 @@ impl SignInClients {
 /// The sign-in window for `account`, opened through `windows`: bound to Entra's sign-in hosts and the identity
 /// provider's hosts its `accounts.toml` entry names ([`SignInHosts::entra_with`]), its decisions in the app's
 /// diagnostic log, its web process extension the one beside this binary. A request whose authorize URL isn't on that
-/// bound opens no window.
+/// bound, or whose redirect URI isn't usable, opens no window and starts no engine.
 ///
 /// # Errors
 /// [`SignInError::Hosts`] for an `idp_hosts` entry the bound refuses, [`SignInError::NoWindow`] when the running
@@ -139,6 +144,10 @@ fn bound_window(setup: &Setup, hosts: Arc<SignInHosts>, windows: &Windows, exten
         }
         if let Err(error) = paths.make_dirs() {
             return SignInAnswer::Failed(format!("the personal data dir: {error}"));
+        }
+        // before the engine: a request no page could answer never starts, or downloads, one
+        if RedirectUri::parse(&request.redirect_uri).is_err() {
+            return SignInAnswer::Failed("the redirect URI isn't usable".into());
         }
         let engine = match windows.engine_source(paths.data_dir()) {
             Ok(engine) => engine,
@@ -280,16 +289,13 @@ fn save_region(path: &Path, region: &Region) -> Result<(), SignInError> {
     let mut staging = path.as_os_str().to_owned();
     staging.push(format!(".{}.new", std::process::id()));
     let staging = PathBuf::from(staging);
+    if let Some(dir) = path.parent() {
+        teams_platform::private::create_dir_all(dir).map_err(failed)?;
+    }
+    // Cleanup belongs only to a file this call created. A colliding staging file is somebody else's data.
+    let mut file =
+        teams_platform::private::open(&staging, teams_platform::private::Open::NewReadWrite).map_err(failed)?;
     let written = (|| {
-        if let Some(dir) = path.parent() {
-            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        }
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&staging)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         fs::rename(&staging, path)

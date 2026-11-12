@@ -5,6 +5,9 @@
 //! Built only with `--features live`, and even then each test skips unless `PROTO_LAB_LIVE=1`, so
 //! `cargo test --all-features` stays offline. The tests share the lab profiles, so they take turns.
 
+// The full Linux browser/scenario harness is outside the Windows provisioning command set.
+#![cfg(unix)]
+
 use std::time::{Duration, SystemTime};
 
 use proto_lab::commands::auth::{AuthOptions, AuthReport, authorize};

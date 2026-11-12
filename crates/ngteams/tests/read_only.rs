@@ -13,15 +13,17 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::future::{self, Future};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use teams_auth::broker::private_pair;
 
 use clap::Parser as _;
 use ngteams::accounts_file::PersonalPaths;
 use ngteams::cli::{Cli, ReadOnlyMode};
-use ngteams::read_only::{self, window_allowed};
+use ngteams::read_only;
+#[cfg(unix)]
+use ngteams::read_only::window_allowed;
 use ngteams::snapshot;
 use serde_json::{Value, json};
 use teams_auth::broker::BrokerSecretStore;
@@ -304,6 +306,7 @@ fn a_read_only_account_opens_no_push_channel_and_no_calling() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_window_refuses_anywhere_but_the_ui_sandbox() {
     let sandbox = Some(OsStr::new("/tmp/ui-sandbox-made-up"));
@@ -401,7 +404,7 @@ async fn the_broker_serves_get_only_and_the_overlay_keeps_renewals_in_memory() {
     let store = Arc::new(MemorySecretStore::new());
     let key = refresh_token_key("a@example.test");
     store.put(&key, &Secret::new("stored-made-up")).await.unwrap();
-    let (ours, theirs) = UnixStream::pair().unwrap();
+    let (ours, theirs) = private_pair().unwrap();
     let scope = read_only::broker_scope("a@example.test");
     assert!(scope.is_get_only());
     let served = Arc::clone(&store);
@@ -446,7 +449,15 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             if path.is_dir() {
                 stack.push(path);
             } else if !path.to_string_lossy().ends_with("-shm") {
-                found.insert(path.clone(), fs::read(&path).unwrap());
+                // Store synchronization files are empty. Windows' mandatory byte locks can refuse even a read
+                // past EOF while the source is open; checking zero length establishes their entire contents.
+                let bytes = if path.extension().is_some_and(|extension| extension == "lock") {
+                    assert_eq!(path.metadata().unwrap().len(), 0, "synthetic lock contents");
+                    Vec::new()
+                } else {
+                    fs::read(&path).unwrap()
+                };
+                found.insert(path, bytes);
             }
         }
     }
