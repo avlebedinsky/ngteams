@@ -31,7 +31,7 @@ def names(path: Path) -> list[str]:
 def readobj_path() -> Path:
     if found := shutil.which("llvm-readobj"):
         return Path(found)
-    sysroot = subprocess.check_output(["rustc", "--print", "sysroot"], text=True, cwd=REPO).strip()
+    sysroot = subprocess.check_output(["rustc", "--print", "sysroot"], encoding="utf-8", cwd=REPO).strip()
     found = list((Path(sysroot) / "lib/rustlib").glob("*/bin/llvm-readobj*"))
     if len(found) != 1:
         raise ValueError("install rustup component llvm-tools-preview or pass --readobj")
@@ -39,7 +39,7 @@ def readobj_path() -> Path:
 
 
 def imports(path: Path, reader: Path) -> list[str]:
-    output = subprocess.check_output([str(reader), "--coff-imports", str(path)], text=True)
+    output = subprocess.check_output([str(reader), "--coff-imports", str(path)], encoding="utf-8")
     if "Format: COFF-x86-64" not in output:
         raise ValueError(f"not a Windows x64 PE: {path}")
     # LLVM prints both Import and DelayImport blocks with a Name field. Symbols have no Name fields.

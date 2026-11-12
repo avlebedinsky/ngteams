@@ -18,7 +18,7 @@ def collect(output: Path, target: Path) -> None:
         raise ValueError("notice output already exists")
     graph = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "x86_64-pc-windows-msvc"],
-        cwd=REPO, text=True))
+        cwd=REPO, encoding="utf-8"))
     packages = {p["id"]: p for p in graph["packages"]}
     nodes = {p["id"]: p for p in graph["resolve"]["nodes"]}
     pending = [p["id"] for p in packages.values() if p["name"] in ("ngteams", "teams-signin", "teams-ctl")]
