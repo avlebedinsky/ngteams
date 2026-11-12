@@ -294,7 +294,8 @@ const STEPS: [Step; 5 + 274] = [
         staged_chat_tools(cx);
         translate_chat(shell, Some("de"), cx);
     }),
-    // half the batch written: those messages show their translation, the rest still wait
+    // the newer half of the batch written (the tool answers the newest first): those messages, at the chat's end, show
+    // their translation, the older ones still wait
     ("chat-translating-partial", |_, _, _| release_staged(1)),
     // the chat translated into German on this computer (a made-up tool, [`FAKE_CHAT_CLAUDE`]): the header's language
     // picker lit, each message translated with Teams' translation mark beside its time
@@ -2564,8 +2565,9 @@ done
 "#;
 
 /// A made-up Claude Code translating a chat as [`FAKE_CHAT_CLAUDE`] does, but streaming its answer a message at a time
-/// and in stages: nothing until the gate's first file exists, then the first half of the batch's answers, then the rest
-/// once its second file exists (each wait a minute at most). `__GATE__` is the gate's path ([`staged_chat_tools`]).
+/// and in stages, the newest first as it is asked: nothing until the gate's first file exists, then the newer half of
+/// the batch's answers, then the rest once its second file exists (each wait a minute at most). `__GATE__` is the
+/// gate's path ([`staged_chat_tools`]).
 const STAGED_CHAT_CLAUDE: &str = r#"#!/bin/bash
 gate="__GATE__"
 delta() { printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s\\n"}}}\n' "$1"; }
@@ -2577,7 +2579,7 @@ while IFS= read -r line; do
     *'<translate>'*)
       body=$(printf '%s' "$line" | sed 's/.*<translate>\\n//; s/\\n<\/translate>.*//')
       body=$(printf '%s' "$body" | sed 's/\(<m id=\\"[0-9]*\\"\) from=\\"[^\\]*\\">\(<x[0-9]*>\)\{0,1\}/\1 lang=\\"en\\">\2Übersetzt: /g')
-      mapfile -t answers < <(printf '%s' "$body" | sed 's/\\n/\n/g')
+      mapfile -t answers < <(printf '%s\n' "$body" | sed 's/\\n/\n/g' | tac)
       half=$(( (${#answers[@]} + 1) / 2 ))
       echo '{"type":"stream_event","event":{"type":"message_start"}}'
       hold 1

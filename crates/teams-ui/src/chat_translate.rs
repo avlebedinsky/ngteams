@@ -30,8 +30,9 @@
 //! - **Progress**: from the moment a language is picked until every message the view holds has its translation, the
 //!   header's button spins and says how far it has come ([`ChatTranslation::progress`]), and each message still
 //!   waiting says "Translating…" in place ([`Mark::Waiting`]). Translations show a message at a time as the tool writes
-//!   them ([`session::Outcome::Partial`]), the newest batch first. Turning translation off (or picking another language)
-//!   mid-run stops the tool at once and drops what it was still writing.
+//!   them ([`session::Outcome::Partial`]), the newest batch first and, within a batch, the newest message first (the
+//!   end of the chat the view shows fills in first). Turning translation off (or picking another language) mid-run
+//!   stops the tool at once and drops what it was still writing.
 //! - **Failures** stop the reading ([`Status::Failed`]: the tool missing, signed out, too slow, or stopped): the chat
 //!   shows a notice saying why, with Try again, and its messages as written.
 //! - **Outside the view** ([`Previews`]): the chat list's preview, a new message's notification and the search's cards
