@@ -1,6 +1,8 @@
 # Installs, upgrades and uninstalls the per-user installer as the current user and checks what each step leaves:
 # the files, the Start menu shortcut, the Add/Remove programs entry, the msteams: handler offered under Default apps,
-# and that an uninstall keeps the user's data. Never starts ngteams (only -UpdateRelaunch does, see below).
+# and that an uninstall keeps the user's data. Also: Setup refuses a folder holding a previous-version it didn't make,
+# and recovers an upgrade cut short at each stage (set up by hand) without losing the previous version. Never starts
+# ngteams (only -UpdateRelaunch does, see below).
 #
 # CI: scripts/test-windows-installer.ps1 -Installer dist/ngteams-<v>-windows-x86_64-setup.exe -Package <unzipped>
 # Agents: the same in win11, on installers packaged from normal lab binaries, under a throwaway Windows user.
@@ -127,6 +129,26 @@ function Assert-FailedUpdate([string]$Name, [string]$Hold, [string]$Older, [stri
     Assert-That (Test-Restarted $log) "$Name started the previous ngteams.exe again"
 }
 
+# A setup run over an upgrade cut short, which $Cut sets up by hand in previous-version, with LICENSE-MIT held open so
+# that, once recovered, Setup stops before upgrading: the previous version must be whole again, bin\recovered.txt
+# with it, and nothing set aside.
+function Assert-RecoveredThenHeld([string]$Name, [scriptblock]$Cut) {
+    $kept = Join-Path $app 'previous-version'
+    Set-Content (Join-Path $app 'bin\recovered.txt') 'the previous version'
+    New-Item -ItemType Directory $kept | Out-Null
+    & $Cut $kept
+    $held = [IO.File]::Open((Join-Path $app 'LICENSE-MIT'), 'Open', 'Read', 'Read')
+    try { $code = (Invoke-Setup $Installer $Name)[-1] } finally { $held.Close() }
+    $log = Join-Path $Logs "$Name.log"
+    Assert-That ($code -ne 0) "$Name stops at the held file"
+    Assert-That ((Get-Content -Raw -LiteralPath $log) -match 'Found the previous version an interrupted upgrade kept') "$Name recovered the interrupted upgrade first"
+    Assert-Installed $version
+    Assert-That (Test-Path -LiteralPath (Join-Path $app 'bin\recovered.txt')) "$Name put the kept bin back rather than deleting it"
+    Assert-That (!(Test-Path -LiteralPath (Join-Path $app 'bin\partial.txt'))) "$Name left nothing of a partial bin"
+    Assert-That (!(Test-Path -LiteralPath $kept)) "$Name left nothing set aside"
+    Remove-Item -LiteralPath (Join-Path $app 'bin\recovered.txt')
+}
+
 function Assert-Package {
     if (!$Package) { return }
     $manifest = Get-Content -Raw (Join-Path $Package 'PACKAGE-MANIFEST.json') | ConvertFrom-Json
@@ -146,6 +168,15 @@ $userChoice = Get-RegistryValue $choice 'ProgId'
 $version = Get-Version $Installer
 New-Item -ItemType Directory -Force (Join-Path $data 'data\updates\.ngteams-update-test') | Out-Null
 Set-Content (Join-Path $data 'data\kept.txt') 'the user data the installer never touches'
+
+# A previous-version folder in a folder ngteams setup never marked isn't the installer's: Setup stops and leaves it.
+$foreign = Join-Path $env:LOCALAPPDATA 'ngteams-installer-test-foreign'
+New-Item -ItemType Directory -Force (Join-Path $foreign 'previous-version\bin') | Out-Null
+Set-Content (Join-Path $foreign 'previous-version\bin\keep.txt') 'not ngteams'
+Assert-That ((Invoke-Setup $Installer "foreign-$version" @("/DIR=`"$foreign`""))[-1] -ne 0) 'Setup refuses a folder holding a previous-version it did not make'
+Assert-That ((Get-Content -LiteralPath (Join-Path $foreign 'previous-version\bin\keep.txt')) -eq 'not ngteams') 'it left that previous-version alone'
+Assert-That (!(Test-Path -LiteralPath (Join-Path $foreign 'bin')) -and !(Test-Path -LiteralPath "HKCU:\$uninstallKey")) 'it installed nothing'
+Remove-Item -LiteralPath $foreign -Recurse
 
 if ($Previous) {
     $older = Get-Version $Previous
@@ -186,6 +217,23 @@ if ($Previous) {
 }
 Assert-Package
 Assert-That ((Get-RegistryValue $choice 'ProgId') -eq $userChoice) "the user's msteams: default is unchanged"
+
+# Upgrades cut short (Setup killed) at each place recovery tells apart.
+# The move aside, after bin: the marker is still in place.
+Assert-RecoveredThenHeld "recover-move-$version" { param($Kept) Move-Item -LiteralPath (Join-Path $app 'bin') -Destination $Kept }
+# The putting back, before bin: share and the files are back, a failed upgrade's partial bin is in place.
+Assert-RecoveredThenHeld "recover-put-back-$version" {
+    param($Kept)
+    Move-Item -LiteralPath (Join-Path $app 'bin') -Destination $Kept
+    New-Item -ItemType Directory (Join-Path $app 'bin') | Out-Null
+    Set-Content (Join-Path $app 'bin\partial.txt') 'a failed upgrade'
+}
+# The deletion of the previous version once the new one was in, cut short in share: the rest of it goes.
+New-Item -ItemType Directory -Force (Join-Path $app 'previous-version\share\licenses') | Out-Null
+Set-Content (Join-Path $app 'previous-version\share\licenses\left.txt') 'the previous version'
+Assert-That ((Invoke-Setup $Installer "recover-discard-$version")[-1] -eq 0) 'Setup after a cut-short deletion of the previous version succeeds'
+Assert-That (!(Test-Path -LiteralPath (Join-Path $app 'previous-version'))) 'it finished deleting the previous version'
+Assert-Installed $version
 
 # What the app registers on its first start, as it would (crates/teams-ui/src/desktop/windows/registration.rs).
 New-Item -Force "HKCU:\$activator\LocalServer32" | Out-Null

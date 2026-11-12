@@ -372,19 +372,64 @@ begin
   RemoveDir(ExpandConstant('{app}\{#PreviousFolder}'));
 end;
 
-{ An upgrade that was cut short (Setup killed, the power cut) left the previous version aside: it goes back when the
-  installation holds no complete version of its own (no marker), and goes otherwise. }
-procedure RecoverInterruptedUpgrade;
+{ Deletes one of the previous version's items kept in {#PreviousFolder}. }
+procedure DeletePreviousItem(const Item: String);
+begin
+  if DirExists(PreviousItem(Item)) then
+    DelTree(PreviousItem(Item), True, True, True)
+  else if FileExists(PreviousItem(Item)) then
+    DeleteFile(PreviousItem(Item));
+end;
+
+{ Deletes the previous version kept in {#PreviousFolder} once the new one is in. share, which holds its marker, goes
+  last: a deletion cut short leaves share kept or nothing, which RecoverInterruptedUpgrade tells apart from a move or
+  put-back cut short. }
+procedure DiscardPrevious;
+var
+  Items: TArrayOfString;
+  I: Integer;
+begin
+  Items := ProgramItems;
+  for I := 0 to GetArrayLength(Items) - 1 do
+    if Items[I] <> 'share' then
+      DeletePreviousItem(Items[I]);
+  DeletePreviousItem('share');
+  if RemoveDir(ExpandConstant('{app}\{#PreviousFolder}')) then
+    Log('Removed the previous version kept in ' + ExpandConstant('{app}\{#PreviousFolder}') + '.');
+end;
+
+{ An upgrade cut short (Setup killed, the power cut) left {#PreviousFolder} behind. It is touched only when this
+  installer's marker is in the installation or in that folder; otherwise it isn't ngteams', and Setup stops rather than
+  make that folder an installation whose next upgrade would take it for its own. Where the marker is tells what was cut
+  short, as share (which holds it) moves aside after bin, lib and libexec and goes back before them:
+  - both markers: the new version is complete (its marker is installed last), so the previous one goes;
+  - the kept marker alone: the copying, or the putting back, was cut short, so the previous version goes back;
+  - the installed marker alone: the move aside or the putting back was cut short, so what is kept goes back, unless
+    share is kept too, which only DiscardPrevious cut short leaves.
+  Why Setup stops (the folder is foreign, or still there afterwards), or ''. }
+function RecoverInterruptedUpgrade: String;
 var
   Folder: String;
+  InPlace, Kept: Boolean;
 begin
+  Result := '';
   Folder := ExpandConstant('{app}\{#PreviousFolder}');
   if not DirExists(Folder) then
     Exit;
+  InPlace := FileExists(InstalledItem(Marker));
+  Kept := FileExists(PreviousItem(Marker));
+  if not InPlace and not Kept then
+  begin
+    Result := Folder + ' was not made by ngteams setup, and is left alone. Move it out of that folder, or install ngteams elsewhere, then run setup again.';
+    Exit;
+  end;
   Log('Found the previous version an interrupted upgrade kept in ' + Folder + '.');
-  if not FileExists(InstalledItem(Marker)) and FileExists(PreviousItem(Marker)) then
+  if InPlace and (Kept or ItemExists(PreviousItem('share'))) then
+    DiscardPrevious
+  else
     PutPreviousBack;
-  DelTree(Folder, True, True, True);
+  if DirExists(Folder) then
+    Result := 'An interrupted upgrade left ' + Folder + ', and it could not be put back or removed. Quit ngteams (including from the notification area) and close any of its files that are open, then run setup again.';
 end;
 
 { Moves the previous version's program items into {#PreviousFolder}, by renames on one disk, where they stay until the
@@ -438,7 +483,9 @@ begin
     if Result <> '' then
       Exit;
   end;
-  RecoverInterruptedUpgrade;
+  Result := RecoverInterruptedUpgrade;
+  if Result <> '' then
+    Exit;
   { an upgrade only in a folder an earlier ngteams installer marked }
   if not FileExists(InstalledItem(Marker)) then
     Exit;
@@ -477,7 +524,7 @@ begin
   if MovedAside then
   begin
     if Installed or FileExists(InstalledItem(Marker)) then
-      DelTree(ExpandConstant('{app}\{#PreviousFolder}'), True, True, True)
+      DiscardPrevious
     else
       PutPreviousBack;
   end;
