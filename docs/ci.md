@@ -252,9 +252,10 @@ folder an earlier ngteams installer marked; the packaging script refuses a stage
 before moving anything while a process runs from the installation. The next run finishes an upgrade cut short from
 where the marker is, and refuses a folder holding a `previous-version` that neither it nor the installation marks. An
 older installer is refused unless run with `/ALLOWDOWNGRADE`, and one installer runs at a time. Uninstall removes the
-program and the app's own notification registration, and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The
-app's updater runs the installer with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit,
-upgrades, and starts it again, the previous version when the upgrade fails. The `windows` job installs and uninstalls it on the
+program, the app's own notification registration, and the shortcut and `msteams:` handler unless they now open
+another copy (a zip's), and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's updater runs the installer
+with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades, and starts it again, the previous
+version when the upgrade fails. The `windows` job installs and uninstalls it on the
 runner with `scripts/test-windows-installer.ps1` (never starting the app) and checks every installed program file
 against the zip's `PACKAGE-MANIFEST.json`.
 

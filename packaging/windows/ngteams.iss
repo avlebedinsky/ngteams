@@ -11,8 +11,8 @@
 ; - WebView2 Runtime missing: Microsoft's Evergreen bootstrapper is downloaded, its Microsoft signature checked, then
 ;   run, as Install.ps1 does.
 ; - An upgrade replaces the previous version's program folders in place, keeping them aside until it has succeeded and
-;   putting them back when it fails; an uninstall removes the program, its shortcut and registrations, and keeps the
-;   accounts and data in %LOCALAPPDATA%\ngteams and Credential Manager.
+;   putting them back when it fails; an uninstall removes the program, and its shortcut and registrations unless they
+;   now open another copy (a zip's), and keeps the accounts and data in %LOCALAPPDATA%\ngteams and Credential Manager.
 ; - The app's own updater (crates/teams-update) runs this installer with /VERYSILENT /UPDATEPID=<pid> /DIR=<folder>:
 ;   it waits for that process to exit, upgrades the folder and starts ngteams again, the previous version when the
 ;   upgrade fails.
@@ -563,11 +563,47 @@ begin
   end;
 end;
 
-{ What [Icons] and [Registry] made: the shortcuts, the msteams: handler and the Default apps entry. }
-procedure RemoveInstallerRegistrations;
+{ Whether the shortcut at Path opens Executable. }
+function ShortcutOpens(const Path, Executable: String): Boolean;
+var
+  Shell, Link: Variant;
 begin
-  DeleteFile(ExpandConstant('{autoprograms}\ngteams.lnk'));
-  DeleteFile(ExpandConstant('{autodesktop}\ngteams.lnk'));
+  Result := False;
+  try
+    Shell := CreateOleObject('WScript.Shell');
+    Link := Shell.CreateShortcut(Path);
+    Result := CompareText(Link.TargetPath, Executable) = 0;
+  except
+    Result := False;
+  end;
+end;
+
+procedure RemoveShortcut(const Path, Executable: String);
+begin
+  if not FileExists(Path) then
+    Exit;
+  if ShortcutOpens(Path, Executable) then
+    DeleteFile(Path)
+  else
+    Log('Kept ' + Path + ': it opens another copy of ngteams.');
+end;
+
+{ What [Icons] and [Registry] made: the shortcuts, the msteams: handler and the Default apps entry, when they belong to
+  this installation, as Unregister.ps1 checks them; another copy's (a zip's Install.ps1 writes the same names) stay. }
+procedure RemoveInstallerRegistrations;
+var
+  Executable, Command: String;
+begin
+  Executable := ExpandConstant('{app}\bin\ngteams.exe');
+  RemoveShortcut(ExpandConstant('{autoprograms}\ngteams.lnk'), Executable);
+  RemoveShortcut(ExpandConstant('{autodesktop}\ngteams.lnk'), Executable);
+  if not RegQueryStringValue(HKA, 'Software\Classes\ngteams.msteams\shell\open\command', '', Command) then
+    Exit;
+  if CompareText(Command, '"' + Executable + '" "%1"') <> 0 then
+  begin
+    Log('Kept the msteams: handler: it opens another copy of ngteams.');
+    Exit;
+  end;
   RegDeleteKeyIncludingSubkeys(HKA, 'Software\Classes\ngteams.msteams');
   RegDeleteKeyIncludingSubkeys(HKA, 'Software\ngteams\Capabilities');
   RegDeleteKeyIfEmpty(HKA, 'Software\ngteams');

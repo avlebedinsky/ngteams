@@ -19,6 +19,10 @@ param(
     # a late failure, the uninstaller held open) must leave the previous version whole and start it again. Only for lab-built installers (a lab build
     # refuses to start without --lab); never in CI.
     [switch]$UpdateRelaunch,
+    # After the uninstall checks: install again, install -Package's zip copy over it with its Install.ps1, and check
+    # that uninstalling the setup copy keeps the zip copy's shortcut and msteams: handler. Install.ps1 refuses an
+    # elevated user, so only as a standard user, on a lab package; never in CI.
+    [switch]$ZipCopy,
     [string]$Logs = (Join-Path ([IO.Path]::GetTempPath()) ('ngteams-installer-test-' + [Guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
@@ -259,4 +263,33 @@ Assert-That (!(Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ngteams-desk
 Assert-That (!(Test-Path -LiteralPath (Join-Path $data 'data\updates'))) 'update downloads are gone'
 Assert-That ((Get-Content (Join-Path $data 'data\kept.txt')) -eq 'the user data the installer never touches') "the user's data is kept"
 Assert-That ((Get-RegistryValue $choice 'ProgId') -eq $userChoice) "the user's msteams: default is still unchanged"
+
+if ($ZipCopy) {
+    # A zip copy installed with its Install.ps1 over the setup copy writes the same shortcut and handler names; the
+    # setup copy's uninstall must leave them to it.
+    Assert-That ((Invoke-Setup $Installer "zip-install-$version")[-1] -eq 0) "ngteams $version installs again"
+    $zip = Get-Content -Raw (Join-Path $Package 'PACKAGE-MANIFEST.json') | ConvertFrom-Json
+    $zipApp = Join-Path $app $zip.version
+    $zipExe = Join-Path $zipApp 'bin\ngteams.exe'
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Package 'Install.ps1')
+    Assert-That ($LASTEXITCODE -eq 0) "the zip's Install.ps1 installs $($zip.version)"
+    $handler = 'HKCU:\Software\Classes\ngteams.msteams\shell\open\command'
+    $shell = New-Object -ComObject WScript.Shell
+    Assert-That ($shell.CreateShortcut($menu).TargetPath -ieq $zipExe) 'the Start menu shortcut opens the zip copy'
+    Assert-That ((Get-RegistryValue $handler '(default)') -eq "`"$zipExe`" `"%1`"") 'the msteams: handler opens the zip copy'
+    $process = Start-Process $uninstaller -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$(Join-Path $Logs 'zip-uninstall.log')`"" -PassThru -Wait
+    $deadline = (Get-Date).AddMinutes(3)
+    while ((Test-Path -LiteralPath $uninstaller) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    Start-Sleep 2
+    Assert-That ($process.ExitCode -eq 0 -and !(Test-Path -LiteralPath $uninstaller)) 'the setup copy uninstalls'
+    Assert-That (!(Test-Path -LiteralPath (Join-Path $app 'bin'))) 'the setup copy is gone'
+    Assert-That (Test-Path -LiteralPath $zipExe) 'the zip copy is still there'
+    Assert-That ((Test-Path -LiteralPath $menu) -and $shell.CreateShortcut($menu).TargetPath -ieq $zipExe) "the zip copy's Start menu shortcut is kept"
+    Assert-That ((Get-RegistryValue $handler '(default)') -eq "`"$zipExe`" `"%1`"") "the zip copy's msteams: handler is kept"
+    Assert-That ((Get-RegistryValue 'HKCU:\Software\RegisteredApplications' 'ngteams') -eq 'Software\ngteams\Capabilities') 'ngteams is still a registered application'
+    Assert-That ((Get-RegistryValue 'HKCU:\Software\ngteams\Capabilities\URLAssociations' 'msteams') -eq 'ngteams.msteams') 'it still offers itself for msteams: links'
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $zipApp 'Unregister.ps1')
+    Remove-Item -LiteralPath $app -Recurse
+    Assert-That (!(Test-Path -LiteralPath $menu) -and !(Test-Path -LiteralPath 'HKCU:\Software\Classes\ngteams.msteams')) "the zip copy's Unregister.ps1 removed its registrations"
+}
 Write-Output "PASSED (logs in $Logs)"
