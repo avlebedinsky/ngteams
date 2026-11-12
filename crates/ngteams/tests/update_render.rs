@@ -2,7 +2,9 @@
 //! All account state, releases and installation files are synthetic; no platform GUI or network service is used.
 
 // Test-only helpers, including the shared fake core.
-#![cfg(all(test, unix))]
+#![cfg(test)]
+// `teams-update` is Unix-only. A separate attribute keeps the literal `cfg(test)` clippy's test allowances look for.
+#![cfg(unix)]
 
 #[path = "../../teams-ui/tests/common/mod.rs"]
 pub mod common;
