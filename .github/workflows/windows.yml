@@ -36,13 +36,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring
       - name: Format
-        run: cargo fmt -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -- --check
+        run: cargo fmt -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -p teams-update -- --check
       - name: Check every target
-        run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner --all-targets
+        run: cargo check --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -p teams-update --all-targets
       - name: Lints
-        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner --all-targets -- -D warnings
-      - name: Offline filesystem, authentication, broker and native startup tests
-        run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -- --test-threads=1
+        run: cargo clippy --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -p teams-update --all-targets -- -D warnings
+      - name: Offline filesystem, authentication, broker, native startup and update tests
+        run: cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth -p teams-ctl -p teams-runner -p teams-update -- --test-threads=1
       - name: Windows coverage tools
         if: runner.os == 'Windows'
         shell: pwsh
