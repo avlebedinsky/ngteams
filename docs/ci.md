@@ -249,9 +249,10 @@ identity, an Add/Remove programs entry and the `msteams:` handler offered under 
 first moves the previous version's program folders aside into `previous-version` inside the installation (only in a
 folder an earlier ngteams installer marked; the packaging script refuses a stage with a top-level name the script's
 `ProgramItems` doesn't list), removes them once the new version is in, and puts them back when it fails; it stops
-before moving anything while a process runs from the installation. The next run finishes an upgrade cut short from
-where the marker is, and refuses a folder holding a `previous-version` that neither it nor the installation marks. An
-older installer is refused unless run with `/ALLOWDOWNGRADE`, and one installer runs at a time. Uninstall removes the
+before moving anything while a process runs from the installation. The next run finishes an upgrade cut short, or a
+removal of the previous version that failed on a held file, from where the marker is, and refuses a folder holding a
+`previous-version` that neither it nor the installation marks. An older installer is refused unless run with
+`/ALLOWDOWNGRADE`, and one installer runs at a time. Uninstall removes the
 program, the app's own notification registration, and the shortcut and `msteams:` handler unless they now open
 another copy (a zip's), and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's updater runs the installer
 with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades, and starts it again, the previous

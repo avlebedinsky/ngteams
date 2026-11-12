@@ -1,8 +1,9 @@
 # Installs, upgrades and uninstalls the per-user installer as the current user and checks what each step leaves:
 # the files, the Start menu shortcut, the Add/Remove programs entry, the msteams: handler offered under Default apps,
 # and that an uninstall keeps the user's data. Also: Setup refuses a folder holding a previous-version it didn't make,
-# and recovers an upgrade cut short at each stage (set up by hand) without losing the previous version. Never starts
-# ngteams (only -UpdateRelaunch does, see below).
+# and recovers an upgrade cut short at each stage, or a removal of the previous version that failed on a held file
+# (set up by hand), without losing the previous version or the new one. Never starts ngteams (only -UpdateRelaunch
+# does, see below).
 #
 # CI: scripts/test-windows-installer.ps1 -Installer dist/ngteams-<v>-windows-x86_64-setup.exe -Package <unzipped>
 # Agents: the same in win11, on installers packaged from normal lab binaries, under a throwaway Windows user.
@@ -237,6 +238,25 @@ New-Item -ItemType Directory -Force (Join-Path $app 'previous-version\share\lice
 Set-Content (Join-Path $app 'previous-version\share\licenses\left.txt') 'the previous version'
 Assert-That ((Invoke-Setup $Installer "recover-discard-$version")[-1] -eq 0) 'Setup after a cut-short deletion of the previous version succeeds'
 Assert-That (!(Test-Path -LiteralPath (Join-Path $app 'previous-version'))) 'it finished deleting the previous version'
+Assert-Installed $version
+# That deletion failing on a file held open in the kept bin (antivirus, the indexer): share, with its marker, must stay,
+# so that the next run finishes the deletion instead of putting the partial bin back over the new version.
+$kept = Join-Path $app 'previous-version'
+New-Item -ItemType Directory -Force (Join-Path $kept 'bin') | Out-Null
+Copy-Item -LiteralPath (Join-Path $app 'share') -Destination $kept -Recurse
+Set-Content (Join-Path $kept 'bin\held.dll') 'the previous version'
+Set-Content (Join-Path $kept 'bin\loose.dll') 'the previous version'
+$held = [IO.File]::Open((Join-Path $kept 'bin\held.dll'), 'Open', 'Read', 'Read')
+try { $code = (Invoke-Setup $Installer "discard-held-$version")[-1] } finally { $held.Close() }
+Assert-That ($code -ne 0) 'Setup stops when it cannot delete the previous version'
+Assert-That ((Get-Content -Raw -LiteralPath (Join-Path $Logs "discard-held-$version.log")) -match 'could not be deleted') 'it says what it could not delete'
+Assert-That (Test-Path -LiteralPath (Join-Path $kept 'share\ngteams\update-format')) 'the kept share keeps its marker while bin is still kept'
+Assert-Installed $version
+Assert-That ((Invoke-Setup $Installer "discard-finish-$version")[-1] -eq 0) 'the next setup run succeeds'
+$log = Get-Content -Raw -LiteralPath (Join-Path $Logs "discard-finish-$version.log")
+Assert-That ($log -match 'Found the previous version an interrupted upgrade kept') 'it found the deletion left unfinished'
+Assert-That ($log -notmatch 'Put the previous version''s') 'it put none of the kept previous version back'
+Assert-That (!(Test-Path -LiteralPath $kept)) 'it finished deleting the previous version'
 Assert-Installed $version
 
 # What the app registers on its first start, as it would (crates/teams-ui/src/desktop/windows/registration.rs).

@@ -382,8 +382,9 @@ begin
 end;
 
 { Deletes the previous version kept in {#PreviousFolder} once the new one is in. share, which holds its marker, goes
-  last: a deletion cut short leaves share kept or nothing, which RecoverInterruptedUpgrade tells apart from a move or
-  put-back cut short. }
+  last, and only once everything else is gone: a deletion cut short (Setup killed) or failing (a file held open) leaves
+  share kept with its marker, share alone, or nothing, which RecoverInterruptedUpgrade tells apart from a move or
+  put-back cut short, so the next run finishes the deletion rather than putting a partial previous version back. }
 procedure DiscardPrevious;
 var
   Items: TArrayOfString;
@@ -393,19 +394,27 @@ begin
   for I := 0 to GetArrayLength(Items) - 1 do
     if Items[I] <> 'share' then
       DeletePreviousItem(Items[I]);
+  for I := 0 to GetArrayLength(Items) - 1 do
+    if (Items[I] <> 'share') and ItemExists(PreviousItem(Items[I])) then
+    begin
+      Log('The previous version''s ' + Items[I] + ' could not be deleted from ' + ExpandConstant('{app}\{#PreviousFolder}') + '; its share is kept, so the next setup run finishes the deletion.');
+      Exit;
+    end;
   DeletePreviousItem('share');
   if RemoveDir(ExpandConstant('{app}\{#PreviousFolder}')) then
     Log('Removed the previous version kept in ' + ExpandConstant('{app}\{#PreviousFolder}') + '.');
 end;
 
-{ An upgrade cut short (Setup killed, the power cut) left {#PreviousFolder} behind. It is touched only when this
-  installer's marker is in the installation or in that folder; otherwise it isn't ngteams', and Setup stops rather than
-  make that folder an installation whose next upgrade would take it for its own. Where the marker is tells what was cut
-  short, as share (which holds it) moves aside after bin, lib and libexec and goes back before them:
-  - both markers: the new version is complete (its marker is installed last), so the previous one goes;
+{ An upgrade cut short (Setup killed, the power cut), or a deletion of the previous version that failed, left
+  {#PreviousFolder} behind. It is touched only when this installer's marker is in the installation or in that folder;
+  otherwise it isn't ngteams', and Setup stops rather than make that folder an installation whose next upgrade would
+  take it for its own. Where the marker is tells what was cut short, as share (which holds it) moves aside after bin,
+  lib and libexec and goes back before them:
+  - both markers: the new version is complete (its marker is installed last), so the previous one goes (also what a
+    failed DiscardPrevious leaves);
   - the kept marker alone: the copying, or the putting back, was cut short, so the previous version goes back;
   - the installed marker alone: the move aside or the putting back was cut short, so what is kept goes back, unless
-    share is kept too, which only DiscardPrevious cut short leaves.
+    share is kept too, which only DiscardPrevious leaves (once all else is gone).
   Why Setup stops (the folder is foreign, or still there afterwards), or ''. }
 function RecoverInterruptedUpgrade: String;
 var
