@@ -268,7 +268,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$package/Install.ps1" -VerifyOnly
           # Identity/help are display-free and touch no account or credential store. Never start a sending GUI in CI.
-          $identity = @(& "$package/bin/ngteams.exe" --build-identity)
+          # ngteams.exe is a GUI-subsystem program: PowerShell waits for it and reads its stdout only inside a
+          # pipeline. A bare capture closes the pipe early and leaves a stale $LASTEXITCODE.
+          $identity = @(& "$package/bin/ngteams.exe" --build-identity | Write-Output)
           if ($LASTEXITCODE -ne 0 -or $identity.Count -ne 2 -or $identity[0] -ne $env:WORKSPACE_VERSION -or $identity[1] -ne $env:NGTEAMS_BUILD_COMMIT) {
             throw 'Packaged Windows build identity mismatch.'
           }
