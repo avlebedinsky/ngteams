@@ -37,18 +37,7 @@ pub fn build_refusal(
 /// Whether this binary was built with any crate's test-support (`cargo test`, `--all-targets`, `--all-features`).
 #[must_use]
 pub fn test_support() -> bool {
-    teams_proto::test_support_enabled() || teams_signin::test_support_enabled() || update_test_support()
-}
-
-#[cfg(unix)]
-fn update_test_support() -> bool {
-    teams_update::test_support_enabled()
-}
-
-/// Windows doesn't build the updater yet.
-#[cfg(windows)]
-fn update_test_support() -> bool {
-    false
+    teams_proto::test_support_enabled() || teams_signin::test_support_enabled() || teams_update::test_support_enabled()
 }
 
 /// The initial gate, independent of app/broker mode so the inherited WPE worker can start.

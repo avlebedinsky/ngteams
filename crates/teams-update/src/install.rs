@@ -1,10 +1,25 @@
 //! A verified update put in the installation's place.
 
-use std::fs;
+use std::ffi::OsString;
+use std::fs::{self, File};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest as _, Sha256};
+
+#[cfg(unix)]
 use crate::privileged::{self, Prompted};
-use crate::{Error, Format, Installation, Version, error};
+use crate::{Error, Format, Installation, Version, error, prepare::hex};
+
+/// What runs once the app has quit with an update in ([`Prepared::install`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Restart {
+    /// The new version's executable; for the Windows installer, the installer, which puts the new version in place
+    /// once this process has exited and then starts it.
+    pub program: PathBuf,
+    /// The installer's own arguments; `None` runs `program` with this run's arguments.
+    pub arguments: Option<Vec<OsString>>,
+}
 
 /// A downloaded and verified update, waiting in its stage; the installation is untouched until [`Prepared::install`].
 /// Dropped, its stage goes too, unless it holds a previous installation that needs recovery.
@@ -29,17 +44,20 @@ impl Prepared {
         self.version
     }
 
-    /// Puts the update in the installation's place and gives back the program a restart runs. A system package is
-    /// installed by the package manager behind the desktop's password prompt, which this call waits for.
+    /// Puts the update in the installation's place and gives back what a restart runs. A system package is
+    /// installed by the package manager behind the desktop's password prompt, which this call waits for. The Windows
+    /// installer can't replace the running program's files, so it is checked again and handed back to run once the
+    /// app has quit: it waits for this process to exit, upgrades the installed folder and starts the new version.
     ///
-    /// The stage stays (it holds an archive's previous version after its swap) until a later start's
-    /// [`Installation::cleanup_stale`], so the files of the running process stay where they are until it has quit.
+    /// The stage stays (it holds an archive's previous version after its swap, or the installer that runs) until a
+    /// later start's [`Installation::cleanup_stale`], so the files of the running process stay where they are until
+    /// it has quit.
     ///
     /// # Errors
     /// The installation changed since the download started, the prompt was closed ([`Error::Cancelled`]), the desktop
-    /// has no prompt, or a step failed. If rollback also fails, the previous installation and recovery marker
-    /// remain in the stage named in the error for manual recovery.
-    pub fn install(&mut self) -> Result<PathBuf, Error> {
+    /// has no prompt, the installer changed since it was verified, or a step failed. If rollback also fails, the
+    /// previous installation and recovery marker remain in the stage named in the error for manual recovery.
+    pub fn install(&mut self) -> Result<Restart, Error> {
         self.install_with_rename(|from, to| fs::rename(from, to))
     }
 
@@ -47,7 +65,7 @@ impl Prepared {
     pub(crate) fn install_with_rename(
         &mut self,
         mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
-    ) -> Result<PathBuf, Error> {
+    ) -> Result<Restart, Error> {
         let installation = &self.installation;
         installation.validate()?;
         if installation.identity()? != self.identity {
@@ -61,6 +79,10 @@ impl Prepared {
             .as_ref()
             .map(|work| work.path().to_path_buf())
             .ok_or_else(|| error("This update is installed already."))?;
+        let mut restart = Restart {
+            program: installation.executable.clone(),
+            arguments: None,
+        };
         match installation.format {
             Format::Archive => {
                 if let Err(error) = swap(&installation.root, &self.candidate, &stage, &mut rename) {
@@ -78,9 +100,44 @@ impl Prepared {
                 ))
             })?,
             Format::Deb | Format::Rpm | Format::Pacman => self.install_package()?,
+            Format::WindowsSetup => {
+                restart = Restart {
+                    program: self.candidate.clone(),
+                    arguments: Some(self.setup_arguments(&stage)?),
+                };
+            }
         }
         self.keep_stage();
-        Ok(self.installation.executable.clone())
+        Ok(restart)
+    }
+
+    /// The installer's arguments for an unattended upgrade of this installation, once it is checked to be still the
+    /// verified download (its stage is in the user's own folder, as writable as the installer itself).
+    ///
+    /// `/UPDATEPID` makes it wait for this process to exit, then start the installed app once it is done (or the
+    /// previous one, when it fails); `/DIR` is the installation detected, never a folder the installer guesses; its
+    /// log stays in the stage.
+    fn setup_arguments(&self, stage: &Path) -> Result<Vec<OsString>, Error> {
+        if file_sha256(&self.candidate)? != self.sha256 {
+            return Err(error(
+                "The downloaded installer changed after it was verified, so it wasn't run. The installed version is \
+                 unchanged.",
+            ));
+        }
+        let mut directory = OsString::from("/DIR=");
+        directory.push(&self.installation.root);
+        let mut log = OsString::from("/LOG=");
+        log.push(stage.join("setup.log"));
+        Ok(vec![
+            "/VERYSILENT".into(),
+            "/SUPPRESSMSGBOXES".into(),
+            "/NORESTART".into(),
+            "/CLOSEAPPLICATIONS".into(),
+            "/SP-".into(),
+            format!("/UPDATEPID={}", std::process::id()).into(),
+            directory,
+            log,
+        ])
     }
 
     fn keep_stage(&mut self) {
@@ -89,6 +146,14 @@ impl Prepared {
         }
     }
 
+    /// A system package can't be installed here: only Linux detects one.
+    #[cfg(windows)]
+    #[expect(clippy::unused_self, reason = "the same call as the Linux package route's")]
+    fn install_package(&self) -> Result<(), Error> {
+        Err(error("This installation isn't a Windows installation."))
+    }
+
+    #[cfg(unix)]
     fn install_package(&self) -> Result<(), Error> {
         let kind = self
             .installation
@@ -105,6 +170,20 @@ impl Prepared {
                 crate::RELEASES_URL
             ))),
         }
+    }
+}
+
+/// `path`'s SHA-256, lowercase hex, read in pieces.
+fn file_sha256(path: &Path) -> std::io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(hex(&hash.finalize()));
+        }
+        hash.update(&buffer[..read]);
     }
 }
 

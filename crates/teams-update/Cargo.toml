@@ -15,7 +15,6 @@ test-support = []
 [dependencies]
 # the release archive (`.tar.gz`) unpacked into its stage
 flate2.workspace = true
-libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -24,6 +23,13 @@ tempfile.workspace = true
 thiserror.workspace = true
 # GitHub's API and release downloads: HTTPS only, no proxy, no credentials (as teams-web-engine's download)
 ureq.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# whether a stage's owner still runs (`stage::alive`)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile.workspace = true

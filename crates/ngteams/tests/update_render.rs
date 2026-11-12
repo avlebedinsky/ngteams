@@ -3,7 +3,8 @@
 
 // Test-only helpers, including the shared fake core.
 #![cfg(test)]
-// `teams-update` is Unix-only. A separate attribute keeps the literal `cfg(test)` clippy's test allowances look for.
+// The fake feed's release trees are Linux's. A separate attribute keeps the literal `cfg(test)` clippy's test
+// allowances look for.
 #![cfg(unix)]
 
 #[path = "../../teams-ui/tests/common/mod.rs"]

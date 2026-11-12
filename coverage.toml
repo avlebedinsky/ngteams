@@ -76,7 +76,7 @@ sha256 = "7bdd5ebbbf07a8daf3659fc52c93eb5866aa515311ff1a0b1b3e31fe7d38b9ee"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/lib.rs"]
-sha256 = "d22f9055e963addc274a3f152b26d7872ac6c45587156a743a6c6ebeb74ecca1"
+sha256 = "3bfdfb03f94a1a463005794d1173e99ae86ecac00a38b55b033b32c6e7f41a82"
 reason = "module declarations, re-exports, documentation and a string constant only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/bundles.rs"]

@@ -24,10 +24,14 @@
 //! - **The install** ([`Prepared::install`]): an unpacked archive's whole folder is swapped for the new one by two
 //!   renames on one filesystem, put back if the second fails; an AppImage file is replaced by one rename; a `.deb`,
 //!   `.rpm` or Arch package goes to the system's package manager behind the desktop's password prompt (`pkexec`). Each
-//!   first checks that nothing else updated the installation since the download started. It gives back the program a
-//!   restart runs: the app quits as it always does (its engines shut down, its stores closed) and runs that.
-//! - **Windows** (a later release package): a Windows installer is another [`Format`], with its asset's name, its
-//!   marker, and its own step in [`Prepared::install`] (`msiexec` for an MSI); nothing else here depends on Linux.
+//!   first checks that nothing else updated the installation since the download started. It gives back what a
+//!   restart runs ([`Restart`]): the app quits as it always does (its engines shut down, its stores closed) and runs
+//!   that.
+//! - **Windows** ([`Format::WindowsSetup`]): the per-user installer (`packaging/windows/ngteams.iss`) writes the marker
+//!   and identity under `share/ngteams/` beside `bin/`. Its update downloads the next installer into the app's own
+//!   folder and checks it the same way; [`Prepared::install`] checks it again and hands back the installer, with its
+//!   silent-update arguments, as the program a restart runs. A running program's files can't be replaced on Windows,
+//!   so the installer waits for this process to exit, upgrades the folder in place and starts the new version.
 //!
 //! Every message is fit to show the user: no URL with a query, header or environment value is in one.
 
@@ -37,18 +41,27 @@ pub mod fakes;
 mod install;
 mod installation;
 mod prepare;
+#[cfg(unix)]
 mod privileged;
 mod stage;
 
 pub use check::{Release, Source};
-pub use install::Prepared;
+pub use install::{Prepared, Restart};
 pub use installation::{Installation, Places};
 
 /// The release marker, relative to an installed tree's root (the folder holding `usr/`): how this copy was installed,
 /// one of [`Format::marker`]'s words.
+#[cfg(unix)]
 pub const MARKER: &str = "usr/share/ngteams/update-format";
 /// The release version an installed tree holds, relative to its root: the one its programs were built as.
+#[cfg(unix)]
 pub const IDENTITY: &str = "usr/share/ngteams/release";
+/// The release marker, relative to the installed folder (the one holding `bin/`), written by the installer.
+#[cfg(windows)]
+pub const MARKER: &str = "share/ngteams/update-format";
+/// The release version the installed folder holds, relative to it, written by the installer.
+#[cfg(windows)]
+pub const IDENTITY: &str = "share/ngteams/release";
 /// The folder an archive unpacks into, and must stay in to update itself.
 pub const FOLDER: &str = "ngteams";
 /// The release page, for a manual download when the app can't install the update itself.
@@ -156,6 +169,8 @@ pub enum Format {
     Rpm,
     /// The Arch package, installed under `/opt/ngteams`.
     Pacman,
+    /// The Windows per-user installer (`-setup.exe`), installed under `%LOCALAPPDATA%\Programs\ngteams`.
+    WindowsSetup,
 }
 
 impl Format {
@@ -168,6 +183,7 @@ impl Format {
             Self::Deb => format!("ngteams_{version}-1_amd64.deb"),
             Self::Rpm => format!("ngteams-{version}-1.x86_64.rpm"),
             Self::Pacman => format!("ngteams-{version}-1-x86_64.pkg.tar.zst"),
+            Self::WindowsSetup => format!("ngteams-{version}-windows-x86_64-setup.exe"),
         }
     }
 
@@ -180,6 +196,7 @@ impl Format {
             Self::Deb => "linux-deb",
             Self::Rpm => "linux-rpm",
             Self::Pacman => "linux-pacman",
+            Self::WindowsSetup => "windows-setup",
         }
     }
 
@@ -190,6 +207,7 @@ impl Format {
             "linux-deb" => Some(Self::Deb),
             "linux-rpm" => Some(Self::Rpm),
             "linux-pacman" => Some(Self::Pacman),
+            "windows-setup" => Some(Self::WindowsSetup),
             _ => None,
         }
     }
@@ -200,8 +218,14 @@ impl Format {
             Self::Deb => Some("deb"),
             Self::Rpm => Some("rpm"),
             Self::Pacman => Some("pacman"),
-            Self::Archive | Self::AppImage => None,
+            Self::Archive | Self::AppImage | Self::WindowsSetup => None,
         }
+    }
+
+    /// Whether an update's stage goes into the app's own folder rather than beside the installation: a system
+    /// package's folder isn't the user's to write, and an installer needs no rename beside what it replaces.
+    pub(crate) fn stages_in_app_folder(self) -> bool {
+        self.system_package().is_some() || self == Self::WindowsSetup
     }
 }
 

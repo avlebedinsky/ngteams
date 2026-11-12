@@ -33,6 +33,7 @@ use teams_ui::account_prompt;
 use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
 use teams_ui::window::PERSONAL_APP_ID;
 use teams_ui::{SettingsFile, ViewTrace};
+use teams_update::Restart;
 
 #[cfg(test)]
 #[path = "../tests/support/lab_startup.rs"]
@@ -78,10 +79,11 @@ enum Outcome {
     },
     /// Lab sign-in keeps the broker and trace available for this same process's next image.
     LabRestart(ngteams::restart::RestartDescriptors),
-    /// An update is in (`ngteams::update`): the process runs `executable`, its new version, with this run's arguments
-    /// (the link it `opened` left out, as for [`Outcome::Restart`]).
+    /// An update is in (`ngteams::update`): the process runs what `restart` names, its new version with this run's
+    /// arguments (the link it `opened` left out, as for [`Outcome::Restart`]), or on Windows the installer that puts
+    /// the new version in place once this process has exited and starts it.
     Update {
-        executable: PathBuf,
+        restart: Restart,
         opened: Option<String>,
     },
 }
@@ -137,8 +139,8 @@ fn main() -> ExitCode {
         Ok(Outcome::Restart { opened }) => restarted(&mut |command| {
             ngteams::restart::exec(command.args(restart_args(std::env::args_os().skip(1), opened.as_deref())))
         }),
-        Ok(Outcome::Update { executable, opened }) => updated(&executable, &mut |command| {
-            ngteams::restart::exec(command.args(restart_args(std::env::args_os().skip(1), opened.as_deref())))
+        Ok(Outcome::Update { restart, opened }) => updated(restart, opened.as_deref(), &mut |command| {
+            ngteams::restart::exec(command)
         }),
         Ok(Outcome::LabRestart(descriptors)) => {
             restarted(&mut |command| descriptors.exec(command.args(std::env::args_os().skip(1))))
@@ -186,18 +188,23 @@ fn restarted(exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// The new version run by `exec` once an update is in, without the AppImage runtime's variables (the new AppImage's
-/// runtime sets them again); `exec` returns only when it couldn't.
-fn updated(executable: &Path, exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
-    let mut command = Command::new(executable);
+/// What `restart` names run by `exec` once an update is in: the new version with this run's arguments (the link it
+/// `opened` left out), without the AppImage runtime's variables (the new AppImage's runtime sets them again), or the
+/// Windows installer with its own; `exec` returns only when it couldn't.
+fn updated(restart: Restart, opened: Option<&str>, exec: &mut dyn FnMut(&mut Command) -> std::io::Error) -> ExitCode {
+    let mut command = Command::new(&restart.program);
+    match restart.arguments {
+        Some(arguments) => command.args(arguments),
+        None => command.args(restart_args(std::env::args_os().skip(1), opened)),
+    };
     #[cfg(unix)]
     for variable in ngteams::update::APPIMAGE_ENV {
         command.env_remove(variable);
     }
     let error = exec(&mut command);
     eprintln!(
-        "teams: the update is installed, but it can't start ({error}): start {} yourself",
-        executable.display()
+        "teams: the update is ready, but {} can't start ({error}): start it yourself",
+        restart.program.display()
     );
     ExitCode::FAILURE
 }
@@ -223,11 +230,7 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     }
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
     // the user's own app, installed from a release, updates itself; no other mode does
-    #[cfg(unix)]
     let updater = ngteams::update::for_this_run(&setup.paths);
-    // Windows updates aren't built yet
-    #[cfg(windows)]
-    let updater = None;
     run_setup(cli, reach, setup, ViewTrace::off(), ctl, updater)
 }
 
@@ -375,9 +378,9 @@ fn run_setup(
 }
 
 /// How a run that opened its window ended: into an update's new version, signed in again, or quit.
-fn ended(restart: bool, update: Option<PathBuf>, opened: Option<String>) -> Outcome {
+fn ended(restart: bool, update: Option<Restart>, opened: Option<String>) -> Outcome {
     match (update, restart) {
-        (Some(executable), _) => Outcome::Update { executable, opened },
+        (Some(restart), _) => Outcome::Update { restart, opened },
         (None, true) => Outcome::Restart { opened },
         (None, false) => Outcome::Quit,
     }
@@ -403,11 +406,10 @@ fn launched_or_said<S: teams_auth::secrets::SecretStore + 'static>(
 
 /// The app's updates (`ngteams::update`) for the window `launched`: its restart waits on the desktop's calls and
 /// drafts, and its program goes to `restart_into` before the app quits.
-#[cfg(unix)]
 fn start_updates(
     updater: Updater,
     launched: &ngteams::app::Launched,
-    restart_into: Rc<Cell<Option<PathBuf>>>,
+    restart_into: Rc<Cell<Option<Restart>>>,
     cx: &mut App,
 ) {
     ngteams::update::start(
@@ -422,18 +424,8 @@ fn start_updates(
     );
 }
 
-#[cfg(windows)]
-fn start_updates(updater: Updater, _: &ngteams::app::Launched, _: Rc<Cell<Option<PathBuf>>>, _: &mut App) {
-    match updater {}
-}
-
 /// What checks for and installs this copy's updates (`ngteams::update`).
-#[cfg(unix)]
 type Updater = ngteams::update::Updater;
-/// Windows updates aren't built yet: no updater exists there.
-#[cfg(windows)]
-#[derive(Clone, Copy)]
-enum Updater {}
 
 /// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
 /// socket taken over first, before anything opens a descriptor of its own; `get` only, of an account

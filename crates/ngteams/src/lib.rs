@@ -29,7 +29,6 @@ pub mod secrets;
 pub mod setup;
 pub mod signin;
 pub mod snapshot;
-#[cfg(unix)]
 pub mod update;
 
 pub use refusal::refusal;

@@ -16,16 +16,17 @@
 //!   Restart to update. A failed rollback keeps the previous installation in the stage named by the error.
 //! - **The restart**: once the update is in, the app quits as it always does, every engine shut down first (the
 //!   outbox's rows and the store stay), and `main` runs the new version in this process, with this run's arguments.
+//!   On Windows, where a running program's files can't be replaced, "in" means the new installer is downloaded and
+//!   checked: `main` starts it as the app exits, and it waits for the exit, upgrades the folder and starts the app.
 //!   The keyring's credentials are untouched.
 
 use std::cell::Cell;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, AsyncApp, Global, SharedString, Task};
 use teams_ui::update::{self as button, Holds, UpdateStatus};
-use teams_update::{Error, Installation, Places, Prepared, Release, Source, Version};
+use teams_update::{Error, Installation, Places, Prepared, Release, Restart, Source, Version};
 
 use crate::accounts_file::PersonalPaths;
 
@@ -86,12 +87,13 @@ struct Flow {
     release: Option<Release>,
     /// Its download, verified, waiting for its install.
     prepared: Option<Prepared>,
-    /// Already installed, awaiting a safe restart; a later press must not install it again.
-    installed: Option<PathBuf>,
+    /// Already installed (on Windows, its installer checked and waiting to run), awaiting a safe restart; a later press
+    /// must not install it again.
+    installed: Option<Restart>,
     /// A download or an install runs.
     busy: bool,
     /// Where a restart's program goes for `main` to run, once the update is in.
-    restart: Rc<Cell<Option<PathBuf>>>,
+    restart: Rc<Cell<Option<Restart>>>,
     /// The app's quit.
     quit: Rc<dyn Fn(&mut App)>,
     _checks: Option<Task<()>>,
@@ -104,7 +106,7 @@ pub struct Started {
     pub updater: Updater,
     /// What holds a restart up ([`teams_ui::desktop::Desktop::update_waiting`]).
     pub holds: Holds,
-    pub restart: Rc<Cell<Option<PathBuf>>>,
+    pub restart: Rc<Cell<Option<Restart>>>,
     pub quit: Rc<dyn Fn(&mut App)>,
     /// When the first check runs; `None` runs none by itself (tests check with [`check`]).
     pub first_check: Option<Duration>,
@@ -292,13 +294,16 @@ fn install(cx: &mut App) {
     .detach();
 }
 
-fn installed_now(prepared: Prepared, installed: Result<PathBuf, Error>, shown: &SharedString, cx: &mut App) {
+fn installed_now(prepared: Prepared, installed: Result<Restart, Error>, shown: &SharedString, cx: &mut App) {
     let flow = cx.global_mut::<Flow>();
     flow.busy = false;
     match installed {
-        Ok(executable) => {
-            log::info!("updates: {shown} is in: the app restarts into {}", executable.display());
-            flow.installed = Some(executable);
+        Ok(restart) => {
+            log::info!(
+                "updates: {shown} is in: the app restarts into {}",
+                restart.program.display()
+            );
+            flow.installed = Some(restart);
             // Package prompts may have waited while a call arrived or a draft was typed.
             // Remember the successful install separately so the next press only restarts.
             flow.prepared = Some(prepared);
@@ -354,6 +359,9 @@ pub fn holds(desktop: gpui::WeakEntity<teams_ui::Desktop>) -> Holds {
     })
 }
 
+// The flow against the fake feed's Linux release trees. A separate attribute keeps the literal `cfg(test)` clippy's
+// test allowances look for.
 #[cfg(test)]
+#[cfg(unix)]
 #[path = "../tests/support/update.rs"]
 mod tests;

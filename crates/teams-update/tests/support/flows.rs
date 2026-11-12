@@ -43,8 +43,8 @@ fn a_newer_release_is_offered_downloaded_verified_and_swapped_in() {
         fs::read_to_string(installation.root().join(IDENTITY)).unwrap(),
         "0.1.0.5\n"
     );
-    let executable = prepared.install().unwrap();
-    assert_eq!(executable, installation.root().join("usr/bin/ngteams"));
+    let restart = prepared.install().unwrap();
+    assert_eq!(restart.program, installation.root().join("usr/bin/ngteams"));
     assert_eq!(
         fs::read_to_string(installation.root().join(IDENTITY)).unwrap(),
         "0.1.0.7\n"
@@ -342,8 +342,8 @@ fn an_appimage_is_replaced_by_its_newer_file() {
     let source = Source::local(&feed.base);
     let release = source.check(&installation, version("0.1.0.5")).unwrap().unwrap();
     let mut prepared = source.prepare(&installation, &release, |_, _| {}).unwrap();
-    let executable = prepared.install().unwrap();
-    assert_eq!(executable, fs::canonicalize(&image).unwrap());
+    let restart = prepared.install().unwrap();
+    assert_eq!(restart.program, fs::canonicalize(&image).unwrap());
     assert_eq!(fs::read(&image).unwrap(), b"new image");
     assert_eq!(fs::metadata(&image).unwrap().permissions().mode() & 0o777, 0o755);
     // replaced meanwhile: its identity (inode, size, time) differs
@@ -421,8 +421,8 @@ fn a_package_goes_to_the_package_manager_behind_the_password_prompt() {
         // a package's download waits in the app's own folder
         let (mut prepared, _feed) = package_prepared(&installation);
         assert!(prepared.candidate.starts_with(case.path().join("data/updates")));
-        let executable = prepared.install().unwrap();
-        assert_eq!(executable, installation.root().join("usr/bin/ngteams"));
+        let restart = prepared.install().unwrap();
+        assert_eq!(restart.program, installation.root().join("usr/bin/ngteams"));
         let installed = fs::read_to_string(&log).unwrap();
         let line = installed.lines().last().unwrap();
         assert!(line.starts_with(manager), "{line}");

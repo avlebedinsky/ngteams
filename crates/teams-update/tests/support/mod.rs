@@ -1,8 +1,11 @@
 //! The updater against a local fake release feed and disposable installations in temporary folders: nothing here
 //! reaches GitHub or touches an installed copy.
 
+#[cfg(unix)]
 mod flows;
+#[cfg(unix)]
 mod parts;
+mod setup;
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +28,7 @@ pub(super) fn places(executable: PathBuf, home: &Path) -> Places {
 }
 
 /// An unpacked archive of `version` at `<home>/opt/ngteams`, detected.
+#[cfg(unix)]
 pub(super) fn archive_installation(home: &Path, version: &str) -> Installation {
     let root = home.join("opt/ngteams");
     tree(&root, version, Format::Archive).unwrap();
@@ -68,7 +72,13 @@ fn each_format_takes_the_asset_the_release_workflow_publishes() {
     assert_eq!(Format::Deb.asset(release), "ngteams_0.1.0.12-1_amd64.deb");
     assert_eq!(Format::Rpm.asset(release), "ngteams-0.1.0.12-1.x86_64.rpm");
     assert_eq!(Format::Pacman.asset(release), "ngteams-0.1.0.12-1-x86_64.pkg.tar.zst");
-    for format in [Format::Archive, Format::Deb, Format::Rpm, Format::Pacman] {
+    for format in [
+        Format::Archive,
+        Format::Deb,
+        Format::Rpm,
+        Format::Pacman,
+        Format::WindowsSetup,
+    ] {
         assert_eq!(Format::from_marker(&format!("{}\n", format.marker())), Some(format));
     }
     // an AppImage's tree found unpacked is an archive
@@ -79,6 +89,23 @@ fn each_format_takes_the_asset_the_release_workflow_publishes() {
     assert_eq!(Format::Deb.system_package(), Some("deb"));
     assert_eq!(Format::Rpm.system_package(), Some("rpm"));
     assert_eq!(Format::Pacman.system_package(), Some("pacman"));
+}
+
+#[test]
+fn a_stage_goes_beside_the_installation_only_where_an_update_renames_it_in() {
+    assert_eq!(
+        Format::WindowsSetup.asset(version("0.1.0.12")),
+        "ngteams-0.1.0.12-windows-x86_64-setup.exe"
+    );
+    assert_eq!(Format::WindowsSetup.system_package(), None);
+    for (format, own_folder) in [
+        (Format::Archive, false),
+        (Format::AppImage, false),
+        (Format::Deb, true),
+        (Format::WindowsSetup, true),
+    ] {
+        assert_eq!(format.stages_in_app_folder(), own_folder, "{format:?}");
+    }
 }
 
 #[test]
