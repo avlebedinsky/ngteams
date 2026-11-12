@@ -16,7 +16,8 @@ pub struct Places {
     pub appimage: Option<OsString>,
     /// `$APPDIR`: where that runtime mounted it.
     pub appdir: Option<OsString>,
-    /// Where a system package's download waits for the package manager (its own folder isn't the user's to write).
+    /// Where a system package's download waits for the package manager (its own folder isn't the user's to write), and
+    /// the Windows installer's for the app to quit and run it.
     pub stage_dir: PathBuf,
     /// The app's data and config directories: an update that would replace one of them is refused.
     pub protected: Vec<PathBuf>,
@@ -41,7 +42,8 @@ impl Places {
 /// A release installation the app can replace with a newer release ([`crate::Source::prepare`]).
 #[derive(Clone, Debug)]
 pub struct Installation {
-    /// What an update replaces: the archive's folder, the AppImage file, or a package's `/opt/ngteams`.
+    /// What an update replaces: the archive's folder, the AppImage file, a package's `/opt/ngteams`, or the Windows
+    /// installer's folder (holding `bin\ngteams.exe`).
     pub(crate) root: PathBuf,
     /// What a restart runs once the update is in.
     pub(crate) executable: PathBuf,

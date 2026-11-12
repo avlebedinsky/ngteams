@@ -216,8 +216,10 @@ pub(crate) fn unwritable(error: std::io::Error, parent: &Path) -> Error {
 fn full(error: &std::io::Error) -> bool {
     #[cfg(unix)]
     let codes = [libc::ENOSPC];
-    // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
     #[cfg(windows)]
-    let codes = [39, 112];
+    let codes = {
+        use windows_sys::Win32::Foundation::{ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL};
+        [ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL].map(u32::cast_signed)
+    };
     error.kind() == std::io::ErrorKind::StorageFull || error.raw_os_error().is_some_and(|code| codes.contains(&code))
 }

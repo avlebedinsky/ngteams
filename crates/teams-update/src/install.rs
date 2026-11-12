@@ -150,7 +150,7 @@ impl Prepared {
     #[cfg(windows)]
     #[expect(clippy::unused_self, reason = "the same call as the Linux package route's")]
     fn install_package(&self) -> Result<(), Error> {
-        Err(error("This installation isn't a Windows installation."))
+        Err(error("A Linux system package can't be installed on Windows."))
     }
 
     #[cfg(unix)]
