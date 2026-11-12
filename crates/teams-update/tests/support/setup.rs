@@ -108,11 +108,13 @@ fn prepared_again(installation: &Installation) -> (Prepared, Feed) {
 fn a_stage_whose_file_is_held_keeps_its_owner_for_a_later_start() {
     let parent = tempfile::tempdir().unwrap();
     let work = parent.path().join(format!("{}held", crate::stage::PREFIX));
-    let held = work.join("held");
-    fs::create_dir_all(&held).unwrap();
-    fs::write(held.join("installer.exe"), "running").unwrap();
-    // the owner exited (a finished child's id)
+    fs::create_dir(&work).unwrap();
+    // the owner exited (a finished child's id); written first and named before the held folder, so a removal in
+    // listing order (creation order on tmpfs, name order on NTFS) reaches it before the held file
     fs::write(work.join("owner"), exited().to_string()).unwrap();
+    let held = work.join("running");
+    fs::create_dir(&held).unwrap();
+    fs::write(held.join("installer.exe"), "running").unwrap();
     let release = hold(&held);
     assert_eq!(crate::stage::cleanup(parent.path()), 0);
     assert!(work.join("owner").exists(), "the owner goes last");
