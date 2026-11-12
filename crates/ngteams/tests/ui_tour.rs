@@ -186,7 +186,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 262] = [
+const STEPS: [Step; 5 + 265] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -214,7 +214,15 @@ const STEPS: [Step; 5 + 262] = [
         hover_last(shell, false, cx);
     }),
     ("chat-hover-mine", |shell, _, cx| hover_last(shell, true, cx)),
+    ("chat-reactors", |shell, _, cx| show_reactors(shell, cx)),
+    ("chat-reactors-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    ("chat-reaction-focus", |shell, window, cx| {
+        focus_reaction(shell, window, cx);
+    }),
     ("chat-actions", |shell, window, cx| {
+        fixed_theme(shell, None, cx);
         hover_none(shell, cx);
         select_last_message(shell, window, cx);
     }),
@@ -3109,8 +3117,52 @@ fn set_font_size(shell: &Entity<Shell>, size: u16, cx: &mut App) {
 
 fn hover_none(shell: &Entity<Shell>, cx: &mut App) {
     if let Some(chat) = shell.read(cx).chat().cloned() {
-        chat.update(cx, |chat, cx| chat.hover(None, cx));
+        chat.update(cx, |chat, cx| {
+            chat.hover(None, cx);
+            chat.show_reactors(None, cx);
+        });
     }
+}
+
+fn focus_reaction(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let reacted = chat
+        .read(cx)
+        .message_items()
+        .filter(|message| !message.reactions.is_empty())
+        .max_by_key(|message| {
+            message
+                .reactions
+                .iter()
+                .map(teams_ui::chat_view::ReactionCount::count)
+                .sum::<usize>()
+        })
+        .map(|message| message.id.clone());
+    chat.update(cx, |chat, cx| {
+        chat.show_reactors(None, cx);
+        chat.select(reacted, cx);
+    });
+    let focus = chat.read(cx).focus_handle().clone();
+    focus.focus(window, cx);
+    window.dispatch_action(Box::new(teams_ui::chat_view::reactors::NextReaction), cx);
+}
+
+fn show_reactors(shell: &Entity<Shell>, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let most = chat
+        .read(cx)
+        .message_items()
+        .flat_map(|message| message.reactions.iter().map(move |reaction| (message, reaction)))
+        .max_by_key(|(_, reaction)| reaction.count())
+        .map(|(message, reaction)| (message.id.clone(), reaction.key.clone()));
+    chat.update(cx, |chat, cx| {
+        chat.hover(None, cx);
+        chat.show_reactors(most.as_ref().map(|(message, key)| (message.as_str(), key.as_str())), cx);
+    });
 }
 
 /// Runs `change` on the compose box of the chat shown.
@@ -4076,7 +4128,11 @@ fn seed_mentions(mock: &ChatServiceMock) -> SandboxResult {
         message["properties"]["mentions"] = serde_json::json!(mentions);
         message["properties"]["emotions"] = serde_json::json!([{
             "key": "1f440_eyes",
-            "users": [{"mri": LAB_A, "time": 1_767_268_800_000_i64, "value": "1767268800000"}],
+            "users": [
+                {"mri": LAB_B, "time": 1_767_268_790_000_i64, "value": "1767268790000"},
+                {"mri": LAB_C, "time": 1_767_268_795_000_i64, "value": "1767268795000"},
+                {"mri": LAB_A, "time": 1_767_268_800_000_i64, "value": "1767268800000"},
+            ],
         }]);
     });
     if !changed {
