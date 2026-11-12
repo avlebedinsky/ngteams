@@ -1,9 +1,11 @@
 """Windows package boundary tests with real x64 PE normal/delay imports, no app or tenant."""
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import unittest
 from unittest.mock import patch
@@ -87,6 +89,11 @@ class WindowsRelease(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "version must"):
             release.stage(self.args, self.reader)
 
+    def test_the_installer_knows_every_top_level_name_of_the_stage(self):
+        release.stage(self.args, self.reader)
+        names = {path.name for path in self.args.output.iterdir()}
+        self.assertLessEqual(names, set(installer_names()))
+
     def test_existing_output_is_never_overwritten(self):
         self.args.archive.write_text("keep")
         with self.assertRaisesRegex(ValueError, "already exists"):
@@ -94,9 +101,61 @@ class WindowsRelease(unittest.TestCase):
         self.assertEqual(self.args.archive.read_text(), "keep")
 
 
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = (REPO / "packaging/windows/ngteams.iss").read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def installer_names():
+    """The stage's top-level names scripts/package-release-windows.ps1 accepts for the installer."""
+    text = (REPO / "scripts/package-release-windows.ps1").read_text(encoding="utf-8")
+    listed = re.search(r"\$installerNames = @\((.*?)\)", text, re.S).group(1)
+    return re.findall(r"'([^']+)'", listed)
+
+
+def iss_define(name):
+    return re.search(rf'^#define {name} "([^"]*)"', SCRIPT, re.M).group(1)
+
+
+def iss_setup(name):
+    return re.search(rf"^{name}=(.*)$", SCRIPT, re.M).group(1)
+
+
+class WindowsInstallerScript(unittest.TestCase):
+    """packaging/windows/ngteams.iss agrees with the packaging script, the app and the updater."""
+
+    def test_an_upgrade_removes_exactly_what_the_installer_ships(self):
+        excluded = re.search(r'Excludes: "([^"]*)"', SCRIPT).group(1).replace("\\", "").split(",")
+        removed = re.findall(r'^Type: (?:files|filesandordirs); Name: "\{app\}\\([^"]+)"; Check: UpgradingHere$',
+                             SCRIPT, re.M)
+        self.assertEqual(sorted(removed + excluded), sorted(installer_names()))
+        self.assertEqual(set(excluded), {"Install.ps1", "Unregister.ps1", "README.txt", "PACKAGE-MANIFEST.json"})
+
+    def test_its_names_and_ids_are_the_apps(self):
+        digest = hashlib.sha256(b"ngteams.toast.activator:com.nickalie.ngteams").hexdigest()[:32].upper()
+        guid = f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:]}"
+        self.assertEqual(iss_define("ToastActivator"), guid)
+        self.assertEqual(iss_define("AppUserModelId"), "com.nickalie.ngteams")
+        for key in ("AppName", "AppPublisher", "UninstallDisplayName", "VersionInfoProductName"):
+            self.assertEqual(iss_setup(key), "ngteams")
+        self.assertNotRegex(SCRIPT.split("[Code]")[0].replace("(Microsoft Teams, say)", ""), "Microsoft Teams|MS Teams")
+        # the asset name the updater asks for (crates/teams-update Format::WindowsSetup)
+        self.assertEqual(iss_setup("OutputBaseFilename"), "ngteams-{#AppVersion}-windows-x86_64-setup")
+        updater = (REPO / "crates/teams-update/src/lib.rs").read_text(encoding="utf-8")
+        self.assertIn('format!("ngteams-{version}-windows-x86_64-setup.exe")', updater)
+        self.assertIn('"windows-setup" => Some(Self::WindowsSetup)', updater)
+
+    def test_the_compiler_is_pinned_by_version_and_hash(self):
+        pins = json.loads((REPO / "packaging/windows/installer-pins.json").read_text(encoding="utf-8"))
+        self.assertRegex(pins["innosetup_sha256"], "^[0-9a-f]{64}$")
+        tag = "is-" + pins["innosetup_version"].replace(".", "_")
+        self.assertEqual(pins["innosetup_url"], "https://github.com/jrsoftware/issrc/releases/download/"
+                         f"{tag}/innosetup-{pins['innosetup_version']}-x64.exe")
+
+
 # Importing the shared test class would discover its tests twice. Select only this suite's new contracts; its
 # inherited constructors/support remain available, and the media suite runs separately in the workflow.
 if __name__ == "__main__":
-    suite = unittest.TestSuite(WindowsRelease(name) for name in WindowsRelease.__dict__ if name.startswith("test_"))
+    suite = unittest.TestSuite(case(name) for case in (WindowsRelease, WindowsInstallerScript)
+                               for name in case.__dict__ if name.startswith("test_"))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     raise SystemExit(not result.wasSuccessful())

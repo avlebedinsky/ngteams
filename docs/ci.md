@@ -205,7 +205,8 @@ only the newest commit is published. A successful `main` run makes a GitHub rele
 `v<workspace version>.<run number>` (`Cargo.toml`'s `[workspace.package] version` and `github.run_number`, monotonic
 for package upgrades), marked latest, targeting the pushed commit. Linux x86_64 builds on `ubuntu-24.04` produce
 `.deb`, `.rpm`, Arch `.pkg.tar.zst`, `.AppImage` and a portable `.tar.gz`; `windows-2025` produces
-`ngteams-<version>-windows-x86_64.zip`. `SHA256SUMS` and GitHub build-provenance attestations cover every asset,
+`ngteams-<version>-windows-x86_64.zip` and the per-user installer `ngteams-<version>-windows-x86_64-setup.exe`, both
+from the same staged, hash-checked folder. `SHA256SUMS` and GitHub build-provenance attestations cover every asset,
 including the runtime below. Publishing requires the tests and both native build jobs and runs only on `main`; a
 manual branch dispatch builds artifacts without publishing.
 
@@ -228,8 +229,40 @@ that exact file's URL, size and SHA-256 into the app, so a published archive is 
 The build compiles the release's version into the app (`NGTEAMS_RELEASE_VERSION`), and each package carries
 `usr/share/ngteams/release` (that version) and `usr/share/ngteams/update-format` (how it installs: `linux-archive`,
 `linux-appimage`, `linux-deb`, `linux-rpm`, `linux-pacman`). The installed app's updater (`crates/teams-update`) reads
-them to pick the asset of a newer release that replaces it. A Windows package adds its own format word and install
-step there.
+them to pick the asset of a newer release that replaces it. On Windows the installer writes `share/ngteams/release`
+and `share/ngteams/update-format` (`windows-setup`) under its folder; the zip carries neither, so a copy installed
+from it doesn't update itself.
+
+### The Windows installer
+
+`packaging/windows/ngteams.iss` is an [Inno Setup](https://jrsoftware.org/isinfo.php) 7 script, compiled by
+`scripts/package-release-windows.ps1 -InnoSetup <ISCC.exe>` after the zip's stage has passed `windows-release.py
+check`. The compiler is installed per user from the hash-pinned release in `packaging/windows/installer-pins.json`
+(`scripts/release-innosetup.ps1`); to update it, change the version, URL and SHA-256 there together. Inno Setup was
+chosen over an MSI because it installs per user without elevation natively, compares all four parts of our
+`MAJOR.MINOR.PATCH.RUN` version (an MSI ignores the fourth, the one every release bumps), upgrades in place by
+running the newer installer, and makes one compressed `.exe` from the ~2,000-file media runtime with no per-file
+component authoring.
+
+It installs under `%LOCALAPPDATA%\Programs\ngteams` with a Start menu shortcut carrying the app's notification
+identity, an Add/Remove programs entry and the `msteams:` handler offered under Default apps, all in `HKCU`. An upgrade
+first removes the previous version's program folders (only in a folder an earlier ngteams installer marked; the
+packaging script refuses a stage with a top-level name `[InstallDelete]` doesn't list). Uninstall removes those and
+the app's own notification registration, and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's
+updater runs the installer with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades,
+and starts it again (the previous one if the upgrade fails). The `windows` job installs and uninstalls it on the
+runner with `scripts/test-windows-installer.ps1` (never starting the app) and checks every installed program file
+against the zip's `PACKAGE-MANIFEST.json`.
+
+### Windows code signing
+
+Nothing is signed yet, so SmartScreen may warn on the installer and the app (the README says how to proceed). The
+hook is `scripts/package-release-windows.ps1 -SignCommand '<command>'`: an Inno Setup sign tool command line, `$f`
+for the quoted file and `$q` for a quote, for example `signtool.exe sign /fd sha256 /td sha256 /tr <timestamp URL>
+/f <certificate> $f`. It signs `ngteams.exe`, `ngteams-webview.exe` and `ngteamsctl.exe` before they are staged (so
+the manifest hashes the signed files), and Inno Setup signs the installer and its uninstaller (`SignTool`,
+`SignedUninstaller`). To turn it on, add a step that provides the certificate (an Azure Trusted Signing or HSM-backed
+`signtool`, say) from a secret available only to `main`, and pass `-SignCommand` in the workflow's packaging step.
 
 `build` runs the tests of the packaging scripts, builds, packages and smoke-tests: the build identity in the archive,
 the AppImage and the installed `.deb`, `--install-web-engine` into a private `XDG_DATA_HOME`, `ngteams-web --probe`

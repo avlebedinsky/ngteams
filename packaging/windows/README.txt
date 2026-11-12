@@ -4,6 +4,10 @@ Keep this whole folder together. bin/ngteams.exe is the desktop app and
 bin/ngteamsctl.exe is its command-line controller. The sign-in worker, media
 plugins, DLLs and notices beside them are required.
 
+The release's ngteams-<version>-windows-x86_64-setup.exe installs the same files
+with a Start menu entry, an Installed apps entry and updates from inside the app;
+it is the easier way. This zip is for a portable copy or a scripted setup.
+
 Install or update (ordinary user, no administrator rights):
 1. Extract the zip, then open PowerShell in the extracted ngteams folder.
 2. Run: powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1

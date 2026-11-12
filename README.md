@@ -97,7 +97,8 @@ Every release is on the [releases page](https://github.com/nickalie/ngteams/rele
 
 | On | Download | Install with |
 |---|---|---|
-| Windows 11 x64 | `ngteams-*-windows-x86_64.zip` | extract, then run `Install.ps1` in PowerShell (see below) |
+| Windows 11 x64 | `ngteams-*-windows-x86_64-setup.exe` | run it (see below) |
+| | `ngteams-*-windows-x86_64.zip` | extract, then run `Install.ps1` in PowerShell |
 | Debian 13+, Ubuntu 24.04+ | `ngteams_*_amd64.deb` | `sudo apt install ./ngteams_*_amd64.deb` |
 | Fedora, RHEL-likes | `ngteams-*.x86_64.rpm` | `sudo dnf install ./ngteams-*.x86_64.rpm` |
 | openSUSE | `ngteams-*.x86_64.rpm` | `sudo zypper install --allow-unsigned-rpm ./ngteams-*.x86_64.rpm` |
@@ -105,14 +106,23 @@ Every release is on the [releases page](https://github.com/nickalie/ngteams/rele
 | Anything with glibc 2.39 or newer | `ngteams-*-linux-x86_64.AppImage` | `chmod +x` it and run it |
 | | `ngteams-*-linux-x86_64.tar.gz` | unpack it and run `ngteams/AppRun` |
 
-**Updates**: ngteams checks for a newer release once an hour. When there is one, **Install update** appears in its title bar: select it and ngteams downloads the release, checks it against the release's `SHA256SUMS`, installs it and restarts. A `.deb`, `.rpm` or Arch package asks for your password first. If a call is going on or you have a message you haven't sent, the restart waits until you select **Restart to update**. To update by hand, install the newer package the same way. The unpacked `.tar.gz` (or an extracted AppImage) updates itself only while it stays in its own folder named `ngteams`.
+**Updates**: ngteams checks for a newer release once an hour. When there is one, **Install update** appears in its title bar: select it and ngteams downloads the release, checks it against the release's `SHA256SUMS`, installs it and restarts. A `.deb`, `.rpm` or Arch package asks for your password first; on Windows, ngteams closes and the new installer upgrades it and opens it again. If a call is going on or you have a message you haven't sent, the restart waits until you select **Restart to update**. To update by hand, install the newer package the same way. The unpacked `.tar.gz` (or an extracted AppImage) updates itself only while it stays in its own folder named `ngteams`; the Windows zip doesn't update itself.
 
-**On Windows**, extract the zip and open PowerShell in its `ngteams` folder. Run
-`powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1` as your ordinary user, then open ngteams from
-Start. Setup installs a separate copy under `%LOCALAPPDATA%\Programs\ngteams`, creates the shortcut and installs
-Microsoft's WebView2 Runtime if missing. To open Teams links here, choose ngteams for MSTeams in Windows Settings →
-Apps → Default apps. The app is unsigned; Windows may show a SmartScreen prompt. The archive's `README.txt` covers
-portable use, verification and removal. Setup never starts the app or changes your current link default.
+**On Windows**, run `ngteams-*-windows-x86_64-setup.exe` as your ordinary user: it needs no administrator rights.
+It installs ngteams for you alone under `%LOCALAPPDATA%\Programs\ngteams`, adds it to Start and to Settings → Apps →
+Installed apps, and installs Microsoft's WebView2 Runtime if it is missing (downloaded from Microsoft and checked to
+be signed by Microsoft). To open Teams links here, choose ngteams for MSTeams in Settings → Apps → Default apps;
+setup offers it there but never changes your current choice. Running a newer installer upgrades ngteams in place.
+Uninstalling it from Installed apps removes the program and keeps your accounts and data
+(`%LOCALAPPDATA%\ngteams`, and the sign-ins in Credential Manager).
+
+The installer and the app aren't code-signed yet, so **Windows SmartScreen** may say it "protected your PC" from an
+unrecognized app: check the download against the release's `SHA256SUMS` (or `gh attestation verify <file> --repo
+nickalie/ngteams`), then choose **More info → Run anyway**.
+
+Without the installer, extract the zip, open PowerShell in its `ngteams` folder and run
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1` as your ordinary user. The archive's
+`README.txt` covers portable use, verification and removal.
 
 **On Linux, the sign-in window** runs on WPE WebKit 2.54 or newer. If your system has it (the Arch package installs it, Debian testing and openSUSE Tumbleweed have it), ngteams uses it. Otherwise it downloads a verified copy of about 120 MB once, the first time you sign in.
 

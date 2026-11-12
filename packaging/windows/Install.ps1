@@ -102,7 +102,7 @@ Set-Item -LiteralPath "$program/shell/open/command" -Value ('"' + $exe + '" "%1"
 $capabilities = 'HKCU:/Software/ngteams/Capabilities'
 New-Item -Path "$capabilities/URLAssociations" -Force | Out-Null
 New-ItemProperty -LiteralPath $capabilities -Name ApplicationName -Value ngteams -Force | Out-Null
-New-ItemProperty -LiteralPath $capabilities -Name ApplicationDescription -Value 'Native Microsoft Teams client' -Force | Out-Null
+New-ItemProperty -LiteralPath $capabilities -Name ApplicationDescription -Value 'ngteams: chats, calls and meetings' -Force | Out-Null
 New-ItemProperty -LiteralPath "$capabilities/URLAssociations" -Name msteams -Value ngteams.msteams -Force | Out-Null
 New-Item -Path 'HKCU:/Software/RegisteredApplications' -Force | Out-Null
 New-ItemProperty -LiteralPath 'HKCU:/Software/RegisteredApplications' -Name ngteams -Value 'Software\ngteams\Capabilities' -Force | Out-Null

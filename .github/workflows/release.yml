@@ -1,4 +1,5 @@
-# Every push to main: build native Linux and Windows x86_64 packages and publish one GitHub release.
+# Every push to main: build native Linux and Windows x86_64 packages (the Windows zip and its per-user installer) and
+# publish one GitHub release.
 #
 # Packages carry no web engine: the app finds WPE WebKit 2.54+ on the system or downloads a pinned runtime the first
 # time it needs one. The runtime is built from ngterm's portable WPE prefix (pinned by digest, attestation-checked; WPE
@@ -237,6 +238,11 @@ jobs:
           key: release-windows-2025
       - name: Pinned native media SDK
         run: scripts/release-windows-deps.ps1
+      # The installer's compiler, hash-pinned in packaging/windows/installer-pins.json, installed for this user only.
+      - name: Pinned Inno Setup
+        run: |
+          $iscc = scripts/release-innosetup.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'innosetup')
+          "ISCC=$iscc" >> $env:GITHUB_ENV
       - name: Packaging contracts
         run: |
           if (!(Get-Command clang -ErrorAction SilentlyContinue)) { throw 'PE fixture compiler clang is required.' }
@@ -251,14 +257,17 @@ jobs:
         env:
           TEAMS_PERSONAL_INSTALL: "1"
         run: |
+          # the version the app's updater compares GitHub's latest release with (crates/teams-update)
+          $env:NGTEAMS_RELEASE_VERSION = $env:VERSION
           . scripts/lib/windows-runner.ps1
           Set-NgteamsMediaEnvironment $pwd.Path
           cargo build --locked --release -p ngteams -p teams-signin --bin ngteams --bin ngteams-webview
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release -p teams-ctl --bin ngteamsctl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Windows archive, complete media runtime and notices
-        run: scripts/package-release-windows.ps1 -Binaries target/release -Version $env:VERSION -Commit $env:NGTEAMS_BUILD_COMMIT
+      # The zip and the installer, both from the same staged and checked files. Code signing: docs/ci.md.
+      - name: Windows archive and installer, complete media runtime and notices
+        run: scripts/package-release-windows.ps1 -Binaries target/release -Version $env:VERSION -Commit $env:NGTEAMS_BUILD_COMMIT -InnoSetup $env:ISCC
       - name: Unpack and verify the archive
         run: |
           $smoke = Join-Path $env:RUNNER_TEMP 'windows-release-smoke'
@@ -276,11 +285,17 @@ jobs:
           }
           & "$package/bin/ngteamsctl.exe" --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "PACKAGE=$package" >> $env:GITHUB_ENV
+      # Per user on this runner, as a user would; never starts the app. Its files must be the zip's, byte for byte.
+      - name: Install and uninstall the installer
+        run: scripts/test-windows-installer.ps1 -Installer "dist/ngteams-$env:VERSION-windows-x86_64-setup.exe" -Package $env:PACKAGE
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: release-windows-x86_64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
           if-no-files-found: error
 
   publish:
