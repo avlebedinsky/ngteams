@@ -1,5 +1,10 @@
 //! Synthetic stored packs: absent events are quiet; promised sounds that cannot be read warn without local names.
 
+#![cfg(test)]
+// The unreadable and symlinked sounds are Unix file modes and links. A separate attribute keeps the literal
+// `cfg(test)` clippy's test allowances look for.
+#![cfg(unix)]
+
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
