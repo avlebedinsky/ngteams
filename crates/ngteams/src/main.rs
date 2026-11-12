@@ -432,6 +432,7 @@ fn start_updates(updater: Updater, _: &ngteams::app::Launched, _: Rc<Cell<Option
 type Updater = ngteams::update::Updater;
 /// Windows updates aren't built yet: no updater exists there.
 #[cfg(windows)]
+#[derive(Clone, Copy)]
 enum Updater {}
 
 /// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
