@@ -112,8 +112,9 @@ const PANE_WIDTH: f32 = 320.0;
 const CHAT_WIDTH: f32 = 360.0;
 /// The window's width under which the toolbar's controls show their icons alone, px.
 const COMPACT_BELOW: f32 = 860.0;
-/// The avatar of the one the call rings (or ended with) and of a tile without video: the kit's large one (80 px),
-/// whose initials it sizes and centres (a custom size leaves them small, at its top left).
+/// The avatar of the one the call rings, holds or ended with: the kit's large one (80 px), whose initials it sizes and
+/// centres (a custom size leaves them small, at its top left). A tile without video sizes its face to the tile
+/// ([`faces::face_side`], `CallStage::tile_face`).
 const BIG_AVATAR: Size = Size::Large;
 /// [`BIG_AVATAR`]'s side, px (the kit's large avatar).
 const BIG_AVATAR_PX: f32 = 80.0;
@@ -234,7 +235,7 @@ pub struct CallStage {
     self_hidden: bool,
     /// View's Show videos first: the tiles whose camera is on lead.
     videos_first: bool,
-    /// View's Turn off other videos: the others' tiles show their initials, not their video.
+    /// View's Turn off other videos: the others' tiles show their pictures (or initials), not their video.
     others_off: bool,
     /// Who has a hand up, in the order they raised it (the account by its own MRI): the People pane numbers them.
     hands: Vec<String>,
@@ -340,6 +341,8 @@ impl CallStage {
         let feed = calls.read(cx).video().cloned();
         let waking = feed.as_ref().map(|feed| wake_on_frames(feed, cx));
         let tiles = feed.map(|feed| Tiles::new(feed, Arc::clone(&trace)));
+        // profile changes before the stage asked about anyone change nothing it read
+        let seen = shell.as_ref().map_or(0, |shell| shell.models.chats.read(cx).revision());
         let profiles = shell.as_ref().map(|shell| {
             cx.observe(&shell.models.chats, |this: &mut Self, chats, cx| {
                 this.profiles_changed(&chats, cx);
@@ -393,7 +396,7 @@ impl CallStage {
             translation,
             with: None,
             own_name: None,
-            faces: faces::Faces::default(),
+            faces: faces::Faces::seen_at(seen),
             end_shown: false,
             closing: None,
             focus: cx.focus_handle(),
@@ -417,8 +420,10 @@ impl CallStage {
                 .and_then(|person| person.name)
                 .filter(|name| !name.trim().is_empty());
             // a stage that is gone shows nobody
+            // none leaves a name the faces' later read gave
+            let Some(name) = name else { return };
             let _ = this.update(cx, |this, cx| {
-                this.own_name = name.map(SharedString::from);
+                this.own_name = Some(SharedString::from(name));
                 cx.notify();
             });
         })
@@ -1275,7 +1280,12 @@ fn calling(
 fn ended_avatar(title: &SharedString, picture: Option<&people::Picture>, palette: Palette) -> gpui::Div {
     div()
         .relative()
-        .child(people::avatar(Some(title), picture, BIG_AVATAR))
+        .child(
+            people::avatar(Some(title), picture, BIG_AVATAR).debug_selector(move || {
+                let shown = if picture.is_some() { "picture" } else { "initials" };
+                format!("call-end-{shown}")
+            }),
+        )
         .child(
             div()
                 .absolute()

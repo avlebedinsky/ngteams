@@ -19,13 +19,9 @@ impl CallStage {
         )];
         if active.view.participants.is_empty() {
             rows.extend(people.iter().enumerate().map(|(index, (mri, name))| {
-                let face = faces::small_face(&self.faces, mri, name);
-                roster_row(
-                    format!("call-roster-{index}"),
-                    (face, name.clone()),
-                    Signs::default(),
-                    palette,
-                )
+                let row = format!("call-roster-{index}");
+                let face = faces::small_face(&self.faces, (&row, mri), name);
+                roster_row(row, (face, name.clone()), Signs::default(), palette)
             }));
         } else {
             rows.extend(active.view.participants.iter().enumerate().map(|(index, participant)| {
@@ -38,8 +34,9 @@ impl CallStage {
                         .then(|| self.hand_rank(&participant.mri).unwrap_or(0)),
                     organizer: participant.organizer && controls::group_or_meeting(active),
                 };
-                let face = faces::small_face(&self.faces, &participant.mri, &name);
-                roster_row(format!("call-roster-{index}"), (face, name), signs, palette)
+                let row = format!("call-roster-{index}");
+                let face = faces::small_face(&self.faces, (&row, &participant.mri), &name);
+                roster_row(row, (face, name), signs, palette)
             }));
         }
         rows.extend(
@@ -170,7 +167,11 @@ impl CallStage {
             .items_center()
             .gap_3()
             .child(hand_ring(
-                faces::small_face(&self.faces, invited.mri.as_str(), &name),
+                faces::small_face(
+                    &self.faces,
+                    (&format!("call-roster-invited-{index}"), invited.mri.as_str()),
+                    &name,
+                ),
                 false,
             ))
             .child(div().flex_1().min_w_0().truncate().child(name))
@@ -265,7 +266,10 @@ impl CallStage {
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 this.hover_added(hovered.then_some(index), cx);
             }))
-            .child(hand_ring(faces::small_face(&self.faces, &mri, &name), false))
+            .child(hand_ring(
+                faces::small_face(&self.faces, (&format!("call-roster-added-{index}"), &mri), &name),
+                false,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -371,7 +375,11 @@ impl CallStage {
             .flex()
             .items_center()
             .gap_3()
-            .child(faces::small_face(&self.faces, person.mri.as_str(), &name))
+            .child(faces::small_face(
+                &self.faces,
+                (&format!("call-roster-waiting-{index}"), person.mri.as_str()),
+                &name,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -539,8 +547,9 @@ fn name_and_role(name: SharedString, organizer: bool, palette: Palette) -> gpui:
         })
 }
 
-/// The account's own row of the People pane, as Teams shows it: its name and picture or initials (its mark, and "You",
-/// until its profile names it), "Organizer" under it for the meeting's organizer, and its signs.
+/// The account's own row of the People pane, as Teams shows it: its name ("You" until its profile names it) and its
+/// picture, else its initials (its mark while its profile names it nothing), "Organizer" under it for the meeting's
+/// organizer, and its signs.
 fn self_row(
     active: &ActiveCall,
     (name, picture): (Option<SharedString>, Option<&people::Picture>),
@@ -553,12 +562,20 @@ fn self_row(
         hand: active.hand_raised.then(|| rank.unwrap_or(0)),
         organizer: active.organizer && controls::group_or_meeting(active),
     };
-    let (mark, name) = match name {
-        Some(name) => (
-            people::avatar(Some(&name), picture, Size::Small).into_any_element(),
+    let (mark, name) = match (name, picture) {
+        (name, Some(picture)) => (
+            people::avatar(name.as_ref(), Some(picture), Size::Small)
+                .debug_selector(|| "call-roster-self-picture".to_owned())
+                .into_any_element(),
+            name.unwrap_or_else(|| SharedString::from("You")),
+        ),
+        (Some(name), None) => (
+            people::avatar(Some(&name), None, Size::Small)
+                .debug_selector(|| "call-roster-self-initials".to_owned())
+                .into_any_element(),
             name,
         ),
-        None => (
+        (None, None) => (
             div()
                 .size(px(24.0))
                 .flex_none()

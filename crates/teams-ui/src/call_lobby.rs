@@ -136,6 +136,7 @@ fn row(
             })),
     )
     .flex_1();
+    let shown = if picture.is_some() { "picture" } else { "initials" };
     div()
         .debug_selector(move || format!("call-lobby-person-{index}"))
         .flex()
@@ -147,11 +148,10 @@ fn row(
                 .items_center()
                 .gap_2()
                 .min_w_0()
-                .child(people::avatar(
-                    Some(&name),
-                    picture.as_ref(),
-                    gpui_component::Size::Small,
-                ))
+                .child(
+                    people::avatar(Some(&name), picture.as_ref(), gpui_component::Size::Small)
+                        .debug_selector(move || format!("call-lobby-person-{index}-{shown}")),
+                )
                 .child(
                     div()
                         .text_sm()

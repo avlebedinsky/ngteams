@@ -5,8 +5,10 @@
 //! the self view.
 //!
 //! The account, the people the call is with, the roster's participants, those invited and those waiting in the lobby
-//! are asked about once each; someone whose profile changed later (`Event::Profile`, as the chats' model counts it) is
-//! asked again. A face shows initials while its picture is being read.
+//! are asked about as they are first shown; someone whose profile changed since (`Event::Profile`, or a message naming
+//! them, as the chats' model counts it) is asked again, even while an earlier read of them is under way: only the
+//! latest ask's answer is kept, so a change that came while a batch was read isn't lost to that batch's older answer.
+//! A face shows initials while its picture is being read.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -24,8 +26,10 @@ const FACE_RANGE: (f32, f32) = (32.0, 200.0);
 pub(super) struct Faces {
     /// Per MRI: the picture read, `None` when they have none.
     read: HashMap<String, Option<Picture>>,
-    /// Asked about and not answered yet.
-    asking: HashSet<String>,
+    /// Asked about and not answered yet, by the ask that asked last: only that ask's answer is kept.
+    asking: HashMap<String, u64>,
+    /// The asks made so far.
+    asks: u64,
     /// The chats' revision whose profile changes were last looked at.
     seen: u64,
     /// Per tile (by its selector): the side of its face, from the tile's size as last laid out.
@@ -33,20 +37,49 @@ pub(super) struct Faces {
 }
 
 impl Faces {
+    /// None read yet, profile changes looked at up to the chats' revision `seen`.
+    pub(super) fn seen_at(seen: u64) -> Self {
+        Self {
+            seen,
+            ..Self::default()
+        }
+    }
+
     /// `mri`'s picture, once read; none while it is read, or when they have none.
     pub(super) fn picture(&self, mri: &str) -> Option<&Picture> {
         self.read.get(mri).and_then(Option::as_ref)
     }
 
-    /// Of `wanted`, those not asked about yet, now marked asked.
-    fn unasked<'a>(&mut self, wanted: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-        let mut ask = Vec::new();
-        for mri in wanted {
-            if !self.read.contains_key(mri) && self.asking.insert(mri.to_owned()) {
-                ask.push(mri.to_owned());
-            }
+    /// Of `wanted`, those not asked about yet.
+    fn unasked<'a>(&self, wanted: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut listed = HashSet::new();
+        wanted
+            .into_iter()
+            .filter(|mri| !self.read.contains_key(*mri) && !self.asking.contains_key(*mri) && listed.insert(*mri))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A new ask about `mris`, marked as the one whose answers are kept for them; `None` when there is nobody.
+    fn ask(&mut self, mris: &[String]) -> Option<u64> {
+        if mris.is_empty() {
+            return None;
         }
-        ask
+        self.asks += 1;
+        for mri in mris {
+            self.asking.insert(mri.clone(), self.asks);
+        }
+        Some(self.asks)
+    }
+
+    /// The answer of ask `ask` about `mri`: kept unless a later ask is under way for them.
+    fn answered(&mut self, ask: u64, mri: String, picture: Option<Picture>) -> bool {
+        if self.asking.get(&mri) != Some(&ask) {
+            return false;
+        }
+        self.asking.remove(&mri);
+        self.read.insert(mri, picture);
+        true
     }
 
     /// The side of the face tile `selector` shows, as its size was last laid out.
@@ -56,8 +89,8 @@ impl Faces {
 }
 
 /// The side of the face a tile of these sides shows, px: Teams' grows with the tile's shorter side, from about half of
-/// a small tile's (68 px in its 134 px self view) to a fifth of a large one's (200 px in a 745 px stage), and no larger;
-/// never more than half the shorter side, so a short strip's tile keeps its name tag clear.
+/// a small tile's (68 px in its 134 px self view) to about a quarter of a large one's (200 px in a 745 px stage), and
+/// no larger; never more than half the shorter side, so a short strip's tile keeps its name tag clear.
 #[must_use]
 pub(super) fn face_side(width: f32, height: f32) -> f32 {
     let shorter = width.min(height);
@@ -90,54 +123,69 @@ impl CallStage {
         let Some(active) = self.live(cx) else { return };
         let me = self.core.me().to_owned();
         let wanted = shown_in(&active, &me, self.people.of(active.id));
-        let ask = self.faces.unasked(wanted);
-        self.read_faces(ask, cx);
+        let unasked = self.faces.unasked(wanted);
+        self.read_faces(unasked, cx);
     }
 
-    /// Someone's profile may have changed (their picture read in the background): those already read are asked again.
+    /// Someone's profile may have changed (their picture read in the background): those read or being read are asked
+    /// again.
     pub(super) fn profiles_changed(&mut self, chats: &Entity<crate::models::Chats>, cx: &mut Context<Self>) {
         let chats = chats.read(cx);
         let since = self.faces.seen;
         self.faces.seen = chats.revision();
-        let changed: Vec<String> = self
-            .faces
-            .read
-            .keys()
-            .filter(|mri| chats.named_at(mri) > since && !self.faces.asking.contains(*mri))
+        let known: HashSet<&String> = self.faces.read.keys().chain(self.faces.asking.keys()).collect();
+        let changed: Vec<String> = known
+            .into_iter()
+            .filter(|mri| chats.named_at(mri) > since)
             .cloned()
             .collect();
-        for mri in &changed {
-            self.faces.asking.insert(mri.clone());
-        }
         self.read_faces(changed, cx);
     }
 
-    /// Reads the pictures of `asked`; each is drawn once read (a picture read before stays until then).
+    /// Reads the pictures of `asked` as a new ask; each is drawn once read (a picture read before stays until then),
+    /// unless they were asked about again meanwhile. The account's read also names it, when its profile does.
     fn read_faces(&mut self, asked: Vec<String>, cx: &mut Context<Self>) {
-        if asked.is_empty() {
-            return;
-        }
+        let Some(ask) = self.faces.ask(&asked) else { return };
         let core = Arc::clone(&self.core);
+        let me = core.me().to_owned();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let mut found = Vec::with_capacity(asked.len());
+            let mut own_name = None;
             for mri in asked {
-                let picture = core
-                    .person(mri.clone())
-                    .await
-                    .ok()
-                    .and_then(|person| Shown::of(person).picture);
-                found.push((mri, picture));
+                let Ok(person) = core.person(mri.clone()).await else {
+                    found.push((mri, None));
+                    continue;
+                };
+                if mri == me {
+                    own_name = person.name.clone().filter(|name| !name.trim().is_empty());
+                }
+                found.push((mri, Shown::of(person).picture));
             }
             // a stage that is gone shows nobody
-            let _ = this.update(cx, |stage, cx| {
-                for (mri, picture) in found {
-                    stage.faces.asking.remove(&mri);
-                    stage.faces.read.insert(mri, picture);
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |stage, cx| stage.faces_read(ask, found, own_name, cx));
         })
         .detach();
+    }
+
+    /// Ask `ask` found these pictures, and the account's name when it asked about the account and its profile names it.
+    fn faces_read(
+        &mut self,
+        ask: u64,
+        found: Vec<(String, Option<Picture>)>,
+        mut own_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let me = self.core.me().to_owned();
+        for (mri, picture) in found {
+            let mine = mri == me;
+            if self.faces.answered(ask, mri, picture)
+                && mine
+                && let Some(name) = own_name.take()
+            {
+                self.own_name = Some(SharedString::from(name));
+            }
+        }
+        cx.notify();
     }
 
     /// The face a tile without video centres: `name`'s picture when `mri` has one, else the initials of `name` (none:
@@ -211,9 +259,16 @@ impl CallStage {
     }
 }
 
-/// A small face (the People pane's, the lobby's): `mri`'s picture once read, else the initials of `name`.
-pub(super) fn small_face(faces: &Faces, mri: &str, name: &SharedString) -> gpui_component::avatar::Avatar {
-    people::avatar(Some(name), faces.picture(mri), Size::Small)
+/// A small face (the People pane's): `mri`'s picture once read, else the initials of `name`; `<row>-picture` or
+/// `<row>-initials` as tests find it.
+pub(super) fn small_face(
+    faces: &Faces,
+    (row, mri): (&str, &str),
+    name: &SharedString,
+) -> gpui_component::avatar::Avatar {
+    let picture = faces.picture(mri);
+    let selector = format!("{row}-{}", if picture.is_some() { "picture" } else { "initials" });
+    people::avatar(Some(name), picture, Size::Small).debug_selector(move || selector.clone())
 }
 
 #[cfg(test)]
