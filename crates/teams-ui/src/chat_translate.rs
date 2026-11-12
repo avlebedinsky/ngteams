@@ -275,10 +275,12 @@ pub type Outgoing = Result<Option<RichText>, SendFailure>;
 /// A message of a batch the tool is working on: its number, id, version and markers.
 type RunningItem = (usize, String, i64, Shells);
 
-/// A batch the tool is working on: its messages not answered yet.
+/// A batch the tool is working on: its messages, and the answers applied so far by their numbers (a later answer that
+/// differs replaces one: the batch's whole answer wins over what streamed before it).
 struct Running {
     id: u64,
     items: Vec<RunningItem>,
+    applied: HashMap<usize, Answer>,
 }
 
 /// How far reading a chat in its language has come: of the text messages the view holds, how many show their
@@ -770,7 +772,11 @@ impl ChatTranslation {
         if let Some(session) = &self.session {
             session.send(session::Job::Batch { id, context, items });
             self.batches += 1;
-            self.running = Some(Running { id, items: running });
+            self.running = Some(Running {
+                id,
+                items: running,
+                applied: HashMap::new(),
+            });
         }
     }
 
@@ -844,16 +850,17 @@ impl ChatTranslation {
                 let Some(mut running) = self.running.take_if(|running| running.id == id) else {
                     return;
                 };
-                running.items = self.answered(running.items, &answers, false);
+                self.answered(&mut running, &answers);
                 self.running = Some(running);
             }
             Outcome::Batch { id, answers } => {
-                let Some(running) = self.running.take_if(|running| running.id == id) else {
+                let Some(mut running) = self.running.take_if(|running| running.id == id) else {
                     return;
                 };
                 match answers {
                     Ok(answers) => {
-                        self.answered(running.items, &answers, true);
+                        self.answered(&mut running, &answers);
+                        self.left_out(&running);
                     }
                     Err(failure) => self.status = Status::Failed(failure),
                 }
@@ -869,52 +876,60 @@ impl ChatTranslation {
         cx.notify();
     }
 
-    /// A batch's answers, those so far (`whole`: all of them): each kept, in memory and in the store. The items not
-    /// answered yet are given back while the batch runs; once it is done, one left out is asked again, up to
-    /// [`ATTEMPTS`].
-    fn answered(&mut self, items: Vec<RunningItem>, answers: &HashMap<usize, Answer>, whole: bool) -> Vec<RunningItem> {
-        let Some(language) = self.language else {
-            return Vec::new();
-        };
+    /// Answers of the batch `running` (so far, or its whole answer): each one new, or differing from the one applied,
+    /// kept in memory and in the store.
+    fn answered(&mut self, running: &mut Running, answers: &HashMap<usize, Answer>) {
         let mut kept = Vec::new();
-        let mut waiting = Vec::new();
-        let entries = Arc::make_mut(&mut self.entries);
-        for (n, id, version, shells) in items {
-            let Some(source) = self.sources.iter().find(|source| source.id == id) else {
+        for (n, id, version, shells) in &running.items {
+            let Some(answer) = answers.get(n).filter(|answer| running.applied.get(n) != Some(*answer)) else {
                 continue;
             };
-            if !whole && !answers.contains_key(&n) {
-                waiting.push((n, id, version, shells));
-                continue;
-            }
-            let entry = match answers.get(&n) {
-                Some(Answer::Translated { text, source }) => Entry::Translated {
-                    version,
-                    text: Arc::new(decode(text, &shells)),
+            let entry = match answer {
+                Answer::Translated { text, source } => Entry::Translated {
+                    version: *version,
+                    text: Arc::new(decode(text, shells)),
                     source: source.clone(),
                 },
-                Some(Answer::Same { source }) => Entry::Same {
-                    version,
+                Answer::Same { source } => Entry::Same {
+                    version: *version,
                     source: source.clone(),
                 },
-                None => {
-                    let tries = self.attempts.entry((id.clone(), version)).or_default();
-                    *tries += 1;
-                    if *tries < ATTEMPTS {
-                        continue;
-                    }
-                    Entry::Failed { version }
-                }
             };
-            if let Some(row) = row_of(source, language, &entry) {
-                kept.push(row);
-            }
-            entries.insert(id, entry);
+            running.applied.insert(*n, answer.clone());
+            kept.extend(self.learn(id, entry));
         }
         if !kept.is_empty() {
             self.keep(kept);
         }
-        waiting
+    }
+
+    /// The batch `running` is done: a message its answer left out is asked again, up to [`ATTEMPTS`], then shows as
+    /// written.
+    fn left_out(&mut self, running: &Running) {
+        for (n, id, version, _) in &running.items {
+            if running.applied.contains_key(n) {
+                continue;
+            }
+            let tries = self.attempts.entry((id.clone(), *version)).or_default();
+            *tries += 1;
+            if *tries >= ATTEMPTS {
+                self.learn(id, Entry::Failed { version: *version });
+            }
+        }
+    }
+
+    /// `entry` for the message `id`, when the view still holds it at the entry's version: kept in memory, and given back
+    /// as the store keeps it. An answer for a version since edited is dropped, never taken for the edit's: the edit is
+    /// asked for once the batch is done.
+    fn learn(&mut self, id: &str, entry: Entry) -> Option<StoredTranslation> {
+        let language = self.language?;
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.id == id && source.version == entry.version())?;
+        let row = row_of(source, language, &entry);
+        Arc::make_mut(&mut self.entries).insert(id.to_owned(), entry);
+        row
     }
 
     /// Keeps `rows` in the store (nothing waits on it).

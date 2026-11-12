@@ -12,7 +12,7 @@
 //! - **Failures** are told with the job they ended ([`Outcome`]); the process is closed and the next job starts a new
 //!   one. Nothing here logs a message, a translation or the tool's output.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,8 +83,8 @@ pub enum Job {
 /// What a session tells the model.
 #[derive(Debug)]
 pub enum Outcome {
-    /// Answers of a batch still running, as the tool writes them: each message's once, before the batch's
-    /// [`Outcome::Batch`] (which holds them again).
+    /// Answers of a batch still running, as the tool writes them: each message's once (again only when a later agent
+    /// message answers it otherwise), before the batch's [`Outcome::Batch`] (which holds them again).
     Partial { id: u64, answers: HashMap<usize, Answer> },
     /// A batch's answers, by the messages' numbers; or why it failed.
     Batch {
@@ -180,7 +180,7 @@ impl Worker {
     fn batch(&mut self, id: u64, context: &[Said], items: &[Item]) -> Outcome {
         let out = self.out.clone();
         let stop = Arc::clone(&self.stop);
-        let mut told = HashSet::new();
+        let mut told = HashMap::new();
         let mut partial = |so_far: &str| {
             let fresh = fresh_answers(so_far, &mut told);
             if !fresh.is_empty() && !stop.load(Ordering::Relaxed) {
@@ -245,17 +245,16 @@ impl Worker {
     }
 }
 
-/// The answers complete in a batch's answer `so_far` that weren't `told` yet (now told). An answer is complete once
-/// its element is closed, so a message cut mid-stream is never taken.
-fn fresh_answers(so_far: &str, told: &mut HashSet<usize>) -> HashMap<usize, Answer> {
-    // nothing new is complete until an element closes
-    if !so_far.trim_end().ends_with('>') {
-        return HashMap::new();
-    }
-    prompt::read_batch(so_far)
+/// The answers complete in a batch's answer `so_far` that weren't `told` yet, or were told otherwise (a later agent
+/// message correcting one), now told. An answer is complete once its element is closed, so a message cut mid-stream is
+/// never taken; a delta may close one and start the next, so every delta is read.
+fn fresh_answers(so_far: &str, told: &mut HashMap<usize, Answer>) -> HashMap<usize, Answer> {
+    let fresh: HashMap<usize, Answer> = prompt::read_batch(so_far)
         .into_iter()
-        .filter(|(n, _)| told.insert(*n))
-        .collect()
+        .filter(|(n, answer)| told.get(n) != Some(answer))
+        .collect();
+    told.extend(fresh.iter().map(|(n, answer)| (*n, answer.clone())));
+    fresh
 }
 
 /// What an answer that isn't a translation fails with.
