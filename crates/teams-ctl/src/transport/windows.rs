@@ -372,11 +372,63 @@ mod tests {
     use super::*;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
     };
     use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
     };
+
+    /// The descriptor's SDDL as Windows writes it: well-known SIDs become aliases (the built-in Administrator, which
+    /// hosted runners use, is `LA`), so both sides of a comparison must come from this conversion.
+    fn sddl_text(descriptor: PSECURITY_DESCRIPTOR, info: OBJECT_SECURITY_INFORMATION) -> String {
+        let mut text = null_mut();
+        // SAFETY: the caller passes a valid descriptor; text is a LocalAlloc output.
+        let converted = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                info,
+                &raw mut text,
+                null_mut(),
+            )
+        };
+        assert_ne!(converted, 0);
+        // SAFETY: the conversion returns a NUL-terminated UTF-16 allocation.
+        let sddl = unsafe { widestring::U16CStr::from_ptr_str(text) }.to_string().unwrap();
+        // SAFETY: text was allocated by the conversion and is no longer borrowed.
+        unsafe { LocalFree(text.cast()) };
+        sddl
+    }
+
+    /// Windows maps a live object's generic full access to file full access, orders label bits either way, and may
+    /// mark the SACL auto-inherited; the same grants and label compare equal.
+    fn same_form(sddl: &str) -> String {
+        sddl.replace(";;FA;", ";;GA;")
+            .replace("S:AI(", "S:(")
+            .replace(";;NWNR;", ";;NRNW;")
+    }
+
+    /// The expected descriptor, parsed and written back by Windows like the live one.
+    fn canonical_sddl(sddl: &str, info: OBJECT_SECURITY_INFORMATION) -> String {
+        let wide = widestring::U16CString::from_str(sddl).unwrap();
+        let mut descriptor = null_mut();
+        // SAFETY: wide is NUL-terminated and outlives the call; the descriptor is freed below.
+        let parsed = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                null_mut(),
+            )
+        };
+        assert_ne!(parsed, 0);
+        let text = sddl_text(descriptor, info);
+        // SAFETY: descriptor was allocated by the parse and is no longer used.
+        unsafe { LocalFree(descriptor) };
+        text
+    }
 
     #[test]
     fn output_quota_query_reports_a_non_pipe_handle() {
@@ -410,30 +462,13 @@ mod tests {
             )
         };
         assert_eq!(status, 0);
-        let mut text = null_mut();
-        // SAFETY: GetSecurityInfo returned a valid descriptor; text is a LocalAlloc output.
-        let converted = unsafe {
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                descriptor,
-                SDDL_REVISION_1,
-                info,
-                &raw mut text,
-                null_mut(),
-            )
-        };
+        let actual = sddl_text(descriptor, info);
         // SAFETY: descriptor was allocated by GetSecurityInfo and is no longer used.
         unsafe { LocalFree(descriptor) };
-        assert_ne!(converted, 0);
-        // SAFETY: the conversion returns a NUL-terminated UTF-16 allocation.
-        let actual = unsafe { widestring::U16CStr::from_ptr_str(text) }.to_string().unwrap();
-        // SAFETY: text was allocated by the conversion and is no longer borrowed.
-        unsafe { LocalFree(text.cast()) };
-        // Windows maps generic full access to file full access, orders label bits, and may mark the SACL auto-inherited.
-        let canonical = actual
-            .replace(";;FA;", ";;GA;")
-            .replace("S:AI(", "S:(")
-            .replace(";;NWNR;", ";;NRNW;");
-        assert_eq!(canonical, security::pipe_sddl().unwrap());
+        assert_eq!(
+            same_form(&actual),
+            same_form(&canonical_sddl(&security::pipe_sddl().unwrap(), info))
+        );
         drop(held);
         client.shutdown(Shutdown::Both).unwrap();
     }
