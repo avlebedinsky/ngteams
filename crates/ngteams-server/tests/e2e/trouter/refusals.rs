@@ -198,7 +198,7 @@ async fn a_socket_that_does_not_authenticate_as_an_account_of_the_server_is_disc
             assert!(socket.ends_with(unauthorized).await, "{}", first.len());
         }
 
-        ngteams_server::admin::set_disabled(&server.app.db, "a@own.test", true)
+        ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "a@own.test", true)
             .await
             .unwrap();
         let mut disabled = Raw::open(&server, &q).await;
@@ -250,6 +250,10 @@ async fn the_socket_answers_keep_alives_takes_answers_and_closes_when_its_token_
         assert_eq!(socket.next().await.as_deref(), Some(r#"6:::9+["pong"]"#));
         // the token runs out: the client is sent back for a new one
         assert!(socket.ends_with(r#"0:::{"reason":"unauthorized"}"#).await);
+        // run out, it opens no socket either, though the token's other checks allow a minute of clock skew
+        let mut late = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+        late.authenticate(&ic3, None).await;
+        assert!(late.ends_with(r#"0:::{"reason":"unauthorized"}"#).await);
         server.stop().await;
     }
 }
@@ -521,5 +525,78 @@ async fn the_calling_stacks_socket_registers_its_own_endpoint_and_gets_no_chat_e
         assert!(messaging.next_within(Duration::from_millis(300)).await.is_err());
         assert!(calling.next_within(Duration::from_millis(300)).await.is_err());
         server.stop().await;
+    }
+}
+
+const UNAUTHORIZED: &str = r#"0:::{"reason":"unauthorized"}"#;
+
+/// The socket's next frame is its `unauthorized` end, within moments.
+async fn ends_at_once(socket: &mut Raw) {
+    let frame = socket.next_within(Duration::from_secs(4)).await;
+    assert_eq!(frame.ok().flatten().as_deref(), Some(UNAUTHORIZED));
+    assert!(socket.next().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_socket_ends_at_once_when_its_account_is_disabled_or_its_password_reset() {
+    for backend in backends() {
+        let server = server(backend).await;
+        server.add_user("a@own.test", "Ada").await;
+        server.add_user("b@own.test", "Bert").await;
+        let (a, b) = (
+            token(&server, "a@own.test", IC3).await,
+            token(&server, "b@own.test", IC3).await,
+        );
+        let mut of_a = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+        of_a.connect(&a).await;
+        let mut calling = Raw::open(&server, &query(EPID, "SkypeSpaces")).await;
+        calling.connect(&a).await;
+        let mut of_b = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+        of_b.connect(&b).await;
+
+        ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "a@own.test", true)
+            .await
+            .unwrap();
+        ends_at_once(&mut of_a).await;
+        ends_at_once(&mut calling).await;
+        assert!(of_b.next_within(Duration::from_millis(1500)).await.is_err());
+
+        ngteams_server::admin::reset_password(
+            &server.app.db,
+            &*server.app.fanout,
+            "b@own.test",
+            "another horse battery",
+        )
+        .await
+        .unwrap();
+        ends_at_once(&mut of_b).await;
+        assert_eq!(server.app.trouter.open(), 0);
+        server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_posted_after_another_process_disabled_the_account_is_not_delivered() {
+    for backend in backends() {
+        let pair = crate::chatsvc::messages::Pair::start_on(server(backend).await).await;
+        let ic3 = token(&pair.server, "b@own.test", IC3).await;
+        let mut socket = Raw::open(&pair.server, &query(EPID, "TeamsCDL")).await;
+        let info = socket.connect(&ic3).await;
+        let body = registration("TeamsCDLWebWorker", EPID, info["surl"].as_str().unwrap(), 3600);
+        assert_eq!(register(&pair.server, Some(&ic3), &body).await, 202);
+        let live = pair.send("delivered while enabled").await;
+        assert!(socket.next().await.unwrap().contains(&live));
+        // the database alone changes, as when the operator's command runs beside a node without Redis
+        ngteams_server::admin::set_disabled(
+            &pair.server.app.db,
+            &ngteams_server::fanout::Local::new(),
+            "b@own.test",
+            true,
+        )
+        .await
+        .unwrap();
+        pair.send("posted after the disable").await;
+        ends_at_once(&mut socket).await;
+        pair.stop().await;
     }
 }

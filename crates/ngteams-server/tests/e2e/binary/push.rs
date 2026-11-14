@@ -359,7 +359,7 @@ async fn clients_reconnect_after_their_node_restarts_and_the_push_works_again() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bad_an_expired_and_a_late_token_and_a_disabled_account_are_refused() {
     for backend in backends() {
-        let rig = Rig::start_with(backend, "[trouter]\nauth_timeout = 1\n[tokens]\naccess_lifetime = 3\n").await;
+        let rig = Rig::start_with(backend, "[trouter]\nauth_timeout = 1\n[tokens]\naccess_lifetime = 6\n").await;
         let node = rig.other();
         let epid = "00000000-0000-4000-8000-0000000000a1";
         let issued = tokio::time::Instant::now();
@@ -387,21 +387,16 @@ async fn a_bad_an_expired_and_a_late_token_and_a_disabled_account_are_refused() 
         assert!(surl.starts_with(&format!("{}/trouter/v4/f/", rig.origin)));
         assert_eq!(register(node, &fresh, epid, &surl).await, 202);
         assert_eq!(
-            socket.next_within(Duration::from_secs(8)).await.unwrap().as_deref(),
+            socket.next_within(Duration::from_secs(12)).await.unwrap().as_deref(),
             Some(UNAUTHORIZED)
         );
 
-        // expired, within the minute of clock skew the server allows: no socket that stays
+        // expired, within the minute of clock skew the server allows: refused as past it, never connected
         let mut socket = Raw::open(node, &rig.origin, epid).await;
         socket.authenticate(&old).await;
-        let mut frames = Vec::new();
-        while let Ok(Some(frame)) = socket.next_within(Duration::from_secs(3)).await {
-            frames.push(frame.chars().take(32).collect::<String>());
-        }
-        eprintln!("an expired token within the skew: {frames:?}");
-        assert_eq!(frames.last().map(String::as_str), Some(UNAUTHORIZED), "{frames:?}");
+        assert!(socket.ends_with(UNAUTHORIZED).await);
         // expired, past the skew
-        tokio::time::sleep_until(issued + Duration::from_secs(3 + 60 + 2)).await;
+        tokio::time::sleep_until(issued + Duration::from_secs(6 + 60 + 2)).await;
         let mut socket = Raw::open(node, &rig.origin, epid).await;
         socket.authenticate(&old).await;
         assert!(socket.ends_with(UNAUTHORIZED).await);
@@ -474,35 +469,59 @@ async fn a_token_refresh_on_a_long_connection_keeps_the_push() {
     }
 }
 
+/// Since `mark` the client was pushed none of `ids`, shows none of them and never connected again.
+async fn nothing_reached(b: &User, mark: usize, chat: &str, ids: &[String]) {
+    let log: Vec<String> = b.log[mark..].iter().map(brief).collect();
+    for id in ids {
+        assert_eq!(b.pushes(mark, chat, id, MessageChange::New), 0, "{log:?}");
+        assert!(b.engine().message(chat, id).await.unwrap().is_none(), "{log:?}");
+    }
+    assert_eq!(
+        b.count(mark, |event| matches!(event, Event::Connected { .. })),
+        0,
+        "{log:?}"
+    );
+}
+
+/// The operator's `command` on b's account while b's client is connected: the service ends b's push at once, and
+/// nothing posted after the command returned is pushed to b.
+async fn the_operators_command_ends_the_clients_push(backend: Backend, command: &[&str], input: &str) {
+    let rig = Rig::start_with(backend, SHORT_TOKENS).await;
+    let a = User::sign_in(&rig.first, &rig.origin, "a@own.test", renewing()).await;
+    let mut b = User::sign_in(rig.other(), &rig.origin, "b@own.test", renewing()).await;
+    let (chat, _) = chat(&a, &mut b, "revoked, first").await;
+    let mark = b.mark();
+    rig.first.cli(command, input);
+    let returned = tokio::time::Instant::now();
+    let just_after = a.send(&chat, "revoked, posted just after").await;
+    // long before its token's renewal (20 s) would have ended the socket
+    b.since(mark, "the service's disconnect", |event| {
+        matches!(event, Event::Disconnected { down: Down::ServiceDisconnect(Some(reason)), .. }
+            if reason == "unauthorized")
+    })
+    .await;
+    assert!(returned.elapsed() < Duration::from_secs(5), "{:?}", returned.elapsed());
+    // its tokens can't be renewed: the client's session is signed out, as the app then shows it
+    b.until_signed_out().await;
+    let unseen = a.send(&chat, "revoked, never shown").await;
+    b.settle().await;
+    nothing_reached(&b, mark, &chat, &[just_after, unseen]).await;
+    drop((a, b));
+    rig.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_client_of_an_account_the_operator_disabled_loses_its_push() {
+async fn a_client_of_an_account_the_operator_disabled_loses_its_push_at_once() {
     for backend in backends() {
-        let rig = Rig::start_with(backend, SHORT_TOKENS).await;
-        let a = User::sign_in(&rig.first, &rig.origin, "a@own.test", renewing()).await;
-        let mut b = User::sign_in(rig.other(), &rig.origin, "b@own.test", renewing()).await;
-        let (chat, _) = chat(&a, &mut b, "disabled, first").await;
-        let mark = b.mark();
-        rig.first.cli(&["user", "disable", "b@own.test"], "");
-        let just_after = a.send(&chat, "disabled, posted just after").await;
-        // its tokens can't be renewed: the client's session is signed out, as the app then shows it
-        b.until_signed_out().await;
-        let shown = b.engine().message(&chat, &just_after).await.unwrap().is_some();
-        eprintln!(
-            "{backend:?}: a message posted after the account was disabled, before its token's renewal: shown={shown}"
-        );
-        let stopped = b.mark();
-        let unseen = a.send(&chat, "disabled, never shown").await;
-        b.settle().await;
-        assert!(b.engine().message(&chat, &unseen).await.unwrap().is_none());
-        assert_eq!(b.pushes(stopped, &chat, &unseen, MessageChange::New), 0);
-        assert_eq!(
-            b.count(mark, |event| matches!(event, Event::Connected { .. })),
-            0,
-            "{:?}",
-            b.log[mark..].iter().map(brief).collect::<Vec<_>>()
-        );
-        drop((a, b));
-        rig.stop().await;
+        the_operators_command_ends_the_clients_push(backend, &["user", "disable", "b@own.test"], "").await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_of_an_account_whose_password_the_operator_reset_loses_its_push_at_once() {
+    for backend in backends() {
+        let command = ["user", "reset-password", "b@own.test"];
+        the_operators_command_ends_the_clients_push(backend, &command, "another horse battery\n").await;
     }
 }
 
@@ -562,14 +581,10 @@ async fn the_clients_registration_is_taken_and_renewed_and_no_push_comes_after_i
         tokio::time::sleep(QUIET).await;
         let kept = Store::open(&store).unwrap().message(&chat, &unseen).unwrap();
         assert!(kept.is_none(), "a signed-out client was pushed a message");
-        let left = until(signed_out.clone()).await;
-        eprintln!(
-            "registration {backend:?} after the sign-out: {}",
-            left.map_or("removed".to_owned(), |end| format!(
-                "kept, {} s left",
-                end - ngteams_server::db::now()
-            ))
-        );
+        // the registration outlives the sign-out and runs out by its TTL: the client sends no removal (no capture
+        // shows Teams' one), and its goodbye is the same on a stop that Teams leaves the registration through
+        let left = until(signed_out.clone()).await.expect("the registration is kept");
+        assert!(left > ngteams_server::db::now() + 3000, "{left}");
 
         // signed in again: a new endpoint, registered; what it missed is there, and the push is live
         let again = b.mark();

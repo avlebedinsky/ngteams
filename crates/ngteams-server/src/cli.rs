@@ -11,6 +11,7 @@ use tracing_subscriber::prelude::*;
 use crate::admin::{Actor, NewAccount};
 use crate::app::{self, App};
 use crate::config::Config;
+use crate::fanout::{Fanout, Local, Redis};
 use crate::serve::Listener;
 
 #[derive(Debug, Parser)]
@@ -91,6 +92,8 @@ pub enum CliError {
     Db(#[from] crate::db::DbError),
     #[error(transparent)]
     Serve(#[from] crate::serve::ServeError),
+    #[error(transparent)]
+    Fanout(#[from] crate::fanout::FanoutError),
     #[error("can't start the runtime: {0}")]
     Runtime(#[source] std::io::Error),
     #[error("can't read the password from standard input: {0}")]
@@ -215,11 +218,30 @@ async fn user(
         UserCommand::List => list(&db, output).await,
         UserCommand::Promote { upn } => Ok(crate::admin::set_admin(&db, &upn, true).await?),
         UserCommand::Demote { upn } => Ok(crate::admin::set_admin(&db, &upn, false).await?),
-        UserCommand::Delete { upn } => Ok(crate::admin::delete_by_upn(&db, &upn).await?),
-        UserCommand::Disable { upn } => Ok(crate::admin::set_disabled(&db, &upn, true).await?),
-        UserCommand::Enable { upn } => Ok(crate::admin::set_disabled(&db, &upn, false).await?),
-        UserCommand::ResetPassword { upn } => Ok(crate::admin::reset_password(&db, &upn, &password(input)?).await?),
+        UserCommand::Delete { upn } => {
+            let nodes = nodes(&config).await?;
+            Ok(crate::admin::delete_by_upn(&db, &*nodes, &upn).await?)
+        }
+        UserCommand::Disable { upn } => {
+            let nodes = nodes(&config).await?;
+            Ok(crate::admin::set_disabled(&db, &*nodes, &upn, true).await?)
+        }
+        UserCommand::Enable { upn } => Ok(crate::admin::set_disabled(&db, &Local::new(), &upn, false).await?),
+        UserCommand::ResetPassword { upn } => {
+            let password = password(input)?;
+            let nodes = nodes(&config).await?;
+            Ok(crate::admin::reset_password(&db, &*nodes, &upn, &password).await?)
+        }
     }
+}
+
+/// The fan-out the running nodes listen on. Without Redis there is none to reach from here: the one node reads the
+/// change from the database.
+async fn nodes(config: &Config) -> Result<Box<dyn Fanout>, CliError> {
+    Ok(match &config.redis_url {
+        Some(url) => Box::new(Redis::connect(url).await?),
+        None => Box::new(Local::new()),
+    })
 }
 
 /// Each account on a line: UPN, id, `enabled` or `disabled`, name, `admin` or `user`, tab-separated.

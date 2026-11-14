@@ -59,7 +59,7 @@ async fn each_service_takes_only_its_own_audience_from_an_enabled_account() {
     assert_eq!(me["userPrincipalName"], "ada@own.test");
 
     // a live token of a disabled account opens nothing
-    ngteams_server::admin::set_disabled(&server.app.db, "ada@own.test", true)
+    ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "ada@own.test", true)
         .await
         .unwrap();
     for ((_, path), token) in routes.iter().zip(&tokens) {

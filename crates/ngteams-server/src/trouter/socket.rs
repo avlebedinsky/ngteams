@@ -9,13 +9,13 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
-use tokio::time::{Instant, Sleep};
+use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::delivery::{self, Kind, Target, Which};
 use super::frames::{self, FromClient};
-use super::{Control, Stack, control_topic, endpoint_id, push_url, tell};
+use super::{Control, Stack, UNAUTHORIZED, control_topic, endpoint_id, push_url, tell};
 use crate::app::App;
 use crate::auth::extract::{Audience as _, Ic3};
 use crate::auth::tokens::seconds_until;
@@ -27,6 +27,8 @@ use crate::fanout::{FanoutError, Missed, Subscription};
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long past two ping intervals a silent socket is kept.
 const IDLE_SLACK: Duration = Duration::from_secs(20);
+/// How often a socket reads its account where no Redis carries the word of its end.
+const ACCOUNT_CHECK: Duration = Duration::from_secs(1);
 /// How long the reconnect parameters of a `trouter.connected` stay valid.
 const PARAMS_VALID: Duration = Duration::from_hours(7 * 24);
 
@@ -119,11 +121,14 @@ struct Account {
     mri: String,
     /// When its token runs out (Unix seconds).
     expires_at: i64,
+    /// The password hash it had: a new password ends the socket.
+    password_hash: String,
     /// Whether the client sent back this endpoint's reconnect parameters: it was connected before.
     reconnect: bool,
 }
 
-/// Reads `user.authenticate` and checks its token: the account, if it is one of ours and not disabled.
+/// Reads `user.authenticate` and checks its token: the account, if it is one of ours and not disabled. A token is
+/// run out at its `exp`, as on an open socket, without the clock skew its other checks allow.
 async fn authenticate(app: &App, first: &str, connect: &Connect) -> Option<Account> {
     let FromClient::Event { name, args, .. } = frames::read(first) else {
         return None;
@@ -132,7 +137,7 @@ async fn authenticate(app: &App, first: &str, connect: &Connect) -> Option<Accou
     let token = argument["headers"]["Authorization"].as_str()?.strip_prefix("Bearer ")?;
     let claims = app.issuer.verify_access(token.trim(), Ic3::AUDIENCE).await.ok()?;
     let user = users::by_id(&app.db, &claims.oid).await.ok()??;
-    if user.disabled {
+    if user.disabled || seconds_until(claims.exp) == 0 {
         return None;
     }
     let endpoint = endpoint_id(&claims.oid, &connect.epid, connect.stack);
@@ -141,6 +146,7 @@ async fn authenticate(app: &App, first: &str, connect: &Connect) -> Option<Accou
         reconnect: argument["connectparams"]["sr"].as_str() == Some(endpoint.as_str()),
         oid: claims.oid,
         expires_at: claims.exp,
+        password_hash: user.password_hash,
     })
 }
 
@@ -159,7 +165,7 @@ where
         Ok(Some(first)) => first,
     };
     let Some(account) = authenticate(app, &first, connect).await else {
-        return Err(End::Tell(Some("unauthorized")));
+        return Err(End::Tell(Some(UNAUTHORIZED)));
     };
     let Some(_entered) = app.trouter.enter(&account.mri) else {
         return Err(End::Tell(Some("too_many_connections")));
@@ -197,12 +203,28 @@ where
     end
 }
 
+/// The next tick of a check a socket may not have (with Redis, the word of an account's end reaches every node).
+async fn ticked(interval: Option<&mut Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// The next payload of a subscription a socket may not have (a calling stack's socket has no chat events).
 async fn next_of(subscription: Option<&mut Subscription>) -> Result<Bytes, Missed> {
     match subscription {
         Some(subscription) => subscription.recv().await,
         None => std::future::pending().await,
     }
+}
+
+fn account_check() -> Interval {
+    let mut check = tokio::time::interval_at(Instant::now() + ACCOUNT_CHECK, ACCOUNT_CHECK);
+    check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    check
 }
 
 fn unix_ms() -> u64 {
@@ -323,6 +345,8 @@ struct Waits {
     /// How long the client may stay silent.
     quiet: Duration,
     idle: Pin<Box<Sleep>>,
+    /// When the account is read again.
+    account: Option<Interval>,
 }
 
 /// One turn of an authenticated socket's loop.
@@ -330,6 +354,7 @@ enum Step {
     Frame(Option<String>),
     Event(Result<Bytes, Missed>),
     Control(Result<Bytes, Missed>),
+    Account,
     End(End),
 }
 
@@ -386,6 +411,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
         } else {
             None
         };
+        // read again now that the word of its end would be heard
+        self.account_holds().await?;
         Arc::make_mut(&mut self.claim).at = unix_ms();
         self.claim.announce(self.app).await?;
         let mut waits = Waits {
@@ -396,6 +423,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             )))),
             quiet: 2 * self.connect.ping + IDLE_SLACK,
             idle: Box::pin(tokio::time::sleep(2 * self.connect.ping + IDLE_SLACK)),
+            account: self.app.config.redis_url.is_none().then(account_check),
         };
         self.unless_ended(Work::Begin, &mut waits, closing).await?;
         loop {
@@ -418,7 +446,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             let mut noted = Noted::default();
             tokio::select! {
                 biased;
-                () = &mut waits.expired => return Err(End::Tell(Some("unauthorized"))),
+                () = &mut waits.expired => return Err(End::Tell(Some(UNAUTHORIZED))),
                 _ = closing.changed() => return Err(End::Tell(None)),
                 end = overtaken(&mut waits.control, &claim, &mut noted) => return Err(end),
                 done = self.work(work) => done?,
@@ -457,7 +485,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             event = next_of(waits.events.as_mut()) => Step::Event(event),
             told = waits.control.recv() => Step::Control(told),
             // an open socket is never authenticated again: the client comes back with a new token
-            () = &mut waits.expired => Step::End(End::Tell(Some("unauthorized"))),
+            () = &mut waits.expired => Step::End(End::Tell(Some(UNAUTHORIZED))),
+            () = ticked(waits.account.as_mut()) => Step::Account,
             () = &mut waits.idle => Step::End(End::Gone),
             _ = closing.changed() => Step::End(End::Tell(None)),
         }
@@ -481,7 +510,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
                 self.noted(lagged).await
             }
             Step::Event(Err(Missed::Closed)) | Step::Control(Err(Missed::Closed)) => Err(End::Tell(None)),
+            Step::Account => self.account_holds().await,
             Step::End(end) => Err(end),
+        }
+    }
+
+    /// Ends the socket unless its account is still there, enabled, with the password it authenticated under.
+    async fn account_holds(&mut self) -> Result<(), End> {
+        let user = users::by_id(&self.app.db, &self.account.oid).await?;
+        if user.is_some_and(|user| !user.disabled && user.password_hash == self.account.password_hash) {
+            Ok(())
+        } else {
+            Err(End::Tell(Some(UNAUTHORIZED)))
         }
     }
 
@@ -604,6 +644,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
 
     /// Writes `entries` to the socket, the cursor following each one written.
     async fn deliver(&mut self, entries: &[Entry]) -> Result<(), End> {
+        if !entries.is_empty() {
+            self.account_holds().await?;
+        }
         for entry in entries {
             if let Ok(envelope) = serde_json::from_slice::<Value>(&entry.payload) {
                 let which = Which::Entry {
@@ -631,6 +674,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
                 self.drain().await
             }
             Kind::Transient if self.registered() => {
+                self.account_holds().await?;
                 let delivery = delivery::delivery(&self.target(), &envelope, &Which::Once);
                 self.link.send(frames::delivery(&delivery)).await
             }

@@ -11,6 +11,11 @@
 //! Nodes tell an account's sockets apart from its events on the control topic `trouter:<mri>`: a registration the
 //! registrar took, a newer socket of the same endpoint (the older one closes), an event the journal couldn't keep
 //! (the clients are told of a loss), a disconnect.
+//!
+//! A socket is its account's only while the account may sign in with the password it had: one that is disabled or
+//! given a new password is disconnected as a refused socket is ([`revoke`]). The word alone would not do: a node
+//! without Redis isn't reached by a command run beside it, and a word can pass a socket that is just connecting. So a
+//! socket reads its account once it listens, before each delivery, and, where there is no Redis, every second.
 
 mod delivery;
 mod frames;
@@ -39,12 +44,14 @@ use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 pub use delivery::keep;
 
 use crate::app::App;
-use crate::fanout::FanoutError;
+use crate::fanout::{Fanout, FanoutError};
 
 /// The connect path.
 pub const CONNECT_PATH: &str = "/trouter/v4/c";
 /// The sockets one account may hold open on a node.
 pub const MAX_SOCKETS: usize = 32;
+/// The reason a socket is disconnected with when its token or its account doesn't hold.
+pub const UNAUTHORIZED: &str = "unauthorized";
 /// The largest frame a socket reads.
 const MAX_INCOMING: usize = 256 * 1024;
 /// The ping interval a connect may name, in seconds.
@@ -154,6 +161,21 @@ pub fn unkept(topic: &str) -> Option<(String, Bytes)> {
 pub async fn disconnect(app: &App, mri: &str, reason: Option<&str>) -> Result<(), FanoutError> {
     let reason = reason.map(str::to_owned);
     tell(app, mri, &Control::Disconnect { reason }).await
+}
+
+/// Disconnects the sockets of the account `oid` on every node `fanout` reaches, as a socket whose token is refused
+/// is: the client comes back with a new token, which a disabled account or one with a new password doesn't get.
+///
+/// # Errors
+/// The fan-out is unavailable.
+pub async fn revoke(fanout: &dyn Fanout, oid: &str) -> Result<(), FanoutError> {
+    let control = Control::Disconnect {
+        reason: Some(UNAUTHORIZED.to_owned()),
+    };
+    let payload = serde_json::to_vec(&control).unwrap_or_default();
+    fanout
+        .publish(&control_topic(&format!("8:orgid:{oid}")), payload.into())
+        .await
 }
 
 /// A node's open sockets: how many each account holds, and the word to close them all.

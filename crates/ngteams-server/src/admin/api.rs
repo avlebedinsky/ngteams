@@ -120,7 +120,10 @@ impl From<DbError> for ApiError {
 impl From<AdminError> for ApiError {
     fn from(error: AdminError) -> Self {
         let (status, code) = match &error {
-            AdminError::Db(_) | AdminError::Random | AdminError::Password(PasswordError::Hash) => {
+            AdminError::Db(_)
+            | AdminError::Random
+            | AdminError::Sockets(_)
+            | AdminError::Password(PasswordError::Hash) => {
                 return Self::server(&error);
             }
             AdminError::Password(PasswordError::TooShort) => (StatusCode::BAD_REQUEST, "WeakPassword"),
@@ -141,6 +144,18 @@ impl From<AdminError> for ApiError {
 /// A JSON answer no cache may keep.
 fn answer(status: StatusCode, body: &Value) -> Response {
     (status, [(CACHE_CONTROL, "no-store")], Json(body)).into_response()
+}
+
+/// A change that is made stands when its account's push sockets weren't told: each socket reads its account before
+/// it delivers, so the caller gets its answer and the node a warning.
+fn made(changed: Result<(), AdminError>) -> Result<(), AdminError> {
+    match changed {
+        Err(AdminError::Sockets(error)) => {
+            tracing::warn!(%error, "an account's open push sockets weren't told of its change");
+            Ok(())
+        }
+        changed => changed,
+    }
 }
 
 fn done() -> Response {
@@ -380,7 +395,13 @@ async fn update(
         enabled: body.enabled,
         admin: body.admin,
     };
-    let user = super::update_user(&app.db, Actor::account(&admin), &id, changes).await?;
+    let user = match super::update_user(&app.db, &*app.fanout, Actor::account(&admin), &id, changes).await {
+        Err(untold @ AdminError::Sockets(_)) => {
+            made(Err(untold))?;
+            repo::get(&app.db, &id).await?.ok_or(AdminError::NoSuchUser)?
+        }
+        updated => updated?,
+    };
     Ok(answer(StatusCode::OK, &account_json(&user)))
 }
 
@@ -390,7 +411,7 @@ async fn remove(
     Admin(admin): Admin,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    super::delete_user(&app.db, Actor::account(&admin), &id).await?;
+    made(super::delete_user(&app.db, &*app.fanout, Actor::account(&admin), &id).await)?;
     Ok(done())
 }
 
@@ -401,8 +422,8 @@ async fn reset_password(
     Path(id): Path<String>,
     Json(body): Json<ResetBody>,
 ) -> Result<Response, ApiError> {
-    let actor = Actor::account(&admin);
-    super::reset_user_password(&app.db, actor, &id, &body.password, body.must_change_password).await?;
+    let (actor, password) = (Actor::account(&admin), body.password.as_str());
+    made(super::reset_user_password(&app.db, &*app.fanout, actor, &id, password, body.must_change_password).await)?;
     Ok(done())
 }
 
@@ -441,6 +462,7 @@ async fn change_password(State(app): State<Arc<App>>, Json(body): Json<ChangeBod
     }
     app.throttle.succeeded(&upn).await;
     let user = user.filter(|user| !user.disabled).ok_or_else(ApiError::credentials)?;
-    super::change_password(&app.db, &user, &body.current_password, &body.new_password).await?;
+    let (current, new) = (body.current_password.as_str(), body.new_password.as_str());
+    made(super::change_password(&app.db, &*app.fanout, &user, current, new).await)?;
     Ok(done())
 }

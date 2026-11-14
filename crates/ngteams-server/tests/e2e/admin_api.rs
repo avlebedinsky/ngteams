@@ -432,7 +432,7 @@ async fn two_admins_removing_each_other_at_once_leave_one() {
     };
     for backend in backends() {
         let server = TestServer::start(backend).await;
-        let db = &server.app.db;
+        let (db, fanout) = (&server.app.db, &*server.app.fanout);
         let root = server.add_user(ROOT, "Root").await;
         let bob = server.add_user(BOB, "Bob").await;
 
@@ -440,8 +440,8 @@ async fn two_admins_removing_each_other_at_once_leave_one() {
             set_admin(db, ROOT, true).await.unwrap();
             set_admin(db, BOB, true).await.unwrap();
             let (first, second) = tokio::join!(
-                update_user(db, Actor::CLI, &bob, demote()),
-                update_user(db, Actor::CLI, &root, demote()),
+                update_user(db, fanout, Actor::CLI, &bob, demote()),
+                update_user(db, fanout, Actor::CLI, &root, demote()),
             );
             assert!(
                 the_guard_refused_one(&first, &second),
@@ -457,8 +457,8 @@ async fn two_admins_removing_each_other_at_once_leave_one() {
             let eve = server.add_user(&upn, "Eve").await;
             set_admin(db, &upn, true).await.unwrap();
             let (first, second) = tokio::join!(
-                delete_user(db, Actor::CLI, &eve),
-                update_user(db, Actor::CLI, &root, demote()),
+                delete_user(db, fanout, Actor::CLI, &eve),
+                update_user(db, fanout, Actor::CLI, &root, demote()),
             );
             assert!(
                 the_guard_refused_one(&first, &second),
@@ -657,7 +657,7 @@ async fn any_account_changes_its_own_password() {
         let upn = format!("ada-{}@own.test", uuid::Uuid::new_v4().simple());
         server.add_user(&upn, "Ada").await;
         server.add_user("off@own.test", "Off").await;
-        ngteams_server::admin::set_disabled(&server.app.db, "off@own.test", true)
+        ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "off@own.test", true)
             .await
             .unwrap();
         let session = server.session(&upn).await;

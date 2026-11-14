@@ -41,7 +41,7 @@ async fn chat_creation_binds_the_actor_and_refuses_unknown_people_and_wrong_cred
             .status(),
         401
     );
-    ngteams_server::admin::set_disabled(&server.app.db, "a@own.test", true)
+    ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "a@own.test", true)
         .await
         .unwrap();
     let request = CreateChat::one_to_one(other(&a), other(&b)).unwrap();

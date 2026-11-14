@@ -1,6 +1,10 @@
 //! Account administration: the operations behind the admin API ([`api`]), the command line and the first-admin setup
 //! ([`setup`]). Each checks its input, then runs as one database transaction ([`repo`]) that also writes its audit
 //! entry and holds the guards that keep the server with an enabled admin.
+//!
+//! An account that is disabled, deleted or given a new password loses its open push sockets at once: they are told
+//! over the fan-out (every node, through Redis), and each socket also reads its account from the database
+//! ([`crate::trouter`]), which is how a node without Redis learns of a command run beside it.
 
 pub mod api;
 pub mod repo;
@@ -12,6 +16,7 @@ use self::repo::{NewPassword, NewUser};
 use crate::auth::password::{self, PasswordError};
 use crate::db::users::{self, User};
 use crate::db::{Db, DbError};
+use crate::fanout::{Fanout, FanoutError};
 
 /// The longest display name, in characters.
 pub const MAX_NAME: usize = 256;
@@ -44,6 +49,8 @@ pub enum AdminError {
     SamePassword,
     #[error("the system's random source failed")]
     Random,
+    #[error("the change is made, but the account's open push sockets weren't told: {0}")]
+    Sockets(#[from] FanoutError),
 }
 
 impl From<diesel::result::Error> for AdminError {
@@ -173,12 +180,29 @@ pub async fn create_first_admin(
     repo::create_first_admin(db, user, digest.as_deref()).await
 }
 
-/// Changes an account's name, UPN, enabled state or admin role. Disabling signs it out everywhere.
+/// Changes an account's name, UPN, enabled state or admin role. Disabling signs it out everywhere and closes its
+/// push sockets.
 ///
 /// # Errors
 /// No such account, a value [`create_user`] would refuse, [`AdminError::LastAdmin`] when it would leave the server
-/// without an enabled admin, or a database failure.
-pub async fn update_user(db: &Db, actor: Actor<'_>, id: &str, changes: Changes) -> Result<User, AdminError> {
+/// without an enabled admin, a database failure, or a fan-out that couldn't tell the sockets.
+pub async fn update_user(
+    db: &Db,
+    fanout: &dyn Fanout,
+    actor: Actor<'_>,
+    id: &str,
+    changes: Changes,
+) -> Result<User, AdminError> {
+    let disables = changes.enabled == Some(false);
+    let user = updated(db, actor, id, changes).await?;
+    if disables {
+        crate::trouter::revoke(fanout, id).await?;
+    }
+    Ok(user)
+}
+
+/// `changes` checked and applied.
+async fn updated(db: &Db, actor: Actor<'_>, id: &str, changes: Changes) -> Result<User, AdminError> {
     let changes = Changes {
         display_name: changes.display_name.as_deref().map(checked_name).transpose()?,
         upn: changes.upn.as_deref().map(checked_upn).transpose()?,
@@ -187,21 +211,23 @@ pub async fn update_user(db: &Db, actor: Actor<'_>, id: &str, changes: Changes) 
     repo::update(db, actor, id, &changes).await
 }
 
-/// Deletes an account ([`repo::delete`]).
+/// Deletes an account ([`repo::delete`]), closing its push sockets.
 ///
 /// # Errors
-/// No such account, [`AdminError::LastAdmin`], or a database failure.
-pub async fn delete_user(db: &Db, actor: Actor<'_>, id: &str) -> Result<(), AdminError> {
-    repo::delete(db, actor, id).await
+/// No such account, [`AdminError::LastAdmin`], a database failure, or a fan-out that couldn't tell the sockets.
+pub async fn delete_user(db: &Db, fanout: &dyn Fanout, actor: Actor<'_>, id: &str) -> Result<(), AdminError> {
+    repo::delete(db, actor, id).await?;
+    Ok(crate::trouter::revoke(fanout, id).await?)
 }
 
-/// Gives an account a new password, signing it out everywhere; with `must_change`, the account must replace it
-/// before it signs in.
+/// Gives an account a new password, signing it out everywhere and closing its push sockets; with `must_change`,
+/// the account must replace it before it signs in.
 ///
 /// # Errors
-/// No such account, a short password, or a database failure.
+/// No such account, a short password, a database failure, or a fan-out that couldn't tell the sockets.
 pub async fn reset_user_password(
     db: &Db,
+    fanout: &dyn Fanout,
     actor: Actor<'_>,
     id: &str,
     password: &str,
@@ -214,16 +240,23 @@ pub async fn reset_user_password(
         verified: None,
         action: "user.password_reset",
     };
-    repo::set_password(db, actor, id, new).await
+    repo::set_password(db, actor, id, new).await?;
+    Ok(crate::trouter::revoke(fanout, id).await?)
 }
 
-/// An account's own password change, once `current` was checked against `user`'s hash: sets `new` and signs the
-/// account out everywhere.
+/// An account's own password change, once `current` was checked against `user`'s hash: sets `new`, signs the
+/// account out everywhere and closes its push sockets.
 ///
 /// # Errors
 /// [`AdminError::SamePassword`], a short password, [`AdminError::Credentials`] when the password changed
-/// meanwhile, or a database failure.
-pub async fn change_password(db: &Db, user: &User, current: &str, new: &str) -> Result<(), AdminError> {
+/// meanwhile, a database failure, or a fan-out that couldn't tell the sockets.
+pub async fn change_password(
+    db: &Db,
+    fanout: &dyn Fanout,
+    user: &User,
+    current: &str,
+    new: &str,
+) -> Result<(), AdminError> {
     if current == new {
         return Err(AdminError::SamePassword);
     }
@@ -234,7 +267,8 @@ pub async fn change_password(db: &Db, user: &User, current: &str, new: &str) -> 
         verified: Some(&user.password_hash),
         action: "user.password_change",
     };
-    repo::set_password(db, Actor::account(user), &user.id, new).await
+    repo::set_password(db, Actor::account(user), &user.id, new).await?;
+    Ok(crate::trouter::revoke(fanout, &user.id).await?)
 }
 
 /// The id of the account with this UPN.
@@ -245,16 +279,17 @@ async fn id_of(db: &Db, upn: &str) -> Result<String, AdminError> {
         .ok_or(AdminError::NoSuchUser)
 }
 
-/// Disables (signing it out everywhere) or enables the account with this UPN (the command line).
+/// Disables (signing it out everywhere and closing its push sockets) or enables the account with this UPN (the
+/// command line).
 ///
 /// # Errors
 /// As [`update_user`].
-pub async fn set_disabled(db: &Db, upn: &str, disabled: bool) -> Result<(), AdminError> {
+pub async fn set_disabled(db: &Db, fanout: &dyn Fanout, upn: &str, disabled: bool) -> Result<(), AdminError> {
     let changes = Changes {
         enabled: Some(!disabled),
         ..Changes::default()
     };
-    update_user(db, Actor::CLI, &id_of(db, upn).await?, changes).await?;
+    update_user(db, fanout, Actor::CLI, &id_of(db, upn).await?, changes).await?;
     Ok(())
 }
 
@@ -267,22 +302,23 @@ pub async fn set_admin(db: &Db, upn: &str, admin: bool) -> Result<(), AdminError
         admin: Some(admin),
         ..Changes::default()
     };
-    update_user(db, Actor::CLI, &id_of(db, upn).await?, changes).await?;
+    updated(db, Actor::CLI, &id_of(db, upn).await?, changes).await?;
     Ok(())
 }
 
-/// Gives the account with this UPN a new password, signing it out everywhere (the command line).
+/// Gives the account with this UPN a new password, signing it out everywhere and closing its push sockets (the
+/// command line).
 ///
 /// # Errors
 /// As [`reset_user_password`].
-pub async fn reset_password(db: &Db, upn: &str, password: &str) -> Result<(), AdminError> {
-    reset_user_password(db, Actor::CLI, &id_of(db, upn).await?, password, false).await
+pub async fn reset_password(db: &Db, fanout: &dyn Fanout, upn: &str, password: &str) -> Result<(), AdminError> {
+    reset_user_password(db, fanout, Actor::CLI, &id_of(db, upn).await?, password, false).await
 }
 
-/// Deletes the account with this UPN (the command line).
+/// Deletes the account with this UPN, closing its push sockets (the command line).
 ///
 /// # Errors
 /// As [`delete_user`].
-pub async fn delete_by_upn(db: &Db, upn: &str) -> Result<(), AdminError> {
-    delete_user(db, Actor::CLI, &id_of(db, upn).await?).await
+pub async fn delete_by_upn(db: &Db, fanout: &dyn Fanout, upn: &str) -> Result<(), AdminError> {
+    delete_user(db, fanout, Actor::CLI, &id_of(db, upn).await?).await
 }

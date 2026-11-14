@@ -127,7 +127,7 @@ async fn authz_refuses_a_disabled_account_as_teams_refuses_an_unlicensed_one() {
     server.add_user(UPN, "Ada").await;
     let session = server.session(UPN).await;
     let spaces = session.access_token(SPACES_RESOURCE).await.unwrap();
-    ngteams_server::admin::set_disabled(&server.app.db, UPN, true)
+    ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, UPN, true)
         .await
         .unwrap();
     let error = server

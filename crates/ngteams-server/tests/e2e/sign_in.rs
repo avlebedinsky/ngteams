@@ -159,10 +159,10 @@ async fn a_disabled_account_or_a_reset_password_signs_the_session_out() {
         server.add_user("bob@own.test", "Bob").await;
         let ada = server.session(UPN).await;
         let bob = server.session("bob@own.test").await;
-        ngteams_server::admin::set_disabled(&server.app.db, UPN, true)
+        ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, UPN, true)
             .await
             .unwrap();
-        ngteams_server::admin::reset_password(&server.app.db, "bob@own.test", "a new password")
+        ngteams_server::admin::reset_password(&server.app.db, &*server.app.fanout, "bob@own.test", "a new password")
             .await
             .unwrap();
         for session in [&ada, &bob] {
@@ -185,7 +185,7 @@ async fn a_disabled_account_or_a_reset_password_signs_the_session_out() {
                 .0,
             200
         );
-        ngteams_server::admin::set_disabled(&server.app.db, UPN, false)
+        ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, UPN, false)
             .await
             .unwrap();
         assert_eq!(server.password_grant(UPN, PASSWORD, &Scope::spaces()).await.0, 200);
@@ -361,9 +361,14 @@ async fn a_successor_inserted_after_revocation_cannot_refresh() {
                     .await
                     .unwrap();
             } else {
-                ngteams_server::admin::reset_password(&server.app.db, UPN, "a replacement password")
-                    .await
-                    .unwrap();
+                ngteams_server::admin::reset_password(
+                    &server.app.db,
+                    &*server.app.fanout,
+                    UPN,
+                    "a replacement password",
+                )
+                .await
+                .unwrap();
             }
             successor.id = uuid::Uuid::new_v4().to_string();
             successor.token_hash = hash("delayed-successor");
@@ -450,7 +455,7 @@ async fn revocation_and_successor_insertion_serialize_on_each_backend() {
                 );
                 inserted.unwrap();
                 revoked.unwrap();
-                ngteams_server::admin::set_disabled(&server.app.db, UPN, false)
+                ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, UPN, false)
                     .await
                     .unwrap();
                 let row = refresh::by_hash(&server.app.db, &token.token_hash).await.unwrap();
@@ -470,7 +475,7 @@ async fn revoke_for_race(
     if family_only {
         Ok(ngteams_server::db::refresh::revoke_family(db, &token.family_id).await?)
     } else {
-        ngteams_server::admin::set_disabled(db, UPN, true).await
+        ngteams_server::admin::set_disabled(db, &ngteams_server::fanout::Local::new(), UPN, true).await
     }
 }
 

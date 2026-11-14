@@ -47,10 +47,11 @@ ngteams-server --config server.toml serve
 
 Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`, `setup-code`,
 `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
-deleting an account, or resetting its password, revokes its refresh tokens: its sessions end when their access
-tokens run out (one hour by default). `user add --admin` and `user promote` make an admin; `user list` ends each
-line with `admin` or `user`. The command line keeps the same guards as the admin API (the last enabled admin stays)
-and its actions are audited as `cli`.
+deleting an account, or resetting its password, revokes its refresh tokens and closes its push sockets at once (with
+`redis_url` set, the command needs Redis for that): a disabled or deleted account is refused everywhere from then
+on, and after a new password the sessions end when their access tokens run out (one hour by default). `user add
+--admin` and `user promote` make an admin; `user list` ends each line with `admin` or `user`. The command line keeps
+the same guards as the admin API (the last enabled admin stays) and its actions are audited as `cli`.
 `NGTEAMS_SERVER_LOG` controls logging (default `info`); dependency debug and trace events are always suppressed
 because database drivers can include secret bind values.
 
@@ -287,8 +288,15 @@ public origin is refused.
 
 - **Authentication.** The server sends `1::`. The first frame must be `user.authenticate` with the account's `ic3`
   token within `trouter.auth_timeout`, else the socket gets `0:::{"reason":"timeout"}`. A token that isn't valid, or
-  a disabled account, gets `0:::{"reason":"unauthorized"}`. When the token runs out the socket gets `unauthorized`
-  too, and the client comes back with a new token (it normally reconnects before that).
+  a disabled account, gets `0:::{"reason":"unauthorized"}` and no `trouter.connected`. A token is run out at its
+  `exp`, with no clock skew, at the connect as on an open socket: when it runs out the socket gets `unauthorized`,
+  and the client comes back with a new token (it normally reconnects before that).
+- **An account's end.** `user disable` and `user reset-password` close the account's open sockets at once with
+  `unauthorized`, on every node: the command publishes the disconnect on Redis. Each socket also reads its account
+  from the database once it listens, before each delivery and, on a node without Redis (which the command can't
+  reach), every second; it ends when the account is gone, disabled or has another password than at the connect. So
+  nothing posted after the command returned is pushed to the account. The client then asks for a new token, which
+  it doesn't get, and is signed out.
 - **Endpoint.** `trouter.connected` names the endpoint, its push URL (`<origin>/trouter/v4/f/<endpoint>/`), the
   `reconnectUrl` on the same origin and `connectparams` valid for seven days. The endpoint id is derived from the
   account, the client's `epid` and its stack, so the same client gets the same endpoint on every connect and on
@@ -299,6 +307,9 @@ public origin is refused.
   (`TeamsCDLWebWorker`, `SkypeSpacesWeb`) and answers `202`. The push URL must be the caller's own endpoint for that
   `registrationId` and stack (else `403`). The TTL is at most 3600 seconds. A registration is a row in
   `push_registrations`; an account holds at most 64 live ones (`429` beyond). The account's sockets are told at once.
+  A registration ends with its TTL. Nothing removes it sooner: Teams' removal at a sign-out is known only from the
+  bundle (no capture shows its request) and the client sends none, and the socket's goodbye (`0::`) is the same on
+  a stop that Teams leaves the registration through. A registration without a socket gets no delivery.
 - **Deliveries.** A messaging endpoint with a live registration gets the account's `push:<mri>` events as `3:::`
   deliveries at `/trouter/v4/f/<endpoint>/messaging`, each body an `EventMessage` around the fan-out's resource:
   `NewMessage`, `MessageUpdate`, `ConversationUpdate`, `CustomUserProperties` and `ThreadUpdate` (a new chat; the

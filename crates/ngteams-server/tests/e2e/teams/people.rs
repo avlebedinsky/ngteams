@@ -191,7 +191,7 @@ async fn the_people_pickers_find_accounts_to_add_and_a_teams_own_people() {
         let bert = Seat::new(&server, "bert@own.test", "Bert Élan").await;
         let cora = Seat::new(&server, "cora@own.test", "Cora").await;
         let gone = server.add_user("bertram@own.test", "Bertram").await;
-        ngteams_server::admin::set_disabled(&server.app.db, "bertram@own.test", true)
+        ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "bertram@own.test", true)
             .await
             .unwrap();
         let (team, group) = ada.make_team("Rocket", false).await;
