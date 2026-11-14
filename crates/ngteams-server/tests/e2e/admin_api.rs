@@ -1,6 +1,7 @@
 //! The admin API, the first-admin setup and the self-service password change over HTTP, with the client's session
 //! feeling each change.
 
+use ngteams_server::admin::{Actor, AdminError, Changes};
 use reqwest::Method;
 use serde_json::{Value, json};
 use teams_auth::authz::AuthzKind;
@@ -243,10 +244,16 @@ async fn only_an_admin_reaches_the_admin_api() {
 /// Search in names and UPNs, any case (also beyond ASCII); a wildcard is a plain character.
 async fn search_finds_names_and_upns(server: &TestServer, root: &str, backend: Backend) {
     add(server, root, "zoe@own.test", "Élodie Šarūnas").await;
+    add(server, root, "oskar@own.test", "ΟΣΚΑΡ").await;
+    add(server, root, "nikos@own.test", "Νίκος").await;
     for (query, found) in [
         ("élodie", vec!["zoe@own.test"]),
         ("ÉLODIE", vec!["zoe@own.test"]),
         ("šARŪ", vec!["zoe@own.test"]),
+        ("ΟΣ", vec!["nikos@own.test", "oskar@own.test"]),
+        ("οσκ", vec!["oskar@own.test"]),
+        ("ΚΟΣ", vec!["nikos@own.test"]),
+        ("κος", vec!["nikos@own.test"]),
         ("LOVE", vec!["ada@own.test"]),
         ("gra", vec!["grace@own.test"]),
         (
@@ -408,51 +415,59 @@ async fn an_admin_changes_an_account() {
     }
 }
 
-/// Whether exactly one of two answers succeeded.
-fn one_succeeded(first: u16, second: u16) -> bool {
-    (first < 300) != (second < 300)
+/// Whether one of two changes went through and the last-admin guard refused the other.
+fn the_guard_refused_one<A, B>(first: &Result<A, AdminError>, second: &Result<B, AdminError>) -> bool {
+    matches!(
+        (first, second),
+        (Ok(_), Err(AdminError::LastAdmin)) | (Err(AdminError::LastAdmin), Ok(_))
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_admins_removing_each_other_at_once_leave_one() {
-    use ngteams_server::admin::{repo, set_admin};
+    use ngteams_server::admin::{delete_user, repo, set_admin, update_user};
+    let demote = || Changes {
+        admin: Some(false),
+        ..Changes::default()
+    };
     for backend in backends() {
         let server = TestServer::start(backend).await;
-        let root = first_admin(&server).await;
-        let root_path = user_path(&my_id(&server, &root).await);
-        let bob_path = user_path(&add(&server, &root, BOB, "Bob").await);
-        let bob = bearer(&server, BOB, PASSWORD).await;
-        let demote = || Some(json!({"admin": false}));
+        let db = &server.app.db;
+        let root = server.add_user(ROOT, "Root").await;
+        let bob = server.add_user(BOB, "Bob").await;
 
         for round in 0..6 {
-            set_admin(&server.app.db, ROOT, true).await.unwrap();
-            set_admin(&server.app.db, BOB, true).await.unwrap();
-            let ((first, _), (second, _)) = tokio::join!(
-                call(&server, Method::PATCH, &bob_path, Some(&root), demote()),
-                call(&server, Method::PATCH, &root_path, Some(&bob), demote()),
+            set_admin(db, ROOT, true).await.unwrap();
+            set_admin(db, BOB, true).await.unwrap();
+            let (first, second) = tokio::join!(
+                update_user(db, Actor::CLI, &bob, demote()),
+                update_user(db, Actor::CLI, &root, demote()),
             );
-            assert!(one_succeeded(first, second), "{backend:?} {round}: {first} {second}");
-            assert_eq!(repo::admins(&server.app.db).await.unwrap(), 1, "{backend:?} {round}");
+            assert!(
+                the_guard_refused_one(&first, &second),
+                "{backend:?} {round}: {first:?} {second:?}"
+            );
+            assert_eq!(repo::admins(db).await.unwrap(), 1, "{backend:?} {round}");
         }
 
-        set_admin(&server.app.db, ROOT, true).await.unwrap();
-        set_admin(&server.app.db, BOB, false).await.unwrap();
+        set_admin(db, ROOT, true).await.unwrap();
+        set_admin(db, BOB, false).await.unwrap();
         for round in 0..4 {
             let upn = format!("eve{round}@own.test");
-            let eve = json!({"upn": upn, "password": PASSWORD, "admin": true});
-            let (status, eve) = call(&server, Method::POST, USERS, Some(&root), Some(eve)).await;
-            assert_eq!(status, 201, "{eve}");
-            let eve_path = user_path(eve["id"].as_str().unwrap());
-            let eve = bearer(&server, &upn, PASSWORD).await;
-            let ((first, _), (second, _)) = tokio::join!(
-                call(&server, Method::DELETE, &eve_path, Some(&root), None),
-                call(&server, Method::PATCH, &root_path, Some(&eve), demote()),
+            let eve = server.add_user(&upn, "Eve").await;
+            set_admin(db, &upn, true).await.unwrap();
+            let (first, second) = tokio::join!(
+                delete_user(db, Actor::CLI, &eve),
+                update_user(db, Actor::CLI, &root, demote()),
             );
-            assert!(one_succeeded(first, second), "{backend:?} {round}: {first} {second}");
-            assert_eq!(repo::admins(&server.app.db).await.unwrap(), 1, "{backend:?} {round}");
-            set_admin(&server.app.db, ROOT, true).await.unwrap();
-            if second < 300 {
-                set_admin(&server.app.db, &upn, false).await.unwrap();
+            assert!(
+                the_guard_refused_one(&first, &second),
+                "{backend:?} {round}: {first:?} {second:?}"
+            );
+            assert_eq!(repo::admins(db).await.unwrap(), 1, "{backend:?} {round}");
+            set_admin(db, ROOT, true).await.unwrap();
+            if second.is_ok() {
+                set_admin(db, &upn, false).await.unwrap();
             }
         }
         server.stop().await;

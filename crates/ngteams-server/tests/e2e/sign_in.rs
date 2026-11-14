@@ -450,6 +450,9 @@ async fn revocation_and_successor_insertion_serialize_on_each_backend() {
                 );
                 inserted.unwrap();
                 revoked.unwrap();
+                ngteams_server::admin::set_disabled(&server.app.db, UPN, false)
+                    .await
+                    .unwrap();
                 let row = refresh::by_hash(&server.app.db, &token.token_hash).await.unwrap();
                 assert!(row.is_none_or(|row| row.revoked_at.is_some()));
             }
@@ -458,15 +461,16 @@ async fn revocation_and_successor_insertion_serialize_on_each_backend() {
     }
 }
 
+/// Revokes the token's family, or signs its account out everywhere by disabling it.
 async fn revoke_for_race(
     db: &ngteams_server::db::Db,
     token: &ngteams_server::db::refresh::RefreshToken,
     family_only: bool,
-) -> Result<(), ngteams_server::db::DbError> {
+) -> Result<(), ngteams_server::admin::AdminError> {
     if family_only {
-        ngteams_server::db::refresh::revoke_family(db, &token.family_id).await
+        Ok(ngteams_server::db::refresh::revoke_family(db, &token.family_id).await?)
     } else {
-        ngteams_server::db::refresh::revoke_user(db, &token.user_id).await
+        ngteams_server::admin::set_disabled(db, UPN, true).await
     }
 }
 
@@ -575,7 +579,8 @@ async fn change_locked_account(
 ) {
     use diesel::{ExpressionMethods as _, QueryDsl as _};
     use diesel_async::{AsyncConnection as _, RunQueryDsl as _};
-    use ngteams_server::db::{DbError, schema::users, with_conn};
+    use ngteams_server::db::schema::{refresh_tokens, users};
+    use ngteams_server::db::{DbError, now, with_conn};
     let result: Result<(), DbError> = async {
         with_conn!(&db, |conn| conn
             .transaction::<_, DbError, _>(async |conn| {
@@ -589,11 +594,14 @@ async fn change_locked_account(
                     .set((users::password_hash.eq(replacement), users::disabled.eq(disable)))
                     .execute(conn)
                     .await?;
+                diesel::update(refresh_tokens::table.filter(refresh_tokens::user_id.eq(&oid)))
+                    .set(refresh_tokens::revoked_at.eq(Some(now())))
+                    .execute(conn)
+                    .await?;
                 Ok(())
             })
             .await)
     }
     .await;
     result.unwrap();
-    ngteams_server::db::refresh::revoke_user(&db, &oid).await.unwrap();
 }

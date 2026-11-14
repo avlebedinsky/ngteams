@@ -487,21 +487,33 @@ fn escape_like(text: &str) -> String {
     escaped
 }
 
+diesel::define_sql_function! {
+    /// SQL `replace`.
+    fn replace(text: diesel::sql_types::Text, from: diesel::sql_types::Text, to: diesel::sql_types::Text) -> diesel::sql_types::Text;
+}
+
+/// Greek's word-final sigma, which a lowercased text has or not by where its Σ stood.
+const FINAL_SIGMA: &str = "ς";
+const SIGMA: &str = "σ";
+
 /// Up to `limit` accounts by UPN, after the UPN `after`, whose UPN or name contains `query` (any case; all for an
 /// empty one).
 ///
 /// # Errors
 /// A database failure.
 pub async fn list(db: &Db, query: &str, after: &str, limit: i64) -> Result<Vec<User>, DbError> {
-    let pattern = format!("%{}%", escape_like(&query.to_lowercase()));
+    let folded = query.to_lowercase().replace(FINAL_SIGMA, SIGMA);
+    let pattern = format!("%{}%", escape_like(&folded));
     with_conn!(db, |conn| Ok(users::table
         .filter(users::deleted_at.is_null())
         .filter(users::upn.gt(after))
         .filter(
-            users::upn
+            replace(users::upn, FINAL_SIGMA, SIGMA)
                 .like(&pattern)
                 .escape('\\')
-                .or(lower(users::display_name).like(&pattern).escape('\\')),
+                .or(replace(lower(users::display_name), FINAL_SIGMA, SIGMA)
+                    .like(&pattern)
+                    .escape('\\')),
         )
         .order(users::upn.asc())
         .limit(limit)

@@ -116,39 +116,23 @@ pub async fn revoke_family(db: &Db, family_id: &str) -> Result<(), DbError> {
         .first::<String>(conn)
         .await
         .optional()?);
-    if let Some(user_id) = user_id {
-        revoke(db, &user_id, Some(family_id)).await?;
-    }
-    Ok(())
-}
-
-/// Revokes every token of an account.
-///
-/// # Errors
-/// A database failure.
-pub async fn revoke_user(db: &Db, user_id: &str) -> Result<(), DbError> {
-    revoke(db, user_id, None).await
-}
-
-async fn revoke(db: &Db, user_id: &str, family_id: Option<&str>) -> Result<(), DbError> {
+    let Some(user_id) = user_id else {
+        return Ok(());
+    };
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
-            diesel::update(users::table.find(user_id))
+            diesel::update(users::table.find(&user_id))
                 .set(users::updated_at.eq(users::updated_at))
                 .execute(conn)
                 .await?;
-            let tokens = refresh_tokens::table
-                .filter(refresh_tokens::user_id.eq(user_id))
-                .filter(refresh_tokens::revoked_at.is_null());
-            let revoked = refresh_tokens::revoked_at.eq(Some(now()));
-            if let Some(family_id) = family_id {
-                diesel::update(tokens.filter(refresh_tokens::family_id.eq(family_id)))
-                    .set(revoked)
-                    .execute(conn)
-                    .await?;
-            } else {
-                diesel::update(tokens).set(revoked).execute(conn).await?;
-            }
+            diesel::update(
+                refresh_tokens::table
+                    .filter(refresh_tokens::family_id.eq(family_id))
+                    .filter(refresh_tokens::revoked_at.is_null()),
+            )
+            .set(refresh_tokens::revoked_at.eq(Some(now())))
+            .execute(conn)
+            .await?;
             Ok(())
         })
         .await)
