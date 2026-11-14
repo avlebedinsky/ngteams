@@ -107,6 +107,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(auth)
         .merge(crate::chatsvc::router())
         .merge(crate::admin::api::router())
+        .merge(crate::teams::router(&app.config))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,

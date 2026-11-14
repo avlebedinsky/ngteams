@@ -16,6 +16,8 @@ pub(super) struct Message {
     pub client_id: Option<String>,
     pub version: i64,
     pub body: String,
+    /// In a channel, the post the message belongs to: 0 in a draft of a new post, which is its own.
+    pub root_id: Option<i64>,
 }
 
 impl Message {
@@ -58,6 +60,13 @@ pub(super) async fn insert(db: &Db, draft: &Message) -> Result<Option<(Message, 
             row.id = version;
             row.version = version;
             let mut body = row.value()?;
+            if let Some(root) = row.root_id {
+                let root = if root == 0 { version } else { root };
+                row.root_id = Some(root);
+                if let Some(link) = body["conversationLink"].as_str() {
+                    body["conversationLink"] = format!("{link};messageid={root}").into();
+                }
+            }
             body["id"] = version.to_string().into();
             body["version"] = version.to_string().into();
             body["sequenceId"] = version.into();
@@ -84,13 +93,19 @@ pub(super) struct Window {
     pub before: i64,
     pub size: i64,
     pub incremental: bool,
+    /// Only the messages of this post's chain.
+    pub root: Option<i64>,
 }
 
 pub(super) async fn page(db: &Db, chat: &str, window: Window) -> Result<Vec<Message>, DbError> {
     with_conn!(db, |conn| {
-        let query = chat_messages::table
+        let mut query = chat_messages::table
             .filter(chat_messages::chat_id.eq(chat))
-            .filter(chat_messages::version.le(window.until));
+            .filter(chat_messages::version.le(window.until))
+            .into_boxed();
+        if let Some(root) = window.root {
+            query = query.filter(chat_messages::root_id.eq(root));
+        }
         if window.incremental {
             Ok(query
                 .filter(chat_messages::version.gt(window.since))
@@ -230,4 +245,18 @@ pub(super) async fn around(db: &Db, chat: &str, at: i64, size: i64) -> Result<Ve
         past.sort_unstable_by_key(|row| std::cmp::Reverse(row.id));
         Ok(past)
     })
+}
+
+/// Whether `post` is a post of the channel that replies can go under: there, a post itself, not deleted.
+pub(super) async fn is_post(db: &Db, chat: &str, post: i64) -> Result<bool, DbError> {
+    let found: Option<Message> = with_conn!(db, |conn| chat_messages::table
+        .find((chat, post))
+        .select(Message::as_select())
+        .first(conn)
+        .await
+        .optional()?);
+    match found {
+        Some(row) if row.root_id == Some(post) => Ok(row.value()?["properties"].get("deletetime").is_none()),
+        _ => Ok(false),
+    }
 }

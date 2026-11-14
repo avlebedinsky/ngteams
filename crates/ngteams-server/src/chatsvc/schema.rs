@@ -36,6 +36,7 @@ diesel::table! {
         client_id -> Nullable<Text>,
         version -> BigInt,
         body -> Text,
+        root_id -> Nullable<BigInt>,
     }
 }
 

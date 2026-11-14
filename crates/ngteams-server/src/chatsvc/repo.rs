@@ -4,10 +4,11 @@ use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use super::schema::{chat_clock, chat_members, chats};
 use crate::db::schema::users;
 use crate::db::{Db, DbError, with_conn};
+use crate::teams::schema::channels;
 
 #[derive(Clone, Queryable, Selectable, Insertable)]
 #[diesel(table_name = chats)]
-pub(super) struct Chat {
+pub(crate) struct Chat {
     pub id: String,
     pub creator: String,
     pub topic: Option<String>,
@@ -18,7 +19,7 @@ pub(super) struct Chat {
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = chat_members)]
-pub(super) struct Member {
+pub(crate) struct Member {
     pub user_id: String,
     pub joined_at: i64,
 }
@@ -42,7 +43,7 @@ macro_rules! advance {
             .await?
     };
 }
-pub(super) use advance;
+pub(crate) use advance;
 
 pub(super) async fn create(db: &Db, chat: &Chat, members: &[String]) -> Result<bool, DbError> {
     let at = super::wire::now();
@@ -113,7 +114,10 @@ pub(super) async fn watermark(db: &Db) -> Result<i64, DbError> {
 pub(super) async fn list(db: &Db, user: &str, after: i64, until: i64, limit: i64) -> Result<Vec<Chat>, DbError> {
     with_conn!(db, |conn| Ok(chats::table
         .inner_join(chat_members::table)
+        .left_join(channels::table.on(channels::id.eq(chats::id)))
         .filter(chat_members::user_id.eq(user))
+        // of a team's channels only the general one is in the list; the others are read by their id
+        .filter(channels::id.is_null().or(channels::id.eq(channels::team_id)))
         .filter(chats::version.gt(after))
         .filter(chats::version.le(until))
         .order(chats::version.asc())

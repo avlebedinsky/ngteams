@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
 
-use super::{Caller, Error, member_of, repo, wire};
+use super::{Caller, Error, channels, member_of, repo, wire};
 use crate::app::App;
 
 type Params = HashMap<String, String>;
@@ -24,6 +24,17 @@ pub(super) async fn thread(
         return Err(Error::InvalidThread);
     }
     let (chat, members) = member_of(&app, &caller, id).await?;
+    if let Some(place) = channels::place(&app.db, id).await? {
+        let roles = channels::roles(&app.db, &place).await?;
+        return Ok(Json(channels::thread(
+            &app,
+            &caller.tenant,
+            &chat,
+            &place,
+            &caller.id,
+            &roles,
+        )));
+    }
     Ok(Json(wire::thread(&app, &caller, &chat, &members)))
 }
 
@@ -31,8 +42,14 @@ pub(super) async fn members(
     State(app): State<Arc<App>>,
     caller: Caller,
     Path(path): Path<Params>,
+    Query(query): Query<Params>,
 ) -> Result<Json<Value>, Error> {
     let (chat, members) = member_of(&app, &caller, target(&path)?).await?;
+    if let Some(place) = channels::place(&app.db, &chat.id).await? {
+        let roles = channels::roles(&app.db, &place).await?;
+        let select = query.get("selectMemberRoles").map(String::as_str);
+        return Ok(Json(channels::members(&app, &chat, &members, &roles, select)));
+    }
     Ok(Json(json!({
         "eTag": format!("\"{}\"", chat.version), "isDeleted": false,
         "members": members.iter().map(|member| wire::member(&app, member, false)).collect::<Vec<_>>(),
@@ -93,6 +110,10 @@ pub(super) async fn conversations(
 
 async fn conversation(app: &App, caller: &Caller, chat: &repo::Chat) -> Result<Value, Error> {
     let mut entry = wire::conversation(app, caller, chat);
+    if let Some(place) = channels::place(&app.db, &chat.id).await? {
+        let roles = channels::roles(&app.db, &place).await?;
+        channels::conversation(&mut entry, caller, chat, &place, &roles);
+    }
     if let Some(message) = super::message_repo::latest(&app.db, &chat.id).await? {
         entry["lastMessage"] = message.value()?;
         if let Some(preview) = entry["lastMessage"].as_object_mut() {

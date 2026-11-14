@@ -7,7 +7,7 @@ use axum::http::{StatusCode, header::LOCATION};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value, json};
 
-use super::{Caller, Error, events, member_of, message_repo, reads, repo, wire};
+use super::{Caller, Error, channels, events, member_of, message_repo, reads, repo, wire};
 use crate::app::App;
 use crate::db::DbError;
 
@@ -21,13 +21,28 @@ pub(super) async fn post(
     Path(path): Path<Params>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, Error> {
-    let chat = reads::target(&path)?;
+    let (chat, post) = channels::split(reads::target(&path)?)?;
     let (_, members) = member_of(&app, &caller, chat).await?;
     let Json(body) = body.map_err(|_| Error::BadRequest)?;
+    let place = channels::place(&app.db, chat).await?;
+    if post.is_some() && place.is_none() {
+        return Err(Error::BadRequest);
+    }
     if body["messagetype"].as_str() == Some("Control/Typing") {
         return typing(&app, &caller, chat, &members, &body).await;
     }
-    let draft = draft(&app, &caller, chat, &body)?;
+    let mut draft = draft(&app, &caller, chat, &body)?;
+    if let Some(place) = &place {
+        if !channels::writable(place) {
+            return Err(Error::Denied);
+        }
+        if let Some(post) = post
+            && !message_repo::is_post(&app.db, chat, post).await?
+        {
+            return Err(Error::BadRequest);
+        }
+        draft.root_id = Some(post.unwrap_or(0));
+    }
     let (row, inserted) = message_repo::insert(&app.db, &draft).await?.ok_or(Error::Denied)?;
     if inserted {
         events::publish(&app, &caller, &members, "NewMessage", &row.value()?).await;
@@ -97,6 +112,7 @@ pub(super) fn draft(app: &App, caller: &Caller, chat: &str, sent: &Value) -> Res
         client_id,
         version: 0,
         body: body.to_string(),
+        root_id: None,
     })
 }
 
@@ -106,7 +122,8 @@ pub(super) async fn page(
     Path(path): Path<Params>,
     Query(query): Query<Params>,
 ) -> Result<Json<Value>, Error> {
-    let chat = reads::target(&path)?;
+    let target = reads::target(&path)?;
+    let (chat, root) = channels::split(target)?;
     if chat == "48:generic" {
         return Err(Error::InvalidThread);
     }
@@ -129,11 +146,12 @@ pub(super) async fn page(
             before,
             size: size + 1,
             incremental,
+            root,
         },
     )
     .await?;
     let (messages, more) = bounded_messages(&rows, size)?;
-    let link = format!("{}/v1/users/ME/conversations/{chat}/messages", wire::base(&app));
+    let link = format!("{}/v1/users/ME/conversations/{target}/messages", wire::base(&app));
     let mut metadata = json!({"syncState": format!("{link}?syncState={until}"),
         "lastCompleteSegmentStartTime": since, "lastCompleteSegmentEndTime": until});
     if more && let Some(last) = rows.get(messages.len().saturating_sub(1)) {

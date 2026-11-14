@@ -36,6 +36,8 @@ pub(super) async fn set_conversation(
                 | "alerts"
                 | "channelNotificationSettings"
                 | "followAllRc"
+                | "notifyAllRc"
+                | "isGeneralChannelFavorite"
                 | "consumptionHorizonBookmark"
         )
     {
@@ -52,8 +54,14 @@ pub(super) async fn set_conversation(
             return Err(Error::BadRequest);
         }
     }
+    if !valid_preference(name, value) {
+        return Err(Error::BadRequest);
+    }
     if !property_repo::set_conversation(&app.db, chat, &caller.id, name, value).await? {
         return Err(Error::Denied);
+    }
+    if matches!(name, "favorite" | "isGeneralChannelFavorite") {
+        crate::teams::listed(&app.db, chat, &caller.id).await?;
     }
     if name == "consumptionhorizon" {
         events::publish(
@@ -73,6 +81,17 @@ pub(super) async fn set_conversation(
     )
     .await;
     Ok(StatusCode::OK)
+}
+
+/// Whether a channel preference has the form its dialog reads back.
+fn valid_preference(name: &str, value: &str) -> bool {
+    match name {
+        "alerts" | "favorite" | "isGeneralChannelFavorite" => matches!(value, "true" | "false"),
+        "channelNotificationSettings" => {
+            serde_json::from_str::<Value>(value).is_ok_and(|settings| settings.is_object())
+        }
+        _ => true,
+    }
 }
 
 pub(super) async fn user(State(app): State<Arc<App>>, caller: Caller) -> Result<Response, Error> {
@@ -134,6 +153,10 @@ pub(super) async fn conversation(
 ) -> Result<Json<Value>, Error> {
     let (chat, _) = member_of(&app, &caller, reads::target(&path)?).await?;
     let mut body = super::wire::conversation(&app, &caller, &chat);
+    if let Some(place) = super::channels::place(&app.db, &chat.id).await? {
+        let roles = super::channels::roles(&app.db, &place).await?;
+        super::channels::conversation(&mut body, &caller, &chat, &place, &roles);
+    }
     if let Some(properties) = body["properties"].as_object_mut() {
         properties.extend(property_repo::conversation(&app.db, &chat.id, &caller.id).await?);
     }

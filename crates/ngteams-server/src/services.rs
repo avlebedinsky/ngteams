@@ -16,5 +16,36 @@ pub fn region_gtms(config: &Config) -> BTreeMap<&'static str, String> {
     BTreeMap::from([
         (AUTH_SERVICE_GTM, format!("{origin}/api/authsvc")),
         ("chatServiceAfd", format!("{origin}/api/chatsvc/{}", config.region)),
+        ("chatSvcAggAfd", format!("{origin}{}", csa_prefix(config))),
+        ("middleTier", format!("{origin}{}", middle_tier_prefix(config))),
+        (
+            "teamsAndChannelsProvisioningService",
+            format!("{origin}{}", provisioning_prefix(config)),
+        ),
     ])
+}
+
+/// CSA's path under the origin.
+#[must_use]
+pub fn csa_prefix(config: &Config) -> String {
+    format!("/api/csa/{}", config.region)
+}
+
+/// The provisioning service's path under the origin.
+#[must_use]
+pub fn provisioning_prefix(config: &Config) -> String {
+    format!("/fabric/{}/templates/api", config.region)
+}
+
+/// The middle tier's path under the origin. The client takes a partition only as `<letters>-<digits>` (`amer-03`),
+/// so the configured one (`own01`) is put in that form.
+#[must_use]
+pub fn middle_tier_prefix(config: &Config) -> String {
+    let letters: String = config.partition.chars().filter(char::is_ascii_lowercase).collect();
+    let digits: String = config.partition.chars().filter(char::is_ascii_digit).collect();
+    format!(
+        "/api/mt/part/{}-{}",
+        if letters.is_empty() { "own" } else { &letters },
+        if digits.is_empty() { "01" } else { &digits }
+    )
 }

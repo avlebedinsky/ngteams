@@ -2,6 +2,7 @@
 //! Database versions order changes across nodes; a page cursor keeps its upper bound so writes during paging
 //! appear in the next sync. No client-supplied author or roster can grant access to another account.
 
+pub(crate) mod channels;
 mod create;
 mod events;
 mod message_repo;
@@ -11,8 +12,8 @@ mod properties;
 mod property_repo;
 mod reactions;
 mod reads;
-mod repo;
-mod schema;
+pub(crate) mod repo;
+pub(crate) mod schema;
 mod wire;
 
 use std::collections::HashMap;
@@ -154,4 +155,23 @@ async fn member_of(app: &App, caller: &Caller, id: &str) -> Result<(repo::Chat, 
         return Err(Error::Denied);
     }
     Ok((chat, members))
+}
+
+pub(crate) fn now() -> i64 {
+    wire::now()
+}
+
+pub(crate) fn decode_properties(body: Option<String>) -> Result<serde_json::Map<String, serde_json::Value>, DbError> {
+    property_repo::decode(body)
+}
+
+/// Sets one of `user`'s own properties of a thread it is in; whether it is in it.
+pub(crate) async fn set_own_property(
+    db: &crate::db::Db,
+    thread: &str,
+    user: &str,
+    name: &str,
+    value: &str,
+) -> Result<bool, DbError> {
+    property_repo::set_conversation(db, thread, user, name, value).await
 }

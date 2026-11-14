@@ -53,12 +53,21 @@ async fn the_account_bring_up_reads_its_bases_from_the_servers_authz_and_keeps_a
         region.base(CHAT_BASE_GTM),
         Some("https://own.example.test/api/chatsvc/own")
     );
+    assert_eq!(
+        region.base(account::CSA_GTM),
+        Some("https://own.example.test/api/csa/own")
+    );
+    assert_eq!(
+        region.base(account::MIDDLE_TIER_GTM),
+        Some("https://own.example.test/api/mt/part/own-01")
+    );
+    assert_eq!(
+        region.base(account::PROVISIONING_GTM),
+        Some("https://own.example.test/fabric/own/templates/api")
+    );
     for gtm in [
-        account::MIDDLE_TIER_GTM,
-        account::CSA_GTM,
         account::PRESENCE_GTM,
         account::AMS_GTM,
-        account::PROVISIONING_GTM,
         account::USER_PROFILE_GTM,
         account::MCPS_GTM,
     ] {
