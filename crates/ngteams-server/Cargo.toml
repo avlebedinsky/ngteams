@@ -20,6 +20,7 @@ axum-server.workspace = true
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 clap = { workspace = true, features = ["env"] }
 diesel.workspace = true
 diesel-async.workspace = true
@@ -38,6 +39,7 @@ object_store.workspace = true
 percent-encoding.workspace = true
 redis.workspace = true
 reqwest.workspace = true
+rrule.workspace = true
 rustls.workspace = true
 scraper.workspace = true
 serde.workspace = true

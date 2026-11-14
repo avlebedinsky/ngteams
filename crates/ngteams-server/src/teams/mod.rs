@@ -49,7 +49,10 @@ impl Audience for Templates {
 pub(crate) fn router(config: &Config) -> Router<Arc<App>> {
     Router::new()
         .nest(&crate::services::csa_prefix(config), csa::routes())
-        .nest(&crate::services::middle_tier_prefix(config), mt::routes())
+        .nest(
+            &crate::services::middle_tier_prefix(config),
+            mt::routes().merge(crate::calendar::routes()),
+        )
         .nest(&crate::services::provisioning_prefix(config), prov::routes())
         .nest(&crate::services::user_profile_prefix(config), people::routes())
         .layer(DefaultBodyLimit::max(BODY_LIMIT))

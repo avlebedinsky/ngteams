@@ -9,6 +9,7 @@ mod admin_api;
 mod authz;
 #[cfg(target_os = "linux")]
 mod binary;
+mod calendar;
 mod calling;
 mod chatsvc;
 mod media;

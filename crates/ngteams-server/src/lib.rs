@@ -12,6 +12,7 @@
 //! - [`throttle`]: failed sign-ins per account;
 //! - [`app`]: the shared state and the router; [`serve`]: the listener, plain or TLS; [`cli`]: the command line;
 //!   [`admin`]: account administration (the admin API, the first-admin setup, the account commands);
+//! - `calendar`: events, series and meetings (the middle tier's calendar routes);
 //! - [`calling`]: the call controller (a 1:1 call's signaling across nodes) and the TURN credentials;
 //! - `teams`: teams and channels (CSA, the middle tier's and the provisioning service's team routes); a channel
 //!   is a thread of the chat service.
@@ -19,6 +20,7 @@
 pub mod admin;
 pub mod app;
 pub mod auth;
+mod calendar;
 pub mod calling;
 mod chatsvc;
 pub mod cli;
