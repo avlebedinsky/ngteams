@@ -253,14 +253,16 @@ async fn groups_supported_by_the_native_builder_are_bounded_by_request_size_with
             .password_hash;
         let mut others = Vec::new();
         for index in 0..251 {
-            let user = ngteams_server::db::users::add(
-                &server.app.db,
-                &format!("member-{index}@own.test"),
-                "Synthetic member",
-                &password,
-            )
-            .await
-            .unwrap();
+            let member = ngteams_server::admin::repo::NewUser {
+                upn: format!("member-{index}@own.test"),
+                display_name: "Synthetic member".into(),
+                password_hash: password.clone(),
+                admin: false,
+                must_change_password: false,
+            };
+            let user = ngteams_server::admin::repo::create(&server.app.db, ngteams_server::admin::Actor::CLI, member)
+                .await
+                .unwrap();
             others.push(Mri::new(format!("8:orgid:{}", user.id)));
         }
         let dir = tempfile::tempdir().unwrap();
