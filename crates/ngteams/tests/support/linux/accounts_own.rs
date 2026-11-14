@@ -1,4 +1,4 @@
-//! The own server's side of the accounts window test: the server the app's child signs in to, what the child tells
+//! The own server's side of the accounts window test: the server the app signs in to, what the child tells
 //! the parent of the window asking for an account and of the requests the app made, and the screen that asks an own
 //! server's account for its password again.
 //!
@@ -40,6 +40,10 @@ pub const PROMPT_ASK: &str = "say-prompt";
 pub const REQUESTS_ASK: &str = "say-requests";
 /// The file in the sandbox dir the child writes the requests' methods and URLs to.
 pub const REQUESTS_FILE: &str = "requests.txt";
+/// The file in the sandbox dir the parent writes to have the own account's credentials handed to the app's next run.
+pub const SECRETS_ASK: &str = "hand-own-secrets";
+/// The file in the sandbox dir they are handed over in: owner-only, deleted by the run that takes them.
+const SECRETS_FILE: &str = "own-secrets";
 /// The file in the sandbox dir the child writes an origin nothing listens on to.
 pub const DEAD_ORIGIN: &str = "own-dead-origin";
 /// The account the password-again screen asks: an own server's, with a Microsoft 365 account of the same user name
@@ -158,10 +162,11 @@ pub fn say_prompt(cx: &mut App) {
     .detach();
 }
 
-/// Installs the app's debug log in the sandbox dir, so every request this process sends is on record.
-pub fn record_requests() -> SandboxResult {
+/// Installs the app's debug log in the sandbox dir (a directory of this run's alone, named with `run`), so every
+/// request this process sends is on record.
+pub fn record_requests(run: &str) -> SandboxResult {
     let config = teams_log::Config {
-        dir: sandbox_dir()?.join("app-log"),
+        dir: sandbox_dir()?.join(format!("app-log-{run}")),
         setting: teams_log::Level::Debug,
         env: None,
         rotation: teams_log::file::Rotation::default(),
@@ -240,6 +245,94 @@ pub fn say_requests_when_asked(origin: String, dead: String, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// The keys an own server's account's credentials are kept under.
+fn own_keys(account: &PersonalAccount) -> [teams_auth::secrets::SecretKey; 3] {
+    [
+        refresh_token_key(&account.id()),
+        skypetoken_key(&account.id()),
+        skypetoken_expiry_key(&account.id()),
+    ]
+}
+
+/// Once the parent writes [`SECRETS_ASK`]: the own server's account's credentials go to [`SECRETS_FILE`], one a
+/// line in [`own_keys`]' order, for the app's next run in this sandbox (the sandbox has no Secret Service to keep
+/// them across runs); says `own-secrets handed=<n>`, never a value.
+pub fn hand_over_secrets_when_asked(setup: Setup, cx: &mut App) {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Ok(dir) = sandbox_dir() else {
+        say("no sandbox dir");
+        return;
+    };
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            if fs::remove_file(dir.join(SECRETS_ASK)).is_err() {
+                continue;
+            }
+            let own = setup
+                .signed_in_accounts()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|account| account.server.is_some());
+            let Some(account) = own else {
+                say("own-secrets: no own server's account");
+                continue;
+            };
+            let secrets = setup.secrets();
+            let (mut lines, mut handed) = (String::new(), 0);
+            for key in own_keys(&account) {
+                if let Ok(Some(secret)) = secrets.get(&key).await {
+                    lines.push_str(secret.expose());
+                    handed += 1;
+                }
+                lines.push('\n');
+            }
+            let written = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(dir.join(SECRETS_FILE))
+                .and_then(|mut file| file.write_all(lines.as_bytes()));
+            match written {
+                Ok(()) => say(&format!("own-secrets handed={handed}")),
+                Err(error) => say(&format!("own-secrets: not written: {error}")),
+            }
+        }
+    })
+    .detach();
+}
+
+/// The app's second run: takes the credentials the first run handed over ([`hand_over_secrets_when_asked`]) into this
+/// run's store, deleting the file, and starts the own server's account from its `accounts.toml` entry as `ngteams`
+/// starts an account signed in before. Says `came-back entries=<n> started=<n>` of the file's accounts.
+pub fn come_back(runner: &accounts::Runner) -> SandboxResult<accounts::Started> {
+    let setup = &runner.setup;
+    let file = sandbox_dir()?.join(SECRETS_FILE);
+    let handed = fs::read_to_string(&file)?;
+    fs::remove_file(&file)?;
+    let signed_in = setup.signed_in_accounts()?;
+    let account = signed_in
+        .iter()
+        .find(|account| account.server.is_some())
+        .ok_or("no own server's account came back")?;
+    let secrets = setup.secrets();
+    for (key, value) in own_keys(account).iter().zip(handed.lines()) {
+        if !value.is_empty() {
+            block_on(secrets.put(key, &Secret::new(value)))??;
+        }
+    }
+    if !accounts::ready(setup, account)? {
+        return Err("the own server's account can't start without a sign-in".into());
+    }
+    say(&format!(
+        "came-back entries={} started={}",
+        setup.accounts()?.len(),
+        signed_in.len()
+    ));
+    Ok(runner.start(account).map_err(String::from)?)
 }
 
 /// The dark theme, whatever the system says.

@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use teams_ui::account_prompt::{NOT_AN_ACCOUNT, SIGNING_IN};
 use teams_ui::{AccountPrompt, AccountPromptEvent, theme};
 
@@ -253,4 +253,63 @@ fn an_own_servers_account_signed_out_is_asked_for_its_password_alone(cx: &mut Te
     let asked = own(&events);
     assert_eq!(asked.len(), 1);
     assert_eq!((asked[0].server.as_str(), asked[0].user.as_str()), (SERVER, UPN));
+}
+
+/// The screen in the kit's root (Tab and Shift+Tab are its keys), own servers offered.
+fn offered_in_kit_root(cx: &mut TestAppContext) -> (Entity<AccountPrompt>, VisualTestContext) {
+    cx.update(teams_ui::window::init);
+    let mut made = None;
+    let window = cx.add_window(|window, cx| {
+        let view = cx.new(|cx| AccountPrompt::new(None, window, cx));
+        made = Some(view.clone());
+        teams_ui::window::KitRoot::new(view, window, cx)
+    });
+    let view = made.unwrap();
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    view.update(&mut cx, AccountPrompt::offer_own_server);
+    cx.run_until_parked();
+    (view, cx)
+}
+
+#[gpui::test]
+fn the_keyboard_alone_chooses_an_own_server_and_fills_its_fields(cx: &mut TestAppContext) {
+    let (view, mut cx) = offered_in_kit_root(cx);
+    let kind = |cx: &mut VisualTestContext| cx.read(|cx| view.read(cx).kind());
+    // from the account's field, Shift+Tab is on the choice (the place chosen); the arrows choose the other place
+    cx.simulate_keystrokes("shift-tab right");
+    assert_eq!(kind(&mut cx), SignInKind::OwnServer);
+    cx.simulate_keystrokes("left");
+    assert_eq!(kind(&mut cx), SignInKind::Microsoft);
+    // typing on the choice writes nowhere
+    cx.simulate_input("x");
+    assert_eq!(cx.read(|cx| view.read(cx).account(cx)), "");
+    cx.simulate_keystrokes("down");
+    assert_eq!(kind(&mut cx), SignInKind::OwnServer);
+    // Tab goes on to the fields in their order
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input(SERVER);
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input(UPN);
+    assert_eq!(
+        cx.read(|cx| view.read(cx).own_fields(cx)),
+        (SERVER.to_owned(), UPN.to_owned())
+    );
+    // back on the choice past the fields, Tab stops on the place chosen: "Own server" now
+    cx.simulate_keystrokes("shift-tab shift-tab home");
+    assert_eq!(kind(&mut cx), SignInKind::Microsoft);
+}
+
+#[gpui::test]
+fn tab_reaches_the_choice_and_enter_or_space_goes_on_to_the_first_field(cx: &mut TestAppContext) {
+    let (view, mut cx) = offered_in_kit_root(cx);
+    // Tab from the account's field: "Sign in", then round to the choice
+    cx.simulate_keystrokes("tab tab right");
+    assert_eq!(cx.read(|cx| view.read(cx).kind()), SignInKind::OwnServer);
+    cx.simulate_keystrokes("space");
+    cx.simulate_input("chat.example.test");
+    assert_eq!(cx.read(|cx| view.read(cx).own_fields(cx)).0, "chat.example.test");
+    cx.simulate_keystrokes("shift-tab left enter");
+    assert_eq!(cx.read(|cx| view.read(cx).kind()), SignInKind::Microsoft);
+    cx.simulate_input(UPN);
+    assert_eq!(cx.read(|cx| view.read(cx).account(cx)), UPN);
 }

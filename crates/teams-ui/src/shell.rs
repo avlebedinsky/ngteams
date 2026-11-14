@@ -2923,12 +2923,12 @@ impl Shell {
             index,
             key,
             name,
-            detail,
             picture,
             reporting,
             unread,
             signed_out,
             shown,
+            tip,
         } = account;
         let selector: SharedString = if shown {
             "rail-status".into()
@@ -2948,7 +2948,6 @@ impl Shell {
             }
         });
         let badge = (!shown && unread > 0).then(|| account_unread(index, unread));
-        let tip: SharedString = format!("{name}\n{detail}").into();
         div()
             .debug_selector({
                 let selector = selector.clone();
@@ -2990,9 +2989,10 @@ impl Shell {
         let account = self.accounts.as_ref().and_then(|(accounts, _)| {
             let accounts = accounts.read(cx);
             let tile = accounts.tile(self.core.me())?;
-            Some((tile.name.clone(), tile.detail.clone(), accounts.can_remove()))
+            let told_apart = (tile.name.clone(), tile.detail.clone(), tile.server.clone());
+            Some((told_apart, accounts.can_remove()))
         });
-        let header = account.as_ref().map(|(name, detail, _)| {
+        let header = account.as_ref().map(|((name, detail, server), _)| {
             div()
                 .debug_selector(|| "status-menu-account".to_owned())
                 .px_2()
@@ -3006,10 +3006,15 @@ impl Shell {
                     div()
                         .text_xs()
                         .text_color(rgb(palette.muted_foreground))
-                        .child(detail.clone()),
+                        .child(detail.clone())
+                        .children(server.clone().map(|server| {
+                            div()
+                                .debug_selector(|| "status-menu-account-server".to_owned())
+                                .child(server)
+                        })),
                 )
         });
-        let remove = account.filter(|(_, _, can_add)| *can_add).map(|_| {
+        let remove = account.filter(|(_, can_remove)| *can_remove).map(|_| {
             div()
                 .w_full()
                 .mt_1()
@@ -3482,13 +3487,24 @@ struct AccountFace {
     index: usize,
     key: String,
     name: SharedString,
-    detail: SharedString,
     picture: Option<people::Picture>,
     reporting: Option<Reporting>,
     unread: u64,
     signed_out: bool,
     /// It is the account this shell is.
     shown: bool,
+    /// What its tile says when pointed at ([`account_tip`]).
+    tip: SharedString,
+}
+
+/// What an account's rail tile says when pointed at: its name, what tells it apart, and for an own server's account
+/// its server, where Teams names an account's organization.
+#[must_use]
+pub fn account_tip(tile: &AccountTile) -> SharedString {
+    match &tile.server {
+        Some(server) => format!("{}\n{}\n{server}", tile.name, tile.detail).into(),
+        None => format!("{}\n{}", tile.name, tile.detail).into(),
+    }
 }
 
 impl AccountFace {
@@ -3497,12 +3513,12 @@ impl AccountFace {
             index,
             key: tile.key.clone(),
             name: tile.name.clone(),
-            detail: tile.detail.clone(),
             picture: tile.picture.clone(),
             reporting: tile.own_presence.as_ref().map(|own| own.read(cx).reporting(cx)),
             unread: tile.unread(cx),
             signed_out: tile.signed_out(cx),
             shown,
+            tip: account_tip(tile),
         }
     }
 }

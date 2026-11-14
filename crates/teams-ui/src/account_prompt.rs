@@ -10,10 +10,14 @@
 //! the password and asks the app to sign in there ([`AccountPromptEvent::SignInOwn`]); no Microsoft window opens for
 //! it. The password leaves the screen only in that event and is cleared from the field when a sign-in fails. An own
 //! server's account signed out is asked for its password alone ([`AccountPrompt::ask_own_again`]).
+//!
+//! **The keyboard**: Tab walks the choice, the fields and "Sign in" in the order they show. The choice is a radio
+//! group ([`crate::keyboard`]): Tab stops on the place chosen, the arrows choose the other one with the keyboard
+//! staying on it, and Enter or Space goes on to the chosen place's first field.
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, img, prelude::FluentBuilder as _, px, rgb,
     size,
 };
@@ -23,6 +27,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 
 use zeroize::Zeroizing;
 
+use crate::keyboard::{self, Handles};
 use crate::window::{KitRoot, init};
 use crate::{app_icon, theme};
 
@@ -64,6 +69,31 @@ pub const SIGNING_IN_OWN: &str = "Signing in…";
 pub enum SignInKind {
     Microsoft,
     OwnServer,
+}
+
+/// The places, in the order the choice shows them.
+const KINDS: [SignInKind; 2] = [SignInKind::Microsoft, SignInKind::OwnServer];
+
+/// Tab's order in the window: the choice, the fields (an own server's three count on from [`TAB_FIELDS`]), "Sign in".
+const TAB_CHOICE: isize = 0;
+const TAB_FIELDS: isize = 1;
+const TAB_SIGN_IN: isize = 4;
+
+impl SignInKind {
+    /// Its key, in its segment's selector.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Microsoft => "microsoft",
+            Self::OwnServer => "own",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Microsoft => "Microsoft 365",
+            Self::OwnServer => "Own server",
+        }
+    }
 }
 
 /// An own server's sign-in as the screen's fields hold it.
@@ -130,6 +160,8 @@ pub struct AccountPrompt {
     user: Entity<InputState>,
     password: Entity<InputState>,
     kind: SignInKind,
+    /// The choice's segments' focus, which the arrows move.
+    kinds: Handles,
     /// Whether the choice of where the account is shows ([`Self::offer_own_server`]), or an own server's account is
     /// asked again, its server and user name fixed ([`Self::ask_own_again`]).
     own: OwnAsk,
@@ -176,6 +208,7 @@ impl AccountPrompt {
             user,
             password,
             kind: SignInKind::Microsoft,
+            kinds: Handles::default(),
             own: OwnAsk::No,
             signing_in: false,
             problem: None,
@@ -225,17 +258,50 @@ impl AccountPrompt {
     /// Chooses where the account is and focuses its first field; nothing while a sign-in is open, or for an account
     /// asked again.
     pub fn choose(&mut self, kind: SignInKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.signing_in || self.own != OwnAsk::Choice || self.kind == kind {
+        if self.signing_in || self.own != OwnAsk::Choice {
             return;
         }
-        self.kind = kind;
-        self.problem = None;
+        self.set_kind(kind, cx);
         let first = match kind {
             SignInKind::Microsoft => &self.input,
             SignInKind::OwnServer => &self.server,
         };
         first.update(cx, |field, cx| field.focus(window, cx));
-        cx.notify();
+    }
+
+    fn set_kind(&mut self, kind: SignInKind, cx: &mut Context<Self>) {
+        if self.kind != kind {
+            self.kind = kind;
+            self.problem = None;
+            cx.notify();
+        }
+    }
+
+    /// The handle of `kind`'s segment in the choice.
+    fn kind_focus(&self, kind: SignInKind, cx: &App) -> FocusHandle {
+        self.kinds.get(kind.key(), cx).tab_index(TAB_CHOICE)
+    }
+
+    /// The choice's keys, as a radio group's: the arrows choose the other place, the keyboard on its segment; Enter
+    /// or Space goes on to the place's first field.
+    fn choice_key(&mut self, kind: SignInKind, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        if matches!(key, "enter" | "space") && !event.keystroke.modifiers.modified() {
+            cx.stop_propagation();
+            self.choose(kind, window, cx);
+            return;
+        }
+        let at = KINDS.iter().position(|shown| *shown == kind).unwrap_or(0);
+        let Some(to) = keyboard::step(event, KINDS.len(), at) else {
+            return;
+        };
+        cx.stop_propagation();
+        if self.signing_in {
+            return;
+        }
+        let kind = KINDS[to];
+        self.set_kind(kind, cx);
+        self.kind_focus(kind, cx).focus(window, cx);
     }
 
     /// What the own server's fields hold: the server's address and the user name, trimmed.
@@ -363,17 +429,23 @@ fn looks_like_account(text: &str) -> bool {
 impl AccountPrompt {
     /// The choice of where the account is: two segments, the chosen one filled.
     fn choice(&self, palette: theme::Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let segment = |key: &'static str, label: &'static str, kind: SignInKind, cx: &mut Context<Self>| {
+        let segments = KINDS.map(|kind| {
             let chosen = self.kind == kind;
+            // the ring of the keyboard's place: on the chosen segment's fill, so in the fill's text colour
+            let ring = if chosen { palette.on_brand } else { palette.brand };
             div()
-                .debug_selector(move || format!("account-prompt-kind-{key}"))
-                .id(key)
+                .debug_selector(move || format!("account-prompt-kind-{}", kind.key()))
+                .id(kind.key())
+                .track_focus(&self.kind_focus(kind, cx).tab_stop(chosen))
                 .h(px(28.0))
                 .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_md()
+                .border_2()
+                .border_color(rgb(ring).opacity(0.0))
+                .focus_visible(move |segment| segment.border_color(rgb(ring)))
                 .text_sm()
                 .cursor_pointer()
                 .when(chosen, |segment| {
@@ -385,10 +457,14 @@ impl AccountPrompt {
                 .when(!chosen, |segment| {
                     segment.hover(move |segment| segment.bg(rgb(palette.hover)))
                 })
-                .child(label)
+                .child(kind.label())
                 .on_click(cx.listener(move |this, _, window, cx| this.choose(kind, window, cx)))
-        };
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    this.choice_key(kind, event, window, cx);
+                }))
+        });
         div()
+            .debug_selector(|| "account-prompt-kind".to_owned())
             .flex()
             .items_center()
             .gap_0p5()
@@ -396,8 +472,7 @@ impl AccountPrompt {
             .rounded_lg()
             .border_1()
             .border_color(rgb(palette.border))
-            .child(segment("microsoft", "Microsoft 365", SignInKind::Microsoft, cx))
-            .child(segment("own", "Own server", SignInKind::OwnServer, cx))
+            .children(segments)
     }
 
     /// An own server's three fields, each under its name.
@@ -419,12 +494,12 @@ impl AccountPrompt {
             .child(field(
                 "server",
                 "Server address",
-                Input::new(&self.server).disabled(fixed).tab_index(1),
+                Input::new(&self.server).disabled(fixed).tab_index(TAB_FIELDS),
             ))
             .child(field(
                 "user",
                 "User name",
-                Input::new(&self.user).disabled(fixed).tab_index(2),
+                Input::new(&self.user).disabled(fixed).tab_index(TAB_FIELDS + 1),
             ))
             .child(field(
                 "password",
@@ -432,7 +507,7 @@ impl AccountPrompt {
                 Input::new(&self.password)
                     .mask_toggle()
                     .disabled(self.signing_in)
-                    .tab_index(3),
+                    .tab_index(TAB_FIELDS + 2),
             ))
     }
 
@@ -466,7 +541,7 @@ impl Render for AccountPrompt {
         let fields = match self.kind {
             SignInKind::Microsoft => div()
                 .debug_selector(|| "account-prompt-field".to_owned())
-                .child(Input::new(&self.input).disabled(self.signing_in))
+                .child(Input::new(&self.input).disabled(self.signing_in).tab_index(TAB_FIELDS))
                 .into_any_element(),
             SignInKind::OwnServer => self.own_form(palette).into_any_element(),
         };
@@ -505,6 +580,7 @@ impl Render for AccountPrompt {
                     Button::new("account-prompt-sign-in")
                         .primary()
                         .label("Sign in")
+                        .tab_index(TAB_SIGN_IN)
                         .disabled(self.signing_in)
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                 ),

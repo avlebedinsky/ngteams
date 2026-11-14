@@ -677,3 +677,45 @@ fn an_own_servers_account_names_its_server_in_its_own_settings_alone() {
     cx.run_until_parked();
     assert!(cx.debug_bounds("account-server").is_some());
 }
+
+#[test]
+fn an_own_servers_account_names_its_server_on_its_rail_tile_and_account_menu() {
+    let d = TwoAccounts::start();
+    let window = d.open();
+    let tips = d.rig.cx.read(|cx| {
+        let accounts = d.desktop.read(cx).accounts().read(cx);
+        accounts
+            .tiles()
+            .iter()
+            .map(|tile| teams_ui::shell::account_tip(tile).to_string())
+            .collect::<Vec<_>>()
+    });
+    // a, on Microsoft 365: its name and what tells it apart, as before own servers
+    assert_eq!(tips[0].lines().count(), 2, "{tips:?}");
+    // b, on its own server: its server under them
+    assert_eq!(tips[1].lines().nth(2), Some("chat.example.test:8443"), "{tips:?}");
+    assert_eq!(tips[1].lines().count(), 3, "{tips:?}");
+
+    let toggle_menu = || {
+        d.rig.cx.update(|cx| {
+            let shell = window::content(window, cx)
+                .unwrap()
+                .read(cx)
+                .shell_in(cx)
+                .unwrap()
+                .clone();
+            shell.update(cx, teams_ui::Shell::toggle_status_menu);
+        });
+        d.rig.cx.run_until_parked();
+    };
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), &d.rig.cx);
+    toggle_menu();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-menu-account").is_some(), "a's account menu");
+    assert!(cx.debug_bounds("status-menu-account-server").is_none());
+    toggle_menu();
+    d.switch(LAB_B);
+    toggle_menu();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-menu-account-server").is_some());
+}
