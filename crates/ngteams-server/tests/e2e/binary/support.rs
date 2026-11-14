@@ -121,13 +121,22 @@ impl Node {
     }
 
     pub async fn start(&mut self) {
+        self.start_with_log(Stdio::null()).await;
+    }
+
+    /// Starts it with its log (standard error) written to `log`.
+    pub async fn start_logged(&mut self, log: &Path) {
+        self.start_with_log(std::fs::File::create(log).unwrap().into()).await;
+    }
+
+    async fn start_with_log(&mut self, log: Stdio) {
         assert!(self.process.is_none());
         self.process = Some(
             self.command()
                 .arg("serve")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(log)
                 .spawn()
                 .unwrap(),
         );

@@ -1,6 +1,7 @@
 //! Operator commands and native client sessions against real server processes; all accounts are synthetic.
 
 mod chats;
+mod setup;
 mod support;
 
 use std::time::Duration;

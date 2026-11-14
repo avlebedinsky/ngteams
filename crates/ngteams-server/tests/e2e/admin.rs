@@ -6,7 +6,7 @@ use teams_auth::token::Scope;
 
 use crate::support::{Backend, PASSWORD, TestServer};
 
-async fn cli(server: &TestServer, args: &[&str], input: &str) -> Result<String, ngteams_server::cli::CliError> {
+pub async fn cli(server: &TestServer, args: &[&str], input: &str) -> Result<String, ngteams_server::cli::CliError> {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("server.toml");
     std::fs::write(

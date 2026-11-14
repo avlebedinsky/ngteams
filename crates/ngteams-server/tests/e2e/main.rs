@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 mod admin;
+mod admin_api;
 mod authz;
 #[cfg(target_os = "linux")]
 mod binary;
