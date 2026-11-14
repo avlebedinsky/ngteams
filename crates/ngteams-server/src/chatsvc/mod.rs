@@ -27,13 +27,8 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use crate::app::App;
-use crate::auth::extract::{Audience, Bearer};
+use crate::auth::extract::{Bearer, Ic3};
 use crate::db::{DbError, users};
-
-struct Ic3;
-impl Audience for Ic3 {
-    const AUDIENCE: &'static str = "https://ic3.teams.office.com";
-}
 
 pub(super) fn router() -> Router<Arc<App>> {
     Router::new()

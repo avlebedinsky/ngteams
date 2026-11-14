@@ -3,6 +3,7 @@
 
 mod connect;
 mod deliveries;
+mod gaps;
 mod nodes;
 mod refusals;
 mod replay;

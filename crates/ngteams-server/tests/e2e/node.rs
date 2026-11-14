@@ -143,6 +143,7 @@ fn the_configuration_refuses_bad_names_databases_and_lifetimes() {
         ConfigError::Lifetime
     ));
     assert!(matches!(refused(|c| c.login.window = 0), ConfigError::Lifetime));
+    assert!(matches!(refused(|c| c.trouter.auth_timeout = 0), ConfigError::Lifetime));
 }
 
 #[tokio::test(flavor = "multi_thread")]

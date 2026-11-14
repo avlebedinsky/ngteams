@@ -202,7 +202,9 @@ pub enum ConfigError {
     Region,
     #[error("database_url must start with postgres:// or sqlite://")]
     Database,
-    #[error("tokens' lifetimes and the login and setup windows must be above zero")]
+    #[error(
+        "tokens' lifetimes, the login and setup windows and the push socket's authentication time must be above zero"
+    )]
     Lifetime,
 }
 
@@ -259,6 +261,7 @@ impl Config {
             || self.tokens.key_rotation == 0
             || self.login.window == 0
             || self.setup.window == 0
+            || self.trouter.auth_timeout == 0
         {
             return Err(ConfigError::Lifetime);
         }

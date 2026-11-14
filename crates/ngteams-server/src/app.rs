@@ -90,7 +90,12 @@ impl App {
                     Throttle::local(setup_limits),
                 ),
             };
-        let fanout: Arc<dyn Fanout> = Arc::new(Keeping::new(fanout, Arc::clone(&journal), crate::trouter::keep));
+        let fanout: Arc<dyn Fanout> = Arc::new(Keeping::new(
+            fanout,
+            Arc::clone(&journal),
+            crate::trouter::keep,
+            crate::trouter::unkept,
+        ));
         let storage = Arc::new(ObjectStorage::open(&config.storage_url, &config.storage_options)?);
         Ok(Arc::new(Self {
             config,

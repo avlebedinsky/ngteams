@@ -145,7 +145,7 @@ async fn an_endpoint_whose_cursor_is_older_than_the_journal_keeps_is_told_of_a_l
         pair.server
             .app
             .journal
-            .set_cursor(&endpoint, EntryId { ms: hour_ago, seq: 0 })
+            .set_cursor(&format!("push:{}", b.mri), &endpoint, EntryId { ms: hour_ago, seq: 0 })
             .await
             .unwrap();
         let mut push = super::Push(trouter.spawn());

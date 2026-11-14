@@ -3,6 +3,7 @@
 use diesel::prelude::*;
 use diesel_async::{AsyncConnection as _, RunQueryDsl};
 
+use crate::db::schema::users;
 use crate::db::{Db, DbError, with_conn};
 
 diesel::table! {
@@ -40,6 +41,11 @@ pub(super) async fn put(db: &Db, registration: &Registration, most: i64) -> Resu
     let now = crate::db::now();
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
+            // holds the account's row, so two nodes can't both count the last free place
+            diesel::update(users::table.find(&registration.user_id))
+                .set(users::disabled.eq(users::disabled))
+                .execute(conn)
+                .await?;
             diesel::delete(
                 dsl::push_registrations
                     .filter(dsl::user_id.eq(&registration.user_id))

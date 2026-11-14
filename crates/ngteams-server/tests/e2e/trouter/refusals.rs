@@ -74,7 +74,7 @@ impl Raw {
             .expect("no frame in time")
     }
 
-    async fn next_within(&mut self, wait: Duration) -> Result<Option<String>, tokio::time::error::Elapsed> {
+    pub(super) async fn next_within(&mut self, wait: Duration) -> Result<Option<String>, tokio::time::error::Elapsed> {
         tokio::time::timeout(wait, async {
             loop {
                 match self.0.next().await {
@@ -258,9 +258,13 @@ async fn the_socket_answers_keep_alives_takes_answers_and_closes_when_its_token_
 async fn a_newer_socket_of_an_endpoint_replaces_the_older_one_and_a_stopping_node_closes_its_sockets() {
     for backend in backends() {
         let server = server(backend).await;
-        server.add_user("a@own.test", "Ada").await;
+        let id = server.add_user("a@own.test", "Ada").await;
         let ic3 = token(&server, "a@own.test", IC3).await;
         let q = query(EPID, "TeamsCDL");
+        // registered, so its cursor is kept and its reconnect misses nothing
+        let own = push_url(ORIGIN, &endpoint_id(&id, EPID, Stack::Messaging));
+        let body = registration("TeamsCDLWebWorker", EPID, &own, 3600);
+        assert_eq!(register(&server, Some(&ic3), &body).await, 202);
         let mut first = Raw::open(&server, &q).await;
         let info = first.connect(&ic3).await;
         let mut other = Raw::open(&server, &query("00000000-0000-4000-8000-0000000000e2", "TeamsCDL")).await;
@@ -421,35 +425,50 @@ async fn the_registrar_takes_only_an_accounts_own_endpoints() {
             .await,
             202
         );
-        // ones that ran out are dropped by the node's housekeeping
+        // one that ran out is dropped by the node's housekeeping, the two that hold are left
+        let brief = "00000000-0000-4000-8000-0000000000e5";
+        let path = push_url(ORIGIN, &endpoint_id(&a, brief, Stack::Messaging));
+        let body = registration("TeamsCDLWebWorker", brief, &path, 1);
+        assert_eq!(register(&server, Some(&ic3), &body).await, 202);
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        ngteams_server::app::tidy(&server.app).await;
         assert_eq!(
             ngteams_server::registrar::purge_expired(&server.app.db, ngteams_server::db::now() + 7200)
                 .await
                 .unwrap(),
             2
         );
-        ngteams_server::app::tidy(&server.app).await;
         server.stop().await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_account_holds_only_so_many_registrations() {
-    let server = server(Backend::Sqlite).await;
-    let a = server.add_user("a@own.test", "Ada").await;
-    let ic3 = token(&server, "a@own.test", IC3).await;
-    let body = |n: i64| {
-        let epid = format!("00000000-0000-4000-8000-{n:012x}");
-        let path = push_url(ORIGIN, &endpoint_id(&a, &epid, Stack::Messaging));
-        registration("TeamsCDLWebWorker", &epid, &path, 3600)
-    };
-    for n in 0..ngteams_server::registrar::MAX_REGISTRATIONS {
-        assert_eq!(register(&server, Some(&ic3), &body(n)).await, 202);
+    for backend in backends() {
+        let server = server(backend).await;
+        let a = server.add_user("a@own.test", "Ada").await;
+        let ic3 = token(&server, "a@own.test", IC3).await;
+        let body = |n: i64| {
+            let epid = format!("00000000-0000-4000-8000-{n:012x}");
+            let path = push_url(ORIGIN, &endpoint_id(&a, &epid, Stack::Messaging));
+            registration("TeamsCDLWebWorker", &epid, &path, 3600)
+        };
+        let free = 4;
+        for n in 0..ngteams_server::registrar::MAX_REGISTRATIONS - free {
+            assert_eq!(register(&server, Some(&ic3), &body(n)).await, 202);
+        }
+        // requests at once take the places left and no more
+        let bodies: Vec<Value> = (100..112).map(body).collect();
+        let at_once = bodies.iter().map(|body| register(&server, Some(&ic3), body));
+        let answers = futures_util::future::join_all(at_once).await;
+        let taken = answers.iter().filter(|status| **status == 202).count();
+        assert_eq!(i64::try_from(taken).unwrap(), free, "{answers:?}");
+        assert!(answers.iter().all(|status| [202, 429].contains(status)), "{answers:?}");
+        assert_eq!(register(&server, Some(&ic3), &body(1000)).await, 429);
+        // one it holds already is renewed all the same
+        assert_eq!(register(&server, Some(&ic3), &body(3)).await, 202);
+        server.stop().await;
     }
-    assert_eq!(register(&server, Some(&ic3), &body(1000)).await, 429);
-    // one it holds already is renewed all the same
-    assert_eq!(register(&server, Some(&ic3), &body(3)).await, 202);
-    server.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

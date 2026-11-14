@@ -2,10 +2,13 @@
 //! topic, on any node. [`Local`] is one process's broadcast (a single node, SQLite); [`Redis`] carries it through Redis
 //! pub/sub to every node, each node's subscribers fed from one Redis subscription per topic. Delivery is at most once:
 //! a subscriber that falls behind learns how much it missed ([`Missed`]), and replays from the topic's [`journal`].
+//! What is published while a node's Redis subscription is down reaches none of its subscribers and none is told, so
+//! the node counts those breaks ([`Fanout::breaks`]) for a subscriber to hold its own count against.
 
 pub mod journal;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -52,6 +55,12 @@ pub trait Fanout: Send + Sync + std::fmt::Debug {
 
     /// Whether it can deliver (readiness).
     async fn ready(&self) -> Result<(), FanoutError>;
+
+    /// How often this node's subscriptions were cut off and came back: a subscriber that sees the count move may
+    /// have missed payloads without a [`Missed`].
+    fn breaks(&self) -> u64 {
+        0
+    }
 }
 
 /// One subscriber's payloads.
@@ -81,9 +90,22 @@ impl Subscription {
 
 /// The topics a node delivers to, each a broadcast channel.
 #[derive(Debug, Default)]
-struct Topics(Mutex<HashMap<String, broadcast::Sender<Bytes>>>);
+struct Topics(Mutex<HashMap<String, broadcast::Sender<Bytes>>>, AtomicU64);
 
 impl Topics {
+    /// A push of the node's Redis subscription: a message is delivered, a lost connection counted.
+    fn pushed(&self, push: PushInfo) {
+        if push.kind == PushKind::Disconnection {
+            self.1.fetch_add(1, Ordering::Relaxed);
+        } else if let Some((topic, payload)) = message(push) {
+            self.deliver(&topic, payload);
+        }
+    }
+
+    fn breaks(&self) -> u64 {
+        self.1.load(Ordering::Relaxed)
+    }
+
     /// A receiver of `topic`, and whether it is the topic's first.
     fn receiver(&self, topic: &str) -> (broadcast::Receiver<Bytes>, bool) {
         let mut topics = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -215,9 +237,7 @@ impl Redis {
         tokio::spawn(async move {
             while let Some(push) = received.recv().await {
                 let Some(inner) = delivering.upgrade() else { break };
-                if let Some((topic, payload)) = message(push) {
-                    inner.topics.deliver(&topic, payload);
-                }
+                inner.topics.pushed(push);
             }
         });
         Ok(Self { inner })
@@ -262,6 +282,10 @@ impl Fanout for Redis {
         redis::cmd("PING").query_async::<()>(&mut commands).await?;
         Ok(())
     }
+
+    fn breaks(&self) -> u64 {
+        self.inner.topics.breaks()
+    }
 }
 
 /// The URL with `protocol=resp3`, which pushes need.
@@ -301,6 +325,38 @@ mod tests {
         let (_receiver, first) = topics.receiver("push:gone");
         assert!(first);
         assert!(!topics.release("push:gone"));
+    }
+
+    #[tokio::test]
+    async fn a_lost_redis_subscription_is_counted_and_its_messages_are_delivered() {
+        let topics = Topics::default();
+        let (mut receiver, _) = topics.receiver("push:a");
+        let message = |payload: &[u8]| PushInfo {
+            kind: PushKind::Message,
+            data: vec![
+                Value::BulkString(b"push:a".to_vec()),
+                Value::BulkString(payload.to_vec()),
+            ],
+        };
+        topics.pushed(message(b"one"));
+        assert_eq!(receiver.recv().await.unwrap(), Bytes::from_static(b"one"));
+        assert_eq!(topics.breaks(), 0);
+        topics.pushed(PushInfo {
+            kind: PushKind::Disconnection,
+            data: Vec::new(),
+        });
+        assert_eq!(topics.breaks(), 1);
+        // a push that is no message of a topic is dropped
+        topics.pushed(PushInfo {
+            kind: PushKind::Message,
+            data: vec![Value::Nil],
+        });
+        topics.pushed(PushInfo {
+            kind: PushKind::Subscribe,
+            data: Vec::new(),
+        });
+        assert!(receiver.is_empty());
+        assert_eq!(Local::new().breaks(), 0);
     }
 
     #[tokio::test]

@@ -9,7 +9,8 @@
 //! (`trouter.message_loss`); typing only to the sockets open now.
 //!
 //! Nodes tell an account's sockets apart from its events on the control topic `trouter:<mri>`: a registration the
-//! registrar took, a newer socket of the same endpoint (the older one closes), a disconnect.
+//! registrar took, a newer socket of the same endpoint (the older one closes), an event the journal couldn't keep
+//! (the clients are told of a loss), a disconnect.
 
 mod delivery;
 mod frames;
@@ -26,6 +27,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine as _;
+use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -39,8 +41,6 @@ pub use delivery::keep;
 use crate::app::App;
 use crate::fanout::FanoutError;
 
-/// The audience of the token a socket authenticates with, and the registrar takes.
-pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
 /// The connect path.
 pub const CONNECT_PATH: &str = "/trouter/v4/c";
 /// The sockets one account may hold open on a node.
@@ -119,8 +119,11 @@ pub fn control_topic(mri: &str) -> String {
 pub enum Control {
     /// The registrar took `endpoint`'s registration, good until `until` (Unix seconds).
     Registered { endpoint: String, until: i64 },
-    /// The socket `socket` now serves `endpoint`: any other socket of it closes.
-    Replaced { endpoint: String, socket: String },
+    /// The socket `socket` serves `endpoint` since `at` (Unix milliseconds): the endpoint's sockets from before it
+    /// close, and one from after it says so in turn.
+    Replaced { endpoint: String, socket: String, at: u64 },
+    /// An event of the account wasn't kept in its journal: its messaging sockets tell their clients of a loss.
+    Lost,
     /// Every socket of the account closes, telling the client `reason` when there is one.
     Disconnect { reason: Option<String> },
 }
@@ -134,8 +137,17 @@ pub async fn tell(app: &App, mri: &str, control: &Control) -> Result<(), FanoutE
     app.fanout.publish(&control_topic(mri), payload.into()).await
 }
 
+/// The fan-out's word ([`crate::fanout::journal::Unkept`]) for an account's event its journal didn't keep.
+#[must_use]
+pub fn unkept(topic: &str) -> Option<(String, Bytes)> {
+    let mri = topic.strip_prefix("push:")?;
+    let lost = serde_json::to_vec(&Control::Lost).ok()?;
+    Some((control_topic(mri), lost.into()))
+}
+
 /// Disconnects `mri`'s sockets on every node, with `reason` as the client reads it: `unauthorized` makes it come
-/// back at once with a new token, any other after its backoff.
+/// back at once with a new token and `dup` at once with the one it has, `skypetoken-deprecated` stops it for good,
+/// and after any other it waits out its backoff.
 ///
 /// # Errors
 /// The fan-out is unavailable.
@@ -307,6 +319,14 @@ mod tests {
         assert_eq!(Stack::of_app("SkypeSpacesWeb"), Some(Stack::Calling));
         assert_eq!(Stack::of_app("TeamsCDLWebWorker"), Some(Stack::Messaging));
         assert_eq!(Stack::of_app("Other"), None);
+    }
+
+    #[test]
+    fn only_an_accounts_events_have_a_word_for_one_that_was_not_kept() {
+        let (topic, word) = unkept("push:8:orgid:a").unwrap();
+        assert_eq!(topic, "trouter:8:orgid:a");
+        assert_eq!(serde_json::from_slice::<Control>(&word).unwrap(), Control::Lost);
+        assert!(unkept("trouter:8:orgid:a").is_none());
     }
 
     #[test]

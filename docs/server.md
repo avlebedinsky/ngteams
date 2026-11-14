@@ -254,8 +254,8 @@ messages (`ThreadActivity/…`) for a team's changes.
 
 ## Prefix table
 
-Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now and authz
-hands out its GTM.
+Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now, and authz
+hands out its GTM where it has one.
 
 | Service | GTM | Path under the origin | Served |
 |---|---|---|---|
@@ -292,8 +292,9 @@ public origin is refused.
 - **Endpoint.** `trouter.connected` names the endpoint, its push URL (`<origin>/trouter/v4/f/<endpoint>/`), the
   `reconnectUrl` on the same origin and `connectparams` valid for seven days. The endpoint id is derived from the
   account, the client's `epid` and its stack, so the same client gets the same endpoint on every connect and on
-  every node, and `connectparams` carry no secret. A newer socket of an endpoint closes the older one. An account
-  holds at most 32 sockets on a node.
+  every node, and `connectparams` carry no secret. Of an endpoint's sockets the one that claimed it last stays: a
+  socket announces its claim with its time once it listens, an older socket closes, and a newer one that hears an
+  older claim announces its own again. An account holds at most 32 sockets on a node.
 - **Registrar.** `POST /registrar/prod/V2/registrations` with the `ic3` token takes either stack's registration
   (`TeamsCDLWebWorker`, `SkypeSpacesWeb`) and answers `202`. The push URL must be the caller's own endpoint for that
   `registrationId` and stack (else `403`). The TTL is at most 3600 seconds. A registration is a row in
@@ -308,12 +309,23 @@ public origin is refused.
   intervals and 20 seconds is closed.
 - **Replay.** Every delivered event but typing (and other `Control/…` messages) is also kept in the account's
   journal for 15 minutes, at most 512 entries: a Redis Stream `journal:push:<mri>`, or memory on a single node. Each
-  endpoint keeps a cursor (`cursor:<endpoint>`, 24 hours). A socket delivers from its endpoint's cursor, so after a
-  reconnect, on any node, the endpoint gets what it missed as stored deliveries (`"mstore":true`, the same `id` as
-  the live one would have had), in order and once. A new endpoint starts at the journal's end.
-- **Message loss.** When entries after the cursor may be gone (the journal overflowed, the cursor is older than 15
-  minutes with nothing left to prove otherwise, or a reconnecting endpoint has no cursor), the socket gets
-  `trouter.message_loss` with the `messaging` tag. The client runs its conversation sync and acknowledges.
+  registered endpoint keeps a cursor, the last entry written to its socket, for 24 hours: a field of the account's
+  hash `cursors:push:<mri>`, which holds the 64 cursors that moved last. A socket delivers from its endpoint's
+  cursor, so after a reconnect, on any node, the endpoint gets what it missed as stored deliveries (`"mstore":true`,
+  the same `id` as the live one would have had), in order, each written to a socket once. The cursor is kept after
+  each batch and when the socket ends; only a node that dies mid-batch replays that batch. A new endpoint starts at
+  the journal's end.
+- **Message loss.** The socket gets `trouter.message_loss` with the `messaging` tag, and the client runs its
+  conversation sync and acknowledges, when entries after the cursor may be gone:
+  - the journal overflowed past the cursor;
+  - the endpoint was away, or unregistered while an event came, and its cursor is older than 15 minutes with
+    nothing left to prove otherwise (a socket that followed its account is not told after a quiet spell);
+  - a reconnecting endpoint has no cursor;
+  - the journal couldn't keep an event (Redis refused it): the account's sockets are told on the control topic;
+  - the socket missed control words, or the node's Redis subscription was cut off since the socket last read the
+    journal.
+- **A slow reader.** A replay ends, like the socket, when the token runs out, the node stops or the control topic
+  says so, however slowly the client reads.
 - **Shutdown.** A node closes its sockets with `0::` when it stops; clients reconnect to another node after their
   backoff. `ngteams_server::trouter::disconnect` closes an account's sockets on every node.
 
@@ -362,9 +374,9 @@ shape that the client treats as empty preferences.
   from it. Without Redis the same `Fanout` trait is one process's broadcast.
 - Delivery through the fan-out is at most once. A subscriber that falls behind learns how many payloads it missed.
 - A Trouter socket lives on one node. Its node subscribes to the account's `push:<mri>` and `trouter:<mri>` (control:
-  a registration taken, a socket replaced, a disconnect) topics. A kept event is appended to the account's journal
-  before it is published, so the node that is woken reads it there, in order; a socket that lagged or reconnected
-  reads from its endpoint's cursor. Registrations are rows, so any node takes one and any node reads it.
+  a registration taken, a socket's claim to its endpoint, an event the journal didn't keep, a disconnect) topics. A
+  kept event is appended to the account's journal before it is published, so the node that is woken reads it there,
+  in order; a socket that lagged or reconnected reads from its endpoint's cursor. Registrations are rows, so any node takes one and any node reads it.
 - Signing keys are rows in the database. A node rotates the key when it is due (checked hourly) and drops keys that
   can no longer verify a live token. Retired keys are kept for the access lifetime plus three hourly reload intervals
   and the verifier's 60-second clock allowance, covering two missed maintenance checks. Nodes that cannot reload
