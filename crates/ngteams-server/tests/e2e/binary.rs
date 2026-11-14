@@ -2,6 +2,7 @@
 
 mod admin_api;
 mod chats;
+mod push;
 mod setup;
 mod support;
 mod teams;
