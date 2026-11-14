@@ -342,7 +342,7 @@ async fn concurrent_password_guesses_reserve_the_login_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_successor_inserted_after_revocation_cannot_refresh() {
     use base64::Engine as _;
-    use ngteams_server::db::{refresh, users};
+    use ngteams_server::db::refresh;
     use sha2::{Digest as _, Sha256};
     for backend in backends() {
         for family_only in [true, false] {
@@ -361,7 +361,7 @@ async fn a_successor_inserted_after_revocation_cannot_refresh() {
                     .await
                     .unwrap();
             } else {
-                users::set_password(&server.app.db, UPN, "replacement hash")
+                ngteams_server::admin::reset_password(&server.app.db, UPN, "a replacement password")
                     .await
                     .unwrap();
             }

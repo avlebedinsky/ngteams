@@ -240,6 +240,27 @@ async fn only_an_admin_reaches_the_admin_api() {
     }
 }
 
+/// Search in names and UPNs, any case (also beyond ASCII); a wildcard is a plain character.
+async fn search_finds_names_and_upns(server: &TestServer, root: &str, backend: Backend) {
+    add(server, root, "zoe@own.test", "Élodie Šarūnas").await;
+    for (query, found) in [
+        ("élodie", vec!["zoe@own.test"]),
+        ("ÉLODIE", vec!["zoe@own.test"]),
+        ("šARŪ", vec!["zoe@own.test"]),
+        ("LOVE", vec!["ada@own.test"]),
+        ("gra", vec!["grace@own.test"]),
+        (
+            "own.test&limit=3",
+            vec!["ada@own.test", "alan@own.test", "grace@own.test"],
+        ),
+        ("a%25", vec![]),
+        ("_", vec![]),
+    ] {
+        let (status, matches) = call(server, Method::GET, &format!("{USERS}?q={query}"), Some(root), None).await;
+        assert_eq!((status, upns(&matches)), (200, found), "{backend:?} {query}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_admin_adds_finds_and_reads_accounts() {
     for backend in backends() {
@@ -308,20 +329,7 @@ async fn an_admin_adds_finds_and_reads_accounts() {
         let (_, last) = call(&server, Method::GET, &page, Some(&root), None).await;
         assert_eq!((upns(&last), &last["next"]), (vec![ROOT], &Value::Null));
 
-        // search in names and UPNs, any case; a wildcard is a plain character
-        for (query, found) in [
-            ("LOVE", vec!["ada@own.test"]),
-            ("gra", vec!["grace@own.test"]),
-            (
-                "own.test&limit=3",
-                vec!["ada@own.test", "alan@own.test", "grace@own.test"],
-            ),
-            ("a%25", vec![]),
-            ("_", vec![]),
-        ] {
-            let (status, matches) = call(&server, Method::GET, &format!("{USERS}?q={query}"), Some(&root), None).await;
-            assert_eq!((status, upns(&matches)), (200, found), "{backend:?} {query}");
-        }
+        search_finds_names_and_upns(&server, &root, backend).await;
 
         let (status, one) = call(&server, Method::GET, &user_path(&ada_id), Some(&root), None).await;
         assert_eq!((status, &one), (200, ada));
@@ -396,6 +404,57 @@ async fn an_admin_changes_an_account() {
         let nobody = user_path("no-such-id");
         let (status, answer) = call(&server, Method::PATCH, &nobody, Some(&root), Some(json!({}))).await;
         assert_eq!((status, error_code(&answer)), (404, "NotFound"));
+        server.stop().await;
+    }
+}
+
+/// Whether exactly one of two answers succeeded.
+fn one_succeeded(first: u16, second: u16) -> bool {
+    (first < 300) != (second < 300)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_admins_removing_each_other_at_once_leave_one() {
+    use ngteams_server::admin::{repo, set_admin};
+    for backend in backends() {
+        let server = TestServer::start(backend).await;
+        let root = first_admin(&server).await;
+        let root_path = user_path(&my_id(&server, &root).await);
+        let bob_path = user_path(&add(&server, &root, BOB, "Bob").await);
+        let bob = bearer(&server, BOB, PASSWORD).await;
+        let demote = || Some(json!({"admin": false}));
+
+        for round in 0..6 {
+            set_admin(&server.app.db, ROOT, true).await.unwrap();
+            set_admin(&server.app.db, BOB, true).await.unwrap();
+            let ((first, _), (second, _)) = tokio::join!(
+                call(&server, Method::PATCH, &bob_path, Some(&root), demote()),
+                call(&server, Method::PATCH, &root_path, Some(&bob), demote()),
+            );
+            assert!(one_succeeded(first, second), "{backend:?} {round}: {first} {second}");
+            assert_eq!(repo::admins(&server.app.db).await.unwrap(), 1, "{backend:?} {round}");
+        }
+
+        set_admin(&server.app.db, ROOT, true).await.unwrap();
+        set_admin(&server.app.db, BOB, false).await.unwrap();
+        for round in 0..4 {
+            let upn = format!("eve{round}@own.test");
+            let eve = json!({"upn": upn, "password": PASSWORD, "admin": true});
+            let (status, eve) = call(&server, Method::POST, USERS, Some(&root), Some(eve)).await;
+            assert_eq!(status, 201, "{eve}");
+            let eve_path = user_path(eve["id"].as_str().unwrap());
+            let eve = bearer(&server, &upn, PASSWORD).await;
+            let ((first, _), (second, _)) = tokio::join!(
+                call(&server, Method::DELETE, &eve_path, Some(&root), None),
+                call(&server, Method::PATCH, &root_path, Some(&eve), demote()),
+            );
+            assert!(one_succeeded(first, second), "{backend:?} {round}: {first} {second}");
+            assert_eq!(repo::admins(&server.app.db).await.unwrap(), 1, "{backend:?} {round}");
+            set_admin(&server.app.db, ROOT, true).await.unwrap();
+            if second < 300 {
+                set_admin(&server.app.db, &upn, false).await.unwrap();
+            }
+        }
         server.stop().await;
     }
 }

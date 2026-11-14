@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use super::{Actor, AdminError, Changes};
 use crate::db::schema::{admin_audit, refresh_tokens, server_meta, users};
 use crate::db::users::User;
-use crate::db::{Db, DbError, conflict, now, with_conn};
+use crate::db::{Db, DbError, conflict, lower, now, with_conn};
 
 /// The `server_meta` row the guarded changes lock (made by the migration).
 const ADMIN_LOCK: &str = "admin_lock";
@@ -17,11 +17,6 @@ const ADMIN_LOCK: &str = "admin_lock";
 const SETUP_CODE: &str = "setup_code";
 /// The name a deleted account keeps for what it authored.
 pub const DELETED_NAME: &str = "Deleted user";
-
-diesel::define_sql_function! {
-    /// SQL `lower`.
-    fn lower(text: diesel::sql_types::Text) -> diesel::sql_types::Text;
-}
 
 /// An account to add, checked and with its password hashed.
 #[derive(Clone)]

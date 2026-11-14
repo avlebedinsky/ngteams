@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use ngteams_server::admin::{self, Actor, NewAccount};
 use ngteams_server::app::{self, App};
 use ngteams_server::config::Config;
 use ngteams_server::serve::Listener;
@@ -129,10 +130,14 @@ impl TestServer {
 
     /// Adds an account with [`PASSWORD`]; its object id.
     pub async fn add_user(&self, upn: &str, name: &str) -> String {
-        ngteams_server::admin::add_user(&self.app.db, upn, name, PASSWORD)
-            .await
-            .unwrap()
-            .id
+        let new = NewAccount {
+            upn,
+            display_name: name,
+            password: PASSWORD,
+            admin: false,
+            must_change_password: false,
+        };
+        admin::create_user(&self.app.db, Actor::CLI, &new).await.unwrap().id
     }
 
     /// The client's token client with this server as its authority.

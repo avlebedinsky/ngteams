@@ -245,21 +245,6 @@ async fn id_of(db: &Db, upn: &str) -> Result<String, AdminError> {
         .ok_or(AdminError::NoSuchUser)
 }
 
-/// Adds an account that is no admin (the command line, tests).
-///
-/// # Errors
-/// As [`create_user`].
-pub async fn add_user(db: &Db, upn: &str, display_name: &str, password: &str) -> Result<User, AdminError> {
-    let new = NewAccount {
-        upn,
-        display_name,
-        password,
-        admin: false,
-        must_change_password: false,
-    };
-    create_user(db, Actor::CLI, &new).await
-}
-
 /// Disables (signing it out everywhere) or enables the account with this UPN (the command line).
 ///
 /// # Errors

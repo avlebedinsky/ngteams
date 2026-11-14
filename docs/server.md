@@ -132,7 +132,7 @@ now gets 403 `NotAdmin` (or `AccountDisabled`), whatever its token's `roles` say
 
 | Request | Does | Answers |
 |---|---|---|
-| `GET /api/admin/v1/users?q=&after=&limit=` | lists accounts by UPN. `q` matches a part of the UPN or name, any case. `limit` is 1–200 (default 50). `after` is the previous page's `next` | 200 `{"users": [account], "next": upn or null}` |
+| `GET /api/admin/v1/users?q=&after=&limit=` | lists accounts by UPN. `q` matches a part of the UPN or name, any case (on Postgres a name's case folds as the database's locale does). `limit` is 1–200 (default 50). `after` is the previous page's `next` | 200 `{"users": [account], "next": upn or null}` |
 | `POST /api/admin/v1/users` | adds an account: `upn`, `password`, optional `display_name` (default: the UPN), `admin`, `must_change_password` | 201 account |
 | `GET /api/admin/v1/users/{id}` | reads an account | 200 account |
 | `PATCH /api/admin/v1/users/{id}` | changes any of `display_name`, `upn`, `enabled`, `admin` (assign or remove an admin). `enabled: false` signs the account out everywhere | 200 account |

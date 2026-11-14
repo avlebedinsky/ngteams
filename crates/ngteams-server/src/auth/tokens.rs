@@ -25,9 +25,9 @@ use crate::db::{now, seconds, unix};
 pub const SKYPETOKEN_AUDIENCE: &str = "urn:ngteams-server:skypetoken";
 /// Clock skew allowed when checking a token's times.
 pub(crate) const LEEWAY: u64 = 60;
-/// Scopes asked with every resource, which name no resource.
 /// The role an admin's tokens name.
 pub const ADMIN_ROLE: &str = "admin";
+/// Scopes asked with every resource, which name no resource.
 const SIGN_IN_SCOPES: [&str; 4] = ["openid", "profile", "offline_access", "email"];
 
 /// An access token's claims.

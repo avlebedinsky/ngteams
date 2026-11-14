@@ -6,6 +6,9 @@
 //! connection; SQLite through Diesel's own connection on the blocking pool, one connection per node (its writes
 //! serialize anyway, and a single writer never meets `SQLITE_BUSY`). Foundation times are Unix seconds; chat
 //! arrival times and versions are Unix milliseconds.
+//!
+//! SQLite's own `lower` folds ASCII only, so each SQLite connection replaces it with Rust's Unicode one: a
+//! case-insensitive match written with [`lower`] then finds "Élodie" on both backends.
 
 pub mod keys;
 pub mod meta;
@@ -177,7 +180,12 @@ impl Db {
     }
 }
 
-/// A SQLite connection with foreign keys on, WAL and a busy timeout.
+diesel::define_sql_function! {
+    /// SQL `lower`, Unicode-aware on both backends (Postgres: as the database's locale folds).
+    fn lower(text: diesel::sql_types::Text) -> diesel::sql_types::Text;
+}
+
+/// A SQLite connection with foreign keys on, WAL, a busy timeout and the Unicode `lower`.
 fn sqlite_setup(path: &str) -> BoxFuture<'_, diesel::ConnectionResult<Sqlite>> {
     async move {
         let mut connection = Sqlite::establish(path).await?;
@@ -185,6 +193,10 @@ fn sqlite_setup(path: &str) -> BoxFuture<'_, diesel::ConnectionResult<Sqlite>> {
             .batch_execute(&format!(
                 "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};"
             ))
+            .await
+            .map_err(ConnectionError::CouldntSetupConfiguration)?;
+        connection
+            .spawn_blocking(|sqlite| lower_utils::register_impl(sqlite, |text: String| text.to_lowercase()))
             .await
             .map_err(ConnectionError::CouldntSetupConfiguration)?;
         Ok(connection)
