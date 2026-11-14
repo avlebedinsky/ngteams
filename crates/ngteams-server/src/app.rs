@@ -12,7 +12,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::keys::{KeyError, KeyRing};
 use crate::auth::tokens::Issuer;
-use crate::config::Config;
+use crate::config::{Config, LoginConfig};
 use crate::db::{Db, DbError};
 use crate::fanout::{Fanout, FanoutError, Local, Redis};
 use crate::storage::{ObjectStorage, Storage, StorageError};
@@ -34,6 +34,8 @@ pub struct App {
     pub db: Db,
     pub issuer: Issuer,
     pub throttle: Throttle,
+    /// First-admin setup attempts per client address.
+    pub setup_throttle: Throttle,
     pub fanout: Arc<dyn Fanout>,
     pub storage: Arc<dyn Storage>,
 }
@@ -63,13 +65,22 @@ impl App {
         let keep = config.tokens.access() + 3 * MAINTENANCE + Duration::from_secs(crate::auth::tokens::LEEWAY);
         let keys = KeyRing::load(db.clone(), config.tokens.rotation(), keep).await?;
         let issuer = Issuer::new(keys, &config.origin(), &tenant, &config.region, config.tokens.access());
-        let (fanout, throttle): (Arc<dyn Fanout>, Throttle) = match &config.redis_url {
+        let setup_limits = LoginConfig {
+            max_failures: config.setup.max_attempts,
+            window: config.setup.window,
+        };
+        let (fanout, throttle, setup_throttle): (Arc<dyn Fanout>, Throttle, Throttle) = match &config.redis_url {
             Some(url) => {
                 let redis = Redis::connect(url).await?;
                 let throttle = Throttle::redis(config.login.clone(), redis.connection());
-                (Arc::new(redis), throttle)
+                let setup_throttle = Throttle::redis(setup_limits, redis.connection());
+                (Arc::new(redis), throttle, setup_throttle)
             }
-            None => (Arc::new(Local::new()), Throttle::local(config.login.clone())),
+            None => (
+                Arc::new(Local::new()),
+                Throttle::local(config.login.clone()),
+                Throttle::local(setup_limits),
+            ),
         };
         let storage = Arc::new(ObjectStorage::open(&config.storage_url, &config.storage_options)?);
         Ok(Arc::new(Self {
@@ -77,6 +88,7 @@ impl App {
             db,
             issuer,
             throttle,
+            setup_throttle,
             fanout,
             storage,
         }))
@@ -94,6 +106,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/health/ready", get(ready))
         .merge(auth)
         .merge(crate::chatsvc::router())
+        .merge(crate::admin::api::router())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,

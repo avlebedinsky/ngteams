@@ -2,13 +2,13 @@
 //! service it serves under one origin, with the same wire as Microsoft's. No client crate depends on it.
 //!
 //! - [`config`]: the configuration (figment: defaults, TOML, `NGTEAMS_SERVER_*`);
-//! - [`db`]: Postgres or SQLite through Diesel: accounts, refresh tokens, signing keys;
+//! - [`db`]: Postgres or SQLite through Diesel: accounts, refresh tokens, signing keys, the admin audit;
 //! - [`auth`]: passwords, signing keys, tokens and the request extractors that check them;
 //! - [`routes`]: the endpoints; [`services`]: the served services and the GTMs authz names them by;
 //! - [`fanout`]: payloads between nodes (in-process or Redis); [`storage`]: files (`object_store`);
 //! - [`throttle`]: failed sign-ins per account;
 //! - [`app`]: the shared state and the router; [`serve`]: the listener, plain or TLS; [`cli`]: the command line;
-//!   [`admin`]: the account commands' operations.
+//!   [`admin`]: account administration (the admin API, the first-admin setup, the account commands).
 
 pub mod admin;
 pub mod app;

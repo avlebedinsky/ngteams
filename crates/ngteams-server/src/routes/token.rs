@@ -1,7 +1,8 @@
 //! `POST /oauth2/v2.0/token`: Entra's v2 token endpoint as the client speaks to it (`docs/protocol/auth.md`), with the
 //! password grant (an own-server sign-in) and the refresh grant (a token per audience). Answers and errors take
 //! Entra's JSON shapes, so the client's `TokenClient` reads them unchanged: a refused grant is `invalid_grant` with an
-//! `AADSTS` code, a held-off account 429 with `Retry-After`.
+//! `AADSTS` code, a held-off account 429 with `Retry-After`. An account whose password must be changed first gets
+//! `invalid_grant` with `AADSTS50055` and `suberror: user_password_expired` for its right password.
 //!
 //! Refresh tokens are single use: each grant issues the next one of the sign-in's family. One presented again within
 //! the grace period (a client retrying after a lost answer) still works; later, it revokes the family.
@@ -35,6 +36,7 @@ pub struct Refusal {
     error: &'static str,
     code: u32,
     description: &'static str,
+    suberror: Option<&'static str>,
     retry_after: Option<Duration>,
 }
 
@@ -45,6 +47,7 @@ impl Refusal {
             error,
             code,
             description,
+            suberror: None,
             retry_after: None,
         }
     }
@@ -67,6 +70,18 @@ impl Refusal {
 
     const fn disabled() -> Self {
         Self::new("invalid_grant", 50_057, "The user account is disabled.")
+    }
+
+    /// The password is right but must be replaced first (`POST /api/account/v1/password`), as Entra answers an
+    /// expired one.
+    const fn password_change() -> Self {
+        let mut refusal = Self::new(
+            "invalid_grant",
+            50_055,
+            "The password must be changed before signing in.",
+        );
+        refusal.suberror = Some("user_password_expired");
+        refusal
     }
 
     const fn refresh() -> Self {
@@ -111,12 +126,15 @@ impl Refusal {
 
 impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
-        let body = json!({
+        let mut body = json!({
             "error": self.error,
             "error_description": format!("AADSTS{}: {}", self.code, self.description),
             "error_codes": [self.code],
             "timestamp": now(),
         });
+        if let Some(suberror) = self.suberror {
+            body["suberror"] = suberror.into();
+        }
         let mut response = (self.status, [(CACHE_CONTROL, "no-store")], axum::Json(body)).into_response();
         if let Some(wait) = self.retry_after
             && let Ok(value) = wait.as_secs().max(1).to_string().parse()
@@ -185,6 +203,9 @@ async fn password_grant(app: &App, upn: &str, secret: &str) -> Result<User, Refu
     let user = user.ok_or_else(Refusal::credentials)?;
     if user.disabled {
         return Err(Refusal::disabled());
+    }
+    if user.must_change_password {
+        return Err(Refusal::password_change());
     }
     Ok(user)
 }

@@ -4,8 +4,9 @@
 wire the client already speaks to Microsoft (the shapes in `docs/protocol/`), with every service under one HTTPS
 origin. The client sends a request to it only for an account signed in to that server.
 
-What authz advertises today: sign-in (the token endpoint), authz and the chat service. Other services are added one
-at a time. Authz names only the services the server serves, so the client keeps every other service off.
+What it serves today: sign-in (the token endpoint), authz, the chat service, and account administration (the admin
+API and the first-admin setup). Other services are added one at a time. Authz names only the services the server
+serves, so the client keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
 reactions, transient typing, account preferences and message pages (newest, backward, incremental and around a
@@ -41,9 +42,12 @@ printf '%s\n' "$PASSWORD" | ngteams-server --config server.toml user add ada@exa
 ngteams-server --config server.toml serve
 ```
 
-Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password`, `keys rotate`. A password is read from
-the first line of standard input, never from the command line. Disabling an account or resetting its password
-revokes its refresh tokens: its sessions end when their access tokens run out (one hour by default).
+Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`, `setup-code`,
+`keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
+deleting an account, or resetting its password, revokes its refresh tokens: its sessions end when their access
+tokens run out (one hour by default). `user add --admin` and `user promote` make an admin; `user list` ends each
+line with `admin` or `user`. The command line keeps the same guards as the admin API (the last enabled admin stays)
+and its actions are audited as `cli`.
 `NGTEAMS_SERVER_LOG` controls logging (default `info`); dependency debug and trace events are always suppressed
 because database drivers can include secret bind values.
 
@@ -72,6 +76,8 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `tokens.key_rotation` | `2592000` | seconds a signing key signs before a new one replaces it (30 days) |
 | `tokens.reuse_grace` | `60` | seconds a spent refresh token may still be redeemed; after that it revokes its sign-in |
 | `login.max_failures`, `login.window` | `10`, `900` | password attempts allowed in the window; success clears the count |
+| `setup.require_code` | `true` | whether creating the first admin takes the setup code; turn it off only for an install nobody else reaches before its admin exists |
+| `setup.max_attempts`, `setup.window` | `5`, `300` | first-admin setup attempts a client address may make in the window (seconds) |
 
 ## Sign-in and tokens
 
@@ -86,12 +92,88 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 - Password attempts are reserved per account before verification (in Redis when configured). Success clears the
   count. After `login.max_failures` the
   account's password sign-ins get 429 with `Retry-After` until the window ends.
+- An account whose password must be changed first (an admin's reset with `must_change_password`) gets
+  `invalid_grant` with `AADSTS50055` and `suberror: user_password_expired` for its right password, as Entra answers
+  an expired one. It gets tokens again after `POST /api/account/v1/password`.
+- An admin's access and ID tokens carry `roles: ["admin"]`; other accounts' tokens have no `roles` claim. The claim
+  says what the account was when the token was minted (up to `tokens.access_lifetime` ago).
+  `GET /api/account/v1/me` says what it is now.
 - `POST /api/authsvc/v1.0/authz` takes an access token for `https://api.spaces.skype.com` and answers with a
   skypetoken, `region`, `partition` and `regionGtms`, as Teams' authz does. The skypetoken runs out when the
   exchanged token does. A disabled account gets 403 `UserNotFoundInSkypeTeam`.
 - Access tokens, ID tokens and skypetokens are EdDSA JWTs with the issuer `<origin>/<tenant>/v2.0`. Each node checks
   them against the shared keys and reloads the keys when it meets a `kid` it doesn't hold. The tenant is one GUID per
   server, made by the first node and kept in the database. Accounts are `8:orgid:<oid>`.
+
+## Accounts and administration
+
+An account is an admin or not (`users.is_admin`). Admins manage accounts from ngteams through the admin API; the
+operator has the same actions on the command line. All bodies are JSON.
+
+### The first admin
+
+- `GET /api/admin/v1/setup` (no credentials) answers `{"needs_admin": bool, "code_required": bool}`. `needs_admin`
+  is true while the server has no enabled admin. The client asks this before sign-in and offers to create the admin.
+- `POST /api/admin/v1/setup` with `{"code", "upn", "display_name", "password"}` creates the first admin (201, the
+  account). It answers 403 `SetupCode` for a missing or wrong code, 409 `AdminExists` once an admin exists, and
+  429 `TooManyAttempts` with `Retry-After` after `setup.max_attempts` attempts from one client address.
+- The setup code: a node that starts without an admin issues a code and logs it once, at `warn`
+  (`… setup code: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`). `ngteams-server setup-code` issues a new code, which replaces
+  the pending one, and prints it. The database keeps only the code's SHA-256, so any node checks it. Creating the
+  first admin spends it. The code is read in any case, with or without the dashes.
+- `setup.require_code = false` drops the code: whoever reaches the server first creates the admin.
+- An admin made on the command line (`user add --admin`, `user promote`) also ends the setup.
+
+### Admin API
+
+Every request carries `Authorization: Bearer <access token for https://api.spaces.skype.com>`. Without a valid
+token the answer is 401. The server looks the account up on every request: an account that is not an enabled admin
+now gets 403 `NotAdmin` (or `AccountDisabled`), whatever its token's `roles` say.
+
+| Request | Does | Answers |
+|---|---|---|
+| `GET /api/admin/v1/users?q=&after=&limit=` | lists accounts by UPN. `q` matches a part of the UPN or name, any case. `limit` is 1–200 (default 50). `after` is the previous page's `next` | 200 `{"users": [account], "next": upn or null}` |
+| `POST /api/admin/v1/users` | adds an account: `upn`, `password`, optional `display_name` (default: the UPN), `admin`, `must_change_password` | 201 account |
+| `GET /api/admin/v1/users/{id}` | reads an account | 200 account |
+| `PATCH /api/admin/v1/users/{id}` | changes any of `display_name`, `upn`, `enabled`, `admin` (assign or remove an admin). `enabled: false` signs the account out everywhere | 200 account |
+| `DELETE /api/admin/v1/users/{id}` | deletes an account | 204 |
+| `POST /api/admin/v1/users/{id}/password` | sets `password`, signs the account out everywhere; with `must_change_password: true` the account must replace it before it signs in | 204 |
+| `GET /api/admin/v1/audit?before=&limit=` | lists admin actions, newest first. `before` is the previous page's `next` | 200 `{"entries": [entry], "next": id or null}` |
+
+An account is `{"id", "mri", "upn", "display_name", "enabled", "admin", "must_change_password", "created_at",
+"updated_at"}` (times in Unix seconds). A refusal is `{"error": {"code", "message"}}`:
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `InvalidUpn`, `InvalidName`, `WeakPassword`, `SamePassword` | a UPN that isn't `name@domain`, a name over 256 characters, a password under 8 characters, a new password equal to the current one |
+| 403 | `NotAdmin`, `AccountDisabled`, `SetupCode`, `InvalidCredentials` | |
+| 404 | `NotFound` | no such account (a deleted one too) |
+| 409 | `UpnTaken`, `LastAdmin`, `AdminExists` | |
+| 429 | `TooManyAttempts` | with `Retry-After` |
+
+A body that isn't the expected JSON gets axum's 400, 415 or 422.
+
+Guards: a change that would leave the server without an enabled admin is refused with 409 `LastAdmin`. That covers
+removing the role from, disabling or deleting the last enabled admin, by itself or by the command line. Each guarded
+change runs in one transaction under a database lock, so two nodes can't each remove "the other" admin.
+
+Deleting an account removes its sign-in: the UPN, password, role and refresh tokens go, and the UPN is free for a
+new account (a new id). The row stays as a disabled account named "Deleted user" with the same id, so messages it
+wrote keep an author. A deleted account's access tokens open nothing: authz and the admin API refuse it.
+
+Audit: every change (`setup.first_admin`, `user.add`, `user.update`, `user.delete`, `user.password_reset`,
+`user.password_change`) writes a row to `admin_audit` in the same transaction, and a `tracing` event at `info`. An
+entry is `{"id", "at", "actor_id", "actor", "action", "target_id", "target", "detail"}`. `actor` is the admin's
+UPN, `cli` or `setup`. `detail` holds the changed values, never a password. A refused change writes nothing.
+
+### The account's own endpoints
+
+- `GET /api/account/v1/me` (the same bearer token, any enabled account) answers the account as the database has it
+  now. The client reads `admin` here to show its admin features.
+- `POST /api/account/v1/password` with `{"upn", "current_password", "new_password"}` replaces the account's own
+  password and signs it out everywhere (204). It takes no token, because an account that must change its password
+  can't get one. The current password is the credential: a wrong one, an unknown account and a disabled account all
+  get 403 `InvalidCredentials`. Attempts count toward `login.max_failures`, as sign-ins do (429 when held).
 
 ## Prefix table
 
@@ -102,6 +184,8 @@ hands out its GTM.
 |---|---|---|---|
 | Token endpoint | (the authority) | `/oauth2/v2.0/token` | yes |
 | authz | `authService` (base `/api/authsvc`) | `/api/authsvc/v1.0/authz` | yes |
+| Admin API, first-admin setup | (the origin) | `/api/admin/v1/` | yes |
+| The account's own endpoints | (the origin) | `/api/account/v1/` | yes |
 | Chat service | `chatServiceAfd` | `/api/chatsvc/<region>/` | yes |
 | Middle tier | `middleTier` | `/api/mt/part/<partition>/` | no |
 | Chat service aggregator | `chatSvcAggAfd` | `/api/csa/<region>/` | no |
@@ -165,6 +249,9 @@ shape that the client treats as empty preferences.
   for longer than three hours should be taken out of service until their database connection recovers.
   `ngteams-server keys rotate` creates a key immediately; running nodes switch at their next hourly check, or
   earlier if verifying an unknown key triggers a reload. Rotation is serialized in the database across nodes.
+- Account administration keeps its state in the database: the setup code's digest, the admin role, the audit. A
+  setup code issued by one node is taken by any node. Setup attempts are counted in Redis when it is configured,
+  else per node.
 - Migrations take a Postgres advisory lock, so nodes starting together take turns.
 
 ## Tests

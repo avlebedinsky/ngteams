@@ -1,4 +1,4 @@
-//! The command line: `serve`, `migrate`, the account commands and `keys rotate`. Every command reads the same
+//! The command line: `serve`, `migrate`, the account commands, `setup-code` and `keys rotate`. Every command reads the same
 //! configuration as the server (`--config`, then `NGTEAMS_SERVER_*`).
 
 use std::io::Write;
@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::prelude::*;
 
+use crate::admin::{Actor, NewAccount};
 use crate::app::{self, App};
 use crate::config::Config;
 use crate::serve::Listener;
@@ -38,6 +39,8 @@ pub enum Command {
     /// Token signing keys.
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Issues a new first-admin setup code (replacing a pending one) and prints it; refused once an admin exists.
+    SetupCode,
 }
 
 #[derive(Debug, Subcommand)]
@@ -48,6 +51,9 @@ pub enum UserCommand {
         /// The name others see.
         #[arg(long)]
         name: String,
+        /// Makes the account an admin.
+        #[arg(long)]
+        admin: bool,
     },
     /// Lists the accounts.
     List,
@@ -57,6 +63,12 @@ pub enum UserCommand {
     Enable { upn: String },
     /// Sets a new password (standard input's first line) and signs the account out everywhere.
     ResetPassword { upn: String },
+    /// Makes an account an admin.
+    Promote { upn: String },
+    /// Takes the admin role from an account; refused for the last enabled admin.
+    Demote { upn: String },
+    /// Deletes an account: it is signed out everywhere and its UPN is free again.
+    Delete { upn: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +158,15 @@ pub async fn run(
             Ok(())
         }
         Command::User(command) => user(config, command, input, output).await,
+        Command::SetupCode => {
+            let db = crate::db::Db::connect(&config.database_url, 1).await?;
+            let code = crate::admin::setup::issue(&db).await?;
+            writeln!(
+                output,
+                "{code}\nEnter it in ngteams when it asks to create the first admin account."
+            )
+            .map_err(CliError::Output)
+        }
         Command::Keys(KeysCommand::Rotate) => {
             let app = App::start(config).await?;
             let kid = app.issuer.keys().rotate().await?;
@@ -162,6 +183,7 @@ async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'stat
     let listener = Listener::bind(config.listen)?;
     let app = App::start(config).await?;
     let tls = app.config.tls.clone();
+    crate::admin::setup::announce(&app).await;
     tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
     let maintenance = tokio::spawn(app::maintain(std::sync::Arc::clone(&app)));
     let served = listener.serve(app::router(app), tls, shutdown).await;
@@ -177,22 +199,41 @@ async fn user(
 ) -> Result<(), CliError> {
     let db = crate::db::Db::connect(&config.database_url, 1).await?;
     match command {
-        UserCommand::Add { upn, name } => {
-            let user = crate::admin::add_user(&db, &upn, &name, &password(input)?).await?;
+        UserCommand::Add { upn, name, admin } => {
+            let password = password(input)?;
+            let new = NewAccount {
+                upn: &upn,
+                display_name: &name,
+                password: &password,
+                admin,
+                must_change_password: false,
+            };
+            let user = crate::admin::create_user(&db, Actor::CLI, &new).await?;
             writeln!(output, "added {} ({})", user.upn, user.id).map_err(CliError::Output)
         }
-        UserCommand::List => {
-            for user in crate::db::users::list(&db).await? {
-                let state = if user.disabled { "disabled" } else { "enabled" };
-                writeln!(output, "{}\t{}\t{}\t{}", user.upn, user.id, state, user.display_name)
-                    .map_err(CliError::Output)?;
-            }
-            Ok(())
-        }
+        UserCommand::List => list(&db, output).await,
+        UserCommand::Promote { upn } => Ok(crate::admin::set_admin(&db, &upn, true).await?),
+        UserCommand::Demote { upn } => Ok(crate::admin::set_admin(&db, &upn, false).await?),
+        UserCommand::Delete { upn } => Ok(crate::admin::delete_by_upn(&db, &upn).await?),
         UserCommand::Disable { upn } => Ok(crate::admin::set_disabled(&db, &upn, true).await?),
         UserCommand::Enable { upn } => Ok(crate::admin::set_disabled(&db, &upn, false).await?),
         UserCommand::ResetPassword { upn } => Ok(crate::admin::reset_password(&db, &upn, &password(input)?).await?),
     }
+}
+
+/// Each account on a line: UPN, id, `enabled` or `disabled`, name, `admin` or `user`, tab-separated.
+async fn list(db: &crate::db::Db, output: &mut dyn Write) -> Result<(), CliError> {
+    for user in crate::db::users::list(db).await? {
+        let state = if user.disabled { "disabled" } else { "enabled" };
+        let role = if user.is_admin { "admin" } else { "user" };
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}",
+            user.upn, user.id, state, user.display_name, role
+        )
+        .map_err(CliError::Output)?;
+    }
+    Ok(())
 }
 
 /// The first line of `input`, without its line end.

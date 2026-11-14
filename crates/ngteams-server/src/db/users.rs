@@ -1,5 +1,7 @@
 //! Accounts: an object id (the `oid` and MRI `8:orgid:<id>`), a UPN (kept lowercase, unique), a name, an Argon2
-//! password hash, and whether the account may sign in.
+//! password hash, whether the account may sign in, whether it is an admin, and whether it must change its password
+//! before it signs in. A deleted account stays as a disabled row without a sign-in (`deleted_at`), so its id keeps
+//! naming what it authored (`crate::admin::repo::delete`).
 
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -8,7 +10,7 @@ use super::schema::users;
 use super::{Db, DbError, conflict, now, refresh, with_conn};
 
 /// An account as the database keeps it.
-#[derive(Clone, PartialEq, Eq, Queryable, Selectable)]
+#[derive(Clone, PartialEq, Eq, Queryable, Selectable, Insertable)]
 #[diesel(table_name = users)]
 pub struct User {
     pub id: String,
@@ -18,6 +20,10 @@ pub struct User {
     pub disabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    pub is_admin: bool,
+    pub must_change_password: bool,
+    /// When the account was deleted; a deleted account is also disabled.
+    pub deleted_at: Option<i64>,
 }
 
 impl std::fmt::Debug for User {
@@ -26,6 +32,7 @@ impl std::fmt::Debug for User {
             .field("id", &self.id)
             .field("upn", &self.upn)
             .field("disabled", &self.disabled)
+            .field("is_admin", &self.is_admin)
             .finish_non_exhaustive()
     }
 }
@@ -50,18 +57,13 @@ pub async fn add(db: &Db, upn: &str, display_name: &str, password_hash: &str) ->
         disabled: false,
         created_at: at,
         updated_at: at,
+        is_admin: false,
+        must_change_password: false,
+        deleted_at: None,
     };
     with_conn!(db, |conn| {
         diesel::insert_into(users::table)
-            .values((
-                users::id.eq(&user.id),
-                users::upn.eq(&user.upn),
-                users::display_name.eq(&user.display_name),
-                users::password_hash.eq(&user.password_hash),
-                users::disabled.eq(false),
-                users::created_at.eq(at),
-                users::updated_at.eq(at),
-            ))
+            .values(&user)
             .execute(conn)
             .await
             .map_err(conflict)?;
@@ -96,12 +98,13 @@ pub async fn by_id(db: &Db, id: &str) -> Result<Option<User>, DbError> {
         .optional()?))
 }
 
-/// Every account, by UPN.
+/// Every account that isn't deleted, by UPN.
 ///
 /// # Errors
 /// A database failure.
 pub async fn list(db: &Db) -> Result<Vec<User>, DbError> {
     with_conn!(db, |conn| Ok(users::table
+        .filter(users::deleted_at.is_null())
         .order(users::upn.asc())
         .select(User::as_select())
         .load(conn)

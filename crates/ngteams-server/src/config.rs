@@ -57,6 +57,7 @@ pub struct Config {
     pub audiences: Vec<String>,
     pub tokens: TokenConfig,
     pub login: LoginConfig,
+    pub setup: SetupConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -67,6 +68,7 @@ impl std::fmt::Debug for Config {
             .field("partition", &self.partition)
             .field("tokens", &self.tokens)
             .field("login", &self.login)
+            .field("setup", &self.setup)
             .finish_non_exhaustive()
     }
 }
@@ -103,6 +105,28 @@ pub struct LoginConfig {
     pub window: u64,
 }
 
+/// The first-admin setup (`crate::admin::setup`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SetupConfig {
+    /// Whether creating the first admin takes the setup code the server logs. Off only for an install nobody else
+    /// can reach before its admin exists.
+    pub require_code: bool,
+    /// Setup attempts a client address may make in `window` seconds.
+    pub max_attempts: u32,
+    pub window: u64,
+}
+
+impl Default for SetupConfig {
+    fn default() -> Self {
+        Self {
+            require_code: true,
+            max_attempts: 5,
+            window: 300,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -119,6 +143,7 @@ impl Default for Config {
             audiences: DEFAULT_AUDIENCES.iter().map(|&audience| audience.to_owned()).collect(),
             tokens: TokenConfig::default(),
             login: LoginConfig::default(),
+            setup: SetupConfig::default(),
         }
     }
 }
@@ -154,7 +179,7 @@ pub enum ConfigError {
     Region,
     #[error("database_url must start with postgres:// or sqlite://")]
     Database,
-    #[error("tokens' lifetimes and the login window must be above zero")]
+    #[error("tokens' lifetimes and the login and setup windows must be above zero")]
     Lifetime,
 }
 
@@ -210,6 +235,7 @@ impl Config {
             || self.tokens.refresh_lifetime == 0
             || self.tokens.key_rotation == 0
             || self.login.window == 0
+            || self.setup.window == 0
         {
             return Err(ConfigError::Lifetime);
         }

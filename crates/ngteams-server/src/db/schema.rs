@@ -16,6 +16,9 @@ diesel::table! {
         disabled -> Bool,
         created_at -> BigInt,
         updated_at -> BigInt,
+        is_admin -> Bool,
+        must_change_password -> Bool,
+        deleted_at -> Nullable<BigInt>,
     }
 }
 
@@ -43,5 +46,18 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    admin_audit (id) {
+        id -> BigInt,
+        at -> BigInt,
+        actor_id -> Nullable<Text>,
+        actor -> Text,
+        action -> Text,
+        target_id -> Nullable<Text>,
+        target -> Text,
+        detail -> Text,
+    }
+}
+
 diesel::joinable!(refresh_tokens -> users (user_id));
-diesel::allow_tables_to_appear_in_same_query!(server_meta, users, refresh_tokens, signing_keys);
+diesel::allow_tables_to_appear_in_same_query!(server_meta, users, refresh_tokens, signing_keys, admin_audit);

@@ -199,12 +199,7 @@ async fn only_an_admin_reaches_the_admin_api() {
         let bob_id = add(&server, &root, BOB, "Bob").await;
         let bob = bearer(&server, BOB, PASSWORD).await;
         // the admin's token for another service is no admin credential
-        let other = server
-            .session(ROOT)
-            .await
-            .access_token(IC3_AUDIENCE)
-            .await
-            .unwrap();
+        let other = server.session(ROOT).await.access_token(IC3_AUDIENCE).await.unwrap();
         let account = json!({"upn": "eve@own.test", "display_name": "Eve", "password": PASSWORD});
         let routes = [
             (Method::GET, USERS.to_owned(), None),
@@ -276,7 +271,13 @@ async fn an_admin_adds_finds_and_reads_accounts() {
         assert_eq!(status, 200);
         assert_eq!(
             upns(&all),
-            ["ada@own.test", "alan@own.test", "grace@own.test", "linus@own.test", ROOT]
+            [
+                "ada@own.test",
+                "alan@own.test",
+                "grace@own.test",
+                "linus@own.test",
+                ROOT
+            ]
         );
         assert_eq!(all["next"], Value::Null);
         let ada = &all["users"][0];
@@ -311,12 +312,15 @@ async fn an_admin_adds_finds_and_reads_accounts() {
         for (query, found) in [
             ("LOVE", vec!["ada@own.test"]),
             ("gra", vec!["grace@own.test"]),
-            ("own.test&limit=3", vec!["ada@own.test", "alan@own.test", "grace@own.test"]),
+            (
+                "own.test&limit=3",
+                vec!["ada@own.test", "alan@own.test", "grace@own.test"],
+            ),
             ("a%25", vec![]),
             ("_", vec![]),
         ] {
-            let (status, list) = call(&server, Method::GET, &format!("{USERS}?q={query}"), Some(&root), None).await;
-            assert_eq!((status, upns(&list)), (200, found), "{backend:?} {query}");
+            let (status, matches) = call(&server, Method::GET, &format!("{USERS}?q={query}"), Some(&root), None).await;
+            assert_eq!((status, upns(&matches)), (200, found), "{backend:?} {query}");
         }
 
         let (status, one) = call(&server, Method::GET, &user_path(&ada_id), Some(&root), None).await;
@@ -420,10 +424,7 @@ async fn admins_are_assigned_and_removed_but_never_the_last_one() {
         let (status, promoted) = call(&server, Method::PATCH, &bob_path, Some(&root), promote.clone()).await;
         assert_eq!((status, &promoted["admin"]), (200, &json!(true)));
         assert_eq!(call(&server, Method::GET, USERS, Some(&bob), None).await.0, 200);
-        assert_eq!(
-            claims(&bearer(&server, BOB, PASSWORD).await)["roles"],
-            json!(["admin"])
-        );
+        assert_eq!(claims(&bearer(&server, BOB, PASSWORD).await)["roles"], json!(["admin"]));
 
         // with two admins one may go; a demoted one is refused at once
         let demote = Some(json!({"admin": false}));
@@ -534,7 +535,7 @@ async fn a_reset_password_replaces_the_old_one_and_can_force_a_change() {
         assert_eq!(grant("a second password").await.0, 200);
 
         // a reset that must be changed at the next sign-in: the password is right, but gets no token
-        let reset = json!({"password": "a temporary one", "must_change": true});
+        let reset = json!({"password": "a temporary one", "must_change_password": true});
         assert_eq!(
             call(&server, Method::POST, &path, Some(&root), Some(reset)).await.0,
             204
@@ -633,16 +634,19 @@ async fn every_admin_action_is_audited() {
         let root_id = my_id(&server, &root).await;
         let bob_id = add(&server, &root, BOB, "Bob").await;
         let path = user_path(&bob_id);
-        let patch = |body: Value| call(&server, Method::PATCH, &path, Some(&root), Some(body));
-        assert_eq!(patch(json!({"display_name": "Robert"})).await.0, 200);
-        assert_eq!(patch(json!({"admin": true})).await.0, 200);
-        let reset = json!({"password": "the reset password", "must_change": true});
+        let change_bob = |body: Value| call(&server, Method::PATCH, &path, Some(&root), Some(body));
+        assert_eq!(change_bob(json!({"display_name": "Robert"})).await.0, 200);
+        assert_eq!(change_bob(json!({"admin": true})).await.0, 200);
+        let reset = json!({"password": "the reset password", "must_change_password": true});
         let reset_path = format!("{path}/password");
         assert_eq!(
-            call(&server, Method::POST, &reset_path, Some(&root), Some(reset)).await.0,
+            call(&server, Method::POST, &reset_path, Some(&root), Some(reset))
+                .await
+                .0,
             204
         );
-        let change = json!({"upn": BOB, "current_password": "the reset password", "new_password": "bob's own password"});
+        let change =
+            json!({"upn": BOB, "current_password": "the reset password", "new_password": "bob's own password"});
         assert_eq!(call(&server, Method::POST, CHANGE, None, Some(change)).await.0, 204);
         cli(&server, &["user", "demote", BOB], "").await.unwrap();
         assert_eq!(call(&server, Method::DELETE, &path, Some(&root), None).await.0, 204);
@@ -685,7 +689,7 @@ async fn every_admin_action_is_audited() {
         assert_eq!(entries[0]["target_id"], bob_id.as_str());
         assert_eq!(entries[1]["actor_id"], Value::Null);
         assert_eq!(entries[1]["detail"], json!({"admin": false}));
-        assert_eq!(entries[3]["detail"], json!({"must_change": true}));
+        assert_eq!(entries[3]["detail"], json!({"must_change_password": true}));
         assert_eq!(entries[5]["detail"], json!({"display_name": "Robert"}));
         assert!(entries.iter().all(|entry| entry["at"].as_i64().unwrap() > 0));
         let text = audit.to_string();
@@ -698,10 +702,10 @@ async fn every_admin_action_is_audited() {
         assert_eq!(first["entries"].as_array().unwrap().len(), 3);
         let next = first["next"].as_i64().unwrap();
         let page = format!("{AUDIT}?limit=10&before={next}");
-        let (_, rest) = call(&server, Method::GET, &page, Some(&root), None).await;
-        assert_eq!(rest["entries"].as_array().unwrap().len(), 5);
-        assert_eq!(rest["entries"][0]["action"], "user.password_reset");
-        assert_eq!(rest["next"], Value::Null);
+        let (_, older) = call(&server, Method::GET, &page, Some(&root), None).await;
+        assert_eq!(older["entries"].as_array().unwrap().len(), 5);
+        assert_eq!(older["entries"][0]["action"], "user.password_reset");
+        assert_eq!(older["next"], Value::Null);
         server.stop().await;
     }
 }
@@ -788,16 +792,10 @@ async fn two_nodes_share_the_setup_the_accounts_and_the_limits() {
 
         // a code issued for the deployment is taken by any node
         let code = setup_code(&a).await;
-        assert_eq!(
-            call(&b, Method::GET, SETUP, None, None).await.1["needs_admin"],
-            true
-        );
+        assert_eq!(call(&b, Method::GET, SETUP, None, None).await.1["needs_admin"], true);
         let (status, answer) = call(&b, Method::POST, SETUP, None, Some(first_account(Some(&code)))).await;
         assert_eq!(status, 201, "{backend:?}: {answer}");
-        assert_eq!(
-            call(&a, Method::GET, SETUP, None, None).await.1["needs_admin"],
-            false
-        );
+        assert_eq!(call(&a, Method::GET, SETUP, None, None).await.1["needs_admin"], false);
         let (status, answer) = call(&a, Method::POST, SETUP, None, Some(first_account(Some(&code)))).await;
         assert_eq!((status, error_code(&answer)), (409, "AdminExists"));
 
@@ -817,9 +815,9 @@ async fn two_nodes_share_the_setup_the_accounts_and_the_limits() {
         let error = session.access_token(IC3_AUDIENCE).await.unwrap_err();
         assert!(matches!(error, TokenError::InvalidGrant(_)), "{backend:?}: {error:?}");
 
-        // with Redis, setup attempts on either node count together
+        // with Redis, setup attempts on either node count together: two were made above
         if shared.redis_url.is_some() {
-            for node in [&a, &b, &a, &b] {
+            for node in [&a, &b, &a] {
                 let again = first_account(Some(&code));
                 assert_eq!(call(node, Method::POST, SETUP, None, Some(again)).await.0, 409);
             }

@@ -5,6 +5,10 @@
 //! - an ID token for the client (`aud` its client id) naming the account;
 //! - the skypetoken: `skypeid` (`orgid:<oid>`), `rgn` and the `exp` of the access token it was exchanged for.
 //!
+//! An admin's access and ID tokens also carry `roles: ["admin"]` (as Entra names app roles), so the client can offer
+//! its admin features; the claim says what the account was when the token was minted, and the admin API asks the
+//! database on every request.
+//!
 //! All three are `EdDSA` JWTs from the [`KeyRing`], with this server's issuer; the skypetoken's audience is its own, so
 //! no access token passes for a skypetoken, nor the other way round. Refresh tokens are opaque (`crate::db::refresh`).
 
@@ -22,6 +26,8 @@ pub const SKYPETOKEN_AUDIENCE: &str = "urn:ngteams-server:skypetoken";
 /// Clock skew allowed when checking a token's times.
 pub(crate) const LEEWAY: u64 = 60;
 /// Scopes asked with every resource, which name no resource.
+/// The role an admin's tokens name.
+pub const ADMIN_ROLE: &str = "admin";
 const SIGN_IN_SCOPES: [&str; 4] = ["openid", "profile", "offline_access", "email"];
 
 /// An access token's claims.
@@ -42,6 +48,9 @@ pub struct AccessClaims {
     pub azp: String,
     pub ver: String,
     pub uti: String,
+    /// `["admin"]` for an admin; absent otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
 }
 
 /// An ID token's claims.
@@ -58,6 +67,8 @@ pub struct IdClaims {
     pub preferred_username: String,
     pub name: String,
     pub ver: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
 }
 
 /// A skypetoken's claims.
@@ -183,6 +194,7 @@ impl Issuer {
             azp: client_id.to_owned(),
             ver: "2.0".to_owned(),
             uti: uuid::Uuid::new_v4().simple().to_string(),
+            roles: roles(user),
         };
         Ok(Minted {
             token: self.keys.sign(&claims)?,
@@ -208,6 +220,7 @@ impl Issuer {
             preferred_username: user.upn.clone(),
             name: user.display_name.clone(),
             ver: "2.0".to_owned(),
+            roles: roles(user),
         })
     }
 
@@ -256,6 +269,15 @@ impl Issuer {
         validation.set_issuer(&[&self.iss]);
         validation.set_required_spec_claims(&["exp", "aud", "iss"]);
         validation
+    }
+}
+
+/// The roles `user`'s tokens name.
+fn roles(user: &User) -> Vec<String> {
+    if user.is_admin {
+        vec![ADMIN_ROLE.to_owned()]
+    } else {
+        Vec::new()
     }
 }
 

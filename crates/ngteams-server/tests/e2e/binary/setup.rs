@@ -12,12 +12,7 @@ const SETUP: &str = "/api/admin/v1/setup";
 const ROOT: &str = "root@own.test";
 
 async fn setup_state(node: &Node) -> Value {
-    let response = node
-        .http
-        .get(format!("{}{SETUP}", node.endpoint))
-        .send()
-        .await
-        .unwrap();
+    let response = node.http.get(format!("{}{SETUP}", node.endpoint)).send().await.unwrap();
     assert_eq!(response.status(), 200);
     response.json().await.unwrap()
 }
@@ -42,7 +37,12 @@ fn logged_code(log: &Path) -> Option<String> {
     const MARK: &str = "setup code: ";
     let text = std::fs::read_to_string(log).unwrap();
     let after = &text[text.find(MARK)? + MARK.len()..];
-    Some(after.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect())
+    Some(
+        after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect(),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -71,10 +71,7 @@ async fn a_new_server_logs_a_setup_code_and_the_first_admin_is_made_with_one() {
         // the admin signs in with the client's session and reaches the admin API
         let session = node.sign_in(ROOT, PASSWORD).await;
         session.skypetoken().await.unwrap();
-        let token = session
-            .access_token(teams_auth::token::SPACES_RESOURCE)
-            .await
-            .unwrap();
+        let token = session.access_token(teams_auth::token::SPACES_RESOURCE).await.unwrap();
         let users = node
             .http
             .get(format!("{}/api/admin/v1/users", node.endpoint))
