@@ -301,9 +301,10 @@ public origin is refused.
   a disabled account, gets `0:::{"reason":"unauthorized"}` and no `trouter.connected`. A token is run out at its
   `exp`, with no clock skew, at the connect as on an open socket: when it runs out the socket gets `unauthorized`,
   and the client comes back with a new token (it normally reconnects before that).
-- **An account's end.** `user disable` and `user reset-password` close the account's open sockets at once with
-  `unauthorized`, on every node: the command publishes the disconnect on Redis, after its database change, and warns
-  when it can't (the change stays, and the read below ends the sockets). Each socket also reads its account
+- **An account's end.** `user disable`, `user delete` and `user reset-password`, the admin API's same changes and
+  an account's own password change close the account's open sockets at once with `unauthorized`, on every node:
+  each publishes the disconnect on Redis, after its database change, and warns when it can't (the change stays, and
+  the read below ends the sockets). Each socket also reads its account
   from the database once it listens, before each delivery and, on a node without Redis (which the command can't
   reach), every second, also while a replay to a slow reader is under way; it ends when the account is gone,
   disabled or has another password than its token was issued under. An access token names its account's password
@@ -325,8 +326,11 @@ public origin is refused.
   a stop that Teams leaves the registration through. A registration without a socket gets no delivery.
 - **Deliveries.** A messaging endpoint with a live registration gets the account's `push:<mri>` events as `3:::`
   deliveries at `/trouter/v4/f/<endpoint>/messaging`, each body an `EventMessage` around the fan-out's resource:
-  `NewMessage`, `MessageUpdate`, `ConversationUpdate`, `CustomUserProperties` and `ThreadUpdate` (a new chat; the
-  client reads it as an unknown kind). `ReadReceipt` stays internal: Teams delivers no peer read receipt. The
+  `NewMessage`, `MessageUpdate`, `ConversationUpdate`, `CustomUserProperties` and `ThreadUpdate` (a new chat, a
+  team's or a channel's change; the client reads it as an unknown kind). A channel's messages come as a chat's do,
+  to the people in the channel's thread: a team's people for a standard channel, its own for a private one, and
+  nobody once they are out of it. A reply's `to` and links name its post's chain (`<channel>;messageid=<post>`); a
+  channel's message names no `threadtype`. `ReadReceipt` stays internal: Teams delivers no peer read receipt. The
   calling stack's socket gets no chat events. The client's answers (`3:::` with a status) are accepted and not
   needed.
 - **Keep-alives.** `ping` is answered `["pong"]`, any other acknowledged event `[]`. A socket silent for two ping
