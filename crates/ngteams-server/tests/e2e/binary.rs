@@ -1,5 +1,6 @@
 //! Operator commands and native client sessions against real server processes; all accounts are synthetic.
 
+mod admin_api;
 mod chats;
 mod setup;
 mod support;

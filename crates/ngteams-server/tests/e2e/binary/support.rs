@@ -98,6 +98,14 @@ impl Node {
     }
 
     pub fn cli(&self, args: &[&str], input: &str) -> String {
+        let output = self.cli_output(args, input);
+        assert!(output.status.success(), "CLI {args:?} failed (output withheld)");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(!stdout.contains("PRIVATE KEY"));
+        stdout
+    }
+
+    pub fn cli_output(&self, args: &[&str], input: &str) -> std::process::Output {
         let mut child = self
             .command()
             .args(args)
@@ -107,11 +115,7 @@ impl Node {
             .spawn()
             .unwrap();
         child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "CLI {args:?} failed (output withheld)");
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(!stdout.contains("PRIVATE KEY"));
-        stdout
+        child.wait_with_output().unwrap()
     }
 
     pub fn add_user(&self, upn: &str, password: &str) {
