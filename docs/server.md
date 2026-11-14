@@ -47,11 +47,21 @@ ngteams-server --config server.toml serve
 
 Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`, `setup-code`,
 `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
-deleting an account, or resetting its password, revokes its refresh tokens and closes its push sockets at once (with
-`redis_url` set, the command needs Redis for that): a disabled or deleted account is refused everywhere from then
-on, and after a new password the sessions end when their access tokens run out (one hour by default). `user add
---admin` and `user promote` make an admin; `user list` ends each line with `admin` or `user`. The command line keeps
-the same guards as the admin API (the last enabled admin stays) and its actions are audited as `cli`.
+deleting an account, or resetting its password, revokes its refresh tokens and closes its push sockets at once: a
+disabled or deleted account is refused everywhere from then on, and after a new password the sessions end when
+their access tokens run out (one hour by default). `user add --admin` and `user promote` make an admin; `user list`
+ends each line with `admin` or `user`. The command line keeps the same guards as the admin API (the last enabled
+admin stays) and its actions are audited as `cli`.
+
+With `redis_url` set, `user disable`, `user delete` and `user reset-password` make the change in the database first
+and then tell the account's open push sockets through Redis. When Redis is down the change stays: the command prints
+a warning on standard error that says the account is disabled or deleted (the password is replaced) and exits 0.
+Nothing more is pushed to the account, as each of its open sockets, on every node, ends at its next delivery check;
+the command need not be run again. A command that changed nothing (no such account, a short password, no database)
+exits 1 with the error. The admin API's same changes (and an account's own password change) end the sockets the
+same way; when Redis is down they answer as made and the node logs a warning. Errors and warnings carry colour codes
+only when standard error is a terminal.
+
 `NGTEAMS_SERVER_LOG` controls logging (default `info`); dependency debug and trace events are always suppressed
 because database drivers can include secret bind values.
 
@@ -292,7 +302,8 @@ public origin is refused.
   `exp`, with no clock skew, at the connect as on an open socket: when it runs out the socket gets `unauthorized`,
   and the client comes back with a new token (it normally reconnects before that).
 - **An account's end.** `user disable` and `user reset-password` close the account's open sockets at once with
-  `unauthorized`, on every node: the command publishes the disconnect on Redis. Each socket also reads its account
+  `unauthorized`, on every node: the command publishes the disconnect on Redis, after its database change, and warns
+  when it can't (the change stays, and the read below ends the sockets). Each socket also reads its account
   from the database once it listens, before each delivery and, on a node without Redis (which the command can't
   reach), every second, also while a replay to a slow reader is under way; it ends when the account is gone,
   disabled or has another password than its token was issued under. An access token names its account's password

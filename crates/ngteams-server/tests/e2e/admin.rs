@@ -24,6 +24,7 @@ pub async fn cli(server: &TestServer, args: &[&str], input: &str) -> Result<Stri
         Cli::parse_from(command),
         &mut input.as_bytes(),
         &mut output,
+        &mut Vec::new(),
         std::future::pending(),
     )
     .await?;
@@ -152,7 +153,14 @@ async fn migrate_brings_a_new_database_up_and_a_bad_config_is_refused() {
     std::fs::write(&config, "public_origin = \"ftp://example.com\"\n").unwrap();
     let parsed = Cli::parse_from(["ngteams-server", "--config", config.to_str().unwrap(), "migrate"]);
     assert!(matches!(
-        run(parsed, &mut "".as_bytes(), &mut Vec::new(), std::future::pending()).await,
+        run(
+            parsed,
+            &mut "".as_bytes(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            std::future::pending()
+        )
+        .await,
         Err(ngteams_server::cli::CliError::Config(_))
     ));
     server.stop().await;

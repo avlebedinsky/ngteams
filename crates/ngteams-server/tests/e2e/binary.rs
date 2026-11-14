@@ -37,6 +37,59 @@ async fn operator_and_native_client_over_tls() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_change_is_made_and_warned_about_when_redis_is_down() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let deployment = Deployment::new(Backend::Sqlite, false, Some(format!("redis://127.0.0.1:{closed}"))).await;
+    let node = deployment.node("a");
+    node.cli(&["migrate"], "");
+    let (ada, bob) = (account(), account());
+    node.add_user(&ada, PASSWORD);
+    node.add_user(&bob, PASSWORD);
+    let listed = |upn: &str, state: &str| {
+        let line = format!("\t{state}\tQA Operator\tuser");
+        node.cli(&["user", "list"], "")
+            .lines()
+            .any(|user| user.starts_with(&format!("{upn}\t")) && user.ends_with(&line))
+    };
+
+    let (done, said) = node.try_cli(&["user", "disable", &ada], "");
+    assert!(done, "{said}");
+    assert!(
+        said.starts_with(&format!(
+            "warning: {ada} IS disabled, but the account's open push sockets weren't told"
+        )),
+        "{said}"
+    );
+    assert!(said.ends_with("ends at its next delivery check."), "{said}");
+    assert!(listed(&ada, "disabled") && listed(&bob, "enabled"));
+
+    let (done, said) = node.try_cli(&["user", "reset-password", &bob], "another horse battery\n");
+    assert!(done, "{said}");
+    assert!(
+        said.starts_with(&format!("warning: the password of {bob} IS replaced, but")),
+        "{said}"
+    );
+    assert!(
+        !said.contains("another horse battery") && !said.contains('\u{1b}'),
+        "{said:?}"
+    );
+    let db = ngteams_server::db::Db::connect(&deployment.database, 1).await.unwrap();
+    let changed = ngteams_server::db::users::by_upn(&db, &bob).await.unwrap().unwrap();
+    assert_eq!(changed.password_version, 1);
+
+    // nothing to tell: no Redis needed, no warning
+    assert_eq!(node.try_cli(&["user", "enable", &ada], ""), (true, String::new()));
+    assert!(listed(&ada, "enabled"));
+    // a command that changed nothing still fails
+    let (done, said) = node.try_cli(&["user", "disable", "nobody@own.test"], "");
+    assert!(!done && said.ends_with("no such account"), "{said}");
+}
+
 async fn operator_flow(backend: Backend, tls: bool) {
     eprintln!("operator: {backend:?}, tls={tls}");
     let deployment = Deployment::new(backend, tls, redis_url()).await;
@@ -49,6 +102,12 @@ async fn operator_flow(backend: Backend, tls: bool) {
     assert!(listed.starts_with(&format!("{upn}\t")));
     assert!(listed.contains("\tenabled\tQA Operator"));
     assert!(!listed.contains(PASSWORD));
+    let (done, said) = node.try_cli(&["user", "disable", "nobody@own.test"], "");
+    assert!(!done && said.ends_with("no such account"), "{said}");
+    assert!(
+        !said.contains('\u{1b}'),
+        "colour codes in output that is no terminal: {said:?}"
+    );
     node.start().await;
     check_native_client(&node, &upn, &deployment.origin).await;
     if tls {

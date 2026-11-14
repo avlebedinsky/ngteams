@@ -736,8 +736,16 @@ async fn an_account_disabled_while_redis_is_stopped_gets_no_push_when_redis_is_b
     );
     // told so, when the sockets weren't: the operator knows the command did not reach the nodes
     for (done, said) in [(done, &said), (reset_done, &reset_said)] {
-        assert!(done || said.contains("push sockets"), "{said}");
+        assert!(
+            done && said.contains("push sockets") && !said.contains('\u{1b}'),
+            "{said}"
+        );
     }
+    assert!(said.starts_with("warning: b@own.test IS disabled, but"), "{said}");
+    assert!(
+        reset_said.starts_with("warning: the password of d@own.test IS replaced, but"),
+        "{reset_said}"
+    );
 
     redis.start().await;
     // the others are live again

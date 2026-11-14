@@ -267,7 +267,7 @@ async fn serve_on_the_command_line_stops_when_told() {
     )
     .unwrap();
     let cli = ngteams_server::cli::Cli::parse_from(["ngteams-server", "--config", config.to_str().unwrap(), "serve"]);
-    ngteams_server::cli::run(cli, &mut "".as_bytes(), &mut Vec::new(), async {})
+    ngteams_server::cli::run(cli, &mut "".as_bytes(), &mut Vec::new(), &mut Vec::new(), async {})
         .await
         .unwrap();
 }

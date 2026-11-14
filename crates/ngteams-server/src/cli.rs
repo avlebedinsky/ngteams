@@ -1,17 +1,19 @@
-//! The command line: `serve`, `migrate`, the account commands, `setup-code` and `keys rotate`. Every command reads the same
-//! configuration as the server (`--config`, then `NGTEAMS_SERVER_*`).
+//! The command line: `serve`, `migrate`, the account commands, `setup-code` and `keys rotate`. Every command reads
+//! the same configuration as the server (`--config`, then `NGTEAMS_SERVER_*`).
 
-use std::io::Write;
+use std::io::{IsTerminal as _, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::prelude::*;
 
-use crate::admin::{Actor, NewAccount};
+use crate::admin::{Actor, AdminError, NewAccount};
 use crate::app::{self, App};
 use crate::config::Config;
-use crate::fanout::{Fanout, Local, Redis};
+use crate::fanout::{Fanout, FanoutError, Local, Redis, Subscription};
 use crate::serve::Listener;
 
 #[derive(Debug, Parser)]
@@ -85,15 +87,13 @@ pub enum CliError {
     #[error(transparent)]
     Start(#[from] app::StartError),
     #[error(transparent)]
-    Admin(#[from] crate::admin::AdminError),
+    Admin(#[from] AdminError),
     #[error(transparent)]
     Key(#[from] crate::auth::keys::KeyError),
     #[error(transparent)]
     Db(#[from] crate::db::DbError),
     #[error(transparent)]
     Serve(#[from] crate::serve::ServeError),
-    #[error(transparent)]
-    Fanout(#[from] crate::fanout::FanoutError),
     #[error("can't start the runtime: {0}")]
     Runtime(#[source] std::io::Error),
     #[error("can't read the password from standard input: {0}")]
@@ -116,17 +116,24 @@ pub fn main() -> ExitCode {
     }
 }
 
-/// [`run`] on a new runtime, with the process's standard input and output, until SIGINT or SIGTERM.
+/// [`run`] on a new runtime, with the process's standard input, output and error, until SIGINT or SIGTERM.
 fn block_on(cli: Cli) -> Result<(), CliError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(CliError::Runtime)?;
     let stdin = std::io::stdin();
-    runtime.block_on(run(cli, &mut stdin.lock(), &mut std::io::stdout(), shutdown_signal()))
+    let (mut output, mut warnings) = (std::io::stdout(), std::io::stderr());
+    runtime.block_on(run(
+        cli,
+        &mut stdin.lock(),
+        &mut output,
+        &mut warnings,
+        shutdown_signal(),
+    ))
 }
 
-/// Logs to standard error, filtered by `NGTEAMS_SERVER_LOG` (default `info`).
+/// Logs to standard error, filtered by `NGTEAMS_SERVER_LOG` (default `info`); in colour only on a terminal.
 fn init_logs() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("NGTEAMS_SERVER_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -135,6 +142,7 @@ fn init_logs() {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
+                .with_ansi(std::io::stderr().is_terminal())
                 .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
                     // Dependency debug events can contain raw SQL bind values, including private keys.
                     *metadata.level() <= tracing::Level::INFO || metadata.target().starts_with("ngteams_server")
@@ -143,7 +151,8 @@ fn init_logs() {
         .init();
 }
 
-/// Runs one command; `serve` runs until `shutdown` resolves.
+/// Runs one command; `serve` runs until `shutdown` resolves. A command that did its work but not all that follows
+/// from it says so on `warnings` and succeeds.
 ///
 /// # Errors
 /// See [`CliError`].
@@ -151,6 +160,7 @@ pub async fn run(
     cli: Cli,
     input: &mut dyn std::io::BufRead,
     output: &mut dyn Write,
+    warnings: &mut dyn Write,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), CliError> {
     let config = Config::load(cli.config.as_deref())?;
@@ -160,7 +170,7 @@ pub async fn run(
             crate::db::Db::connect(&config.database_url, 1).await?;
             Ok(())
         }
-        Command::User(command) => user(config, command, input, output).await,
+        Command::User(command) => user(config, command, input, &mut Streams { output, warnings }).await,
         Command::SetupCode => {
             let db = crate::db::Db::connect(&config.database_url, 1).await?;
             let code = crate::admin::setup::issue(&db).await?;
@@ -195,13 +205,20 @@ async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'stat
     Ok(served?)
 }
 
+/// Where a command writes.
+struct Streams<'a> {
+    output: &'a mut dyn Write,
+    warnings: &'a mut dyn Write,
+}
+
 async fn user(
     config: Config,
     command: UserCommand,
     input: &mut dyn std::io::BufRead,
-    output: &mut dyn Write,
+    streams: &mut Streams<'_>,
 ) -> Result<(), CliError> {
     let db = crate::db::Db::connect(&config.database_url, 1).await?;
+    let nodes = Nodes(config.redis_url);
     match command {
         UserCommand::Add { upn, name, admin } => {
             let password = password(input)?;
@@ -213,35 +230,69 @@ async fn user(
                 must_change_password: false,
             };
             let user = crate::admin::create_user(&db, Actor::CLI, &new).await?;
-            writeln!(output, "added {} ({})", user.upn, user.id).map_err(CliError::Output)
+            writeln!(streams.output, "added {} ({})", user.upn, user.id).map_err(CliError::Output)
         }
-        UserCommand::List => list(&db, output).await,
+        UserCommand::List => list(&db, streams.output).await,
         UserCommand::Promote { upn } => Ok(crate::admin::set_admin(&db, &upn, true).await?),
         UserCommand::Demote { upn } => Ok(crate::admin::set_admin(&db, &upn, false).await?),
         UserCommand::Delete { upn } => {
-            let nodes = nodes(&config).await?;
-            Ok(crate::admin::delete_by_upn(&db, &*nodes, &upn).await?)
+            let ended = crate::admin::delete_by_upn(&db, &nodes, &upn).await;
+            changed(ended, &format!("{upn} IS deleted"), streams.warnings)
         }
         UserCommand::Disable { upn } => {
-            let nodes = nodes(&config).await?;
-            Ok(crate::admin::set_disabled(&db, &*nodes, &upn, true).await?)
+            let ended = crate::admin::set_disabled(&db, &nodes, &upn, true).await;
+            changed(ended, &format!("{upn} IS disabled"), streams.warnings)
         }
-        UserCommand::Enable { upn } => Ok(crate::admin::set_disabled(&db, &Local::new(), &upn, false).await?),
+        UserCommand::Enable { upn } => Ok(crate::admin::set_disabled(&db, &nodes, &upn, false).await?),
         UserCommand::ResetPassword { upn } => {
-            let password = password(input)?;
-            let nodes = nodes(&config).await?;
-            Ok(crate::admin::reset_password(&db, &*nodes, &upn, &password).await?)
+            let ended = crate::admin::reset_password(&db, &nodes, &upn, &password(input)?).await;
+            changed(ended, &format!("the password of {upn} IS replaced"), streams.warnings)
         }
     }
 }
 
-/// The fan-out the running nodes listen on. Without Redis there is none to reach from here: the one node reads the
+/// An account change's result for the operator: a change that is made but couldn't be told to the account's open
+/// push sockets is a success with a warning, as the database holds it and every socket reads it there.
+fn changed(ended: Result<(), AdminError>, done: &str, warnings: &mut dyn Write) -> Result<(), CliError> {
+    match ended {
+        Err(AdminError::Sockets(error)) => writeln!(
+            warnings,
+            "warning: {done}, but the account's open push sockets weren't told ({error}). Nothing more is pushed to \
+             the account: each of its open sockets, on every node, ends at its next delivery check."
+        )
+        .map_err(CliError::Output),
+        ended => Ok(ended?),
+    }
+}
+
+/// The fan-out the running nodes listen on, connected to only when it is used: a command makes its database change
+/// first, and keeps it when Redis is down. Without Redis there is none to reach from here: the one node reads the
 /// change from the database.
-async fn nodes(config: &Config) -> Result<Box<dyn Fanout>, CliError> {
-    Ok(match &config.redis_url {
-        Some(url) => Box::new(Redis::connect(url).await?),
-        None => Box::new(Local::new()),
-    })
+#[derive(Debug)]
+struct Nodes(Option<String>);
+
+impl Nodes {
+    async fn reach(&self) -> Result<Box<dyn Fanout>, FanoutError> {
+        Ok(match &self.0 {
+            Some(url) => Box::new(Redis::connect(url).await?),
+            None => Box::new(Local::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl Fanout for Nodes {
+    async fn publish(&self, topic: &str, payload: Bytes) -> Result<(), FanoutError> {
+        self.reach().await?.publish(topic, payload).await
+    }
+
+    async fn subscribe(&self, topic: &str) -> Result<Subscription, FanoutError> {
+        self.reach().await?.subscribe(topic).await
+    }
+
+    async fn ready(&self) -> Result<(), FanoutError> {
+        self.reach().await?.ready().await
+    }
 }
 
 /// Each account on a line: UPN, id, `enabled` or `disabled`, name, `admin` or `user`, tab-separated.
@@ -283,5 +334,48 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = interrupt.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_change_the_sockets_werent_told_of_is_a_warning_and_any_other_failure_an_error() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let down = Nodes(Some(format!("redis://127.0.0.1:{closed}")));
+        let untold = down.publish("topic", Bytes::new()).await.unwrap_err();
+
+        let mut warnings = Vec::new();
+        changed(
+            Err(AdminError::Sockets(untold)),
+            "a@own.test IS disabled",
+            &mut warnings,
+        )
+        .unwrap();
+        let warning = String::from_utf8(warnings).unwrap();
+        assert!(
+            warning.starts_with("warning: a@own.test IS disabled, but the account's open push sockets weren't told"),
+            "{warning}"
+        );
+        assert!(warning.ends_with("ends at its next delivery check.\n"), "{warning}");
+
+        let mut warnings = Vec::new();
+        changed(Ok(()), "done", &mut warnings).unwrap();
+        assert!(changed(Err(AdminError::NoSuchUser), "done", &mut warnings).is_err());
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_redis_there_is_nobody_to_tell() {
+        let alone = Nodes(None);
+        alone.ready().await.unwrap();
+        alone.subscribe("topic").await.unwrap();
+        alone.publish("topic", Bytes::new()).await.unwrap();
     }
 }
