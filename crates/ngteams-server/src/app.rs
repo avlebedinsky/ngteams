@@ -43,6 +43,8 @@ pub struct App {
     pub journal: Arc<dyn Journal>,
     pub trouter: Arc<Hub>,
     pub storage: Arc<dyn Storage>,
+    /// What reads pages and pictures for link previews.
+    pub(crate) fetcher: crate::media::Fetcher,
 }
 
 /// Why a node can't start.
@@ -56,6 +58,8 @@ pub enum StartError {
     Fanout(#[from] FanoutError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error("the link preview client can't be built: {0}")]
+    Previews(String),
 }
 
 impl App {
@@ -97,7 +101,10 @@ impl App {
             crate::trouter::unkept,
         ));
         let storage = Arc::new(ObjectStorage::open(&config.storage_url, &config.storage_options)?);
+        let fetcher =
+            crate::media::Fetcher::new(&config.media).map_err(|error| StartError::Previews(error.to_string()))?;
         Ok(Arc::new(Self {
+            fetcher,
             config,
             db,
             issuer,

@@ -36,6 +36,7 @@ mime_guess.workspace = true
 object_store.workspace = true
 percent-encoding.workspace = true
 redis.workspace = true
+reqwest.workspace = true
 rustls.workspace = true
 scraper.workspace = true
 serde.workspace = true

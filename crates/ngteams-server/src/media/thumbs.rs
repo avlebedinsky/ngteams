@@ -70,26 +70,36 @@ pub(super) async fn picture(
         .map(|bytes| ("image/jpeg", bytes)))
 }
 
-/// Each size of `source` as a JPEG, never larger than the picture itself; `None` when it isn't a picture.
-fn render(source: &[u8]) -> Option<Vec<(&'static str, u32, u32, Bytes)>> {
+/// `source` as a picture, within the decoder's limits; `None` when it isn't one.
+pub(super) fn decode(source: &[u8]) -> Option<DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(source)).with_guessed_format().ok()?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_SIDE);
     limits.max_image_height = Some(MAX_SIDE);
     limits.max_alloc = Some(MAX_DECODED);
     reader.limits(limits);
-    let picture = reader.decode().ok()?;
-    let mut made = Vec::new();
-    for (size, side) in SIZES {
-        let scaled = if picture.width() <= side && picture.height() <= side {
-            picture.clone()
-        } else {
-            picture.thumbnail(side, side)
-        };
-        let flat = DynamicImage::ImageRgb8(scaled.to_rgb8());
-        let mut bytes = Cursor::new(Vec::new());
-        flat.write_to(&mut bytes, ImageFormat::Jpeg).ok()?;
-        made.push((size, flat.width(), flat.height(), Bytes::from(bytes.into_inner())));
-    }
-    Some(made)
+    reader.decode().ok()
+}
+
+/// `picture` as a JPEG whose longest side is at most `side`, never larger than the picture itself: its width,
+/// height and bytes.
+pub(super) fn jpeg(picture: &DynamicImage, side: u32) -> Option<(u32, u32, Bytes)> {
+    let scaled = if picture.width() <= side && picture.height() <= side {
+        picture.clone()
+    } else {
+        picture.thumbnail(side, side)
+    };
+    let flat = DynamicImage::ImageRgb8(scaled.to_rgb8());
+    let mut bytes = Cursor::new(Vec::new());
+    flat.write_to(&mut bytes, ImageFormat::Jpeg).ok()?;
+    Some((flat.width(), flat.height(), Bytes::from(bytes.into_inner())))
+}
+
+/// Each of Graph's sizes of `source`; `None` when it isn't a picture.
+fn render(source: &[u8]) -> Option<Vec<(&'static str, u32, u32, Bytes)>> {
+    let picture = decode(source)?;
+    SIZES
+        .iter()
+        .map(|(size, side)| jpeg(&picture, *side).map(|(width, height, bytes)| (*size, width, height, bytes)))
+        .collect()
 }

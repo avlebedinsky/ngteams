@@ -9,13 +9,17 @@
 
 mod ams;
 mod drive;
+mod fetch;
 mod graph;
 mod people;
 mod repo;
 mod schema;
 mod thumbs;
+mod urlp;
 
 use std::sync::Arc;
+
+pub(crate) use fetch::Fetcher;
 
 use axum::http::header::WWW_AUTHENTICATE;
 use axum::http::{HeaderMap, StatusCode};
@@ -50,8 +54,14 @@ pub(crate) fn router(app: &App) -> Router<Arc<App>> {
             StatusCode::REQUEST_TIMEOUT,
             SHORT,
         ));
+    let previews = if app.config.media.link_previews {
+        urlp::router()
+    } else {
+        Router::new()
+    };
     let long = ams::router(app)
         .merge(drive::router())
+        .merge(previews)
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             LONG,
@@ -68,6 +78,8 @@ enum Error {
     Unsupported,
     TooLarge,
     Quota,
+    Upstream,
+    Busy,
     Database(DbError),
     Storage(StorageError),
     Key(KeyError),
@@ -119,6 +131,10 @@ impl IntoResponse for Error {
                 "quotaLimitReached",
                 "The account's storage is full.",
             ),
+            Self::Upstream => (StatusCode::BAD_GATEWAY, "badGateway", "The link's site didn't answer."),
+            Self::Busy => {
+                return (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, "5")]).into_response();
+            }
             Self::Database(error) => return unavailable(&error),
             Self::Storage(error) => return unavailable(&error),
             Self::Key(error) => return unavailable(&error),
