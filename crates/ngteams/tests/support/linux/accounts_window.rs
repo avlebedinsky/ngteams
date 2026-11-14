@@ -15,6 +15,19 @@
 //! starts once the server serves a chat service (until it does, the window says which service is missing). The
 //! tray's "Quit" quits the app, both engines' threads joined.
 //!
+//! The own server is the real `ngteams-server` binary when there is one, its user made with `user add`
+//! (`accounts_own.rs`), and the user has a's user name: the same name on Microsoft 365 and on the own server stays two
+//! accounts. Before the sign-in goes through, a server nothing listens on and a wrong password each say why under the
+//! fields; Tab walks address, user name, password and Enter submits. Afterwards the app's own request log and the
+//! mock say where the requests went: the own account's to its server alone, none of its to the mock.
+//!
+//! More scenes, each the app started again in the same sandbox ([`SCENES`]; `NGTEAMS_ACCOUNTS_SCENES` names the ones
+//! to run): the own server's form in Teams Dark and what it says of an empty field; the window without own servers,
+//! which asks for a Microsoft 365 account alone; an own server's account signed out, asked for its password again
+//! and forgotten as `ngteams --forget <server>/<UPN>` forgets it; and an own server's account as the window shows
+//! one (its engine on the mock until the server serves chats): `ngteamsctl accounts` names its server, its address
+//! `<server>/<UPN>` switches to it, Settings > General names its server.
+//!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -26,10 +39,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fs, future, io, thread};
 
+use clap::Parser as _;
 use gpui::{App, AsyncApp, Window, WindowingModes};
 use ngteams::app::{self, Launch};
+#[path = "accounts_own.rs"]
+mod own;
 #[path = "../own_server.rs"]
 mod own_server;
+#[path = "../own_server_binary.rs"]
+mod own_server_binary;
 #[path = "../window.rs"]
 mod support;
 use ngteams::descriptors::adopt_trace;
@@ -40,6 +58,7 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
+use teams_ctl::cli::{self, Cli, Exit};
 use teams_mock::{AC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock};
 use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
@@ -47,7 +66,7 @@ use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::tray::{ITEM_PATH, MENU_PATH, MENU_QUIT};
 use tokio::sync::broadcast;
-use ui_sandbox::input::{Modifier, keys};
+use ui_sandbox::input::{Modifier, VirtualInput, keys};
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
 
 /// Which mode the child runs in.
@@ -55,7 +74,9 @@ const CHILD_ENV: &str = "NGTEAMS_ACCOUNTS_TEST";
 /// The child's view trace descriptor.
 const TRACE_FD_ENV: &str = "NGTEAMS_ACCOUNTS_TRACE_FD";
 /// From the child's start to its `ready` (the mock started, the window drawn).
-const STARTUP: Duration = Duration::from_secs(90);
+const STARTUP: Duration = Duration::from_secs(180);
+/// A sign-in on the own server (its password hash is slow in a debug build on a loaded host).
+const SIGN_IN: Duration = Duration::from_secs(120);
 /// Anything else the parent waits for.
 const WAIT: Duration = Duration::from_secs(30);
 /// Frames the window presents before the child says `ready`.
@@ -66,17 +87,32 @@ const POST_TRIGGER: &str = "post-as-c";
 const C_SAYS: &str = "hello a, from c";
 /// The file in the sandbox dir the child writes the own server's origin to.
 const OWN_ORIGIN: &str = "own-server-origin";
-/// The own server's user.
-const OWN_UPN: &str = "dana@own.example.test";
-const OWN_NAME: &str = "Dana Own";
+/// The own server's user: a's user name, so the same name is on Microsoft 365 and on the own server.
+const OWN_UPN: &str = "bot-a@lab.example.test";
+const OWN_NAME: &str = "Bot A Own";
+/// The server of the account the window shows as an own server's (the `shown` scenes; nothing is sent to it).
+const SHOWN_SERVER: &str = "https://chat.example.test:8443";
+const SHOWN_HOST: &str = "chat.example.test:8443";
+/// The app's control socket, in the sandbox dir.
+const CTL_SOCKET: &str = "ctl.sock";
+/// The file in the sandbox dir the parent writes to have the mock's requests said.
+const MOCK_ASK: &str = "say-mock";
 /// The rail's "+", and the "Own server" segment of the window it opens, as the sandbox's output shows them.
 const RAIL_ADD_AT: (u32, u32) = (38, 713);
 const OWN_SEGMENT_AT: (u32, u32) = (936, 164);
+/// The own server's address field in that window.
+const SERVER_FIELD_AT: (u32, u32) = (640, 264);
+/// The third account's tile on the rail (three accounts).
+const THIRD_TILE_AT: (u32, u32) = (38, 660);
 
 pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
-        Ok("window") => child_window(),
-        Ok(other) => Err(format!("unknown mode {other}").into()),
+        Ok("again") => own::child_again(false),
+        Ok("again-dark") => own::child_again(true),
+        Ok(other) => match Mode::named(other) {
+            Some(mode) => child_window(mode),
+            None => Err(format!("unknown mode {other}").into()),
+        },
         Err(_) => parent(),
     };
     match outcome {
@@ -105,10 +141,54 @@ fn parent() -> SandboxResult {
     let Some(sandbox) = sandbox_or_skip("ngteams accounts window", &options)? else {
         return Ok(());
     };
-    two_accounts_in_one_window(&sandbox).map_err(|error| format!("{error}{}", sandbox.logs()))?;
-    say("ngteams accounts window: ok");
-    Ok(())
+    let only = std::env::var("NGTEAMS_ACCOUNTS_SCENES").unwrap_or_default();
+    let mut failed = Vec::new();
+    let mut passed = 0_usize;
+    for (name, scene) in SCENES {
+        if !only.is_empty() && !only.split(',').any(|wanted| name.contains(wanted.trim())) {
+            continue;
+        }
+        match scene(&sandbox) {
+            Ok(()) => {
+                passed += 1;
+                say(&format!("ok {name}"));
+            }
+            Err(error) => {
+                say(&format!("FAILED {name}: {error}"));
+                failed.push(format!("{name}: {error}"));
+            }
+        }
+    }
+    say(&format!("scenes: {passed} passed, {} failed", failed.len()));
+    if failed.is_empty() {
+        say("ngteams accounts window: ok");
+        return Ok(());
+    }
+    Err(format!("{}{}", failed.join("\n"), sandbox.logs()).into())
 }
+
+/// One run of the app in the sandbox, by name.
+type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
+
+/// The scenes, each the app started afresh (see the module docs).
+const SCENES: [Scene; 7] = [
+    (
+        "two_accounts_and_an_own_servers_account_added",
+        two_accounts_in_one_window,
+    ),
+    ("own_servers_form_in_teams_dark", own_form_in_dark),
+    ("without_own_servers_microsoft_alone", without_own_servers),
+    ("signed_out_own_account_password_again", |sandbox| {
+        password_again(sandbox, false)
+    }),
+    ("signed_out_own_account_password_again_dark", |sandbox| {
+        password_again(sandbox, true)
+    }),
+    ("own_account_shown_names_its_server", |sandbox| shown(sandbox, false)),
+    ("own_account_shown_names_its_server_dark", |sandbox| {
+        shown(sandbox, true)
+    }),
+];
 
 /// The child's view trace, line by line as it comes.
 struct TraceReader {
@@ -178,23 +258,38 @@ fn shot(sandbox: &Sandbox, name: &str) -> SandboxResult {
     Ok(())
 }
 
-fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
+/// The app's child in `mode`, started and `ready`: the lines it said before that, and its view trace.
+fn start(sandbox: &Sandbox, mode: &str) -> SandboxResult<(Running, TraceReader, Vec<String>)> {
     let (reader, writer) = io::pipe()?;
     let fd = writer.as_raw_fd().to_string();
-    let child = sandbox.spawn_with_fds(
-        &std::env::current_exe()?,
-        &[],
-        &[(CHILD_ENV, "window"), (TRACE_FD_ENV, &fd)],
-        &[writer.as_fd()],
-    )?;
+    let mut env = vec![(CHILD_ENV, mode.to_owned()), (TRACE_FD_ENV, fd)];
+    if let Some(binary) = std::env::var_os(own_server_binary::BIN_ENV) {
+        env.push((own_server_binary::BIN_ENV, binary.to_string_lossy().into_owned()));
+    }
+    let env: Vec<(&str, &str)> = env.iter().map(|(name, value)| (*name, value.as_str())).collect();
+    let child = sandbox.spawn_with_fds(&std::env::current_exe()?, &[], &env, &[writer.as_fd()])?;
     // the child holds the only writer from here, so the trace ends when it exits
     drop(writer);
     let mut running = Running::new(child)?;
-    let mut trace = TraceReader::start(reader);
-    running
-        .line_where(STARTUP, |line| line == "ready")
-        .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
-    for account in [LAB_A, LAB_B] {
+    let trace = TraceReader::start(reader);
+    let mut said = Vec::new();
+    loop {
+        let line = running
+            .line_where(STARTUP, |_| true)
+            .map_err(|error| running.fail(&format!("no ready line: {error:?}; said {said:?}")))?;
+        if line == "ready" {
+            return Ok((running, trace, said));
+        }
+        if line.starts_with("own-server ") {
+            say(&line);
+        }
+        said.push(line);
+    }
+}
+
+/// Waits for the accounts `accounts` on the rail, the first one connected and its chat list shown.
+fn accounts_shown(trace: &mut TraceReader, running: &mut Running, accounts: &[&str]) -> SandboxResult {
+    for account in accounts {
         trace
             .wait_where("account added", |line| about(line, "account", "added", account))
             .map_err(|error| running.fail(&error.to_string()))?;
@@ -209,6 +304,25 @@ fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
             line["view"] == "chat-list" && line["change"] == "shown"
         })
         .map_err(|error| running.fail(&error.to_string()))?;
+    Ok(())
+}
+
+/// The tray's "Quit", then the child's exit with its engines released.
+fn quit_and_finish(sandbox: &Sandbox, trace: &mut TraceReader, running: Running) -> SandboxResult {
+    quit(sandbox, trace, &running)?;
+    running
+        .line_where(WAIT, |line| line == "engines-released")
+        .map_err(|error| format!("the engines weren't released: {error:?}"))?;
+    let (status, stderr) = running.finish(WAIT)?;
+    if !status.success() {
+        return Err(format!("the app exited {status}: {stderr}").into());
+    }
+    Ok(())
+}
+
+fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
+    let (mut running, mut trace, _) = start(sandbox, "window")?;
+    accounts_shown(&mut trace, &mut running, &[LAB_A, LAB_B])?;
     shot(sandbox, "ngteams-accounts-a.png")?;
 
     let mut input = sandbox.input()?;
@@ -221,15 +335,8 @@ fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
     a_s_message_notifies_and_shows_a(sandbox, &mut trace, &running)?;
     shot(sandbox, "ngteams-accounts-notified.png")?;
     an_own_servers_account_is_added(sandbox, &mut input, &mut trace, &running)?;
-    quit(sandbox, &mut trace, &running)?;
-    running
-        .line_where(WAIT, |line| line == "engines-released")
-        .map_err(|error| running.fail(&format!("the engines weren't released: {error:?}")))?;
-    let (status, stderr) = running.finish(WAIT)?;
-    if !status.success() {
-        return Err(format!("the app exited {status}: {stderr}").into());
-    }
-    Ok(())
+    each_accounts_requests_stay_on_its_services(sandbox, &running)?;
+    quit_and_finish(sandbox, &mut trace, running)
 }
 
 /// c posts to a's chat with c while b is shown: a's notification is titled with the chat alone, naming no account,
@@ -261,29 +368,116 @@ fn a_s_message_notifies_and_shows_a(sandbox: &Sandbox, trace: &mut TraceReader, 
     Ok(())
 }
 
-/// The rail's "+", then "Own server", the server's address, the user name and the password typed: the account signs
-/// in on the in-process server (see the module docs).
+fn ensure(holds: bool, what: impl FnOnce() -> String) -> SandboxResult {
+    if holds { Ok(()) } else { Err(what().into()) }
+}
+
+/// The first `prompt …` line (the window asking for an account, changed) that `wanted` takes.
+fn prompt_line(running: &Running, wait: Duration, what: &str, wanted: impl Fn(&str) -> bool) -> SandboxResult<String> {
+    running
+        .line_where(wait, |line| line.starts_with("prompt ") && wanted(line))
+        .map_err(|error| format!("the window asking for an account: {what}: {error:?}").into())
+}
+
+/// What the window asking for an account holds now (`prompt-now …`), after the frames that follow the last input.
+fn prompt_now(sandbox: &Sandbox, running: &Running) -> SandboxResult<String> {
+    thread::sleep(Duration::from_millis(500));
+    fs::write(sandbox.path(own::PROMPT_ASK), "")?;
+    running
+        .line_where(WAIT, |line| line.starts_with("prompt-now "))
+        .map_err(|error| format!("the window asking for an account wasn't said: {error:?}").into())
+}
+
+/// Empties the field at `at` of `typed` characters, then types `text` into it.
+fn retype(input: &mut VirtualInput, at: (u32, u32), typed: usize, text: &str) -> SandboxResult {
+    input.click(at.0, at.1, keys::BTN_LEFT)?;
+    input.key(keys::END)?;
+    for _ in 0..typed {
+        input.key(keys::BACKSPACE)?;
+    }
+    input.type_text(text)
+}
+
+/// The rail's "+", then "Own server". A server nothing listens on and a wrong password each say why under the
+/// fields (Tab walks address, user name, password; Enter submits); then the right password, typed at once into the
+/// password's field, signs the account in on the own server (see the module docs).
 fn an_own_servers_account_is_added(
     sandbox: &Sandbox,
-    input: &mut ui_sandbox::input::VirtualInput,
+    input: &mut VirtualInput,
     trace: &mut TraceReader,
     running: &Running,
 ) -> SandboxResult {
-    let origin = fs::read_to_string(sandbox.path(OWN_ORIGIN))?;
+    let origin = fs::read_to_string(sandbox.path(OWN_ORIGIN))?.trim().to_owned();
+    let dead = fs::read_to_string(sandbox.path(own::DEAD_ORIGIN))?.trim().to_owned();
     input.click(RAIL_ADD_AT.0, RAIL_ADD_AT.1, keys::BTN_LEFT)?;
+    let asked = prompt_now(sandbox, running)?;
+    ensure(asked.contains("kind=microsoft"), || {
+        format!("Microsoft 365 isn't the place chosen first: {asked}")
+    })?;
     shot(sandbox, "ngteams-accounts-add-microsoft.png")?;
     input.click(OWN_SEGMENT_AT.0, OWN_SEGMENT_AT.1, keys::BTN_LEFT)?;
+    let chosen = prompt_now(sandbox, running)?;
+    ensure(chosen.contains("kind=own"), || {
+        format!("\"Own server\" wasn't chosen: {chosen}")
+    })?;
     shot(sandbox, "ngteams-accounts-add-own.png")?;
-    input.type_text(origin.trim())?;
+
+    // a server nothing listens on; the fields in Tab's order
+    input.type_text(&dead)?;
     input.key(keys::TAB)?;
     input.type_text(OWN_UPN)?;
     input.key(keys::TAB)?;
-    input.type_text(own_server::PASSWORD)?;
+    input.type_text(own::PASSWORD)?;
+    let typed = prompt_now(sandbox, running)?;
+    ensure(typed.contains(&format!("server={dead} user={OWN_UPN} ")), || {
+        format!("Tab didn't walk address, user name, password: {typed}")
+    })?;
     shot(sandbox, "ngteams-accounts-add-own-filled.png")?;
     input.key(keys::ENTER)?;
+    let unreachable = prompt_line(running, SIGN_IN, "the unreachable server's reason", |line| {
+        line.contains("can't be reached")
+    })?;
+    ensure(
+        unreachable.contains("ca_file") && unreachable.contains("signing=false"),
+        || format!("the unreachable server's reason: {unreachable}"),
+    )?;
+    shot(sandbox, "ngteams-accounts-own-unreachable.png")?;
+
+    // the right server, a wrong password
+    retype(input, SERVER_FIELD_AT, dead.len(), &origin)?;
+    input.key(keys::TAB)?;
+    input.key(keys::TAB)?;
+    input.type_text("not the password")?;
+    input.key(keys::ENTER)?;
+    let wrong = prompt_line(running, SIGN_IN, "the wrong password's reason", |line| {
+        line.contains("problem=The user name or password isn't right.")
+    })?;
+    ensure(wrong.contains(&format!("server={origin} user={OWN_UPN} ")), || {
+        format!("the fields after it: {wrong}")
+    })?;
+    shot(sandbox, "ngteams-accounts-own-wrong-password.png")?;
+
+    // the right password, typed at once: the password's field is empty again and still holds the keyboard
+    input.type_text(own::PASSWORD)?;
+    input.key(keys::ENTER)?;
+    own_account_signed_in(sandbox, trace, running)
+}
+
+/// The own server's account signed in as the app keeps one (the child's `own-signed-in`), beside the Microsoft 365
+/// account of the same user name; shown on the rail once the server serves chats, else the window says so.
+fn own_account_signed_in(sandbox: &Sandbox, trace: &mut TraceReader, running: &Running) -> SandboxResult {
+    let entries = running
+        .line_where(SIGN_IN, |line| {
+            line.starts_with("own-entries ") || line.starts_with("own account")
+        })
+        .map_err(|error| format!("the own server's account wasn't signed in: {error:?}"))?;
+    ensure(
+        entries == "own-entries total=3 microsoft_same_upn=true own_same_upn=1",
+        || format!("the same user name on Microsoft 365 and the own server isn't two accounts: {entries}"),
+    )?;
     let signed = running
         .line_where(WAIT, |line| line.starts_with("own-signed-in "))
-        .map_err(|error| format!("the own server's account wasn't signed in: {error:?}"))?;
+        .map_err(|error| format!("the own server's account wasn't kept: {error:?}"))?;
     if signed.ends_with("chat=true") {
         let mri = signed
             .split_whitespace()
@@ -299,9 +493,231 @@ fn an_own_servers_account_is_added(
         shot(sandbox, "ngteams-accounts-own-added.png")?;
     } else {
         // the server serves no chat service yet: signed in, and the window says what is missing
+        let said = prompt_now(sandbox, running)?;
+        ensure(
+            said.contains(&format!("problem={OWN_UPN} is signed in, but ")) && said.contains("doesn't serve chats"),
+            || format!("the window doesn't say the server serves no chats: {said}"),
+        )?;
         shot(sandbox, "ngteams-accounts-own-no-chat-service.png")?;
     }
     Ok(())
+}
+
+/// A `name=value` field of a line the child said.
+fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|word| word.strip_prefix(name)?.strip_prefix('='))
+}
+
+/// Where the requests went: the app's own log has the own account's sign-in and authz on its server and nowhere
+/// else, and the mock got no sign-in or authz request and nothing carrying the own account's token.
+fn each_accounts_requests_stay_on_its_services(sandbox: &Sandbox, running: &Running) -> SandboxResult {
+    fs::write(sandbox.path(own::REQUESTS_ASK), "")?;
+    let requests = running
+        .line_where(WAIT, |line| line.starts_with("requests "))
+        .map_err(|error| format!("the app's requests weren't said: {error:?}"))?;
+    say(&requests);
+    fs::copy(
+        sandbox.path(own::REQUESTS_FILE),
+        shots_dir()?.join("ngteams-accounts-requests.txt"),
+    )?;
+    let count = |name: &str| field(&requests, name).and_then(|value| value.parse::<u32>().ok());
+    ensure(
+        field(&requests, "own_paths") == Some("/api/authsvc/v1.0/authz,/oauth2/v2.0/token")
+            && count("own") >= Some(3)
+            && count("dead") >= Some(1)
+            && count("elsewhere_auth") == Some(0),
+        || format!("the own account's requests: {requests}"),
+    )?;
+    fs::write(sandbox.path(MOCK_ASK), "")?;
+    let mock = running
+        .line_where(WAIT, |line| line.starts_with("mock-requests "))
+        .map_err(|error| format!("the mock's requests weren't said: {error:?}"))?;
+    say(&mock);
+    let count = |name: &str| field(&mock, name).and_then(|value| value.parse::<u32>().ok());
+    ensure(
+        count("total") > Some(0) && count("auth_paths") == Some(0) && count("own_token") == Some(0),
+        || format!("the mock's requests: {mock}"),
+    )
+}
+
+/// Teams Dark, own servers on: the window asking for an account, the own server's form, and what it says of an empty
+/// address and of a user name that isn't one, nothing sent.
+fn own_form_in_dark(sandbox: &Sandbox) -> SandboxResult {
+    let (mut running, mut trace, _) = start(sandbox, "dark")?;
+    accounts_shown(&mut trace, &mut running, &[LAB_A, LAB_B])?;
+    shot(sandbox, "ngteams-accounts-a-dark.png")?;
+    let mut input = sandbox.input()?;
+    input.click(RAIL_ADD_AT.0, RAIL_ADD_AT.1, keys::BTN_LEFT)?;
+    let asked = prompt_now(sandbox, &running)?;
+    ensure(asked.contains("kind=microsoft"), || format!("the window: {asked}"))?;
+    shot(sandbox, "ngteams-accounts-add-microsoft-dark.png")?;
+    // the keyboard alone: said, not required (the choice is a pointer's today)
+    input.key(keys::TAB)?;
+    input.key(keys::RIGHT)?;
+    input.key(keys::SPACE)?;
+    let by_keys = prompt_now(sandbox, &running)?;
+    say(&format!(
+        "note keyboard-reaches-own-server={}",
+        by_keys.contains("kind=own")
+    ));
+    input.click(OWN_SEGMENT_AT.0, OWN_SEGMENT_AT.1, keys::BTN_LEFT)?;
+    let chosen = prompt_now(sandbox, &running)?;
+    ensure(chosen.contains("kind=own"), || {
+        format!("\"Own server\" wasn't chosen: {chosen}")
+    })?;
+    shot(sandbox, "ngteams-accounts-add-own-dark.png")?;
+    input.key(keys::ENTER)?;
+    prompt_line(&running, WAIT, "an empty address", |line| {
+        line.contains(&format!("problem={}", teams_ui::account_prompt::NOT_A_SERVER))
+    })?;
+    shot(sandbox, "ngteams-accounts-add-own-empty-dark.png")?;
+    input.type_text("chat.example.test")?;
+    input.key(keys::TAB)?;
+    input.type_text("someone")?;
+    input.key(keys::ENTER)?;
+    prompt_line(&running, WAIT, "a user name that isn't one", |line| {
+        line.contains(&format!("problem={}", teams_ui::account_prompt::NOT_A_USER))
+    })?;
+    quit_and_finish(sandbox, &mut trace, running)
+}
+
+/// Own servers off: an own server's account in `accounts.toml` stays there unstarted, and the window the rail's "+"
+/// opens asks for a Microsoft 365 account alone, as before: no choice to click, and Enter on what isn't an account
+/// says so without opening anything.
+fn without_own_servers(sandbox: &Sandbox) -> SandboxResult {
+    let (mut running, mut trace, said) = start(sandbox, "off")?;
+    ensure(
+        said.iter().any(|line| line == "off-accounts entries=3 started=2"),
+        || format!("the own server's entry isn't kept unstarted: {said:?}"),
+    )?;
+    accounts_shown(&mut trace, &mut running, &[LAB_A, LAB_B])?;
+    let mut input = sandbox.input()?;
+    input.click(RAIL_ADD_AT.0, RAIL_ADD_AT.1, keys::BTN_LEFT)?;
+    let asked = prompt_now(sandbox, &running)?;
+    ensure(asked.contains("kind=microsoft"), || format!("the window: {asked}"))?;
+    shot(sandbox, "ngteams-accounts-add-flag-off.png")?;
+    input.type_text("someone")?;
+    input.key(keys::ENTER)?;
+    prompt_line(&running, WAIT, "what isn't an account", |line| {
+        line.contains("account=someone ")
+            && line.contains(&format!("problem={}", teams_ui::account_prompt::NOT_AN_ACCOUNT))
+    })?;
+    input.click(OWN_SEGMENT_AT.0, OWN_SEGMENT_AT.1, keys::BTN_LEFT)?;
+    let clicked = prompt_now(sandbox, &running)?;
+    ensure(clicked.contains("kind=microsoft"), || {
+        format!("a choice of place is there without own servers: {clicked}")
+    })?;
+    shot(sandbox, "ngteams-accounts-add-flag-off-refused.png")?;
+    quit_and_finish(sandbox, &mut trace, running)
+}
+
+/// An own server's account signed out: the screen asks its password alone, its server and user name fixed; a wrong
+/// password says so; the right one, typed at once, signs it in on the server; then it is forgotten by its
+/// `<server>/<UPN>` and the Microsoft 365 account of the same user name stays.
+fn password_again(sandbox: &Sandbox, dark: bool) -> SandboxResult {
+    let (mode, suffix) = if dark { ("again-dark", "-dark") } else { ("again", "") };
+    let (running, _trace, _) = start(sandbox, mode)?;
+    let asked = prompt_now(sandbox, &running)?;
+    ensure(
+        asked.contains("kind=own")
+            && asked.contains("server=https://127.0.0.1:")
+            && asked.contains(&format!(" user={} ", own::AGAIN_UPN)),
+        || format!("the screen doesn't hold the account's server and user name: {asked}"),
+    )?;
+    shot(sandbox, &format!("ngteams-own-password-again{suffix}.png"))?;
+    let mut input = sandbox.input()?;
+    input.type_text("not the password")?;
+    input.key(keys::ENTER)?;
+    prompt_line(&running, SIGN_IN, "the wrong password's reason", |line| {
+        line.contains("problem=The user name or password isn't right.")
+    })?;
+    shot(sandbox, &format!("ngteams-own-password-again-wrong{suffix}.png"))?;
+    input.type_text(own::PASSWORD)?;
+    input.key(keys::ENTER)?;
+    let signed = running
+        .line_where(SIGN_IN, |line| line.starts_with("again-signed-in "))
+        .map_err(|error| format!("the password typed again didn't sign in: {error:?}"))?;
+    ensure(signed == "again-signed-in ready=true", || {
+        format!("signed in again: {signed}")
+    })?;
+    let forgot = running
+        .line_where(WAIT, |line| line.starts_with("forgot "))
+        .map_err(|error| format!("the account wasn't forgotten: {error:?}"))?;
+    ensure(
+        forgot == "forgot own_left=false microsoft_left=true token_left=false",
+        || format!("forgotten by <server>/<UPN>: {forgot}"),
+    )?;
+    let (status, stderr) = running.finish(WAIT)?;
+    ensure(status.success(), || format!("the app exited {status}: {stderr}"))
+}
+
+/// `ngteamsctl <args>` against the app's socket, in-process: its exit, stdout and stderr.
+fn ctl(sandbox: &Sandbox, args: &[&str]) -> SandboxResult<String> {
+    let socket = sandbox.path(CTL_SOCKET).to_string_lossy().into_owned();
+    let line = ["ngteamsctl", "--socket", socket.as_str()]
+        .into_iter()
+        .chain(args.iter().copied());
+    let parsed = Cli::try_parse_from(line)?;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let exit = cli::run(&parsed, &teams_ctl::Env::default(), &mut out, &mut err);
+    let (out, err) = (String::from_utf8(out)?, String::from_utf8(err)?);
+    ensure(exit == Exit::Ok, || {
+        format!("ngteamsctl {args:?} exited {exit:?}: {out}{err}")
+    })?;
+    Ok(out)
+}
+
+/// An own server's account as the window shows one, beside a (the same user name, on Microsoft 365) and b:
+/// `ngteamsctl accounts` names its server in a SERVER column, `<server>/<UPN>` switches to it and the bare user name
+/// to the Microsoft 365 one, and Settings > General names the server for it alone.
+fn shown(sandbox: &Sandbox, dark: bool) -> SandboxResult {
+    let (mode, suffix) = if dark { ("shown-dark", "-dark") } else { ("shown", "") };
+    let (mut running, mut trace, _) = start(sandbox, mode)?;
+    accounts_shown(&mut trace, &mut running, &[LAB_A, LAB_B, LAB_C])?;
+    let table = ctl(sandbox, &["accounts"])?;
+    fs::write(shots_dir()?.join("ngteams-accounts-ctl-accounts.txt"), &table)?;
+    let own_rows: Vec<&str> = table.lines().filter(|line| line.contains(SHOWN_SERVER)).collect();
+    ensure(
+        table.lines().next().is_some_and(|header| header.contains("SERVER"))
+            && own_rows.len() == 1
+            && own_rows[0].contains(OWN_UPN),
+        || format!("ngteamsctl accounts:\n{table}"),
+    )?;
+    let listed: serde_json::Value = serde_json::from_str(ctl(sandbox, &["--json", "accounts"])?.trim())?;
+    let servers: Vec<Option<&str>> = listed["ok"]["accounts"]
+        .as_array()
+        .ok_or_else(|| format!("ngteamsctl --json accounts: {listed}"))?
+        .iter()
+        .map(|account| account["server"].as_str())
+        .collect();
+    ensure(servers == [None, None, Some(SHOWN_SERVER)], || {
+        format!("the accounts' servers: {listed}")
+    })?;
+
+    ctl(sandbox, &["account", "switch", &format!("{SHOWN_SERVER}/{OWN_UPN}")])?;
+    trace.next_where("switched to the own server's account", |line| {
+        about(line, "account", "switched", LAB_C)
+    })?;
+    ctl(sandbox, &["open", "settings", "general"])?;
+    shot(sandbox, &format!("ngteams-own-settings-general{suffix}.png"))?;
+    let mut input = sandbox.input()?;
+    input.move_to(THIRD_TILE_AT.0, THIRD_TILE_AT.1)?;
+    thread::sleep(Duration::from_secs(2));
+    shot(sandbox, &format!("ngteams-own-rail-tile{suffix}.png"))?;
+    input.move_to(640, 400)?;
+
+    // the bare user name is the Microsoft 365 account's
+    ctl(sandbox, &["account", "switch", OWN_UPN])?;
+    trace.next_where("switched to the Microsoft 365 account", |line| {
+        about(line, "account", "switched", LAB_A)
+    })?;
+    ctl(sandbox, &["open", "settings", "general"])?;
+    shot(sandbox, &format!("ngteams-microsoft-settings-general{suffix}.png"))?;
+    ensure(!ctl(sandbox, &["status"])?.is_empty(), || {
+        "ngteamsctl status said nothing".to_owned()
+    })?;
+    quit_and_finish(sandbox, &mut trace, running)
 }
 
 /// The tray menu's "Quit".
@@ -404,6 +820,16 @@ impl MockLab {
 
     /// `alias`'s engine (its MRI `mri`) on the mock.
     fn engine(&self, alias: Alias, mri: &str, upn: &str) -> SandboxResult<EngineHandle> {
+        self.engine_at(&support::store_file(self.dir.path(), alias), mri, upn)
+    }
+
+    /// The store of the third account the `shown` scenes add.
+    fn third_store(&self) -> PathBuf {
+        self.dir.path().join("store").join("third.sqlite")
+    }
+
+    /// The engine of the account `mri` on the mock, its store at `store`.
+    fn engine_at(&self, store: &Path, mri: &str, upn: &str) -> SandboxResult<EngineHandle> {
         let tokens = Arc::new(Tokens {
             token: self.mock.token(mri).ok_or("the mock's token")?,
             renewals: broadcast::channel(4).0,
@@ -423,7 +849,7 @@ impl MockLab {
         let author = Author::new(Mri::new(mri), display_name(upn));
         Ok(engine::start(Parts {
             calls: None,
-            store: Store::open(&support::store_file(self.dir.path(), alias))?,
+            store: Store::open(store)?,
             client: Arc::new(Client::new(http()?)),
             outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter)),
@@ -432,8 +858,11 @@ impl MockLab {
         })?)
     }
 
-    /// Whether both accounts' engine locks are free: their engines' threads have ended.
-    fn engines_released(&self) -> SandboxResult<bool> {
+    /// Whether the accounts' engine locks are free (c's too when it ran, `third`): their engines' threads have ended.
+    fn engines_released(&self, third: bool) -> SandboxResult<bool> {
+        if third && Store::open(&self.third_store())?.engine_lock().is_err() {
+            return Ok(false);
+        }
         for alias in [Alias::A, Alias::B] {
             if Store::open(&support::store_file(self.dir.path(), alias))?
                 .engine_lock()
@@ -446,18 +875,104 @@ impl MockLab {
     }
 }
 
-fn child_window() -> SandboxResult {
+/// How the app's child runs (the scenes of [`SCENES`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Own servers on, an own server running for the account the window adds, the app's requests on record.
+    Window,
+    /// Own servers on, in Teams Dark.
+    Dark,
+    /// Own servers off.
+    Off,
+    /// Own servers on, a third account that is on an own server shown beside a and b, the control socket served.
+    Shown,
+    /// [`Mode::Shown`] in Teams Dark.
+    ShownDark,
+}
+
+impl Mode {
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "window" => Some(Self::Window),
+            "dark" => Some(Self::Dark),
+            "off" => Some(Self::Off),
+            "shown" => Some(Self::Shown),
+            "shown-dark" => Some(Self::ShownDark),
+            _ => None,
+        }
+    }
+
+    /// Own servers on (`NGTEAMS_OWN_SERVER=1`, as the setup takes it).
+    fn own_servers(self) -> bool {
+        self != Self::Off
+    }
+
+    /// Teams Dark, whatever the system says.
+    fn dark(self) -> bool {
+        matches!(self, Self::Dark | Self::ShownDark)
+    }
+
+    fn shown(self) -> bool {
+        matches!(self, Self::Shown | Self::ShownDark)
+    }
+}
+
+/// c as the window shows an own server's account: a's user name, on [`SHOWN_SERVER`] (its engine on the mock: the
+/// server serves no chats yet, and nothing is sent to that address).
+fn shown_account(lab: &MockLab) -> SandboxResult<ngteams::accounts::Started<teams_auth::secrets::MemorySecretStore>> {
+    let engine = lab.engine_at(&lab.third_store(), LAB_C, "bot-c@lab.example.test")?;
+    // the session is only the sign-out watch's, as for a and b
+    let mut c = support::started(Alias::B, engine)?;
+    c.account = ngteams::accounts_file::PersonalAccount::new(
+        OWN_UPN,
+        LAB_C.strip_prefix("8:orgid:").ok_or("mock orgid")?,
+        "00000000-0000-4000-8000-000000000001",
+    )?;
+    c.account.name = Some(OWN_NAME.to_owned());
+    c.account.server = Some(SHOWN_SERVER.to_owned());
+    if c.account.server_host().as_deref() != Some(SHOWN_HOST) {
+        return Err("the shown account's server".into());
+    }
+    Ok(c)
+}
+
+fn child_window(mode: Mode) -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let fd: RawFd = std::env::var(TRACE_FD_ENV)?.parse()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(fd)?);
     let lab = MockLab::start()?;
     let a = support::started(Alias::A, lab.engine(Alias::A, LAB_A, "bot-a@lab.example.test")?)?;
     let b = support::started(Alias::B, lab.engine(Alias::B, LAB_B, "bot-b@lab.example.test")?)?;
+    let mut others = vec![b];
+    if mode.shown() {
+        others.push(shown_account(&lab)?);
+    }
     let settings = teams_ui::SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
-    let own = own_server::OwnServer::start().map_err(|error| error.to_string())?;
-    own.add_user(OWN_UPN, OWN_NAME).map_err(|error| error.to_string())?;
-    let runner = runner_with_own_servers(lab.dir.path(), &own)?;
+    if mode.dark() {
+        fs::create_dir_all(lab.dir.path().join("ui"))?;
+        fs::write(lab.dir.path().join("ui").join("a.toml"), own::DARK_SETTINGS)?;
+    }
+    let server = if mode == Mode::Window {
+        own::record_requests()?;
+        let server = own::Own::start()?;
+        server.add_user(OWN_UPN, OWN_NAME)?;
+        Some(server)
+    } else {
+        None
+    };
+    let mut held = vec![a.account.clone()];
+    held.extend(others.iter().map(|started| started.account.clone()));
+    let runner = runner_of(lab.dir.path(), mode, &held, server.as_ref())?;
     let watched = runner.setup.clone();
+    let origins = match &server {
+        Some(server) => Some((server.origin().to_owned(), dead_origin()?)),
+        None => None,
+    };
+    let ctl = if mode.shown() {
+        Some(own::sandbox_dir()?.join(CTL_SOCKET))
+    } else {
+        None
+    };
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     let mock = Arc::clone(&lab.mock);
@@ -467,9 +982,9 @@ fn child_window() -> SandboxResult {
             cx,
             Launch {
                 first: a,
-                others: vec![b],
+                others,
                 trace: Arc::new(trace),
-                ctl: None,
+                ctl,
                 settings: teams_ui::SettingsModel::load(settings),
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
@@ -480,8 +995,7 @@ fn child_window() -> SandboxResult {
         );
         match launched {
             Ok(launched) => {
-                post_when_asked(mock, cx);
-                say_when_own_signed_in(watched, cx);
+                tell_the_parent(mock, watched, origins, cx);
                 let _ = launched.window.update(cx, |_, window, _| {
                     after_frames(window, READY_FRAMES, |_, _| say("ready"));
                 });
@@ -495,27 +1009,75 @@ fn child_window() -> SandboxResult {
     if let Some(error) = failed.lock().unwrap_or_else(PoisonError::into_inner).take() {
         return Err(error.into());
     }
-    if lab.engines_released()? {
+    if lab.engines_released(mode.shown())? {
         say("engines-released");
     }
     Ok(())
 }
 
-/// The app's runner with own servers on and a credential store of this process alone (the sandbox has no Secret
-/// Service). The own server's certificate authority is written into the account's entry beforehand, as a user of a
-/// self-signed deployment writes it; the origin goes to the sandbox dir for the parent to type.
-fn runner_with_own_servers(root: &Path, own: &own_server::OwnServer) -> SandboxResult<ngteams::accounts::Runner> {
-    use ngteams::accounts_file::OwnServer;
+/// What the child does and says for the parent while the app runs: c's post when asked, the window asking for an
+/// account, and with an own server running (`origins`: its origin and the one nothing listens on) the account signed
+/// in and where the requests went.
+fn tell_the_parent(
+    mock: Arc<ChatServiceMock>,
+    setup: ngteams::setup::Setup,
+    origins: Option<(String, String)>,
+    cx: &mut App,
+) {
+    post_when_asked(Arc::clone(&mock), cx);
+    own::say_prompt(cx);
+    if let Some((origin, dead)) = origins {
+        say_when_own_signed_in(setup.clone(), cx);
+        own::say_requests_when_asked(origin, dead, cx);
+        say_mock_requests_when_asked(mock, setup, cx);
+    }
+}
+
+/// An origin nothing listens on, written to the sandbox dir for the parent to type.
+fn dead_origin() -> SandboxResult<String> {
+    let dead = format!("https://127.0.0.1:{}", own_server_binary::free_port()?);
+    fs::write(own::sandbox_dir()?.join(own::DEAD_ORIGIN), &dead)?;
+    Ok(dead)
+}
+
+/// The app's runner with a credential store of this process alone (the sandbox has no Secret Service) and own
+/// servers as `mode` says. The accounts the window starts with (`held`) are in `accounts.toml` as accounts signed in
+/// before. With an own server running, its certificate authority is written into the account's entry beforehand, as
+/// a user of a self-signed deployment writes it, and its origin goes to the sandbox dir for the parent to type.
+/// Without own servers, an own server's account signed in before is in the file too, and stays unstarted: said as
+/// `off-accounts entries=<n> started=<n>`.
+fn runner_of(
+    root: &Path,
+    mode: Mode,
+    held: &[ngteams::accounts_file::PersonalAccount],
+    server: Option<&own::Own>,
+) -> SandboxResult<ngteams::accounts::Runner> {
+    use ngteams::accounts_file::{OwnServer, PersonalAccount};
     let setup = support::runner(root)?
         .setup
         .with_secrets(ngteams::secrets::AppSecrets::in_memory())
-        .with_own_servers(true);
-    setup.ask_for_on(
-        OWN_UPN,
-        &OwnServer::parse(&own.origin, &own.ca_file.display().to_string())?,
-    )?;
-    let dir = std::env::var_os(ui_sandbox::SANDBOX_ENV).ok_or("no sandbox dir")?;
-    fs::write(PathBuf::from(dir).join(OWN_ORIGIN), &own.origin)?;
+        .with_own_servers(mode.own_servers());
+    for account in held.iter().filter(|account| account.server.is_none()) {
+        account.save(&setup.paths)?;
+    }
+    if let Some(server) = server {
+        setup.ask_for_on(OWN_UPN, &server.entry()?)?;
+        fs::write(own::sandbox_dir()?.join(OWN_ORIGIN), server.origin())?;
+    }
+    if !mode.own_servers() {
+        PersonalAccount::pending_on(OWN_UPN, &OwnServer::parse(SHOWN_SERVER, "")?)?
+            .signed_in_as(
+                "00000000-0000-4000-8000-0000000000a1",
+                "00000000-0000-4000-8000-000000000001",
+                None,
+            )?
+            .save(&setup.paths)?;
+        say(&format!(
+            "off-accounts entries={} started={}",
+            setup.accounts()?.len(),
+            setup.signed_in_accounts()?.len()
+        ));
+    }
     Ok(ngteams::accounts::Runner {
         setup,
         floor: teams_core::CallFloor::new(),
@@ -523,9 +1085,10 @@ fn runner_with_own_servers(root: &Path, own: &own_server::OwnServer) -> SandboxR
     })
 }
 
-/// Says `own-signed-in <mri> chat=<bool>` once the own server's account is signed in as the app keeps one: its entry
-/// named by the sign-in, its refresh token under its server and UPN, its region's bases on its server alone; `chat`
-/// is whether the server's region names a chat service (so its engine can start).
+/// Says `own-entries total=<n> microsoft_same_upn=<bool> own_same_upn=<n>` and `own-signed-in <mri> chat=<bool>` once
+/// the own server's account is signed in as the app keeps one: its entry named by the sign-in beside the Microsoft
+/// 365 account of the same user name, its refresh token under its server and UPN, its region's bases on its server
+/// alone; `chat` is whether the server's region names a chat service (so its engine can start).
 fn say_when_own_signed_in(setup: ngteams::setup::Setup, cx: &mut App) {
     use teams_auth::secrets::SecretStore as _;
     cx.spawn(async move |cx: &mut AsyncApp| {
@@ -534,13 +1097,14 @@ fn say_when_own_signed_in(setup: ngteams::setup::Setup, cx: &mut App) {
             let Ok(accounts) = setup.signed_in_accounts() else {
                 continue;
             };
-            let Some(account) = accounts.into_iter().find(|account| account.upn == OWN_UPN) else {
+            let Some(account) = accounts
+                .iter()
+                .find(|account| account.upn == OWN_UPN && account.server.is_some())
+                .cloned()
+            else {
                 continue;
             };
-            let Some(server) = account.server.clone() else {
-                say("own account has no server");
-                return;
-            };
+            let server = account.server.clone().unwrap_or_default();
             let region = setup
                 .paths
                 .region_file(&account)
@@ -560,10 +1124,81 @@ fn say_when_own_signed_in(setup: ngteams::setup::Setup, cx: &mut App) {
                 ));
                 return;
             }
+            let all = setup.accounts().unwrap_or_default();
+            let same = |own: bool| {
+                all.iter()
+                    .filter(|held| held.upn == OWN_UPN && held.server.is_some() == own && held.is_signed_in())
+                    .count()
+            };
+            say(&format!(
+                "own-entries total={} microsoft_same_upn={} own_same_upn={}",
+                all.len(),
+                same(false) == 1,
+                same(true)
+            ));
             let chat = region.base("chatServiceAfd").is_some() || region.base("chatService").is_some();
             let mri = account.mri().map(|mri| mri.as_str().to_owned()).unwrap_or_default();
             say(&format!("own-signed-in {mri} chat={chat}"));
             return;
+        }
+    })
+    .detach();
+}
+
+/// Once the parent writes [`MOCK_ASK`]: `mock-requests total=<n> auth_paths=<n> own_token=<n>` of the requests the
+/// mock (Microsoft's services here) got: how many asked a sign-in or authz service, and how many carried the own
+/// server's account's skypetoken.
+fn say_mock_requests_when_asked(mock: Arc<ChatServiceMock>, setup: ngteams::setup::Setup, cx: &mut App) {
+    use teams_auth::secrets::SecretStore as _;
+    let Ok(dir) = own::sandbox_dir() else {
+        say("no sandbox dir");
+        return;
+    };
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            if fs::remove_file(dir.join(MOCK_ASK)).is_err() {
+                continue;
+            }
+            let own = setup
+                .signed_in_accounts()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|account| account.server.is_some());
+            let token = match own {
+                Some(account) => setup
+                    .secrets()
+                    .get(&teams_auth::authz::skypetoken_key(&account.id()))
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            let Some(token) = token else {
+                say("mock-requests: the own account holds no skypetoken to look for");
+                continue;
+            };
+            let requests = mock.received_requests().await;
+            let auth_paths = requests
+                .iter()
+                .filter(|request| {
+                    let path = request.url.path();
+                    path.contains("/oauth2/") || path.contains("/authsvc/")
+                })
+                .count();
+            let own_token = requests
+                .iter()
+                .filter(|request| {
+                    request
+                        .headers
+                        .values()
+                        .any(|value| value.to_str().is_ok_and(|value| value.contains(token.expose())))
+                })
+                .count();
+            say(&format!(
+                "mock-requests total={} auth_paths={auth_paths} own_token={own_token}",
+                requests.len()
+            ));
         }
     })
     .detach();

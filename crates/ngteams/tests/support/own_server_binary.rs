@@ -1,0 +1,178 @@
+//! The real `ngteams-server` binary on loopback, run as an operator runs it: a configuration file, `serve` as a
+//! process of its own, users made with `user add` (the password on standard input). TLS with a certificate a made-up
+//! certificate authority signed (the CA's PEM is what an account's `ca_file` names), SQLite in a temporary directory.
+//! Nothing leaves loopback.
+
+use std::io::Write as _;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+
+/// The variable naming the binary; without it, `ngteams-server` beside the test's own target directory.
+pub const BIN_ENV: &str = "NGTEAMS_QA_SERVER_BIN";
+
+/// The password of every user [`BinaryServer::add_user`] adds.
+pub const PASSWORD: &str = "correct horse battery";
+
+/// How long `serve` has to listen (the host may be loaded).
+const READY: Duration = Duration::from_secs(60);
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// The binary to run: [`BIN_ENV`]'s, which must exist, else the one `cargo build -p ngteams-server` left beside this
+/// test's target directory, if it is there.
+pub fn binary() -> TestResult<Option<PathBuf>> {
+    if let Some(named) = std::env::var_os(BIN_ENV) {
+        let named = PathBuf::from(named);
+        if !named.is_file() {
+            return Err(format!("{BIN_ENV} names no file: {}", named.display()).into());
+        }
+        return Ok(Some(named));
+    }
+    let exe = std::env::current_exe()?;
+    // target/<profile>/deps/<test> -> target/<profile>/ngteams-server
+    let beside = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|profile| profile.join("ngteams-server"));
+    Ok(beside.filter(|path| path.is_file()))
+}
+
+/// A running server process; killed when dropped.
+pub struct BinaryServer {
+    /// `https://127.0.0.1:<port>`.
+    pub origin: String,
+    /// The certificate authority that signed its certificate (PEM).
+    pub ca_file: PathBuf,
+    binary: PathBuf,
+    config: PathBuf,
+    serving: Child,
+    dir: tempfile::TempDir,
+}
+
+impl BinaryServer {
+    /// Writes the certificates and the configuration, then starts `serve` and waits until it listens.
+    pub fn start(binary: &Path) -> TestResult<Self> {
+        let dir = tempfile::tempdir()?;
+        let ca_file = write_certificates(dir.path())?;
+        let port = free_port()?;
+        let origin = format!("https://127.0.0.1:{port}");
+        let config = dir.path().join("server.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "listen = \"127.0.0.1:{port}\"\npublic_origin = \"{origin}\"\ndatabase_url = \"sqlite://{}\"\n\n\
+                 [tls]\ncert = \"{}\"\nkey = \"{}\"\n",
+                dir.path().join("server.sqlite").display(),
+                dir.path().join("cert.pem").display(),
+                dir.path().join("key.pem").display(),
+            ),
+        )?;
+        let log = std::fs::File::create(dir.path().join("server.log"))?;
+        let serving = Command::new(binary)
+            .arg("--config")
+            .arg(&config)
+            .arg("serve")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()?;
+        let mut server = Self {
+            origin,
+            ca_file,
+            binary: binary.to_owned(),
+            config,
+            serving,
+            dir,
+        };
+        server.wait_until_listening(port)?;
+        Ok(server)
+    }
+
+    /// Waits for `serve` to say it serves (its database is ready by then) and to take a connection.
+    fn wait_until_listening(&mut self, port: u16) -> TestResult {
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let start = Instant::now();
+        loop {
+            if self.log().contains("serving")
+                && TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
+            {
+                return Ok(());
+            }
+            if let Some(status) = self.serving.try_wait()? {
+                return Err(format!("ngteams-server serve exited {status}: {}", self.log()).into());
+            }
+            if start.elapsed() > READY {
+                return Err(format!("ngteams-server serve doesn't listen on {address}: {}", self.log()).into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// `ngteams-server user add <upn> --name <name>` with [`PASSWORD`] on standard input; the user's object id.
+    pub fn add_user(&self, upn: &str, name: &str) -> TestResult<String> {
+        let mut adding = Command::new(&self.binary)
+            .arg("--config")
+            .arg(&self.config)
+            .args(["user", "add", upn, "--name", name])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        adding
+            .stdin
+            .take()
+            .ok_or("the command's standard input")?
+            .write_all(format!("{PASSWORD}\n").as_bytes())?;
+        let output = adding.wait_with_output()?;
+        let said = String::from_utf8_lossy(&output.stdout).into_owned();
+        if !output.status.success() {
+            return Err(format!("user add {upn}: {}", String::from_utf8_lossy(&output.stderr)).into());
+        }
+        // "added <upn> (<id>)"
+        let id = said
+            .trim()
+            .rsplit_once('(')
+            .and_then(|(_, id)| id.strip_suffix(')'))
+            .ok_or_else(|| format!("user add said: {said}"))?;
+        Ok(id.to_owned())
+    }
+
+    /// What `serve` wrote to standard error so far.
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("server.log")).unwrap_or_default()
+    }
+}
+
+impl Drop for BinaryServer {
+    fn drop(&mut self) {
+        let _ = self.serving.kill();
+        let _ = self.serving.wait();
+    }
+}
+
+/// A port nothing listens on now.
+pub fn free_port() -> TestResult<u16> {
+    Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
+}
+
+/// The server's certificate and key and the certificate authority's PEM in `dir`; the CA file's path.
+fn write_certificates(dir: &Path) -> TestResult<PathBuf> {
+    let ca_key = KeyPair::generate()?;
+    let mut ca = CertificateParams::new(Vec::new())?;
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca.distinguished_name
+        .push(rcgen::DnType::CommonName, "ngteams test certificate authority");
+    let ca_cert = ca.self_signed(&ca_key)?;
+    let key = KeyPair::generate()?;
+    let leaf = CertificateParams::new(vec!["127.0.0.1".to_owned()])?;
+    let cert = leaf.signed_by(&key, &Issuer::new(ca, ca_key))?;
+    std::fs::write(dir.join("cert.pem"), cert.pem())?;
+    std::fs::write(dir.join("key.pem"), key.serialize_pem())?;
+    let ca_file = dir.join("ca.pem");
+    std::fs::write(&ca_file, ca_cert.pem())?;
+    Ok(ca_file)
+}
