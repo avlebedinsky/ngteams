@@ -117,3 +117,26 @@ async fn disabling_an_account_on_one_node_ends_its_sockets_on_the_other_at_once(
         pair.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_account_on_one_node_ends_its_sockets_on_the_other_at_once() {
+    let Some(redis) = redis_url() else { return };
+    for backend in backends() {
+        let (pair, node_b) = nodes(backend, &redis).await;
+        let ic3 = token(&pair.server, "b@own.test", IC3).await;
+        let mut socket = Raw::open(&node_b, &query(EPID, "TeamsCDL")).await;
+        socket.connect(&ic3).await;
+        let app = &pair.server.app;
+        ngteams_server::admin::delete_by_upn(&app.db, &*app.fanout, "b@own.test")
+            .await
+            .unwrap();
+        let frame = socket.next_within(std::time::Duration::from_secs(4)).await;
+        assert_eq!(
+            frame.ok().flatten().as_deref(),
+            Some(r#"0:::{"reason":"unauthorized"}"#)
+        );
+        assert!(socket.next().await.is_none());
+        node_b.stop().await;
+        pair.stop().await;
+    }
+}

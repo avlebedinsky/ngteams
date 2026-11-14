@@ -579,6 +579,63 @@ async fn an_open_socket_ends_at_once_when_its_account_is_disabled_or_its_passwor
     }
 }
 
+/// A request of the admin API or the account's own endpoints; its status.
+async fn api(server: &TestServer, method: reqwest::Method, path: &str, token: Option<&str>, body: Value) -> u16 {
+    let mut request = reqwest::Client::new().request(method, server.url(path)).json(&body);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    request.send().await.unwrap().status().as_u16()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_socket_ends_at_once_when_the_admin_api_ends_its_account_or_the_account_changes_its_password() {
+    use reqwest::Method;
+    for backend in backends() {
+        let server = server(backend).await;
+        server.add_user("root@own.test", "Root").await;
+        ngteams_server::admin::set_admin(&server.app.db, "root@own.test", true)
+            .await
+            .unwrap();
+        let admin = token(&server, "root@own.test", "https://api.spaces.skype.com").await;
+        let mut sockets = Vec::new();
+        let mut ids = Vec::new();
+        for upn in ["a@own.test", "b@own.test", "c@own.test", "d@own.test", "root@own.test"] {
+            if upn != "root@own.test" {
+                ids.push(server.add_user(upn, "Someone").await);
+            }
+            let mut socket = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+            socket.connect(&token(&server, upn, IC3).await).await;
+            sockets.push(socket);
+        }
+        let user = |index: usize| format!("/api/admin/v1/users/{}", ids[index]);
+        let admin = Some(admin.as_str());
+
+        let disabled = api(&server, Method::PATCH, &user(0), admin, json!({"enabled": false})).await;
+        assert_eq!(disabled, 200);
+        ends_at_once(&mut sockets[0]).await;
+        let reset = json!({"password": "another horse battery"});
+        let path = format!("{}/password", user(1));
+        assert_eq!(api(&server, Method::POST, &path, admin, reset).await, 204);
+        ends_at_once(&mut sockets[1]).await;
+        assert_eq!(api(&server, Method::DELETE, &user(2), admin, json!({})).await, 204);
+        ends_at_once(&mut sockets[2]).await;
+        let change = json!({
+            "upn": "d@own.test", "current_password": PASSWORD, "new_password": "another horse battery",
+        });
+        let changed = api(&server, Method::POST, "/api/account/v1/password", None, change).await;
+        assert_eq!(changed, 204);
+        ends_at_once(&mut sockets[3]).await;
+
+        // the admin's own socket stays, and a change that ends nobody's sign-in ends no socket
+        let renamed = api(&server, Method::PATCH, &user(1), admin, json!({"display_name": "Bert"})).await;
+        assert_eq!(renamed, 200);
+        assert!(sockets[4].next_within(Duration::from_millis(1500)).await.is_err());
+        assert_eq!(server.app.trouter.open(), 1);
+        server.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_event_posted_after_another_process_disabled_the_account_is_not_delivered() {
     for backend in backends() {
