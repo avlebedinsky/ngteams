@@ -2,11 +2,11 @@
 
 mod blocked;
 mod contract;
-mod messages;
+pub(crate) mod messages;
 mod mutations;
 mod noops;
 mod paging;
-mod properties;
+pub(crate) mod properties;
 mod reactions;
 mod security;
 mod typing;

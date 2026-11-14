@@ -26,6 +26,14 @@ impl Audience for Spaces {
     const AUDIENCE: &'static str = "https://api.spaces.skype.com";
 }
 
+/// `https://ic3.teams.office.com`: the chat service, the registrar, Trouter.
+#[derive(Debug)]
+pub struct Ic3;
+
+impl Audience for Ic3 {
+    const AUDIENCE: &'static str = "https://ic3.teams.office.com";
+}
+
 /// An access token for `A`'s audience, from `Authorization: Bearer`.
 #[derive(Debug)]
 pub struct Bearer<A> {

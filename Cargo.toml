@@ -321,6 +321,10 @@ axum-server = { version = "0.9.2", default-features = false, features = ["tls-ru
 bytes = "1.12.1"
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tower = "0.5.3"
+# its push socket: the upgrade taken from hyper, the WebSocket from the tokio-tungstenite the client already links
+# (axum's own `ws` would add a second tungstenite)
+hyper = { version = "1.12.0", default-features = false }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 tower-http = { version = "0.6.11", features = ["limit", "timeout", "trace"] }
 # its passwords (Argon2id) and tokens (EdDSA JWTs with key ids)
 argon2 = "0.6.0"

@@ -14,9 +14,11 @@ use crate::auth::keys::{KeyError, KeyRing};
 use crate::auth::tokens::Issuer;
 use crate::config::{Config, LoginConfig};
 use crate::db::{Db, DbError};
+use crate::fanout::journal::{Journal, Keeping, LocalJournal, RedisJournal};
 use crate::fanout::{Fanout, FanoutError, Local, Redis};
 use crate::storage::{ObjectStorage, Storage, StorageError};
 use crate::throttle::Throttle;
+use crate::trouter::Hub;
 
 /// The largest request body the auth endpoints take.
 const AUTH_BODY_LIMIT: usize = 64 * 1024;
@@ -36,7 +38,10 @@ pub struct App {
     pub throttle: Throttle,
     /// First-admin setup attempts per client address.
     pub setup_throttle: Throttle,
+    /// The fan-out; an account's deliverable events (`push:<mri>`) are also kept in the journal.
     pub fanout: Arc<dyn Fanout>,
+    pub journal: Arc<dyn Journal>,
+    pub trouter: Arc<Hub>,
     pub storage: Arc<dyn Storage>,
 }
 
@@ -69,19 +74,23 @@ impl App {
             max_failures: config.setup.max_attempts,
             window: config.setup.window,
         };
-        let (fanout, throttle, setup_throttle): (Arc<dyn Fanout>, Throttle, Throttle) = match &config.redis_url {
-            Some(url) => {
-                let redis = Redis::connect(url).await?;
-                let throttle = Throttle::redis(config.login.clone(), redis.connection());
-                let setup_throttle = Throttle::redis(setup_limits, redis.connection());
-                (Arc::new(redis), throttle, setup_throttle)
-            }
-            None => (
-                Arc::new(Local::new()),
-                Throttle::local(config.login.clone()),
-                Throttle::local(setup_limits),
-            ),
-        };
+        let (fanout, journal, throttle, setup_throttle): (Arc<dyn Fanout>, Arc<dyn Journal>, Throttle, Throttle) =
+            match &config.redis_url {
+                Some(url) => {
+                    let redis = Redis::connect(url).await?;
+                    let throttle = Throttle::redis(config.login.clone(), redis.connection());
+                    let setup_throttle = Throttle::redis(setup_limits, redis.connection());
+                    let journal = RedisJournal::new(redis.connection());
+                    (Arc::new(redis), Arc::new(journal), throttle, setup_throttle)
+                }
+                None => (
+                    Arc::new(Local::new()),
+                    Arc::new(LocalJournal::new()),
+                    Throttle::local(config.login.clone()),
+                    Throttle::local(setup_limits),
+                ),
+            };
+        let fanout: Arc<dyn Fanout> = Arc::new(Keeping::new(fanout, Arc::clone(&journal), crate::trouter::keep));
         let storage = Arc::new(ObjectStorage::open(&config.storage_url, &config.storage_options)?);
         Ok(Arc::new(Self {
             config,
@@ -90,6 +99,8 @@ impl App {
             throttle,
             setup_throttle,
             fanout,
+            journal,
+            trouter: Arc::new(Hub::new()),
             storage,
         }))
     }
@@ -109,12 +120,21 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::chatsvc::router())
         .merge(crate::admin::api::router())
         .merge(crate::teams::router(&app.config))
+        .merge(crate::registrar::router())
+        .merge(crate::trouter::router())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(app)
+}
+
+/// `shutdown`, as the listener takes it: once it resolves the node's push sockets are closed too, so the listener's
+/// open connections end without waiting out their grace.
+pub async fn closing(app: Arc<App>, shutdown: impl Future<Output = ()> + Send) {
+    shutdown.await;
+    app.trouter.close_all();
 }
 
 /// Ready when the database and the fan-out answer.
@@ -130,7 +150,8 @@ async fn ready(State(app): State<Arc<App>>) -> StatusCode {
     }
 }
 
-/// The node's housekeeping, until the task is dropped: key rotation when due, expired refresh tokens dropped.
+/// The node's housekeeping, until the task is dropped: key rotation when due, expired refresh tokens and push
+/// registrations dropped.
 pub async fn maintain(app: Arc<App>) {
     let mut every = tokio::time::interval(MAINTENANCE);
     loop {
@@ -155,5 +176,12 @@ async fn purge(app: &App) {
     let before = crate::db::now() - crate::db::seconds(EXPIRED_KEPT);
     if let Err(error) = crate::db::refresh::purge_expired(&app.db, before).await {
         tracing::warn!(%error, "expired refresh tokens weren't dropped");
+    }
+    purge_registrations(app).await;
+}
+
+async fn purge_registrations(app: &App) {
+    if let Err(error) = crate::registrar::purge_expired(&app.db, crate::db::now()).await {
+        tracing::warn!(%error, "expired push registrations weren't dropped");
     }
 }

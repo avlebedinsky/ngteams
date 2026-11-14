@@ -5,9 +5,10 @@ wire the client already speaks to Microsoft (the shapes in `docs/protocol/`), wi
 origin. The client sends a request to it only for an account signed in to that server.
 
 What it serves today: sign-in (the token endpoint), authz, the chat service, teams and channels (CSA, the middle
-tier's and the provisioning service's team routes), and account administration (the admin API and the first-admin
-setup). Other services are added one at a time. Authz names only the services the server
-serves, so the client keeps every other service off.
+tier's and the provisioning service's team routes), account administration (the admin API and the first-admin
+setup), the registrar and the Trouter push socket. The registrar and Trouter have no GTM (the client finds them on
+the origin). Other services are added one at a time. Authz names only the services the server serves, so the client
+keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
 reactions, transient typing, account preferences and message pages (newest, backward, incremental and around a
@@ -22,11 +23,12 @@ membership changes are still being added.
 | Need | Library |
 |---|---|
 | HTTP | axum 0.8 on hyper 1 and tower; tower-http for request timeouts, body limits and traces |
+| Push socket | tokio-tungstenite on hyper's upgrade (the tungstenite the client links; axum's `ws` would add a second one) |
 | TLS | rustls (aws-lc-rs) through axum-server, or plain HTTP behind a reverse proxy |
 | Database | Diesel 2.4: Postgres through diesel-async (tokio-postgres, no libpq), SQLite through Diesel's own connection on the blocking pool; bb8 pools; embedded migrations per backend |
 | Passwords | argon2 (Argon2id, PHC strings) |
 | Tokens | jsonwebtoken (EdDSA, Ed25519 keys from aws-lc-rs, `kid` per key); opaque refresh tokens kept as SHA-256 |
-| Fan-out, counters | redis-rs 1.8: a connection manager with RESP3 pushes and resubscription after a reconnect (Redis or Valkey) |
+| Fan-out, replay, counters | redis-rs 1.8: a connection manager with RESP3 pushes and resubscription after a reconnect; Redis Streams for the replay journal (Redis 6.2 or later, or Valkey) |
 | Files | object_store: a local directory, memory or S3 |
 | Configuration, CLI | figment (TOML plus environment), clap |
 | Logs | tracing, tracing-subscriber |
@@ -79,6 +81,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `login.max_failures`, `login.window` | `10`, `900` | password attempts allowed in the window; success clears the count |
 | `setup.require_code` | `true` | whether creating the first admin takes the setup code; turn it off only for an install nobody else reaches before its admin exists |
 | `setup.max_attempts`, `setup.window` | `5`, `300` | first-admin setup attempts a client address may make in the window (seconds) |
+| `trouter.auth_timeout` | `10` | seconds a push socket has to authenticate after it opened |
 
 ## Sign-in and tokens
 
@@ -265,8 +268,8 @@ hands out its GTM.
 | Chat service aggregator | `chatSvcAggAfd` | `/api/csa/<region>/` | yes |
 | Provisioning | `teamsAndChannelsProvisioningService` | `/fabric/<region>/templates/api/` (the client takes a region of letters only) | yes |
 | Presence | `presenceUPS` | `/ups/<geo>/` | no |
-| Registrar | (the origin) | `/registrar/prod/V2/` | no |
-| Trouter | (the origin) | `wss://<origin>/trouter/v4/c` | no |
+| Registrar | (the origin) | `/registrar/prod/V2/` | yes |
+| Trouter | (the origin) | `wss://<origin>/trouter/v4/c` | yes |
 | AMS | `amsV2` | `/ams/` | no |
 | Graph | (the origin) | `/graph/v1.0/` | `me` |
 | User profiles | `userProfileService` | `/api/userprofilesvc/<region>/` | a team's people search |
@@ -275,6 +278,44 @@ hands out its GTM.
 | Search | (the origin) | `/search/` | no |
 | Flight proxy | (the origin) | `/flightproxy/api/v2/` | no |
 | TURN credentials | (the origin) | `/trap/tokens` | no |
+
+## Push: the registrar and Trouter
+
+The wire is Teams' (`docs/protocol/trouter.md`): socket.io 0.9 over a WebSocket at `/trouter/v4/c`, with the
+client's query (`tc`, `timeout`, `epid`). The handshake carries no credential; one with another `Origin` than the
+public origin is refused.
+
+- **Authentication.** The server sends `1::`. The first frame must be `user.authenticate` with the account's `ic3`
+  token within `trouter.auth_timeout`, else the socket gets `0:::{"reason":"timeout"}`. A token that isn't valid, or
+  a disabled account, gets `0:::{"reason":"unauthorized"}`. When the token runs out the socket gets `unauthorized`
+  too, and the client comes back with a new token (it normally reconnects before that).
+- **Endpoint.** `trouter.connected` names the endpoint, its push URL (`<origin>/trouter/v4/f/<endpoint>/`), the
+  `reconnectUrl` on the same origin and `connectparams` valid for seven days. The endpoint id is derived from the
+  account, the client's `epid` and its stack, so the same client gets the same endpoint on every connect and on
+  every node, and `connectparams` carry no secret. A newer socket of an endpoint closes the older one. An account
+  holds at most 32 sockets on a node.
+- **Registrar.** `POST /registrar/prod/V2/registrations` with the `ic3` token takes either stack's registration
+  (`TeamsCDLWebWorker`, `SkypeSpacesWeb`) and answers `202`. The push URL must be the caller's own endpoint for that
+  `registrationId` and stack (else `403`). The TTL is at most 3600 seconds. A registration is a row in
+  `push_registrations`; an account holds at most 64 live ones (`429` beyond). The account's sockets are told at once.
+- **Deliveries.** A messaging endpoint with a live registration gets the account's `push:<mri>` events as `3:::`
+  deliveries at `/trouter/v4/f/<endpoint>/messaging`, each body an `EventMessage` around the fan-out's resource:
+  `NewMessage`, `MessageUpdate`, `ConversationUpdate`, `CustomUserProperties` and `ThreadUpdate` (a new chat; the
+  client reads it as an unknown kind). `ReadReceipt` stays internal: Teams delivers no peer read receipt. The
+  calling stack's socket gets no chat events. The client's answers (`3:::` with a status) are accepted and not
+  needed.
+- **Keep-alives.** `ping` is answered `["pong"]`, any other acknowledged event `[]`. A socket silent for two ping
+  intervals and 20 seconds is closed.
+- **Replay.** Every delivered event but typing (and other `Control/…` messages) is also kept in the account's
+  journal for 15 minutes, at most 512 entries: a Redis Stream `journal:push:<mri>`, or memory on a single node. Each
+  endpoint keeps a cursor (`cursor:<endpoint>`, 24 hours). A socket delivers from its endpoint's cursor, so after a
+  reconnect, on any node, the endpoint gets what it missed as stored deliveries (`"mstore":true`, the same `id` as
+  the live one would have had), in order and once. A new endpoint starts at the journal's end.
+- **Message loss.** When entries after the cursor may be gone (the journal overflowed, the cursor is older than 15
+  minutes with nothing left to prove otherwise, or a reconnecting endpoint has no cursor), the socket gets
+  `trouter.message_loss` with the `messaging` tag. The client runs its conversation sync and acknowledges.
+- **Shutdown.** A node closes its sockets with `0::` when it stops; clients reconnect to another node after their
+  backoff. `ngteams_server::trouter::disconnect` closes an account's sockets on every node.
 
 ## Chat events
 
@@ -285,7 +326,8 @@ wraps this internal event separately. A message post publishes `NewMessage` with
 an edit, soft deletion or reaction publishes `MessageUpdate` to the same recipients. Typing and peer read receipts
 exclude the acting account.
 Edits require message ownership and preserve its ID, client message ID, original arrival time and reactions. Publication happens after the transaction commits. The fan-out is at most
-once; clients catch up through conversation sync after a missed event.
+once; a socket reads kept events from the journal instead (above), and clients catch up through conversation sync
+after a reported loss.
 
 Database versions advance a shared row inside the write transaction. A conversation page keeps its upper bound
 and follows versions as a keyset; a chat changed during paging appears on the next incremental scan. This keeps
@@ -319,6 +361,10 @@ shape that the client treats as empty preferences.
   subscriber for it delivers them. Each node keeps one Redis subscription per topic and feeds its local subscribers
   from it. Without Redis the same `Fanout` trait is one process's broadcast.
 - Delivery through the fan-out is at most once. A subscriber that falls behind learns how many payloads it missed.
+- A Trouter socket lives on one node. Its node subscribes to the account's `push:<mri>` and `trouter:<mri>` (control:
+  a registration taken, a socket replaced, a disconnect) topics. A kept event is appended to the account's journal
+  before it is published, so the node that is woken reads it there, in order; a socket that lagged or reconnected
+  reads from its endpoint's cursor. Registrations are rows, so any node takes one and any node reads it.
 - Signing keys are rows in the database. A node rotates the key when it is due (checked hourly) and drops keys that
   can no longer verify a live token. Retired keys are kept for the access lifetime plus three hourly reload intervals
   and the verifier's 60-second clock allowance, covering two missed maintenance checks. Nodes that cannot reload

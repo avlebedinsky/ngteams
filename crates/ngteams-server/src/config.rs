@@ -58,6 +58,7 @@ pub struct Config {
     pub tokens: TokenConfig,
     pub login: LoginConfig,
     pub setup: SetupConfig,
+    pub trouter: TrouterConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -69,6 +70,7 @@ impl std::fmt::Debug for Config {
             .field("tokens", &self.tokens)
             .field("login", &self.login)
             .field("setup", &self.setup)
+            .field("trouter", &self.trouter)
             .finish_non_exhaustive()
     }
 }
@@ -127,6 +129,26 @@ impl Default for SetupConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TrouterConfig {
+    /// Seconds a push socket has to authenticate after it opened.
+    pub auth_timeout: u64,
+}
+
+impl Default for TrouterConfig {
+    fn default() -> Self {
+        Self { auth_timeout: 10 }
+    }
+}
+
+impl TrouterConfig {
+    #[must_use]
+    pub fn auth_timeout(&self) -> Duration {
+        Duration::from_secs(self.auth_timeout)
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -144,6 +166,7 @@ impl Default for Config {
             tokens: TokenConfig::default(),
             login: LoginConfig::default(),
             setup: SetupConfig::default(),
+            trouter: TrouterConfig::default(),
         }
     }
 }

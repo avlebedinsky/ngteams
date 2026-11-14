@@ -5,7 +5,9 @@
 //! - [`db`]: Postgres or SQLite through Diesel: accounts, refresh tokens, signing keys, the admin audit;
 //! - [`auth`]: passwords, signing keys, tokens and the request extractors that check them;
 //! - [`routes`]: the endpoints; [`services`]: the served services and the GTMs authz names them by;
-//! - [`fanout`]: payloads between nodes (in-process or Redis); [`storage`]: files (`object_store`);
+//! - [`fanout`]: payloads between nodes (in-process or Redis) and their replay journal; [`storage`]: files
+//!   (`object_store`);
+//! - [`trouter`]: the push socket; [`registrar`]: the registrations of its endpoints;
 //! - [`throttle`]: failed sign-ins per account;
 //! - [`app`]: the shared state and the router; [`serve`]: the listener, plain or TLS; [`cli`]: the command line;
 //!   [`admin`]: account administration (the admin API, the first-admin setup, the account commands);
@@ -20,9 +22,11 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod fanout;
+pub mod registrar;
 pub mod routes;
 pub mod serve;
 pub mod services;
 pub mod storage;
 mod teams;
 pub mod throttle;
+pub mod trouter;

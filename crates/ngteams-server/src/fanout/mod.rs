@@ -1,7 +1,9 @@
 //! Fan-out between the nodes: a payload published on a topic (such as `push:<mri>`) reaches every subscriber of that
 //! topic, on any node. [`Local`] is one process's broadcast (a single node, SQLite); [`Redis`] carries it through Redis
 //! pub/sub to every node, each node's subscribers fed from one Redis subscription per topic. Delivery is at most once:
-//! a subscriber that falls behind learns how much it missed ([`Missed`]), and replays from its own record.
+//! a subscriber that falls behind learns how much it missed ([`Missed`]), and replays from the topic's [`journal`].
+
+pub mod journal;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};

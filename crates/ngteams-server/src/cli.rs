@@ -186,6 +186,7 @@ async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'stat
     crate::admin::setup::announce(&app).await;
     tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
     let maintenance = tokio::spawn(app::maintain(std::sync::Arc::clone(&app)));
+    let shutdown = app::closing(std::sync::Arc::clone(&app), shutdown);
     let served = listener.serve(app::router(app), tls, shutdown).await;
     maintenance.abort();
     Ok(served?)

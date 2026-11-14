@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use super::{client, engine};
 use crate::support::{Backend, TestServer, backends};
 
-pub(super) struct Pair {
+pub(crate) struct Pair {
     pub server: TestServer,
     pub a_id: String,
     pub b_id: String,
@@ -25,6 +25,11 @@ impl Pair {
             config.public_origin = url::Url::parse("https://own.example.test").unwrap();
         })
         .await;
+        Self::start_on(server).await
+    }
+
+    /// The pair on a server already running (its public origin `https://own.example.test`).
+    pub async fn start_on(server: TestServer) -> Self {
         let a_id = server.add_user("a@own.test", "Ada").await;
         let b_id = server.add_user("b@own.test", "Bert").await;
         let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];

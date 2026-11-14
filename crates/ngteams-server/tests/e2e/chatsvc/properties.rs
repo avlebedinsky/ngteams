@@ -86,10 +86,10 @@ async fn native_app_preferences_persist_and_are_visible_only_to_their_own_accoun
     }
 }
 
-struct PropertyWrite {
-    chat: Option<String>,
-    name: String,
-    value: serde_json::Value,
+pub(crate) struct PropertyWrite {
+    pub chat: Option<String>,
+    pub name: String,
+    pub value: serde_json::Value,
 }
 
 impl teams_proto::Request for PropertyWrite {

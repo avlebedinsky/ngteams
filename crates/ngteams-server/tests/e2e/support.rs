@@ -89,13 +89,11 @@ impl TestServer {
         let app = App::start(config).await.unwrap();
         let router = app::router(Arc::clone(&app));
         let (shutdown, stop) = oneshot::channel::<()>();
+        let closing = app::closing(Arc::clone(&app), async move {
+            let _ = stop.await;
+        });
         let task = tokio::spawn(async move {
-            listener
-                .serve(router, None, async move {
-                    let _ = stop.await;
-                })
-                .await
-                .unwrap();
+            listener.serve(router, None, closing).await.unwrap();
         });
         Self {
             origin,

@@ -26,6 +26,8 @@ diesel-async.workspace = true
 diesel_migrations.workspace = true
 figment.workspace = true
 futures-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 jsonwebtoken.workspace = true
 libsqlite3-sys.workspace = true
 object_store.workspace = true
@@ -36,6 +38,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing = { workspace = true, features = ["std", "attributes"] }
@@ -51,6 +54,8 @@ teams-auth.workspace = true
 teams-core = { workspace = true, features = ["test-support"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-store.workspace = true
+# the push channel's e2e tests: the client's own Trouter session, and a bare socket for what that session never sends
+teams-trouter = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]
