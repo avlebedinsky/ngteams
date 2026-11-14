@@ -34,7 +34,11 @@
 //! which asks for a Microsoft 365 account alone; an own server's account signed out, asked for its password again
 //! and forgotten as `ngteams --forget <server>/<UPN>` forgets it; and an own server's account as the window shows
 //! one whose server isn't on loopback (its engine on the mock; nothing is sent to that address): `ngteamsctl accounts`
-//! names its server, its address `<server>/<UPN>` switches to it, Settings > General and its rail tile name its server.
+//! names its server, its address `<server>/<UPN>` switches to it, Settings > General, its rail tile and its account
+//! menu name its server, and the Microsoft 365 account of the same user name beside it names none. And the choice of
+//! place worked as a user without a pointer works it, in Teams Light and Dark: Tab reaches it from the account's field
+//! past "Sign in", each arrow, Home and End choose, Space and Enter go on to the place's first field, and Tab walks
+//! on through the fields and "Sign in" back to the choice; then the pointer chooses each place.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -114,10 +118,13 @@ const MOCK_ASK: &str = "say-mock";
 /// The rail's "+", and the "Own server" segment of the window it opens, as the sandbox's output shows them.
 const RAIL_ADD_AT: (u32, u32) = (38, 713);
 const OWN_SEGMENT_AT: (u32, u32) = (936, 164);
+const MICROSOFT_SEGMENT_AT: (u32, u32) = (342, 164);
 /// The own server's address field in that window.
 const SERVER_FIELD_AT: (u32, u32) = (640, 264);
 /// The third account's tile on the rail (three accounts).
 const THIRD_TILE_AT: (u32, u32) = (38, 660);
+/// The first account's tile on the rail (three accounts).
+const FIRST_TILE_AT: (u32, u32) = (38, 534);
 
 pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -185,7 +192,7 @@ fn parent() -> SandboxResult {
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 7] = [
+const SCENES: [Scene; 9] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -201,6 +208,12 @@ const SCENES: [Scene; 7] = [
     ("own_account_shown_names_its_server", |sandbox| shown(sandbox, false)),
     ("own_account_shown_names_its_server_dark", |sandbox| {
         shown(sandbox, true)
+    }),
+    ("sign_in_choice_by_keyboard", |sandbox| {
+        choice_by_keyboard(sandbox, false)
+    }),
+    ("sign_in_choice_by_keyboard_dark", |sandbox| {
+        choice_by_keyboard(sandbox, true)
     }),
 ];
 
@@ -384,9 +397,36 @@ fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
 
 /// The pointer on the third account's tile until its tooltip shows, screenshot as `name`, then away.
 fn own_tile_pointed_at(sandbox: &Sandbox, input: &mut VirtualInput, name: &str) -> SandboxResult {
-    input.move_to(THIRD_TILE_AT.0, THIRD_TILE_AT.1)?;
+    tile_pointed_at(sandbox, input, THIRD_TILE_AT, name)
+}
+
+/// The pointer on the tile at `tile` until its tooltip shows, screenshot as `name`, then away.
+fn tile_pointed_at(sandbox: &Sandbox, input: &mut VirtualInput, tile: (u32, u32), name: &str) -> SandboxResult {
+    input.move_to(tile.0, tile.1)?;
     thread::sleep(Duration::from_secs(2));
     shot(sandbox, name)?;
+    input.move_to(640, 400)?;
+    Ok(())
+}
+
+/// A click on the shown account's tile at `tile` opens its account menu, screenshot as `name` with the pointer away;
+/// a second click closes it.
+fn account_menu_opened(
+    sandbox: &Sandbox,
+    input: &mut VirtualInput,
+    trace: &mut TraceReader,
+    tile: (u32, u32),
+    name: &str,
+) -> SandboxResult {
+    let menu = |change: &'static str| {
+        move |line: &serde_json::Value| line["view"] == "status-menu" && line["change"] == change
+    };
+    input.click(tile.0, tile.1, keys::BTN_LEFT)?;
+    trace.next_where("the account menu opened", menu("opened"))?;
+    input.move_to(640, 400)?;
+    shot(sandbox, name)?;
+    input.click(tile.0, tile.1, keys::BTN_LEFT)?;
+    trace.next_where("the account menu closed", menu("closed"))?;
     input.move_to(640, 400)?;
     Ok(())
 }
@@ -439,6 +479,13 @@ fn the_accounts_come_back(
     let mut input = sandbox.input()?;
     shot(sandbox, "ngteams-accounts-own-restarted.png")?;
     own_tile_pointed_at(sandbox, &mut input, "ngteams-own-rail-tile-restarted.png")?;
+    account_menu_opened(
+        sandbox,
+        &mut input,
+        &mut trace,
+        THIRD_TILE_AT,
+        "ngteams-own-account-menu-restarted.png",
+    )?;
     each_accounts_requests_stay_on_its_services(sandbox, &running, false, connected)?;
     quit_and_finish(sandbox, &mut trace, running)
 }
@@ -767,6 +814,111 @@ fn password_again(sandbox: &Sandbox, dark: bool) -> SandboxResult {
     ensure(status.success(), || format!("the app exited {status}: {stderr}"))
 }
 
+/// What `key` (named `named`) leaves in the window asking for an account: it must hold `wanted`.
+fn key_leaves(
+    sandbox: &Sandbox,
+    input: &mut VirtualInput,
+    running: &Running,
+    (named, key): (&str, u32),
+    wanted: &str,
+) -> SandboxResult {
+    input.key(key)?;
+    let now = prompt_now(sandbox, running)?;
+    ensure(now.contains(wanted), || {
+        format!("after {named} the window doesn't hold `{wanted}`: {now}")
+    })
+}
+
+/// The choice of place with the keyboard alone, as a user without a pointer works it (see the module docs), then
+/// with the pointer.
+fn choice_by_keyboard(sandbox: &Sandbox, dark: bool) -> SandboxResult {
+    const OWN: &str = "kind=own ";
+    const MICROSOFT: &str = "kind=microsoft ";
+    let (mode, suffix) = if dark { ("dark", "-dark") } else { ("keys", "") };
+    let (mut running, mut trace, _) = start(sandbox, mode)?;
+    accounts_shown(&mut trace, &mut running, &[LAB_A, LAB_B])?;
+    let mut input = sandbox.input()?;
+    input.click(RAIL_ADD_AT.0, RAIL_ADD_AT.1, keys::BTN_LEFT)?;
+    let asked = prompt_now(sandbox, &running)?;
+    ensure(asked.contains(MICROSOFT), || format!("the window: {asked}"))?;
+
+    // Tab from the account's field: "Sign in", then round to the choice
+    input.key(keys::TAB)?;
+    input.key(keys::TAB)?;
+    shot(sandbox, &format!("ngteams-accounts-keys-choice{suffix}.png"))?;
+    let mut press =
+        |named: &str, key: u32, wanted: &str| key_leaves(sandbox, &mut input, &running, (named, key), wanted);
+    press("Tab, Tab, Right", keys::RIGHT, OWN)?;
+    shot(sandbox, &format!("ngteams-accounts-keys-own{suffix}.png"))?;
+    press("Left", keys::LEFT, MICROSOFT)?;
+    press("End", keys::END, OWN)?;
+    press("Home", keys::HOME, MICROSOFT)?;
+    press("Down", keys::DOWN, OWN)?;
+    press("Up", keys::UP, MICROSOFT)?;
+    press("Left on the first place", keys::LEFT, OWN)?;
+    press("Right on the last place", keys::RIGHT, MICROSOFT)?;
+    press("Right", keys::RIGHT, OWN)?;
+
+    // a letter on the choice is nobody's; Space goes on to the server's field
+    input.type_text("z")?;
+    let untouched = prompt_now(sandbox, &running)?;
+    ensure(
+        untouched.contains("kind=own signing=false server= user= account= "),
+        || format!("a letter typed on the choice went somewhere: {untouched}"),
+    )?;
+    input.key(keys::SPACE)?;
+    input.type_text("x")?;
+    let typed = prompt_now(sandbox, &running)?;
+    ensure(
+        typed.contains("kind=own ") && typed.contains(" server=x user= "),
+        || format!("Space on the choice didn't go on to the server's field: {typed}"),
+    )?;
+    shot(sandbox, &format!("ngteams-accounts-keys-own-field{suffix}.png"))?;
+
+    // back on the choice: Tab walks the server's address, the user name, the password, "Sign in", and round
+    input.key_with(&[Modifier::Shift], keys::TAB)?;
+    input.key(keys::TAB)?;
+    input.type_text("1")?;
+    input.key(keys::TAB)?;
+    input.type_text("2")?;
+    input.key(keys::TAB)?;
+    input.key(keys::TAB)?;
+    input.key(keys::TAB)?;
+    let walked = prompt_now(sandbox, &running)?;
+    ensure(
+        walked.contains("kind=own ") && walked.contains(" server=x1 user=2 "),
+        || format!("Tab didn't walk the choice, the address and the user name: {walked}"),
+    )?;
+    let mut press =
+        |named: &str, key: u32, wanted: &str| key_leaves(sandbox, &mut input, &running, (named, key), wanted);
+    press("Tab round to the choice, Left", keys::LEFT, MICROSOFT)?;
+
+    // Enter goes on to the account's field
+    input.key(keys::ENTER)?;
+    input.type_text("y")?;
+    let typed = prompt_now(sandbox, &running)?;
+    ensure(typed.contains(MICROSOFT) && typed.contains(" account=y "), || {
+        format!("Enter on the choice didn't go on to the account's field: {typed}")
+    })?;
+    ensure(typed.contains("signing=false") && typed.contains("problem=-"), || {
+        format!("the keys on the choice started a sign-in or left a problem: {typed}")
+    })?;
+
+    // the pointer chooses each place
+    input.click(OWN_SEGMENT_AT.0, OWN_SEGMENT_AT.1, keys::BTN_LEFT)?;
+    let clicked = prompt_now(sandbox, &running)?;
+    ensure(clicked.contains(OWN), || {
+        format!("the pointer didn't choose \"Own server\": {clicked}")
+    })?;
+    input.click(MICROSOFT_SEGMENT_AT.0, MICROSOFT_SEGMENT_AT.1, keys::BTN_LEFT)?;
+    let clicked = prompt_now(sandbox, &running)?;
+    ensure(clicked.contains(MICROSOFT), || {
+        format!("the pointer didn't choose \"Microsoft 365\": {clicked}")
+    })?;
+    shot(sandbox, &format!("ngteams-accounts-keys-pointer{suffix}.png"))?;
+    quit_and_finish(sandbox, &mut trace, running)
+}
+
 /// `ngteamsctl <args>` against the app's socket, in-process: its exit, stdout and stderr.
 fn ctl(sandbox: &Sandbox, args: &[&str]) -> SandboxResult<String> {
     let socket = sandbox.path(CTL_SOCKET).to_string_lossy().into_owned();
@@ -818,6 +970,13 @@ fn shown(sandbox: &Sandbox, dark: bool) -> SandboxResult {
     shot(sandbox, &format!("ngteams-own-settings-general{suffix}.png"))?;
     let mut input = sandbox.input()?;
     own_tile_pointed_at(sandbox, &mut input, &format!("ngteams-own-rail-tile{suffix}.png"))?;
+    account_menu_opened(
+        sandbox,
+        &mut input,
+        &mut trace,
+        THIRD_TILE_AT,
+        &format!("ngteams-own-account-menu{suffix}.png"),
+    )?;
 
     // the bare user name is the Microsoft 365 account's
     ctl(sandbox, &["account", "switch", OWN_UPN])?;
@@ -826,6 +985,20 @@ fn shown(sandbox: &Sandbox, dark: bool) -> SandboxResult {
     })?;
     ctl(sandbox, &["open", "settings", "general"])?;
     shot(sandbox, &format!("ngteams-microsoft-settings-general{suffix}.png"))?;
+    // the Microsoft 365 account of the same user name: its tile and its account menu name no server
+    tile_pointed_at(
+        sandbox,
+        &mut input,
+        FIRST_TILE_AT,
+        &format!("ngteams-microsoft-rail-tile{suffix}.png"),
+    )?;
+    account_menu_opened(
+        sandbox,
+        &mut input,
+        &mut trace,
+        FIRST_TILE_AT,
+        &format!("ngteams-microsoft-account-menu{suffix}.png"),
+    )?;
     ensure(!ctl(sandbox, &["status"])?.is_empty(), || {
         "ngteamsctl status said nothing".to_owned()
     })?;
@@ -1002,6 +1175,8 @@ enum Mode {
     Window,
     /// Own servers on, in Teams Dark.
     Dark,
+    /// Own servers on, in Teams Light, no own server running.
+    Keys,
     /// Own servers off.
     Off,
     /// Own servers on, a third account that is on an own server shown beside a and b, the control socket served.
@@ -1017,6 +1192,7 @@ impl Mode {
         match name {
             "window" => Some(Self::Window),
             "dark" => Some(Self::Dark),
+            "keys" => Some(Self::Keys),
             "off" => Some(Self::Off),
             "shown" => Some(Self::Shown),
             "shown-dark" => Some(Self::ShownDark),
