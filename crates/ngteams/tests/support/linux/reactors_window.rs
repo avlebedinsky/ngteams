@@ -59,6 +59,10 @@ use teams_ui::view::Root;
 use teams_ui::window::KitRoot;
 use tokio::sync::broadcast;
 use ui_sandbox::input::{VirtualInput, keys};
+#[path = "reactors_pixels.rs"]
+mod pixels;
+use pixels::{Rect, card_drawn, changed_within, highlighted};
+
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
 
 /// Which mode the child runs in.
@@ -84,8 +88,6 @@ const LAUGH: &str = "laugh";
 const OTHER: &str = "made-up-key";
 /// How many people gave the laugh: more than the card shows at once.
 const MANY: usize = 16;
-/// The most room a card takes beside its pill, either way: a little over its 320 px.
-const CARD_REACH: u32 = 340;
 
 pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -154,38 +156,6 @@ fn who_reacted(user: &mut User) -> SandboxResult {
     a_click_sets_and_takes_back_the_account_s_own(user, &pills)?;
     space_sets_and_takes_back_the_account_s_own(user)?;
     a_pill_gone_under_the_keys_takes_nothing(user)
-}
-
-/// A rectangle on the screen, in output pixels: `x0..x1`, `y0..y1`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Rect {
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-}
-
-impl Rect {
-    fn center(self) -> (u32, u32) {
-        (u32::midpoint(self.x0, self.x1), u32::midpoint(self.y0, self.y1))
-    }
-
-    fn contains(self, (x, y): (u32, u32)) -> bool {
-        (self.x0..self.x1).contains(&x) && (self.y0..self.y1).contains(&y)
-    }
-
-    fn overlaps(self, other: Self) -> bool {
-        self.x0 < other.x1 && other.x0 < self.x1 && self.y0 < other.y1 && other.y0 < self.y1
-    }
-
-    fn grown(self, by: u32) -> Self {
-        Self {
-            x0: self.x0.saturating_sub(by),
-            y0: self.y0.saturating_sub(by),
-            x1: self.x1 + by,
-            y1: self.y1 + by,
-        }
-    }
 }
 
 /// Where a pill and its card were drawn, found from the keys' highlight.
@@ -384,85 +354,6 @@ fn shots_dir() -> io::Result<PathBuf> {
         .join("ui-shots");
     fs::create_dir_all(&dir)?;
     Ok(dir)
-}
-
-/// The pixels of `after` drawn in the palette's selection colour that weren't in `before`: the pill under the keys.
-fn highlighted(before: &Path, after: &Path) -> SandboxResult<Rect> {
-    let wanted = teams_ui::theme::LIGHT_PALETTE.selection.to_be_bytes();
-    let near = |pixel: &image::Rgb<u8>| {
-        pixel
-            .0
-            .iter()
-            .zip(&wanted[1..])
-            .all(|(&got, &want)| got.abs_diff(want) <= 6)
-    };
-    let (before, after) = (image::open(before)?.to_rgb8(), image::open(after)?.to_rgb8());
-    bounds_of(&after, |x, y, pixel| near(pixel) && !near(before.get_pixel(x, y)))
-        .ok_or_else(|| "no pill drawn in the selection colour".into())
-}
-
-/// The pixels of `after` that differ from `before` around `pill` but not on it: the card shown. Only where a card of
-/// that pill can be (centred on it, at most [`CARD_REACH`] wide and tall, under or over it), so nothing else that
-/// changed on the screen meanwhile counts.
-fn card_drawn(before: &Path, after: &Path, pill: Rect) -> SandboxResult<Rect> {
-    let (before, after) = (image::open(before)?.to_rgb8(), image::open(after)?.to_rgb8());
-    let around = pill.grown(3);
-    let (middle, _) = pill.center();
-    let reach = Rect {
-        x0: middle.saturating_sub(CARD_REACH / 2),
-        y0: pill.y0.saturating_sub(CARD_REACH),
-        x1: middle + CARD_REACH / 2,
-        y1: pill.y1 + CARD_REACH,
-    };
-    bounds_of(&after, |x, y, pixel| {
-        reach.contains((x, y))
-            && !around.contains((x, y))
-            && pixel
-                .0
-                .iter()
-                .zip(before.get_pixel(x, y).0)
-                .any(|(&got, was)| got.abs_diff(was) > 48)
-    })
-    .ok_or_else(|| "no card drawn".into())
-}
-
-/// The bounds of the pixels `taken` takes, if any.
-fn bounds_of(shot: &image::RgbImage, taken: impl Fn(u32, u32, &image::Rgb<u8>) -> bool) -> Option<Rect> {
-    let mut found: Option<Rect> = None;
-    for (x, y, pixel) in shot.enumerate_pixels() {
-        if !taken(x, y, pixel) {
-            continue;
-        }
-        found = Some(found.map_or(
-            Rect {
-                x0: x,
-                y0: y,
-                x1: x + 1,
-                y1: y + 1,
-            },
-            |rect| Rect {
-                x0: rect.x0.min(x),
-                y0: rect.y0.min(y),
-                x1: rect.x1.max(x + 1),
-                y1: rect.y1.max(y + 1),
-            },
-        ));
-    }
-    found
-}
-
-/// Whether the pixels of `rect` differ between two screenshots.
-fn changed_within(before: &Path, after: &Path, rect: Rect) -> SandboxResult<bool> {
-    let (before, after) = (image::open(before)?.to_rgb8(), image::open(after)?.to_rgb8());
-    Ok(bounds_of(&after, |x, y, pixel| {
-        rect.contains((x, y))
-            && pixel
-                .0
-                .iter()
-                .zip(before.get_pixel(x, y).0)
-                .any(|(&got, was)| got.abs_diff(was) > 48)
-    })
-    .is_some())
 }
 
 /// With b's message selected by the keys: Right reaches each pill in turn (found on the screen by its highlight), its
