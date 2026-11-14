@@ -1,6 +1,7 @@
 //! Teams and channels: the real own-cloud engine and the client's typed reads against the server's CSA, middle
 //! tier, provisioning and chat service.
 
+mod activity;
 mod channels;
 mod create;
 mod golden;

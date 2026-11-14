@@ -1,6 +1,6 @@
 //! The real own-cloud engine and typed reads against persisted local chat service accounts.
 
-mod activity;
+pub(crate) mod activity;
 mod blocked;
 mod contract;
 pub(crate) mod messages;

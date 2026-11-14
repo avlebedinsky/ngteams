@@ -61,7 +61,7 @@ pub(super) fn mri(id: &str) -> Mri {
 }
 
 /// "<name> <words>", `name` a mention of `target` (a person's MRI, or a group chat's id for everyone in it).
-pub(super) fn mentioning(target: &str, name: &str, words: &str) -> MessageText {
+pub(crate) fn mentioning(target: &str, name: &str, words: &str) -> MessageText {
     let text = RichText {
         nodes: vec![Node::Paragraph(vec![
             Node::Mention {
@@ -78,7 +78,7 @@ pub(super) fn mentioning(target: &str, name: &str, words: &str) -> MessageText {
     MessageText::new(text, [("m".to_owned(), Mri::new(target))]).unwrap()
 }
 
-pub(super) async fn send(from: &EngineHandle, conversation: &str, text: MessageText) -> String {
+pub(crate) async fn send(from: &EngineHandle, conversation: &str, text: MessageText) -> String {
     let row = from
         .write(Action::Send {
             conversation: conversation.into(),
@@ -91,15 +91,15 @@ pub(super) async fn send(from: &EngineHandle, conversation: &str, text: MessageT
 }
 
 /// The account's feed after a catch-up.
-pub(super) async fn feed(of: &EngineHandle) -> ActivityFeed {
+pub(crate) async fn feed(of: &EngineHandle) -> ActivityFeed {
     assert!(of.sync().await.unwrap().failed.is_empty());
     of.activity().await.unwrap()
 }
 
 /// A post as a client that skips the composer's own checks would send it.
-struct RawPost {
-    chat: String,
-    body: Value,
+pub(crate) struct RawPost {
+    pub chat: String,
+    pub body: Value,
 }
 
 impl Request for RawPost {
@@ -258,7 +258,7 @@ async fn a_mention_reaches_nobody_outside_the_chat_and_names_no_other_chats_ever
     }
 }
 
-fn react(conversation: &str, message: &str, key: &str) -> Action {
+pub(crate) fn react(conversation: &str, message: &str, key: &str) -> Action {
     Action::React {
         conversation: conversation.into(),
         message_id: message.into(),
@@ -266,7 +266,7 @@ fn react(conversation: &str, message: &str, key: &str) -> Action {
     }
 }
 
-async fn sent(engine: &EngineHandle, action: Action) {
+pub(crate) async fn sent(engine: &EngineHandle, action: Action) {
     let row = engine.write(action).await.unwrap();
     assert_eq!(row.state, OutboxState::Sent, "{row:?}");
 }
