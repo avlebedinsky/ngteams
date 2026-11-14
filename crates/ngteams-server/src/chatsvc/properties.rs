@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use super::{Caller, Error, events, member_of, property_repo, reads};
+use super::{Caller, Error, events, member_of, property_repo, reads, streams};
 use crate::app::App;
 
 type Params = HashMap<String, String>;
@@ -20,6 +20,10 @@ pub(super) async fn set_conversation(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<StatusCode, Error> {
     let chat = reads::target(&path)?;
+    // a feed nothing was written to yet still takes its own horizon and bookmark
+    if matches!(chat, streams::FEED | streams::MENTIONS) {
+        streams::ensure(&app.db, chat, &caller.id).await?;
+    }
     let (found, members) = member_of(&app, &caller, chat).await?;
     let name = query.get("name").map(String::as_str).ok_or(Error::BadRequest)?;
     if query

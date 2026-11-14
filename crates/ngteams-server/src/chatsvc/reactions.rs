@@ -7,7 +7,7 @@ use axum::http::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Caller, Error, events, member_of, message_repo, mutations, reads};
+use super::{Caller, Error, events, member_of, message_repo, mutations, reads, streams};
 use crate::app::App;
 use crate::db::DbError;
 
@@ -34,10 +34,14 @@ pub(super) async fn react(
     method: Method,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<&'static str, Error> {
-    if query.len() != 1 || query.get("name").map(String::as_str) != Some("emotions") {
+    let chat = reads::target(&path)?;
+    let name = query.get("name").map(String::as_str).filter(|_| query.len() == 1);
+    if name == Some("isread") && method == Method::PUT && matches!(chat, streams::FEED | streams::MENTIONS) {
+        return mark_read(&app, &caller, &path, body).await;
+    }
+    if name != Some("emotions") {
         return Err(Error::BadRequest);
     }
-    let chat = reads::target(&path)?;
     let (found, _) = member_of(&app, &caller, chat).await?;
     let id = mutations::message_id(&path)?;
     let Json(body) = body.map_err(|_| Error::BadRequest)?;
@@ -85,6 +89,50 @@ pub(super) async fn react(
     )
     .await;
     Ok(if remove { "null" } else { "200" })
+}
+
+/// `PUT …/48:notifications/messages/<item>/properties?name=isread`: the account's own item read or unread. Its
+/// version moves, so the account's other clients sync the mark.
+async fn mark_read(
+    app: &App,
+    caller: &Caller,
+    path: &Params,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<&'static str, Error> {
+    let (found, _) = member_of(app, caller, reads::target(path)?).await?;
+    let Json(body) = body.map_err(|_| Error::BadRequest)?;
+    let read = match &body["isread"] {
+        Value::Bool(read) => *read,
+        Value::String(text) if text == "true" => true,
+        Value::String(text) if text == "false" => false,
+        _ => return Err(Error::BadRequest),
+    };
+    let change = message_repo::Change {
+        chat: &found.id,
+        id: mutations::message_id(path)?,
+        actor: &caller.id,
+        who: message_repo::Who::Owner,
+        effect: message_repo::Effect::None,
+        base: &super::wire::base(app),
+    };
+    let result = message_repo::update(&app.db, change, |item, _| {
+        if item["properties"].get("deletetime").is_some() {
+            return Err(DbError::Conflict);
+        }
+        item["properties"]["isread"] = json!(read);
+        Ok(true)
+    })
+    .await?;
+    let changed = mutations::updated(result)?;
+    events::tell(
+        app,
+        "MessageUpdate",
+        &changed.row.value()?,
+        &changed.readers,
+        &changed.told,
+    )
+    .await;
+    Ok("")
 }
 
 fn apply(body: &mut Value, at: i64, key: &str, value: Option<&str>, actor: &str) -> Result<bool, DbError> {
