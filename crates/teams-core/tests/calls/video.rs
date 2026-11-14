@@ -67,6 +67,20 @@ async fn the_camera_goes_on_by_the_account_s_action_and_both_ways_carry_video() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_test_call_s_camera_goes_on_as_a_one_to_one_call_s_and_shows_the_self_view() {
     let lab = Lab::start().await;
+    test_call_camera(&lab).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_test_call_s_camera_also_works_when_acceptance_precedes_the_start_response() {
+    let lab = Lab::start().await;
+    lab.mock.delay_next_call_op("epconv", Duration::from_secs(1));
+    assert!(
+        test_call_camera(&lab).await,
+        "the deferred acceptance uses its admitted HTTP fallback"
+    );
+}
+
+async fn test_call_camera(lab: &Lab) -> bool {
     let mut a = lab.account(LAB_A, A_TONE).await;
     let requests = a.handle.requests();
     let call = requests
@@ -91,19 +105,18 @@ async fn the_test_call_s_camera_goes_on_as_a_one_to_one_call_s_and_shows_the_sel
 
     requests.call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
-    let sent = lab.sent_by(LAB_A);
-    assert_eq!(
-        sent,
-        [
+    super::acceptance::assert_operations(
+        lab,
+        &[
             "start",
             "updateEndpointMetadata",
             "add",
             "renegotiate",
             "acknowledge",
-            "leave"
+            "leave",
         ],
-        "the test call's writes, its camera's renegotiation among them"
-    );
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

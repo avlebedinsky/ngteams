@@ -32,6 +32,9 @@ use teams_store::Store;
 use teams_trouter::{CallStack, Options, RegistrationReport, Trouter, TrouterCredentials};
 use tokio::sync::broadcast;
 
+#[path = "../../../tests/support/call_acceptance.rs"]
+mod acceptance;
+
 /// How long a test waits for an event.
 const WAIT: Duration = Duration::from_secs(30);
 /// How long the media runs once connected, before what was heard is judged.
@@ -141,6 +144,24 @@ impl Lab {
             .filter(|(_, account)| account == mri)
             .map(|(op, _)| op.clone())
             .collect()
+    }
+
+    async fn assert_test_call_operations(&self) {
+        let responses = self
+            .trouter
+            .sockets()
+            .iter()
+            .filter(|socket| socket.account.as_deref() == Some(LAB_A))
+            .flat_map(|socket| socket.frames.clone())
+            .filter(|frame| acceptance::is_acceptance_response(frame))
+            .count();
+        acceptance::assert_operations(
+            &self.sent_by(LAB_A),
+            &self.mock.received_requests().await,
+            &self.last_call(),
+            responses,
+            &["start", "updateEndpointMetadata", "add", "leave"],
+        );
     }
 }
 
@@ -428,7 +449,7 @@ async fn the_test_call_goes_to_the_echo_service_and_sends_the_complete_call_sequ
     a.act(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
 
-    assert_eq!(lab.sent_by(LAB_A), ["start", "updateEndpointMetadata", "add", "leave"]);
+    lab.assert_test_call_operations().await;
 
     assert_eq!(
         a.opened.cameras(),

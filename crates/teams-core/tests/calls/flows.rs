@@ -35,16 +35,7 @@ async fn the_test_call_connects_its_tone_crosses_both_ways_and_its_operations_ar
     assert_eq!(a.ended(call).await, End::HungUp);
 
     let id = lab.last_call();
-    assert_eq!(
-        lab.sent_by(LAB_A),
-        ["start", "updateEndpointMetadata", "add", "leave"],
-        "the start, the follow-ups on its registered call, the leave"
-    );
-    assert_eq!(
-        lab.responses_of(LAB_A),
-        1,
-        "the acceptance's acknowledgement, as its delivery response"
-    );
+    super::acceptance::assert_operations(&lab, &["start", "updateEndpointMetadata", "add", "leave"]).await;
     // the media crossed both ways: the peer's tone in a's recording, a's in the peer's
     tokio::time::sleep(Duration::from_millis(300)).await;
     let peer = lab.mock.close_peer(&id, LAB_A).expect("the media controller's peer");
@@ -334,7 +325,9 @@ async fn a_call_outlives_its_calling_socket_s_reconnect_and_keeps_its_media() {
     // the calling socket comes back on its endpoint and registers again, the call untouched
     a.next(|event| match event {
         Event::CallingRegistration(RegistrationReport::Registered) => Some(()),
-        Event::Call { status, .. } if *status != CallStatus::Connected => panic!("the call moved: {status:?}"),
+        Event::Call { status, .. } if *status != CallStatus::Connected => {
+            panic!("the call moved: {status:?}")
+        }
         _ => None,
     })
     .await;
@@ -344,11 +337,7 @@ async fn a_call_outlives_its_calling_socket_s_reconnect_and_keeps_its_media() {
     assert!(after > before + 50, "the media went on: {before} → {after}");
     requests.call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
-    assert_eq!(
-        lab.sent_by(LAB_A),
-        ["start", "updateEndpointMetadata", "add", "leave"],
-        "the leave on the links the call had before"
-    );
+    super::acceptance::assert_operations(&lab, &["start", "updateEndpointMetadata", "add", "leave"]).await;
     let _ = lab.mock.close_peer(&id, LAB_A);
     assert!(heard(&a.recording, PEER_TONE, TALK) > HEARD);
 }
