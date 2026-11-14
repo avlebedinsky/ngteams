@@ -67,11 +67,7 @@ pub(super) async fn of(app: &App, item: &repo::Item) -> Result<Made, Error> {
 }
 
 /// One thumbnail's bytes, when the file has it.
-pub(super) async fn picture(
-    app: &App,
-    item: &repo::Item,
-    size: &str,
-) -> Result<Option<(&'static str, Bytes)>, Error> {
+pub(super) async fn picture(app: &App, item: &repo::Item, size: &str) -> Result<Option<(&'static str, Bytes)>, Error> {
     if !SIZES.iter().any(|(known, _)| *known == size) {
         return Ok(None);
     }

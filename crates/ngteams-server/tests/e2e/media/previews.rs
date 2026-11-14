@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::Router;
-use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::http::StatusCode;
+use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::routing::get;
 use serde_json::Value;
 use teams_proto::LinkPreviewPicture;
@@ -25,14 +25,22 @@ async fn site() -> (String, Arc<AtomicUsize>) {
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&hits);
     let router = Router::new()
-        .route("/page", get(|| async { ([(CONTENT_TYPE, "text/html; charset=utf-8")], PAGE) }))
-        .route("/picture.png", get(|| async { ([(CONTENT_TYPE, "image/png")], png(1600, 400)) }))
+        .route(
+            "/page",
+            get(|| async { ([(CONTENT_TYPE, "text/html; charset=utf-8")], PAGE) }),
+        )
+        .route(
+            "/picture.png",
+            get(|| async { ([(CONTENT_TYPE, "image/png")], png(1600, 400)) }),
+        )
         .route("/moved", get(|| async { (StatusCode::FOUND, [(LOCATION, "/page")]) }))
         .route("/text", get(|| async { "not a picture" }))
-        .layer(axum::middleware::from_fn(move |request, next: axum::middleware::Next| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            next.run(request)
-        }));
+        .layer(axum::middleware::from_fn(
+            move |request, next: axum::middleware::Next| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                next.run(request)
+            },
+        ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

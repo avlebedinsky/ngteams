@@ -28,8 +28,8 @@ use url::Url;
 
 use super::{Error, account, quota, repo, thumbs};
 use crate::app::App;
-use crate::db::users::{self, User};
 use crate::db::DbError;
+use crate::db::users::{self, User};
 
 /// The folder chat files go to, as Teams names it.
 pub(super) const FOLDER: &str = "Microsoft Teams Chat Files";
@@ -89,7 +89,11 @@ pub(super) async fn shared(app: &App, link: &str) -> Result<repo::Item, Error> {
     let segments: Vec<String> = url
         .path_segments()
         .ok_or(Error::Missing)?
-        .map(|segment| percent_encoding::percent_decode_str(segment).decode_utf8_lossy().into_owned())
+        .map(|segment| {
+            percent_encoding::percent_decode_str(segment)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
         .collect();
     let [sp, personal, user, documents, folder, name] = segments.as_slice() else {
         return Err(Error::Missing);
@@ -307,7 +311,9 @@ fn mime(name: &str) -> String {
 async fn invite(app: &App, caller: &User, item: &repo::Item, body: &[u8]) -> Result<Response, Error> {
     let body: Value = serde_json::from_slice(body).map_err(|_| Error::Invalid("The share isn't JSON."))?;
     if body["requireSignIn"] != json!(true) || body["sendInvitation"] != json!(false) {
-        return Err(Error::Invalid("A file is shared only with named accounts that sign in."));
+        return Err(Error::Invalid(
+            "A file is shared only with named accounts that sign in.",
+        ));
     }
     let recipients = body["recipients"]
         .as_array()
@@ -332,12 +338,7 @@ async fn invite(app: &App, caller: &User, item: &repo::Item, body: &[u8]) -> Res
 }
 
 /// The item a link's `tempauth` is the credential for.
-async fn linked(
-    app: &App,
-    audience: &str,
-    id: &str,
-    query: &HashMap<String, String>,
-) -> Result<repo::Item, Error> {
+async fn linked(app: &App, audience: &str, id: &str, query: &HashMap<String, String>) -> Result<repo::Item, Error> {
     let credential = query.get("tempauth").ok_or(Error::Unauthorized)?;
     let subject = app
         .issuer

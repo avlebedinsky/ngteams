@@ -29,8 +29,8 @@ use serde_json::json;
 
 use crate::app::App;
 use crate::auth::keys::KeyError;
-use crate::db::users::{self, User};
 use crate::db::DbError;
+use crate::db::users::{self, User};
 use crate::storage::StorageError;
 
 /// The largest body of a read by POST.
@@ -59,13 +59,9 @@ pub(crate) fn router(app: &App) -> Router<Arc<App>> {
     } else {
         Router::new()
     };
-    let long = ams::router(app)
-        .merge(drive::router())
-        .merge(previews)
-        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            LONG,
-        ));
+    let long = ams::router(app).merge(drive::router()).merge(previews).layer(
+        tower_http::timeout::TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, LONG),
+    );
     small.merge(long)
 }
 
@@ -133,7 +129,11 @@ impl IntoResponse for Error {
             ),
             Self::Upstream => (StatusCode::BAD_GATEWAY, "badGateway", "The link's site didn't answer."),
             Self::Busy => {
-                return (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, "5")]).into_response();
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "5")],
+                )
+                    .into_response();
             }
             Self::Database(error) => return unavailable(&error),
             Self::Storage(error) => return unavailable(&error),

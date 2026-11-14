@@ -63,8 +63,18 @@ async fn an_engine_sends_a_file_and_the_other_member_sees_its_thumbnail_and_down
 
         let outsider = trio.outsider().await;
         for refused in [
-            status(&outsider.read(&FileDownload::of_in(&cloud(), &share).unwrap()).await.unwrap_err()),
-            status(&outsider.read(&FileThumbnails::of_in(&cloud(), &share).unwrap()).await.unwrap_err()),
+            status(
+                &outsider
+                    .read(&FileDownload::of_in(&cloud(), &share).unwrap())
+                    .await
+                    .unwrap_err(),
+            ),
+            status(
+                &outsider
+                    .read(&FileThumbnails::of_in(&cloud(), &share).unwrap())
+                    .await
+                    .unwrap_err(),
+            ),
         ] {
             assert_eq!(refused, Some(403));
         }

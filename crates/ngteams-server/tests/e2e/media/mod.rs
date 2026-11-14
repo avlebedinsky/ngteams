@@ -74,18 +74,13 @@ pub async fn server(backend: Backend, configure: impl FnOnce(&mut Config)) -> (T
 }
 
 pub fn transport_with(session: Arc<Session<MemorySecretStore>>, server: &TestServer, id: &str) -> Transport {
-    HttpTransport::for_cloud_with_mock_origin(
-        session,
-        &format!("{ORIGIN}/api/chatsvc/own"),
-        cloud(),
-        &server.origin,
-    )
-    .unwrap()
-    .with_ams(&format!("{ORIGIN}/ams"))
-    .unwrap()
-    .with_middle_tier(&format!("{ORIGIN}/api/mt/part/own-01"))
-    .unwrap()
-    .for_account(Mri::new(format!("8:orgid:{id}")))
+    HttpTransport::for_cloud_with_mock_origin(session, &format!("{ORIGIN}/api/chatsvc/own"), cloud(), &server.origin)
+        .unwrap()
+        .with_ams(&format!("{ORIGIN}/ams"))
+        .unwrap()
+        .with_middle_tier(&format!("{ORIGIN}/api/mt/part/own-01"))
+        .unwrap()
+        .for_account(Mri::new(format!("8:orgid:{id}")))
 }
 
 pub async fn client(server: &TestServer, upn: &str, id: &str) -> MediaClient {

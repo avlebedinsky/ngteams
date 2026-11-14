@@ -1,5 +1,6 @@
 //! Who reaches a drive, an object and a file's links; and two nodes over one database and one store.
 
+use base64::Engine as _;
 use reqwest::Method;
 use serde_json::{Value, json};
 use teams_proto::{CreatePicture, FileDownload, PastedFormat, PastedPicture, UploadPicture};
@@ -37,12 +38,16 @@ async fn a_drive_and_an_object_answer_only_their_owner_and_the_people_shared_wit
     let drive = format!("{}/_api/v2.0/drive", site(a));
     let own = token(server, "a@own.test", ORIGIN).await;
     let others = token(server, "b@own.test", ORIGIN).await;
-    let get = |path: String, token: String| async move { raw(server, Method::GET, &path, Some(&token), &[], None).await.0 };
+    let get =
+        |path: String, token: String| async move { raw(server, Method::GET, &path, Some(&token), &[], None).await.0 };
     assert_eq!(get(drive.clone(), own.clone()).await, 200);
     assert_eq!(get(drive.clone(), others.clone()).await, 403);
     assert_eq!(get(drive.clone(), token(server, "a@own.test", GRAPH).await).await, 401);
     assert_eq!(get(format!("{}/_api/v2.0/drive", site(b)), others.clone()).await, 200);
-    assert_eq!(get(format!("{}/_api/v2.0/drive/items", site(a)), own.clone()).await, 404);
+    assert_eq!(
+        get(format!("{}/_api/v2.0/drive/items", site(a)), own.clone()).await,
+        404
+    );
     let permissions = format!("{}/_api/v2.0/sites/root/items/{id}/driveItem/permissions", site(a));
     assert_eq!(get(permissions.clone(), own.clone()).await, 200);
     assert_eq!(get(permissions.replace(&site(a), &site(b)), others.clone()).await, 404);
@@ -52,17 +57,25 @@ async fn a_drive_and_an_object_answer_only_their_owner_and_the_people_shared_wit
         let own = own.clone();
         async move {
             let headers = [("content-type", "application/json")];
-            raw(server, Method::POST, &path, Some(&own), &headers, Some(body.to_string().into_bytes()))
-                .await
-                .0
+            raw(
+                server,
+                Method::POST,
+                &path,
+                Some(&own),
+                &headers,
+                Some(body.to_string().into_bytes()),
+            )
+            .await
+            .0
         }
     };
-    let to = |email: &str, sign_in: bool| {
-        json!({"recipients": [{"email": email}], "roles": ["write"], "requireSignIn": sign_in, "sendInvitation": false})
-    };
+    let to = |email: &str, sign_in: bool| json!({"recipients": [{"email": email}], "roles": ["write"], "requireSignIn": sign_in, "sendInvitation": false});
     assert_eq!(invite(to("nobody@own.test", true)).await, 400);
     assert_eq!(invite(to("c@own.test", false)).await, 400);
-    assert_eq!(invite(json!({"recipients": [], "requireSignIn": true, "sendInvitation": false})).await, 400);
+    assert_eq!(
+        invite(json!({"recipients": [], "requireSignIn": true, "sendInvitation": false})).await,
+        400
+    );
     assert_eq!(invite(to("C@own.test", true)).await, 200);
     let outsider = trio.outsider().await;
     let read = FileDownload::of_in(&cloud(), &share).unwrap();
@@ -78,7 +91,10 @@ async fn a_drive_and_an_object_answer_only_their_owner_and_the_people_shared_wit
     let graph = token(server, "b@own.test", GRAPH).await;
     for (share, expected) in [("u!bm90IGEgbGluaw", 404), ("not-a-token", 400)] {
         let path = format!("/graph/v1.0/shares/{share}/driveItem");
-        assert_eq!(raw(server, Method::GET, &path, Some(&graph), &[], None).await.0, expected);
+        assert_eq!(
+            raw(server, Method::GET, &path, Some(&graph), &[], None).await.0,
+            expected
+        );
     }
     let elsewhere = FileDownload::of_in(&cloud(), &share.replace("report.txt", "other.txt")).unwrap();
     let path = format!("/graph/v1.0/shares/{}/driveItem", elsewhere.share());
@@ -120,7 +136,15 @@ async fn an_object_is_made_for_the_makers_chats_filled_by_its_maker_and_read_onc
     assert_eq!(raw(server, Method::GET, &view, Some(&ic3), &[], None).await.0, 200);
     let unknown = view.replace("imgo", "imgt1");
     assert_eq!(raw(server, Method::GET, &unknown, Some(&ic3), &[], None).await.0, 404);
-    let (status, _, body) = raw(server, Method::GET, &format!("/ams/v1/objects/{object}"), Some(&ic3), &[], None).await;
+    let (status, _, body) = raw(
+        server,
+        Method::GET,
+        &format!("/ams/v1/objects/{object}"),
+        Some(&ic3),
+        &[],
+        None,
+    )
+    .await;
     let read: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!((status, read["type"].as_str()), (200, Some("pish/image")));
     assert!(read["contents"]["imgpsh"]["length"].as_u64().unwrap() > 0);
@@ -143,7 +167,12 @@ async fn a_download_link_serves_ranges_and_only_with_its_own_credential() {
 
     let (status, headers, body) = get(link.clone(), None).await;
     assert_eq!((status, body.as_slice()), (200, bytes.as_slice()));
-    assert!(headers["content-disposition"].to_str().unwrap().starts_with("attachment"));
+    assert!(
+        headers["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment")
+    );
     assert_eq!(headers["x-content-type-options"], "nosniff");
     assert_eq!(headers["accept-ranges"], "bytes");
     for (range, expected, content_range) in [
@@ -157,7 +186,10 @@ async fn a_download_link_serves_ranges_and_only_with_its_own_credential() {
         assert_eq!(headers["content-range"], content_range);
     }
     let (status, headers, _) = get(link.clone(), Some("bytes=10-")).await;
-    assert_eq!((status, headers["content-range"].to_str().unwrap()), (416, "bytes */10"));
+    assert_eq!(
+        (status, headers["content-range"].to_str().unwrap()),
+        (416, "bytes */10")
+    );
     assert_eq!(get(link.clone(), Some("lines=1-2")).await.0, 416);
     let (status, _, body) = get(link.clone(), Some("bytes=0-1,4-5")).await;
     assert_eq!((status, body.len()), (200, 10));
@@ -168,7 +200,12 @@ async fn a_download_link_serves_ranges_and_only_with_its_own_credential() {
     let swapped = other_link.replace(&other_id, &id);
     assert_eq!(get(swapped, None).await.0, 401);
     let credential = link.split_once("tempauth=").unwrap().1;
-    assert_eq!(get(format!("/sp/thumbnail/{id}/large?tempauth={credential}"), None).await.0, 401);
+    assert_eq!(
+        get(format!("/sp/thumbnail/{id}/large?tempauth={credential}"), None)
+            .await
+            .0,
+        401
+    );
     trio.stop().await;
 }
 
@@ -247,4 +284,53 @@ async fn two_nodes_share_files_pictures_and_link_credentials() {
         first.stop().await;
         drop(blobs);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_is_no_picture_has_no_thumbnail_and_odd_links_name_nothing() {
+    let trio = Trio::start(Backend::Sqlite).await;
+    let server = &trio.server;
+    let share = send_file(&trio, "notes.txt", b"plain words").await;
+    assert!(trio.b.file_thumbnail(share.clone()).await.unwrap().is_none());
+    // asked again, the note of what was made answers
+    let read = teams_proto::FileThumbnails::of_in(&cloud(), &share).unwrap();
+    let graph = token(server, "b@own.test", GRAPH).await;
+    let path = format!("/graph/v1.0/shares/{}/driveItem/thumbnails", read.share());
+    let (status, _, body) = raw(server, Method::GET, &path, Some(&graph), &[], None).await;
+    assert_eq!(
+        (status, serde_json::from_slice::<Value>(&body).unwrap()),
+        (200, json!({"value": []}))
+    );
+
+    let (id, link) = item(server, "b@own.test", &share).await;
+    let credential = link.split_once("tempauth=").unwrap().1;
+    let thumbnail = format!("/sp/thumbnail/{id}/large?tempauth={credential}");
+    assert_eq!(raw(server, Method::GET, &thumbnail, None, &[], None).await.0, 401);
+
+    let token_of = |link: &str| format!("u!{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(link));
+    for link in [
+        "https://elsewhere.example/sp/personal/x/Documents/Microsoft%20Teams%20Chat%20Files/notes.txt".to_owned(),
+        format!("{share}?download=1"),
+        format!("{ORIGIN}/sp/personal/not-an-account/Documents/Microsoft%20Teams%20Chat%20Files/notes.txt"),
+        share.replace("Documents", "Other"),
+        format!("{ORIGIN}/sp/personal"),
+    ] {
+        let path = format!("/graph/v1.0/shares/{}/driveItem", token_of(&link));
+        assert_eq!(
+            raw(server, Method::GET, &path, Some(&graph), &[], None).await.0,
+            404,
+            "{link}"
+        );
+    }
+    let (status, _, body) = raw(server, Method::GET, "/graph/v1.0/me/drive", Some(&graph), &[], None).await;
+    let drive: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        (status, drive["owner"]["user"]["id"].as_str()),
+        (200, Some(trio.ids[1].as_str()))
+    );
+    let user = format!("/graph/v1.0/users/{}", trio.ids[0]);
+    assert_eq!(raw(server, Method::GET, &user, Some(&graph), &[], None).await.0, 200);
+    let nobody = "/graph/v1.0/users/00000000-0000-4000-8000-000000000000";
+    assert_eq!(raw(server, Method::GET, nobody, Some(&graph), &[], None).await.0, 404);
+    trio.stop().await;
 }

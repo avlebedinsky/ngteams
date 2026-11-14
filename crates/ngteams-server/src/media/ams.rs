@@ -49,11 +49,7 @@ pub(super) fn key(object: &str) -> String {
     format!("ams/{object}")
 }
 
-async fn create(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Result<Response, Error> {
+async fn create(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Response, Error> {
     let caller = account(&app, &headers, IC3).await?;
     if body["type"].as_str() != Some(PICTURE) {
         return Err(Error::Invalid("Only pictures (pish/image) are stored."));

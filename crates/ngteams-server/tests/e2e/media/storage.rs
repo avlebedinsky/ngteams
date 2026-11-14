@@ -55,7 +55,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stream_is_stored_read_back_in_ranges_and_dropped_when_over_its_limit() {
         let (store, _dir) = store().await;
-        let size = store.put_stream("a/b", body(&[b"0123", b"4567", b"89"]), 10).await.unwrap();
+        let size = store
+            .put_stream("a/b", body(&[b"0123", b"4567", b"89"]), 10)
+            .await
+            .unwrap();
         assert_eq!(size, 10);
         let whole = store.open("a/b", None).await.unwrap().unwrap();
         assert_eq!((whole.size, whole.range.clone()), (10, 0..10));

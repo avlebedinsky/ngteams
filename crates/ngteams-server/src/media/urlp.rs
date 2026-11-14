@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::http::HeaderMap;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -90,7 +90,10 @@ fn read_page(html: &str, base: &Url) -> Page {
             content(&[r#"meta[property="og:description"]"#, r#"meta[name="description"]"#]),
             MAX_DESCRIPTION,
         ),
-        picture: link(content(&[r#"meta[property="og:image"]"#, r#"meta[name="twitter:image"]"#])),
+        picture: link(content(&[
+            r#"meta[property="og:image"]"#,
+            r#"meta[name="twitter:image"]"#,
+        ])),
         favicon: link(content(&[r#"link[rel~="icon"]"#]).or_else(|| Some("/favicon.ico".to_owned()))),
     }
 }
