@@ -460,8 +460,9 @@ async fn a_bad_an_expired_and_a_late_token_and_a_disabled_account_are_refused() 
         let rig = Rig::start_with(backend, "[trouter]\nauth_timeout = 1\n[tokens]\naccess_lifetime = 6\n").await;
         let node = rig.other();
         let epid = "00000000-0000-4000-8000-0000000000a1";
-        let issued = tokio::time::Instant::now();
         let old = token(&rig.first, "a@own.test", IC3).await;
+        // after the answer: a slow sign-in must not shorten the wait for the token's end
+        let issued = tokio::time::Instant::now();
         let spaces = token(node, "a@own.test", SPACES).await;
 
         // late: nothing sent within the time to authenticate
