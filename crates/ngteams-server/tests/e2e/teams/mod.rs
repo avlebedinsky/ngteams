@@ -1,7 +1,10 @@
 //! Teams and channels: the real own-cloud engine and the client's typed reads against the server's CSA, middle
 //! tier, provisioning and chat service.
 
+mod channels;
 mod create;
+mod people;
+mod posts;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,6 +134,40 @@ impl Seat {
         (thread, group.unwrap())
     }
 
+    /// Puts `people` on the team, as members.
+    pub(crate) async fn add(&self, team: &str, group: &str, people: &[&Seat]) {
+        let written = self
+            .engine
+            .team_write(
+                TeamWrite::AddMembers {
+                    team: team.into(),
+                    group: group.into(),
+                    members: people
+                        .iter()
+                        .map(|seat| (Mri::new(&seat.mri), teams_proto::TeamRole::Member))
+                        .collect(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(written.not_added.is_empty(), "{written:?}");
+    }
+
+    /// Makes a standard channel of the team through the engine; its thread.
+    pub(crate) async fn make_channel(&self, team: &str, group: &str, name: &str, show_by_default: bool) -> String {
+        let made = self
+            .engine
+            .create_channel(teams_core::ChannelDraft {
+                channel: new_channel(team, group, name, teams_proto::NewChannelKind::Standard),
+                show_by_default,
+            })
+            .await
+            .unwrap();
+        assert!(!made.not_shown_by_default);
+        made.thread.unwrap()
+    }
+
     pub(crate) fn stop(self) {
         self.engine.shutdown();
     }
@@ -150,4 +187,43 @@ pub(crate) async fn stored_teams(
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("the engine's teams never settled");
+}
+
+pub(crate) fn new_channel(
+    team: &str,
+    group: &str,
+    name: &str,
+    kind: teams_proto::NewChannelKind,
+) -> teams_proto::NewChannel {
+    teams_proto::NewChannel {
+        team: team.into(),
+        group: group.into(),
+        mailbox: None,
+        name: name.into(),
+        description: format!("About {name}"),
+        kind,
+        layout: teams_proto::ChannelLayout::Threads,
+    }
+}
+
+/// A change of the standard channel `channel` of a team.
+pub(crate) fn channel_write(team: &str, group: &str, channel: &str, action: teams_proto::ChannelChange) -> TeamWrite {
+    TeamWrite::Channel(teams_proto::ChannelWrite {
+        target: teams_proto::ChannelTarget {
+            team: team.into(),
+            team_group: group.into(),
+            channel: channel.into(),
+            channel_group: None,
+            mailbox: None,
+        },
+        action,
+    })
+}
+
+/// The code a refused team write names.
+pub(crate) fn refusal<T: std::fmt::Debug>(answer: Result<T, teams_core::EngineError>) -> Option<String> {
+    match answer {
+        Err(teams_core::EngineError::TeamNotChanged { code }) => code,
+        other => panic!("not a refused team write: {other:?}"),
+    }
 }
