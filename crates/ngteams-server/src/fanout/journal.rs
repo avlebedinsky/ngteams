@@ -74,6 +74,16 @@ pub struct Kept {
     pub complete: bool,
     /// Whether the topic overflowed past the cursor: the one gap a reader that never fell behind can still have.
     pub overflowed: bool,
+    /// The cursor just before the moment of this read: everything appended after the read comes after it. A reader
+    /// with nothing left after its cursor goes on from here, so nothing appended since is skipped.
+    pub read_at: EntryId,
+}
+
+impl Default for EntryId {
+    /// Before every entry.
+    fn default() -> Self {
+        Self { ms: 0, seq: 0 }
+    }
 }
 
 /// A journal every node holds one of.
@@ -200,6 +210,7 @@ impl Journal for LocalJournal {
         let Some(kept) = kept else {
             return Ok(Kept {
                 complete: !incomplete(None, 0, cursor, now),
+                read_at: before(now),
                 ..Kept::default()
             });
         };
@@ -210,6 +221,7 @@ impl Journal for LocalJournal {
             more: later.next().is_some(),
             complete: !incomplete(kept.front().map(|entry| entry.id), kept.len(), cursor, now),
             overflowed: overflowed(kept.front().map(|entry| entry.id), kept.len(), cursor),
+            read_at: before(now),
         })
     }
 
@@ -392,6 +404,7 @@ impl Journal for RedisJournal {
             more,
             complete: !incomplete(first, len, cursor, redis_ms(now)),
             overflowed: overflowed(first, len, cursor),
+            read_at: before(redis_ms(now)),
         })
     }
 
@@ -488,10 +501,6 @@ impl Fanout for Keeping {
 
     async fn ready(&self) -> Result<(), FanoutError> {
         self.fanout.ready().await
-    }
-
-    fn breaks(&self) -> u64 {
-        self.fanout.breaks()
     }
 }
 
@@ -602,7 +611,6 @@ mod tests {
         assert_eq!(word.recv().await.unwrap(), Bytes::from_static(b"unkept"));
         assert!(word.receiver.is_empty());
         keeping.ready().await.unwrap();
-        assert_eq!(keeping.breaks(), 0);
         // the journal's other answers, which a fan-out never asks for
         let none = EntryId { ms: 0, seq: 0 };
         assert!(Refusing.after("kept:a", none).await.unwrap().entries.is_empty());

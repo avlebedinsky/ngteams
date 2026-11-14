@@ -2,13 +2,12 @@
 //! topic, on any node. [`Local`] is one process's broadcast (a single node, SQLite); [`Redis`] carries it through Redis
 //! pub/sub to every node, each node's subscribers fed from one Redis subscription per topic. Delivery is at most once:
 //! a subscriber that falls behind learns how much it missed ([`Missed`]), and replays from the topic's [`journal`].
-//! What is published while a node's Redis subscription is down reaches none of its subscribers and none is told, so
-//! the node counts those breaks ([`Fanout::breaks`]) for a subscriber to hold its own count against.
+//! What is published while a node's Redis subscription is down reaches none of its subscribers, so a break closes
+//! every subscription of the node ([`Missed::Closed`]): a subscriber subscribes again and reads what it missed.
 
 pub mod journal;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -39,7 +38,7 @@ pub enum Missed {
     /// The subscriber fell this many payloads behind; the next ones follow.
     #[error("missed {0} payloads")]
     Lagged(u64),
-    /// The fan-out is gone.
+    /// The fan-out is gone, or the node's subscription broke: payloads may have passed unseen, and none follow.
     #[error("the fan-out closed")]
     Closed,
 }
@@ -55,12 +54,6 @@ pub trait Fanout: Send + Sync + std::fmt::Debug {
 
     /// Whether it can deliver (readiness).
     async fn ready(&self) -> Result<(), FanoutError>;
-
-    /// How often this node's subscriptions were cut off and came back: a subscriber that sees the count move may
-    /// have missed payloads without a [`Missed`].
-    fn breaks(&self) -> u64 {
-        0
-    }
 }
 
 /// One subscriber's payloads.
@@ -79,7 +72,7 @@ impl Subscription {
     /// The next payload.
     ///
     /// # Errors
-    /// [`Missed`]: payloads were dropped for falling behind, or the fan-out closed.
+    /// [`Missed`]: payloads were dropped for falling behind, or the fan-out closed or broke.
     pub async fn recv(&mut self) -> Result<Bytes, Missed> {
         self.receiver.recv().await.map_err(|error| match error {
             RecvError::Lagged(missed) => Missed::Lagged(missed),
@@ -90,20 +83,23 @@ impl Subscription {
 
 /// The topics a node delivers to, each a broadcast channel.
 #[derive(Debug, Default)]
-struct Topics(Mutex<HashMap<String, broadcast::Sender<Bytes>>>, AtomicU64);
+struct Topics(Mutex<HashMap<String, broadcast::Sender<Bytes>>>);
 
 impl Topics {
-    /// A push of the node's Redis subscription: a message is delivered, a lost connection counted.
+    /// A push of the node's Redis subscription: a message is delivered, a lost connection closes every topic.
     fn pushed(&self, push: PushInfo) {
         if push.kind == PushKind::Disconnection {
-            self.1.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("the Redis subscription broke: its subscribers are closed");
+            self.close();
         } else if let Some((topic, payload)) = message(push) {
             self.deliver(&topic, payload);
         }
     }
 
-    fn breaks(&self) -> u64 {
-        self.1.load(Ordering::Relaxed)
+    /// Closes every subscription: each reads what it was still sent, then [`Missed::Closed`]. Nothing tells a
+    /// subscriber what was published while the node's subscription was down, so none may go on as if nothing was.
+    fn close(&self) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
 
     /// A receiver of `topic`, and whether it is the topic's first.
@@ -208,7 +204,8 @@ impl RedisInner {
     }
 }
 
-/// The fan-out through Redis pub/sub (RESP3 pushes; the connection manager resubscribes after a reconnect).
+/// The fan-out through Redis pub/sub (RESP3 pushes). When its subscriber connection breaks, the subscriptions made
+/// on it are closed; the connection manager reconnects, and the topics subscribed again are asked for anew.
 #[derive(Debug, Clone)]
 pub struct Redis {
     inner: Arc<RedisInner>,
@@ -223,9 +220,8 @@ impl Redis {
         let client = redis::Client::open(resp3(url))?;
         let commands = ConnectionManager::new(client.clone()).await?;
         let (pushes, mut received) = mpsc::unbounded_channel::<PushInfo>();
-        let config = redis::aio::ConnectionManagerConfig::new()
-            .set_push_sender(pushes)
-            .set_automatic_resubscription();
+        // no automatic resubscription: a break closes the subscriptions, and their topics are asked for anew
+        let config = redis::aio::ConnectionManagerConfig::new().set_push_sender(pushes);
         let subscriber = ConnectionManager::new_with_config(client, config).await?;
         let inner = Arc::new(RedisInner {
             commands,
@@ -282,10 +278,6 @@ impl Fanout for Redis {
         redis::cmd("PING").query_async::<()>(&mut commands).await?;
         Ok(())
     }
-
-    fn breaks(&self) -> u64 {
-        self.inner.topics.breaks()
-    }
 }
 
 /// The URL with `protocol=resp3`, which pushes need.
@@ -328,7 +320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lost_redis_subscription_is_counted_and_its_messages_are_delivered() {
+    async fn a_lost_redis_subscription_closes_its_subscribers_and_its_messages_are_delivered() {
         let topics = Topics::default();
         let (mut receiver, _) = topics.receiver("push:a");
         let message = |payload: &[u8]| PushInfo {
@@ -340,12 +332,6 @@ mod tests {
         };
         topics.pushed(message(b"one"));
         assert_eq!(receiver.recv().await.unwrap(), Bytes::from_static(b"one"));
-        assert_eq!(topics.breaks(), 0);
-        topics.pushed(PushInfo {
-            kind: PushKind::Disconnection,
-            data: Vec::new(),
-        });
-        assert_eq!(topics.breaks(), 1);
         // a push that is no message of a topic is dropped
         topics.pushed(PushInfo {
             kind: PushKind::Message,
@@ -356,7 +342,20 @@ mod tests {
             data: Vec::new(),
         });
         assert!(receiver.is_empty());
-        assert_eq!(Local::new().breaks(), 0);
+        // a break: what was delivered is still read, then the subscription ends, and the topic starts anew
+        topics.pushed(message(b"two"));
+        topics.pushed(PushInfo {
+            kind: PushKind::Disconnection,
+            data: Vec::new(),
+        });
+        assert_eq!(receiver.recv().await.unwrap(), Bytes::from_static(b"two"));
+        assert_eq!(receiver.recv().await, Err(RecvError::Closed));
+        let (mut again, first) = topics.receiver("push:a");
+        assert!(first);
+        topics.pushed(message(b"three"));
+        assert_eq!(again.recv().await.unwrap(), Bytes::from_static(b"three"));
+        // the subscriptions the break closed don't take the new one's topic with them
+        assert!(!topics.release("push:a"));
     }
 
     #[tokio::test]

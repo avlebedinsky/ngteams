@@ -190,7 +190,6 @@ where
         loss_told: None,
         caught_up: false,
         gap: false,
-        breaks: app.fanout.breaks(),
     };
     let end = session.serve(&mut closing).await;
     // what was written to the socket is not replayed, however it ended
@@ -344,7 +343,8 @@ enum Work {
 
 /// Whether a reader at the cursor `kept` was read after may have lost entries. One that had read everything and
 /// listened since can only have lost them to an overflow: its cursor grows old while the account is quiet, and the
-/// journal empties, without anything passing it by.
+/// journal empties, without anything passing it by. A socket never listens across a break of its node's
+/// subscription: the break closes it ([`Missed::Closed`]).
 fn lost(kept: &Kept, caught_up: bool) -> bool {
     if caught_up { kept.overflowed } else { !kept.complete }
 }
@@ -375,8 +375,6 @@ struct Session<'a, S> {
     caught_up: bool,
     /// Whether an event passed the journal by, and the client isn't told yet.
     gap: bool,
-    /// The fan-out's breaks ([`crate::fanout::Fanout::breaks`]) the socket knows of.
-    breaks: u64,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
@@ -580,10 +578,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
         let Some(mut cursor) = self.cursor.filter(|_| self.registered()) else {
             return Ok(());
         };
-        let breaks = self.app.fanout.breaks();
-        if std::mem::replace(&mut self.breaks, breaks) != breaks {
-            self.caught_up = false;
-        }
         if std::mem::take(&mut self.gap) {
             self.message_loss(cursor).await?;
         }
@@ -594,8 +588,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
                 self.message_loss(cursor).await?;
             }
             if lost && kept.entries.is_empty() {
-                // nothing left of what was lost: go on from the journal's end
-                self.cursor = Some(self.app.journal.tail(&self.topic).await?);
+                // nothing left of what was lost: go on from where this read stood, not from a later look at the
+                // journal's end, which would pass by an entry appended in between
+                self.cursor = Some(cursor.max(kept.read_at));
             }
             self.deliver(&kept.entries).await?;
             self.keep_cursor().await?;

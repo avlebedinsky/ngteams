@@ -112,7 +112,7 @@ impl Raw {
     }
 
     /// Whether the socket ends with this disconnect.
-    async fn ends_with(&mut self, frame: &str) -> bool {
+    pub(super) async fn ends_with(&mut self, frame: &str) -> bool {
         self.next().await.as_deref() == Some(frame) && self.next().await.is_none()
     }
 }

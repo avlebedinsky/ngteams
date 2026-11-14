@@ -1,11 +1,12 @@
 //! What a replay must neither lose nor invent: no loss is reported to a socket that followed its account, one is
 //! reported for an event the journal couldn't keep, cursors are kept only for registered endpoints and only so many
-//! of them, and a replay to a slow reader ends with its token.
+//! of them, a replay to a slow reader ends with its token, a break of the node's Redis subscription closes its
+//! sockets, and a reader with nothing left to read goes on from where that read stood.
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use ngteams_server::fanout::journal::{CURSORS, EntryId};
+use ngteams_server::fanout::journal::{CURSORS, EntryId, KEPT_FOR};
 use ngteams_server::trouter::{Control, Stack, endpoint_id, push_url, tell};
 use serde_json::{Value, json};
 
@@ -250,4 +251,105 @@ async fn a_replay_to_a_reader_that_takes_nothing_ends_when_its_token_runs_out() 
     let end = server.app.journal.tail(&topic).await.unwrap();
     assert!(kept.is_some_and(|kept| kept < end));
     server.stop().await;
+}
+
+/// The Redis database of the test that breaks its node's subscription: it tells that node's connections from the
+/// other tests', which share the Redis.
+const BREAK_DB: &str = "13";
+
+/// Closes, as a network break would, the connections in [`BREAK_DB`] that hold subscriptions; how many it closed.
+async fn break_subscriptions(redis: &str) -> usize {
+    let client = redis::Client::open(redis).unwrap();
+    let mut commands = client.get_multiplexed_async_connection().await.unwrap();
+    let clients: String = redis::cmd("CLIENT")
+        .arg("LIST")
+        .query_async(&mut commands)
+        .await
+        .unwrap();
+    let mut closed = 0;
+    for line in clients.lines() {
+        let field = |name: &str| {
+            line.split(' ')
+                .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
+        };
+        if field("db") == Some(BREAK_DB) && field("sub").is_some_and(|count| count != "0") {
+            closed += redis::cmd("CLIENT")
+                .arg("KILL")
+                .arg("ID")
+                .arg(field("id").unwrap())
+                .query_async::<usize>(&mut commands)
+                .await
+                .unwrap();
+        }
+    }
+    closed
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_break_of_the_nodes_redis_subscription_closes_its_sockets_and_the_next_one_is_replayed_what_passed() {
+    let Some(redis) = redis_url() else { return };
+    let own = format!("{}/{BREAK_DB}", redis.trim_end_matches('/'));
+    let server = server_with(Backend::Sqlite, |config| config.redis_url = Some(own)).await;
+    let id = server.add_user("a@own.test", "Ada").await;
+    let ic3 = token(&server, "a@own.test", IC3).await;
+    let topic = format!("push:8:orgid:{id}");
+    registered(&server, &id, &ic3, EPID).await;
+    let mut socket = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+    socket.connect(&ic3).await;
+    let mut calling = Raw::open(&server, &query(EPID, "SkypeSpaces")).await;
+    calling.connect(&ic3).await;
+    server.app.fanout.publish(&topic, message("before")).await.unwrap();
+    assert!(socket.next().await.unwrap().contains("before"));
+
+    // nothing tells a socket what its node didn't hear, so neither socket goes on: their clients come back
+    assert_eq!(break_subscriptions(&redis).await, 1);
+    assert!(socket.ends_with("0::").await);
+    assert!(calling.ends_with("0::").await);
+    server
+        .app
+        .fanout
+        .publish(&topic, message("during the break"))
+        .await
+        .unwrap();
+
+    // the node subscribes anew for the next socket: it is replayed what passed, told of no loss, and hears on
+    let mut socket = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+    socket.connect(&ic3).await;
+    let stored = socket.next().await.unwrap();
+    assert!(
+        stored.contains("during the break") && stored.contains("mstore"),
+        "{stored}"
+    );
+    server.app.fanout.publish(&topic, message("after")).await.unwrap();
+    let live = socket.next().await.unwrap();
+    assert!(live.contains("after") && !live.contains("mstore"), "{live}");
+    assert!(socket.next_within(Duration::from_millis(300)).await.is_err());
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_that_finds_nothing_left_says_where_to_go_on_without_passing_by_a_later_entry() {
+    for redis in [None, redis_url()].into_iter().skip(usize::from(redis_url().is_some())) {
+        let server = server_with(Backend::Sqlite, |config| config.redis_url = redis).await;
+        let journal = &server.app.journal;
+        let topic = format!("push:8:orgid:{}", uuid::Uuid::new_v4());
+        // a cursor older than the journal keeps, with nothing left after it
+        let old = EntryId {
+            ms: now_ms() - u64::try_from(KEPT_FOR.as_millis()).unwrap() - 60_000,
+            seq: 0,
+        };
+        let read = journal.after(&topic, old).await.unwrap();
+        assert!(read.entries.is_empty() && !read.complete);
+        assert!(read.read_at > old);
+        // what is appended after the read comes after the place it named, even before the journal's end is asked
+        let appended = journal.append(&topic, message("just after")).await.unwrap();
+        assert!(appended > read.read_at, "{appended} {}", read.read_at);
+        let next = journal.after(&topic, read.read_at).await.unwrap();
+        assert_eq!(
+            next.entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            [appended]
+        );
+        assert!(next.complete);
+        server.stop().await;
+    }
 }

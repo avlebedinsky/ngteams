@@ -28,7 +28,7 @@ membership changes are still being added.
 | Database | Diesel 2.4: Postgres through diesel-async (tokio-postgres, no libpq), SQLite through Diesel's own connection on the blocking pool; bb8 pools; embedded migrations per backend |
 | Passwords | argon2 (Argon2id, PHC strings) |
 | Tokens | jsonwebtoken (EdDSA, Ed25519 keys from aws-lc-rs, `kid` per key); opaque refresh tokens kept as SHA-256 |
-| Fan-out, replay, counters | redis-rs 1.8: a connection manager with RESP3 pushes and resubscription after a reconnect; Redis Streams for the replay journal (Redis 6.2 or later, or Valkey) |
+| Fan-out, replay, counters | redis-rs 1.8: a connection manager with RESP3 pushes (a broken subscription ends its subscribers); Redis Streams for the replay journal (Redis 6.2 or later, or Valkey) |
 | Files | object_store: a local directory, memory or S3 |
 | Configuration, CLI | figment (TOML plus environment), clap |
 | Logs | tracing, tracing-subscriber |
@@ -322,8 +322,11 @@ public origin is refused.
     nothing left to prove otherwise (a socket that followed its account is not told after a quiet spell);
   - a reconnecting endpoint has no cursor;
   - the journal couldn't keep an event (Redis refused it): the account's sockets are told on the control topic;
-  - the socket missed control words, or the node's Redis subscription was cut off since the socket last read the
-    journal.
+  - the socket missed control words.
+- **A broken Redis subscription.** What is published while a node's Redis subscription is down reaches none of its
+  sockets, and nothing says what it was. So the break closes every socket of the node with `0::`. Each client
+  reconnects after its backoff, is replayed what the journal kept from its cursor, and syncs its conversations as
+  on any connect, which covers an event that reached neither the journal nor the control topic.
 - **A slow reader.** A replay ends, like the socket, when the token runs out, the node stops or the control topic
   says so, however slowly the client reads.
 - **Shutdown.** A node closes its sockets with `0::` when it stops; clients reconnect to another node after their
@@ -373,6 +376,7 @@ shape that the client treats as empty preferences.
   subscriber for it delivers them. Each node keeps one Redis subscription per topic and feeds its local subscribers
   from it. Without Redis the same `Fanout` trait is one process's broadcast.
 - Delivery through the fan-out is at most once. A subscriber that falls behind learns how many payloads it missed.
+  When a node's Redis subscription breaks, its subscriptions end: a subscriber subscribes again.
 - A Trouter socket lives on one node. Its node subscribes to the account's `push:<mri>` and `trouter:<mri>` (control:
   a registration taken, a socket's claim to its endpoint, an event the journal didn't keep, a disconnect) topics. A
   kept event is appended to the account's journal before it is published, so the node that is woken reads it there,
