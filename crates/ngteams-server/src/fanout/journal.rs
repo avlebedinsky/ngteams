@@ -173,8 +173,9 @@ fn expired(entry: &Entry, now: u64) -> bool {
 #[async_trait]
 impl Journal for LocalJournal {
     async fn append(&self, topic: &str, payload: Bytes) -> Result<EntryId, FanoutError> {
-        let now = now_ms();
         let mut state = self.state();
+        // after the lock: an append that follows a read gets a later clock than the read's `read_at`
+        let now = now_ms();
         let id = match state.last {
             Some(last) if last.ms >= now => EntryId {
                 ms: last.ms,
@@ -201,8 +202,8 @@ impl Journal for LocalJournal {
     }
 
     async fn after(&self, topic: &str, cursor: EntryId) -> Result<Kept, FanoutError> {
-        let now = now_ms();
         let state = self.state();
+        let now = now_ms();
         let kept = state
             .topics
             .get(topic)
@@ -226,8 +227,8 @@ impl Journal for LocalJournal {
     }
 
     async fn tail(&self, topic: &str) -> Result<EntryId, FanoutError> {
-        let now = now_ms();
         let state = self.state();
+        let now = now_ms();
         let newest = state
             .topics
             .get(topic)
