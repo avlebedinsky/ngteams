@@ -441,3 +441,31 @@ async fn a_member_grants_itself_nothing() {
     assert!(!world.seats[2].team(other).await.owner && !world.seats[1].team(other).await.owner);
     world.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_team_takes_as_many_private_channels_as_teams_allows() {
+    let world = World::new().await;
+    let path = "{PROV}/teams/{group}/channels";
+    let named =
+        |n: usize| format!(r#"{{"spaceThreadId":"{{team}}","displayName":"Room {n}","channelType":"Private"}}"#);
+    for n in 0..30 {
+        assert_eq!(world.send("ada", "POST", path, &named(n)).await.0, 200, "{n}");
+    }
+    let (status, answer) = world.send("ada", "POST", path, &named(30)).await;
+    assert_eq!(
+        (status, answer["errorCode"].as_str()),
+        (403, Some("MaxPrivateChannelLimitExceeded"))
+    );
+    // a standard channel is still made, and Bert, in none of the private ones, is told of none
+    let standard = r#"{"displayName":"Open","groupId":"{group}","channelType":"Standard"}"#;
+    assert_eq!(
+        world
+            .send("ada", "POST", "{MT}/teams/{team}/channels", standard)
+            .await
+            .0,
+        201
+    );
+    let listed = world.seats[1].team(world.name("{team}")).await;
+    assert_eq!(listed.channels.len(), 3);
+    world.stop().await;
+}

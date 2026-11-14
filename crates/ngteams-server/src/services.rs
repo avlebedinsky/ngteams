@@ -22,6 +22,7 @@ pub fn region_gtms(config: &Config) -> BTreeMap<&'static str, String> {
             "teamsAndChannelsProvisioningService",
             format!("{origin}{}", provisioning_prefix(config)),
         ),
+        ("userProfileService", format!("{origin}{}", user_profile_prefix(config))),
     ])
 }
 
@@ -29,6 +30,12 @@ pub fn region_gtms(config: &Config) -> BTreeMap<&'static str, String> {
 #[must_use]
 pub fn csa_prefix(config: &Config) -> String {
     format!("/api/csa/{}", config.region)
+}
+
+/// The user profile service's path under the origin.
+#[must_use]
+pub fn user_profile_prefix(config: &Config) -> String {
+    format!("/api/userprofilesvc/{}", config.region)
 }
 
 /// The provisioning service's path under the origin.

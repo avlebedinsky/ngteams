@@ -53,6 +53,10 @@ fn items(folder: &mut Value) -> Answer<&mut Vec<Value>> {
         .ok_or(Error::BAD_REQUEST)
 }
 
+/// The most sections an account keeps, and the most channels in one.
+const MAX_FOLDERS: usize = 200;
+const MAX_ITEMS: usize = 1000;
+
 fn apply(hierarchy: &mut Value, change: &Value, at: i64, user: &str) -> Answer<()> {
     for action in change["actions"].as_array().ok_or(Error::BAD_REQUEST)? {
         let item = action["itemId"].as_str().filter(|item| !item.is_empty());
@@ -68,6 +72,7 @@ fn apply(hierarchy: &mut Value, change: &Value, at: i64, user: &str) -> Answer<(
                 let id = format!("{user}~{}", uuid::Uuid::new_v4().simple());
                 hierarchy["conversationFolders"]
                     .as_array_mut()
+                    .filter(|folders| folders.len() < MAX_FOLDERS)
                     .ok_or(Error::BAD_REQUEST)?
                     .push(json!({
                         "id": id, "sortType": "UserDefinedCustomOrder", "name": name, "folderType": "UserDefined",
@@ -83,6 +88,9 @@ fn apply(hierarchy: &mut Value, change: &Value, at: i64, user: &str) -> Answer<(
                 let folder = folder(hierarchy, action["folderId"].as_str().unwrap_or_default())?;
                 let items = items(folder)?;
                 items.retain(|kept| kept["conversationId"] != item);
+                if items.len() >= MAX_ITEMS {
+                    return Err(Error::BAD_REQUEST);
+                }
                 let index = action["itemIndex"]
                     .as_u64()
                     .and_then(|index| usize::try_from(index).ok())

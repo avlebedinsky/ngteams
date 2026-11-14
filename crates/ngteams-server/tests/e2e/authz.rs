@@ -65,12 +65,11 @@ async fn the_account_bring_up_reads_its_bases_from_the_servers_authz_and_keeps_a
         region.base(account::PROVISIONING_GTM),
         Some("https://own.example.test/fabric/own/templates/api")
     );
-    for gtm in [
-        account::PRESENCE_GTM,
-        account::AMS_GTM,
-        account::USER_PROFILE_GTM,
-        account::MCPS_GTM,
-    ] {
+    assert_eq!(
+        region.base(account::USER_PROFILE_GTM),
+        Some("https://own.example.test/api/userprofilesvc/own")
+    );
+    for gtm in [account::PRESENCE_GTM, account::AMS_GTM, account::MCPS_GTM] {
         assert_eq!(region.base(gtm), None, "{gtm} isn't served yet");
     }
     let dir = tempfile::tempdir().unwrap();

@@ -182,3 +182,44 @@ async fn a_private_teams_member_asks_its_owners_to_let_someone_in() {
         server.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_people_pickers_find_accounts_to_add_and_a_teams_own_people() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert Élan").await;
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+        let gone = server.add_user("bertram@own.test", "Bertram").await;
+        ngteams_server::admin::set_disabled(&server.app.db, "bertram@own.test", true)
+            .await
+            .unwrap();
+        let (team, group) = ada.make_team("Rocket", false).await;
+        ada.add(&team, &group, &[&bert]).await;
+
+        // Add member's box: every enabled account, by a part of its name or address, any case
+        let found = ada.engine.addable_people("BERT").await.unwrap();
+        assert_eq!(found.len(), 1, "{gone} can't sign in, so it isn't offered");
+        assert_eq!(found[0].mri, bert.mri);
+        assert_eq!(found[0].name, "Bert Élan");
+        assert_eq!(found[0].email.as_deref(), Some("bert@own.test"));
+        assert_eq!(ada.engine.addable_people("élan").await.unwrap().len(), 1);
+        assert_eq!(ada.engine.addable_people("own.test").await.unwrap().len(), 3);
+        assert!(
+            ada.engine.addable_people("%").await.unwrap().is_empty(),
+            "a wildcard is a character"
+        );
+        assert!(ada.engine.addable_people("  ").await.unwrap().is_empty());
+
+        // a private channel's box: the team's people only, for the team's people only
+        let inside = ada.engine.team_people(team.as_str(), "o").await.unwrap();
+        let mris: Vec<&str> = inside.iter().map(|person| person.mri.as_str()).collect();
+        assert_eq!(mris, [ada.mri.as_str(), bert.mri.as_str()], "Cora isn't on the team");
+        assert!(ada.engine.team_people(team.as_str(), "cora").await.unwrap().is_empty());
+        assert!(cora.engine.team_people(team.as_str(), "o").await.unwrap().is_empty());
+        for seat in [ada, bert, cora] {
+            seat.stop();
+        }
+        server.stop().await;
+    }
+}

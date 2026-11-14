@@ -10,6 +10,7 @@
 mod csa;
 mod folders;
 mod mt;
+mod people;
 mod prov;
 pub(crate) mod repo;
 pub(crate) mod schema;
@@ -50,6 +51,7 @@ pub(crate) fn router(config: &Config) -> Router<Arc<App>> {
         .nest(&crate::services::csa_prefix(config), csa::routes())
         .nest(&crate::services::middle_tier_prefix(config), mt::routes())
         .nest(&crate::services::provisioning_prefix(config), prov::routes())
+        .nest(&crate::services::user_profile_prefix(config), people::routes())
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
 

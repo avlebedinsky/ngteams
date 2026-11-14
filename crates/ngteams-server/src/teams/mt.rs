@@ -60,6 +60,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
             post(set_picture).layer(DefaultBodyLimit::max(PICTURE_LIMIT)),
         )
         .route("/beta/users/{own}/profilepicturev2/teams/{group}", get(picture))
+        .route("/beta/users/searchV2", post(super::people::addable))
         .route("/beta/analytics/me/teams/summary-timeseries", get(all_analytics))
         .route("/beta/analytics/teams/{group}/summary-timeseries", get(team_analytics))
         .route(
@@ -155,7 +156,7 @@ async fn reset_code(State(app): State<Arc<App>>, actor: Me, Path(id): Path<Strin
     let seat = Seat::of(&app.db, &actor.id, &id).await?;
     seat.owner()?;
     seat.active()?;
-    let code: String = uuid::Uuid::new_v4().simple().to_string().chars().take(10).collect();
+    let code: String = uuid::Uuid::new_v4().simple().to_string().chars().take(16).collect();
     let edit = TeamEdit {
         join_code: Some(repo::Code::Set(&code)),
         ..TeamEdit::NONE
@@ -423,8 +424,20 @@ pub(super) fn layout(value: &Value) -> Answer<String> {
     }
 }
 
+/// The most standard channels a team has, and the most private ones, as Teams limits them.
+const MAX_CHANNELS: usize = 200;
+const MAX_PRIVATE_CHANNELS: usize = 30;
+
 /// Makes the channel and lists it for its creator.
 pub(super) async fn make_channel(app: &App, tenant: &str, creator: &str, channel: &Channel) -> Answer<Channel> {
+    let existing = repo::channels_of(&app.db, std::slice::from_ref(&channel.team_id)).await?;
+    let alike = existing.iter().filter(|other| other.private == channel.private).count();
+    if channel.private && alike >= MAX_PRIVATE_CHANNELS {
+        return Err(Error::Code(StatusCode::FORBIDDEN, "MaxPrivateChannelLimitExceeded"));
+    }
+    if alike >= MAX_CHANNELS {
+        return Err(Error::Code(StatusCode::FORBIDDEN, "MaxChannelLimitExceeded"));
+    }
     let made = match repo::create_channel(&app.db, channel, creator).await {
         Ok(made) => made,
         Err(crate::db::DbError::Conflict) => return Err(Error::NAME_TAKEN),

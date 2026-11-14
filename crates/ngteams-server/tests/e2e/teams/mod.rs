@@ -23,7 +23,7 @@ use std::time::Duration;
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_core::Outbox;
-use teams_core::account::{CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM};
+use teams_core::account::{CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM, USER_PROFILE_GTM};
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
 use teams_proto::{Author, Client, Cloud, CsaTeams, HttpTransport, Mri, NewTeam, TeamWrite};
 use teams_store::Store;
@@ -66,6 +66,8 @@ async fn transport(
     .with_csa(&base(CSA_GTM))
     .unwrap()
     .with_provisioning(&base(PROVISIONING_GTM))
+    .unwrap()
+    .with_user_profile(&base(USER_PROFILE_GTM))
     .unwrap()
 }
 

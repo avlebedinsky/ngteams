@@ -196,7 +196,8 @@ The team pages' writes and reads ([teams.md](teams.md)). Answers marked bundle-o
 Own server ([server.md](../server.md#teams-and-channels)): serves the team rows (create, edit, settings, people,
 join requests, codes, joining, archive, restore, delete, picture, copy, channels, invitations as none, analytics
 from its own messages) and the tag rows. Not served: the apps rows (`apps/…`), team templates (the list answers
-empty), `teamtemplates/v1.0/<id>/…`, `workflow/status/<id>`, `defaultProfilePicture` and `users/searchV2`.
+empty), `teamtemplates/v1.0/<id>/…`, `workflow/status/<id>` and `defaultProfilePicture`. `users/searchV2` lists
+accounts by a part of their name or address.
 
 | Method | Path | What | Native | Notes | Seen |
 | --- | --- | --- | --- | --- | --- |
@@ -234,8 +235,8 @@ empty), `teamtemplates/v1.0/<id>/…`, `workflow/status/<id>`, `defaultProfilePi
 The dialog's writes and reads ([channels.md](channels.md#creating-a-channel)). Current native entries are listed below.
 
 Own server: serves a standard and a private channel's creation (a private one's answer already names its
-`threadId`), its status read, its people and `setDefaultChannel`. Not served: `channelsWarmup` and the user profile
-service's `profilesearch`.
+`threadId`), its status read, its people, `setDefaultChannel` and the user profile service's `profilesearch` (the
+team's people). Not served: `channelsWarmup`.
 
 | Method | Path | What | Native | Notes | Seen |
 | --- | --- | --- | --- | --- | --- |

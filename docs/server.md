@@ -178,8 +178,8 @@ UPN, `cli` or `setup`. `detail` holds the changed values, never a password. A re
 
 ## Teams and channels
 
-The client's team pages and channel dialogs find their routes at three GTMs: `chatSvcAggAfd` (CSA), `middleTier`
-and `teamsAndChannelsProvisioningService`. The shapes are those of `docs/protocol/channels.md` and `teams.md`; each
+The client's team pages and channel dialogs find their routes at four GTMs: `chatSvcAggAfd` (CSA), `middleTier`,
+`teamsAndChannelsProvisioningService` and `userProfileService`. The shapes are those of `docs/protocol/channels.md` and `teams.md`; each
 route takes the access token of its own service's audience and looks the account up, so a disabled account's live
 token opens nothing.
 
@@ -213,6 +213,10 @@ token opens nothing.
   `PUT v1/threads/<channel>/members/<own mri>` (the account's own interest); and the account's own channel
   properties (`favorite`, `isGeneralChannelFavorite`, `channelNotificationSettings`, `followAllRc`, `notifyAllRc`,
   `alerts`) on `v1/users/ME/conversations/<channel>/properties`.
+- **People pickers** (reads by `POST`, the middle tier's token): `beta/users/searchV2` with the text as a JSON
+  string lists up to 15 accounts that can sign in whose name or address holds it (Add member's box);
+  `<userProfileService>/api/v1.0/teams/<team>/users/profilesearch` with `{"keyword"}` lists the team's people the
+  same way, for the team's people (a private channel's box).
 - **Graph**: `GET /graph/v1.0/me` (the token's account), which the client reads before each account-own write.
 
 Who may do what, checked against the database on every request:
@@ -231,8 +235,12 @@ channel. A refusal is `{"errorCode", "message"}`; the codes the client's dialogs
 `CannotCreatePrivateChannelDueToUserPolicy`). A team's or channel's change is published to its people as a
 `ThreadUpdate` on `push:<mri>`.
 
-Not served yet: a channel's email address, team apps and templates, the default team picture, the user profile
-service's people search, channel moderation enforced on posts (the settings are kept and read back), and system
+Limits: 200 standard and 30 private channels a team (`MaxChannelLimitExceeded`,
+`MaxPrivateChannelLimitExceeded`), 200 tags a team, 200 sections an account and 1000 channels a section; a team's
+code is 16 characters.
+
+Not served yet: a channel's email address, team apps and templates, the default team picture, channel moderation
+enforced on posts (the settings are kept and read back), and system
 messages (`ThreadActivity/…`) for a team's changes.
 
 ## Prefix table
@@ -255,6 +263,7 @@ hands out its GTM.
 | Trouter | (the origin) | `wss://<origin>/trouter/v4/c` | no |
 | AMS | `amsV2` | `/ams/` | no |
 | Graph | (the origin) | `/graph/v1.0/` | `me` |
+| User profiles | `userProfileService` | `/api/userprofilesvc/<region>/` | a team's people search |
 | Files | (the origin) | `/sp/` | no |
 | Loki | (the origin) | `/loki/` | no |
 | Search | (the origin) | `/search/` | no |

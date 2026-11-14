@@ -108,6 +108,9 @@ async fn expand_sections(
     ))
 }
 
+/// The most tags a team keeps.
+const MAX_TAGS: usize = 200;
+
 fn tag_settings_of(seat: &Seat) -> Value {
     serde_json::from_str(&seat.team.tag_settings).unwrap_or_else(|_| json!({}))
 }
@@ -189,6 +192,9 @@ async fn create_tag(
         })
         .collect::<Answer<Vec<String>>>()?;
     let existing = repo::tags(&app.db, &team).await?;
+    if existing.len() >= MAX_TAGS {
+        return Err(Error::Code(StatusCode::FORBIDDEN, "MaxTagLimitExceeded"));
+    }
     if existing
         .iter()
         .any(|tag| tag.name.to_lowercase() == name.to_lowercase())

@@ -7,6 +7,7 @@ use super::schema::{
 };
 use crate::chatsvc::repo::advance;
 use crate::chatsvc::schema::{chat_members, chat_messages, chat_properties, chats};
+use crate::db::schema::users;
 use crate::db::{Db, DbError, with_conn};
 
 #[derive(Clone, Queryable, Selectable, Insertable)]
@@ -238,18 +239,58 @@ pub(crate) async fn roster(db: &Db, team: &str) -> Result<Vec<TeamMember>, DbErr
         .await?))
 }
 
+/// A `LIKE` pattern (escaped with `\`) for text holding `keyword`, any case.
+fn like(keyword: &str) -> String {
+    format!(
+        "%{}%",
+        keyword
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
+/// An account as a people picker lists it.
+#[derive(Queryable)]
+pub(crate) struct Person {
+    pub id: String,
+    pub upn: String,
+    pub name: String,
+}
+
+/// Up to `limit` accounts that can sign in whose name or address holds `keyword` (any case), by name: everyone,
+/// or the people of `team`.
+pub(crate) async fn people(db: &Db, keyword: &str, team: Option<&str>, limit: i64) -> Result<Vec<Person>, DbError> {
+    let pattern = like(keyword);
+    with_conn!(db, |conn| {
+        let mut query = users::table
+            .filter(users::disabled.eq(false))
+            .filter(users::deleted_at.is_null())
+            .filter(
+                crate::db::lower(users::upn)
+                    .like(&pattern)
+                    .escape('\\')
+                    .or(crate::db::lower(users::display_name).like(&pattern).escape('\\')),
+            )
+            .order((users::display_name.asc(), users::id.asc()))
+            .limit(limit)
+            .select((users::id, users::upn, users::display_name))
+            .into_boxed();
+        if let Some(team) = team {
+            query = query.filter(diesel::dsl::exists(
+                team_members::table
+                    .filter(team_members::team_id.eq(team))
+                    .filter(team_members::user_id.eq(users::id)),
+            ));
+        }
+        Ok(query.load(conn).await?)
+    })
+}
+
 /// Public teams `user` isn't on whose name or description holds `keywords` (any case), by name.
 pub(crate) async fn joinable(db: &Db, user: &str, keywords: Option<&str>) -> Result<Vec<Team>, DbError> {
-    let pattern = keywords.map(|keywords| {
-        format!(
-            "%{}%",
-            keywords
-                .to_lowercase()
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        )
-    });
+    let pattern = keywords.map(like);
     with_conn!(db, |conn| {
         let mut query = teams::table
             .filter(teams::public.eq(true))

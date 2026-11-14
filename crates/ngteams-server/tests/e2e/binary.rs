@@ -99,7 +99,11 @@ async fn check_region(session: &Session<MemorySecretStore>, origin: &str) {
         session.service_base("teamsAndChannelsProvisioningService"),
         Some(format!("{origin}/fabric/own/templates/api"))
     );
-    assert_eq!(session.region().endpoints.len(), 5);
+    assert_eq!(
+        session.service_base("userProfileService"),
+        Some(format!("{origin}/api/userprofilesvc/own"))
+    );
+    assert_eq!(session.region().endpoints.len(), 6);
 }
 
 async fn rejects_an_untrusted_certificate(node: &Node) {
