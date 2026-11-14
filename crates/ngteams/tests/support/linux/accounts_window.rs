@@ -8,7 +8,12 @@
 //! connected; screenshots the window (the rail's avatars above Settings; kept under `target/ui-shots/`); switches to b
 //! with the sandbox's virtual keyboard (Ctrl+Alt+Down) and screenshots it again; then c posts on the mock to a's chat
 //! with c while b is shown: a's notification reaches the sandbox's fake server naming no account, and activating it
-//! shows a again with that chat open. The tray's "Quit" quits the app, both engines' threads joined.
+//! shows a again with that chat open. Then an own server's account is added beside the two (own servers on): the
+//! rail's "+" opens the window asking for an account, "Own server" shows its fields, and the server's address, the user
+//! name and the password typed sign it in on an in-process `ngteams-server` over TLS (its certificate authority in the
+//! account's `ca_file`); its tokens are kept under its server and UPN, its region is the server's own, and its engine
+//! starts once the server serves a chat service (until it does, the window says which service is missing). The
+//! tray's "Quit" quits the app, both engines' threads joined.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -23,6 +28,8 @@ use std::{fs, future, io, thread};
 
 use gpui::{App, AsyncApp, Window, WindowingModes};
 use ngteams::app::{self, Launch};
+#[path = "../own_server.rs"]
+mod own_server;
 #[path = "../window.rs"]
 mod support;
 use ngteams::descriptors::adopt_trace;
@@ -57,6 +64,14 @@ const READY_FRAMES: usize = 3;
 const POST_TRIGGER: &str = "post-as-c";
 /// What c posts.
 const C_SAYS: &str = "hello a, from c";
+/// The file in the sandbox dir the child writes the own server's origin to.
+const OWN_ORIGIN: &str = "own-server-origin";
+/// The own server's user.
+const OWN_UPN: &str = "dana@own.example.test";
+const OWN_NAME: &str = "Dana Own";
+/// The rail's "+", and the "Own server" segment of the window it opens, as the sandbox's output shows them.
+const RAIL_ADD_AT: (u32, u32) = (38, 713);
+const OWN_SEGMENT_AT: (u32, u32) = (936, 164);
 
 pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -205,6 +220,7 @@ fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
 
     a_s_message_notifies_and_shows_a(sandbox, &mut trace, &running)?;
     shot(sandbox, "ngteams-accounts-notified.png")?;
+    an_own_servers_account_is_added(sandbox, &mut input, &mut trace, &running)?;
     quit(sandbox, &mut trace, &running)?;
     running
         .line_where(WAIT, |line| line == "engines-released")
@@ -242,6 +258,49 @@ fn a_s_message_notifies_and_shows_a(sandbox: &Sandbox, trace: &mut TraceReader, 
     trace.wait_where("its chat opened", |line| {
         line["view"] == "chat" && line["change"] == "opened" && line["conversation"] == AC_CHAT
     })?;
+    Ok(())
+}
+
+/// The rail's "+", then "Own server", the server's address, the user name and the password typed: the account signs
+/// in on the in-process server (see the module docs).
+fn an_own_servers_account_is_added(
+    sandbox: &Sandbox,
+    input: &mut ui_sandbox::input::VirtualInput,
+    trace: &mut TraceReader,
+    running: &Running,
+) -> SandboxResult {
+    let origin = fs::read_to_string(sandbox.path(OWN_ORIGIN))?;
+    input.click(RAIL_ADD_AT.0, RAIL_ADD_AT.1, keys::BTN_LEFT)?;
+    shot(sandbox, "ngteams-accounts-add-microsoft.png")?;
+    input.click(OWN_SEGMENT_AT.0, OWN_SEGMENT_AT.1, keys::BTN_LEFT)?;
+    shot(sandbox, "ngteams-accounts-add-own.png")?;
+    input.type_text(origin.trim())?;
+    input.key(keys::TAB)?;
+    input.type_text(OWN_UPN)?;
+    input.key(keys::TAB)?;
+    input.type_text(own_server::PASSWORD)?;
+    shot(sandbox, "ngteams-accounts-add-own-filled.png")?;
+    input.key(keys::ENTER)?;
+    let signed = running
+        .line_where(WAIT, |line| line.starts_with("own-signed-in "))
+        .map_err(|error| format!("the own server's account wasn't signed in: {error:?}"))?;
+    if signed.ends_with("chat=true") {
+        let mri = signed
+            .split_whitespace()
+            .nth(1)
+            .ok_or("the own account's MRI")?
+            .to_owned();
+        trace.next_where("the own server's account added", |line| {
+            about(line, "account", "added", &mri)
+        })?;
+        trace.next_where("its chat list", |line| {
+            line["view"] == "chat-list" && line["change"] == "shown"
+        })?;
+        shot(sandbox, "ngteams-accounts-own-added.png")?;
+    } else {
+        // the server serves no chat service yet: signed in, and the window says what is missing
+        shot(sandbox, "ngteams-accounts-own-no-chat-service.png")?;
+    }
     Ok(())
 }
 
@@ -395,7 +454,10 @@ fn child_window() -> SandboxResult {
     let a = support::started(Alias::A, lab.engine(Alias::A, LAB_A, "bot-a@lab.example.test")?)?;
     let b = support::started(Alias::B, lab.engine(Alias::B, LAB_B, "bot-b@lab.example.test")?)?;
     let settings = teams_ui::SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
-    let runner = support::runner(lab.dir.path())?;
+    let own = own_server::OwnServer::start().map_err(|error| error.to_string())?;
+    own.add_user(OWN_UPN, OWN_NAME).map_err(|error| error.to_string())?;
+    let runner = runner_with_own_servers(lab.dir.path(), &own)?;
+    let watched = runner.setup.clone();
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     let mock = Arc::clone(&lab.mock);
@@ -419,6 +481,7 @@ fn child_window() -> SandboxResult {
         match launched {
             Ok(launched) => {
                 post_when_asked(mock, cx);
+                say_when_own_signed_in(watched, cx);
                 let _ = launched.window.update(cx, |_, window, _| {
                     after_frames(window, READY_FRAMES, |_, _| say("ready"));
                 });
@@ -436,6 +499,74 @@ fn child_window() -> SandboxResult {
         say("engines-released");
     }
     Ok(())
+}
+
+/// The app's runner with own servers on and a credential store of this process alone (the sandbox has no Secret
+/// Service). The own server's certificate authority is written into the account's entry beforehand, as a user of a
+/// self-signed deployment writes it; the origin goes to the sandbox dir for the parent to type.
+fn runner_with_own_servers(root: &Path, own: &own_server::OwnServer) -> SandboxResult<ngteams::accounts::Runner> {
+    use ngteams::accounts_file::OwnServer;
+    let setup = support::runner(root)?
+        .setup
+        .with_secrets(ngteams::secrets::AppSecrets::in_memory())
+        .with_own_servers(true);
+    setup.ask_for_on(
+        OWN_UPN,
+        &OwnServer::parse(&own.origin, &own.ca_file.display().to_string())?,
+    )?;
+    let dir = std::env::var_os(ui_sandbox::SANDBOX_ENV).ok_or("no sandbox dir")?;
+    fs::write(PathBuf::from(dir).join(OWN_ORIGIN), &own.origin)?;
+    Ok(ngteams::accounts::Runner {
+        setup,
+        floor: teams_core::CallFloor::new(),
+        devices: None,
+    })
+}
+
+/// Says `own-signed-in <mri> chat=<bool>` once the own server's account is signed in as the app keeps one: its entry
+/// named by the sign-in, its refresh token under its server and UPN, its region's bases on its server alone; `chat`
+/// is whether the server's region names a chat service (so its engine can start).
+fn say_when_own_signed_in(setup: ngteams::setup::Setup, cx: &mut App) {
+    use teams_auth::secrets::SecretStore as _;
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(Duration::from_millis(200)).await;
+            let Ok(accounts) = setup.signed_in_accounts() else {
+                continue;
+            };
+            let Some(account) = accounts.into_iter().find(|account| account.upn == OWN_UPN) else {
+                continue;
+            };
+            let Some(server) = account.server.clone() else {
+                say("own account has no server");
+                return;
+            };
+            let region = setup
+                .paths
+                .region_file(&account)
+                .and_then(|path| teams_auth::authz::Region::load(&path).ok());
+            let Some(region) = region else {
+                continue;
+            };
+            let key = teams_auth::refresh::refresh_token_key(&account.id());
+            let bare = teams_auth::refresh::refresh_token_key(&account.upn);
+            let secrets = setup.secrets();
+            let stored = secrets.get(&key).await.ok().flatten().is_some();
+            let under_upn = secrets.get(&bare).await.ok().flatten().is_some();
+            let own_bases = region.base("authService").is_some_and(|base| base.starts_with(&server));
+            if !stored || under_upn || !own_bases {
+                say(&format!(
+                    "own account kept wrongly: stored={stored} under_upn={under_upn} own_bases={own_bases}"
+                ));
+                return;
+            }
+            let chat = region.base("chatServiceAfd").is_some() || region.base("chatService").is_some();
+            let mri = account.mri().map(|mri| mri.as_str().to_owned()).unwrap_or_default();
+            say(&format!("own-signed-in {mri} chat={chat}"));
+            return;
+        }
+    })
+    .detach();
 }
 
 /// Once the parent writes a chat's id to [`POST_TRIGGER`] in the sandbox dir, c posts [`C_SAYS`] there on the mock,

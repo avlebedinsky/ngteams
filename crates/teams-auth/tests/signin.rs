@@ -146,3 +146,113 @@ async fn another_account_signed_in_through_the_window_stores_nothing() -> TestRe
     assert!(store.get(&refresh_token_key("b@lab.example.test")).await?.is_none());
     Ok(())
 }
+
+// --- an own server's password sign-in ---
+
+use teams_auth::refresh::PasswordSignIn;
+use wiremock::matchers::body_string_contains;
+
+const OWN_KEY: &str = "https://chat.example.test/a@lab.example.test";
+
+/// A token endpoint that takes the password grant and names `username` in its ID token.
+async fn password_endpoint(username: &str) -> TestResult<(MockServer, TokenClient)> {
+    let server = MockServer::start().await;
+    let body: Value = json!({
+        "token_type": "Bearer",
+        "scope": "https://api.spaces.skype.com/.default",
+        "expires_in": 3600,
+        "access_token": "made-up-access-token",
+        "refresh_token": "made-up-own-refresh-token",
+        "id_token": id_token(username)?,
+    });
+    Mock::given(method("POST"))
+        .and(path("/oauth2/v2.0/token"))
+        .and(body_string_contains("grant_type=password"))
+        .and(body_string_contains("username=a%40lab.example.test"))
+        .and(body_string_contains("password=made-up+password"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let client = TokenClient::new(EntraConfig::teams_native().with_authority(format!("{}/", server.uri())))?;
+    Ok((server, client))
+}
+
+fn own_sign_in(expected: Option<(&'static str, &'static str)>) -> PasswordSignIn<'static> {
+    PasswordSignIn {
+        account: OWN_KEY,
+        username: ACCOUNT,
+        expected,
+    }
+}
+
+#[tokio::test]
+async fn a_password_sign_in_stores_the_refresh_token_under_the_accounts_key() -> TestResult {
+    let (_server, client) = password_endpoint(ACCOUNT).await?;
+    let store = MemorySecretStore::new();
+    let password = Secret::new("made-up password");
+    let signed = client
+        .password_sign_in(&store, own_sign_in(Some((TENANT, OID))), &password, &Scope::spaces())
+        .await?;
+    assert_eq!(
+        (signed.account.object_id.as_str(), signed.account.tenant.as_str()),
+        (OID, TENANT)
+    );
+    let stored = store.get(&refresh_token_key(OWN_KEY)).await?;
+    assert_eq!(stored.as_ref().map(Secret::expose), Some("made-up-own-refresh-token"));
+    // never under the bare user name, where a Microsoft 365 account of that UPN keeps its own
+    assert!(store.get(&refresh_token_key(ACCOUNT)).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_password_sign_in_naming_another_account_stores_nothing() -> TestResult {
+    let store = MemorySecretStore::new();
+    let password = Secret::new("made-up password");
+    // the server's ID token names somebody else
+    let (_server, client) = password_endpoint("b@lab.example.test").await?;
+    let other = client
+        .password_sign_in(&store, own_sign_in(None), &password, &Scope::spaces())
+        .await;
+    assert!(
+        matches!(
+            other,
+            Err(TokenError::WrongAccount {
+                claim: "preferred_username",
+                ..
+            })
+        ),
+        "{other:?}"
+    );
+    // an earlier sign-in named another object id
+    let (_server, client) = password_endpoint(ACCOUNT).await?;
+    let renamed = client
+        .password_sign_in(
+            &store,
+            own_sign_in(Some((TENANT, "00000000-0000-4000-8000-00000000000b"))),
+            &password,
+            &Scope::spaces(),
+        )
+        .await;
+    assert!(
+        matches!(renamed, Err(TokenError::WrongAccount { claim: "oid", .. })),
+        "{renamed:?}"
+    );
+    // a wrong password: the server's refusal, the password never in the error
+    let refused = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_grant",
+            "error_description": "The user name or password is incorrect.",
+        })))
+        .mount(&refused)
+        .await;
+    let client = TokenClient::new(EntraConfig::teams_native().with_authority(format!("{}/", refused.uri())))?;
+    let wrong = client
+        .password_sign_in(&store, own_sign_in(None), &password, &Scope::spaces())
+        .await
+        .expect_err("a wrong password");
+    assert!(matches!(wrong, TokenError::InvalidGrant(_)));
+    assert!(!format!("{wrong} {wrong:?}").contains("made-up password"));
+    assert!(store.get(&refresh_token_key(OWN_KEY)).await?.is_none());
+    Ok(())
+}

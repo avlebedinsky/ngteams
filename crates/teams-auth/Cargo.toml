@@ -57,6 +57,8 @@ tempfile.workspace = true
 # the broker's tests: its server on a socket pair's end, a deadline on its end (`time`)
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 wiremock.workspace = true
+# a made-up certificate authority for an own server's extra roots
+rcgen = { workspace = true, features = ["pem"] }
 
 [lints]
 workspace = true

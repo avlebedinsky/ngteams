@@ -22,6 +22,10 @@ mod transport;
 
 const CASE: &str = "NGTEAMS_STARTUP_TEST_CASE";
 const TID: &str = "00000000-0000-4000-8000-000000000001";
+/// A made-up own server, its user and password.
+const OWN_SERVER: &str = "https://chat.example.test";
+const OWN_UPN: &str = "unready-own@example.test";
+const OWN_PASSWORD: &str = "a made-up password";
 
 pub(crate) fn calls() -> &'static Mutex<Vec<String>> {
     static CALLS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
@@ -107,6 +111,33 @@ pub(super) mod accounts {
         }
     }
 
+    pub fn add_own(
+        setup: &Setup,
+        upn: &str,
+        server: &ngteams::accounts_file::OwnServer,
+        password: &teams_auth::secrets::Secret,
+    ) -> Result<PersonalAccount, String> {
+        record("add-own", &format!("{}/{upn}", server.origin));
+        assert_eq!(password.expose(), super::OWN_PASSWORD);
+        if std::env::var(CASE).unwrap().ends_with("error") {
+            return Err("synthetic own sign-in failure".to_owned());
+        }
+        setup.ask_for_on(upn, server).map_err(|error| error.to_string())
+    }
+
+    pub fn sign_in_own(
+        _: &Setup,
+        account: &PersonalAccount,
+        password: &teams_auth::secrets::Secret,
+    ) -> Result<PersonalAccount, String> {
+        record("sign-in-own", &account.id());
+        assert_eq!(password.expose(), super::OWN_PASSWORD);
+        if std::env::var(CASE).unwrap().ends_with("error") {
+            return Err("synthetic own reauthentication failure".to_owned());
+        }
+        Ok(account.clone())
+    }
+
     pub fn forget(_: &Setup, upn: &str) -> Result<ngteams::forget::Forgot, String> {
         record("forget", upn);
         match upn {
@@ -163,7 +194,7 @@ pub(super) mod prompt {
         app_id: &str,
         title: gpui::SharedString,
         held: Option<&str>,
-        own: teams_ui::OwnOffer,
+        own: &teams_ui::OwnOffer,
     ) -> gpui::Result<(
         gpui::WindowHandle<teams_ui::window::KitRoot>,
         gpui::Entity<teams_ui::AccountPrompt>,
@@ -206,7 +237,11 @@ pub(super) mod platform {
             if matches!(case.as_str(), "prompt-success" | "prompt-error") {
                 submit_prompt(&cx);
             }
+            if case.starts_with("own-") {
+                submit_own_prompt(&cx, case.starts_with("own-prompt-"));
+            }
             if matches!(case.as_str(), "prompt-success" | "prompt-error")
+                || case.starts_with("own-")
                 || case.starts_with("first-")
                 || case.starts_with("again-")
             {
@@ -233,15 +268,48 @@ pub(super) mod platform {
         });
     }
 
+    /// The sign-in screen's own server's fields submitted: all three on the first run's screen (`choice`: the place
+    /// is chosen first), the password alone for an account asked again (its server and user name are there already).
+    fn submit_own_prompt(cx: &TestAppContext, choice: bool) {
+        use teams_ui::{OwnSignIn, SignInKind};
+        let prompt = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .filter_map(|window| window.downcast::<KitRoot>())
+                .find_map(|window| window.read(cx).ok()?.view().clone().downcast::<AccountPrompt>().ok())
+                .expect("the account prompt is open")
+        });
+        let (kind, held) = cx.read(|cx| (prompt.read(cx).kind(), prompt.read(cx).own_fields(cx)));
+        if choice {
+            assert_eq!(
+                kind,
+                SignInKind::Microsoft,
+                "Microsoft 365 is chosen until the user chooses"
+            );
+        } else {
+            assert_eq!(kind, SignInKind::OwnServer);
+            assert_eq!(held, (super::OWN_SERVER.to_owned(), super::OWN_UPN.to_owned()));
+        }
+        cx.update(|cx| {
+            prompt.update(cx, |_, cx| {
+                cx.emit(AccountPromptEvent::SignInOwn(OwnSignIn {
+                    server: "chat.example.test".into(),
+                    user: super::OWN_UPN.into(),
+                    password: super::OWN_PASSWORD.to_owned().into(),
+                }));
+            });
+        });
+    }
+
     fn wait_for_backend(cx: &TestAppContext) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             cx.run_until_parked();
-            let complete = super::calls()
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|call| call.starts_with("add:") || call.starts_with("sign-in:"));
+            let complete = super::calls().lock().unwrap().iter().any(|call| {
+                ["add:", "sign-in:", "add-own:", "sign-in-own:"]
+                    .iter()
+                    .any(|kind| call.starts_with(kind))
+            });
             if complete {
                 // Flush the foreground continuation after the synchronous fake backend returns.
                 for _ in 0..4 {
@@ -271,6 +339,17 @@ fn signed(setup: &Setup, upn: &str, suffix: u8, region: bool) -> PersonalAccount
         )
         .unwrap();
     }
+    account
+}
+
+/// An own server's account a sign-in named, which can't start without its password ([`accounts::ready`]).
+fn signed_own(setup: &Setup) -> PersonalAccount {
+    let server = ngteams::accounts_file::OwnServer::parse(OWN_SERVER, "").unwrap();
+    let account = PersonalAccount::pending_on(OWN_UPN, &server)
+        .unwrap()
+        .signed_in_as("00000000-0000-4000-8000-0000000000a1", TID, None)
+        .unwrap();
+    account.save(&setup.paths).unwrap();
     account
 }
 
@@ -304,6 +383,11 @@ const STARTUP_CASES: &[&str] = &[
     "broken-ready",
     "again-success",
     "again-error",
+    "own-prompt-success",
+    "own-prompt-error",
+    "own-first-again",
+    "own-first-again-error",
+    "own-again-running",
     "forget-missing",
     "forget-pending",
     "forget-stored",
@@ -323,6 +407,10 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
             .args(["--exact", "startup_tests::child", "--nocapture", "--test-threads", "1"])
             .env_clear()
             .env(CASE, case)
+            .envs(
+                case.starts_with("own-")
+                    .then_some((ngteams::setup::OWN_SERVER_ENV, "1")),
+            )
             .env("HOME", root.path().join("home"))
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("XDG_DATA_HOME", root.path().join("data"))
@@ -423,29 +511,21 @@ fn child() {
                 format!("{}@example.test", value.trim_start_matches("forget-")),
             ]);
         }
-        "empty" | "prompt-window-error" => {}
+        "own-first-again" | "own-first-again-error" => {
+            signed_own(&setup);
+        }
+        "own-again-running" => {
+            signed(&setup, "ready@example.test", 2, true);
+            signed_own(&setup);
+        }
+        "empty" | "prompt-window-error" | "own-prompt-success" | "own-prompt-error" => {}
         other => panic!("unknown synthetic case {other}"),
     }
     let outcome = run(
         &ngteams::cli::Cli::try_parse_from(args).unwrap(),
         teams_media::devices::Reach::Sandbox,
     );
-    if let Err(error) = &outcome {
-        eprintln!("synthetic startup {case}: {error}");
-    }
-    match case.as_str() {
-        "prompt-success" | "first-success" | "first-unready-success" | "again-success" => {
-            // no link was given: the restart leaves nothing out
-            assert!(matches!(outcome, Ok(Outcome::Restart { opened: None })));
-        }
-        "first-error"
-        | "first-start-fails"
-        | "broken-ready"
-        | "forget-error"
-        | "window-error"
-        | "prompt-window-error" => assert!(outcome.is_err()),
-        _ => assert!(matches!(outcome, Ok(Outcome::Quit))),
-    }
+    check_outcome(&case, &outcome);
     seen_after(&case);
 }
 
@@ -499,6 +579,32 @@ fn a_restart_carries_a_given_link_it_did_not_open() {
     );
 }
 
+/// How a case's run must have ended.
+fn check_outcome(case: &str, outcome: &Result<Outcome, String>) {
+    if let Err(error) = outcome {
+        eprintln!("synthetic startup {case}: {error}");
+    }
+    match case {
+        "prompt-success"
+        | "first-success"
+        | "first-unready-success"
+        | "again-success"
+        | "own-prompt-success"
+        | "own-first-again"
+        | "own-again-running" => {
+            // no link was given: the restart leaves nothing out
+            assert!(matches!(outcome, Ok(Outcome::Restart { opened: None })));
+        }
+        "first-error"
+        | "first-start-fails"
+        | "broken-ready"
+        | "forget-error"
+        | "window-error"
+        | "prompt-window-error" => assert!(outcome.is_err()),
+        _ => assert!(matches!(outcome, Ok(Outcome::Quit))),
+    }
+}
+
 /// What a case's run did besides its outcome.
 fn seen_after(case: &str) {
     let seen = calls().lock().unwrap();
@@ -509,6 +615,32 @@ fn seen_after(case: &str) {
             .unwrap();
         assert!(seen.contains(&format!("ctl-bound:{}", personal.display())), "{seen:?}");
         assert!(!personal.exists(), "the quit removes the socket");
+    }
+    let own = format!("{OWN_SERVER}/{OWN_UPN}");
+    match case {
+        // the server's address typed without its scheme is the account's HTTPS origin
+        "own-prompt-success" | "own-prompt-error" => {
+            assert!(seen.contains(&format!("add-own:{own}")), "{seen:?}");
+            assert!(
+                !seen.iter().any(|call| call.starts_with("add:")),
+                "no Microsoft window: {seen:?}"
+            );
+        }
+        // signed out with nothing else to start, or beside a running account: its password again, on its server
+        "own-first-again" | "own-first-again-error" | "own-again-running" => {
+            assert!(seen.contains(&format!("sign-in-own:{own}")), "{seen:?}");
+            assert!(
+                !seen
+                    .iter()
+                    .any(|call| call.starts_with("sign-in:") && call.contains(OWN_UPN)),
+                "no Microsoft window for it: {seen:?}"
+            );
+            assert_eq!(
+                seen.iter().any(|call| call == "start:ready@example.test"),
+                case == "own-again-running"
+            );
+        }
+        _ => {}
     }
     if case == "many" {
         assert!(

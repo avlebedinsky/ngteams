@@ -60,10 +60,16 @@ impl StartFailed {
                     | AccountError::Store(teams_store::StoreError::EngineRunning { .. })
             )
         );
-        Self {
-            message: format!("{}: {error}", account.upn),
-            running,
-        }
+        let no_chats = matches!(error, engine::StartError::Account(AccountError::NoChatBase));
+        let message = match account.server_host() {
+            // an own server that doesn't serve chats: said in the user's words, not the region's
+            Some(server) if no_chats => format!(
+                "{} is signed in, but {server} doesn't serve chats, so it can't be shown yet.",
+                account.upn
+            ),
+            _ => format!("{}: {error}", account.upn),
+        };
+        Self { message, running }
     }
 }
 

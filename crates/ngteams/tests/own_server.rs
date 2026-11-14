@@ -4,7 +4,9 @@
 //! `accounts.toml` naming the server; what a wrong password, an untrusted certificate and own servers switched off
 //! leave behind; the forget. Every value is made up and nothing leaves loopback.
 
-#![cfg(all(test, target_os = "linux"))]
+// test code throughout (its helpers unwrap like the tests do)
+#![cfg(test)]
+#![cfg(target_os = "linux")]
 
 #[path = "support/own_server.rs"]
 mod own_server;
@@ -73,31 +75,56 @@ fn an_own_servers_account_signs_in_with_its_password_beside_the_microsoft_one() 
         (None, Some(MICROSOFT_OID))
     );
     assert_eq!(accounts[1], signed);
+    kept_under_its_server(&setup, &server, &signed, &store)?;
+
+    signed_in_again_and_forgotten(&setup, &signed, &store)
+}
+
+/// A second sign-in takes the same entry, Microsoft's window never opens for the account, and forgetting it leaves
+/// the Microsoft 365 account of the same UPN whole.
+fn signed_in_again_and_forgotten(setup: &Setup, signed: &PersonalAccount, store: &MemorySecretStore) -> TestResult {
+    let password = Secret::new(PASSWORD);
+    // a second sign-in (signed out, say) must name the same account, and takes the same entry
+    let again = block_on(signin::sign_in_own(setup, signed, &password, store))?;
+    assert_eq!(&again, signed);
+    // Microsoft's window is never opened for it
+    let clients = signin::SignInClients::live()?;
+    let refused = block_on(signin::sign_in(
+        setup,
+        signed,
+        &clients,
+        store,
+        Box::new(|_| panic!("no sign-in window opens for an own server's account")),
+    ));
+    assert!(matches!(refused, Err(SignInError::WrongCloud)), "{refused:?}");
+
+    // forgotten: its tokens, its region and its entry go; the Microsoft account stays whole
+    let forgot = block_on(forget::forget(setup, &signed.id(), store))?;
+    assert!(matches!(forgot, Forgot::Account { .. }));
+    assert!(block_on(store.get(&refresh_token_key(&signed.id())))?.is_none());
+    assert!(block_on(store.get(&refresh_token_key(UPN)))?.is_some());
+    assert_eq!(PersonalAccount::load_all(&setup.paths)?.len(), 1);
+    Ok(())
+}
+
+/// The signed-in account's tokens and region are its own server's, and its engine reads them.
+fn kept_under_its_server(
+    setup: &Setup,
+    server: &OwnServer,
+    signed: &PersonalAccount,
+    store: &MemorySecretStore,
+) -> TestResult {
     // its tokens under its server and UPN together, the Microsoft account's untouched
     let microsoft = block_on(store.get(&refresh_token_key(UPN)))?.ok_or("the Microsoft token")?;
     assert_eq!(microsoft.expose(), "microsoft-refresh");
     let own = block_on(store.get(&refresh_token_key(&signed.id())))?.ok_or("the own server's token")?;
     assert_ne!(own.expose(), "microsoft-refresh");
     assert!(block_on(store.get(&skypetoken_key(&signed.id())))?.is_some());
-    assert!(block_on(signin::ready(&setup, &signed, &store))?);
+    assert!(block_on(signin::ready(setup, signed, store))?);
     // its region is the server's own: every base on its origin
-    let region = Region::load(&setup.paths.region_file(&signed).ok_or("the region file")?)?;
+    let region = Region::load(&setup.paths.region_file(signed).ok_or("the region file")?)?;
     let auth = region.base("authService").ok_or("the auth base")?;
     assert!(auth.starts_with(&server.origin), "{auth}");
-
-    // a second sign-in (signed out, say) must name the same account, and takes the same entry
-    let again = block_on(signin::sign_in_own(&setup, &signed, &password, &store))?;
-    assert_eq!(again, signed);
-    // Microsoft's window is never opened for it
-    let clients = signin::SignInClients::live()?;
-    let refused = block_on(signin::sign_in(
-        &setup,
-        &signed,
-        &clients,
-        &store,
-        Box::new(|_| panic!("no sign-in window opens for an own server's account")),
-    ));
-    assert!(matches!(refused, Err(SignInError::WrongCloud)), "{refused:?}");
 
     // the engine's own handle on the account's tokens
     let engine_store = MemorySecretStore::new();
@@ -110,14 +137,7 @@ fn an_own_servers_account_signs_in_with_its_password_beside_the_microsoft_one() 
             block_on(engine_store.put(&key, &secret))?;
         }
     }
-    engine_starts_or_names_the_missing_chat_service(&setup, &signed, &region, engine_store);
-
-    // forgotten: its tokens, its region and its entry go; the Microsoft account stays whole
-    let forgot = block_on(forget::forget(&setup, &signed.id(), &store))?;
-    assert!(matches!(forgot, Forgot::Account { .. }));
-    assert!(block_on(store.get(&refresh_token_key(&signed.id())))?.is_none());
-    assert!(block_on(store.get(&refresh_token_key(UPN)))?.is_some());
-    assert_eq!(PersonalAccount::load_all(&setup.paths)?.len(), 1);
+    engine_starts_or_names_the_missing_chat_service(setup, signed, &region, engine_store);
     Ok(())
 }
 
@@ -131,8 +151,10 @@ fn engine_starts_or_names_the_missing_chat_service(
 ) {
     let started = engine::start(&setup.paths, account, CallFloor::new(), store, false, None);
     if region.base("chatServiceAfd").is_some() || region.base("chatService").is_some() {
-        let engine = started.expect("the engine starts on the server's chat service");
-        engine.handle.shutdown();
+        match started {
+            Ok(engine) => engine.handle.shutdown(),
+            Err(error) => panic!("the engine doesn't start on the server's chat service: {error}"),
+        }
     } else {
         assert!(
             matches!(started, Err(StartError::Account(AccountError::NoChatBase))),
@@ -211,7 +233,7 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_no_entry() -> TestResult {
         off.signed_in_accounts()?.is_empty(),
         "an own server's account isn't started while they are off"
     );
-    assert_eq!(setup.signed_in_accounts()?, [signed.clone()]);
+    assert_eq!(setup.signed_in_accounts()?, std::slice::from_ref(&signed));
     let again = block_on(signin::sign_in_own(&off, &signed, &Secret::new(PASSWORD), &store));
     assert!(matches!(again, Err(SignInError::WrongCloud)));
     Ok(())

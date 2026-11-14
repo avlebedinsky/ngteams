@@ -43,7 +43,7 @@ the own origin rather than a Microsoft SharePoint origin:
 | Service | Own-origin base or endpoint | Current entry |
 | --- | --- | --- |
 | Authorization | `/oauth2/v2.0/authorize` | `EntraConfig::for_cloud` |
-| Token grants | `/oauth2/v2.0/token` | `EntraConfig::for_cloud` |
+| Token grants | `/oauth2/v2.0/token` | `TokenClient::for_cloud`; the sign-in is the password grant (`TokenClient::password_sign_in`), then refresh grants |
 | Authz | `/api/authsvc/v1.0/authz` | `AuthzClient::for_cloud` |
 | Chat service | `/api/chatsvc/<region>/` | `HttpTransport::for_cloud`, authz `chatServiceAfd`; `ChatReads` validates sync/forward/backward links against the exact account base via `link_endpoint_in` |
 | Middle tier | `/api/mt/part/<partition>/` | `with_middle_tier`, authz `middleTier` |

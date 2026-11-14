@@ -385,7 +385,11 @@ fn run_setup(
             let account = lab::account(&setup.paths)?;
             return sign_in_first(setup, account);
         }
-        return ask_account(setup, unready.first().map(|account| account.upn.clone()));
+        return match unready.into_iter().next() {
+            // an own server's account signed out: its password again, never Microsoft's field holding its user name
+            Some(account) if account.server.is_some() => sign_in_first(setup, account),
+            held => ask_account(setup, held.map(|account| account.upn)),
+        };
     }
     let devices = Some(CallDevices::open(reach));
     let runner = Runner {
@@ -729,7 +733,7 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
         } else {
             OwnOffer::No
         };
-        match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref(), own) {
+        match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref(), &own) {
             Ok((_, prompt)) => cx
                 .subscribe(&prompt, move |prompt, event, cx| {
                     let (setup, restart) = (setup.clone(), Rc::clone(&restart_in_app));
@@ -796,13 +800,11 @@ fn sign_in_own_from_prompt(
 ) {
     let signing = cx.background_spawn(async move {
         let password = teams_auth::secrets::Secret::new(own.password.as_str());
-        match again {
-            Some(account) => accounts::sign_in_own(&setup, &account, &password),
-            None => {
-                let server = OwnServer::parse(&own.server, "").map_err(|error| error.to_string())?;
-                accounts::add_own(&setup, &own.user, &server, &password)
-            }
+        if let Some(account) = again {
+            return accounts::sign_in_own(&setup, &account, &password);
         }
+        let server = OwnServer::parse(&own.server, "").map_err(|error| error.to_string())?;
+        accounts::add_own(&setup, &own.user, &server, &password)
     });
     cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
         Ok(_) => {
@@ -825,7 +827,7 @@ fn ask_own_password(setup: Setup, account: PersonalAccount, restart: Rc<Cell<boo
         server: account.server.clone().unwrap_or_default(),
         user: account.upn.clone(),
     };
-    match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), None, own) {
+    match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), None, &own) {
         Ok((_, prompt)) => cx
             .subscribe(&prompt, move |prompt, event, cx| {
                 if let AccountPromptEvent::SignInOwn(own) = event {

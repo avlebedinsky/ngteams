@@ -100,7 +100,8 @@ impl TwoAccounts {
             models: models.clone(),
             name: "Bee Work".into(),
             detail: "bee@example.test".into(),
-            server: None,
+            // b is on an own server, a on Microsoft 365
+            server: Some("chat.example.test:8443".into()),
         };
         let given: Arc<dyn NotificationServer> = server.clone();
         let desktop = rig.cx.update(|cx| {
@@ -637,4 +638,42 @@ fn an_activity_open_waiting_for_the_feed_is_dropped_when_its_account_is_switched
         }),
         "the hidden account opens and reads nothing: {actions:?}"
     );
+}
+
+#[test]
+fn an_own_servers_account_names_its_server_in_its_own_settings_alone() {
+    let d = TwoAccounts::start();
+    let window = d.open();
+    let servers = d.rig.cx.read(|cx| {
+        let accounts = d.desktop.read(cx).accounts().read(cx);
+        accounts
+            .tiles()
+            .iter()
+            .map(|tile| tile.server.as_ref().map(ToString::to_string))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(servers, [None, Some("chat.example.test:8443".to_owned())]);
+    let show_settings = || {
+        d.rig.cx.update(|cx| {
+            let shell = window::content(window, cx)
+                .unwrap()
+                .read(cx)
+                .shell_in(cx)
+                .unwrap()
+                .clone();
+            shell.update(cx, teams_ui::Shell::show_settings);
+        });
+        d.rig.cx.run_until_parked();
+    };
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), &d.rig.cx);
+    // a, on Microsoft 365: its settings name no server
+    show_settings();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("send-presence").is_some(), "the General page shows");
+    assert!(cx.debug_bounds("account-server").is_none());
+    // b, on its own server
+    d.switch(LAB_B);
+    show_settings();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("account-server").is_some());
 }

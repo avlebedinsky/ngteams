@@ -380,7 +380,7 @@ joins with `refused_read_only`. A lab alias's writes and calls are live lab runs
 
 ```sh
 ngteamsctl status                           # version, accounts and their engines, the window, the call up
-ngteamsctl accounts
+ngteamsctl accounts                         # each account; an own server's names its server
 ngteamsctl chats [--unread] [--limit N]
 ngteamsctl messages <chat> [--limit N] [--before <message-id>]
 ngteamsctl unread                           # the badge's counts, per chat and total

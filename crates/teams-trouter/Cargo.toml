@@ -55,6 +55,8 @@ teams-mock.workspace = true
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 wiremock.workspace = true
+# a made-up certificate authority for an own server's extra roots
+rcgen = { workspace = true, features = ["pem"] }
 
 [lints]
 workspace = true

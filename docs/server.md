@@ -420,6 +420,12 @@ shape that the client treats as empty preferences.
   else per node.
 - Migrations take a Postgres advisory lock, so nodes starting together take turns.
 
+## The client
+
+`ngteams` signs in to this server from its account window ("Own server": address, user name, password), behind
+`NGTEAMS_OWN_SERVER=1`: [personal-build.md](personal-build.md#own-server-accounts). A deployment with a certificate
+the system doesn't trust gives its certificate authority to each account as `ca_file`.
+
 ## Tests
 
 `cargo test -p ngteams-server` runs the e2e tests: the real client crates (`teams-auth`'s session and clients,

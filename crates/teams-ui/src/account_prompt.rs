@@ -103,6 +103,14 @@ pub enum AccountPromptEvent {
     SignInOwn(OwnSignIn),
 }
 
+/// How the screen stands to own servers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnAsk {
+    No,
+    Choice,
+    Again,
+}
+
 /// Whether, and how, the screen asks for an own server's account.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum OwnOffer {
@@ -122,10 +130,9 @@ pub struct AccountPrompt {
     user: Entity<InputState>,
     password: Entity<InputState>,
     kind: SignInKind,
-    /// Whether the choice of where the account is shows ([`Self::offer_own_server`]).
-    own_offered: bool,
-    /// An own server's account asked again: its server and user name are fixed ([`Self::ask_own_again`]).
-    own_fixed: bool,
+    /// Whether the choice of where the account is shows ([`Self::offer_own_server`]), or an own server's account is
+    /// asked again, its server and user name fixed ([`Self::ask_own_again`]).
+    own: OwnAsk,
     signing_in: bool,
     /// What the line under the field says, and the field's text when it was said: an edit clears it (the kit's input
     /// also tells a change after an Enter that changed nothing, which must not).
@@ -169,8 +176,7 @@ impl AccountPrompt {
             user,
             password,
             kind: SignInKind::Microsoft,
-            own_offered: false,
-            own_fixed: false,
+            own: OwnAsk::No,
             signing_in: false,
             problem: None,
             clear_password: false,
@@ -194,7 +200,7 @@ impl AccountPrompt {
 
     /// Shows the choice of where the account is: Microsoft 365 (chosen) or an own server.
     pub fn offer_own_server(&mut self, cx: &mut Context<Self>) {
-        self.own_offered = true;
+        self.own = OwnAsk::Choice;
         cx.notify();
     }
 
@@ -202,8 +208,7 @@ impl AccountPrompt {
     /// field focused, and no choice of another place.
     pub fn ask_own_again(&mut self, server: &str, user: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.kind = SignInKind::OwnServer;
-        self.own_offered = false;
-        self.own_fixed = true;
+        self.own = OwnAsk::Again;
         let (server, user) = (server.to_owned(), user.to_owned());
         self.server.update(cx, |field, cx| field.set_value(server, window, cx));
         self.user.update(cx, |field, cx| field.set_value(user, window, cx));
@@ -220,7 +225,7 @@ impl AccountPrompt {
     /// Chooses where the account is and focuses its first field; nothing while a sign-in is open, or for an account
     /// asked again.
     pub fn choose(&mut self, kind: SignInKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.signing_in || self.own_fixed || !self.own_offered || self.kind == kind {
+        if self.signing_in || self.own != OwnAsk::Choice || self.kind == kind {
             return;
         }
         self.kind = kind;
@@ -406,7 +411,7 @@ impl AccountPrompt {
                 .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(name))
                 .child(input)
         };
-        let fixed = self.signing_in || self.own_fixed;
+        let fixed = self.signing_in || self.own == OwnAsk::Again;
         div()
             .flex()
             .flex_col()
@@ -438,7 +443,9 @@ impl AccountPrompt {
                 "Enter your work account. Microsoft's sign-in opens in a window of its own.",
                 SIGNING_IN,
             ),
-            SignInKind::OwnServer if self.own_fixed => ("Enter your password to sign in again.", SIGNING_IN_OWN),
+            SignInKind::OwnServer if self.own == OwnAsk::Again => {
+                ("Enter your password to sign in again.", SIGNING_IN_OWN)
+            }
             SignInKind::OwnServer => ("Enter your server's address and your account on it.", SIGNING_IN_OWN),
         }
     }
@@ -484,7 +491,7 @@ impl Render for AccountPrompt {
                     .font_weight(gpui::FontWeight::BOLD)
                     .child("Sign in to Teams"),
             )
-            .when(self.own_offered, |card| card.child(self.choice(palette, cx)))
+            .when(self.own == OwnAsk::Choice, |card| card.child(self.choice(palette, cx)))
             .child(div().text_sm().text_color(rgb(palette.muted_foreground)).child(words))
             .child(fields)
             .children(status.map(|status| {
@@ -524,7 +531,7 @@ pub fn open(
     title: SharedString,
     account: Option<&str>,
 ) -> gpui::Result<(WindowHandle<KitRoot>, Entity<AccountPrompt>)> {
-    open_offering(cx, app_id, title, account, OwnOffer::No)
+    open_offering(cx, app_id, title, account, &OwnOffer::No)
 }
 
 /// [`open`], asking for an own server's account as `own` says: the window taller for its fields.
@@ -536,9 +543,9 @@ pub fn open_offering(
     app_id: &str,
     title: SharedString,
     account: Option<&str>,
-    own: OwnOffer,
+    own: &OwnOffer,
 ) -> gpui::Result<(WindowHandle<KitRoot>, Entity<AccountPrompt>)> {
-    let height = if own == OwnOffer::No { SIZE.1 } else { OWN_HEIGHT };
+    let height = if *own == OwnOffer::No { SIZE.1 } else { OWN_HEIGHT };
     let bounds = Bounds::centered(None, size(px(SIZE.0), px(height)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -555,7 +562,7 @@ pub fn open_offering(
         let following = theme::follow(window, cx);
         let view = cx.new(|cx| {
             let mut prompt = AccountPrompt::new(account, window, cx).following(following);
-            match &own {
+            match own {
                 OwnOffer::No => {}
                 OwnOffer::Choice => prompt.offer_own_server(cx),
                 OwnOffer::Again { server, user } => prompt.ask_own_again(server, user, window, cx),

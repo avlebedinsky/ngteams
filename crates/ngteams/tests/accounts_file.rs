@@ -337,9 +337,16 @@ fn an_own_servers_account_sits_beside_the_microsoft_one_of_the_same_upn() -> Tes
         PersonalAccount::find(&paths, &own.id().to_uppercase())?,
         Some(own.clone())
     );
+    kept_apart_when_saved_and_removed(&paths, &own, &text)
+}
+
+/// The rest of the test above: `own` saved again, an account given twice refused, and a bare UPN's meaning as
+/// accounts are removed.
+fn kept_apart_when_saved_and_removed(paths: &PersonalPaths, own: &PersonalAccount, text: &str) -> TestResult {
+    let upn = own.upn.as_str();
     // saved again in its own place, never over the account of the same UPN elsewhere
-    own.signed_in_as(GUID_S, TENANT, Some("Renamed"))?.save(&paths)?;
-    let names: Vec<_> = PersonalAccount::load_all(&paths)?
+    own.signed_in_as(GUID_S, TENANT, Some("Renamed"))?.save(paths)?;
+    let names: Vec<_> = PersonalAccount::load_all(paths)?
         .into_iter()
         .map(|account| account.name)
         .collect();
@@ -348,16 +355,16 @@ fn an_own_servers_account_sits_beside_the_microsoft_one_of_the_same_upn() -> Tes
     let twice = format!("{text}\n[[account]]\nupn = \"{upn}\"\nserver = \"{SERVER}\"\n");
     fs::write(paths.accounts_file(), twice)?;
     assert!(matches!(
-        PersonalAccount::load_all(&paths),
+        PersonalAccount::load_all(paths),
         Err(PersonalError::Account(_))
     ));
-    fs::write(paths.accounts_file(), &text)?;
+    fs::write(paths.accounts_file(), text)?;
     // without the Microsoft account, a bare UPN names an own server's only while one alone has it
-    PersonalAccount::remove(&paths, upn)?;
-    assert_eq!(PersonalAccount::find(&paths, upn)?, None);
-    PersonalAccount::remove(&paths, &format!("https://other.example.test/{upn}"))?;
+    PersonalAccount::remove(paths, upn)?;
+    assert_eq!(PersonalAccount::find(paths, upn)?, None);
+    PersonalAccount::remove(paths, &format!("https://other.example.test/{upn}"))?;
     assert_eq!(
-        PersonalAccount::find(&paths, upn)?.map(|account| account.id()),
+        PersonalAccount::find(paths, upn)?.map(|account| account.id()),
         Some(own.id())
     );
     Ok(())

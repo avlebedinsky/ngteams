@@ -111,7 +111,6 @@ impl Cloud {
     }
 
     /// `builder` trusting this cloud's extra certificate authorities beside the system's.
-    #[must_use]
     pub fn trust(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
         // checked when they were taken ([`Cloud::trusting`]): one that no longer parses adds nothing
         match self

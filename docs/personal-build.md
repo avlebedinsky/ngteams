@@ -28,7 +28,9 @@ browser harness's `data_dir`. Lab paths resolving into personal data/config are 
 
 `accounts.toml` holds `[[account]]` entries, not tokens: UPN, verified object/tenant IDs (`oid`, `tid`), optional
 display name and manually named identity-provider hosts (`idp_hosts`). Sign-in verifies the account and tenant;
-an existing identity is not replaced by a different account. Under the data root:
+an existing identity is not replaced by a different account. An account on an own server
+([Own-server accounts](#own-server-accounts)) also names its `server` and, for a self-signed deployment, its
+`ca_file`; an entry without `server` is a Microsoft 365 account. Under the data root:
 
 - `store/<oid>.sqlite`: the account's SQLite/WAL store, with adjacent engine locks and picture cache.
 - `regions/<oid>.json`: region metadata from authz, without a token.
@@ -52,6 +54,32 @@ A newly typed account is pending until sign-in succeeds. If sign-in stores nothi
 UPN is removed; entries with manual identity-provider hosts or a refused provider remain pending for correction.
 An existing provisioned lab identity is different: canceling or failing its first sign-in retains it so the alias
 can retry. A lab alias selects its one provisioned account directly and cannot add a second one, but can forget it.
+
+### Own-server accounts
+
+Behind `NGTEAMS_OWN_SERVER=1` while it is being built, the window that asks for an account first asks where the
+account is: **Microsoft 365** (the default; the flow above, unchanged) or **Own server**
+([docs/server.md](server.md)). An own server's account is asked for the server's address, the user name and the
+password. The app signs in with the password grant on that server alone: Microsoft's sign-in window never opens for
+it, and the password is sent once and kept nowhere.
+
+The server belongs to the account, not to the app. Microsoft 365 accounts and accounts of one or more own servers
+run side by side in one window, and each one keeps its own:
+
+- entry in `accounts.toml`: `server = "https://chat.example.com"`, and optionally
+  `ca_file = "/path/to/ca.pem"` (an absolute path to the PEM certificate authority of a self-signed deployment,
+  trusted beside the system's for that account's connections only; the connection is always HTTPS);
+- identity: an account is told from the others by its server and UPN together, so the same user name may exist on
+  Microsoft 365 and on an own server;
+- tokens: stored under `<server>/<UPN>`, never under the bare UPN, and sent only to that server;
+- store and region (`store/<oid>.sqlite`, `regions/<oid>.json`), keyed by the object id the server gave it.
+
+A server with its own certificate authority needs `ca_file` written by hand: add an `[[account]]` entry with `upn`,
+`server` and `ca_file`, then sign in with the same server and user name, which takes that entry up. An entry holding
+a `ca_file` stays when its sign-in fails; a bare one is removed. An own server's account that is signed out is asked
+for its password again. The account menu, the rail's tooltip and Settings > General name the account's server, and
+`ngteamsctl accounts` lists it. Without `NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not
+started. `ngteams --forget <server>/<UPN>` (or the bare UPN while no other account has it) forgets one.
 
 ## Requests, outbox and diagnostics
 

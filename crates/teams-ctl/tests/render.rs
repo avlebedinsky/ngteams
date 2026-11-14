@@ -546,6 +546,34 @@ fn rows_without_their_optional_values_read_plainly() {
         }],
     });
     assert!(accounts.ends_with("\n1  b@lab.invalid  down\n"), "{accounts}");
+    // an own server's account names its server in a column the Microsoft 365 accounts fill too
+    let mixed = text(&Response::Accounts {
+        accounts: vec![
+            AccountRow {
+                index: 0,
+                upn: s("a@lab.invalid"),
+                server: None,
+                mri: s("8:orgid:a"),
+                name: None,
+                shown: true,
+                state: s("connected"),
+            },
+            AccountRow {
+                index: 1,
+                upn: s("a@lab.invalid"),
+                server: Some(s("https://chat.lab.invalid")),
+                mri: s("8:orgid:b"),
+                name: Some(s("A")),
+                shown: false,
+                state: s("connected"),
+            },
+        ],
+    });
+    assert!(mixed.contains("SERVER"), "{mixed}");
+    assert!(
+        mixed.contains("Microsoft 365") && mixed.contains("https://chat.lab.invalid"),
+        "{mixed}"
+    );
     let chats = text(&Response::Chats {
         chats: vec![ChatRow {
             id: s("19:x"),

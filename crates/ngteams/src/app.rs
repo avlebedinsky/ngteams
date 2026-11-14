@@ -505,7 +505,7 @@ impl Running {
         } else {
             OwnOffer::No
         };
-        let opened = account_prompt::open_offering(cx, PERSONAL_APP_ID, "Add an account".into(), None, own);
+        let opened = account_prompt::open_offering(cx, PERSONAL_APP_ID, "Add an account".into(), None, &own);
         let (window, prompt) = match opened {
             Ok(opened) => opened,
             Err(error) => {
@@ -537,7 +537,7 @@ impl Running {
         let id = format!("{}/{}", server.origin, own.user);
         if self.bridges.iter().any(|(_, held, _)| held.eq_ignore_ascii_case(&id)) {
             prompt.update(cx, |prompt, cx| {
-                prompt.failed(format!("{} is added already", own.user), cx)
+                prompt.failed(format!("{} is added already", own.user), cx);
             });
             return;
         }
@@ -546,12 +546,11 @@ impl Running {
             let password = Secret::new(own.password.as_str());
             accounts::add_own(&setup, &own.user, &server, &password)
         });
-        self.start_signed(signing, prompt, cx);
+        Self::start_signed(signing, prompt, cx);
     }
 
     /// Once `signing` went through, starts the account and shows it; one that didn't is said on `prompt`.
     fn start_signed(
-        &mut self,
         signing: Task<Result<PersonalAccount, String>>,
         prompt: Entity<AccountPrompt>,
         cx: &mut gpui::Context<Self>,
@@ -583,7 +582,7 @@ impl Running {
         let setup = self.runner.setup.clone();
         let windows = crate::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
-        self.start_signed(signing, prompt, cx);
+        Self::start_signed(signing, prompt, cx);
     }
 
     /// An account added: started, shown, and the prompt that asked for it closed.

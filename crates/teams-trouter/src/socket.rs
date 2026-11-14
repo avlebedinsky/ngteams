@@ -436,6 +436,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_socket_trusts_an_own_servers_certificate_authority_beside_the_systems() {
+        let authority = rcgen::generate_simple_self_signed(vec!["chat.example".to_owned()]).unwrap();
+        let own = Cloud::own("https://chat.example:8443").unwrap();
+        let trusting = own.clone().trusting(authority.cert.pem().as_bytes()).unwrap();
+        for cloud in [Cloud::Microsoft, own, trusting] {
+            assert!(tls_config(&cloud).is_ok(), "{cloud:?}");
+        }
+    }
+
+    #[test]
     fn own_connect_and_regional_urls_stay_on_origin() {
         let cloud = Cloud::own("https://chat.example:8443").unwrap();
         let global = ConnectBase::global_in(&cloud).unwrap();
