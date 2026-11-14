@@ -32,7 +32,9 @@
 //! to run): the own server's form in Teams Dark, the place chosen with the keyboard alone (Shift+Tab to the choice,
 //! Right, Enter), and what it says of an empty field; the window without own servers,
 //! which asks for a Microsoft 365 account alone; an own server's account signed out, asked for its password again
-//! and forgotten as `ngteams --forget <server>/<UPN>` forgets it; and an own server's account as the window shows
+//! and forgotten as `ngteams --forget <server>/<UPN>` forgets it; an own server's account whose server serves no
+//! chats, told so on its sign-in screen, and what that screen says of a server that can't be reached (with and
+//! without a `ca_file` in its entry), in Teams Light and Dark; and an own server's account as the window shows
 //! one whose server isn't on loopback (its engine on the mock; nothing is sent to that address): `ngteamsctl accounts`
 //! names its server, its address `<server>/<UPN>` switches to it, Settings > General, its rail tile and its account
 //! menu name its server, and the Microsoft 365 account of the same user name beside it names none. And the choice of
@@ -130,6 +132,8 @@ pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
         Ok("again") => own::child_again(false),
         Ok("again-dark") => own::child_again(true),
+        Ok("said") => own::child_said(false),
+        Ok("said-dark") => own::child_said(true),
         Ok(other) => match Mode::named(other) {
             Some(mode) => child_window(mode),
             None => Err(format!("unknown mode {other}").into()),
@@ -192,7 +196,7 @@ fn parent() -> SandboxResult {
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 9] = [
+const SCENES: [Scene; 11] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -204,6 +208,10 @@ const SCENES: [Scene; 9] = [
     }),
     ("signed_out_own_account_password_again_dark", |sandbox| {
         password_again(sandbox, true)
+    }),
+    ("own_sign_in_screen_says_why", |sandbox| said_reasons(sandbox, false)),
+    ("own_sign_in_screen_says_why_dark", |sandbox| {
+        said_reasons(sandbox, true)
     }),
     ("own_account_shown_names_its_server", |sandbox| shown(sandbox, false)),
     ("own_account_shown_names_its_server_dark", |sandbox| {
@@ -810,6 +818,46 @@ fn password_again(sandbox: &Sandbox, dark: bool) -> SandboxResult {
         forgot == "forgot own_left=false microsoft_left=true token_left=false",
         || format!("forgotten by <server>/<UPN>: {forgot}"),
     )?;
+    let (status, stderr) = running.finish(WAIT)?;
+    ensure(status.success(), || format!("the app exited {status}: {stderr}"))
+}
+
+/// An own server's account signed in on a server that serves no chats: its sign-in screen says so from the start
+/// and stays. With the server gone, a password typed says the server can't be reached: for an entry that names its
+/// certificate authority, with that file and no advice to add one; for an entry without, with the line to add.
+fn said_reasons(sandbox: &Sandbox, dark: bool) -> SandboxResult {
+    let (mode, suffix) = if dark { ("said-dark", "-dark") } else { ("said", "") };
+    let (running, _trace, _) = start(sandbox, mode)?;
+    let asked = prompt_now(sandbox, &running)?;
+    ensure(
+        asked.contains("kind=own")
+            && asked.contains("signing=false")
+            && asked.contains(&format!(" user={} ", own::AGAIN_UPN))
+            && asked.contains(&format!("problem={} is signed in, but 127.0.0.1:", own::AGAIN_UPN))
+            && asked.ends_with("doesn't serve chats, so it can't be shown yet."),
+        || format!("the screen doesn't say the server serves no chats: {asked}"),
+    )?;
+    shot(sandbox, &format!("ngteams-own-no-chat-service-screen{suffix}.png"))?;
+    let example = ngteams::signin::CA_FILE_EXAMPLE;
+    let mut input = sandbox.input()?;
+    input.type_text(own::PASSWORD)?;
+    input.key(keys::ENTER)?;
+    let named = prompt_line(&running, SIGN_IN, "the unreachable server, its CA file named", |line| {
+        line.contains("can't be reached")
+    })?;
+    ensure(
+        named.contains("ca.pem is its certificate authority") && !named.contains(example),
+        || format!("an entry with a ca_file is told to add one: {named}"),
+    )?;
+    shot(sandbox, &format!("ngteams-own-unreachable-with-ca{suffix}.png"))?;
+    input.type_text(own::PASSWORD)?;
+    input.key(keys::ENTER)?;
+    prompt_line(&running, SIGN_IN, "the unreachable server, the line to add", |line| {
+        line.contains("can't be reached") && line.contains(example)
+    })?;
+    shot(sandbox, &format!("ngteams-own-unreachable-without-ca{suffix}.png"))?;
+    input.type_text(own::PASSWORD)?;
+    input.key(keys::ENTER)?;
     let (status, stderr) = running.finish(WAIT)?;
     ensure(status.success(), || format!("the app exited {status}: {stderr}"))
 }

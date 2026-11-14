@@ -26,6 +26,8 @@ const TID: &str = "00000000-0000-4000-8000-000000000001";
 const OWN_SERVER: &str = "https://chat.example.test";
 const OWN_UPN: &str = "unready-own@example.test";
 const OWN_PASSWORD: &str = "a made-up password";
+/// An own server's user whose tokens are there ([`accounts::ready`]).
+const READY_OWN_UPN: &str = "ready-own@example.test";
 
 pub(crate) fn calls() -> &'static Mutex<Vec<String>> {
     static CALLS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
@@ -50,7 +52,7 @@ pub(super) mod accounts {
     use teams_signin::window::Windows;
 
     pub type Started<S = MemorySecretStore> = ngteams::accounts::Started<S>;
-    pub use ngteams::accounts::StartFailed;
+    pub use ngteams::accounts::{StartFailed, unserved};
 
     pub struct Runner {
         pub setup: Setup,
@@ -121,6 +123,10 @@ pub(super) mod accounts {
         assert_eq!(password.expose(), super::OWN_PASSWORD);
         if std::env::var(CASE).unwrap().ends_with("error") {
             return Err("synthetic own sign-in failure".to_owned());
+        }
+        if std::env::var(CASE).unwrap().ends_with("unserved") {
+            // signed in on a server whose authz named no chat service
+            return Ok(super::signed_own_as(setup, upn));
         }
         setup.ask_for_on(upn, server).map_err(|error| error.to_string())
     }
@@ -234,6 +240,10 @@ pub(super) mod platform {
             cx.update(launch);
             cx.run_until_parked();
             let case = std::env::var(super::CASE).unwrap();
+            if case == "unserved-own" {
+                // said on the screen at the start, before anything is typed
+                said_unserved(&cx, super::READY_OWN_UPN, true);
+            }
             if matches!(case.as_str(), "prompt-success" | "prompt-error") {
                 submit_prompt(&cx);
             }
@@ -247,19 +257,52 @@ pub(super) mod platform {
             {
                 wait_for_backend(&cx);
             }
+            if case == "own-prompt-unserved" {
+                // the harness typed nothing into the first run's fields
+                said_unserved(&cx, super::OWN_UPN, false);
+            }
             cx.update(ngteams::app::quit);
             cx.run_until_parked();
         }
     }
 
-    fn submit_prompt(cx: &TestAppContext) {
-        let prompt = cx.update(|cx| {
+    fn open_prompt(cx: &TestAppContext) -> gpui::Entity<AccountPrompt> {
+        cx.update(|cx| {
             cx.windows()
                 .into_iter()
                 .filter_map(|window| window.downcast::<KitRoot>())
                 .find_map(|window| window.read(cx).ok()?.view().clone().downcast::<AccountPrompt>().ok())
                 .expect("the account prompt is open")
+        })
+    }
+
+    /// The sign-in screen is open and says the server of the own server's account `user` serves no chats; `held`
+    /// when the screen is that account's own, its server and user name in the fields.
+    fn said_unserved(cx: &TestAppContext, user: &str, held: bool) {
+        let prompt = open_prompt(cx);
+        let (said, fields, signing) = cx.read(|cx| {
+            let prompt = prompt.read(cx);
+            (
+                prompt.problem().map(ToString::to_string),
+                prompt.own_fields(cx),
+                prompt.is_signing_in(),
+            )
         });
+        assert_eq!(
+            said.as_deref(),
+            Some(
+                format!("{user} is signed in, but chat.example.test doesn't serve chats, so it can't be shown yet.")
+                    .as_str()
+            )
+        );
+        if held {
+            assert_eq!(fields, (super::OWN_SERVER.to_owned(), user.to_owned()));
+        }
+        assert!(!signing, "the screen takes another try");
+    }
+
+    fn submit_prompt(cx: &TestAppContext) {
+        let prompt = open_prompt(cx);
         assert_eq!(cx.read(|cx| prompt.read(cx).account(cx)), "pending@example.test");
         cx.update(|cx| {
             prompt.update(cx, |_, cx| {
@@ -272,13 +315,7 @@ pub(super) mod platform {
     /// is chosen first), the password alone for an account asked again (its server and user name are there already).
     fn submit_own_prompt(cx: &TestAppContext, choice: bool) {
         use teams_ui::{OwnSignIn, SignInKind};
-        let prompt = cx.update(|cx| {
-            cx.windows()
-                .into_iter()
-                .filter_map(|window| window.downcast::<KitRoot>())
-                .find_map(|window| window.read(cx).ok()?.view().clone().downcast::<AccountPrompt>().ok())
-                .expect("the account prompt is open")
-        });
+        let prompt = open_prompt(cx);
         let (kind, held) = cx.read(|cx| (prompt.read(cx).kind(), prompt.read(cx).own_fields(cx)));
         if choice {
             assert_eq!(
@@ -353,6 +390,25 @@ fn signed_own(setup: &Setup) -> PersonalAccount {
     account
 }
 
+/// The own server's account `upn` as a sign-in left it on a server whose authz named no chat service: its region
+/// saved without one, so its engine can't start.
+fn signed_own_as(setup: &Setup, upn: &str) -> PersonalAccount {
+    let server = ngteams::accounts_file::OwnServer::parse(OWN_SERVER, "").unwrap();
+    let account = PersonalAccount::pending_on(upn, &server)
+        .unwrap()
+        .signed_in_as("00000000-0000-4000-8000-0000000000a2", TID, None)
+        .unwrap();
+    account.save(&setup.paths).unwrap();
+    let path = setup.paths.region_file(&account).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        r#"{"_synthetic":true,"region":"own","partition":null,"regionGtms":{}}"#,
+    )
+    .unwrap();
+    account
+}
+
 const STARTUP_CASES: &[&str] = &[
     "command-invalid-env",
     "command-invalid-account",
@@ -388,6 +444,8 @@ const STARTUP_CASES: &[&str] = &[
     "own-first-again",
     "own-first-again-error",
     "own-again-running",
+    "own-prompt-unserved",
+    "unserved-own",
     "forget-missing",
     "forget-pending",
     "forget-stored",
@@ -407,10 +465,7 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
             .args(["--exact", "startup_tests::child", "--nocapture", "--test-threads", "1"])
             .env_clear()
             .env(CASE, case)
-            .envs(
-                case.starts_with("own-")
-                    .then_some((ngteams::setup::OWN_SERVER_ENV, "1")),
-            )
+            .envs(case.contains("own").then_some((ngteams::setup::OWN_SERVER_ENV, "1")))
             .env("HOME", root.path().join("home"))
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("XDG_DATA_HOME", root.path().join("data"))
@@ -518,7 +573,11 @@ fn child() {
             signed(&setup, "ready@example.test", 2, true);
             signed_own(&setup);
         }
-        "empty" | "prompt-window-error" | "own-prompt-success" | "own-prompt-error" => {}
+        // signed in before, on a server that serves no chats: nothing else to start
+        "unserved-own" => {
+            signed_own_as(&setup, READY_OWN_UPN);
+        }
+        "empty" | "prompt-window-error" | "own-prompt-success" | "own-prompt-error" | "own-prompt-unserved" => {}
         other => panic!("unknown synthetic case {other}"),
     }
     let outcome = run(
@@ -619,7 +678,7 @@ fn seen_after(case: &str) {
     let own = format!("{OWN_SERVER}/{OWN_UPN}");
     match case {
         // the server's address typed without its scheme is the account's HTTPS origin
-        "own-prompt-success" | "own-prompt-error" => {
+        "own-prompt-success" | "own-prompt-error" | "own-prompt-unserved" => {
             assert!(seen.contains(&format!("add-own:{own}")), "{seen:?}");
             assert!(
                 !seen.iter().any(|call| call.starts_with("add:")),
@@ -639,6 +698,11 @@ fn seen_after(case: &str) {
                 seen.iter().any(|call| call == "start:ready@example.test"),
                 case == "own-again-running"
             );
+        }
+        // the engine was tried, and its refusal is on the screen: nothing is asked of the server
+        "unserved-own" => {
+            assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
+            assert!(!seen.iter().any(|call| call.starts_with("sign-in-own:")), "{seen:?}");
         }
         _ => {}
     }

@@ -67,8 +67,10 @@ The server belongs to the account, not to the app. Microsoft 365 accounts and ac
 run side by side in one window, and each one keeps its own:
 
 - entry in `accounts.toml`: `server = "https://chat.example.com"`, and optionally
-  `ca_file = "/path/to/ca.pem"` (an absolute path to the PEM certificate authority of a self-signed deployment,
-  trusted beside the system's for that account's connections only; the connection is always HTTPS);
+  `ca_file = '/path/to/ca.pem'` (an absolute path to the PEM certificate authority of a self-signed deployment,
+  trusted beside the system's for that account's connections only; the connection is always HTTPS). On Windows
+  write the path in single quotes, `ca_file = 'C:\Users\you\ca.pem'`, or with forward slashes: in double quotes
+  TOML reads a backslash as an escape;
 - identity: an account is told from the others by its server and UPN together, so the same user name may exist on
   Microsoft 365 and on an own server;
 - tokens: stored under `<server>/<UPN>`, never under the bare UPN, and sent only to that server;
@@ -78,7 +80,9 @@ A server with its own certificate authority needs `ca_file` written by hand: add
 `server` and `ca_file`, then sign in with the same server and user name, which takes that entry up. An entry holding
 a `ca_file` stays when its sign-in fails; a bare one is removed. An own server's account that is signed out is asked
 for its password again. Settings > General names the account's server, and `ngteamsctl accounts` lists it. Without
-`NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not started. `ngteams --forget <server>/<UPN>`
+`NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not started, and none is asked for its password.
+An account whose server serves no chats (an older or partial server) is signed in but can't be shown: its sign-in
+screen says so and stays open. `ngteams --forget <server>/<UPN>`
 (or the bare UPN while no other account has it) forgets one. A `server` written with a trailing `/` is the same
 server.
 

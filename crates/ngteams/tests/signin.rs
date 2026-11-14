@@ -303,6 +303,43 @@ fn a_hand_written_own_server_entry_is_taken_up_however_its_server_is_spelled() {
     assert!(!setup.abandon(&taken.id()).unwrap());
 }
 
+/// The `ca_file` line the "can't be reached" message gives is one `accounts.toml` takes as written on this platform.
+#[test]
+fn the_ca_file_example_the_user_is_given_is_a_line_the_accounts_file_takes() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir).with_own_servers(true);
+    let written = format!(
+        "[[account]]\nupn = \"{UPN}\"\nserver = \"https://chat.example.test\"\n{}\n",
+        signin::CA_FILE_EXAMPLE
+    );
+    fs::create_dir_all(setup.paths.config_dir()).unwrap();
+    fs::write(setup.paths.accounts_file(), written).unwrap();
+    let accounts = setup.accounts().unwrap();
+    let ca_file = accounts[0].ca_file.as_deref().unwrap();
+    assert!(ca_file.is_absolute() && ca_file.ends_with("ca.pem"), "{ca_file:?}");
+}
+
+/// Own servers turned off: an own server's account is told so in plain words, before anything is sent.
+#[tokio::test]
+async fn an_own_servers_sign_in_while_they_are_off_says_they_are_off() {
+    use ngteams::accounts_file::OwnServer;
+    let dir = tempfile::tempdir().unwrap();
+    let server = OwnServer::parse("https://chat.example.test", "").unwrap();
+    let account = setup_in(&dir).with_own_servers(true).ask_for_on(UPN, &server).unwrap();
+    let off = setup_in(&dir);
+    let store = MemorySecretStore::new();
+    let refused = signin::sign_in_own(&off, &account, &Secret::new("a made-up password"), &store)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, SignInError::OwnServersOff), "{refused:?}");
+    let said = signin::own_failure(&off, &account, &refused);
+    assert_eq!(said, signin::OWN_SERVERS_OFF);
+    assert!(
+        !said.contains("stored nothing") && said.contains("NGTEAMS_OWN_SERVER=1"),
+        "{said}"
+    );
+}
+
 #[tokio::test]
 async fn an_abandoned_account_goes_only_while_no_sign_in_named_it() {
     let dir = tempfile::tempdir().unwrap();

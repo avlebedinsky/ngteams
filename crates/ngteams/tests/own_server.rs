@@ -164,6 +164,29 @@ fn engine_starts_or_names_the_missing_chat_service(
     }
 }
 
+/// A server that can't be reached whose entry names its certificate authority already isn't told to add one: the
+/// file it names is said.
+#[test]
+fn an_unreachable_server_with_a_ca_file_names_that_file() -> TestResult {
+    let server = OwnServer::start()?;
+    server.add_user(UPN, NAME)?;
+    let dir = tempfile::tempdir()?;
+    let setup = &setup_in(&dir);
+    let store = MemorySecretStore::new();
+    let other = OwnServer::start()?;
+    let wrong_ca = accounts_file::OwnServer::parse(&server.origin, &other.ca_file.display().to_string())?;
+    let said = block_on(signin::add_own(setup, UPN, &wrong_ca, &Secret::new(PASSWORD), &store)).unwrap_err();
+    assert!(
+        said.contains("can't be reached") && said.contains(&other.ca_file.display().to_string()),
+        "{said}"
+    );
+    assert!(!said.contains(signin::CA_FILE_EXAMPLE), "{said}");
+    for account in PersonalAccount::load_all(&setup.paths)? {
+        PersonalAccount::remove(&setup.paths, &account.id())?;
+    }
+    Ok(())
+}
+
 #[test]
 fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() -> TestResult {
     let server = OwnServer::start()?;
@@ -210,7 +233,10 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() 
         &store,
     ));
     let said = untrusted.unwrap_err();
-    assert!(said.contains("can't be reached") && said.contains("ca_file"), "{said}");
+    assert!(
+        said.contains("can't be reached") && said.contains(signin::CA_FILE_EXAMPLE),
+        "{said}"
+    );
     assert!(PersonalAccount::load_all(&setup.paths)?.is_empty());
 
     // own servers switched off: nothing is added, signed in or started
@@ -235,7 +261,9 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() 
         "an own server's account isn't started while they are off"
     );
     assert_eq!(setup.signed_in_accounts()?, std::slice::from_ref(&signed));
-    let again = block_on(signin::sign_in_own(&off, &signed, &Secret::new(PASSWORD), &store));
-    assert!(matches!(again, Err(SignInError::WrongCloud)));
+    // said plainly, never as a sign-in that "stored nothing"
+    let again = block_on(signin::sign_in_own(&off, &signed, &Secret::new(PASSWORD), &store)).unwrap_err();
+    assert!(matches!(again, SignInError::OwnServersOff), "{again:?}");
+    assert_eq!(signin::own_failure(&off, &signed, &again), signin::OWN_SERVERS_OFF);
     Ok(())
 }

@@ -90,11 +90,22 @@ pub enum SignInError {
     NoWindow(io::Error),
     #[error(transparent)]
     Hosts(#[from] HostRefused),
-    #[error(
-        "the account signs in another way: Microsoft 365 in Microsoft's window, an own server's with its password (own servers may be off)"
-    )]
+    #[error("the account signs in another way: Microsoft 365 in Microsoft's window, an own server's with its password")]
     WrongCloud,
+    #[error("{OWN_SERVERS_OFF}")]
+    OwnServersOff,
 }
+
+/// What the user is told about an own server's account while own servers are off.
+pub const OWN_SERVERS_OFF: &str = "Own servers are turned off. Set NGTEAMS_OWN_SERVER=1 and start ngteams again.";
+
+/// How `ca_file` is written in `accounts.toml`, in a form the platform's paths survive: a TOML literal string, which
+/// keeps a Windows path's backslashes.
+pub const CA_FILE_EXAMPLE: &str = if cfg!(windows) {
+    r"ca_file = 'C:\path\to\ca.pem'"
+} else {
+    "ca_file = '/path/to/ca.pem'"
+};
 
 /// The clients a sign-in talks to: Entra's token endpoint (and the authorize request's config) and authz.
 #[derive(Clone, Debug)]
@@ -232,8 +243,11 @@ pub async fn sign_in_own<S: SecretStore>(
     password: &Secret,
     store: &S,
 ) -> Result<PersonalAccount, SignInError> {
-    if !setup.own_servers() || account.server.is_none() {
+    if account.server.is_none() {
         return Err(SignInError::WrongCloud);
+    }
+    if !setup.own_servers() {
+        return Err(SignInError::OwnServersOff);
     }
     let cloud = account.cloud()?;
     let clients = SignInClients::for_cloud(&cloud)?;
@@ -342,7 +356,7 @@ pub async fn add_own<S: SecretStore>(
 
 /// What the user is told when an own server's sign-in stored nothing: a wrong user name or password, a wait the
 /// server asked for, a server that can't be reached (with where a self-signed deployment's certificate authority
-/// goes), else the error.
+/// goes, or the one its entry names already), own servers turned off, else the error.
 #[must_use]
 pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError) -> String {
     let server = account.server.as_deref().unwrap_or_default();
@@ -351,11 +365,24 @@ pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError
         SignInError::Token(TokenError::Throttled { .. }) => {
             "Too many attempts: wait a few minutes, then sign in again.".to_owned()
         }
-        SignInError::Token(TokenError::Http(_)) | SignInError::Authz(AuthzError::Http(_)) => format!(
-            "{server} can't be reached. For a server with its own certificate authority, add ca_file = \"/path/to/ca.pem\" to \
-             an [[account]] entry with this user name and server in {}, then sign in again.",
-            setup.paths.accounts_file().display(),
-        ),
+        SignInError::Token(TokenError::Http(_)) | SignInError::Authz(AuthzError::Http(_)) => {
+            let file = setup.paths.accounts_file();
+            match &account.ca_file {
+                Some(ca_file) => format!(
+                    "{server} can't be reached. Check that the server is running and that {} is its certificate \
+                     authority (ca_file in {}), then sign in again.",
+                    ca_file.display(),
+                    file.display(),
+                ),
+                None => format!(
+                    "{server} can't be reached. For a server with its own certificate authority, add \
+                     {CA_FILE_EXAMPLE} to an [[account]] entry with this user name and server in {}, then sign in \
+                     again.",
+                    file.display(),
+                ),
+            }
+        }
+        SignInError::OwnServersOff => OWN_SERVERS_OFF.to_owned(),
         error => format!("the sign-in stored nothing: {error}"),
     }
 }

@@ -26,6 +26,7 @@ fn lab_startup_and_broker_use_alias_files_and_preserve_restart_descriptors() {
         "pending-shortcut-closed",
         "pending-shortcut-failed",
         "wrong-account",
+        "own-off",
         "no-sandbox",
         "broker",
     ] {
@@ -87,6 +88,13 @@ fn lab_child() {
     let pending = PersonalAccount::pending("pending@example.test").unwrap();
     let account = if case.starts_with("pending") {
         pending.clone()
+    } else if case == "own-off" {
+        // an alias on an own server, signed in before, started without NGTEAMS_OWN_SERVER
+        let server = ngteams::accounts_file::OwnServer::parse("https://chat.example.test", "").unwrap();
+        PersonalAccount::pending_on("ready@example.test", &server)
+            .unwrap()
+            .signed_in_as(OID, TID, None)
+            .unwrap()
     } else {
         PersonalAccount::new("ready@example.test", OID, TID).unwrap()
     };
@@ -167,6 +175,18 @@ fn check_outcome(
         ("ready" | "ready-ctl", Ok(Outcome::Quit)) => assert!(paths.store_file(account).unwrap().exists()),
         ("pending", Ok(Outcome::LabRestart(descriptors))) => assert!(descriptors.socket().is_ok()),
         ("wrong-account", Err(error)) => assert!(error.contains("configured for")),
+        // no password form, and never a sign-in that "stored nothing"
+        ("own-off", Err(error)) => {
+            assert_eq!(
+                error,
+                format!(
+                    "ready@example.test is an own server's account. {}",
+                    ngteams::signin::OWN_SERVERS_OFF
+                )
+            );
+            let asked = crate::startup_tests::calls().lock().unwrap().clone();
+            assert!(asked.iter().all(|call| !call.contains("sign-in")), "{asked:?}");
+        }
         ("no-sandbox", Err(error)) => {
             assert!(error.contains(if cfg!(windows) { "VM console opt-in" } else { "DISPLAY" }));
         }

@@ -2,6 +2,7 @@
 //! Each engine owns its account's store and sends writes through its outbox.
 
 use crate::accounts_file::{OwnServer, PersonalAccount};
+use teams_auth::authz::{CHAT_BASE_GTM, Region};
 use teams_auth::secrets::{Secret, SecretStore};
 use teams_core::CallFloor;
 use teams_signin::window::Windows;
@@ -45,6 +46,8 @@ pub struct Runner {
 pub struct StartFailed {
     pub message: String,
     pub running: bool,
+    /// The account is an own server's, signed in, and that server serves no chats: nothing of it can be shown.
+    pub unserved: bool,
 }
 
 impl StartFailed {
@@ -61,16 +64,36 @@ impl StartFailed {
             )
         );
         let no_chats = matches!(error, engine::StartError::Account(AccountError::NoChatBase));
-        let message = match account.server_host() {
-            // an own server that doesn't serve chats: said in the user's words, not the region's
-            Some(server) if no_chats => format!(
-                "{} is signed in, but {server} doesn't serve chats, so it can't be shown yet.",
-                account.upn
+        // an own server that doesn't serve chats: said in the user's words, not the region's
+        let unserved = account.server_host().filter(|_| no_chats);
+        Self {
+            message: unserved.as_deref().map_or_else(
+                || format!("{}: {error}", account.upn),
+                |server| no_chats_on(account, server),
             ),
-            _ => format!("{}: {error}", account.upn),
-        };
-        Self { message, running }
+            running,
+            unserved: unserved.is_some(),
+        }
     }
+}
+
+fn no_chats_on(account: &PersonalAccount, server: &str) -> String {
+    format!(
+        "{} is signed in, but {server} doesn't serve chats, so it can't be shown yet.",
+        account.upn
+    )
+}
+
+/// What the user is told when `account` is an own server's and the region its sign-in saved names no chat service
+/// (an older or partial server), so its engine can't start ([`StartFailed::unserved`]); `None` for any other account.
+#[must_use]
+pub fn unserved(setup: &Setup, account: &PersonalAccount) -> Option<String> {
+    let server = account.server_host()?;
+    let region = Region::load(&setup.paths.region_file(account)?).ok()?;
+    region
+        .base(CHAT_BASE_GTM)
+        .is_none()
+        .then(|| no_chats_on(account, &server))
 }
 
 impl std::fmt::Display for StartFailed {

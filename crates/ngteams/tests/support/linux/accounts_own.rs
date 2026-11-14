@@ -412,6 +412,84 @@ pub fn child_again(is_dark: bool) -> SandboxResult {
     Ok(())
 }
 
+/// The child of the said-reasons scene: an own server's account signed in on a server that serves no chats (the
+/// region its sign-in saved names no chat service, as an older server leaves it). The app's own check
+/// (`accounts::unserved`) gives what its sign-in screen says at the start, as `ngteams` opens that screen when the
+/// account can't start. The server is gone by then: the first password typed is the entry's as it is, with its
+/// `ca_file`; the second is the entry without one; each sign-in's reason is the app's own. A third quits.
+pub fn child_said(is_dark: bool) -> SandboxResult {
+    ngteams::read_only::window_allowed_here()?;
+    let dir = tempfile::tempdir()?;
+    let paths = PersonalPaths::new(dir.path().join("ngteams-config"), dir.path().join("ngteams-data"));
+    let setup = Setup::new(paths)?
+        .with_secrets(ngteams::secrets::AppSecrets::in_memory())
+        .with_own_servers(true);
+    let own = Own::start()?;
+    own.add_user(AGAIN_UPN, AGAIN_NAME)?;
+    let account = accounts::add_own(&setup, AGAIN_UPN, &own.entry()?, &Secret::new(PASSWORD))?;
+    // the certificate authority's file outlives the server, as a deployment's does
+    let ca_file = dir.path().join("ca.pem");
+    fs::copy(own.ca_file(), &ca_file)?;
+    let account = PersonalAccount {
+        ca_file: Some(ca_file),
+        ..account
+    };
+    account.save(&setup.paths)?;
+    let region = setup.paths.region_file(&account).ok_or("the account's region file")?;
+    fs::write(region, r#"{"region":"own","partition":null,"regionGtms":{}}"#)?;
+    let said = accounts::unserved(&setup, &account).ok_or("a server without a chat service isn't told")?;
+    drop(own);
+    let offer = OwnOffer::Again {
+        server: account.server.clone().unwrap_or_default(),
+        user: account.upn.clone(),
+    };
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
+        if is_dark {
+            teams_ui::theme::set_appearance(&dark(), cx);
+        }
+        let title = ngteams::app::TITLE.into();
+        match account_prompt::open_offering(cx, PERSONAL_APP_ID, title, None, &offer) {
+            Ok((window, prompt)) => {
+                prompt.update(cx, |prompt, cx| prompt.failed(said, cx));
+                let tries = std::rc::Rc::new(std::cell::Cell::new(0_u8));
+                cx.subscribe(&prompt, move |prompt, event, cx| {
+                    let AccountPromptEvent::SignInOwn(typed) = event else {
+                        return;
+                    };
+                    tries.set(tries.get() + 1);
+                    let account = match tries.get() {
+                        1 => account.clone(),
+                        2 => PersonalAccount {
+                            ca_file: None,
+                            ..account.clone()
+                        },
+                        _ => return cx.quit(),
+                    };
+                    let (setup, password) = (setup.clone(), Secret::new(typed.password.as_str()));
+                    let signing =
+                        cx.background_spawn(async move { accounts::sign_in_own(&setup, &account, &password) });
+                    cx.spawn(async move |cx: &mut AsyncApp| {
+                        let reason = signing.await.err().unwrap_or_else(|| "signed in".to_owned());
+                        cx.update(|cx| prompt.update(cx, |prompt, cx| prompt.failed(reason, cx)));
+                    })
+                    .detach();
+                })
+                .detach();
+                say_prompt(cx);
+                let _ = window.update(cx, |_, window, _| {
+                    after_frames(window, READY_FRAMES, |_, _| say("ready"));
+                });
+            }
+            Err(error) => {
+                say(&format!("the screen can't be opened: {error:#}"));
+                cx.quit();
+            }
+        }
+    });
+    Ok(())
+}
+
 /// Signs `account` in again with `password` off the foreground; said on `prompt` when it fails (see [`child_again`]).
 fn sign_in_again(
     setup: Setup,

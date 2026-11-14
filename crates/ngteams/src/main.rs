@@ -399,6 +399,7 @@ fn run_setup(
     };
     let (first, others) = match start_accounts(&runner, &ready) {
         Ok(started) => started,
+        Err(failed) if failed.unserved => return unserved_screen(runner, ready, failed),
         Err(failed) => return hand_off_to_starting(cli, ctl.as_deref(), failed),
     };
     let restart = Rc::new(Cell::new(false));
@@ -449,6 +450,16 @@ fn run_setup(
     }
     // the link was opened in this run: a sign-in's restart doesn't show its pre-join again
     Ok(ended(restart.get(), update.take(), cli.url.clone()))
+}
+
+/// The first account is an own server's and that server serves no chats (`failed`): said on its sign-in screen,
+/// which stays for another try, not on stderr alone.
+fn unserved_screen(runner: Runner, ready: Vec<PersonalAccount>, failed: StartFailed) -> Result<Outcome, String> {
+    eprintln!("teams: {failed}");
+    let setup = runner.setup.clone();
+    drop(runner);
+    let account = ready.into_iter().next().ok_or(failed.message.as_str())?;
+    Ok(own_screen(setup, account, Some(failed.message)))
 }
 
 /// How a run that opened its window ended: into an update's new version, signed in again, or quit.
@@ -685,6 +696,7 @@ fn start_accounts(runner: &Runner, ready: &[PersonalAccount]) -> Result<(Started
     let (first, rest) = ready.split_first().ok_or_else(|| StartFailed {
         message: "no account is signed in".to_owned(),
         running: false,
+        unserved: false,
     })?;
     let first = runner.start(first)?;
     let mut others = Vec::new();
@@ -803,11 +815,7 @@ fn sign_in_own_from_prompt(
 ) {
     let signing = cx.background_spawn(async move {
         let password = teams_auth::secrets::Secret::new(own.password.as_str());
-        if let Some(account) = again {
-            return accounts::sign_in_own(&setup, &account, &password);
-        }
-        let server = OwnServer::parse(&own.server, "").map_err(|error| error.to_string())?;
-        accounts::add_own(&setup, &own.user, &server, &password)
+        signed_in_own(&setup, &own, again, &password)
     });
     cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
         Ok(_) => {
@@ -823,22 +831,53 @@ fn sign_in_own_from_prompt(
     .detach();
 }
 
-/// The screen asking for the password of the own server's `account` again (signed out, or not signed in yet): a
-/// sign-in that goes through restarts the app.
-fn ask_own_password(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>, cx: &mut App) {
+/// The own server's account signed in with `password`, as [`sign_in_own_from_prompt`] does it: one whose server
+/// serves no chats is signed in and can't be shown, which is said like a sign-in that didn't go through, so the
+/// screen stays instead of the app restarting into nothing.
+fn signed_in_own(
+    setup: &Setup,
+    own: &OwnSignIn,
+    again: Option<PersonalAccount>,
+    password: &teams_auth::secrets::Secret,
+) -> Result<PersonalAccount, String> {
+    let signed = if let Some(account) = again {
+        accounts::sign_in_own(setup, &account, password)?
+    } else {
+        let server = OwnServer::parse(&own.server, "").map_err(|error| error.to_string())?;
+        accounts::add_own(setup, &own.user, &server, password)?
+    };
+    match accounts::unserved(setup, &signed) {
+        Some(unserved) => Err(unserved),
+        None => Ok(signed),
+    }
+}
+
+/// The screen asking for the password of the own server's `account` again (signed out, or not signed in yet), with
+/// `said` under its fields when there is why it is shown: a sign-in that goes through restarts the app.
+fn ask_own_password(
+    setup: Setup,
+    account: PersonalAccount,
+    said: Option<String>,
+    restart: Rc<Cell<bool>>,
+    cx: &mut App,
+) {
     let own = OwnOffer::Again {
         server: account.server.clone().unwrap_or_default(),
         user: account.upn.clone(),
     };
     match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), None, &own) {
-        Ok((_, prompt)) => cx
-            .subscribe(&prompt, move |prompt, event, cx| {
+        Ok((_, prompt)) => {
+            if let Some(said) = said {
+                prompt.update(cx, |prompt, cx| prompt.failed(said, cx));
+            }
+            cx.subscribe(&prompt, move |prompt, event, cx| {
                 if let AccountPromptEvent::SignInOwn(own) = event {
                     let (setup, restart) = (setup.clone(), Rc::clone(&restart));
                     sign_in_own_from_prompt(setup, own.clone(), Some(account.clone()), prompt, restart, cx);
                 }
             })
-            .detach(),
+            .detach();
+        }
         Err(error) => {
             eprintln!("teams: the window can't be opened: {error:#}");
             log::warn!("the sign-in screen of an own server's account can't be opened");
@@ -846,12 +885,13 @@ fn ask_own_password(setup: Setup, account: PersonalAccount, restart: Rc<Cell<boo
     }
 }
 
-/// [`sign_in_first`] for an own server's account: its password asked on the sign-in screen, alone.
-fn sign_in_first_own(setup: Setup, account: PersonalAccount) -> Outcome {
+/// [`sign_in_first`] for an own server's account: its password asked on the sign-in screen, alone, with `said`
+/// under its fields ([`ask_own_password`]).
+fn own_screen(setup: Setup, account: PersonalAccount, said: Option<String>) -> Outcome {
     let restart = Rc::new(Cell::new(false));
     let restart_in_app = Rc::clone(&restart);
     let application = platform::application().with_assets(teams_ui::AppAssets);
-    application.run(move |cx: &mut App| ask_own_password(setup, account, restart_in_app, cx));
+    application.run(move |cx: &mut App| ask_own_password(setup, account, said, restart_in_app, cx));
     if restart.get() {
         Outcome::Restart { opened: None }
     } else {
@@ -864,7 +904,15 @@ fn sign_in_first_own(setup: Setup, account: PersonalAccount) -> Outcome {
 /// sign it in as an existing account so closing or failing its first window leaves it available for another try.
 fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, String> {
     if account.server.is_some() {
-        return Ok(sign_in_first_own(setup, account));
+        // no password is asked for a sign-in that own servers being off would refuse
+        if !setup.own_servers() {
+            return Err(format!(
+                "{} is an own server's account. {}",
+                account.upn,
+                ngteams::signin::OWN_SERVERS_OFF
+            ));
+        }
+        return Ok(own_screen(setup, account, None));
     }
     let restart = Rc::new(Cell::new(false));
     let failure = Rc::new(std::cell::RefCell::new(None));
@@ -911,7 +959,7 @@ fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>
         let (setup, account, restart) = (setup.clone(), account.clone(), Rc::clone(&restart));
         if account.server.is_some() {
             // an own server's account never sees Microsoft's window: its password is asked again
-            ask_own_password(setup, account, restart, cx);
+            ask_own_password(setup, account, None, restart, cx);
             return;
         }
         let windows = ngteams::signin::windows_for(&setup, cx);
