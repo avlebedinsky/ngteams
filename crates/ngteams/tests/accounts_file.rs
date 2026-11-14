@@ -358,6 +358,16 @@ fn kept_apart_when_saved_and_removed(paths: &PersonalPaths, own: &PersonalAccoun
         PersonalAccount::load_all(paths),
         Err(PersonalError::Account(_))
     ));
+    // a server written with a trailing `/` is the same server: the same id, so the same entry and tokens
+    let slashed = format!("{text}\n[[account]]\nupn = \"{upn}\"\nserver = \"{SERVER}/\"\n");
+    fs::write(paths.accounts_file(), slashed)?;
+    assert!(matches!(
+        PersonalAccount::load_all(paths),
+        Err(PersonalError::Account(_))
+    ));
+    let written = PersonalAccount::parse(&format!("upn = \"{upn}\"\nserver = \"{SERVER}/\"\n"))?;
+    assert_eq!(written.server.as_deref(), Some(SERVER));
+    assert!(written.is(own), "{}", written.id());
     fs::write(paths.accounts_file(), text)?;
     // without the Microsoft account, a bare UPN names an own server's only while one alone has it
     PersonalAccount::remove(paths, upn)?;

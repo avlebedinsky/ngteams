@@ -54,7 +54,8 @@ use crate::render;
     about = "Drive the running ngteams: read chats and messages, open views, and follow what happens."
 )]
 pub struct Cli {
-    /// The account addressed, by UPN, MRI or index (`ngteamsctl accounts`); the account the window shows by default.
+    /// The account addressed, by UPN (an own server's: `<server>/<UPN>`, or its bare UPN while no other account has
+    /// it), MRI or index (`ngteamsctl accounts`); the account the window shows by default.
     /// `events` and `wait`: only this account's events.
     #[arg(long, global = true, value_name = "UPN|MRI|INDEX")]
     pub account: Option<String>,

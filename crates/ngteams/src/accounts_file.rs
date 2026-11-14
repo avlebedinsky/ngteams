@@ -257,6 +257,12 @@ impl PersonalAccount {
         Ok(position(&accounts, name).map(|index| accounts[index].clone()))
     }
 
+    /// The account named `name` among `accounts`, as [`Self::find`] reads a name.
+    #[must_use]
+    pub fn named<'a>(accounts: &'a [Self], name: &str) -> Option<&'a Self> {
+        position(accounts, name).map(|index| &accounts[index])
+    }
+
     /// Takes the account named `name` (as [`Self::find`] reads it) out of `paths`' `accounts.toml`, the others kept in
     /// their order; the account taken, or `None` when it wasn't one.
     ///
@@ -273,8 +279,9 @@ impl PersonalAccount {
         Ok(Some(removed))
     }
 
-    /// Parses one account (a single account's `account.toml`, or one `[[account]]` table of `accounts.toml`): a UPN (`user@domain`), the object id and tenant id as GUIDs (stored lowercase), both or
-    /// neither, and the identity provider hosts, each a lowercase DNS name.
+    /// Parses one account (a single account's `account.toml`, or one `[[account]]` table of `accounts.toml`): a UPN
+    /// (`user@domain`), the object id and tenant id as GUIDs (stored lowercase), both or neither, the identity provider
+    /// hosts, each a lowercase DNS name, and an own server's origin (kept without a trailing `/`).
     ///
     /// # Errors
     /// [`PersonalError::Account`] saying what is wrong.
@@ -282,6 +289,12 @@ impl PersonalAccount {
         let mut account: Self = toml::from_str(text).map_err(|error| PersonalError::Account(error.message().into()))?;
         account.oid = account.oid.map(|oid| oid.to_ascii_lowercase());
         account.tid = account.tid.map(|tid| tid.to_ascii_lowercase());
+        // one spelling of a server, as the sign-in screen's ([`OwnServer::parse`]): the account's id, and so its
+        // entry and its tokens, never depend on a trailing `/`
+        account.server = account.server.map(|server| match server.strip_suffix('/') {
+            Some(origin) => origin.to_owned(),
+            None => server,
+        });
         account.validate()?;
         Ok(account)
     }

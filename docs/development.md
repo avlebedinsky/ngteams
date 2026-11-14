@@ -422,7 +422,8 @@ ngteamsctl events kinds
 ngteamsctl wait <kind> [--match REGEX] [--timeout SECONDS] [--chat C] [--from WHO] [--mentions]
 ```
 
-- **Addressing**: `--account <upn|mri|index>` (index as `accounts` numbers them, from 0); by default the account the
+- **Addressing**: `--account <upn|mri|index>` (index as `accounts` numbers them, from 0; an own server's account is
+  `<server>/<UPN>`, or its bare UPN while no other account has it); by default the account the
   window shows, and for call commands the account ringing or in the call. A chat is its id or its title as the chat
   list shows it (the topic, otherwise the other members' names), in any case; a title several chats share is
   `ambiguous_chat`, listing their ids. A channel is its id, name or `<team>/<channel>`; a settings page its key or

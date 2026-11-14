@@ -140,11 +140,13 @@ start() {
     # timeout signals only serve, whose pass_only boundary closes lock FDs in broker/app; cleanup retains locks.
     # The sandbox clears the app's environment, so it is told where its control socket is: the run dir, where
     # teams_ctl::socket_path(Mode::Lab) looks for it.
+    # For the same reason NGTEAMS_OWN_SERVER is handed on by name (empty is off): an alias on an own server needs it.
     setsid timeout --foreground --signal=TERM "$seconds" "$runner" serve --dir "$run" "${media[@]}" \
         --broker "$teams" \
         --broker-arg secrets --broker-arg --lab --broker-arg "$alias" --broker-arg --fd --broker-arg '{broker-fd}' \
         --app /usr/bin/env \
-        --app-arg "XDG_DATA_HOME=$data_home" --app-arg "XDG_CONFIG_HOME=$config_home" --app-arg "$teams" \
+        --app-arg "XDG_DATA_HOME=$data_home" --app-arg "XDG_CONFIG_HOME=$config_home" \
+        --app-arg "NGTEAMS_OWN_SERVER=${NGTEAMS_OWN_SERVER:-}" --app-arg "$teams" \
         --app-arg --lab --app-arg "$alias" \
         --app-arg --secrets-fd --app-arg '{secrets-fd}' --app-arg --trace-fd --app-arg '{trace-fd}' \
         --app-arg --ctl-socket --app-arg "$run/ctl.sock" \

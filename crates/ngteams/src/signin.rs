@@ -314,7 +314,7 @@ pub async fn add<S: SecretStore>(
     signed.map_err(|error| {
         // kept when the window refused a host: the user adds it to this entry's `idp_hosts`
         if refused_host(&error).is_none() {
-            let _ = setup.abandon(upn);
+            let _ = setup.abandon(&account.id());
         }
         failure(setup, &account, &error)
     })

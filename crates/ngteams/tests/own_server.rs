@@ -165,7 +165,7 @@ fn engine_starts_or_names_the_missing_chat_service(
 }
 
 #[test]
-fn a_sign_in_that_stores_nothing_says_why_and_leaves_no_entry() -> TestResult {
+fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() -> TestResult {
     let server = OwnServer::start()?;
     server.add_user(UPN, NAME)?;
     let dir = tempfile::tempdir()?;
@@ -190,6 +190,7 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_no_entry() -> TestResult {
     assert_eq!(unknown.unwrap_err(), "The user name or password isn't right.");
     // an entry the user wrote a CA file into stays for the next try; nothing is stored for it
     let kept = PersonalAccount::load_all(&setup.paths)?;
+    assert_eq!(kept.len(), 2, "both entries hold the CA file the sign-in gave");
     assert!(
         kept.iter()
             .all(|account| !account.is_signed_in() && account.ca_file.is_some())

@@ -140,7 +140,7 @@ pub struct AccountPrompt {
     /// A failed sign-in's password is cleared from its field at the next draw (the field needs the window).
     clear_password: bool,
     _input_events: [Subscription; 4],
-    /// The theme following the window's appearance ([`open`] makes it so).
+    /// The theme following the window's appearance ([`open_offering`] makes it so).
     appearance: Option<Subscription>,
 }
 
@@ -521,20 +521,8 @@ impl Render for AccountPrompt {
 }
 
 /// Opens the first sign-in screen in a window of its own, titled `title`, with app id `app_id`, its field holding
-/// `account`; sets the app up first ([`init`]) and keeps the theme following the window's appearance.
-///
-/// # Errors
-/// The platform can't open a window.
-pub fn open(
-    cx: &mut App,
-    app_id: &str,
-    title: SharedString,
-    account: Option<&str>,
-) -> gpui::Result<(WindowHandle<KitRoot>, Entity<AccountPrompt>)> {
-    open_offering(cx, app_id, title, account, &OwnOffer::No)
-}
-
-/// [`open`], asking for an own server's account as `own` says: the window taller for its fields.
+/// `account`, asking for an own server's account as `own` says (the window taller for its fields); sets the app up
+/// first ([`init`]) and keeps the theme following the window's appearance.
 ///
 /// # Errors
 /// The platform can't open a window.

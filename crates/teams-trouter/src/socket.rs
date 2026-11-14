@@ -435,13 +435,65 @@ impl FrameWriter for SocketWriter {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_socket_trusts_an_own_servers_certificate_authority_beside_the_systems() {
-        let authority = rcgen::generate_simple_self_signed(vec!["chat.example".to_owned()]).unwrap();
-        let own = Cloud::own("https://chat.example:8443").unwrap();
-        let trusting = own.clone().trusting(authority.cert.pem().as_bytes()).unwrap();
-        for cloud in [Cloud::Microsoft, own, trusting] {
+    /// A TLS handshake with a loopback server whose certificate `authority` signed, checked as `cloud`'s socket
+    /// checks it.
+    async fn handshake(cloud: &Cloud, authority: &rcgen::Issuer<'_, rcgen::KeyPair>) -> std::io::Result<()> {
+        use tokio_rustls::rustls::ServerConfig;
+        use tokio_rustls::rustls::pki_types::{PrivateKeyDer, ServerName};
+        let key = rcgen::KeyPair::generate().unwrap();
+        let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+        let cert = leaf.signed_by(&key, authority).unwrap();
+        let server = ServerConfig::builder_with_provider(Arc::new(crypto::aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::try_from(key.serialize_der()).unwrap(),
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let accepting = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            tokio_rustls::TlsAcceptor::from(Arc::new(server))
+                .accept(stream)
+                .await
+                .map(drop)
+        });
+        let stream = tokio::net::TcpStream::connect(address).await?;
+        let connected = tokio_rustls::TlsConnector::from(tls_config(cloud).unwrap())
+            .connect(ServerName::try_from("localhost").unwrap(), stream)
+            .await
+            .map(drop);
+        // the server's side ends with the client's: its outcome is the client's to tell
+        let _ = accepting.await;
+        connected
+    }
+
+    #[tokio::test]
+    async fn the_socket_trusts_an_own_servers_certificate_authority_beside_the_systems() {
+        let authority_key = rcgen::KeyPair::generate().unwrap();
+        let mut authority = rcgen::CertificateParams::new(Vec::new()).unwrap();
+        authority.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        authority
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "made-up certificate authority");
+        let pem = authority.self_signed(&authority_key).unwrap().pem();
+        let authority = rcgen::Issuer::new(authority, authority_key);
+        let own = Cloud::own("https://localhost:8443").unwrap();
+        let trusting = own.clone().trusting(pem.as_bytes()).unwrap();
+        for cloud in [Cloud::Microsoft, own.clone(), trusting.clone()] {
             assert!(tls_config(&cloud).is_ok(), "{cloud:?}");
+        }
+        // the server's certificate is accepted only by the cloud that trusts its authority
+        handshake(&trusting, &authority).await.unwrap();
+        for cloud in [own, Cloud::Microsoft] {
+            let refused = handshake(&cloud, &authority).await;
+            assert!(
+                refused.is_err(),
+                "{cloud:?} trusted a certificate authority it wasn't given"
+            );
         }
     }
 

@@ -43,12 +43,14 @@ pub struct Cli {
     /// Run a lab alias in its UI sandbox, using the lab credential broker and isolated account files.
     #[arg(long, value_name = "ALIAS", value_parser = crate::lab::alias, conflicts_with = "read_only")]
     pub lab: Option<String>,
-    /// A work account to sign in (its UPN) before the app starts, skipping the window that asks for it: one of the
-    /// accounts already given, or a new one added after them. In the read-only mode: the account to show.
+    /// A Microsoft 365 work account to sign in (its UPN) before the app starts, skipping the window that asks for it:
+    /// one of the accounts already given, or a new one added after them. In the read-only mode: the account to show
+    /// (an own server's: `<server>/<UPN>`, or its bare UPN while no other account has it).
     #[arg(long, value_name = "UPN")]
     pub account: Option<String>,
-    /// Sign out and forget the account of this UPN: its Secret Service items, its entry in `accounts.toml` and its saved
-    /// region; the other accounts stay. Refused while Teams runs for it (quit it first). Its store stays.
+    /// Sign out and forget the account of this UPN (an own server's account: `<server>/<UPN>`, or its bare UPN while no
+    /// other account has it): its Secret Service items, its entry in `accounts.toml` and its saved region; the other
+    /// accounts stay. Refused while Teams runs for it (quit it first). Its store stays.
     #[arg(long, value_name = "UPN", conflicts_with_all = ["account", "read_only"])]
     pub forget: Option<String>,
     #[command(flatten)]
@@ -105,7 +107,7 @@ pub enum Command {
     /// The credential broker, run outside the UI sandbox. Personal --account serves get only; --lab serves that
     /// alias's ngteams-lab items with get, put and delete. Other accounts/applications are refused.
     Secrets {
-        /// The account (its UPN).
+        /// The account (its UPN; an own server's: `<server>/<UPN>`, or its bare UPN while no other account has it).
         #[arg(long, value_name = "UPN", required_unless_present = "lab", conflicts_with = "lab")]
         account: Option<String>,
         /// The lab alias, whose account is read from its isolated accounts.toml.

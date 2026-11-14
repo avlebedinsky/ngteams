@@ -253,6 +253,56 @@ fn an_account_given_is_the_one_held_and_another_is_added_after_it() {
     assert_eq!(setup.accounts().unwrap().len(), 2);
 }
 
+/// The Microsoft 365 add (`ask_for`, `abandon`) never takes an own server's account of the same UPN for its own,
+/// whichever was added first.
+#[test]
+fn a_microsoft_account_is_added_beside_an_own_servers_of_the_same_upn() {
+    use ngteams::accounts_file::OwnServer;
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir).with_own_servers(true);
+    let server = OwnServer::parse("https://chat.example.test", "").unwrap();
+    let own = setup.ask_for_on(UPN, &server).unwrap();
+    assert_eq!(own.id(), format!("https://chat.example.test/{UPN}"));
+
+    // the Microsoft 365 account of that UPN is a new entry, not the own server's
+    let microsoft = setup.ask_for("SOMEONE@example.test").unwrap();
+    assert_eq!(microsoft.server, None);
+    assert_eq!(setup.accounts().unwrap(), vec![own.clone(), microsoft.clone()]);
+    assert_eq!(setup.ask_for(UPN).unwrap(), microsoft);
+    // its failed sign-in takes out its own bare entry and leaves the own server's
+    assert!(setup.abandon(&microsoft.id()).unwrap());
+    assert_eq!(setup.accounts().unwrap(), vec![own.clone()]);
+    // with only the own server's entry left, the bare UPN still isn't the Microsoft add's to take out or take up
+    assert!(!setup.abandon(UPN).unwrap());
+    assert_eq!(setup.accounts().unwrap(), vec![own.clone()]);
+    assert_eq!(setup.ask_for(UPN).unwrap().server, None);
+    assert!(setup.abandon(UPN).unwrap());
+    assert!(setup.abandon(&own.id()).unwrap());
+    assert!(setup.accounts().unwrap().is_empty());
+}
+
+/// An entry written by hand with its CA file, the server spelled with a trailing `/`: the sign-in takes it up.
+#[test]
+fn a_hand_written_own_server_entry_is_taken_up_however_its_server_is_spelled() {
+    use ngteams::accounts_file::OwnServer;
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir).with_own_servers(true);
+    let server = OwnServer::parse("https://chat.example.test", "").unwrap();
+    let ca_file = dir.path().join("ca.pem");
+    let written = format!(
+        "[[account]]\nupn = \"{UPN}\"\nserver = \"https://chat.example.test/\"\nca_file = \"{}\"\n",
+        ca_file.display()
+    );
+    fs::create_dir_all(setup.paths.config_dir()).unwrap();
+    fs::write(setup.paths.accounts_file(), written).unwrap();
+    let taken = setup.ask_for_on(UPN, &server).unwrap();
+    assert_eq!(taken.ca_file.as_deref(), Some(ca_file.as_path()));
+    assert_eq!(taken.id(), format!("https://chat.example.test/{UPN}"));
+    assert_eq!(setup.accounts().unwrap(), vec![taken.clone()]);
+    // and it stays when that sign-in fails
+    assert!(!setup.abandon(&taken.id()).unwrap());
+}
+
 #[tokio::test]
 async fn an_abandoned_account_goes_only_while_no_sign_in_named_it() {
     let dir = tempfile::tempdir().unwrap();

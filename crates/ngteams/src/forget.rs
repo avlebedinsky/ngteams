@@ -1,5 +1,6 @@
-//! `ngteams --forget <UPN>`: signs out and forgets one account — its `ngteams` items (the refresh token, the
-//! skypetoken and its expiry, each under its UPN), its region (`regions/<oid>.json`) and its entry in `accounts.toml`,
+//! `ngteams --forget <UPN>` (an own server's account: `<server>/<UPN>`, or its bare UPN while no other account has
+//! it): signs out and forgets one account — its `ngteams` items (the refresh token, the skypetoken and its expiry, each
+//! under its id, [`PersonalAccount::id`]), its region (`regions/<oid>.json`) and its entry in `accounts.toml`,
 //! the other accounts kept as they are. Its store stays (`store/<oid>.sqlite`, never another account's), to delete by
 //! hand.
 //!
@@ -43,7 +44,8 @@ pub enum ForgetError {
     Remove { path: PathBuf, source: std::io::Error },
 }
 
-/// Forgets the account `upn` (case aside) of `setup`'s `accounts.toml`, its items deleted from `secrets` (see the
+/// Forgets the account `upn` names (case aside, as [`PersonalAccount::find`] reads a name) of `setup`'s
+/// `accounts.toml`, its items deleted from `secrets` (see the
 /// module docs).
 ///
 /// # Errors

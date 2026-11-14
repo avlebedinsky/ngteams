@@ -622,12 +622,15 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     read_only::window_allowed_here()?;
     let mine = PersonalPaths::from_env().map_err(|error| error.to_string())?;
     let paths = read_only::snapshot_paths(&mode.data, &mine)?;
-    let setup = Setup::new(paths).map_err(|error| error.to_string())?;
-    let account = setup
-        .signed_in_accounts()
+    // own servers' accounts too (the runner's sandbox clears the variable that turns them on): the mode never signs
+    // in, and its broker serves an account's own keys only
+    let setup = Setup::new(paths)
         .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|account| account.upn.eq_ignore_ascii_case(&mode.account))
+        .with_own_servers(true);
+    let signed_in = setup.signed_in_accounts().map_err(|error| error.to_string())?;
+    // named as the broker reads it: an id, or a bare UPN
+    let account = PersonalAccount::named(&signed_in, &mode.account)
+        .cloned()
         .ok_or_else(|| format!("read-only: {} isn't a signed-in account of the snapshot", mode.account))?;
     let secrets = read_only::secrets(socket).map_err(|error| format!("the broker's socket: {error}"))?;
     let file = SettingsFile::new(setup.paths.settings_file());

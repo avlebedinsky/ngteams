@@ -3,8 +3,8 @@
 //! The accounts are `accounts.toml`'s, in the order the user added them: each one given (the first run's screen, the
 //! window's "add account", `--account`) is written there at once without an object id ([`Setup::ask_for`]), and its
 //! first sign-in adds the object id and tenant (`crate::signin`); one whose sign-in never went through can be taken
-//! out again while it holds nothing but its UPN ([`Setup::abandon`]): one the user wrote more into (its `idp_hosts`)
-//! stays, a pending entry the next sign-in of that UPN takes up, never an account the app starts. A build of one account's `account.toml` and `region.json` is moved into these files
+//! out again while it holds nothing but its UPN ([`Setup::abandon`]): one the user wrote more into (its `idp_hosts`,
+//! an own server's `ca_file`) stays, a pending entry the next sign-in of that UPN takes up, never an account the app starts. A build of one account's `account.toml` and `region.json` is moved into these files
 //! when the setup is made (`PersonalPaths::migrate_single_account`).
 
 use crate::accounts_file::{OwnServer, PersonalAccount, PersonalError, PersonalPaths};
@@ -115,18 +115,24 @@ impl Setup {
             .collect())
     }
 
-    /// The account `upn` (case aside), to sign in: the one `accounts.toml` holds of that UPN, signed in or not, else
-    /// `upn` added after the others without an object id (`0600`).
+    /// The Microsoft 365 account `upn` (case aside), to sign in: the one `accounts.toml` holds of that UPN, signed in or
+    /// not, else `upn` added after the others without an object id (`0600`). An own server's account of the same UPN
+    /// is another account ([`Self::ask_for_on`]) and is never taken for it.
     ///
     /// # Errors
     /// [`SetupError::Personal`] for a bad UPN or a file that can't be read or written.
     pub fn ask_for(&self, upn: &str) -> Result<PersonalAccount, SetupError> {
-        if let Some(held) = PersonalAccount::find(&self.paths, upn)? {
+        let pending = PersonalAccount::pending(upn)?;
+        if let Some(held) = self.held(&pending)? {
             return Ok(held);
         }
-        let pending = PersonalAccount::pending(upn)?;
         pending.save(&self.paths)?;
         Ok(pending)
+    }
+
+    /// The entry `accounts.toml` holds of `account`'s server and UPN (case aside), and of no other account's.
+    fn held(&self, account: &PersonalAccount) -> Result<Option<PersonalAccount>, SetupError> {
+        Ok(self.accounts()?.into_iter().find(|held| held.is(account)))
     }
 
     /// The own server `server`'s account `upn`, to sign in: the one `accounts.toml` holds of that server and UPN (with
@@ -141,7 +147,7 @@ impl Setup {
             return Err(PersonalError::Account(format!("own servers are off (set {OWN_SERVER_ENV}=1)")).into());
         }
         let pending = PersonalAccount::pending_on(upn, server)?;
-        match PersonalAccount::find(&self.paths, &pending.id())? {
+        match self.held(&pending)? {
             Some(held) if server.ca_file.is_none() || held.ca_file == server.ca_file => Ok(held),
             Some(held) => {
                 let held = PersonalAccount {
@@ -158,22 +164,29 @@ impl Setup {
         }
     }
 
-    /// Takes the account `upn` (case aside) out of `accounts.toml` when no sign-in ever named it and it holds nothing
-    /// but its UPN (as [`Self::ask_for`] wrote it), so an account added whose sign-in stored nothing leaves nothing
-    /// behind. An entry the user wrote more into (its `idp_hosts`, by hand) stays pending for the next sign-in of that
-    /// UPN, and an account a sign-in named stays (`crate::forget` forgets either). Whether one was taken out.
+    /// Takes the account whose id is `id` (case aside; [`PersonalAccount::id`]: a Microsoft 365 account's UPN, an own
+    /// server's `<server>/<UPN>`) out of `accounts.toml` when no sign-in ever named it and it holds nothing but its
+    /// UPN and server (as [`Self::ask_for`] or [`Self::ask_for_on`] wrote it), so an account added whose sign-in stored
+    /// nothing leaves nothing behind. An entry the user wrote more into (its `idp_hosts` or its `ca_file`, by hand)
+    /// stays pending for the next sign-in of that account, and an account a sign-in named stays (`crate::forget`
+    /// forgets either). A bare UPN never names an own server's account here. Whether one was taken out.
     ///
     /// # Errors
     /// [`SetupError::Personal`] when `accounts.toml` can't be read or written.
-    pub fn abandon(&self, upn: &str) -> Result<bool, SetupError> {
-        match PersonalAccount::find(&self.paths, upn)? {
-            Some(held) if is_bare(&held) => Ok(PersonalAccount::remove(&self.paths, upn)?.is_some()),
+    pub fn abandon(&self, id: &str) -> Result<bool, SetupError> {
+        let held = self
+            .accounts()?
+            .into_iter()
+            .find(|held| held.id().eq_ignore_ascii_case(id));
+        match held {
+            // by its id, which `remove` reads before any bare UPN
+            Some(held) if is_bare(&held) => Ok(PersonalAccount::remove(&self.paths, &held.id())?.is_some()),
             _ => Ok(false),
         }
     }
 }
 
-/// Whether `account` holds nothing but its UPN: no sign-in named it and nothing was written into it by hand.
+/// Whether `account` holds nothing but its UPN and server: no sign-in named it and nothing was written into it by hand.
 fn is_bare(account: &PersonalAccount) -> bool {
     !account.is_signed_in() && account.name.is_none() && account.idp_hosts.is_empty() && account.ca_file.is_none()
 }

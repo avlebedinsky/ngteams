@@ -66,7 +66,8 @@ fn is_false(value: &bool) -> bool {
 pub struct RequestLine {
     /// Pairs the response with the request; a client numbers its requests from 1.
     pub id: u64,
-    /// The account addressed, by UPN, MRI or index; the shown account (or the call's) without it.
+    /// The account addressed, by UPN (an own server's: `<server>/<UPN>`, or its bare UPN while no other account has
+    /// it), MRI or index; the shown account (or the call's) without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(flatten)]

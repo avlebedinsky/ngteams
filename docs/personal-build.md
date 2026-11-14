@@ -77,9 +77,10 @@ run side by side in one window, and each one keeps its own:
 A server with its own certificate authority needs `ca_file` written by hand: add an `[[account]]` entry with `upn`,
 `server` and `ca_file`, then sign in with the same server and user name, which takes that entry up. An entry holding
 a `ca_file` stays when its sign-in fails; a bare one is removed. An own server's account that is signed out is asked
-for its password again. The account menu, the rail's tooltip and Settings > General name the account's server, and
-`ngteamsctl accounts` lists it. Without `NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not
-started. `ngteams --forget <server>/<UPN>` (or the bare UPN while no other account has it) forgets one.
+for its password again. Settings > General names the account's server, and `ngteamsctl accounts` lists it. Without
+`NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not started. `ngteams --forget <server>/<UPN>`
+(or the bare UPN while no other account has it) forgets one. A `server` written with a trailing `/` is the same
+server.
 
 ## Requests, outbox and diagnostics
 
