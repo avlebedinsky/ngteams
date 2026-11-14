@@ -5,10 +5,10 @@ wire the client already speaks to Microsoft (the shapes in `docs/protocol/`), wi
 origin. The client sends a request to it only for an account signed in to that server.
 
 What it serves today: sign-in (the token endpoint), authz, the chat service, teams and channels (CSA, the middle
-tier's and the provisioning service's team routes), account administration (the admin API and the first-admin
-setup), the registrar and the Trouter push socket. The registrar and Trouter have no GTM (the client finds them on
-the origin). Other services are added one at a time. Authz names only the services the server serves, so the client
-keeps every other service off.
+tier's and the provisioning service's team routes), pictures in messages, files sent in chats, link previews, account
+administration (the admin API and the first-admin setup), the registrar and the Trouter push socket. The registrar
+and Trouter have no GTM (the client finds them on the origin). Other services are added one at a time. Authz names
+only the services the server serves, so the client keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
 reactions, transient typing, account preferences and message pages (newest, backward, incremental and around a
@@ -29,7 +29,10 @@ group chat's people (below). Rich quote normalization is still being added.
 | Passwords | argon2 (Argon2id, PHC strings) |
 | Tokens | jsonwebtoken (EdDSA, Ed25519 keys from aws-lc-rs, `kid` per key); opaque refresh tokens kept as SHA-256 |
 | Fan-out, replay, counters | redis-rs 1.8: a connection manager with RESP3 pushes (a broken subscription ends its subscribers); Redis Streams for the replay journal (Redis 6.2 or later, or Valkey) |
-| Files | object_store: a local directory, memory or S3 |
+| Files | object_store: any S3-compatible service, a local directory, or memory |
+| Pictures, thumbnails | image (PNG, JPEG, GIF, WebP), decoded within size and memory limits |
+| Link previews | reqwest behind an address guard, scraper for the page's metadata |
+| Download ranges, media types | http-range-header, mime_guess |
 | Configuration, CLI | figment (TOML plus environment), clap |
 | Logs | tracing, tracing-subscriber |
 
@@ -81,7 +84,15 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `database_url` | `sqlite://ngteams-server.sqlite` | `postgres://…` or `sqlite://<path>` |
 | `database_pool` | `16` | Postgres connections per node (SQLite: one) |
 | `redis_url` | none | `redis://…` or `rediss://…`; without it, fan-out and login counters stay in the node |
-| `storage_url`, `storage_options` | `memory:///`, none | `file:///<dir>`, `s3://<bucket>[/<prefix>]`, with `object_store`'s option names (`aws_region`, `aws_endpoint`, …) |
+| `storage_url`, `storage_options` | `memory:///`, none | where pictures and files live: `s3://<bucket>[/<prefix>]` on any S3-compatible service, or `file:///<dir>` on one node ([Storage](#storage)). `memory:///` forgets everything at exit |
+| `media.max_picture_bytes` | `25165824` | the largest picture pasted into a message (24 MiB, the most the client reads back) |
+| `media.max_file_bytes` | `262144000` | the largest file sent in a chat (250 MiB, the client's own limit) |
+| `media.user_quota_bytes` | `5368709120` | what one account may store, pictures and files together (5 GiB); `0` is no limit |
+| `media.link_lifetime` | `3600` | seconds a file's download or thumbnail link works |
+| `media.link_previews` | `true` | whether the server fetches pages and pictures for link previews |
+| `media.preview_timeout` | `5` | seconds one preview fetch may take |
+| `media.preview_max_page_bytes`, `media.preview_max_picture_bytes` | `1048576`, `5242880` | the most of a page read for its preview; the largest picture fetched for one |
+| `media.preview_allow_private_addresses` | `false` | lets previews reach loopback and private addresses. For tests only |
 | `tls.cert`, `tls.key` | none | PEM chain and key; without them the server speaks plain HTTP for a proxy in front |
 | `region`, `partition` | `own`, `own01` | the names in authz's answer and the regional bases |
 | `audiences` | the client's resources | the resources a token may be asked for |
@@ -281,10 +292,10 @@ hands out its GTM where it has one.
 | Presence | `presenceUPS` | `/ups/<geo>/` | no |
 | Registrar | (the origin) | `/registrar/prod/V2/` | yes |
 | Trouter | (the origin) | `wss://<origin>/trouter/v4/c` | yes |
-| AMS | `amsV2` | `/ams/` | no |
-| Graph | (the origin) | `/graph/v1.0/` | `me` |
+| AMS and link previews | `amsV2` | `/ams/` | yes |
+| Graph | (the origin) | `/graph/v1.0/` | `me`, `me/drive`, `users/<id>`, a shared file's item and thumbnails |
 | User profiles | `userProfileService` | `/api/userprofilesvc/<region>/` | a team's people search |
-| Files | (the origin) | `/sp/` | no |
+| Files | (the origin) | `/sp/` | yes |
 | Loki | (the origin) | `/loki/` | no |
 | Search | (the origin) | `/search/` | no |
 | Flight proxy | (the origin) | `/flightproxy/api/v2/` | no |
@@ -359,6 +370,130 @@ public origin is refused.
   says so, however slowly the client reads.
 - **Shutdown.** A node closes its sockets with `0::` when it stops; clients reconnect to another node after their
   backoff. `ngteams_server::trouter::disconnect` closes an account's sockets on every node.
+
+## Storage
+
+Every stored blob (a pasted picture, a sent file, a file's thumbnails) goes through `object_store`. Only its own
+S3 calls are used, so any S3-compatible service works by configuration alone. Several nodes share one bucket. The
+database says who may read a blob; the bucket needs no public access and clients never reach it.
+
+AWS S3:
+
+```toml
+storage_url = "s3://my-bucket/ngteams"
+
+[storage_options]
+aws_region = "eu-central-1"
+aws_access_key_id = "…"
+aws_secret_access_key = "…"
+# aws_session_token = "…"        # temporary credentials
+```
+
+Any other S3-compatible service (RustFS, MinIO, Ceph, Garage, R2):
+
+```toml
+storage_url = "s3://my-bucket/ngteams"
+
+[storage_options]
+aws_endpoint = "https://s3.example.com"
+aws_region = "us-east-1"                      # the name the service signs requests with
+aws_access_key_id = "…"
+aws_secret_access_key = "…"
+aws_virtual_hosted_style_request = "false"    # path-style addressing; "true" for <bucket>.<host>
+# aws_allow_http = "true"                     # only for a plain-HTTP endpoint on a trusted network
+```
+
+The option names are `object_store`'s. In the environment they are `NGTEAMS_SERVER_STORAGE_OPTIONS__AWS_REGION`
+and so on. Without keys, `object_store` takes the instance's or the container's role credentials. The bucket must
+exist. Uploads go as multipart uploads, so the store's rule for unfinished multipart uploads decides how long an
+aborted one stays.
+
+Keys in the bucket: `ams/<object>` (pictures), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails).
+
+## Pictures, files and link previews
+
+### Pictures in messages (AMS, `/ams/`)
+
+Requests carry the chat service's token (`https://ic3.teams.office.com`).
+
+| Request | Does | Answers |
+|---|---|---|
+| `POST /ams/v1/objects/` | makes an object for a pasted picture: `{"type": "pish/image", "permissions": {"<chat>": ["read"]}, "filename"}`. The caller must be a member of every chat named | 201 `{"id"}`; 403 for a chat the caller isn't in |
+| `PUT /ams/v1/objects/<id>/content/imgpsh` | stores the picture's bytes. Only the object's maker; only PNG, JPEG, GIF or WebP, by their signature | 201; 403; 413 over `media.max_picture_bytes`; 415; 507 over the quota |
+| `GET /ams/v1/objects/<id>/views/<view>` | the picture (`imgo`, `imgpsh_fullsize`, `imgpsh_fullsize_anim`: all the bytes as sent) | 200; 403; 404 while the object is empty |
+| `GET /ams/v1/objects/<id>` | the object's description, in Teams' eight keys | 200; 403 |
+
+An object is read by its maker and by whoever is a member of one of its chats when the read arrives: someone who
+left the chat no longer reads it. `forward` (sharing an object with another chat) and other object types are not
+served.
+
+### Files sent in chats (`/sp/`, `/graph/v1.0/`)
+
+The client sends a file the way it sends one to OneDrive, and the server keeps one drive per account:
+
+1. `GET /graph/v1.0/me/drive` names the drive at `<origin>/sp/personal/<account id without dashes>/`.
+2. Under `/sp/personal/<account>/_api/v2.0/`, with a token whose audience is the server's own origin (the token
+   endpoint mints it beside the configured audiences), and only for the drive's owner:
+   - `GET drive`: the drive and its owner.
+   - `GET drive/root:/Microsoft Teams Chat Files` (404 until the first upload) and its `:/permissions`, or
+     `drive/root/permissions`: the owner's grant alone.
+   - `PUT drive/root:/Microsoft Teams Chat Files/<name>:/content`: stores the body, streamed to the store, never
+     held whole. 201 with the item (`id`, `name`, `size`, `webUrl`, `parentReference.driveId`,
+     `sharepointIds.listItemUniqueId`). A name the drive already has gets a number (`notes 1.txt`). 413 over
+     `media.max_file_bytes`, 507 over the quota. A new file is readable by its owner alone.
+   - `POST sites/root/items/<item>/driveItem/invite`: shares the file with named accounts (`recipients` by
+     `email`, which is the UPN). Only the direct form the client sends is taken: `requireSignIn: true` and
+     `sendInvitation: false`. There are no links anyone could open. 400 for an address that is no enabled account.
+   - `GET sites/root/items/<item>/driveItem/permissions`: who the file is shared with: the owner
+     (`roles: ["owner"]`) and each other account (`["write"]`).
+   - `DELETE sites/root/items/<item>/driveItem/permissions/<account id>`: ends one account's access.
+3. A reader reaches the file through Graph, by the sharing link the message carries (the file's `webUrl`):
+   `GET /graph/v1.0/shares/u!<link, base64url>/driveItem` (the item with `@microsoft.graph.downloadUrl`) and
+   `…/driveItem/thumbnails` (Graph's `small`, `medium` and `large`, 96, 176 and 800 pixels). 403 for an account
+   the file isn't shared with.
+
+Download and thumbnail links are `<origin>/sp/download/<item>?tempauth=…` and
+`<origin>/sp/thumbnail/<item>/<size>?tempauth=…`. The `tempauth` is a JWT the server signs for that one item and
+purpose, valid for `media.link_lifetime` seconds. Any node checks it with the shared keys. The link takes no
+token of the account, and the server streams the bytes from the store, so the store's credentials and the
+account's tokens never meet. S3's own presigned URLs aren't handed out: the client takes a file link only on the
+server's origin and follows no redirect.
+
+A download serves `Range` (one range: 206 with `Content-Range`; an unsatisfiable one: 416; several ranges: the
+whole file). Files always download as attachments (`Content-Disposition`, `nosniff`), so nothing uploaded is
+rendered on the server's origin.
+
+Thumbnails are made the first time they are asked for, from PNG, JPEG, GIF and WebP files up to 32 MiB, as JPEGs,
+and kept in the store. Other files have none (`value: []`), and the client draws its placeholder.
+
+The file's `webUrl` itself answers nothing: there is no web page to open a file in.
+
+Sharing needs two people reads the people service will own: `POST /api/mt/part/<partition>/beta/users/
+fetchShortProfile` (MRIs to names and addresses) and `GET /graph/v1.0/users/<id>`. Both are served in the smallest
+form file sharing needs. Authz doesn't hand out `middleTier` yet, so a client signed in through authz can paste
+pictures now and send files once the people service is served.
+
+### Link previews (`/ams/urlp/v1/url/`)
+
+- `GET info?url=<page>` answers `{"url", "status", "title", "favicon", "preview": {"title", "description",
+  "previewurl"}}`, from the page's Open Graph tags, else its `<title>` and description. `preview` is the object a
+  message's `properties.links` entry carries. Teams' own answer was never captured, so this shape is ours.
+- `GET image/Thumbnail?url=<picture>` answers the picture as a JPEG at most 640 pixels on its longer side. This is
+  the read the client makes for a message's `previewurl`, so a reader's client never reaches the page's site.
+
+The account chooses the address, so the server guards every fetch against request forgery:
+
+- only `http` and `https` on their default ports, no user info;
+- every address of the host must be public: loopback, private, link-local (the cloud metadata address too),
+  shared, reserved, multicast and documentation ranges are refused, in IPv4, IPv6 and the IPv6 forms that carry an
+  IPv4 address. A refused address gets 403 before anything is sent;
+- the connection is made through a resolver that hands out public addresses only, so a name can't change its
+  answer between the check and the connection;
+- at most three redirects, each checked the same way; no proxy;
+- `media.preview_timeout` for the whole exchange, size caps for the page and the picture, and at most 16 fetches
+  per node at once (503 with `Retry-After` beyond).
+
+`media.link_previews = false` removes both routes.
 
 ## Chat events
 
@@ -486,6 +621,9 @@ the 1:1 chat and its history stay its two people's.
   a registration taken, a socket's claim to its endpoint, an event the journal didn't keep, a disconnect) topics. A
   kept event is appended to the account's journal before it is published, so the node that is woken reads it there,
   in order; a socket that lagged or reconnected reads from its endpoint's cursor. Registrations are rows, so any node takes one and any node reads it.
+- Pictures and files live in the shared store and their rows in the database, so one node takes an upload and
+  another serves it. A download link one node signed opens on every node. Each account's stored bytes are counted
+  in one row updated in a single statement, so two nodes can't both pass the quota.
 - Signing keys are rows in the database. A node rotates the key when it is due (checked hourly) and drops keys that
   can no longer verify a live token. Retired keys are kept for the access lifetime plus three hourly reload intervals
   and the verifier's 60-second clock allowance, covering two missed maintenance checks. Nodes that cannot reload
@@ -508,12 +646,17 @@ the system doesn't trust gives its certificate authority to each account as `ca_
 `cargo test -p ngteams-server` runs the e2e tests: the real client crates (`teams-auth`'s session and clients,
 `teams-core`'s account bring-up) against an in-process server on loopback, on SQLite. With `NGTEAMS_SERVER_PG_URL`
 (a Postgres the tests may create databases on) the Postgres cases run too, and with `NGTEAMS_SERVER_REDIS_URL` the
-Redis cases. CI's Coverage job sets both from its service containers. Locally:
+Redis cases. The picture and file tests keep their blobs in the S3 store `NGTEAMS_SERVER_S3_URL` names
+(`http://<access key>:<secret>@<host>:<port>/<bucket>`; they make the bucket), else in a temporary directory. CI's
+Coverage job sets all three from its service containers (RustFS for S3). Locally:
 
 ```sh
 podman run -d --rm --name ngts-pg -e POSTGRES_PASSWORD=ngts -p 55432:5432 docker.io/library/postgres:17
 podman run -d --rm --name ngts-redis -p 56379:6379 docker.io/library/redis:7
+podman run -d --rm --name ngts-s3 -p 59000:9000 -e RUSTFS_ACCESS_KEY=ngtsaccess -e RUSTFS_SECRET_KEY=ngtssecret \
+  docker.io/rustfs/rustfs:1.0.5
 NGTEAMS_SERVER_PG_URL=postgres://postgres:ngts@127.0.0.1:55432/postgres \
-NGTEAMS_SERVER_REDIS_URL=redis://127.0.0.1:56379 cargo test -p ngteams-server
-podman stop ngts-pg ngts-redis
+NGTEAMS_SERVER_REDIS_URL=redis://127.0.0.1:56379 \
+NGTEAMS_SERVER_S3_URL=http://ngtsaccess:ngtssecret@127.0.0.1:59000/ngts-test cargo test -p ngteams-server
+podman stop ngts-pg ngts-redis ngts-s3
 ```

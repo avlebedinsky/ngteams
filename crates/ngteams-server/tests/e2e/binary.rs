@@ -164,7 +164,8 @@ async fn check_region(session: &Session<MemorySecretStore>, origin: &str) {
         session.service_base("userProfileService"),
         Some(format!("{origin}/api/userprofilesvc/own"))
     );
-    assert_eq!(session.region().endpoints.len(), 6);
+    assert_eq!(session.service_base("amsV2"), Some(format!("{origin}/ams")));
+    assert_eq!(session.region().endpoints.len(), 7);
 }
 
 async fn rejects_an_untrusted_certificate(node: &Node) {

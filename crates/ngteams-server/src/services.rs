@@ -23,6 +23,7 @@ pub fn region_gtms(config: &Config) -> BTreeMap<&'static str, String> {
             format!("{origin}{}", provisioning_prefix(config)),
         ),
         ("userProfileService", format!("{origin}{}", user_profile_prefix(config))),
+        ("amsV2", format!("{origin}/ams")),
     ])
 }
 

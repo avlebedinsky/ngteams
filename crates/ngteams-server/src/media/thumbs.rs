@@ -20,6 +20,18 @@ const MAX_SOURCE: i64 = 32 * 1024 * 1024;
 const MAX_SIDE: u32 = 16_384;
 const MAX_DECODED: u64 = 256 * 1024 * 1024;
 
+/// Pictures a node decodes at once: each may take [`MAX_DECODED`] of memory.
+static DECODERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Runs `work` over `source` off the async threads, when a decoder is free in turn.
+pub(super) async fn decoding<T: Send + 'static>(
+    source: Bytes,
+    work: impl FnOnce(&[u8]) -> Option<T> + Send + 'static,
+) -> Option<T> {
+    let _turn = DECODERS.acquire().await.ok()?;
+    tokio::task::spawn_blocking(move || work(&source)).await.ok().flatten()
+}
+
 /// What was made for a file: each size's width and height; none when the file has no thumbnail.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct Made {
@@ -42,7 +54,7 @@ pub(super) async fn of(app: &App, item: &repo::Item) -> Result<Made, Error> {
     let mut made = Made::default();
     if item.size <= MAX_SOURCE
         && let Some(source) = app.storage.get(&drive::key(&item.id)).await?
-        && let Ok(Some(pictures)) = tokio::task::spawn_blocking(move || render(&source)).await
+        && let Some(pictures) = decoding(source, render).await
     {
         for (size, width, height, bytes) in pictures {
             app.storage.put(&picture_key(&item.id, size), bytes).await?;

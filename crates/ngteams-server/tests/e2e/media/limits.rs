@@ -80,3 +80,37 @@ async fn pictures_and_files_over_their_size_limits_are_refused() {
     assert_eq!(writer.write(text).await.unwrap().status(), 415);
     trio.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_that_fails_answers_unavailable_and_keeps_no_trace_of_the_bytes() {
+    use reqwest::Method;
+
+    let blobs = tempfile::tempdir().unwrap();
+    let root = blobs.path().join("store");
+    let url = format!("file://{}", root.display());
+    let trio = Trio::start_with(Backend::Sqlite, |config| {
+        config.storage_url = url;
+        config.storage_options.clear();
+        config.media.user_quota_bytes = 0;
+    })
+    .await;
+    let writer = client(&trio.server, "a@own.test", &trio.ids[0]).await;
+    let made = writer
+        .write(CreatePicture::new(&trio.chat, PastedFormat::Png).unwrap())
+        .await
+        .unwrap();
+    let object = CreatePicture::read_answer(made.body()).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, b"not a directory").unwrap();
+
+    let fill = UploadPicture::new(&object, &picture(png(8, 8))).unwrap();
+    assert_eq!(writer.write(fill).await.unwrap().status(), 503);
+    let ic3 = super::token(&trio.server, "a@own.test", super::IC3).await;
+    let path = format!("/ams/v1/objects/{object}/");
+    let (status, _, body) = super::raw(&trio.server, Method::GET, &path, Some(&ic3), &[], None).await;
+    let read: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!((status, &read["contents"]), (200, &serde_json::json!({})));
+    let refused = upload(&trio, "lost.bin", b"bytes").await.unwrap_err();
+    assert!(refused.contains("503"), "{refused}");
+    trio.stop().await;
+}

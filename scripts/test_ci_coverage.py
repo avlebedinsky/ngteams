@@ -70,11 +70,14 @@ class EnvironmentTests(unittest.TestCase):
         services = shards.split("    services:\n", 1)[1].split("    steps:\n", 1)[0]
         self.assertIn("image: postgres:17", services)
         self.assertIn("image: redis:7", services)
+        self.assertIn("image: rustfs/rustfs:", services)
         step = shards.split("      - name: Run every assigned target, retaining failures", 1)[1].split("      - ", 1)[0]
         self.assertIn("NGTEAMS_SERVER_PG_URL: postgres://postgres:ngts@host.docker.internal:5432/postgres", step)
         self.assertIn("NGTEAMS_SERVER_REDIS_URL: redis://host.docker.internal:6379", step)
+        self.assertIn("NGTEAMS_SERVER_S3_URL: http://ngtsaccess:ngtssecret@host.docker.internal:9000/ngts-test", step)
         self.assertIn(".github/ci/docker.sh test", step)
-        urls = {"NGTEAMS_SERVER_PG_URL": "synthetic-postgres", "NGTEAMS_SERVER_REDIS_URL": "synthetic-redis"}
+        urls = {"NGTEAMS_SERVER_PG_URL": "synthetic-postgres", "NGTEAMS_SERVER_REDIS_URL": "synthetic-redis",
+                "NGTEAMS_SERVER_S3_URL": "synthetic-s3"}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             docker = root / "bin/docker"

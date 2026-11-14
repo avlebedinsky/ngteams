@@ -6,7 +6,7 @@ if [[ -d .ci-cache/webrtc/include ]]; then
     arguments+=(--env LK_CUSTOM_WEBRTC=/workspace/.ci-cache/webrtc)
 fi
 # The shards' service containers listen on the runner; only a job that sets their URLs forwards them.
-for name in NGTEAMS_SERVER_PG_URL NGTEAMS_SERVER_REDIS_URL; do
+for name in NGTEAMS_SERVER_PG_URL NGTEAMS_SERVER_REDIS_URL NGTEAMS_SERVER_S3_URL; do
     if [[ -n "${!name:-}" ]]; then
         arguments+=(--env "$name")
     fi

@@ -188,8 +188,9 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
-    # the own server's Postgres and Redis cases (crates/ngteams-server, docs/server.md); reached from the measuring
-    # container through the host gateway. Every shard has them: the balancer may assign the server's targets to any.
+    # the own server's Postgres, Redis and S3 cases (crates/ngteams-server, docs/server.md); reached from the
+    # measuring container through the host gateway. Every shard has them: the balancer may assign the server's
+    # targets to any.
     services:
       postgres:
         image: postgres:17
@@ -205,6 +206,14 @@ jobs:
           - 6379:6379
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+      # an S3-compatible store for the server's pictures and files; the tests make their own bucket
+      rustfs:
+        image: rustfs/rustfs:1.0.5
+        env:
+          RUSTFS_ACCESS_KEY: ngtsaccess
+          RUSTFS_SECRET_KEY: ngtssecret
+        ports:
+          - 9000:9000
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -236,11 +245,21 @@ jobs:
         run: |
           .github/ci/unpack.sh target
           rm target/coverage-*.tar.zst
+      - name: Wait for the S3 store
+        run: |
+          for _ in $(seq 60); do
+            # any HTTP answer (it refuses an unsigned request) says the store is up
+            curl --silent --output /dev/null http://127.0.0.1:9000/ && exit 0
+            sleep 1
+          done
+          echo "the S3 store didn't come up" >&2
+          exit 1
       - name: Run every assigned target, retaining failures
         env:
           SHARD: ${{ matrix.shard }}
           NGTEAMS_SERVER_PG_URL: postgres://postgres:ngts@host.docker.internal:5432/postgres
           NGTEAMS_SERVER_REDIS_URL: redis://host.docker.internal:6379
+          NGTEAMS_SERVER_S3_URL: http://ngtsaccess:ngtssecret@host.docker.internal:9000/ngts-test
         run: .github/ci/docker.sh test "$SHARD"
       - name: Bundle current LLVM profiles
         if: always()

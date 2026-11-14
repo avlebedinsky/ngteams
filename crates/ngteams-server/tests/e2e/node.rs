@@ -144,6 +144,19 @@ fn the_configuration_refuses_bad_names_databases_and_lifetimes() {
     ));
     assert!(matches!(refused(|c| c.login.window = 0), ConfigError::Lifetime));
     assert!(matches!(refused(|c| c.trouter.auth_timeout = 0), ConfigError::Lifetime));
+    for change in [
+        (|c| c.media.max_picture_bytes = 0) as fn(&mut Config),
+        |c| c.media.max_file_bytes = 0,
+        |c| c.media.link_lifetime = 0,
+        |c| c.media.preview_timeout = 0,
+        |c| c.media.preview_max_page_bytes = 0,
+        |c| c.media.preview_max_picture_bytes = 0,
+    ] {
+        assert!(matches!(refused(change), ConfigError::Media));
+    }
+    let mut unlimited = Config::default();
+    unlimited.media.user_quota_bytes = 0;
+    unlimited.check().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

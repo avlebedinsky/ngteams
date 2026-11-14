@@ -131,13 +131,10 @@ async fn thumbnail(
         .fetcher
         .get(asked(&query)?, app.config.media.preview_max_picture_bytes, false)
         .await?;
-    let picture = tokio::task::spawn_blocking(move || {
-        let picture = thumbs::decode(&fetched.bytes)?;
-        thumbs::jpeg(&picture, THUMBNAIL_SIDE)
+    let picture = thumbs::decoding(fetched.bytes.into(), |source| {
+        thumbs::jpeg(&thumbs::decode(source)?, THUMBNAIL_SIDE)
     })
     .await
-    .ok()
-    .flatten()
     .ok_or(Error::Unsupported)?;
     Ok((
         [
