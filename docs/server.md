@@ -228,12 +228,18 @@ Who may do what, checked against the database on every request:
 | a private channel's owner | rename, archive, restore and delete it; add, change and remove its people |
 | anyone signed in | make a team; find and join public teams; join by a code; ask to join a private team by its group id |
 
-A team and a private channel always keep an owner (403 `LastOwnerCannotBeRemoved`). Someone outside a team gets
-404 `NotFound` for every route that names it, and someone outside a private channel for every route that names the
-channel. A refusal is `{"errorCode", "message"}`; the codes the client's dialogs word are Teams' own
+A team and a private channel always keep an owner (403 `LastOwnerCannotBeRemoved`). When a private channel's only
+owner leaves the team or is removed from it, the channel's longest-standing other member becomes its owner; a
+channel with nobody else in it is deleted. Someone outside a team gets 404 `NotFound` for every CSA, middle-tier
+and provisioning route that names it, and someone outside a private channel for every such route that names the
+channel; the chat service's thread routes answer their own 403 to anyone not in the thread. A refusal is `{"errorCode", "message"}`; the codes the client's dialogs word are Teams' own
 (`ChannelNameAlreadyExist`, `OperationNotAllowedOnArchivedTeam`, `NoPermissionToCreateChannel`,
-`CannotCreatePrivateChannelDueToUserPolicy`). A team's or channel's change is published to its people as a
-`ThreadUpdate` on `push:<mri>`.
+`CannotCreatePrivateChannelDueToUserPolicy`).
+
+These changes are published to the team's or channel's people as a `ThreadUpdate` on `push:<mri>`: a team made,
+edited, archived, restored or deleted (the thread as it last was, with `isDeleted` true), its people and their
+roles, its settings, and a channel made, renamed, archived, restored, deleted, moderated or given other people. A
+channel's show-by-default, the team's picture, codes and tags reach other clients only with their next teams read.
 
 Limits: 200 standard and 30 private channels a team (`MaxChannelLimitExceeded`,
 `MaxPrivateChannelLimitExceeded`), 200 tags a team, 200 sections an account and 1000 channels a section; a team's

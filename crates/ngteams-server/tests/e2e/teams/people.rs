@@ -223,3 +223,32 @@ async fn the_people_pickers_find_accounts_to_add_and_a_teams_own_people() {
         server.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_add_member_request_changes_roles_and_a_team_keeps_an_owner() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        ada.add(&team, &group, &[&bert]).await;
+        let roles = |role| TeamWrite::AddMembers {
+            team: team.clone(),
+            group: group.clone(),
+            members: vec![(Mri::new(&ada.mri), role), (Mri::new(&bert.mri), role)],
+        };
+
+        let written = ada.engine.team_write(roles(TeamRole::Member), None).await.unwrap();
+        assert_eq!(written.not_added, std::slice::from_ref(&ada.mri), "the only owner");
+        assert!(ada.team(&team).await.owner);
+        let written = ada.engine.team_write(roles(TeamRole::Owner), None).await.unwrap();
+        assert!(written.not_added.is_empty() && bert.team(&team).await.owner);
+        // of two owners named at once, the last one stays
+        let written = ada.engine.team_write(roles(TeamRole::Member), None).await.unwrap();
+        assert_eq!(written.not_added, std::slice::from_ref(&bert.mri));
+        assert!(!ada.team(&team).await.owner && bert.team(&team).await.owner);
+        ada.stop();
+        bert.stop();
+        server.stop().await;
+    }
+}

@@ -111,6 +111,18 @@ macro_rules! touch_team {
     }};
 }
 
+macro_rules! touch_channel {
+    ($conn:expr, $channel:expr, $version:expr) => {{
+        diesel::update(channels::table.find($channel))
+            .set(channels::version.eq($version))
+            .execute($conn)
+            .await?;
+        diesel::update(chats::table.find($channel))
+            .set(chats::version.eq($version))
+            .execute($conn)
+            .await?;
+    }};
+}
 fn now() -> i64 {
     crate::chatsvc::now()
 }
@@ -503,7 +515,8 @@ pub(crate) async fn delete_team(db: &Db, id: &str) -> Result<(), DbError> {
         .await)
 }
 
-/// Puts `user` on the team with a role (changing the role of someone already on it) and into its standard channels.
+/// Puts `user` on the team with a role and into its standard channels. Someone already on it keeps their role:
+/// only `change_member`, which keeps an owner, changes one.
 pub(crate) async fn put_member(db: &Db, team: &str, user: &str, owner: bool) -> Result<(), DbError> {
     let at = now();
     with_conn!(db, |conn| conn
@@ -516,9 +529,7 @@ pub(crate) async fn put_member(db: &Db, team: &str, user: &str, owner: bool) -> 
                     team_members::owner.eq(owner),
                     team_members::joined_at.eq(version),
                 ))
-                .on_conflict((team_members::team_id, team_members::user_id))
-                .do_update()
-                .set(team_members::owner.eq(owner))
+                .on_conflict_do_nothing()
                 .execute(conn)
                 .await?;
             let standard: Vec<String> = channels::table
@@ -547,8 +558,66 @@ pub(crate) enum Changed {
     LastOwner,
 }
 
-/// Changes the role of someone on the team (`owner`), or takes them off it (`None`), never leaving it ownerless.
-pub(crate) async fn change_member(db: &Db, team: &str, user: &str, owner: Option<bool>) -> Result<Changed, DbError> {
+/// Before `user` goes from the team: each private channel only they own gets its longest-standing other member as
+/// owner, and one with nobody else in it is deleted. The channels that got an owner.
+macro_rules! hand_on_channels {
+    ($conn:expr, $team:expr, $user:expr, $version:expr) => {{
+        let private: Vec<String> = channels::table
+            .filter(channels::team_id.eq($team))
+            .filter(channels::private.eq(true))
+            .select(channels::id)
+            .load($conn)
+            .await?;
+        let owners: Vec<(String, String)> = channel_roles::table
+            .filter(channel_roles::channel_id.eq_any(&private))
+            .filter(channel_roles::owner.eq(true))
+            .select((channel_roles::channel_id, channel_roles::user_id))
+            .load($conn)
+            .await?;
+        let mut handed = Vec::new();
+        for channel in private {
+            let of_channel = owners.iter().filter(|(of, _)| *of == channel);
+            if !of_channel.map(|(_, owner)| owner.as_str()).eq([$user]) {
+                continue;
+            }
+            let heir: Option<String> = chat_members::table
+                .filter(chat_members::chat_id.eq(&channel))
+                .filter(chat_members::user_id.ne($user))
+                .order((chat_members::joined_at.asc(), chat_members::user_id.asc()))
+                .select(chat_members::user_id)
+                .first($conn)
+                .await
+                .optional()?;
+            let Some(heir) = heir else {
+                diesel::delete(chats::table.find(&channel)).execute($conn).await?;
+                continue;
+            };
+            diesel::insert_into(channel_roles::table)
+                .values((
+                    channel_roles::channel_id.eq(&channel),
+                    channel_roles::user_id.eq(&heir),
+                    channel_roles::owner.eq(true),
+                ))
+                .on_conflict((channel_roles::channel_id, channel_roles::user_id))
+                .do_update()
+                .set(channel_roles::owner.eq(true))
+                .execute($conn)
+                .await?;
+            touch_channel!($conn, &channel, $version);
+            handed.push(channel);
+        }
+        handed
+    }};
+}
+
+/// Changes the role of someone on the team (`owner`), or takes them off it (`None`), never leaving it or a private
+/// channel of it ownerless. With what it came to, the private channels that got a new owner.
+pub(crate) async fn change_member(
+    db: &Db,
+    team: &str,
+    user: &str,
+    owner: Option<bool>,
+) -> Result<(Changed, Vec<String>), DbError> {
     let at = now();
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
@@ -560,7 +629,7 @@ pub(crate) async fn change_member(db: &Db, team: &str, user: &str, owner: Option
                 .await
                 .optional()?
             else {
-                return Ok(Changed::NotMember);
+                return Ok((Changed::NotMember, Vec::new()));
             };
             if current && owner != Some(true) {
                 let owners: i64 = team_members::table
@@ -570,15 +639,17 @@ pub(crate) async fn change_member(db: &Db, team: &str, user: &str, owner: Option
                     .get_result(conn)
                     .await?;
                 if owners < 2 {
-                    return Ok(Changed::LastOwner);
+                    return Ok((Changed::LastOwner, Vec::new()));
                 }
             }
+            let mut handed = Vec::new();
             if let Some(owner) = owner {
                 diesel::update(team_members::table.find((team, user)))
                     .set(team_members::owner.eq(owner))
                     .execute(conn)
                     .await?;
             } else {
+                handed = hand_on_channels!(conn, team, user, version);
                 let threads: Vec<String> = channels::table
                     .filter(channels::team_id.eq(team))
                     .select(channels::id)
@@ -603,7 +674,7 @@ pub(crate) async fn change_member(db: &Db, team: &str, user: &str, owner: Option
                     .await?;
             }
             touch_team!(conn, team, version);
-            Ok(Changed::Done)
+            Ok((Changed::Done, handed))
         })
         .await)
 }
@@ -675,16 +746,26 @@ impl ChannelEdit<'_> {
     };
 }
 
+/// Changes the fields `edit` names of the channel as it is now, so two edits at once keep each other's change.
 /// `Conflict` when the new name is another channel's of the team.
-pub(crate) async fn edit_channel(db: &Db, channel: &Channel, edit: &ChannelEdit<'_>) -> Result<(), DbError> {
+pub(crate) async fn edit_channel(db: &Db, id: &str, edit: &ChannelEdit<'_>) -> Result<(), DbError> {
     let at = now();
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             let version: i64 = advance!(conn, at);
+            let Some(channel) = channels::table
+                .find(id)
+                .select(Channel::as_select())
+                .first(conn)
+                .await
+                .optional()?
+            else {
+                return Ok(());
+            };
             if let Some(name) = edit.name {
                 let taken: i64 = channels::table
                     .filter(channels::team_id.eq(&channel.team_id))
-                    .filter(channels::id.ne(&channel.id))
+                    .filter(channels::id.ne(id))
                     .filter(crate::db::lower(channels::name).eq(name.to_lowercase()))
                     .count()
                     .get_result(conn)
@@ -693,9 +774,10 @@ pub(crate) async fn edit_channel(db: &Db, channel: &Channel, edit: &ChannelEdit<
                     return Err(DbError::Conflict);
                 }
             }
-            diesel::update(channels::table.find(&channel.id))
+            let name = edit.name.unwrap_or(&channel.name);
+            diesel::update(channels::table.find(id))
                 .set((
-                    channels::name.eq(edit.name.unwrap_or(&channel.name)),
+                    channels::name.eq(name),
                     channels::description.eq(edit.description.unwrap_or(&channel.description)),
                     channels::archived.eq(edit.archived.unwrap_or(channel.archived)),
                     channels::shown_by_default.eq(edit.shown_by_default.unwrap_or(channel.shown_by_default)),
@@ -704,11 +786,8 @@ pub(crate) async fn edit_channel(db: &Db, channel: &Channel, edit: &ChannelEdit<
                 ))
                 .execute(conn)
                 .await?;
-            diesel::update(chats::table.find(&channel.id))
-                .set((
-                    chats::topic.eq(Some(edit.name.unwrap_or(&channel.name))),
-                    chats::version.eq(version),
-                ))
+            diesel::update(chats::table.find(id))
+                .set((chats::topic.eq(Some(name)), chats::version.eq(version)))
                 .execute(conn)
                 .await?;
             touch_team!(conn, &channel.team_id, version);
@@ -729,7 +808,8 @@ pub(crate) async fn delete_channel(db: &Db, channel: &Channel) -> Result<(), DbE
         .await)
 }
 
-/// Someone on the team put into a private channel with a role, or their role there changed.
+/// Someone on the team put into a private channel with a role. Someone already in it keeps their role: only
+/// `change_channel_member`, which keeps an owner, changes one.
 pub(crate) async fn put_channel_member(db: &Db, channel: &Channel, user: &str, owner: bool) -> Result<(), DbError> {
     let at = now();
     with_conn!(db, |conn| conn
@@ -742,9 +822,7 @@ pub(crate) async fn put_channel_member(db: &Db, channel: &Channel, user: &str, o
                     channel_roles::user_id.eq(user),
                     channel_roles::owner.eq(owner),
                 ))
-                .on_conflict((channel_roles::channel_id, channel_roles::user_id))
-                .do_update()
-                .set(channel_roles::owner.eq(owner))
+                .on_conflict_do_nothing()
                 .execute(conn)
                 .await?;
             touch_channel!(conn, &channel.id, version);
@@ -752,20 +830,6 @@ pub(crate) async fn put_channel_member(db: &Db, channel: &Channel, user: &str, o
         })
         .await)
 }
-
-macro_rules! touch_channel {
-    ($conn:expr, $channel:expr, $version:expr) => {{
-        diesel::update(channels::table.find($channel))
-            .set(channels::version.eq($version))
-            .execute($conn)
-            .await?;
-        diesel::update(chats::table.find($channel))
-            .set(chats::version.eq($version))
-            .execute($conn)
-            .await?;
-    }};
-}
-use touch_channel;
 
 /// Takes someone out of a private channel, or makes an owner of it a member, never leaving it ownerless.
 pub(crate) async fn change_channel_member(
@@ -1004,8 +1068,8 @@ async fn first_folders(db: &Db, user: &str, version: i64, body: &str) -> Result<
         > 0))
 }
 
-/// What a team's or a channel's messages come to since `since`: posts, replies, reactions, mentions, and the
-/// people who wrote them by day (`YYYY-MM-DD` of the message's arrival).
+/// The id, post, author and body of each message of `threads` that arrived since `since`, oldest first (counted
+/// by `mt::metrics`).
 pub(crate) async fn message_bodies(
     db: &Db,
     threads: &[String],

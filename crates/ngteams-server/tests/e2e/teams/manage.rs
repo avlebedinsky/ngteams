@@ -97,8 +97,21 @@ async fn an_owner_edits_archives_restores_and_deletes_a_team() {
             refusal(bert.engine.team_write(delete.clone(), None).await).as_deref(),
             Some("Forbidden")
         );
+        let mut events = server
+            .app
+            .fanout
+            .subscribe(&format!("push:{}", bert.mri))
+            .await
+            .unwrap();
         ada.engine.team_write(delete, None).await.unwrap();
         assert!(ada.listed().await.is_empty() && bert.listed().await.is_empty());
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await;
+        let event: serde_json::Value = serde_json::from_slice(&event.unwrap().unwrap()).unwrap();
+        assert_eq!(event["resourceType"], "ThreadUpdate");
+        assert_eq!(
+            (&event["resource"]["id"], &event["resource"]["isDeleted"]),
+            (&team.as_str().into(), &true.into())
+        );
         let reads = ChatReads::new(&*bert.client);
         for thread in [&team, &channel] {
             assert_eq!(reads.thread(thread).await.unwrap_err().status(), Some(404));

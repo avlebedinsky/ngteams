@@ -262,7 +262,7 @@ async fn set_channel_archived(app: &App, actor: &Me, group: &str, thread: &str, 
         archived: Some(archived),
         ..ChannelEdit::NONE
     };
-    repo::edit_channel(&app.db, &channel, &edit).await?;
+    repo::edit_channel(&app.db, &channel.id, &edit).await?;
     announce(app, &actor.tenant, &channel.id).await;
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -351,7 +351,8 @@ async fn channels(State(app): State<Arc<App>>, actor: Me, Path(group): Path<Stri
     Ok(Json(json!({"channels": listed})))
 }
 
-/// A new team copied from one the caller owns: its standard channels, and its settings and people when asked.
+/// A new team copied from one the caller owns: its General channel, and its standard channels, settings and people
+/// when asked.
 async fn clone(
     State(app): State<Arc<App>>,
     actor: Me,

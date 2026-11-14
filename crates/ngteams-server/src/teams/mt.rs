@@ -18,7 +18,7 @@ use super::repo::{self, Changed, Channel, ChannelEdit, Team, TeamEdit};
 use super::{Actor, Answer, Error, Seat, body, channel_of, mri, object_id, text, wire};
 use crate::app::App;
 use crate::auth::extract::Spaces;
-use crate::chatsvc::channels::announce;
+use crate::chatsvc::channels::{self, announce};
 use crate::db::users;
 
 type Me = Actor<Spaces>;
@@ -139,7 +139,10 @@ async fn edit(
 
 async fn delete(State(app): State<Arc<App>>, actor: Me, Path(id): Path<String>) -> Answer<Json<Value>> {
     Seat::of(&app.db, &actor.id, &id).await?.owner()?;
+    // its people are known only while it is there
+    let last = channels::farewell(&app, &actor.tenant, &id).await;
     repo::delete_team(&app.db, &id).await?;
+    channels::publish(&app, last).await;
     Ok(Json(json!({"value": true})))
 }
 
@@ -186,6 +189,17 @@ async fn account(app: &App, mri: &str) -> Answer<Option<String>> {
         .map(|user| user.id))
 }
 
+/// Puts `user` on the team with the role, or gives someone on it the role; not when the team would lose its
+/// last owner.
+async fn place(app: &App, team: &str, user: &str, owner: bool, on_team: bool) -> Answer<bool> {
+    if on_team {
+        let (changed, _) = repo::change_member(&app.db, team, user, Some(owner)).await?;
+        return Ok(changed == Changed::Done);
+    }
+    repo::put_member(&app.db, team, user, owner).await?;
+    Ok(true)
+}
+
 async fn add_members(
     State(app): State<Arc<App>>,
     actor: Me,
@@ -215,13 +229,11 @@ async fn add_members(
             .find(|person| Some(person.user_id.as_str()) == object_id(named));
         // only an owner makes owners or changes the role of someone already on the team
         let allowed = seat.member.owner || (!owner && current.is_none());
-        match account(&app, named).await? {
-            Some(user) if allowed => {
-                repo::put_member(&app.db, &id, &user, owner).await?;
-                added.push(json!({"mri": named}));
-            }
-            _ => failed.push(json!({"mri": named})),
-        }
+        let placed = match account(&app, named).await? {
+            Some(user) if allowed => place(&app, &id, &user, owner, current.is_some()).await?,
+            _ => false,
+        };
+        if placed { &mut added } else { &mut failed }.push(json!({"mri": named}));
     }
     announce(&app, &actor.tenant, &id).await;
     Ok(Json(json!({"value": {"addedMembers": added, "failedMembers": failed}})))
@@ -252,10 +264,14 @@ async fn update_member(
         seat.owner()?;
         seat.active()?;
     }
-    match repo::change_member(&app.db, &id, user, role).await? {
+    let (changed, handed) = repo::change_member(&app.db, &id, user, role).await?;
+    match changed {
         Changed::Done => {}
         Changed::NotMember => return Err(Error::NOT_FOUND),
         Changed::LastOwner => return Err(Error::LAST_OWNER),
+    }
+    for channel in &handed {
+        announce(&app, &actor.tenant, channel).await;
     }
     announce(&app, &actor.tenant, &id).await;
     Ok(Json(json!({"value": true})))
@@ -529,7 +545,7 @@ pub(super) async fn rename(app: &App, tenant: &str, channel: &Channel, input: &V
         description: Some(&description),
         ..ChannelEdit::NONE
     };
-    match repo::edit_channel(&app.db, channel, &edit).await {
+    match repo::edit_channel(&app.db, &channel.id, &edit).await {
         Ok(()) => {}
         Err(crate::db::DbError::Conflict) => return Err(Error::NAME_TAKEN),
         Err(error) => return Err(error.into()),
@@ -570,7 +586,7 @@ async fn show_by_default(
         shown_by_default: Some(method == axum::http::Method::PUT),
         ..ChannelEdit::NONE
     };
-    repo::edit_channel(&app.db, &channel, &edit).await?;
+    repo::edit_channel(&app.db, &channel.id, &edit).await?;
     Ok(Json(json!({"value": true})))
 }
 

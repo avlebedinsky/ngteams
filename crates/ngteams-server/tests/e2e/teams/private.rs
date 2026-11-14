@@ -195,3 +195,68 @@ async fn a_private_channels_owners_manage_its_people_and_the_channel() {
         secret.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_channel_outlives_its_only_owner_leaving_the_team() {
+    for backend in backends() {
+        let secret = Secret::new(backend).await;
+        let (ada, bert, cora) = (&secret.ada, &secret.bert, &secret.cora);
+        // Bert, a member of the team, has a private channel of his own with Cora in it
+        let draft = |seat: &Seat| {
+            seat.engine.create_channel(ChannelDraft {
+                channel: new_channel(&secret.team, &secret.group, "Den", NewChannelKind::Private),
+                show_by_default: false,
+            })
+        };
+        let den = draft(bert).await.unwrap();
+        let (den_group, den) = (den.group.unwrap(), den.thread.unwrap());
+        let people = vec![cora.mri.clone()];
+        let failed = bert
+            .engine
+            .add_channel_members(secret.group.as_str(), den_group.as_str(), people)
+            .await
+            .unwrap();
+        assert!(failed.is_empty());
+        let owns = async |seat: &Seat| {
+            let team = seat.team(&secret.team).await;
+            team.channels
+                .iter()
+                .find(|channel| channel.id == den)
+                .map(|channel| channel.owner)
+        };
+        assert_eq!(owns(cora).await, Some(false));
+
+        let goes = |seat: &Seat, update| TeamWrite::UpdateMember {
+            team: secret.team.clone(),
+            group: secret.group.clone(),
+            member: teams_proto::Mri::new(&seat.mri),
+            update,
+        };
+        let mut events = secret
+            .server
+            .app
+            .fanout
+            .subscribe(&format!("push:{}", cora.mri))
+            .await
+            .unwrap();
+        let left = goes(bert, teams_proto::MemberUpdate::Left);
+        bert.engine.team_write(left, None).await.unwrap();
+        assert_eq!(owns(cora).await, Some(true), "the channel's other member owns it now");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await;
+        let event: serde_json::Value = serde_json::from_slice(&event.unwrap().unwrap()).unwrap();
+        assert_eq!(event["resource"]["id"], den.as_str());
+        assert_eq!(event["resource"]["members"][0]["role"], "Admin");
+
+        // with nobody left in it the channel goes, and its name is free again
+        let removed = goes(cora, teams_proto::MemberUpdate::Removed);
+        ada.engine.team_write(removed, None).await.unwrap();
+        assert_eq!(
+            ChatReads::new(&*ada.client).thread(&den).await.unwrap_err().status(),
+            Some(404)
+        );
+        assert!(draft(ada).await.unwrap().thread.is_some());
+        // Ada's own channel, where she is the only owner and Bert was a member, is as it was
+        assert_eq!(secret.listed(ada).await, Some(true));
+        secret.stop().await;
+    }
+}

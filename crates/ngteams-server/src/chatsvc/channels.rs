@@ -171,8 +171,8 @@ pub(super) fn conversation(entry: &mut Value, caller: &Caller, chat: &Chat, plac
     entry["memberProperties"]["role"] = json!(roles.name(&caller.id));
 }
 
-/// Tells everyone in `thread` that it changed (a team's or channel's name, people, state), as a chat's creation does.
-pub(crate) async fn announce(app: &App, tenant: &str, thread: &str) {
+/// The `ThreadUpdate` of `thread` for each of its people, by the channel it is published on.
+async fn updates(app: &App, tenant: &str, thread: &str, deleted: bool) -> Vec<(String, Value)> {
     let found = async {
         let Some(chat) = super::repo::chat(&app.db, thread).await? else {
             return Ok(None);
@@ -184,21 +184,45 @@ pub(crate) async fn announce(app: &App, tenant: &str, thread: &str) {
         let roles = roles(&app.db, &place).await?;
         Ok::<_, DbError>(Some((chat, place, members, roles)))
     };
-    let Ok(Some((chat, place, members, roles))) = found.await else {
-        return;
+    let (chat, place, members, roles) = match found.await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, "team event read failed; the teams read will catch up");
+            return Vec::new();
+        }
     };
-    for member in &members {
-        let resource = self::thread(app, tenant, &chat, &place, &member.user_id, &roles);
-        let payload = json!({"resourceType": "ThreadUpdate", "resource": resource}).to_string();
-        if app
-            .fanout
-            .publish(&format!("push:8:orgid:{}", member.user_id), payload.into())
-            .await
-            .is_err()
-        {
+    members
+        .iter()
+        .map(|member| {
+            let mut resource = self::thread(app, tenant, &chat, &place, &member.user_id, &roles);
+            if deleted {
+                resource["isDeleted"] = json!(true);
+            }
+            (
+                format!("push:8:orgid:{}", member.user_id),
+                json!({"resourceType": "ThreadUpdate", "resource": resource}),
+            )
+        })
+        .collect()
+}
+
+pub(crate) async fn publish(app: &App, updates: Vec<(String, Value)>) {
+    for (channel, payload) in updates {
+        if app.fanout.publish(&channel, payload.to_string().into()).await.is_err() {
             tracing::warn!("team event fan-out unavailable; the teams read will catch up");
         }
     }
+}
+
+/// Tells everyone in `thread` that it changed (a team's or channel's name, people, state), as a chat's creation does.
+pub(crate) async fn announce(app: &App, tenant: &str, thread: &str) {
+    publish(app, updates(app, tenant, thread, false).await).await;
+}
+
+/// What tells everyone in `thread` that it is gone (`isDeleted`), read before the delete and published after it.
+pub(crate) async fn farewell(app: &App, tenant: &str, thread: &str) -> Vec<(String, Value)> {
+    updates(app, tenant, thread, true).await
 }
 
 type Params = HashMap<String, String>;
@@ -243,7 +267,7 @@ pub(super) async fn set_property(
                 settings: Some(text),
                 ..repo::ChannelEdit::NONE
             };
-            repo::edit_channel(&app.db, &place.channel, &edit).await?;
+            repo::edit_channel(&app.db, &place.channel.id, &edit).await?;
         }
         _ => return Err(Error::BadRequest),
     }

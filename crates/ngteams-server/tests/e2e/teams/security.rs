@@ -198,6 +198,15 @@ const OUTSIDE: [(&str, &str, &str); 25] = [
 #[tokio::test(flavor = "multi_thread")]
 async fn someone_outside_a_team_learns_nothing_of_it_and_changes_nothing() {
     let world = World::new().await;
+    // a picture is there to be refused
+    let picture = teams_proto::TeamWrite::SetPicture {
+        team: world.name("{team}").to_owned(),
+        group: world.name("{group}").to_owned(),
+        picture: teams_proto::RawBody::from(vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+    };
+    world.seats[0].engine.team_write(picture, None).await.unwrap();
+    let path = "{MT}/users/{ada}/profilepicturev2/teams/{group}";
+    assert_eq!(world.send("ada", "GET", path, "").await.0, 200);
     for (method, path, body) in OUTSIDE {
         let (status, answer) = world.send("cora", method, path, body).await;
         assert_eq!(status, 404, "{method} {path}: {answer}");
@@ -393,7 +402,7 @@ const BEYOND: [(&str, &str, &str, u16); 9] = [
     ),
     ("PUT", "{MT}/teams/{channel}/setDefaultChannel", "", 403),
     ("PATCH", "{MT}/teams/{team}", r#"{"description":"mine"}"#, 403),
-    ("POST", "{MT}/teams/{team}/profilepicture?threadId={team}", "{}", 404),
+    ("POST", "{MT}/teams/{group}/profilepicture?threadId={team}", "{}", 403),
     ("POST", "{PROV}/groups/{group}/unarchive", "", 403),
     (
         "PUT",
