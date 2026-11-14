@@ -417,7 +417,20 @@ impl TokenClient {
     /// # Errors
     /// When the HTTP client can't be built (no TLS backend).
     pub fn new(config: EntraConfig) -> Result<Self, TokenError> {
-        let http = reqwest::Client::builder()
+        Self::build(config, &crate::cloud::Cloud::Microsoft)
+    }
+
+    /// The native client against `cloud`'s token endpoint, trusting the certificate authorities `cloud` names.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn for_cloud(cloud: &crate::cloud::Cloud) -> Result<Self, TokenError> {
+        Self::build(EntraConfig::teams_native().for_cloud(cloud), cloud)
+    }
+
+    fn build(config: EntraConfig, cloud: &crate::cloud::Cloud) -> Result<Self, TokenError> {
+        let http = cloud
+            .trust(reqwest::Client::builder())
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)
@@ -460,6 +473,24 @@ impl TokenClient {
             ("scope", scope.as_str()),
         ];
         self.grant(&form, &[refresh_token.expose()], clock).await
+    }
+
+    /// Redeems a user name and password (`grant_type=password`), asking for an ID token too. Only an own server takes
+    /// this grant: Microsoft accounts sign in on Microsoft's page.
+    pub(crate) async fn redeem_password(
+        &self,
+        username: &str,
+        password: &Secret,
+        scope: &Scope,
+    ) -> Result<Grant, TokenError> {
+        let form = [
+            ("client_id", self.config.client_id()),
+            ("grant_type", "password"),
+            ("username", username),
+            ("password", password.expose()),
+            ("scope", scope.as_str()),
+        ];
+        self.grant(&form, &[password.expose()], &SystemClock).await
     }
 
     /// POSTs one grant. `secrets` are the sent values an error text must never echo; `clock` dates the request, which

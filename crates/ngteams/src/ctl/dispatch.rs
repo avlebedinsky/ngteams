@@ -170,9 +170,16 @@ fn account_rows(running: &Running, cx: &App) -> Vec<AccountRow> {
                 .tile(mri)
                 .map(|tile| tile.name.to_string())
                 .filter(|name| !name.is_empty());
+            let server = running.server_of(mri).map(str::to_owned);
+            // an own server's account is named by its server and UPN together: the row gives each on its own
+            let upn = server
+                .as_deref()
+                .and_then(|server| upn.strip_prefix(server)?.strip_prefix('/'))
+                .unwrap_or(upn);
             AccountRow {
                 index: u32::try_from(index).unwrap_or(u32::MAX),
-                upn: upn.clone(),
+                upn: upn.to_owned(),
+                server,
                 mri: mri.clone(),
                 name,
                 shown: shown == Some(mri.as_str()),

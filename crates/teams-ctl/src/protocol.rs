@@ -468,6 +468,9 @@ pub struct AccountRow {
     /// Its place in the app's accounts, from 0: what `--account <index>` names.
     pub index: u32,
     pub upn: String,
+    /// Its own server's origin; absent for a Microsoft 365 account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     pub mri: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

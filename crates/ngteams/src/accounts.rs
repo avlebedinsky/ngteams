@@ -1,8 +1,8 @@
 //! Accounts running side by side, with one shared call floor and device set.
 //! Each engine owns its account's store and sends writes through its outbox.
 
-use crate::accounts_file::PersonalAccount;
-use teams_auth::secrets::SecretStore;
+use crate::accounts_file::{OwnServer, PersonalAccount};
+use teams_auth::secrets::{Secret, SecretStore};
 use teams_core::CallFloor;
 use teams_signin::window::Windows;
 
@@ -170,6 +170,32 @@ pub fn add(setup: &Setup, upn: &str, windows: &Windows) -> Result<PersonalAccoun
         let signed = signin::add(setup, upn, &clients, &store, window).await?;
         log::info!("an account was added (its tenant matched)");
         Ok(signed)
+    })
+}
+
+/// Adds the own server `server`'s account `upn` and signs it in with `password` (blocking), as [`signin::add_own`].
+///
+/// # Errors
+/// Why it wasn't added, as the user is told it ([`signin::own_failure`]).
+pub fn add_own(setup: &Setup, upn: &str, server: &OwnServer, password: &Secret) -> Result<PersonalAccount, String> {
+    let store = setup.secrets();
+    runtime()?.block_on(async {
+        let signed = signin::add_own(setup, upn, server, password, &store).await?;
+        log::info!("an own server's account was added");
+        Ok(signed)
+    })
+}
+
+/// Signs the own server's `account` in again with `password` (blocking), as [`signin::sign_in_own`].
+///
+/// # Errors
+/// Why the sign-in stored nothing, as the user is told it ([`signin::own_failure`]).
+pub fn sign_in_own(setup: &Setup, account: &PersonalAccount, password: &Secret) -> Result<PersonalAccount, String> {
+    let store = setup.secrets();
+    runtime()?.block_on(async {
+        signin::sign_in_own(setup, account, password, &store)
+            .await
+            .map_err(|error| signin::own_failure(setup, account, &error))
     })
 }
 

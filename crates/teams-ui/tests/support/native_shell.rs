@@ -73,6 +73,7 @@ fn desktop(id: &'static str, cx: &mut App) -> (Entity<Desktop>, [Arc<FakeCore>; 
                 },
                 account_name: "Synthetic A".into(),
                 account_detail: "a@example.test".into(),
+                account_server: None,
                 can_add: true,
                 ringer: None,
                 pictures_dir: None,
@@ -87,6 +88,7 @@ fn desktop(id: &'static str, cx: &mut App) -> (Entity<Desktop>, [Arc<FakeCore>; 
                 models: models[1].clone(),
                 name: "Synthetic B".into(),
                 detail: "b@example.test".into(),
+                server: None,
             },
             cx,
         );

@@ -30,13 +30,13 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::accounts_file::{PersonalAccount, PersonalError};
+use crate::accounts_file::{OwnServer, PersonalAccount, PersonalError};
 use gpui::{App, Global};
 use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region};
 use teams_auth::pkce::PkceError;
 use teams_auth::redirect::RedirectUri;
-use teams_auth::refresh::refresh_token_key;
-use teams_auth::secrets::{SecretError, SecretStore};
+use teams_auth::refresh::{PasswordSignIn, refresh_token_key};
+use teams_auth::secrets::{Secret, SecretError, SecretStore};
 use teams_auth::signin::{SignInAnswer, SignInRequest, WindowError, WindowSignInError, sign_in_with};
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
 use teams_signin::hosts::{HostRefused, SignInHosts};
@@ -90,6 +90,10 @@ pub enum SignInError {
     NoWindow(io::Error),
     #[error(transparent)]
     Hosts(#[from] HostRefused),
+    #[error(
+        "the account signs in another way: Microsoft 365 in Microsoft's window, an own server's with its password (own servers may be off)"
+    )]
+    WrongCloud,
 }
 
 /// The clients a sign-in talks to: Entra's token endpoint (and the authorize request's config) and authz.
@@ -101,6 +105,19 @@ pub struct SignInClients {
 }
 
 impl SignInClients {
+    /// The ones of `cloud`: its token endpoint and authz, trusting its certificate authority.
+    ///
+    /// # Errors
+    /// When an HTTP client can't be built.
+    pub fn for_cloud(cloud: &teams_proto::Cloud) -> Result<Self, SignInError> {
+        let token = TokenClient::for_cloud(cloud)?;
+        Ok(Self {
+            entra: token.config().clone(),
+            token,
+            authz: AuthzClient::for_cloud(cloud)?,
+        })
+    }
+
     /// The live ones: the native client against Entra, and Teams' authz.
     ///
     /// # Errors
@@ -172,7 +189,7 @@ pub async fn ready<S: SecretStore>(setup: &Setup, account: &PersonalAccount, sto
     if !account.is_signed_in() || !setup.paths.region_file(account).is_some_and(|region| region.is_file()) {
         return Ok(false);
     }
-    Ok(store.get(&refresh_token_key(&account.upn)).await?.is_some())
+    Ok(store.get(&refresh_token_key(&account.id())).await?.is_some())
 }
 
 /// Signs `account` in through the window `window` starts (see the module docs) and gives the account as the sign-in
@@ -189,16 +206,65 @@ pub async fn sign_in<S: SecretStore>(
     store: &S,
     window: Window,
 ) -> Result<PersonalAccount, SignInError> {
+    if account.server.is_some() {
+        // an own server's account never sees Microsoft's page, and Microsoft never its user name
+        return Err(SignInError::WrongCloud);
+    }
     let mut authorization = Authorization::new(&clients.entra, &account.upn, Scope::spaces())?;
     if let (Some(oid), Some(tid)) = (&account.oid, &account.tid) {
         authorization = authorization.expect_object_id(oid).expect_tenant(tid);
     }
     let signed = sign_in_with(&clients.token, store, &authorization, window).await?;
-    let named = account.signed_in_as(
-        &signed.account.object_id,
-        &signed.account.tenant,
-        signed.account.display_name.as_deref(),
-    )?;
+    finish(setup, account, clients, store, &signed.account).await
+}
+
+/// Signs the own server's account `account` in with `password` (the password grant against its server, never
+/// Microsoft's window), then as [`sign_in`]: its entry named, its skypetoken and region taken from its server's authz.
+/// Its tokens are stored under the account qualified by its server ([`PersonalAccount::id`]).
+///
+/// # Errors
+/// [`SignInError`]: own servers are off or the account isn't an own server's, its CA file can't be read, the server
+/// refused the user name or password or named another account (nothing stored then), authz refused, or a file
+/// couldn't be written.
+pub async fn sign_in_own<S: SecretStore>(
+    setup: &Setup,
+    account: &PersonalAccount,
+    password: &Secret,
+    store: &S,
+) -> Result<PersonalAccount, SignInError> {
+    if !setup.own_servers() || account.server.is_none() {
+        return Err(SignInError::WrongCloud);
+    }
+    let cloud = account.cloud()?;
+    let clients = SignInClients::for_cloud(&cloud)?;
+    let id = account.id();
+    let signed = clients
+        .token
+        .password_sign_in(
+            store,
+            PasswordSignIn {
+                account: &id,
+                username: &account.upn,
+                expected: account.tid.as_deref().zip(account.oid.as_deref()),
+            },
+            password,
+            &Scope::spaces(),
+        )
+        .await?;
+    finish(setup, account, &clients, store, &signed.account).await
+}
+
+/// What follows a sign-in that stored `account`'s refresh token: its entry saved as `signed` names it, its skypetoken
+/// stored and its region saved.
+async fn finish<S: SecretStore>(
+    setup: &Setup,
+    account: &PersonalAccount,
+    clients: &SignInClients,
+    store: &S,
+    signed: &teams_auth::id_token::Account,
+) -> Result<PersonalAccount, SignInError> {
+    let id = account.id();
+    let named = account.signed_in_as(&signed.object_id, &signed.tenant, signed.display_name.as_deref())?;
     // If another entry already has this object id, remove the credential just stored for this sign-in.
     let saved = (|| {
         setup.paths.make_dirs().map_err(|source| PersonalError::Write {
@@ -208,15 +274,15 @@ pub async fn sign_in<S: SecretStore>(
         named.save(&setup.paths)
     })();
     if let Err(error) = saved {
-        store.delete(&refresh_token_key(&account.upn)).await?;
+        store.delete(&refresh_token_key(&id)).await?;
         return Err(error.into());
     }
-    let spaces = clients.token.refresh(store, &account.upn, &Scope::spaces()).await?;
+    let spaces = clients.token.refresh(store, &id, &Scope::spaces()).await?;
     let skypetoken = clients
         .authz
         .exchange_and_store(
             store,
-            &account.upn,
+            &id,
             &spaces.access_token,
             spaces.expires_at,
             AuthzKind::ExplicitLogin,
@@ -252,6 +318,46 @@ pub async fn add<S: SecretStore>(
         }
         failure(setup, &account, &error)
     })
+}
+
+/// Adds the own server `server`'s account `upn` (or takes up the entry held of it: [`Setup::ask_for_on`]) and signs
+/// it in with `password` ([`sign_in_own`]); no sign-in window opens. One whose sign-in stores nothing is taken out
+/// again while it holds nothing the user wrote ([`Setup::abandon`]).
+///
+/// # Errors
+/// What the user is told ([`own_failure`]).
+pub async fn add_own<S: SecretStore>(
+    setup: &Setup,
+    upn: &str,
+    server: &OwnServer,
+    password: &Secret,
+    store: &S,
+) -> Result<PersonalAccount, String> {
+    let account = setup.ask_for_on(upn, server).map_err(|error| error.to_string())?;
+    sign_in_own(setup, &account, password, store).await.map_err(|error| {
+        let _ = setup.abandon(&account.id());
+        own_failure(setup, &account, &error)
+    })
+}
+
+/// What the user is told when an own server's sign-in stored nothing: a wrong user name or password, a wait the
+/// server asked for, a server that can't be reached (with where a self-signed deployment's certificate authority
+/// goes), else the error.
+#[must_use]
+pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError) -> String {
+    let server = account.server.as_deref().unwrap_or_default();
+    match error {
+        SignInError::Token(TokenError::InvalidGrant(_)) => "The user name or password isn't right.".to_owned(),
+        SignInError::Token(TokenError::Throttled { .. }) => {
+            "Too many attempts: wait a few minutes, then sign in again.".to_owned()
+        }
+        SignInError::Token(TokenError::Http(_)) | SignInError::Authz(AuthzError::Http(_)) => format!(
+            "{server} can't be reached. For a server with its own certificate authority, add ca_file = \"/path/to/ca.pem\" to \
+             an [[account]] entry with this user name and server in {}, then sign in again.",
+            setup.paths.accounts_file().display(),
+        ),
+        error => format!("the sign-in stored nothing: {error}"),
+    }
 }
 
 /// The host the sign-in window refused to go to, when that is why it stored nothing: a federated identity provider's

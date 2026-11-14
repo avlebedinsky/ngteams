@@ -8,7 +8,7 @@ use crate::CallFloor;
 use teams_auth::authz::{AuthzClient, AuthzError, CHAT_BASE_GTM, Region};
 use teams_auth::secrets::SecretStore;
 use teams_auth::session::Session;
-use teams_auth::token::{EntraConfig, TokenClient, TokenError};
+use teams_auth::token::{TokenClient, TokenError};
 use teams_call::Identity;
 use teams_call::Tracker;
 use teams_media::video::codec::EncoderSettings;
@@ -97,7 +97,7 @@ pub enum AccountError {
 /// The account an engine is for, as the binary knows it.
 #[derive(Debug)]
 pub struct Account<S> {
-    /// Its UPN: what its tokens are stored under.
+    /// What its tokens are stored under: its UPN, qualified by its server for an own-server account.
     pub upn: String,
     /// Its MRI (`8:orgid:<oid>`).
     pub mri: String,
@@ -272,7 +272,7 @@ fn new_session<S: SecretStore>(
     Ok(Session::new(
         upn,
         secrets,
-        TokenClient::new(EntraConfig::teams_native().for_cloud(cloud))?,
+        TokenClient::for_cloud(cloud)?,
         AuthzClient::for_cloud(cloud)?,
         region,
     ))

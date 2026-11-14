@@ -33,7 +33,48 @@ pub struct SignIn {
     pub account: Account,
 }
 
+/// An own server's sign-in by user name and password ([`TokenClient::password_sign_in`]).
+#[derive(Clone, Copy, Debug)]
+pub struct PasswordSignIn<'a> {
+    /// What the refresh token is stored under ([`refresh_token_key`]): the account qualified by its server.
+    pub account: &'a str,
+    /// The user name the server signs in, which its ID token must name.
+    pub username: &'a str,
+    /// The tenant and object id an earlier sign-in named, which this one must match.
+    pub expected: Option<(&'a str, &'a str)>,
+}
+
 impl TokenClient {
+    /// Signs in with a user name and password (the password grant; an own server's sign-in, never Microsoft's),
+    /// checks that the answer's ID token names that user for this client (and the tenant and object id expected), and
+    /// only then stores the refresh token under the sign-in's account. The password is sent once and kept nowhere.
+    ///
+    /// # Errors
+    /// The server's refusal ([`TokenError::InvalidGrant`] for a wrong user name or password,
+    /// [`TokenError::Throttled`] while the account is held off), an ID token that is missing or names another account,
+    /// an answer without a refresh token, or a store failure. On every error but the last nothing is stored.
+    pub async fn password_sign_in<S: SecretStore>(
+        &self,
+        store: &S,
+        sign_in: PasswordSignIn<'_>,
+        password: &crate::secrets::Secret,
+        scope: &Scope,
+    ) -> Result<SignIn, TokenError> {
+        let grant = self.redeem_password(sign_in.username, password, scope).await?;
+        let id_token = grant.tokens.id_token.as_ref().ok_or(IdTokenError::Missing)?;
+        let (tenant, object_id) = sign_in
+            .expected
+            .map_or((None, None), |(tid, oid)| (Some(tid), Some(oid)));
+        let account =
+            IdTokenClaims::parse(id_token)?.bind_to(sign_in.username, tenant, object_id, self.config().client_id())?;
+        let refresh_token = grant.refresh_token.ok_or(TokenError::MissingField("refresh_token"))?;
+        store.put(&refresh_token_key(sign_in.account), &refresh_token).await?;
+        Ok(SignIn {
+            tokens: grant.tokens,
+            account,
+        })
+    }
+
     /// Redeems the code from `authorization`'s redirect, checks that the answer's ID token names the authorization's
     /// account (and its expected tenant and object id, where given) and was issued to this client, and only then
     /// stores the refresh token under that account.

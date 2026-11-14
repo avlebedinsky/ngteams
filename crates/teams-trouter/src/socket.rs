@@ -218,13 +218,24 @@ pub enum ConnectError {
     Refused(Option<u16>),
 }
 
-/// The TLS client config: the system's certificate verifier on `aws-lc-rs`, as the HTTP transport's (reqwest's).
+/// The TLS client config: the system's certificate verifier on `aws-lc-rs`, as the HTTP transport's (reqwest's),
+/// trusting `cloud`'s own certificate authorities beside the system's when it names some.
 ///
 /// # Errors
-/// When the system verifier can't be set up.
-pub(crate) fn tls_config() -> Result<Arc<ClientConfig>, tokio_rustls::rustls::Error> {
+/// When the system verifier can't be set up, or a certificate authority `cloud` names can't be read.
+pub(crate) fn tls_config(cloud: &Cloud) -> Result<Arc<ClientConfig>, tokio_rustls::rustls::Error> {
+    use tokio_rustls::rustls::pki_types::CertificateDer;
+    use tokio_rustls::rustls::pki_types::pem::PemObject as _;
     let provider = Arc::new(crypto::aws_lc_rs::default_provider());
-    let verifier = rustls_platform_verifier::Verifier::new(Arc::clone(&provider))?;
+    let verifier = match cloud.extra_roots() {
+        Some(pem) => {
+            let roots = CertificateDer::pem_slice_iter(pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| tokio_rustls::rustls::Error::General(format!("the certificate authority: {error}")))?;
+            rustls_platform_verifier::Verifier::new_with_extra_roots(roots, Arc::clone(&provider))?
+        }
+        None => rustls_platform_verifier::Verifier::new(Arc::clone(&provider))?,
+    };
     let config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .dangerous()
@@ -478,7 +489,7 @@ mod tests {
             drop(socket);
         });
         let cloud = Cloud::own("https://chat.example:8443").unwrap();
-        let opener = Opener::new(tls_config().unwrap())
+        let opener = Opener::new(tls_config(&Cloud::Microsoft).unwrap())
             .for_cloud(cloud.clone())
             .with_mock_origin(mock);
         let own = ConnectBase::global_in(&cloud).unwrap();

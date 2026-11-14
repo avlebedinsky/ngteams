@@ -552,7 +552,8 @@ impl<C: Credentials> HttpTransport<C> {
             .and_then(|host| AFD_HOSTS.iter().find(|afd| **afd == host))
             .copied()
             .unwrap_or(AFD_HOSTS[0]);
-        let client = reqwest::Client::builder()
+        let client = cloud
+            .trust(reqwest::Client::builder())
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             // the only retries are `exchange`'s and the outbox's (see the module docs)

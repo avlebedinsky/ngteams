@@ -158,11 +158,12 @@ pub(super) mod app {
 }
 
 pub(super) mod prompt {
-    pub(crate) fn open(
+    pub(crate) fn open_offering(
         cx: &mut gpui::App,
         app_id: &str,
         title: gpui::SharedString,
         held: Option<&str>,
+        own: teams_ui::OwnOffer,
     ) -> gpui::Result<(
         gpui::WindowHandle<teams_ui::window::KitRoot>,
         gpui::Entity<teams_ui::AccountPrompt>,
@@ -170,7 +171,7 @@ pub(super) mod prompt {
         if std::env::var(super::CASE).unwrap() == "prompt-window-error" {
             return Err(std::io::Error::other("synthetic prompt window failure").into());
         }
-        teams_ui::account_prompt::open(cx, app_id, title, held)
+        teams_ui::account_prompt::open_offering(cx, app_id, title, held, own)
     }
 }
 

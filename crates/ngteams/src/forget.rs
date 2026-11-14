@@ -65,11 +65,8 @@ pub async fn forget<S: SecretStore>(setup: &Setup, upn: &str, secrets: &S) -> Re
         })?),
         None => None,
     };
-    for key in [
-        refresh_token_key(&account.upn),
-        skypetoken_key(&account.upn),
-        skypetoken_expiry_key(&account.upn),
-    ] {
+    let id = account.id();
+    for key in [refresh_token_key(&id), skypetoken_key(&id), skypetoken_expiry_key(&id)] {
         secrets.delete(&key).await?;
     }
     if let Some(path) = setup.paths.region_file(&account) {
@@ -79,7 +76,7 @@ pub async fn forget<S: SecretStore>(setup: &Setup, upn: &str, secrets: &S) -> Re
             Err(source) => return Err(ForgetError::Remove { path, source }),
         }
     }
-    PersonalAccount::remove(&setup.paths, &account.upn)?;
+    PersonalAccount::remove(&setup.paths, &id)?;
     Ok(Forgot::Account {
         upn: account.upn,
         store,

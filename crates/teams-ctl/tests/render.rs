@@ -538,6 +538,7 @@ fn rows_without_their_optional_values_read_plainly() {
         accounts: vec![AccountRow {
             index: 1,
             upn: s("b@lab.invalid"),
+            server: None,
             mri: s("8:orgid:b"),
             name: None,
             shown: false,

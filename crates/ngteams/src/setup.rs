@@ -7,7 +7,7 @@
 //! stays, a pending entry the next sign-in of that UPN takes up, never an account the app starts. A build of one account's `account.toml` and `region.json` is moved into these files
 //! when the setup is made (`PersonalPaths::migrate_single_account`).
 
-use crate::accounts_file::{PersonalAccount, PersonalError, PersonalPaths};
+use crate::accounts_file::{OwnServer, PersonalAccount, PersonalError, PersonalPaths};
 use crate::secrets::AppSecrets;
 
 /// Why the personal build can't run for an account here.
@@ -22,6 +22,16 @@ pub enum SetupError {
 pub struct Setup {
     pub paths: PersonalPaths,
     secrets: AppSecrets,
+    own_servers: bool,
+}
+
+/// The variable that turns own-server accounts on (`NGTEAMS_OWN_SERVER=1`) while they are being built.
+pub const OWN_SERVER_ENV: &str = "NGTEAMS_OWN_SERVER";
+
+/// Whether this process was started with own-server accounts on ([`OWN_SERVER_ENV`]).
+#[must_use]
+pub fn own_servers_from_env() -> bool {
+    std::env::var_os(OWN_SERVER_ENV).is_some_and(|value| value == "1")
 }
 
 impl Setup {
@@ -42,7 +52,21 @@ impl Setup {
         Ok(Self {
             paths,
             secrets: AppSecrets::personal(),
+            own_servers: false,
         })
+    }
+
+    /// Whether own-server accounts are offered, signed in and started (off unless asked for).
+    #[must_use]
+    pub fn with_own_servers(mut self, own_servers: bool) -> Self {
+        self.own_servers = own_servers;
+        self
+    }
+
+    /// Whether own-server accounts are on ([`Self::with_own_servers`]).
+    #[must_use]
+    pub fn own_servers(&self) -> bool {
+        self.own_servers
     }
 
     /// Uses the startup-selected credential backend for every account operation.
@@ -73,7 +97,8 @@ impl Setup {
     /// As [`Self::accounts`].
     pub fn signed_in_accounts(&self) -> Result<Vec<PersonalAccount>, SetupError> {
         let mut accounts = self.accounts()?;
-        accounts.retain(PersonalAccount::is_signed_in);
+        // an own server's account stays in the file, unstarted, while own servers are off
+        accounts.retain(|account| account.is_signed_in() && (self.own_servers || account.server.is_none()));
         Ok(accounts)
     }
 
@@ -85,7 +110,7 @@ impl Setup {
     pub fn pending_upns(&self) -> Result<Vec<String>, SetupError> {
         Ok(PersonalAccount::load_all(&self.paths)?
             .into_iter()
-            .filter(|account| !account.is_signed_in())
+            .filter(|account| !account.is_signed_in() && account.server.is_none())
             .map(|account| account.upn)
             .collect())
     }
@@ -102,6 +127,35 @@ impl Setup {
         let pending = PersonalAccount::pending(upn)?;
         pending.save(&self.paths)?;
         Ok(pending)
+    }
+
+    /// The own server `server`'s account `upn`, to sign in: the one `accounts.toml` holds of that server and UPN (with
+    /// whatever the user wrote into it, its `ca_file` say; a CA file given now replaces the entry's), else added after
+    /// the others without an object id.
+    ///
+    /// # Errors
+    /// [`SetupError::Personal`] while own servers are off, for a bad UPN or server, or a file that can't be read or
+    /// written.
+    pub fn ask_for_on(&self, upn: &str, server: &OwnServer) -> Result<PersonalAccount, SetupError> {
+        if !self.own_servers {
+            return Err(PersonalError::Account(format!("own servers are off (set {OWN_SERVER_ENV}=1)")).into());
+        }
+        let pending = PersonalAccount::pending_on(upn, server)?;
+        match PersonalAccount::find(&self.paths, &pending.id())? {
+            Some(held) if server.ca_file.is_none() || held.ca_file == server.ca_file => Ok(held),
+            Some(held) => {
+                let held = PersonalAccount {
+                    ca_file: server.ca_file.clone(),
+                    ..held
+                };
+                held.save(&self.paths)?;
+                Ok(held)
+            }
+            None => {
+                pending.save(&self.paths)?;
+                Ok(pending)
+            }
+        }
     }
 
     /// Takes the account `upn` (case aside) out of `accounts.toml` when no sign-in ever named it and it holds nothing
@@ -121,5 +175,5 @@ impl Setup {
 
 /// Whether `account` holds nothing but its UPN: no sign-in named it and nothing was written into it by hand.
 fn is_bare(account: &PersonalAccount) -> bool {
-    !account.is_signed_in() && account.name.is_none() && account.idp_hosts.is_empty()
+    !account.is_signed_in() && account.name.is_none() && account.idp_hosts.is_empty() && account.ca_file.is_none()
 }

@@ -197,6 +197,7 @@ impl OnDesktop {
                         shell,
                         account_name: "Lab A".into(),
                         account_detail: "lab a".into(),
+                        account_server: None,
                         can_add: false,
                         ringer: None,
                         pictures_dir: None,
@@ -651,6 +652,7 @@ fn an_account_added_to_an_open_window_keeps_the_active_shell_and_inherits_the_no
         models,
         name: "Synthetic second account".into(),
         detail: "second@example.test".into(),
+        server: None,
     };
     d.rig.cx.update(|cx| {
         d.desktop.update(cx, |desktop, cx| {

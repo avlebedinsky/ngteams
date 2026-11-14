@@ -282,7 +282,7 @@ impl AuthzClient {
         let endpoint = cloud
             .service_url(AUTHZ_ENDPOINT, "/api/authsvc/v1.0/authz")
             .map_err(|_| AuthzError::InvalidEndpoint)?;
-        Self::with_endpoint(endpoint.as_str())
+        Self::build(endpoint.as_str(), cloud)
     }
 
     /// A client for another authz URL (another cloud, or a mock server). No proxy, no redirects, a 30 s timeout.
@@ -291,11 +291,16 @@ impl AuthzClient {
     /// [`AuthzError::InvalidEndpoint`] unless the URL is HTTPS (or HTTP on a loopback host) and its path ends in the
     /// segment `authz`, with no query or fragment; or when the HTTP client can't be built.
     pub fn with_endpoint(endpoint: &str) -> Result<Self, AuthzError> {
+        Self::build(endpoint, &crate::cloud::Cloud::Microsoft)
+    }
+
+    fn build(endpoint: &str, cloud: &crate::cloud::Cloud) -> Result<Self, AuthzError> {
         let endpoint = Url::parse(endpoint).map_err(|_| AuthzError::InvalidEndpoint)?;
         if !is_authz_endpoint(&endpoint) {
             return Err(AuthzError::InvalidEndpoint);
         }
-        let http = reqwest::Client::builder()
+        let http = cloud
+            .trust(reqwest::Client::builder())
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)

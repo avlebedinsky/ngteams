@@ -1,4 +1,7 @@
-//! Account service boundaries. An own-server account has one HTTPS origin for every credentialed service.
+//! Account service boundaries. An own-server account has one HTTPS origin for every credentialed service, and may
+//! trust its deployment's own certificate authority beside the system's (a self-signed deployment's `ca_file`).
+
+use std::sync::Arc;
 
 use url::Url;
 
@@ -13,8 +16,26 @@ pub enum Cloud {
 }
 
 /// A validated HTTPS origin without a path, user info, query or fragment.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct OwnOrigin(Url);
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct OwnOrigin {
+    url: Url,
+    /// The deployment's certificate authorities (PEM), trusted beside the system's for this origin's connections.
+    roots: Option<Arc<[u8]>>,
+}
+
+impl std::fmt::Debug for OwnOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnOrigin")
+            .field("url", &self.url.as_str())
+            .field("roots", &self.roots.is_some())
+            .finish()
+    }
+}
+
+/// The certificate authority file holds no PEM certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the certificate authority file holds no PEM certificate")]
+pub struct InvalidRoots;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("an own server needs an HTTPS origin without user info, path, query or fragment")]
@@ -36,7 +57,9 @@ impl Cloud {
             && url.fragment().is_none()
             && (url.as_str() == origin || url.as_str() == format!("{origin}/"));
         if bare {
-            Ok(Self::Own { origin: OwnOrigin(url) })
+            Ok(Self::Own {
+                origin: OwnOrigin { url, roots: None },
+            })
         } else {
             Err(InvalidOrigin)
         }
@@ -51,7 +74,52 @@ impl Cloud {
     pub fn origin(&self) -> Option<&Url> {
         match self {
             Self::Microsoft => None,
-            Self::Own { origin } => Some(&origin.0),
+            Self::Own { origin } => Some(&origin.url),
+        }
+    }
+
+    /// The same cloud trusting the certificate authorities in `pem` beside the system's, on its own origin's
+    /// connections only. Microsoft's cloud never takes one.
+    ///
+    /// # Errors
+    /// [`InvalidRoots`] unless `pem` holds at least one certificate and every one of them parses.
+    pub fn trusting(self, pem: &[u8]) -> Result<Self, InvalidRoots> {
+        match self {
+            Self::Microsoft => Err(InvalidRoots),
+            Self::Own { origin } => {
+                let parsed = reqwest::Certificate::from_pem_bundle(pem).map_err(|_| InvalidRoots)?;
+                if parsed.is_empty() {
+                    return Err(InvalidRoots);
+                }
+                Ok(Self::Own {
+                    origin: OwnOrigin {
+                        url: origin.url,
+                        roots: Some(Arc::from(pem)),
+                    },
+                })
+            }
+        }
+    }
+
+    /// The extra certificate authorities this cloud trusts (PEM), if any ([`Cloud::trusting`]).
+    #[must_use]
+    pub fn extra_roots(&self) -> Option<&[u8]> {
+        match self {
+            Self::Microsoft => None,
+            Self::Own { origin } => origin.roots.as_deref(),
+        }
+    }
+
+    /// `builder` trusting this cloud's extra certificate authorities beside the system's.
+    #[must_use]
+    pub fn trust(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        // checked when they were taken ([`Cloud::trusting`]): one that no longer parses adds nothing
+        match self
+            .extra_roots()
+            .and_then(|pem| reqwest::Certificate::from_pem_bundle(pem).ok())
+        {
+            Some(roots) => builder.tls_certs_merge(roots),
+            None => builder,
         }
     }
 

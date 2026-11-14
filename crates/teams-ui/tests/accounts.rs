@@ -100,6 +100,7 @@ impl TwoAccounts {
             models: models.clone(),
             name: "Bee Work".into(),
             detail: "bee@example.test".into(),
+            server: None,
         };
         let given: Arc<dyn NotificationServer> = server.clone();
         let desktop = rig.cx.update(|cx| {
@@ -112,6 +113,7 @@ impl TwoAccounts {
                         shell,
                         account_name: "Aye Work".into(),
                         account_detail: "aye@example.test".into(),
+                        account_server: None,
                         can_add: true,
                         ringer: None,
                         pictures_dir: None,
@@ -490,6 +492,7 @@ fn a_lone_account_s_notifications_name_no_account() {
                     shell,
                     account_name: "Aye Work".into(),
                     account_detail: "aye@example.test".into(),
+                    account_server: None,
                     can_add: true,
                     ringer: None,
                     pictures_dir: None,

@@ -16,6 +16,8 @@ pub enum StartError {
     Region(#[from] RegionFileError),
     #[error(transparent)]
     Account(#[from] AccountError),
+    #[error("the account's server can't be used: {0}")]
+    Server(#[from] crate::accounts_file::PersonalError),
 }
 
 /// The account's running engine and its session (the app watches it for a sign-out).
@@ -65,7 +67,7 @@ fn start_with<S: SecretStore + 'static>(
     let store_file = paths.store_file(account).ok_or(StartError::NotSignedIn)?;
     let region = Region::load(&paths.region_file(account).ok_or(StartError::NotSignedIn)?)?;
     let parts = Account {
-        upn: account.upn.clone(),
+        upn: account.id(),
         mri: mri.as_str().to_owned(),
         display_name: display_name(account).to_owned(),
         store_file,
@@ -76,7 +78,7 @@ fn start_with<S: SecretStore + 'static>(
         calls,
         read_only,
     };
-    Ok(account::start(parts, floor)?)
+    Ok(account::start_for_cloud(parts, floor, &account.cloud()?)?)
 }
 
 /// The name the account's posts carry (`imdisplayname`): the display name the sign-in's ID token gave (its

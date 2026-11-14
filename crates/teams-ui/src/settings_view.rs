@@ -115,6 +115,10 @@ pub const TEST_CALL_DESCRIPTION: &str =
 /// What the shell tells the view of its test call, asked each time the Calls page draws.
 pub type TestCallState = Rc<dyn Fn(&App) -> TestCallOffer>;
 
+/// The own server of the view's account, as the shell tells it ([`SettingsView::with_server`]); `None` for a
+/// Microsoft 365 account.
+pub type AccountServer = Rc<dyn Fn(&App) -> Option<SharedString>>;
+
 /// What the settings view asks of the shell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsViewEvent {
@@ -327,6 +331,8 @@ pub struct SettingsView {
     fonts: Option<Fonts>,
     /// Whether the test call is offered now, as the shell tells it ([`SettingsView::with_test_call`]); `None`: never.
     test_call: Option<TestCallState>,
+    /// The account's own server, as the shell tells it ([`SettingsView::with_server`]).
+    server: Option<AccountServer>,
     /// The video effects' picker while the Calls page shows.
     effects: Option<Entity<EffectsPicker>>,
     /// The local AI choices' pickers (captions, then recaps), made the first time the Calls page shows.
@@ -358,6 +364,7 @@ impl SettingsView {
             focus: cx.focus_handle(),
             fonts: None,
             test_call: None,
+            server: None,
             effects: None,
             ai: None,
             chat_ai: None,
@@ -395,6 +402,32 @@ impl SettingsView {
     pub fn for_account(mut self, account: String) -> Self {
         self.account = Some(account);
         self
+    }
+
+    /// The view naming its account's own server on the General page, as `server` tells it (nothing for a Microsoft
+    /// 365 account).
+    #[must_use]
+    pub fn with_server(mut self, server: AccountServer) -> Self {
+        self.server = Some(server);
+        self
+    }
+
+    /// The General page's box naming the account's own server; none for a Microsoft 365 account.
+    fn server_box(&self, palette: Palette, cx: &App) -> Option<AnyElement> {
+        let server = self.server.as_ref().and_then(|server| server(cx))?;
+        Some(group(
+            Some("Account"),
+            vec![row(
+                "Server",
+                Some("This account is on your own server, not Microsoft 365."),
+                div()
+                    .debug_selector(|| "account-server".to_owned())
+                    .text_sm()
+                    .child(server),
+                palette,
+            )],
+            palette,
+        ))
     }
 
     /// The family the font picker shows, once the view has drawn it.
@@ -1226,6 +1259,9 @@ impl SettingsView {
         match self.page {
             Page::General => {
                 let mut boxes = self.general(settings, palette);
+                if let Some(server) = self.server_box(palette, cx) {
+                    boxes.insert(0, server);
+                }
                 boxes.push(self.chat_ai_picker(cx).into_any_element());
                 boxes.push(self.correction_ai_picker(cx).into_any_element());
                 boxes.push(self.message_translation_ai_picker(cx).into_any_element());

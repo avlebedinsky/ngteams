@@ -89,11 +89,22 @@ pub fn known<'a>(
     Ok((mri, upn, bridge))
 }
 
-/// The index of the account `wanted` names: its MRI, its UPN in any case, or its index.
+/// The index of the account `wanted` names: its MRI, its name in any case (its UPN; an own server's account is
+/// `<server>/<UPN>`, or its UPN alone while no other account has it), or its index.
 fn named(bridges: &[(String, String, Entity<teams_ui::Bridge>)], wanted: &str) -> Option<usize> {
     bridges
         .iter()
         .position(|(mri, upn, _)| mri == wanted || upn.eq_ignore_ascii_case(wanted))
+        .or_else(|| {
+            let mut own = bridges.iter().enumerate().filter(|(_, (_, name, _))| {
+                name.rsplit_once('/')
+                    .is_some_and(|(_, upn)| upn.eq_ignore_ascii_case(wanted))
+            });
+            match (own.next(), own.next()) {
+                (Some((index, _)), None) => Some(index),
+                _ => None,
+            }
+        })
         .or_else(|| wanted.parse::<usize>().ok().filter(|index| *index < bridges.len()))
 }
 

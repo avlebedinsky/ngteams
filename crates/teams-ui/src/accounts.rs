@@ -38,6 +38,8 @@ pub struct AccountParts {
     pub name: SharedString,
     /// What tells it apart beside the name: its UPN, or the lab's alias.
     pub detail: SharedString,
+    /// Its own server (the host, with a port that isn't 443); `None` for a Microsoft 365 account.
+    pub server: Option<SharedString>,
 }
 
 /// One account as the rail shows it.
@@ -45,6 +47,8 @@ pub struct AccountTile {
     pub key: String,
     pub name: SharedString,
     pub detail: SharedString,
+    /// Its own server; `None` for a Microsoft 365 account.
+    pub server: Option<SharedString>,
     pub core: Arc<dyn Core>,
     pub models: Models,
     /// Its unread total, counted as the tray counts it.
@@ -175,6 +179,7 @@ impl Accounts {
             key,
             name: parts.name,
             detail: parts.detail,
+            server: parts.server,
             core: parts.core,
             models: parts.models,
             tray,

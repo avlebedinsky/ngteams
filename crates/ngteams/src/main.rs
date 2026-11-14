@@ -14,7 +14,7 @@ use clap::Parser as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity};
 #[cfg(not(test))]
 use ngteams::accounts::{self, Runner, StartFailed, Started};
-use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
+use ngteams::accounts_file::{OwnServer, PersonalAccount, PersonalPaths};
 #[cfg(not(test))]
 use ngteams::app;
 use ngteams::app::{Launch, SignInAgain};
@@ -30,7 +30,7 @@ use teams_core::CallFloor;
 use teams_media::devices::Reach;
 #[cfg(not(test))]
 use teams_ui::account_prompt;
-use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
+use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent, OwnOffer, OwnSignIn};
 use teams_ui::window::PERSONAL_APP_ID;
 use teams_ui::{SettingsFile, ViewTrace};
 use teams_update::Restart;
@@ -299,7 +299,9 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     {
         return handed;
     }
-    let setup = Setup::from_env().map_err(|error| error.to_string())?;
+    let setup = Setup::from_env()
+        .map_err(|error| error.to_string())?
+        .with_own_servers(ngteams::setup::own_servers_from_env());
     // the user's own app, installed from a release, updates itself; no other mode does
     let updater = ngteams::update::for_this_run(&setup.paths);
     run_setup(cli, reach, setup, ViewTrace::off(), ctl, updater)
@@ -511,7 +513,7 @@ fn broker(upn: &str, fd: RawDescriptor) -> ExitCode {
         Ok(_) => return failed("secrets", &format!("{upn} isn't one of your signed-in accounts")),
         Err(error) => return failed("secrets", &error),
     };
-    let scope = read_only::broker_scope(&account.upn);
+    let scope = read_only::broker_scope(&account.id());
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => return failed("secrets", &format!("can't start the async runtime: {error}")),
@@ -564,7 +566,8 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
     let store = secrets::AppSecrets::lab(socket).map_err(|error| format!("the lab broker's socket: {error}"))?;
     let setup = Setup::new(paths)
         .map_err(|error| error.to_string())?
-        .with_secrets(store);
+        .with_secrets(store)
+        .with_own_servers(ngteams::setup::own_servers_from_env());
     let account = lab::account(&setup.paths)?;
     for requested in [cli.account.as_deref(), cli.forget.as_deref()].into_iter().flatten() {
         if !requested.eq_ignore_ascii_case(&account.upn) {
@@ -595,7 +598,8 @@ fn lab_broker(alias: &str, fd: RawDescriptor) -> ExitCode {
         Err(error) => return failed("secrets", &error),
     };
     let store = LazyKeyring::new(lab::LAB_KEYRING_APPLICATION);
-    let scope = secrets::lab_broker_scope(&account.upn);
+    // an own server's account keeps its tokens under its server and UPN together
+    let scope = secrets::lab_broker_scope(&account.id());
     match runtime.block_on(read_only::serve_broker(socket, &scope, &store, &mut std::io::stderr())) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => failed("secrets", &format!("{error}; the socket is closed")),
@@ -720,11 +724,21 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
     let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
-        match account_prompt::open(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref()) {
+        let own = if setup.own_servers() {
+            OwnOffer::Choice
+        } else {
+            OwnOffer::No
+        };
+        match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref(), own) {
             Ok((_, prompt)) => cx
                 .subscribe(&prompt, move |prompt, event, cx| {
-                    let AccountPromptEvent::SignIn(upn) = event;
-                    sign_in_from_prompt(setup.clone(), upn.clone(), prompt, Rc::clone(&restart_in_app), cx);
+                    let (setup, restart) = (setup.clone(), Rc::clone(&restart_in_app));
+                    match event {
+                        AccountPromptEvent::SignIn(upn) => sign_in_from_prompt(setup, upn.clone(), prompt, restart, cx),
+                        AccountPromptEvent::SignInOwn(own) => {
+                            sign_in_own_from_prompt(setup, own.clone(), None, prompt, restart, cx);
+                        }
+                    }
                 })
                 .detach(),
             Err(error) => {
@@ -769,10 +783,84 @@ fn sign_in_from_prompt(
     .detach();
 }
 
+/// Signs an own server's account in from a sign-in screen with the password typed, off GPUI's foreground: `again`
+/// when it is an account signed out before ([`accounts::sign_in_own`]), else added ([`accounts::add_own`]). One that
+/// goes through quits the app to start it afresh; one that doesn't is said on `prompt`.
+fn sign_in_own_from_prompt(
+    setup: Setup,
+    own: OwnSignIn,
+    again: Option<PersonalAccount>,
+    prompt: Entity<AccountPrompt>,
+    restart: Rc<Cell<bool>>,
+    cx: &mut App,
+) {
+    let signing = cx.background_spawn(async move {
+        let password = teams_auth::secrets::Secret::new(own.password.as_str());
+        match again {
+            Some(account) => accounts::sign_in_own(&setup, &account, &password),
+            None => {
+                let server = OwnServer::parse(&own.server, "").map_err(|error| error.to_string())?;
+                accounts::add_own(&setup, &own.user, &server, &password)
+            }
+        }
+    });
+    cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
+        Ok(_) => {
+            log::info!("an own server's account was signed in: the app restarts");
+            restart.set(true);
+            cx.update(app::quit);
+        }
+        Err(error) => {
+            eprintln!("teams: {error}");
+            cx.update(|cx| prompt.update(cx, |prompt, cx| prompt.failed(error, cx)));
+        }
+    })
+    .detach();
+}
+
+/// The screen asking for the password of the own server's `account` again (signed out, or not signed in yet): a
+/// sign-in that goes through restarts the app.
+fn ask_own_password(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>, cx: &mut App) {
+    let own = OwnOffer::Again {
+        server: account.server.clone().unwrap_or_default(),
+        user: account.upn.clone(),
+    };
+    match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), None, own) {
+        Ok((_, prompt)) => cx
+            .subscribe(&prompt, move |prompt, event, cx| {
+                if let AccountPromptEvent::SignInOwn(own) = event {
+                    let (setup, restart) = (setup.clone(), Rc::clone(&restart));
+                    sign_in_own_from_prompt(setup, own.clone(), Some(account.clone()), prompt, restart, cx);
+                }
+            })
+            .detach(),
+        Err(error) => {
+            eprintln!("teams: the window can't be opened: {error:#}");
+            log::warn!("the sign-in screen of an own server's account can't be opened");
+        }
+    }
+}
+
+/// [`sign_in_first`] for an own server's account: its password asked on the sign-in screen, alone.
+fn sign_in_first_own(setup: Setup, account: PersonalAccount) -> Outcome {
+    let restart = Rc::new(Cell::new(false));
+    let restart_in_app = Rc::clone(&restart);
+    let application = platform::application().with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| ask_own_password(setup, account, restart_in_app, cx));
+    if restart.get() {
+        Outcome::Restart { opened: None }
+    } else {
+        Outcome::Quit
+    }
+}
+
 /// The selected account's sign-in window, alone. A successful sign-in restarts the app; a failed personal add
 /// abandons its bare entry as the rail's "+" does ([`accounts::add`]). The lab identity was provisioned beforehand:
 /// sign it in as an existing account so closing or failing its first window leaves it available for another try.
 fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, String> {
+    if account.server.is_some() {
+        return Ok(sign_in_first_own(setup, account));
+    }
     let restart = Rc::new(Cell::new(false));
     let failure = Rc::new(std::cell::RefCell::new(None));
     let (restart_in_app, failure_in_app) = (Rc::clone(&restart), Rc::clone(&failure));
@@ -816,6 +904,11 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
 fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>) -> SignInAgain {
     Rc::new(move |cx: &mut App| {
         let (setup, account, restart) = (setup.clone(), account.clone(), Rc::clone(&restart));
+        if account.server.is_some() {
+            // an own server's account never sees Microsoft's window: its password is asked again
+            ask_own_password(setup, account, restart, cx);
+            return;
+        }
         let windows = ngteams::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move { accounts::sign_in(&setup, &account, &windows) });
         cx.spawn(async move |cx: &mut AsyncApp| match signing.await {

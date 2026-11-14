@@ -814,10 +814,18 @@ impl Shell {
                 .upgrade()
                 .map_or(TestCallOffer::Hidden, |shell| shell.read(cx).test_call_offer(cx))
         });
+        let shell = cx.weak_entity();
+        let server: crate::settings_view::AccountServer = Rc::new(move |cx: &App| {
+            let shell = shell.upgrade()?;
+            let shell = shell.read(cx);
+            let (accounts, _) = shell.accounts.as_ref()?;
+            accounts.read(cx).tile(shell.core.me())?.server.clone()
+        });
         let view = cx.new(|cx| {
             SettingsView::new(settings.clone(), cx)
                 .for_account(account)
                 .with_test_call(offer)
+                .with_server(server)
         });
         let asked = cx.subscribe(&view, |this: &mut Self, _, event, cx| match event {
             SettingsViewEvent::MakeTestCall => this.ask_call(Ask::TestCall, cx),

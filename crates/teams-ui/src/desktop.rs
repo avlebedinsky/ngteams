@@ -98,6 +98,8 @@ pub struct DesktopParts {
     /// The first account's name and what tells it apart (its UPN, the lab's alias), as the rail shows them.
     pub account_name: SharedString,
     pub account_detail: SharedString,
+    /// The first account's own server ([`AccountParts::server`]).
+    pub account_server: Option<SharedString>,
     /// Whether the app adds and removes accounts ([`crate::accounts::Accounts::can_add`]).
     pub can_add: bool,
     /// What plays an incoming call's ringtone (the app's speaker); `None` plays none.
@@ -259,6 +261,7 @@ impl Desktop {
         let tray = first.tray.clone();
         let name = parts.account_name.clone();
         let detail = parts.account_detail.clone();
+        let server = parts.account_server.clone();
         let mut this = Self {
             parts,
             window: None,
@@ -277,7 +280,7 @@ impl Desktop {
             call_windows,
             _subscriptions: [asking, closing, calling],
         };
-        this.push(first, name, detail, cx);
+        this.push(first, (name, detail, server), cx);
         this
     }
 
@@ -428,12 +431,18 @@ impl Desktop {
 
     /// Adds `slot` to the desktop: to the accounts, to the item's total, to the window's shells and to the bus's
     /// notifications when they are up.
-    fn push(&mut self, slot: Slot, name: SharedString, detail: SharedString, cx: &mut Context<Self>) {
+    fn push(
+        &mut self,
+        slot: Slot,
+        (name, detail, server): (SharedString, SharedString, Option<SharedString>),
+        cx: &mut Context<Self>,
+    ) {
         let account = AccountParts {
             core: Arc::clone(&slot.shell.core),
             models: slot.shell.models.clone(),
             name,
             detail,
+            server,
         };
         let (tray, own, key) = (slot.tray.clone(), slot.own_presence.clone(), slot.key.clone());
         self.accounts.update(cx, |accounts, cx| {
@@ -483,7 +492,7 @@ impl Desktop {
             trace: Arc::clone(&first.trace),
         };
         let slot = Self::slot(&self.parts, shell, Arc::new(ViewTrace::off()), cx);
-        self.push(slot, account.name, account.detail, cx);
+        self.push(slot, (account.name, account.detail, account.server), cx);
     }
 
     /// Takes account `key` out (the app stops its engine): its own presence stopped (nothing more is reported), its

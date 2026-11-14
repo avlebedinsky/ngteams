@@ -89,10 +89,29 @@ impl IdTokenClaims {
     /// [`TokenError::IdToken`] when no name claim is present, [`TokenError::WrongAccount`] naming the first claim
     /// that doesn't match.
     pub fn bind(self, authorization: &Authorization, client_id: &str) -> Result<Account, TokenError> {
+        self.bind_to(
+            authorization.account(),
+            authorization.expected_tenant(),
+            authorization.expected_object_id(),
+            client_id,
+        )
+    }
+
+    /// [`Self::bind`] for a sign-in without an authorization request (an own server's password grant): the account
+    /// asked for, and the tenant and object id an earlier sign-in named, where there was one.
+    ///
+    /// # Errors
+    /// As [`Self::bind`].
+    pub fn bind_to(
+        self,
+        account: &str,
+        expected_tenant: Option<&str>,
+        expected_object_id: Option<&str>,
+        client_id: &str,
+    ) -> Result<Account, TokenError> {
         if !self.audiences.iter().any(|audience| audience == client_id) {
             return Err(wrong("aud", client_id, &self.audiences.join(" ")));
         }
-        let account = authorization.account();
         let names = [
             ("preferred_username", self.preferred_username.as_deref()),
             ("upn", self.upn.as_deref()),
@@ -108,8 +127,8 @@ impl IdTokenClaims {
         let username = username
             .ok_or(IdTokenError::MissingClaim("preferred_username"))?
             .to_owned();
-        expect(authorization.expected_tenant(), "tid", &self.tenant)?;
-        expect(authorization.expected_object_id(), "oid", &self.object_id)?;
+        expect(expected_tenant, "tid", &self.tenant)?;
+        expect(expected_object_id, "oid", &self.object_id)?;
         Ok(Account {
             username,
             object_id: self.object_id,

@@ -261,15 +261,25 @@ fn app_status(status: &AppStatus) -> String {
 }
 
 fn account_table(accounts: &[AccountRow]) -> String {
+    // the server's column only once an account is on an own server: Microsoft 365 alone reads as before
+    let own = accounts.iter().any(|account| account.server.is_some());
     let rows = accounts.iter().map(|account| {
-        vec![
+        let mut row = vec![
             format!("{}{}", account.index, if account.shown { "*" } else { "" }),
             account.upn.clone(),
             account.state.clone(),
             account.name.clone().unwrap_or_default(),
-        ]
+        ];
+        if own {
+            row.push(account.server.clone().unwrap_or_else(|| "Microsoft 365".to_owned()));
+        }
+        row
     });
-    table(&["#", "ACCOUNT", "STATE", "NAME"], rows)
+    if own {
+        table(&["#", "ACCOUNT", "STATE", "NAME", "SERVER"], rows)
+    } else {
+        table(&["#", "ACCOUNT", "STATE", "NAME"], rows)
+    }
 }
 
 fn chat_table(chats: &[ChatRow]) -> String {

@@ -280,7 +280,7 @@ where
     /// endpoint id can be made.
     pub fn new(transport: Arc<T>, credentials: Arc<K>) -> Result<Self, BuildError> {
         let cloud = transport.cloud().clone();
-        let opener = Opener::new(socket::tls_config().map_err(BuildError::Tls)?).for_cloud(cloud.clone());
+        let opener = Opener::new(socket::tls_config(&cloud).map_err(BuildError::Tls)?).for_cloud(cloud.clone());
         Ok(Self {
             transport,
             cloud,

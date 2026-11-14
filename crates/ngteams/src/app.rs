@@ -8,7 +8,9 @@
 //!
 //! **Adding an account** (the rail's "+"): the window asking for the account opens (the first sign-in's), the account
 //! is signed in through the sign-in window off GPUI's foreground ([`crate::accounts::add`]), and once that goes through
-//! its engine starts ([`Runner::start`]) and the window shows it; nothing else restarts. **Removing one** ("Sign out
+//! its engine starts ([`Runner::start`]) and the window shows it; nothing else restarts. With own servers on, the
+//! window asks first where the account is: an own server's is signed in with its password on that server alone
+//! ([`crate::accounts::add_own`]) and runs beside the Microsoft 365 accounts, its tokens, store and services its own. **Removing one** ("Sign out
 //! and remove" in its account menu): its engine is shut down, then it is forgotten as `ngteams --forget` forgets it,
 //! then it leaves the window; the last one removed quits the app.
 //!
@@ -25,13 +27,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::accounts_file::PersonalAccount;
+use crate::accounts_file::{OwnServer, PersonalAccount};
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
-use teams_auth::secrets::SecretStore;
+use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::SignedOut;
 use teams_core::EngineHandle;
 use teams_log::diagnostics::Source as DiagnosticsSource;
-use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent};
+use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent, OwnOffer, OwnSignIn};
 use teams_ui::bus::BusError;
 use teams_ui::window::{KitRoot, PERSONAL_APP_ID};
 use teams_ui::{
@@ -140,6 +142,8 @@ impl Global for Held {}
 pub struct Running {
     desktop: Entity<Desktop>,
     bridges: Vec<(String, String, Entity<Bridge>)>,
+    /// The own server's origin of each account that is on one, by its MRI.
+    servers: std::collections::HashMap<String, String>,
     runner: Runner,
     settings: Entity<SettingsModel>,
     sign_in_again: Rc<dyn Fn(&PersonalAccount) -> SignInAgain>,
@@ -178,6 +182,7 @@ fn desktop_parts(app_id: &'static str, shell: ShellParts, account: &PersonalAcco
         shell,
         account_name: display_name(account).to_owned().into(),
         account_detail: account.upn.clone().into(),
+        account_server: account.server_host().map(Into::into),
         can_add: !read_only,
         ringer: None,
         pictures_dir: None,
@@ -231,9 +236,17 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     };
     let desktop = cx.new(|cx| Desktop::new(parts, cx));
     limit_lab_accounts(&desktop, &runner, cx);
+    let servers = first
+        .account
+        .server
+        .clone()
+        .map(|server| (key.clone(), server))
+        .into_iter()
+        .collect();
     let running = cx.new(|_| Running {
         desktop: desktop.clone(),
-        bridges: vec![(key, first.account.upn.clone(), bridge)],
+        bridges: vec![(key, first.account.id(), bridge)],
+        servers,
         runner,
         settings,
         sign_in_again,
@@ -378,7 +391,13 @@ impl Running {
         &self.desktop
     }
 
-    /// Each account as it runs, in the rail's order: its MRI, its UPN and its bridge.
+    /// The own server's origin of the account `mri`; `None` for a Microsoft 365 account.
+    pub(crate) fn server_of(&self, mri: &str) -> Option<&str> {
+        self.servers.get(mri).map(String::as_str)
+    }
+
+    /// Each account as it runs, in the rail's order: its MRI, its name ([`PersonalAccount::id`]: its UPN, with its
+    /// server before it for an own server's) and its bridge.
     pub(crate) fn bridges(&self) -> &[(String, String, Entity<Bridge>)] {
         &self.bridges
     }
@@ -454,11 +473,16 @@ impl Running {
             models,
             name: display_name(&account).to_owned().into(),
             detail: account.upn.clone().into(),
+            server: account.server_host().map(Into::into),
         };
         self.desktop.update(cx, |desktop, cx| desktop.add_account(parts, cx));
-        crate::ctl::watch::account(&self.hub, &account.upn, &bridge, &self.desktop, cx);
-        self.tell(&account.upn, &bridge, teams_ctl::protocol::CtlEvent::AccountAdded, cx);
-        self.bridges.push((key, account.upn, bridge));
+        let id = account.id();
+        if let Some(server) = account.server {
+            self.servers.insert(key.clone(), server);
+        }
+        crate::ctl::watch::account(&self.hub, &id, &bridge, &self.desktop, cx);
+        self.tell(&id, &bridge, teams_ctl::protocol::CtlEvent::AccountAdded, cx);
+        self.bridges.push((key, id, bridge));
     }
 
     /// The rail's "+": the window asking for the account (the first sign-in's), brought forward if it is open. The
@@ -476,7 +500,13 @@ impl Running {
         {
             return;
         }
-        let (window, prompt) = match account_prompt::open(cx, PERSONAL_APP_ID, "Add an account".into(), None) {
+        let own = if self.runner.setup.own_servers() {
+            OwnOffer::Choice
+        } else {
+            OwnOffer::No
+        };
+        let opened = account_prompt::open_offering(cx, PERSONAL_APP_ID, "Add an account".into(), None, own);
+        let (window, prompt) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 log::warn!("the window asking for an account can't be opened: {error:#}");
@@ -484,9 +514,59 @@ impl Running {
             }
         };
         self.adding = Some(window);
-        cx.subscribe(&prompt, |running, prompt, event, cx| {
-            let AccountPromptEvent::SignIn(upn) = event;
-            running.sign_in_added(upn.clone(), prompt, cx);
+        cx.subscribe(&prompt, |running, prompt, event, cx| match event {
+            AccountPromptEvent::SignIn(upn) => running.sign_in_added(upn.clone(), prompt, cx),
+            AccountPromptEvent::SignInOwn(own) => running.sign_in_own_added(own.clone(), prompt, cx),
+        })
+        .detach();
+    }
+
+    /// Signs the own server's account the prompt named in with its password, on its server alone (no sign-in
+    /// window), then starts it beside the others ([`Running::ask_account`]).
+    fn sign_in_own_added(&mut self, own: OwnSignIn, prompt: Entity<AccountPrompt>, cx: &mut gpui::Context<Self>) {
+        if !self.can_add_account() {
+            return;
+        }
+        let server = match OwnServer::parse(&own.server, "") {
+            Ok(server) => server,
+            Err(error) => {
+                prompt.update(cx, |prompt, cx| prompt.failed(error.to_string(), cx));
+                return;
+            }
+        };
+        let id = format!("{}/{}", server.origin, own.user);
+        if self.bridges.iter().any(|(_, held, _)| held.eq_ignore_ascii_case(&id)) {
+            prompt.update(cx, |prompt, cx| {
+                prompt.failed(format!("{} is added already", own.user), cx)
+            });
+            return;
+        }
+        let setup = self.runner.setup.clone();
+        let signing = cx.background_spawn(async move {
+            let password = Secret::new(own.password.as_str());
+            accounts::add_own(&setup, &own.user, &server, &password)
+        });
+        self.start_signed(signing, prompt, cx);
+    }
+
+    /// Once `signing` went through, starts the account and shows it; one that didn't is said on `prompt`.
+    fn start_signed(
+        &mut self,
+        signing: Task<Result<PersonalAccount, String>>,
+        prompt: Entity<AccountPrompt>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let signed = signing.await;
+            let _ = this.update(cx, |running, cx| {
+                match signed.and_then(|account| running.runner.start(&account).map_err(String::from)) {
+                    Ok(started) => running.added(started, cx),
+                    Err(error) => {
+                        log::warn!("an account wasn't added");
+                        prompt.update(cx, |prompt, cx| prompt.failed(error, cx));
+                    }
+                }
+            });
         })
         .detach();
     }
@@ -503,19 +583,7 @@ impl Running {
         let setup = self.runner.setup.clone();
         let windows = crate::signin::windows_for(&setup, cx);
         let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let signed = signing.await;
-            let _ = this.update(cx, |running, cx| {
-                match signed.and_then(|account| running.runner.start(&account).map_err(String::from)) {
-                    Ok(started) => running.added(started, cx),
-                    Err(error) => {
-                        log::warn!("an account wasn't added");
-                        prompt.update(cx, |prompt, cx| prompt.failed(error, cx));
-                    }
-                }
-            });
-        })
-        .detach();
+        self.start_signed(signing, prompt, cx);
     }
 
     /// An account added: started, shown, and the prompt that asked for it closed.

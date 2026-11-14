@@ -255,6 +255,7 @@ fn read_cases() -> Vec<Case> {
     let accounts = vec![AccountRow {
         index: 0,
         upn: s("a@lab.invalid"),
+        server: None,
         mri: s("8:orgid:a"),
         name: Some(s("Lab A")),
         shown: true,

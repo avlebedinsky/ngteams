@@ -292,3 +292,118 @@ fn account_file_obstructions_are_read_errors_instead_of_empty_account_lists() ->
     );
     Ok(())
 }
+
+const SERVER: &str = "https://chat.example.test:8443";
+const GUID_S: &str = "00000000-0000-4000-8000-0000000000a1";
+const GUID_T: &str = "00000000-0000-4000-8000-0000000000a2";
+
+#[test]
+fn an_own_servers_account_sits_beside_the_microsoft_one_of_the_same_upn() -> TestResult {
+    use ngteams::accounts_file::OwnServer;
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(&dir);
+    let upn = "someone@example.test";
+    // an entry written before own servers reads as Microsoft 365, and saving beside it leaves its lines as they were
+    let old = format!("[[account]]\nupn = \"{upn}\"\noid = \"{GUID_X}\"\ntid = \"{TENANT}\"\nidp_hosts = []\n");
+    fs::create_dir_all(paths.config_dir())?;
+    fs::write(paths.accounts_file(), &old)?;
+    let microsoft = PersonalAccount::find(&paths, upn)?.ok_or("the old entry")?;
+    assert_eq!((microsoft.server.as_deref(), microsoft.id().as_str()), (None, upn));
+    assert!(microsoft.cloud()?.is_microsoft());
+
+    let server = OwnServer::parse(" chat.example.test:8443/ ", "")?;
+    assert_eq!(server.origin, SERVER);
+    let own = PersonalAccount::pending_on(upn, &server)?.signed_in_as(GUID_S, TENANT, Some("Someone"))?;
+    own.save(&paths)?;
+    let other = OwnServer::parse("https://other.example.test", "")?;
+    PersonalAccount::pending_on(upn, &other)?
+        .signed_in_as(GUID_T, TENANT, None)?
+        .save(&paths)?;
+    let text = fs::read_to_string(paths.accounts_file())?;
+    assert!(text.contains(&old), "{text}");
+    assert!(text.contains(&format!("server = \"{SERVER}\"\n")), "{text}");
+
+    let accounts = PersonalAccount::load_all(&paths)?;
+    assert_eq!(accounts.len(), 3);
+    assert_eq!(own.id(), format!("{SERVER}/{upn}"));
+    assert_eq!(
+        own.cloud()?.origin().map(ToString::to_string).as_deref(),
+        Some("https://chat.example.test:8443/")
+    );
+    assert_eq!(own.server_host().as_deref(), Some("chat.example.test:8443"));
+    // a bare UPN names the Microsoft account; an own server's is named by its id, case aside
+    assert_eq!(PersonalAccount::find(&paths, upn)?, Some(microsoft));
+    assert_eq!(
+        PersonalAccount::find(&paths, &own.id().to_uppercase())?,
+        Some(own.clone())
+    );
+    // saved again in its own place, never over the account of the same UPN elsewhere
+    own.signed_in_as(GUID_S, TENANT, Some("Renamed"))?.save(&paths)?;
+    let names: Vec<_> = PersonalAccount::load_all(&paths)?
+        .into_iter()
+        .map(|account| account.name)
+        .collect();
+    assert_eq!(names, [None, Some("Renamed".to_owned()), None]);
+    // the same server and UPN twice is refused
+    let twice = format!("{text}\n[[account]]\nupn = \"{upn}\"\nserver = \"{SERVER}\"\n");
+    fs::write(paths.accounts_file(), twice)?;
+    assert!(matches!(
+        PersonalAccount::load_all(&paths),
+        Err(PersonalError::Account(_))
+    ));
+    fs::write(paths.accounts_file(), &text)?;
+    // without the Microsoft account, a bare UPN names an own server's only while one alone has it
+    PersonalAccount::remove(&paths, upn)?;
+    assert_eq!(PersonalAccount::find(&paths, upn)?, None);
+    PersonalAccount::remove(&paths, &format!("https://other.example.test/{upn}"))?;
+    assert_eq!(
+        PersonalAccount::find(&paths, upn)?.map(|account| account.id()),
+        Some(own.id())
+    );
+    Ok(())
+}
+
+#[test]
+fn an_own_server_is_an_https_origin_with_an_absolute_ca_file() -> TestResult {
+    use ngteams::accounts_file::OwnServer;
+    let good = format!("upn = \"someone@example.test\"\nserver = \"{SERVER}\"\n");
+    assert!(PersonalAccount::parse(&good).is_ok());
+    for bad in [
+        good.replace("https://", "http://"),
+        good.replace(SERVER, "https://chat.example.test/path"),
+        good.replace(SERVER, "https://user@chat.example.test"),
+        format!("{good}ca_file = \"relative/ca.pem\"\n"),
+        format!("{good}idp_hosts = [\"sso.example.test\"]\n"),
+        "upn = \"someone@example.test\"\nca_file = \"/tmp/ca.pem\"\n".to_owned(),
+    ] {
+        assert!(PersonalAccount::parse(&bad).is_err(), "{bad}");
+    }
+    for bad in [
+        "",
+        "http://chat.example.test",
+        "chat.example.test/path",
+        "ftp://chat.example.test",
+    ] {
+        assert!(OwnServer::parse(bad, "").is_err(), "{bad}");
+    }
+    assert!(OwnServer::parse(SERVER, "ca.pem").is_err());
+
+    // the CA file is read when the account's cloud is made: one missing or holding no certificate is said
+    let dir = tempfile::tempdir()?;
+    let ca = dir.path().join("ca.pem");
+    let account = PersonalAccount::pending_on(
+        "someone@example.test",
+        &OwnServer::parse(SERVER, &ca.display().to_string())?,
+    )?;
+    assert!(matches!(account.cloud(), Err(PersonalError::Read { .. })));
+    fs::write(&ca, "not a certificate\n")?;
+    assert!(matches!(account.cloud(), Err(PersonalError::Account(_))));
+    let authority = rcgen::generate_simple_self_signed(vec!["chat.example.test".to_owned()])?;
+    fs::write(&ca, authority.cert.pem())?;
+    assert!(account.cloud()?.extra_roots().is_some());
+    let saved = tempfile::tempdir()?;
+    let paths = paths_in(&saved);
+    account.save(&paths)?;
+    assert_eq!(PersonalAccount::load_all(&paths)?, [account]);
+    Ok(())
+}

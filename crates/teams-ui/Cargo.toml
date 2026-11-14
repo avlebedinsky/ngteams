@@ -45,6 +45,8 @@ image-webp.workspace = true
 similar.workspace = true
 # the engine: its request side (behind `Core`), its events and its shutdown
 teams-core.workspace = true
+# the sign-in screen's password, zeroed when dropped
+zeroize.workspace = true
 # a message's content read as rich text, for the chat list's preview line (sanitized, capped; never shown as HTML)
 teams-proto.workspace = true
 # the rows the engine's queries answer with

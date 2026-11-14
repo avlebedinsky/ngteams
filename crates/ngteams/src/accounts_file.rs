@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use teams_proto::Mri;
+use teams_proto::{Cloud, Mri};
 
 pub use paths::{PERSONAL_DIR, PersonalLocations, overlapping};
 mod paths;
@@ -149,7 +149,12 @@ impl PersonalPaths {
 /// tid = "<its tenant id>"             # written by the first sign-in
 /// name = "Someone Example"            # written by a sign-in whose ID token gave one
 /// idp_hosts = ["sso.example.com"]     # optional: the federated identity provider's hosts the sign-in window may reach
+/// server = "https://chat.example.com" # an own server's account; absent means Microsoft 365
+/// ca_file = "/etc/ssl/own-ca.pem"     # optional, with `server`: the certificate authority of a self-signed deployment
 /// ```
+///
+/// The server is the account's own: accounts of Microsoft 365 and of own servers sit side by side, each one's tokens,
+/// store and region its own. An account is told from the others by its server and UPN together ([`Self::id`]).
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonalAccount {
@@ -162,12 +167,58 @@ pub struct PersonalAccount {
     pub name: Option<String>,
     #[serde(default)]
     pub idp_hosts: Vec<String>,
+    /// The own server's HTTPS origin; `None` is Microsoft 365.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// The certificate authority (a PEM file) the own server's certificate is checked against beside the system's.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
+}
+
+/// Where an own-server account signs in: its server's origin and, for a self-signed deployment, its CA file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnServer {
+    pub origin: String,
+    pub ca_file: Option<PathBuf>,
+}
+
+impl OwnServer {
+    /// The server at `url` as the user wrote it (a trailing `/` and spaces around it dropped, `https://` put before a
+    /// bare host), with the CA file `ca_file` names (empty is none).
+    ///
+    /// # Errors
+    /// [`PersonalError::Account`] unless it is an HTTPS origin and the CA file's path is absolute.
+    pub fn parse(url: &str, ca_file: &str) -> Result<Self, PersonalError> {
+        let url = url.trim().trim_end_matches('/');
+        let origin = if url.contains("://") {
+            url.to_owned()
+        } else {
+            format!("https://{url}")
+        };
+        let ca_file = Some(ca_file.trim()).filter(|path| !path.is_empty()).map(PathBuf::from);
+        let server = Self { origin, ca_file };
+        server.validate()?;
+        Ok(server)
+    }
+
+    fn validate(&self) -> Result<(), PersonalError> {
+        if Cloud::own(&self.origin).is_err() {
+            return Err(PersonalError::Account(
+                "server isn't an HTTPS address like https://chat.example.com".to_owned(),
+            ));
+        }
+        if self.ca_file.as_ref().is_some_and(|path| !path.is_absolute()) {
+            return Err(PersonalError::Account("ca_file isn't an absolute path".to_owned()));
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for PersonalAccount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PersonalAccount")
             .field("upn", &self.upn)
+            .field("server", &self.server)
             .field("idp_hosts", &self.idp_hosts.len())
             .finish_non_exhaustive()
     }
@@ -195,28 +246,26 @@ impl PersonalAccount {
         }
     }
 
-    /// The account `upn` (case aside) of `paths`' accounts ([`PersonalAccount::load_all`]); `None` when it isn't one.
+    /// The account named `name` (case aside) of `paths`' accounts ([`PersonalAccount::load_all`]): its [`Self::id`],
+    /// or a bare UPN, which names the Microsoft 365 account of that UPN, else the one own-server account of it;
+    /// `None` when it names none, or several own-server accounts alike.
     ///
     /// # Errors
     /// As [`PersonalAccount::load_all`].
-    pub fn find(paths: &PersonalPaths, upn: &str) -> Result<Option<Self>, PersonalError> {
-        Ok(Self::load_all(paths)?
-            .into_iter()
-            .find(|account| account.upn.eq_ignore_ascii_case(upn)))
+    pub fn find(paths: &PersonalPaths, name: &str) -> Result<Option<Self>, PersonalError> {
+        let accounts = Self::load_all(paths)?;
+        Ok(position(&accounts, name).map(|index| accounts[index].clone()))
     }
 
-    /// Takes the account `upn` (case aside) out of `paths`' `accounts.toml`, the others kept in their order; the account
-    /// taken, or `None` when it wasn't one.
+    /// Takes the account named `name` (as [`Self::find`] reads it) out of `paths`' `accounts.toml`, the others kept in
+    /// their order; the account taken, or `None` when it wasn't one.
     ///
     /// # Errors
     /// When the accounts can't be read or written.
-    pub fn remove(paths: &PersonalPaths, upn: &str) -> Result<Option<Self>, PersonalError> {
+    pub fn remove(paths: &PersonalPaths, name: &str) -> Result<Option<Self>, PersonalError> {
         let _changing = changing();
         let mut accounts = Self::load_all(paths)?;
-        let Some(index) = accounts
-            .iter()
-            .position(|account| account.upn.eq_ignore_ascii_case(upn))
-        else {
+        let Some(index) = position(&accounts, name) else {
             return Ok(None);
         };
         let removed = accounts.remove(index);
@@ -248,9 +297,85 @@ impl PersonalAccount {
             tid: None,
             name: None,
             idp_hosts: Vec::new(),
+            server: None,
+            ca_file: None,
         };
         account.validate()?;
         Ok(account)
+    }
+
+    /// The own server `server`'s account `upn` before its first sign-in.
+    ///
+    /// # Errors
+    /// As [`PersonalAccount::parse`].
+    pub fn pending_on(upn: &str, server: &OwnServer) -> Result<Self, PersonalError> {
+        let account = Self {
+            server: Some(server.origin.clone()),
+            ca_file: server.ca_file.clone(),
+            ..Self::pending(upn)?
+        };
+        account.validate()?;
+        Ok(account)
+    }
+
+    /// The own server this account is of; `None` for a Microsoft 365 account.
+    #[must_use]
+    pub fn own_server(&self) -> Option<OwnServer> {
+        self.server.as_ref().map(|origin| OwnServer {
+            origin: origin.clone(),
+            ca_file: self.ca_file.clone(),
+        })
+    }
+
+    /// What tells the account from every other, and what its tokens are stored under: its UPN for a Microsoft 365
+    /// account (as before own servers), and for an own server's its server before it (`https://chat.example.com/upn`),
+    /// so the same user name on two servers, or on a server and Microsoft 365, never shares a token.
+    #[must_use]
+    pub fn id(&self) -> String {
+        match &self.server {
+            Some(server) => format!("{server}/{}", self.upn),
+            None => self.upn.clone(),
+        }
+    }
+
+    /// The own server as the window names it: its host, with a port that isn't HTTPS's own.
+    #[must_use]
+    pub fn server_host(&self) -> Option<String> {
+        let cloud = Cloud::own(self.server.as_deref()?).ok()?;
+        let url = cloud.origin()?;
+        let host = url.host_str()?;
+        Some(
+            url.port()
+                .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}")),
+        )
+    }
+
+    /// Whether `other` is this account: the same server and UPN, case aside.
+    #[must_use]
+    pub fn is(&self, other: &Self) -> bool {
+        self.id().eq_ignore_ascii_case(&other.id())
+    }
+
+    /// The services the account belongs to: Microsoft's, or its own server's with the certificate authority its
+    /// `ca_file` holds.
+    ///
+    /// # Errors
+    /// When the server isn't an HTTPS origin, or the CA file can't be read or holds no certificate.
+    pub fn cloud(&self) -> Result<Cloud, PersonalError> {
+        let Some(server) = &self.server else {
+            return Ok(Cloud::Microsoft);
+        };
+        let cloud = Cloud::own(server).map_err(|error| PersonalError::Account(format!("{}: {error}", self.upn)))?;
+        let Some(path) = &self.ca_file else {
+            return Ok(cloud);
+        };
+        let pem = fs::read(path).map_err(|source| PersonalError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        cloud
+            .trusting(&pem)
+            .map_err(|error| PersonalError::Account(format!("{}: {error}", path.display())))
     }
 
     /// The account `upn` as a sign-in named it: its object id and tenant.
@@ -259,11 +384,9 @@ impl PersonalAccount {
     /// As [`PersonalAccount::parse`].
     pub fn new(upn: &str, oid: &str, tid: &str) -> Result<Self, PersonalError> {
         let account = Self {
-            upn: upn.to_owned(),
             oid: Some(oid.to_ascii_lowercase()),
             tid: Some(tid.to_ascii_lowercase()),
-            name: None,
-            idp_hosts: Vec::new(),
+            ..Self::pending(upn)?
         };
         account.validate()?;
         Ok(account)
@@ -313,6 +436,16 @@ impl PersonalAccount {
         if !self.idp_hosts.iter().all(|host| is_host(host)) {
             return bad("an idp_hosts entry isn't a lowercase DNS name");
         }
+        match self.own_server() {
+            Some(server) => {
+                server.validate()?;
+                if !self.idp_hosts.is_empty() {
+                    return bad("idp_hosts is for a Microsoft 365 account, not an own server's");
+                }
+            }
+            None if self.ca_file.is_some() => return bad("ca_file needs a server"),
+            None => {}
+        }
         Ok(())
     }
 
@@ -323,7 +456,7 @@ impl PersonalAccount {
     }
 
     /// Writes the account into `paths`' `accounts.toml` (`0600`, its directory `0700`): in the place of the account of
-    /// the same UPN (case aside), else after the others; the file whole, through a new file renamed over it.
+    /// the same server and UPN (case aside), else after the others; the file whole, through a new file renamed over it.
     /// A single account's files not moved yet ([`PersonalPaths::migrate_single_account`]) are moved first.
     ///
     /// # Errors
@@ -333,10 +466,7 @@ impl PersonalAccount {
         // a single account's files not moved yet go first, so they are never left behind `accounts.toml`
         paths.migrate_single_account()?;
         let mut accounts = Self::load_all(paths)?;
-        match accounts
-            .iter_mut()
-            .find(|account| account.upn.eq_ignore_ascii_case(&self.upn))
-        {
+        match accounts.iter_mut().find(|account| account.is(self)) {
             Some(held) => *held = self.clone(),
             None => accounts.push(self.clone()),
         }
@@ -360,8 +490,18 @@ impl PersonalAccount {
             .as_ref()
             .map(|name| format!("name = {}\n", toml::Value::String(name.clone())))
             .unwrap_or_default();
+        let server = self
+            .server
+            .as_ref()
+            .map(|server| format!("server = {}\n", toml::Value::String(server.clone())))
+            .unwrap_or_default();
+        let ca_file = self
+            .ca_file
+            .as_ref()
+            .map(|path| format!("ca_file = {}\n", toml::Value::String(path.display().to_string())))
+            .unwrap_or_default();
         format!(
-            "[[account]]\nupn = {}\n{ids}{name}idp_hosts = {}\n",
+            "[[account]]\nupn = {}\n{ids}{name}idp_hosts = {}\n{server}{ca_file}",
             toml::Value::String(self.upn.clone()),
             toml::Value::Array(hosts),
         )
@@ -399,14 +539,32 @@ fn parse_accounts(text: &str) -> Result<Vec<PersonalAccount>, PersonalError> {
     Ok(accounts)
 }
 
-/// Refuses an account given twice, by UPN (case aside) or object id.
+/// The account `name` names among `accounts` ([`PersonalAccount::find`]).
+fn position(accounts: &[PersonalAccount], name: &str) -> Option<usize> {
+    if let Some(index) = accounts
+        .iter()
+        .position(|account| account.id().eq_ignore_ascii_case(name))
+    {
+        return Some(index);
+    }
+    let mut own = accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| account.server.is_some() && account.upn.eq_ignore_ascii_case(name));
+    match (own.next(), own.next()) {
+        (Some((index, _)), None) => Some(index),
+        _ => None,
+    }
+}
+
+/// Refuses an account given twice, by its server and UPN (case aside) or object id.
 fn check_distinct(accounts: &[PersonalAccount]) -> Result<(), PersonalError> {
     for (index, account) in accounts.iter().enumerate() {
-        let twice = accounts[..index].iter().any(|earlier| {
-            earlier.upn.eq_ignore_ascii_case(&account.upn) || (earlier.oid.is_some() && earlier.oid == account.oid)
-        });
+        let twice = accounts[..index]
+            .iter()
+            .any(|earlier| earlier.is(account) || (earlier.oid.is_some() && earlier.oid == account.oid));
         if twice {
-            return Err(PersonalError::Account(format!("{} is given twice", account.upn)));
+            return Err(PersonalError::Account(format!("{} is given twice", account.id())));
         }
     }
     Ok(())

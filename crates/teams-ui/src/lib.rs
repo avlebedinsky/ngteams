@@ -185,7 +185,7 @@ pub mod workflow_dialog;
 pub mod workflow_run;
 pub mod workflows_app;
 
-pub use account_prompt::{AccountPrompt, AccountPromptEvent};
+pub use account_prompt::{AccountPrompt, AccountPromptEvent, OwnOffer, OwnSignIn, SignInKind};
 pub use accounts::{AccountParts, AccountTile, Accounts, AccountsEvent};
 pub use assets::AppAssets;
 pub use bridge::{Bridge, Core, EventSource, StoppedCore, Tap};
