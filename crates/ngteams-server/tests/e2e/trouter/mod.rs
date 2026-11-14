@@ -1,6 +1,7 @@
 //! The push channel: the client's own Trouter session (`teams-trouter`) against the in-process server, with the
 //! registrar it registers its endpoint at and the chat service whose events it is pushed.
 
+mod channels;
 mod connect;
 mod deliveries;
 mod gaps;

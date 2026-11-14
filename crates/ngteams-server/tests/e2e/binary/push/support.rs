@@ -8,6 +8,7 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
+use teams_core::account::{CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM, USER_PROFILE_GTM};
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, MessageChange, Parts, Source};
 use teams_core::{Outbox, Transient};
 use teams_proto::chat::MessageText;
@@ -106,6 +107,15 @@ impl Rig {
         User::sign_in(node, &self.origin, upn, options()).await
     }
 
+    /// As [`Rig::user`], its client also reaching the team services authz names.
+    pub async fn team_user(&self, node: &Node, upn: &str) -> User {
+        let mut user = User::signed_in(node, &self.origin, upn, options()).await;
+        user.teams = true;
+        user.start();
+        user.online(0).await;
+        user
+    }
+
     pub async fn stop(mut self) {
         if let Some(node) = &mut self.second {
             node.stop().await;
@@ -126,6 +136,8 @@ pub struct User {
     /// The endpoint id of the running push channel (the registration's id).
     pub epid: String,
     pub log: Vec<Event>,
+    /// Whether the client's requests reach the team services too.
+    teams: bool,
     engine: Option<EngineHandle>,
     session: Arc<Session<MemorySecretStore>>,
     origin: String,
@@ -153,6 +165,7 @@ impl User {
             mri: Mri::new(format!("8:{}", skype.skype_id.as_deref().unwrap())),
             epid: String::new(),
             log: Vec::new(),
+            teams: false,
             engine: None,
             session,
             origin: origin.into(),
@@ -202,14 +215,31 @@ impl User {
     }
 
     fn transport(&self) -> Transport {
-        HttpTransport::for_cloud_with_mock_origin(
+        let chats = HttpTransport::for_cloud_with_mock_origin(
             Arc::clone(&self.session),
             &format!("{}/api/chatsvc/own", self.origin),
             Cloud::own(&self.origin).unwrap(),
             &self.http,
         )
         .unwrap()
-        .for_account(self.mri.clone())
+        .for_account(self.mri.clone());
+        if !self.teams {
+            return chats;
+        }
+        let base = |gtm: &str| {
+            self.session
+                .service_base(gtm)
+                .unwrap_or_else(|| panic!("authz names no {gtm}"))
+        };
+        chats
+            .with_middle_tier(&base(MIDDLE_TIER_GTM))
+            .unwrap()
+            .with_csa(&base(CSA_GTM))
+            .unwrap()
+            .with_provisioning(&base(PROVISIONING_GTM))
+            .unwrap()
+            .with_user_profile(&base(USER_PROFILE_GTM))
+            .unwrap()
     }
 
     /// Starts the client on its store: a new engine with a new push channel, as a start of ngteams makes them.

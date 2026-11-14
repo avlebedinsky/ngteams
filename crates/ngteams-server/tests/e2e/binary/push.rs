@@ -2,6 +2,7 @@
 //! and each client's session, engine, store and Trouter channel. Nothing here asks an engine to sync: what a client
 //! shows came over its push channel or the catch-up the channel itself starts.
 
+mod channels;
 mod support;
 
 use std::time::Duration;
