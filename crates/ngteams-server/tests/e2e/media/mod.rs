@@ -1,7 +1,9 @@
 //! Pictures, files and link previews: the real own-cloud engine and typed reads against the media routes, with the
 //! blobs in the S3 store `NGTEAMS_SERVER_S3_URL` names (else a local directory).
 
+mod access;
 mod files;
+mod limits;
 mod pictures;
 mod previews;
 mod storage;
@@ -22,6 +24,8 @@ use crate::support::{Backend, TestServer};
 
 pub const S3_ENV: &str = "NGTEAMS_SERVER_S3_URL";
 pub const ORIGIN: &str = "https://own.example.test";
+pub const IC3: &str = "https://ic3.teams.office.com";
+pub const GRAPH: &str = "https://graph.microsoft.com";
 
 type Transport = HttpTransport<Session<MemorySecretStore>>;
 pub type MediaClient = Client<Transport>;
@@ -166,7 +170,7 @@ impl Trio {
 /// A PNG of `width` by `height`, each pixel its own colour.
 pub fn png(width: u32, height: u32) -> Vec<u8> {
     let picture = image::RgbImage::from_fn(width, height, |x, y| {
-        image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+        image::Rgb([x.to_le_bytes()[0], y.to_le_bytes()[0], (x + y).to_le_bytes()[0]])
     });
     let mut bytes = std::io::Cursor::new(Vec::new());
     picture.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
@@ -179,4 +183,36 @@ pub fn status(error: &teams_proto::HttpError) -> Option<u16> {
         teams_proto::HttpError::Status(answer) => Some(answer.status()),
         _ => None,
     }
+}
+
+/// `upn`'s access token for `audience`, as its session gets one.
+pub async fn token(server: &TestServer, upn: &str, audience: &str) -> String {
+    let session = server.session(upn).await;
+    let token = session.access_token(audience).await.unwrap();
+    token.token.expose().to_owned()
+}
+
+/// A raw request to the server with `token`; the answer's status, headers and body.
+pub async fn raw(
+    server: &TestServer,
+    method: reqwest::Method,
+    path: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<Vec<u8>>,
+) -> (u16, reqwest::header::HeaderMap, Vec<u8>) {
+    let mut request = reqwest::Client::new().request(method, server.url(path));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+    let answer = request.send().await.unwrap();
+    let status = answer.status().as_u16();
+    let headers = answer.headers().clone();
+    (status, headers, answer.bytes().await.unwrap().to_vec())
 }

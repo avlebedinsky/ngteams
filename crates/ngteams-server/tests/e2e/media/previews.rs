@@ -11,7 +11,7 @@ use axum::routing::get;
 use serde_json::Value;
 use teams_proto::LinkPreviewPicture;
 
-use super::{ORIGIN, Trio, cloud, png};
+use super::{IC3, ORIGIN, Trio, cloud, png, token};
 use crate::support::{Backend, TestServer};
 
 const PAGE: &str = r#"<!doctype html><html><head><title>Fallback title</title>
@@ -39,12 +39,6 @@ async fn site() -> (String, Arc<AtomicUsize>) {
     (origin, hits)
 }
 
-async fn token(server: &TestServer, upn: &str) -> String {
-    let session = server.session(upn).await;
-    let token = session.access_token("https://ic3.teams.office.com").await.unwrap();
-    token.token.expose().to_owned()
-}
-
 async fn ask(server: &TestServer, token: Option<&str>, path: &str, url: &str) -> (u16, Vec<u8>) {
     let mut asked = url::Url::parse(&server.url(&format!("/ams/urlp/v1/url/{path}"))).unwrap();
     asked.query_pairs_mut().append_pair("url", url);
@@ -63,7 +57,7 @@ async fn a_links_preview_is_read_and_its_picture_reaches_the_engine_as_a_thumbna
     })
     .await;
     let (site, _) = site().await;
-    let token = token(&trio.server, "a@own.test").await;
+    let token = token(&trio.server, "a@own.test", IC3).await;
     for page in ["/page", "/moved"] {
         let (status, body) = ask(&trio.server, Some(&token), "info", &format!("{site}{page}")).await;
         assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
@@ -94,7 +88,7 @@ async fn previews_refuse_private_loopback_and_link_local_addresses() {
     let trio = Trio::start(Backend::Sqlite).await;
     let (site, hits) = site().await;
     let port = site.rsplit(':').next().unwrap();
-    let token = token(&trio.server, "a@own.test").await;
+    let token = token(&trio.server, "a@own.test", IC3).await;
     for url in [
         format!("{site}/page"),
         format!("http://localhost:{port}/page"),
@@ -125,7 +119,7 @@ async fn previews_refuse_private_loopback_and_link_local_addresses() {
 #[tokio::test(flavor = "multi_thread")]
 async fn previews_can_be_turned_off() {
     let trio = Trio::start_with(Backend::Sqlite, |config| config.media.link_previews = false).await;
-    let token = token(&trio.server, "a@own.test").await;
+    let token = token(&trio.server, "a@own.test", IC3).await;
     let (status, _) = ask(&trio.server, Some(&token), "info", "https://example.com/").await;
     assert_eq!(status, 404);
     trio.stop().await;

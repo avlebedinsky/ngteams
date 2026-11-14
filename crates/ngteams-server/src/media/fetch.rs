@@ -122,18 +122,7 @@ impl Fetcher {
             if !answer.status().is_success() {
                 return Err(FetchError::Failed);
             }
-            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-            let mut bytes = Vec::new();
-            while let Some(chunk) = answer.chunk().await.map_err(|_| FetchError::Failed)? {
-                if bytes.len() + chunk.len() > limit {
-                    if !cut {
-                        return Err(FetchError::TooLarge);
-                    }
-                    bytes.extend_from_slice(&chunk[..limit - bytes.len()]);
-                    break;
-                }
-                bytes.extend_from_slice(&chunk);
-            }
+            let bytes = body(&mut answer, limit, cut).await?;
             return Ok(Fetched { url, bytes });
         }
         Err(FetchError::Failed)
@@ -164,6 +153,24 @@ impl Fetcher {
         };
         if public { Ok(()) } else { Err(FetchError::NotPublic) }
     }
+}
+
+/// At most `limit` bytes of an answer's body: a longer one is cut there (`cut`) or refused.
+async fn body(answer: &mut reqwest::Response, limit: u64, cut: bool) -> Result<Vec<u8>, FetchError> {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = answer.chunk().await.map_err(|_| FetchError::Failed)? {
+        let room = limit - bytes.len();
+        if chunk.len() <= room {
+            bytes.extend_from_slice(&chunk);
+        } else if cut {
+            bytes.extend_from_slice(&chunk[..room]);
+            break;
+        } else {
+            return Err(FetchError::TooLarge);
+        }
+    }
+    Ok(bytes)
 }
 
 /// Whether `address` is on the public internet: not loopback, private, link-local (the cloud metadata address
@@ -204,10 +211,8 @@ fn is_public_v6(address: Ipv6Addr) -> bool {
         [0, 0, 0, 0, 0, 0xffff | 0, high, low] => {
             !address.is_unspecified() && !address.is_loopback() && embedded(high, low)
         }
-        // NAT64
-        [0x64, 0xff9b, 0, 0, 0, 0, high, low] => embedded(high, low),
-        // 6to4
-        [0x2002, high, low, ..] => embedded(high, low),
+        // NAT64 and 6to4
+        [0x64, 0xff9b, 0, 0, 0, 0, high, low] | [0x2002, high, low, ..] => embedded(high, low),
         [first, second, ..] => {
             !(address.is_multicast()
                 || (first & 0xfe00) == 0xfc00

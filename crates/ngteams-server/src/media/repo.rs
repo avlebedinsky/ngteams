@@ -83,12 +83,12 @@ pub(super) async fn object_chats(db: &Db, id: &str) -> Result<Vec<String>, DbErr
         .await?))
 }
 
-/// Records the bytes put into an object when the owner's stored bytes stay within `quota` (0: no limit); `false`
-/// when they wouldn't.
+/// Records what an object holds now (`content_type`, `size`) in place of `object`'s own, when the owner's stored
+/// bytes stay within `quota` (0: no limit); `false` when they wouldn't.
 pub(super) async fn fill_object(
     db: &Db,
     object: &Object,
-    content_type: &str,
+    content_type: Option<&str>,
     size: i64,
     quota: i64,
 ) -> Result<bool, DbError> {

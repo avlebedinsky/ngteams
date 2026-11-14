@@ -10,7 +10,7 @@ use super::{Trio, cloud, png, status};
 use crate::support::backends;
 
 /// Uploads `bytes` as `name` from `trio`'s a and sends it to the chat; the sharing link b reads it by.
-async fn send_file(trio: &Trio, name: &str, bytes: &[u8]) -> String {
+pub async fn send_file(trio: &Trio, name: &str, bytes: &[u8]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(name);
     std::fs::write(&path, bytes).unwrap();

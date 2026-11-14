@@ -102,10 +102,15 @@ async fn fill(
     }
     let content_type = picture_type(&bytes).ok_or(Error::Unsupported)?;
     let size = i64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
-    if !repo::fill_object(&app.db, &object, content_type, size, quota(&app)).await? {
+    if !repo::fill_object(&app.db, &object, Some(content_type), size, quota(&app)).await? {
         return Err(Error::Quota);
     }
-    app.storage.put(&key(&id), bytes).await?;
+    if let Err(error) = app.storage.put(&key(&id), bytes).await {
+        // the bytes aren't there: the object and its owner's count go back to what they were
+        let filled = repo::Object { size, ..object.clone() };
+        repo::fill_object(&app.db, &filled, object.content_type.as_deref(), object.size, 0).await?;
+        return Err(error.into());
+    }
     Ok(StatusCode::CREATED.into_response())
 }
 

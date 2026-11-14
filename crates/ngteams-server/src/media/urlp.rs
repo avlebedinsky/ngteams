@@ -166,9 +166,9 @@ mod tests {
         assert_eq!(page.description.as_deref(), Some("Plain words"));
         assert_eq!(page.picture.as_deref(), Some("https://cdn.example/p.png"));
         assert_eq!(page.favicon.as_deref(), Some("https://site.example/a/i.ico"));
-        let bare = read_page(r#"<meta property="og:image" content="javascript:alert(1)">"#, &base);
+        let empty = read_page(r#"<meta property="og:image" content="javascript:alert(1)">"#, &base);
         assert_eq!(
-            bare,
+            empty,
             Page {
                 favicon: Some("https://site.example/favicon.ico".to_owned()),
                 ..Page::default()

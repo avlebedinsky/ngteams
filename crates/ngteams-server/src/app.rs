@@ -104,7 +104,6 @@ impl App {
         let fetcher =
             crate::media::Fetcher::new(&config.media).map_err(|error| StartError::Previews(error.to_string()))?;
         Ok(Arc::new(Self {
-            fetcher,
             config,
             db,
             issuer,
@@ -114,6 +113,7 @@ impl App {
             journal,
             trouter: Arc::new(Hub::new()),
             storage,
+            fetcher,
         }))
     }
 }
