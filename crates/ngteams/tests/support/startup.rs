@@ -446,6 +446,7 @@ const STARTUP_CASES: &[&str] = &[
     "own-again-running",
     "own-prompt-unserved",
     "unserved-own",
+    "unserved-own-then-ready",
     "forget-missing",
     "forget-pending",
     "forget-stored",
@@ -577,6 +578,11 @@ fn child() {
         "unserved-own" => {
             signed_own_as(&setup, READY_OWN_UPN);
         }
+        // the same account added before one that starts: it doesn't hold that one back
+        "unserved-own-then-ready" => {
+            signed_own_as(&setup, READY_OWN_UPN);
+            signed(&setup, "ready@example.test", 2, true);
+        }
         "empty" | "prompt-window-error" | "own-prompt-success" | "own-prompt-error" | "own-prompt-unserved" => {}
         other => panic!("unknown synthetic case {other}"),
     }
@@ -675,6 +681,17 @@ fn seen_after(case: &str) {
         assert!(seen.contains(&format!("ctl-bound:{}", personal.display())), "{seen:?}");
         assert!(!personal.exists(), "the quit removes the socket");
     }
+    seen_own(case, &seen);
+    if case == "many" {
+        assert!(
+            seen.iter().any(|call| call == "start:ready-other@example.test"),
+            "a later account still starts"
+        );
+    }
+}
+
+/// What a case's run did with an own server's account.
+fn seen_own(case: &str, seen: &[String]) {
     let own = format!("{OWN_SERVER}/{OWN_UPN}");
     match case {
         // the server's address typed without its scheme is the account's HTTPS origin
@@ -704,13 +721,13 @@ fn seen_after(case: &str) {
             assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
             assert!(!seen.iter().any(|call| call.starts_with("sign-in-own:")), "{seen:?}");
         }
+        // left out, and the account after it runs the app: no sign-in screen stands in its way
+        "unserved-own-then-ready" => {
+            assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
+            assert!(seen.contains(&"start:ready@example.test".to_owned()), "{seen:?}");
+            assert!(seen.iter().any(|call| call.starts_with("ctl-bound:")), "{seen:?}");
+        }
         _ => {}
-    }
-    if case == "many" {
-        assert!(
-            seen.iter().any(|call| call == "start:ready-other@example.test"),
-            "a later account still starts"
-        );
     }
 }
 

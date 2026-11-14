@@ -452,10 +452,9 @@ fn run_setup(
     Ok(ended(restart.get(), update.take(), cli.url.clone()))
 }
 
-/// The first account is an own server's and that server serves no chats (`failed`): said on its sign-in screen,
-/// which stays for another try, not on stderr alone.
+/// No account started, and the first is an own server's whose server serves no chats (`failed`, said on stderr by
+/// [`start_accounts`]): said on its sign-in screen too, which stays for another try.
 fn unserved_screen(runner: Runner, ready: Vec<PersonalAccount>, failed: StartFailed) -> Result<Outcome, String> {
-    eprintln!("teams: {failed}");
     let setup = runner.setup.clone();
     drop(runner);
     let account = ready.into_iter().next().ok_or(failed.message.as_str())?;
@@ -690,26 +689,42 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     Ok(Outcome::Quit)
 }
 
-/// Every account's engine: the first one's must start (another `ngteams` running on it, say, ends this launch, after
-/// its hand-off: [`hand_off_to_starting`]); a later one that can't is said and left out.
+/// Every account's engine: the first one that can be shown must start (another `ngteams` running on it, say, ends
+/// this launch, after its hand-off: [`hand_off_to_starting`]); a later one that can't is said and left out, and so is
+/// an own server's account whose server serves no chats, which fails the start only when nothing else starts.
 fn start_accounts(runner: &Runner, ready: &[PersonalAccount]) -> Result<(Started, Vec<Started>), StartFailed> {
-    let (first, rest) = ready.split_first().ok_or_else(|| StartFailed {
-        message: "no account is signed in".to_owned(),
-        running: false,
-        unserved: false,
-    })?;
-    let first = runner.start(first)?;
+    let mut accounts = ready.iter();
+    let mut unserved = None;
+    let first = loop {
+        let Some(account) = accounts.next() else {
+            return Err(unserved.unwrap_or_else(|| StartFailed {
+                message: "no account is signed in".to_owned(),
+                running: false,
+                unserved: false,
+            }));
+        };
+        match runner.start(account) {
+            Ok(started) => break started,
+            Err(failed) if failed.unserved => {
+                not_started(&failed);
+                unserved.get_or_insert(failed);
+            }
+            Err(failed) => return Err(failed),
+        }
+    };
     let mut others = Vec::new();
-    for account in rest {
+    for account in accounts {
         match runner.start(account) {
             Ok(started) => others.push(started),
-            Err(error) => {
-                eprintln!("teams: an account isn't started: {error}");
-                log::warn!("an account isn't started");
-            }
+            Err(failed) => not_started(&failed),
         }
     }
     Ok((first, others))
+}
+
+fn not_started(failed: &StartFailed) {
+    eprintln!("teams: an account isn't started: {failed}");
+    log::warn!("an account isn't started");
 }
 
 /// The accounts a sign-in named, in the order they were added: those that can start without a sign-in, and those
