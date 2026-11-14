@@ -26,6 +26,9 @@ const DELIVERED: [&str; 5] = [
     "CustomUserProperties",
 ];
 
+/// What ends the id of a team's or a channel's thread (`crate::teams`).
+const CHANNEL_THREAD: &str = "@thread.tacv2";
+
 pub(crate) fn kind(envelope: &Value) -> Kind {
     let resource_type = envelope["resourceType"].as_str().unwrap_or_default();
     if !DELIVERED.contains(&resource_type) {
@@ -134,7 +137,10 @@ fn event_message(base: &str, envelope: &Value) -> Value {
                 .to_owned();
             if let Value::Object(fields) = &mut resource {
                 fields.entry("to").or_insert_with(|| json!(chat));
-                fields.entry("threadtype").or_insert_with(|| json!("chat"));
+                // a channel's thread is a `space` or a `topic`, which its message doesn't say
+                if !chat.contains(CHANNEL_THREAD) {
+                    fields.entry("threadtype").or_insert_with(|| json!("chat"));
+                }
             }
             format!("{base}/v1/users/ME/conversations/{chat}/messages/{}", id(&resource))
         }
@@ -170,6 +176,26 @@ mod tests {
         assert!(!keep("push:8:orgid:a", receipt.to_string().as_bytes()));
         assert!(!keep("push:8:orgid:a", b"not json"));
         assert!(!keep("trouter:8:orgid:a", message.to_string().as_bytes()));
+    }
+
+    #[test]
+    fn a_chats_message_is_delivered_as_a_chats_and_a_channels_names_no_thread_type() {
+        let base = "https://own.example.test/api/chatsvc/own";
+        let message = |conversation: &str| {
+            let link = format!("{base}/v1/users/ME/conversations/{conversation}");
+            let envelope = json!({"resourceType": "NewMessage", "resource": {"id": "7", "conversationLink": link}});
+            event_message(base, &envelope)
+        };
+        let chat = message("19:x@thread.v2");
+        assert_eq!(chat["resource"]["threadtype"], "chat");
+        assert_eq!(chat["resource"]["to"], "19:x@thread.v2");
+        let reply = message("19:y@thread.tacv2;messageid=5");
+        assert_eq!(reply["resource"].get("threadtype"), None);
+        assert_eq!(reply["resource"]["to"], "19:y@thread.tacv2;messageid=5");
+        assert_eq!(
+            reply["resourceLink"],
+            format!("{base}/v1/users/ME/conversations/19:y@thread.tacv2;messageid=5/messages/7")
+        );
     }
 
     #[test]
