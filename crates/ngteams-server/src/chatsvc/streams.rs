@@ -80,6 +80,7 @@ macro_rules! ensure_in {
         }
     }};
 }
+pub(super) use ensure_in;
 
 /// Makes `user`'s stream `name` when it has none yet.
 pub(super) async fn ensure(db: &Db, name: &str, user: &str) -> Result<(), DbError> {

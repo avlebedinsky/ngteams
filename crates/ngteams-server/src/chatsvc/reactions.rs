@@ -38,7 +38,7 @@ pub(super) async fn react(
         return Err(Error::BadRequest);
     }
     let chat = reads::target(&path)?;
-    let (found, members) = member_of(&app, &caller, chat).await?;
+    let (found, _) = member_of(&app, &caller, chat).await?;
     let id = mutations::message_id(&path)?;
     let Json(body) = body.map_err(|_| Error::BadRequest)?;
     let key = body["emotions"]["key"]
@@ -59,20 +59,31 @@ pub(super) async fn react(
         }
         Some(value)
     };
-    let result = message_repo::update(
-        &app.db,
-        &found.id,
+    let change = message_repo::Change {
+        chat: &found.id,
         id,
-        &caller.id,
-        message_repo::Who::AnyMember,
-        |current, at| apply(current, at, key, value.as_deref(), &caller.mri()),
-    )
+        actor: &caller.id,
+        who: message_repo::Who::AnyMember,
+        effect: if remove {
+            message_repo::Effect::Unreacted
+        } else {
+            message_repo::Effect::Reacted(key)
+        },
+        base: &super::wire::base(&app),
+    };
+    let result = message_repo::update(&app.db, change, |current, at| {
+        apply(current, at, key, value.as_deref(), &caller.mri())
+    })
     .await?;
-    let changed = matches!(&result, message_repo::Updated::Message(_));
-    let row = mutations::updated(result)?;
-    if changed {
-        events::publish(&app, &caller, &members, "MessageUpdate", &row.value()?).await;
-    }
+    let changed = mutations::updated(result)?;
+    events::tell(
+        &app,
+        "MessageUpdate",
+        &changed.row.value()?,
+        &changed.readers,
+        &changed.told,
+    )
+    .await;
     Ok(if remove { "null" } else { "200" })
 }
 

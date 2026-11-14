@@ -49,9 +49,12 @@ pub(super) async fn post(
         }
         draft.root_id = Some(post.unwrap_or(0));
     }
-    let (row, inserted) = message_repo::insert(&app.db, &draft).await?.ok_or(Error::Denied)?;
-    if inserted {
-        events::publish(&app, &caller, &members, "NewMessage", &row.value()?).await;
+    let posted = message_repo::insert(&app.db, &draft, &wire::base(&app))
+        .await?
+        .ok_or(Error::Denied)?;
+    let row = &posted.row;
+    if posted.inserted {
+        events::tell(&app, "NewMessage", &row.value()?, &posted.readers, &posted.told).await;
     }
     Ok((
         StatusCode::CREATED,
