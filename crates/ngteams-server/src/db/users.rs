@@ -111,26 +111,6 @@ pub async fn list(db: &Db) -> Result<Vec<User>, DbError> {
         .await?))
 }
 
-/// Disables or enables an account by UPN. Disabling also revokes its refresh tokens, so it is signed out everywhere
-/// once its access tokens run out. `false` when there is no such account.
-///
-/// # Errors
-/// A database failure.
-pub async fn set_disabled(db: &Db, upn: &str, disabled: bool) -> Result<bool, DbError> {
-    let Some(id) = id_of(db, upn).await? else {
-        return Ok(false);
-    };
-    let at = now();
-    with_conn!(db, |conn| diesel::update(users::table.find(&id))
-        .set((users::disabled.eq(disabled), users::updated_at.eq(at)))
-        .execute(conn)
-        .await?);
-    if disabled {
-        refresh::revoke_user(db, &id).await?;
-    }
-    Ok(true)
-}
-
 /// Replaces an account's password hash and revokes its refresh tokens. `false` when there is no such account.
 ///
 /// # Errors
