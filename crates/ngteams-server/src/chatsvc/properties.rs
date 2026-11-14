@@ -20,7 +20,7 @@ pub(super) async fn set_conversation(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<StatusCode, Error> {
     let chat = reads::target(&path)?;
-    let (_, members) = member_of(&app, &caller, chat).await?;
+    let (found, members) = member_of(&app, &caller, chat).await?;
     let name = query.get("name").map(String::as_str).ok_or(Error::BadRequest)?;
     if query
         .keys()
@@ -57,7 +57,7 @@ pub(super) async fn set_conversation(
     if !valid_preference(name, value) {
         return Err(Error::BadRequest);
     }
-    if !property_repo::set_conversation(&app.db, chat, &caller.id, name, value).await? {
+    if !property_repo::set_conversation(&app.db, &found.id, &caller.id, name, value).await? {
         return Err(Error::Denied);
     }
     if matches!(name, "favorite" | "isGeneralChannelFavorite") {

@@ -38,7 +38,7 @@ pub(super) async fn react(
         return Err(Error::BadRequest);
     }
     let chat = reads::target(&path)?;
-    let (_, members) = member_of(&app, &caller, chat).await?;
+    let (found, members) = member_of(&app, &caller, chat).await?;
     let id = mutations::message_id(&path)?;
     let Json(body) = body.map_err(|_| Error::BadRequest)?;
     let key = body["emotions"]["key"]
@@ -61,7 +61,7 @@ pub(super) async fn react(
     };
     let result = message_repo::update(
         &app.db,
-        chat,
+        &found.id,
         id,
         &caller.id,
         message_repo::Who::AnyMember,

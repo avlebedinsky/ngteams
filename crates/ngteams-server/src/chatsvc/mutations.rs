@@ -18,7 +18,7 @@ pub(super) async fn edit(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<StatusCode, Error> {
     let chat = reads::target(&path)?;
-    let (_, members) = member_of(&app, &caller, chat).await?;
+    let (found, members) = member_of(&app, &caller, chat).await?;
     let id = message_id(&path)?;
     let Json(mut sent) = body.map_err(|_| Error::BadRequest)?;
     if !sent.is_object() {
@@ -34,7 +34,7 @@ pub(super) async fn edit(
     let draft = messages::draft(&app, &caller, chat, &sent)?.value()?;
     let changed = message_repo::update(
         &app.db,
-        chat,
+        &found.id,
         id,
         &caller.id,
         message_repo::Who::Owner,
@@ -87,20 +87,27 @@ pub(super) async fn delete(
         return Err(Error::Missing);
     }
     let chat = reads::target(&path)?;
-    let (_, members) = member_of(&app, &caller, chat).await?;
+    let (found, members) = member_of(&app, &caller, chat).await?;
     let id = message_id(&path)?;
-    let result = message_repo::update(&app.db, chat, id, &caller.id, message_repo::Who::Owner, |body, at| {
-        body["content"] = "".into();
-        body["properties"] = json!({"deletetime": at});
-        if let Some(client) = body.get("clientmessageid").cloned() {
-            body["skypeeditedid"] = client;
-        }
-        if let Some(object) = body.as_object_mut() {
-            object.remove("amsreferences");
-            object.remove("annotationsSummary");
-        }
-        Ok(true)
-    })
+    let result = message_repo::update(
+        &app.db,
+        &found.id,
+        id,
+        &caller.id,
+        message_repo::Who::Owner,
+        |body, at| {
+            body["content"] = "".into();
+            body["properties"] = json!({"deletetime": at});
+            if let Some(client) = body.get("clientmessageid").cloned() {
+                body["skypeeditedid"] = client;
+            }
+            if let Some(object) = body.as_object_mut() {
+                object.remove("amsreferences");
+                object.remove("annotationsSummary");
+            }
+            Ok(true)
+        },
+    )
     .await?;
     let row = updated(result)?;
     events::publish(&app, &caller, &members, "MessageUpdate", &row.value()?).await;

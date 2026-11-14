@@ -118,6 +118,7 @@ pub(super) async fn list(db: &Db, user: &str, after: i64, until: i64, limit: i64
         .filter(chat_members::user_id.eq(user))
         // of a team's channels only the general one is in the list; the others are read by their id
         .filter(channels::id.is_null().or(channels::id.eq(channels::team_id)))
+        .filter(chats::id.not_like("48:notes:%"))
         .filter(chats::version.gt(after))
         .filter(chats::version.le(until))
         .order(chats::version.asc())

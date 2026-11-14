@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use super::{
     Caller,
     repo::{Chat, Member},
+    streams,
 };
 use crate::app::App;
 
@@ -53,7 +54,35 @@ pub(super) fn thread(app: &App, caller: &Caller, chat: &Chat, members: &[Member]
     })
 }
 
+/// A stream's entry among the account's conversations: named by its `48:` id, never by the thread it is kept as.
+fn stream(app: &App, chat: &Chat, name: &str) -> Value {
+    let kind = name.trim_start_matches("48:");
+    let product = match name {
+        streams::NOTES => "StreamOfNotes",
+        streams::MENTIONS => "StreamOfMentions",
+        _ => "StreamOfNotifications",
+    };
+    json!({
+        "id": name, "type": "Conversation", "version": chat.version,
+        "targetLink": format!("{}/v1/threads/{name}", base(app)),
+        "messages": format!("{}/v1/users/ME/conversations/{name}/messages", base(app)),
+        "lastUpdatedMessageId": 0, "lastUpdatedMessageVersion": 0, "lastMessage": {},
+        "memberProperties": {"role": "Admin", "interest": "Interested", "isReader": false,
+            "memberExpirationTime": 0},
+        "properties": {"isemptyconversation": "True"},
+        "threadProperties": {
+            "threadType": format!("streamof{kind}"), "productThreadType": product, "isCreator": true,
+            "gapDetectionEnabled": "True", "lastjoinat": chat.created_at.to_string(),
+            "originalThreadId": format!("19:teamsstream_{kind}_{}@thread.v2", chat.creator),
+            "rosterVersion": chat.created_at, "version": chat.created_at.to_string(),
+        },
+    })
+}
+
 pub(super) fn conversation(app: &App, caller: &Caller, chat: &Chat) -> Value {
+    if let Some(name) = streams::name_of(&chat.id) {
+        return stream(app, chat, name);
+    }
     let mut properties = json!({
         "threadType": "chat", "productThreadType": if chat.unique_roster { "OneToOneChat" } else { "Chat" },
         "createdat": chat.created_at.to_string(), "isCreator": chat.creator == caller.id,

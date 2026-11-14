@@ -7,7 +7,7 @@ use axum::http::{StatusCode, header::LOCATION};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value, json};
 
-use super::{Caller, Error, channels, events, member_of, message_repo, reads, repo, wire};
+use super::{Caller, Error, channels, events, member_of, message_repo, reads, repo, streams, wire};
 use crate::app::App;
 use crate::db::DbError;
 
@@ -22,7 +22,12 @@ pub(super) async fn post(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, Error> {
     let (chat, post) = channels::split(reads::target(&path)?)?;
-    let (_, members) = member_of(&app, &caller, chat).await?;
+    match chat {
+        streams::NOTES => streams::ensure(&app.db, chat, &caller.id).await?,
+        streams::FEED | streams::MENTIONS => return Err(Error::Denied),
+        _ => {}
+    }
+    let (found, members) = member_of(&app, &caller, chat).await?;
     let Json(body) = body.map_err(|_| Error::BadRequest)?;
     let place = channels::place(&app.db, chat).await?;
     if post.is_some() && place.is_none() {
@@ -32,6 +37,7 @@ pub(super) async fn post(
         return typing(&app, &caller, chat, &members, &body).await;
     }
     let mut draft = draft(&app, &caller, chat, &body)?;
+    draft.chat_id = found.id;
     if let Some(place) = &place {
         if !channels::writable(place) {
             return Err(Error::Denied);
@@ -124,10 +130,7 @@ pub(super) async fn page(
 ) -> Result<Json<Value>, Error> {
     let target = reads::target(&path)?;
     let (chat, root) = channels::split(target)?;
-    if chat == "48:generic" {
-        return Err(Error::InvalidThread);
-    }
-    member_of(&app, &caller, chat).await?;
+    let (found, _) = member_of(&app, &caller, chat).await?;
     let current = repo::watermark(&app.db).await?;
     let until = reads::number(&query, "until", current)?;
     let since = reads::number(&query, "syncState", 0)?;
@@ -139,7 +142,7 @@ pub(super) async fn page(
     let incremental = query.contains_key("syncState");
     let rows = message_repo::page(
         &app.db,
-        chat,
+        &found.id,
         message_repo::Window {
             since,
             until,
@@ -182,13 +185,13 @@ pub(super) async fn around(
     Query(query): Query<Params>,
 ) -> Result<Json<Value>, Error> {
     let chat = reads::target(&path)?;
-    member_of(&app, &caller, chat).await?;
+    let (found, _) = member_of(&app, &caller, chat).await?;
     let at = reads::number(&path, "time", 0)?;
     let size = reads::number(&query, "pageSize", 200)?.clamp(1, 200);
     if query.get("direction").map(String::as_str) != Some("BIDIRECTIONAL") {
         return Err(Error::BadRequest);
     }
-    let rows = message_repo::around(&app.db, chat, at, size).await?;
+    let rows = message_repo::around(&app.db, &found.id, at, size).await?;
     let (messages, more) = bounded_messages(&rows, size)?;
     let mut metadata = json!({"lastCompleteSegmentStartTime": 0, "lastCompleteSegmentEndTime": 0});
     if more && let Some(last) = rows.get(messages.len().saturating_sub(1)) {

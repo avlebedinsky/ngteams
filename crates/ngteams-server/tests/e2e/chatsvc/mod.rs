@@ -5,6 +5,7 @@ mod contract;
 pub(crate) mod messages;
 mod mutations;
 mod noops;
+mod notes;
 mod paging;
 pub(crate) mod properties;
 mod reactions;

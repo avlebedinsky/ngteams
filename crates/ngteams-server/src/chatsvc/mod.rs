@@ -14,6 +14,7 @@ mod reactions;
 mod reads;
 pub(crate) mod repo;
 pub(crate) mod schema;
+mod streams;
 mod wire;
 
 use std::collections::HashMap;
@@ -151,9 +152,11 @@ impl IntoResponse for Error {
     }
 }
 
+/// The stored thread `id` names and its members, for one of them: `id` is a chat's or one of the caller's streams.
 async fn member_of(app: &App, caller: &Caller, id: &str) -> Result<(repo::Chat, Vec<repo::Member>), Error> {
-    let chat = repo::chat(&app.db, id).await?.ok_or(Error::Missing)?;
-    let members = repo::members(&app.db, id).await?;
+    let stored = streams::stored(id, caller)?;
+    let chat = repo::chat(&app.db, &stored).await?.ok_or(Error::Missing)?;
+    let members = repo::members(&app.db, &stored).await?;
     if !members.iter().any(|member| member.user_id == caller.id) {
         return Err(Error::Denied);
     }

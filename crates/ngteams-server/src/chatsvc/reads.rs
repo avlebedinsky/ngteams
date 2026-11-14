@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
 
-use super::{Caller, Error, channels, member_of, repo, wire};
+use super::{Caller, Error, channels, member_of, repo, streams, wire};
 use crate::app::App;
 
 type Params = HashMap<String, String>;
@@ -20,9 +20,7 @@ pub(super) async fn thread(
     Path(path): Path<Params>,
 ) -> Result<Json<Value>, Error> {
     let id = target(&path)?;
-    if id == "48:generic" {
-        return Err(Error::InvalidThread);
-    }
+    streams::no_thread(id)?;
     let (chat, members) = member_of(&app, &caller, id).await?;
     if let Some(place) = channels::place(&app.db, id).await? {
         let roles = channels::roles(&app.db, &place).await?;
@@ -44,7 +42,9 @@ pub(super) async fn members(
     Path(path): Path<Params>,
     Query(query): Query<Params>,
 ) -> Result<Json<Value>, Error> {
-    let (chat, members) = member_of(&app, &caller, target(&path)?).await?;
+    let id = target(&path)?;
+    streams::no_thread(id)?;
+    let (chat, members) = member_of(&app, &caller, id).await?;
     if let Some(place) = channels::place(&app.db, &chat.id).await? {
         let roles = channels::roles(&app.db, &place).await?;
         let select = query.get("selectMemberRoles").map(String::as_str);
