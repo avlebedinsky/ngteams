@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 
+use super::meeting::Meeting;
 use super::repo::{Attendee, Event};
+use crate::app::App;
 use crate::db::users::User;
 
 pub(super) const EVENT_TYPE: &str = "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent";
@@ -12,9 +14,12 @@ pub(super) const EVENT_TYPE: &str = "Microsoft.SkypeSpaces.MiddleTier.Models.Cal
 /// The longest `bodyPreview`, in characters.
 const PREVIEW: usize = 255;
 
-/// The accounts the events of one answer name.
-#[derive(Default)]
-pub(super) struct People(pub HashMap<String, User>);
+/// What the events of one answer name beyond their own rows: their organizers and their meetings.
+pub(super) struct Book<'a> {
+    pub app: &'a App,
+    pub users: HashMap<String, User>,
+    pub meetings: HashMap<String, Meeting>,
+}
 
 /// One event for one reader: the row, the occurrence of it when the row is a series read by its occurrences, and
 /// the reader's own invitation.
@@ -23,7 +28,7 @@ pub(super) struct Shown<'a> {
     pub event: &'a Event,
     pub occurrence: Option<i64>,
     pub mine: Option<&'a Attendee>,
-    pub people: &'a People,
+    pub book: &'a Book<'a>,
 }
 
 impl Shown<'_> {
@@ -87,7 +92,12 @@ impl Shown<'_> {
             .and_then(Value::as_str)
             .map(preview)
             .unwrap_or_default();
-        let owner = self.people.0.get(&self.event.owner_id);
+        let owner = self.book.users.get(&self.event.owner_id);
+        let meeting = self
+            .event
+            .meeting_chat
+            .as_ref()
+            .and_then(|chat| self.book.meetings.get(chat));
         let series = self
             .occurrence
             .map(|_| self.event.id.clone())
@@ -97,7 +107,8 @@ impl Shown<'_> {
             "objectId": id, "iCalUID": ical_uid, "cleanGlobalObjectId": ical_uid,
             "subject": subject, "startTime": iso(start), "endTime": iso(end),
             "eventType": self.kind(), "isCancelled": self.event.cancelled,
-            "isOnlineMeeting": false,
+            "isOnlineMeeting": meeting.is_some(), "location": location(&Value::Object(fields.clone()), meeting.is_some()),
+            "showAs": self.show_as(&fields),
             "isOrganizer": self.organizes(), "myResponseType": self.response(),
             "organizerName": owner.map(|owner| owner.display_name.as_str()),
             "organizerAddress": owner.map(|owner| owner.upn.as_str()),
@@ -108,6 +119,17 @@ impl Shown<'_> {
         }
         if let Some(series) = series {
             fields.insert("seriesMasterId".into(), json!(series));
+        }
+        if let Some(meeting) = meeting {
+            let link = meeting.join_link(self.book.app);
+            let data = json!({"cid": meeting.chat_id, "uid": mri(&meeting.organizer_id), "type": 0, "private": true});
+            fields.insert("skypeTeamsMeetingUrl".into(), json!(link));
+            fields.insert(
+                "shortOnlineMeetingJoinUrl".into(),
+                json!(meeting.short_link(self.book.app)),
+            );
+            fields.insert("onlineMeetingConferenceId".into(), json!(meeting.code));
+            fields.insert("skypeTeamsData".into(), json!(data.to_string()));
         }
         if self.kind() != "RecurringMaster" {
             fields.remove("eventRecurrencePattern");
@@ -122,20 +144,56 @@ impl Shown<'_> {
     pub(super) fn full(&self, attendees: &[(Attendee, User)]) -> Value {
         let mut entry = self.entry();
         let stored = self.fields();
-        for key in [
-            "bodyContent",
-            "bodyContentType",
-            "eventRecurrencePattern",
-            "eventRecurrenceRange",
-        ] {
+        for key in ["bodyContent", "bodyContentType"] {
             if let Some(value) = stored.get(key) {
                 entry[key] = value.clone();
             }
         }
-        if !attendees.is_empty() {
-            entry["attendees"] = json!([]);
+        entry["isAppointment"] = json!(attendees.is_empty());
+        if attendees.is_empty() {
+            return entry;
         }
+        let mut listed = Vec::new();
+        if let Some(owner) = self.book.users.get(&self.event.owner_id) {
+            listed.push(attendee(owner, "Organizer", "Organizer", self.event.version));
+        }
+        for (invited, user) in attendees {
+            let kind = if invited.optional { "Optional" } else { "Required" };
+            let time = invited.responded_at.unwrap_or(self.event.version);
+            listed.push(attendee(user, kind, &invited.response, time));
+        }
+        entry["attendees"] = Value::Array(listed);
         entry
+    }
+
+    /// How the event shows the reader's time: its organizer's as set; an invited account's by its answer.
+    fn show_as(&self, fields: &Map<String, Value>) -> Value {
+        let set = fields.get("showAs").cloned().unwrap_or_else(|| json!("Busy"));
+        match self.response() {
+            "Organizer" | "Accepted" => set,
+            "Declined" => json!("Free"),
+            _ => json!("Tentative"),
+        }
+    }
+}
+
+fn attendee(user: &User, kind: &str, response: &str, time: i64) -> Value {
+    json!({
+        "address": user.upn, "name": user.display_name, "mri": mri(&user.id), "role": "Admin", "type": kind,
+        "status": {"response": response, "time": iso(time)},
+    })
+}
+
+fn mri(id: &str) -> String {
+    format!("8:orgid:{id}")
+}
+
+/// Where the event is: as set, else Teams' own words for an online meeting.
+pub(super) fn location(fields: &Value, online: bool) -> &str {
+    match fields["location"].as_str() {
+        Some(place) if !place.is_empty() => place,
+        _ if online => "Microsoft Teams Meeting",
+        _ => "",
     }
 }
 

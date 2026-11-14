@@ -6,10 +6,15 @@
 //! it invites reads it, answers it and takes it off its own calendar, and nobody else learns that it exists.
 
 mod draft;
+mod invite;
+mod meeting;
+mod people;
 mod recur;
 pub(crate) mod repo;
+mod scheduler;
 pub(crate) mod schema;
 mod wire;
+mod write;
 mod zones;
 
 use std::collections::HashMap;
@@ -19,7 +24,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
@@ -27,9 +32,9 @@ use crate::app::App;
 use crate::auth::extract::Spaces;
 use crate::db::{Db, DbError};
 use crate::teams::Actor;
-use draft::Draft;
+pub(crate) use meeting::describe_thread;
 use repo::{Event, Seen};
-use wire::{People, Shown};
+use wire::{Book, Shown};
 
 type Me = Actor<Spaces>;
 type Params = HashMap<String, String>;
@@ -41,8 +46,19 @@ const WIDEST_WINDOW_MS: i64 = 100 * 24 * 3_600_000;
 pub(crate) fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/v2.0/me/calendars/default/calendarView", get(view))
-        .route("/v2.0/me/calendars/default/events", post(create))
-        .route("/v2.0/me/calendars/events/{id}", get(read))
+        .route("/v2.0/me/calendars/default/events", post(write::create))
+        .route(
+            "/v2.0/me/calendars/events/{id}",
+            get(read).put(write::update).delete(write::delete),
+        )
+        .route("/v2.0/me/calendars/events/{id}/cancel", put(write::cancel))
+        .route("/v2.0/me/calendars/events/{id}/respond", put(write::respond))
+        .route("/v2.0/me/calendars/findMeetingTimes", put(scheduler::meeting_times))
+        .route("/v2.0/me/calendars/schedules", put(scheduler::schedules))
+        .route(
+            "/beta/me/calendarEvents/privateMeeting/schedulingService/create",
+            post(meeting::create),
+        )
         .route("/beta/me/calendarEvents/timeZoneSettingsWithOffset", get(time_zone))
 }
 
@@ -55,7 +71,10 @@ pub(crate) enum Error {
 
 impl Error {
     const BAD_REQUEST: Self = Self::Code(StatusCode::BAD_REQUEST, "BadRequest");
+    const FORBIDDEN: Self = Self::Code(StatusCode::FORBIDDEN, "Forbidden");
     const NOT_FOUND: Self = Self::Code(StatusCode::NOT_FOUND, "NotFound");
+    /// An attendee that isn't an account of this server: it takes no mail.
+    const UNKNOWN_ATTENDEE: Self = Self::Code(StatusCode::BAD_REQUEST, "UnknownAttendee");
 }
 
 impl From<DbError> for Error {
@@ -92,13 +111,83 @@ async fn time_zone(_: Me, Query(query): Query<Params>) -> Answer<Json<Value>> {
     })))
 }
 
-/// The accounts `events` name.
-async fn people(db: &Db, events: &[&Event]) -> Result<People, DbError> {
+/// What `events` name beyond their rows: their organizers and their meetings.
+async fn book<'a>(app: &'a App, events: &[&Event]) -> Result<Book<'a>, DbError> {
     let mut ids: Vec<String> = events.iter().map(|event| event.owner_id.clone()).collect();
     ids.sort();
     ids.dedup();
-    let users = repo::users_by_id(db, &ids).await?;
-    Ok(People(users.into_iter().map(|user| (user.id.clone(), user)).collect()))
+    let users = repo::users_by_id(&app.db, &ids).await?;
+    let mut chats: Vec<String> = events.iter().filter_map(|event| event.meeting_chat.clone()).collect();
+    chats.sort();
+    chats.dedup();
+    let meetings = if chats.is_empty() {
+        Vec::new()
+    } else {
+        meeting::of_chats(&app.db, &chats).await?
+    };
+    Ok(Book {
+        app,
+        users: users.into_iter().map(|user| (user.id.clone(), user)).collect(),
+        meetings: meetings
+            .into_iter()
+            .map(|meeting| (meeting.chat_id.clone(), meeting))
+            .collect(),
+    })
+}
+
+/// One event, or one occurrence of a series, where it is on an account's calendar.
+pub(super) struct Placed {
+    pub seen: Arc<Seen>,
+    /// The occurrence's start, for an occurrence of a series that has no row of its own.
+    pub occurrence: Option<i64>,
+    pub start: i64,
+    pub end: i64,
+}
+
+/// What is on `user`'s calendar in `[from, to)`, by start: a series as its occurrences, one kept as a row of its
+/// own in place of the series' at that time.
+pub(super) async fn placed(app: &App, user: &str, from: i64, to: i64) -> Result<Vec<Placed>, DbError> {
+    let seen = repo::window(&app.db, user, from, to).await?;
+    let series: Vec<String> = seen
+        .iter()
+        .filter(|(event, _)| event.recurring)
+        .map(|(event, _)| event.id.clone())
+        .collect();
+    let own_rows = if series.is_empty() {
+        Vec::new()
+    } else {
+        repo::own_rows(&app.db, &series).await?
+    };
+    let mut placed = Vec::new();
+    for seen in seen.into_iter().map(Arc::new) {
+        let event = &seen.0;
+        if !event.recurring {
+            placed.push(Placed {
+                occurrence: None,
+                start: event.start_ms,
+                end: event.end_ms,
+                seen: Arc::clone(&seen),
+            });
+            continue;
+        }
+        let fields = serde_json::from_str(&event.body).unwrap_or_default();
+        let Some(rule) = draft::series_of(&fields, event.start_ms, event.end_ms) else {
+            continue;
+        };
+        let length = event.end_ms - event.start_ms;
+        for start in rule.starts(from, to) {
+            if !own_rows.iter().any(|(id, own)| *id == event.id && *own == start) {
+                placed.push(Placed {
+                    occurrence: Some(start),
+                    start,
+                    end: start + length,
+                    seen: Arc::clone(&seen),
+                });
+            }
+        }
+    }
+    placed.sort_by_key(|placed| placed.start);
+    Ok(placed)
 }
 
 /// `GET v2.0/me/calendars/default/calendarView?StartDate&EndDate`: the account's events of the window, a series
@@ -115,44 +204,23 @@ async fn view(State(app): State<Arc<App>>, me: Me, Query(query): Query<Params>) 
     if to <= from || to - from > WIDEST_WINDOW_MS {
         return Err(Error::BAD_REQUEST);
     }
-    let seen = repo::window(&app.db, &me.id, from, to).await?;
-    let series: Vec<String> = seen
+    let placed = placed(&app, &me.id, from, to).await?;
+    let events: Vec<&Event> = placed.iter().map(|placed| &placed.seen.0).collect();
+    let book = book(&app, &events).await?;
+    let listed = placed
         .iter()
-        .filter(|(event, _)| event.recurring)
-        .map(|(event, _)| event.id.clone())
+        .map(|placed| {
+            let shown = Shown {
+                reader: &me.id,
+                event: &placed.seen.0,
+                occurrence: placed.occurrence,
+                mine: placed.seen.1.as_ref(),
+                book: &book,
+            };
+            shown.entry()
+        })
         .collect();
-    let own_rows = if series.is_empty() {
-        Vec::new()
-    } else {
-        repo::own_rows(&app.db, &series).await?
-    };
-    let events: Vec<&Event> = seen.iter().map(|(event, _)| event).collect();
-    let people = people(&app.db, &events).await?;
-    let mut listed: Vec<(i64, Value)> = Vec::new();
-    for (event, mine) in &seen {
-        let shown = |occurrence| Shown {
-            reader: &me.id,
-            event,
-            occurrence,
-            mine: mine.as_ref(),
-            people: &people,
-        };
-        if !event.recurring {
-            listed.push((event.start_ms, shown(None).entry()));
-            continue;
-        }
-        let fields = serde_json::from_str(&event.body).unwrap_or_default();
-        let Some(rule) = draft::series_of(&fields, event.start_ms, event.end_ms) else {
-            continue;
-        };
-        for start in rule.starts(from, to) {
-            if !own_rows.iter().any(|(id, own)| *id == event.id && *own == start) {
-                listed.push((start, shown(Some(start)).entry()));
-            }
-        }
-    }
-    listed.sort_by_key(|(start, _)| *start);
-    Ok(Json(wire::events(listed.into_iter().map(|(_, entry)| entry).collect())))
+    Ok(Json(wire::events(listed)))
 }
 
 /// An event `user` may read: the row, or the occurrence of a series that has no row of its own.
@@ -194,6 +262,58 @@ impl Found {
     }
 }
 
+impl Found {
+    /// Whether the event is `user`'s own to change and cancel.
+    fn organized_by(&self, user: &str) -> bool {
+        self.event.team_id.is_none() && self.event.owner_id == user
+    }
+
+    /// Whether it is one occurrence of a series.
+    fn one_of_a_series(&self) -> bool {
+        self.occurrence.is_some() || self.event.series_id.is_some()
+    }
+
+    /// The occurrence as a row of its own under its series: the row it has, or the series' fields at its time.
+    fn own_row(&self) -> Event {
+        let Some(start) = self.occurrence else {
+            return self.event.clone();
+        };
+        let mut fields: serde_json::Map<String, Value> = serde_json::from_str(&self.event.body).unwrap_or_default();
+        fields.remove("eventRecurrencePattern");
+        fields.remove("eventRecurrenceRange");
+        let end = start + (self.event.end_ms - self.event.start_ms);
+        Event {
+            id: wire::occurrence_id(&self.event.id, start),
+            series_id: Some(self.event.id.clone()),
+            original_start: Some(start),
+            start_ms: start,
+            end_ms: end,
+            until_ms: end,
+            recurring: false,
+            changed: false,
+            body: Value::Object(fields).to_string(),
+            ..self.event.clone()
+        }
+    }
+}
+
+impl Found {
+    /// The rows `user`'s answer or removal of the event touches: the row itself; a series' and every occurrence
+    /// kept under it; for an occurrence without a row, a row made for it.
+    async fn rows_for(&self, db: &Db) -> Result<Vec<String>, DbError> {
+        if self.occurrence.is_some() {
+            let row = self.own_row();
+            repo::put_own_row(db, &row).await?;
+            return Ok(vec![row.id]);
+        }
+        let mut rows = vec![self.event.id.clone()];
+        if self.event.recurring {
+            rows.extend(repo::own_row_ids(db, &self.event.id).await?);
+        }
+        Ok(rows)
+    }
+}
+
 /// Whether the event is on `user`'s calendar: its own while it isn't cancelled, or one it is invited to and didn't
 /// take off.
 fn on_calendar((event, mine): &Seen, user: &str) -> bool {
@@ -204,49 +324,14 @@ fn on_calendar((event, mine): &Seen, user: &str) -> bool {
 /// `GET v2.0/me/calendars/events/<id>`: one event whole.
 async fn read(State(app): State<Arc<App>>, me: Me, Path(id): Path<String>) -> Answer<Json<Value>> {
     let found = Found::of(&app.db, &me.id, &id).await?;
-    let people = people(&app.db, &[&found.event]).await?;
+    let book = book(&app, &[&found.event]).await?;
     let attendees = repo::attendees(&app.db, &found.event.id).await?;
     let shown = Shown {
         reader: &me.id,
         event: &found.event,
         occurrence: found.occurrence,
         mine: found.mine.as_ref(),
-        people: &people,
+        book: &book,
     };
     Ok(Json(shown.full(&attendees)))
-}
-
-/// `POST v2.0/me/calendars/default/events` with `{"calendarEvent"}`: a new event of the account's own.
-async fn create(State(app): State<Arc<App>>, me: Me, input: Result<Json<Value>, JsonRejection>) -> Answer {
-    let input = body(input)?;
-    let draft = Draft::read(&input["calendarEvent"], true)?;
-    let at = crate::chatsvc::now();
-    let event = Event {
-        id: uuid::Uuid::new_v4().simple().to_string(),
-        owner_id: me.id.clone(),
-        team_id: None,
-        channel_id: None,
-        post_id: None,
-        series_id: None,
-        original_start: None,
-        start_ms: draft.start_ms,
-        end_ms: draft.end_ms,
-        until_ms: draft.series_until.unwrap_or(draft.end_ms),
-        recurring: draft.series_until.is_some(),
-        changed: false,
-        cancelled: false,
-        meeting_chat: None,
-        body: Value::Object(draft.body).to_string(),
-        version: at,
-    };
-    repo::insert(&app.db, &event, &[]).await?;
-    let people = people(&app.db, &[&event]).await?;
-    let shown = Shown {
-        reader: &me.id,
-        event: &event,
-        occurrence: None,
-        mine: None,
-        people: &people,
-    };
-    Ok((StatusCode::CREATED, Json(wire::events(vec![shown.entry()]))).into_response())
 }

@@ -33,7 +33,9 @@ pub(super) async fn thread(
             &roles,
         )));
     }
-    Ok(Json(wire::thread(&app, &caller, &chat, &members)))
+    let mut thread = wire::thread(&app, &caller, &chat, &members);
+    crate::calendar::describe_thread(&app, &chat.id, &mut thread["properties"]).await?;
+    Ok(Json(thread))
 }
 
 pub(super) async fn members(
@@ -114,6 +116,7 @@ async fn conversation(app: &App, caller: &Caller, chat: &repo::Chat) -> Result<V
         let roles = channels::roles(&app.db, &place).await?;
         channels::conversation(&mut entry, caller, chat, &place, &roles);
     }
+    crate::calendar::describe_thread(app, &chat.id, &mut entry["threadProperties"]).await?;
     if let Some(message) = super::message_repo::latest(&app.db, &chat.id, &caller.id).await? {
         entry["lastMessage"] = message.value()?;
         if let Some(preview) = entry["lastMessage"].as_object_mut() {

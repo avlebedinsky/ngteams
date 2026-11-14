@@ -139,3 +139,257 @@ pub(super) async fn users_by_id(db: &Db, ids: &[String]) -> Result<Vec<User>, Db
         .load(conn)
         .await?))
 }
+
+/// Writes what can change of the event `event.id`.
+pub(super) async fn save(db: &Db, event: &Event) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::update(calendar_events::table.find(&event.id))
+            .set(changes(event))
+            .execute(conn)
+            .await?;
+    });
+    Ok(())
+}
+
+type Changes<'a> = (
+    diesel::dsl::Eq<calendar_events::start_ms, i64>,
+    diesel::dsl::Eq<calendar_events::end_ms, i64>,
+    diesel::dsl::Eq<calendar_events::until_ms, i64>,
+    diesel::dsl::Eq<calendar_events::recurring, bool>,
+    diesel::dsl::Eq<calendar_events::changed, bool>,
+    diesel::dsl::Eq<calendar_events::cancelled, bool>,
+    diesel::dsl::Eq<calendar_events::body, &'a str>,
+    diesel::dsl::Eq<calendar_events::version, i64>,
+);
+
+fn changes(event: &Event) -> Changes<'_> {
+    (
+        calendar_events::start_ms.eq(event.start_ms),
+        calendar_events::end_ms.eq(event.end_ms),
+        calendar_events::until_ms.eq(event.until_ms),
+        calendar_events::recurring.eq(event.recurring),
+        calendar_events::changed.eq(event.changed),
+        calendar_events::cancelled.eq(event.cancelled),
+        calendar_events::body.eq(event.body.as_str()),
+        calendar_events::version.eq(event.version),
+    )
+}
+
+/// Deletes an event, a series with the occurrences kept under it.
+pub(super) async fn delete(db: &Db, id: &str) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::delete(calendar_events::table.find(id)).execute(conn).await?;
+    });
+    Ok(())
+}
+
+/// Forgets the occurrences kept as rows of their own under `series`: its rule or its times changed.
+pub(super) async fn drop_own_rows(db: &Db, series: &str) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::delete(calendar_events::table.filter(calendar_events::series_id.eq(series)))
+            .execute(conn)
+            .await?;
+    });
+    Ok(())
+}
+
+/// Gives the series' new fields to its occurrences kept as rows without a change of their own.
+pub(super) async fn refresh_own_rows(db: &Db, series: &str, body: &str, version: i64) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::update(
+            calendar_events::table
+                .filter(calendar_events::series_id.eq(series))
+                .filter(calendar_events::changed.eq(false)),
+        )
+        .set((calendar_events::body.eq(body), calendar_events::version.eq(version)))
+        .execute(conn)
+        .await?;
+    });
+    Ok(())
+}
+
+/// Keeps one occurrence of a series as a row of its own: a new row takes the series' invitations as they stand,
+/// a row there already is written over.
+pub(super) async fn put_own_row(db: &Db, row: &Event) -> Result<(), DbError> {
+    let Some(series) = row.series_id.as_deref() else {
+        return save(db, row).await;
+    };
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let inserted = diesel::insert_into(calendar_events::table)
+                .values(row)
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await?;
+            if inserted == 0 {
+                diesel::update(calendar_events::table.find(&row.id))
+                    .set(changes(row))
+                    .execute(conn)
+                    .await?;
+                return Ok(());
+            }
+            let invited: Vec<Attendee> = calendar_attendees::table
+                .filter(calendar_attendees::event_id.eq(series))
+                .select(Attendee::as_select())
+                .load(conn)
+                .await?;
+            for mut attendee in invited {
+                attendee.event_id.clone_from(&row.id);
+                diesel::insert_into(calendar_attendees::table)
+                    .values(&attendee)
+                    .execute(conn)
+                    .await?;
+            }
+            Ok(())
+        })
+        .await)
+}
+
+/// The ids of the occurrences kept as rows of their own under `series`.
+pub(super) async fn own_row_ids(db: &Db, series: &str) -> Result<Vec<String>, DbError> {
+    with_conn!(db, |conn| Ok(calendar_events::table
+        .filter(calendar_events::series_id.eq(series))
+        .select(calendar_events::id)
+        .load(conn)
+        .await?))
+}
+
+/// Whether an event already takes place in the meeting chat `chat`.
+pub(super) async fn uses_chat(db: &Db, chat: &str) -> Result<bool, DbError> {
+    with_conn!(db, |conn| Ok(diesel::select(diesel::dsl::exists(
+        calendar_events::table.filter(calendar_events::meeting_chat.eq(chat))
+    ))
+    .get_result(conn)
+    .await?))
+}
+
+/// Gives the event (and the occurrences kept under it) its meeting's chat.
+pub(super) async fn set_meeting(db: &Db, id: &str, chat: &str) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::update(calendar_events::table.filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id))))
+            .set(calendar_events::meeting_chat.eq(chat))
+            .execute(conn)
+            .await?;
+    });
+    Ok(())
+}
+
+/// Remembers the message that told the event (and the occurrences kept under it).
+pub(super) async fn set_post(db: &Db, id: &str, post: i64) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::update(calendar_events::table.filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id))))
+            .set(calendar_events::post_id.eq(post))
+            .execute(conn)
+            .await?;
+    });
+    Ok(())
+}
+
+/// Cancels an event, a series with the occurrences kept under it.
+pub(super) async fn cancel(db: &Db, id: &str, version: i64) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::update(calendar_events::table.filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id))))
+            .set((
+                calendar_events::cancelled.eq(true),
+                calendar_events::version.eq(version),
+            ))
+            .execute(conn)
+            .await?;
+    });
+    Ok(())
+}
+
+/// Makes the invitations of each of `events` the accounts `wanted` (each with whether it is optional): who isn't
+/// among them loses the event, who is new is invited, and with `reset` everyone is asked again.
+pub(super) async fn sync_attendees(
+    db: &Db,
+    events: &[String],
+    wanted: &[(String, bool)],
+    reset: bool,
+) -> Result<(), DbError> {
+    let ids: Vec<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            diesel::delete(
+                calendar_attendees::table
+                    .filter(calendar_attendees::event_id.eq_any(events))
+                    .filter(calendar_attendees::user_id.ne_all(&ids)),
+            )
+            .execute(conn)
+            .await?;
+            if reset {
+                diesel::update(calendar_attendees::table.filter(calendar_attendees::event_id.eq_any(events)))
+                    .set((
+                        calendar_attendees::response.eq("None"),
+                        calendar_attendees::responded_at.eq(None::<i64>),
+                        calendar_attendees::removed.eq(false),
+                    ))
+                    .execute(conn)
+                    .await?;
+            }
+            for event in events {
+                for (position, (user, optional)) in wanted.iter().enumerate() {
+                    let row = Attendee {
+                        event_id: event.clone(),
+                        user_id: user.clone(),
+                        position: i32::try_from(position).unwrap_or(i32::MAX),
+                        optional: *optional,
+                        response: "None".into(),
+                        responded_at: None,
+                        removed: false,
+                    };
+                    diesel::insert_into(calendar_attendees::table)
+                        .values(&row)
+                        .on_conflict((calendar_attendees::event_id, calendar_attendees::user_id))
+                        .do_update()
+                        .set((
+                            calendar_attendees::position.eq(row.position),
+                            calendar_attendees::optional.eq(row.optional),
+                        ))
+                        .execute(conn)
+                        .await?;
+                }
+            }
+            Ok(())
+        })
+        .await)
+}
+
+/// Sets `user`'s answer to each of `events`.
+pub(super) async fn set_response(
+    db: &Db,
+    events: &[String],
+    user: &str,
+    response: &str,
+    at: i64,
+) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::update(
+            calendar_attendees::table
+                .filter(calendar_attendees::event_id.eq_any(events))
+                .filter(calendar_attendees::user_id.eq(user)),
+        )
+        .set((
+            calendar_attendees::response.eq(response),
+            calendar_attendees::responded_at.eq(at),
+        ))
+        .execute(conn)
+        .await?;
+    });
+    Ok(())
+}
+
+/// Takes each of `events` off `user`'s calendar.
+pub(super) async fn set_removed(db: &Db, events: &[String], user: &str) -> Result<(), DbError> {
+    with_conn!(db, |conn| {
+        diesel::update(
+            calendar_attendees::table
+                .filter(calendar_attendees::event_id.eq_any(events))
+                .filter(calendar_attendees::user_id.eq(user)),
+        )
+        .set(calendar_attendees::removed.eq(true))
+        .execute(conn)
+        .await?;
+    });
+    Ok(())
+}

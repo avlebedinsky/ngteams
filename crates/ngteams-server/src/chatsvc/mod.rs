@@ -18,6 +18,7 @@ mod reactions;
 mod reads;
 pub(crate) mod repo;
 pub(crate) mod schema;
+pub(crate) mod service;
 mod streams;
 mod wire;
 

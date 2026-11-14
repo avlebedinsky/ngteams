@@ -1,0 +1,181 @@
+//! What the server's other services do in the chat service: open a thread of their own (a meeting's chat), change
+//! who is in it, and post or change a message as an account that is in it. Each goes through the same rows and
+//! the same fan-out as a client's request, so every reader and every sync sees it as one.
+
+use diesel::prelude::*;
+use diesel_async::{AsyncConnection as _, RunQueryDsl};
+use serde_json::{Map, Value, json};
+
+use super::repo::{Chat, advance};
+use super::schema::{chat_members, chats};
+use super::{Caller, events, message_repo, repo, wire};
+use crate::app::App;
+use crate::db::users::User;
+use crate::db::{Db, DbError, with_conn};
+
+fn caller(app: &App, user: &User) -> Caller {
+    Caller {
+        id: user.id.clone(),
+        tenant: app.issuer.tenant().to_owned(),
+        name: user.display_name.clone(),
+    }
+}
+
+/// Opens the thread `id` with `creator` alone in it.
+pub(crate) async fn open_thread(db: &Db, id: &str, creator: &str, topic: Option<&str>) -> Result<(), DbError> {
+    let chat = Chat {
+        id: id.to_owned(),
+        creator: creator.to_owned(),
+        topic: topic.map(str::to_owned),
+        unique_roster: false,
+        created_at: 0,
+        version: 0,
+    };
+    if repo::create(db, &chat, &[creator.to_owned()]).await? {
+        Ok(())
+    } else {
+        Err(DbError::Conflict)
+    }
+}
+
+/// Sets who else is in the thread besides those it must keep: `wanted` are put in, and of `gone` whoever is there
+/// is taken out. Whether anything changed.
+pub(crate) async fn set_members(db: &Db, thread: &str, wanted: &[String], gone: &[String]) -> Result<bool, DbError> {
+    let at = wire::now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let version: i64 = advance!(conn, at);
+            let last: Option<i32> = chat_members::table
+                .filter(chat_members::chat_id.eq(thread))
+                .select(diesel::dsl::max(chat_members::position))
+                .first(conn)
+                .await?;
+            let mut changed = 0;
+            for (place, user) in wanted.iter().enumerate() {
+                let position = last.unwrap_or(0) + 1 + i32::try_from(place).unwrap_or(i32::MAX / 2);
+                changed += diesel::insert_into(chat_members::table)
+                    .values((
+                        chat_members::chat_id.eq(thread),
+                        chat_members::user_id.eq(user),
+                        chat_members::position.eq(position),
+                        chat_members::joined_at.eq(version),
+                    ))
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .await?;
+            }
+            changed += diesel::delete(
+                chat_members::table
+                    .filter(chat_members::chat_id.eq(thread))
+                    .filter(chat_members::user_id.eq_any(gone)),
+            )
+            .execute(conn)
+            .await?;
+            if changed > 0 {
+                diesel::update(chats::table.find(thread))
+                    .set(chats::version.eq(version))
+                    .execute(conn)
+                    .await?;
+            }
+            Ok(changed > 0)
+        })
+        .await)
+}
+
+/// Names the thread.
+pub(crate) async fn set_topic(db: &Db, thread: &str, topic: &str) -> Result<(), DbError> {
+    let at = wire::now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let version: i64 = advance!(conn, at);
+            diesel::update(chats::table.find(thread))
+                .set((chats::topic.eq(topic), chats::version.eq(version)))
+                .execute(conn)
+                .await?;
+            Ok(())
+        })
+        .await)
+}
+
+/// Tells everyone in the thread that it changed, as its creation told them.
+pub(crate) async fn announce(app: &App, thread: &str, as_user: &User) -> Result<(), DbError> {
+    let Some(chat) = repo::chat(&app.db, thread).await? else {
+        return Ok(());
+    };
+    let members = repo::members(&app.db, thread).await?;
+    let caller = caller(app, as_user);
+    let mut resource = wire::thread(app, &caller, &chat, &members);
+    crate::calendar::describe_thread(app, thread, &mut resource["properties"]).await?;
+    events::publish(app, &caller, &members, "ThreadUpdate", &resource).await;
+    Ok(())
+}
+
+/// A message the server posts for `author`, who is in the thread.
+pub(crate) struct Post<'a> {
+    pub thread: &'a str,
+    pub author: &'a User,
+    pub kind: &'a str,
+    pub content: &'a str,
+    pub properties: Map<String, Value>,
+    /// In a channel: the post it replies under, or `None` for a post of its own.
+    pub under: Option<i64>,
+}
+
+/// Posts it and tells the thread's people; its id, or `None` when the author isn't in the thread.
+pub(crate) async fn post(app: &App, post: Post<'_>) -> Result<Option<i64>, DbError> {
+    let caller = caller(app, post.author);
+    let base = wire::base(app);
+    let body = json!({
+        "type": "Message", "conversationid": post.thread,
+        "conversationLink": format!("{base}/v1/users/ME/conversations/{}", post.thread),
+        "from": format!("{base}/v1/users/ME/contacts/{}", caller.mri()),
+        "fromDisplayNameInToken": caller.name, "imdisplayname": caller.name,
+        "messagetype": post.kind, "contenttype": "Text", "content": post.content,
+        "properties": post.properties,
+    });
+    let in_channel = super::channels::place(&app.db, post.thread).await?.is_some();
+    let draft = message_repo::Message {
+        chat_id: post.thread.to_owned(),
+        id: 0,
+        owner_id: caller.id.clone(),
+        client_id: None,
+        version: 0,
+        body: body.to_string(),
+        root_id: in_channel.then_some(post.under.unwrap_or(0)),
+    };
+    let Some((row, _)) = message_repo::insert(&app.db, &draft).await? else {
+        return Ok(None);
+    };
+    let members = repo::members(&app.db, post.thread).await?;
+    events::publish(app, &caller, &members, "NewMessage", &row.value()?).await;
+    Ok(Some(row.id))
+}
+
+/// Changes the properties of a message `author` posted, and tells the thread's people. Whether it was there.
+pub(crate) async fn set_property(
+    app: &App,
+    thread: &str,
+    message: i64,
+    author: &User,
+    name: &str,
+    value: &Value,
+) -> Result<bool, DbError> {
+    let changed = message_repo::update(
+        &app.db,
+        thread,
+        message,
+        &author.id,
+        message_repo::Who::Owner,
+        |body, _| {
+            body["properties"][name] = value.clone();
+            Ok(true)
+        },
+    )
+    .await?;
+    let message_repo::Updated::Message(row) = changed else {
+        return Ok(false);
+    };
+    let members = repo::members(&app.db, thread).await?;
+    events::publish(app, &caller(app, author), &members, "MessageUpdate", &row.value()?).await;
+    Ok(true)
+}
