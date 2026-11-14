@@ -2,10 +2,16 @@
 //! messages passes the same membership check as a chat's. What differs is here: a channel's thread and conversation
 //! shapes, a post's reply chain (`<channel>;messageid=<post>`), and the roles its member list names.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::{Path, Query, State, rejection::JsonRejection};
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::repo::{Chat, Member};
-use super::{Caller, Error, wire};
+use super::{Caller, Error, member_of, wire};
 use crate::app::App;
 use crate::db::{Db, DbError};
 use crate::teams::repo::{self, Channel, Team};
@@ -191,5 +197,75 @@ pub(crate) async fn announce(app: &App, tenant: &str, thread: &str) {
         {
             tracing::warn!("team event fan-out unavailable; the teams read will catch up");
         }
+    }
+}
+
+type Params = HashMap<String, String>;
+
+/// `PUT v1/threads/<thread>/properties?name=…`: a team's settings (`spaceAdminSettings`, on its general channel's
+/// thread) or a standard channel's moderation (`channelSettings`), each the whole JSON as text, from a team owner.
+pub(super) async fn set_property(
+    State(app): State<Arc<App>>,
+    caller: Caller,
+    Path(path): Path<Params>,
+    Query(query): Query<Params>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<StatusCode, Error> {
+    let thread = super::reads::target(&path)?;
+    member_of(&app, &caller, thread).await?;
+    let place = place(&app.db, thread).await?.ok_or(Error::BadRequest)?;
+    let name = query.get("name").map(String::as_str).ok_or(Error::BadRequest)?;
+    let Json(body) = body.map_err(|_| Error::BadRequest)?;
+    let text = body[name].as_str().ok_or(Error::BadRequest)?;
+    let settings: Value = serde_json::from_str(text).map_err(|_| Error::BadRequest)?;
+    let owner = repo::membership(&app.db, &place.team.id, &caller.id)
+        .await?
+        .is_some_and(|member| member.owner);
+    if !owner || place.team.archived {
+        return Err(Error::Denied);
+    }
+    match name {
+        "spaceAdminSettings" if place.channel.general() && settings["userSettings"].is_object() => {
+            let edit = repo::TeamEdit {
+                settings: Some(text),
+                ..repo::TeamEdit::NONE
+            };
+            repo::edit_team(&app.db, &place.team.id, &edit).await?;
+        }
+        "channelSettings"
+            if settings.is_object()
+                && !place.channel.general()
+                && !place.channel.private
+                && !place.channel.archived =>
+        {
+            let edit = repo::ChannelEdit {
+                settings: Some(text),
+                ..repo::ChannelEdit::NONE
+            };
+            repo::edit_channel(&app.db, &place.channel, &edit).await?;
+        }
+        _ => return Err(Error::BadRequest),
+    }
+    announce(&app, &caller.tenant, thread).await;
+    Ok(StatusCode::OK)
+}
+
+/// `PUT v1/threads/<thread>/members/<own mri>` with `{"interest"}`: the account's own interest in a channel, sent
+/// beside the `favorite` property that lists or hides it. Only the property is kept; nobody else's can be set.
+pub(super) async fn set_interest(
+    State(app): State<Arc<App>>,
+    caller: Caller,
+    Path(path): Path<Params>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<StatusCode, Error> {
+    let thread = super::reads::target(&path)?;
+    member_of(&app, &caller, thread).await?;
+    if path.get("member") != Some(&caller.mri()) {
+        return Err(Error::Denied);
+    }
+    let Json(body) = body.map_err(|_| Error::BadRequest)?;
+    match body["interest"].as_str() {
+        Some("Interested" | "NotInterested") if place(&app.db, thread).await?.is_some() => Ok(StatusCode::OK),
+        _ => Err(Error::BadRequest),
     }
 }

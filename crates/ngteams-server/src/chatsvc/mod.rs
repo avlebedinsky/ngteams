@@ -41,6 +41,14 @@ pub(super) fn router() -> Router<Arc<App>> {
         .route("/api/chatsvc/{region}/v1/threads/{chat}", get(reads::thread))
         .route("/api/chatsvc/{region}/v1/threads/{chat}/members", get(reads::members))
         .route(
+            "/api/chatsvc/{region}/v1/threads/{chat}/members/{member}",
+            put(channels::set_interest),
+        )
+        .route(
+            "/api/chatsvc/{region}/v1/threads/{chat}/properties",
+            put(channels::set_property),
+        )
+        .route(
             "/api/chatsvc/{region}/v1/users/{owner}/conversations",
             get(reads::conversations),
         )

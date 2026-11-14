@@ -104,6 +104,7 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/health/live", get(|| async { StatusCode::NO_CONTENT }))
         .route("/health/ready", get(ready))
+        .route("/graph/v1.0/me", get(crate::routes::graph::me))
         .merge(auth)
         .merge(crate::chatsvc::router())
         .merge(crate::admin::api::router())

@@ -3,8 +3,12 @@
 
 mod channels;
 mod create;
+mod own_view;
 mod people;
 mod posts;
+mod private;
+mod sections;
+mod settings;
 
 use std::sync::Arc;
 use std::time::Duration;
