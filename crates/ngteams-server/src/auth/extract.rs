@@ -93,7 +93,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok().map(str::trim)
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = header(headers, AUTHORIZATION.as_str())?;
     let (scheme, token) = value.split_once(' ')?;
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())

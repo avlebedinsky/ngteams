@@ -28,6 +28,7 @@ figment.workspace = true
 futures-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 jsonwebtoken.workspace = true
 libsqlite3-sys.workspace = true
 object_store.workspace = true
@@ -48,6 +49,7 @@ url = { workspace = true, features = ["serde"] }
 uuid.workspace = true
 
 [dev-dependencies]
+image = { workspace = true, features = ["png"] }
 # the e2e tests: the real client crates against the in-process server
 rcgen = { workspace = true, features = ["pem"] }
 reqwest = { workspace = true, features = ["form", "json"] }

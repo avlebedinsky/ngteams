@@ -10,6 +10,7 @@ mod authz;
 #[cfg(target_os = "linux")]
 mod binary;
 mod chatsvc;
+mod media;
 mod migrations;
 mod node;
 mod shared;

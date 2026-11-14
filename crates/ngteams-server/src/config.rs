@@ -14,8 +14,8 @@ use url::Url;
 /// The environment variables' prefix.
 pub const ENV_PREFIX: &str = "NGTEAMS_SERVER_";
 /// Variables under the prefix that aren't configuration keys: the command line's file and log filter, and the tests'
-/// Postgres and the Redis they stop.
-const NOT_KEYS: [&str; 4] = ["config", "log", "pg_url", "stop_redis"];
+/// Postgres, S3 store and the Redis they stop.
+const NOT_KEYS: [&str; 5] = ["config", "log", "pg_url", "s3_url", "stop_redis"];
 
 /// Audiences the client asks tokens for (`teams-proto`'s and `teams-auth`'s resources): a token request for any other
 /// resource is refused.
@@ -59,6 +59,7 @@ pub struct Config {
     pub login: LoginConfig,
     pub setup: SetupConfig,
     pub trouter: TrouterConfig,
+    pub media: MediaConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -71,6 +72,7 @@ impl std::fmt::Debug for Config {
             .field("login", &self.login)
             .field("setup", &self.setup)
             .field("trouter", &self.trouter)
+            .field("media", &self.media)
             .finish_non_exhaustive()
     }
 }
@@ -117,6 +119,46 @@ pub struct SetupConfig {
     /// Setup attempts a client address may make in `window` seconds.
     pub max_attempts: u32,
     pub window: u64,
+}
+
+/// Pictures, files and link previews (`crate::media`). Sizes are in bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MediaConfig {
+    /// The largest picture pasted into a message.
+    pub max_picture_bytes: u64,
+    /// The largest file sent in a chat.
+    pub max_file_bytes: u64,
+    /// What one account may store, pictures and files together; 0 is no limit.
+    pub user_quota_bytes: u64,
+    /// Seconds a file's download or thumbnail link works.
+    pub link_lifetime: u64,
+    /// Whether the server fetches pages and pictures for link previews.
+    pub link_previews: bool,
+    /// Seconds one preview fetch may take.
+    pub preview_timeout: u64,
+    /// The most of a page read for its preview, and the largest picture fetched for one.
+    pub preview_max_page_bytes: u64,
+    pub preview_max_picture_bytes: u64,
+    /// Lets previews reach loopback, private and link-local addresses. Only for tests: on a real server it lets
+    /// any account read the server's own network.
+    pub preview_allow_private_addresses: bool,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            max_picture_bytes: 24 * 1024 * 1024,
+            max_file_bytes: 250 * 1024 * 1024,
+            user_quota_bytes: 5 * 1024 * 1024 * 1024,
+            link_lifetime: 3600,
+            link_previews: true,
+            preview_timeout: 5,
+            preview_max_page_bytes: 1024 * 1024,
+            preview_max_picture_bytes: 5 * 1024 * 1024,
+            preview_allow_private_addresses: false,
+        }
+    }
 }
 
 impl Default for SetupConfig {
@@ -167,6 +209,7 @@ impl Default for Config {
             login: LoginConfig::default(),
             setup: SetupConfig::default(),
             trouter: TrouterConfig::default(),
+            media: MediaConfig::default(),
         }
     }
 }
@@ -206,6 +249,8 @@ pub enum ConfigError {
         "tokens' lifetimes, the login and setup windows and the push socket's authentication time must be above zero"
     )]
     Lifetime,
+    #[error("media sizes, the link lifetime and the preview timeout must be above zero")]
+    Media,
 }
 
 impl Config {
@@ -264,6 +309,16 @@ impl Config {
             || self.trouter.auth_timeout == 0
         {
             return Err(ConfigError::Lifetime);
+        }
+        let media = &self.media;
+        if media.max_picture_bytes == 0
+            || media.max_file_bytes == 0
+            || media.link_lifetime == 0
+            || media.preview_timeout == 0
+            || media.preview_max_page_bytes == 0
+            || media.preview_max_picture_bytes == 0
+        {
+            return Err(ConfigError::Media);
         }
         Ok(())
     }

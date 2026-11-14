@@ -7,6 +7,7 @@
 //! - [`routes`]: the endpoints; [`services`]: the served services and the GTMs authz names them by;
 //! - [`fanout`]: payloads between nodes (in-process or Redis) and their replay journal; [`storage`]: files
 //!   (`object_store`);
+//! - `media`: pictures in messages, files sent in chats and link previews, kept in [`storage`];
 //! - [`trouter`]: the push socket; [`registrar`]: the registrations of its endpoints;
 //! - [`throttle`]: failed sign-ins per account;
 //! - [`app`]: the shared state and the router; [`serve`]: the listener, plain or TLS; [`cli`]: the command line;
@@ -22,6 +23,7 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod fanout;
+mod media;
 pub mod registrar;
 pub mod routes;
 pub mod serve;

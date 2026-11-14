@@ -131,6 +131,8 @@ pub fn router(app: Arc<App>) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ))
+        // after the timeout: a file's upload or download may run longer than other requests
+        .merge(crate::media::router(&app))
         .layer(TraceLayer::new_for_http())
         .with_state(app)
 }

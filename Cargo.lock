@@ -7765,6 +7765,7 @@ dependencies = [
  "futures-util",
  "hyper",
  "hyper-util",
+ "image",
  "jsonwebtoken",
  "libsqlite3-sys",
  "object_store",

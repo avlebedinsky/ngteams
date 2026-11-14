@@ -170,7 +170,10 @@ pub async fn token(
     let field = |name: &str| form.get(name).map(String::as_str).filter(|value| !value.is_empty());
     let client_id = field("client_id").ok_or_else(Refusal::missing)?;
     let scope = field("scope").ok_or_else(Refusal::missing)?;
-    let resource = requested(scope, &app.config.audiences).ok_or_else(Refusal::scope)?;
+    // the file service's audience is the server's own origin, as a SharePoint site's is its origin
+    let resource = requested(scope, &app.config.audiences)
+        .or_else(|| requested(scope, &[app.config.origin()]))
+        .ok_or_else(Refusal::scope)?;
     let (user, refresh) = match field("grant_type") {
         Some("password") => {
             let upn = field("username").ok_or_else(Refusal::missing)?;
