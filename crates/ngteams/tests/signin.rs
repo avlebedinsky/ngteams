@@ -290,7 +290,7 @@ fn a_hand_written_own_server_entry_is_taken_up_however_its_server_is_spelled() {
     let server = OwnServer::parse("https://chat.example.test", "").unwrap();
     let ca_file = dir.path().join("ca.pem");
     let written = format!(
-        "[[account]]\nupn = \"{UPN}\"\nserver = \"https://chat.example.test/\"\nca_file = \"{}\"\n",
+        "[[account]]\nupn = \"{UPN}\"\nserver = \"https://chat.example.test/\"\nca_file = '{}'\n",
         ca_file.display()
     );
     fs::create_dir_all(setup.paths.config_dir()).unwrap();
