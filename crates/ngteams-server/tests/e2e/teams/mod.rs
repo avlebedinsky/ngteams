@@ -3,14 +3,17 @@
 
 mod channels;
 mod create;
+mod golden;
 mod join;
 mod manage;
+mod nodes;
 mod own_view;
 mod pages;
 mod people;
 mod posts;
 mod private;
 mod sections;
+mod security;
 mod settings;
 mod tags;
 

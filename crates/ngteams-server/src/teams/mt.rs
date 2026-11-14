@@ -269,7 +269,9 @@ async fn joinable(State(app): State<Arc<App>>, actor: Me, Query(query): Query<Pa
         .get("keywords")
         .map(|keywords| keywords.trim())
         .filter(|k| !k.is_empty());
-    let teams = repo::joinable(&app.db, &actor.id, keywords).await?;
+    let mut teams = repo::joinable(&app.db, &actor.id, keywords).await?;
+    // the databases collate names differently; the list reads the same from either
+    teams.sort_by_key(|team| team.name.to_lowercase());
     Ok(Json(
         json!({"value": teams.iter().map(joinable_entry).collect::<Vec<_>>()}),
     ))

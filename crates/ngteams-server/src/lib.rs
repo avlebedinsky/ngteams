@@ -8,7 +8,9 @@
 //! - [`fanout`]: payloads between nodes (in-process or Redis); [`storage`]: files (`object_store`);
 //! - [`throttle`]: failed sign-ins per account;
 //! - [`app`]: the shared state and the router; [`serve`]: the listener, plain or TLS; [`cli`]: the command line;
-//!   [`admin`]: account administration (the admin API, the first-admin setup, the account commands).
+//!   [`admin`]: account administration (the admin API, the first-admin setup, the account commands);
+//! - `teams`: teams and channels (CSA, the middle tier's and the provisioning service's team routes); a channel
+//!   is a thread of the chat service.
 
 pub mod admin;
 pub mod app;

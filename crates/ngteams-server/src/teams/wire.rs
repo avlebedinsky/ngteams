@@ -53,6 +53,8 @@ pub(super) struct View<'a> {
     /// The account's own properties, by thread.
     pub own: &'a [(String, Map<String, Value>)],
     pub roles: &'a [Role],
+    /// Who made each thread.
+    pub creators: &'a [(String, String)],
     pub user: &'a str,
     /// Everyone on the team, and its owners among them.
     pub people: i64,
@@ -62,6 +64,13 @@ pub(super) struct View<'a> {
 impl View<'_> {
     fn own(&self, thread: &str) -> Option<&Map<String, Value>> {
         self.own.iter().find(|(id, _)| id == thread).map(|(_, own)| own)
+    }
+
+    fn creator(&self, thread: &str) -> &str {
+        self.creators
+            .iter()
+            .find(|(id, _)| id == thread)
+            .map_or("", |(_, creator)| creator.as_str())
     }
 
     fn role(&self, channel: &Channel) -> Option<&Role> {
@@ -82,8 +91,13 @@ impl View<'_> {
             "threadType": if channel.general() || channel.private { "space" } else { "topic" },
             "threadSubType": "", "channelType": u8::from(channel.private),
             "modality": if channel.layout == "PostReply" { "postReply" } else { "conversational" },
+            "creator": format!("8:orgid:{}", self.creator(&channel.id)),
             "creationTime": iso(channel.created_at), "lastJoinAt": iso(channel.created_at),
             "lastMessage": {"messageType": null, "content": null, "id": null, "sequenceId": 0, "version": 0},
+        });
+        let flags = json!({
+            "lastL2MessageIdNFS": 0, "isMessageRead": true, "isImportantMessageRead": true,
+            "isEmptyConversation": false, "isGapDetectionEnabled": true, "csaV1": false, "interestCountMap": "",
             "version": channel.version, "threadVersion": channel.version, "membershipVersion": channel.version,
             "membershipExpiry": 0, "memberRole": if owner { 2 } else { 0 },
             "memberRoleString": if owner { "Admin" } else { "User" },
@@ -95,6 +109,7 @@ impl View<'_> {
             "explicitlyAdded": channel.private, "channelOnlyMember": false, "archivalLevel": "none",
             "tabs": [], "connectorProfiles": [], "defaultFileSettings": {}, "extensionDefinition": {},
         });
+        merge(&mut entry, flags);
         if let Some(group) = &channel.group_id {
             entry["substrateGroupId"] = json!(group);
         }
@@ -108,9 +123,18 @@ impl View<'_> {
             json!(team_settings["createPrivateSpace"].as_bool() != Some(false));
         team_settings["isSharedChannelCreationEnabled"] = json!(false);
         let general = self.channels.iter().find(|channel| channel.general());
-        json!({
+        let mut entry = json!({
             "id": team.id, "displayName": team.name, "description": team.description,
             "channels": self.channels.iter().map(|channel| self.channel(channel)).collect::<Vec<_>>(),
+            "creator": format!("8:orgid:{}", self.creator(&team.id)),
+            "isCreator": self.creator(&team.id) == self.user,
+            "classification": null, "conversationVersion": null, "guestUsersCategory": null,
+            "teamStatus": {"exchangeTeamCreationStatus": 0, "sharePointSiteCreationStatus": 0,
+                "teamNotebookCreationStatus": 0},
+            "extensionDefinition": {"tabsEtag": null, "updatedTime": iso(team.created_at)},
+            "interestCountMap": "", "isEmptyConversation": false, "isUnlockMembershipSyncRequired": false,
+        });
+        let about = json!({
             "tenantId": self.tenant, "smtpAddress": format!("{}@{}", team.group_id, self.host),
             "pictureETag": team.picture_etag, "joiningenabled": "True", "spaceTypes": "standard", "teamType": 0,
             "accessType": if team.public { 3 } else { 1 },
@@ -129,6 +153,15 @@ impl View<'_> {
             "isGeneralChannelFavorite": general.is_some_and(|general| super::shown(general, self.own(&general.id))),
             "isTeamLocked": false, "isTenantWide": false, "isUserMuted": false, "channelOnlyMember": false,
             "teamSettings": team_settings, "teamGuestSettings": settings(team, "guestSettings"),
-        })
+        });
+        merge(&mut entry, about);
+        entry
+    }
+}
+
+/// Puts the keys of `more` into `entry`: one `json!` object of every key is past the macro's recursion limit.
+fn merge(entry: &mut Value, more: Value) {
+    if let (Some(entry), Value::Object(more)) = (entry.as_object_mut(), more) {
+        entry.extend(more);
     }
 }

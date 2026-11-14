@@ -40,6 +40,7 @@ async fn teams(State(app): State<Arc<App>>, actor: Actor<Csa>) -> Answer<Json<Va
     let joined = repo::joined(&app.db, &actor.id, &ids).await?;
     let own = repo::own_properties(&app.db, &actor.id, &ids).await?;
     let roles = repo::roles_of(&app.db, &ids).await?;
+    let creators = repo::creators(&app.db, &ids).await?;
     let counts = repo::head_counts(&app.db, &team_ids).await?;
     let host = app.config.public_origin.host_str().unwrap_or("localhost");
     let listed: Vec<Value> = seats
@@ -63,6 +64,7 @@ async fn teams(State(app): State<Arc<App>>, actor: Actor<Csa>) -> Answer<Json<Va
                     .collect(),
                 own: &own,
                 roles: &roles,
+                creators: &creators,
                 user: &actor.id,
                 people: count(false),
                 owners: count(true),

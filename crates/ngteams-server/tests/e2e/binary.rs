@@ -87,7 +87,19 @@ async fn check_region(session: &Session<MemorySecretStore>, origin: &str) {
         session.service_base("chatServiceAfd"),
         Some(format!("{origin}/api/chatsvc/own"))
     );
-    assert_eq!(session.region().endpoints.len(), 2);
+    assert_eq!(
+        session.service_base("middleTier"),
+        Some(format!("{origin}/api/mt/part/own-01"))
+    );
+    assert_eq!(
+        session.service_base("chatSvcAggAfd"),
+        Some(format!("{origin}/api/csa/own"))
+    );
+    assert_eq!(
+        session.service_base("teamsAndChannelsProvisioningService"),
+        Some(format!("{origin}/fabric/own/templates/api"))
+    );
+    assert_eq!(session.region().endpoints.len(), 5);
 }
 
 async fn rejects_an_untrusted_certificate(node: &Node) {

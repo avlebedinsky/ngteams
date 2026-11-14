@@ -4,8 +4,9 @@
 wire the client already speaks to Microsoft (the shapes in `docs/protocol/`), with every service under one HTTPS
 origin. The client sends a request to it only for an account signed in to that server.
 
-What it serves today: sign-in (the token endpoint), authz, the chat service, and account administration (the admin
-API and the first-admin setup). Other services are added one at a time. Authz names only the services the server
+What it serves today: sign-in (the token endpoint), authz, the chat service, teams and channels (CSA, the middle
+tier's and the provisioning service's team routes), and account administration (the admin API and the first-admin
+setup). Other services are added one at a time. Authz names only the services the server
 serves, so the client keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
@@ -175,6 +176,65 @@ UPN, `cli` or `setup`. `detail` holds the changed values, never a password. A re
   can't get one. The current password is the credential: a wrong one, an unknown account and a disabled account all
   get 403 `InvalidCredentials`. Attempts count toward `login.max_failures`, as sign-ins do (429 when held).
 
+## Teams and channels
+
+The client's team pages and channel dialogs find their routes at three GTMs: `chatSvcAggAfd` (CSA), `middleTier`
+and `teamsAndChannelsProvisioningService`. The shapes are those of `docs/protocol/channels.md` and `teams.md`; each
+route takes the access token of its own service's audience and looks the account up, so a disabled account's live
+token opens nothing.
+
+- **A team** has a thread id (`19:<id>@thread.tacv2`, its general channel's) and a group id (a GUID). Its creator
+  is its owner. **A channel is a thread of the chat service**: a standard channel's members are the team's people,
+  a private channel's the people its owners put in it (people of the team only). So a channel's messages, edits,
+  reactions and read state are the chat service's, behind its membership check. Of a team's channels only the
+  general one is in the conversation list; the others are read by their id.
+- **Posts and replies.** A message posted to a channel is a post: its `conversationLink` ends in
+  `;messageid=<its own id>`. A reply is posted to `<channel>;messageid=<post>` and is kept with the channel's
+  messages under that post; the chain's own page (`…/conversations/<channel>;messageid=<post>/messages`) holds the
+  post and its replies. A reply needs a post of that channel that isn't deleted. An archived channel, or a channel
+  of an archived team, takes no new message.
+- **CSA**: `GET api/v3/teams/users/me` lists the account's teams with the channels it may see, its role, the
+  team's settings as `teamSettings`, and the account's `conversationFolders` (its channel sections). The sections'
+  writes (`POST …/conversationFolders`, `PATCH …/batchUpdateExpandedState`) name the hierarchy version they were made
+  against; another version answers 409 and changes nothing. A team's tags: `tagCards`, `tagSettings`, `tags`
+  (`PATCH` with `if-match: <version>`, 412 for another version).
+- **Middle tier** (`beta/…`): `teams/create`, `PATCH teams/<team>`, `DELETE teams/<team>/delete`, `joinCode`,
+  `bulkUpdateRoledMembers`, `members` (`Promoted`, `Demoted`, `Removed`, `Left`, `DemotedAndLeft`),
+  `sponsorJoinRequest`, `findJoinRequests`, `joinRequestAdminAction`, `joinRequest`, `joinByCode`, `suggested`,
+  `find`, standard channels (`teams/<team>/channels[/<channel>]`, `setDefaultChannel`), the team's picture (PNG or
+  JPEG, at most 4 MiB, kept in the file store) and `analytics/…/summary-timeseries` (counted from the channels'
+  messages: posts, replies, reactions, mentions and the people who wrote, by day).
+- **Provisioning**: private channels (`teams/<group>/channels`, their `users`, archive and restore), a channel's
+  moderators (`channels/<channel>/members`), `groups/<group>/archive|unarchive|channels|clone`, the account's own
+  `team/<team>/hide` and `conversations/show`, and `users/me/invitations` and `teamtemplates/v1.0/en-us`, both
+  empty.
+- **Chat service**: `PUT v1/threads/<thread>/properties?name=spaceAdminSettings` (a team's settings, on its general
+  channel) and `?name=channelSettings` (a standard channel's moderation), from a team's owner;
+  `PUT v1/threads/<channel>/members/<own mri>` (the account's own interest); and the account's own channel
+  properties (`favorite`, `isGeneralChannelFavorite`, `channelNotificationSettings`, `followAllRc`, `notifyAllRc`,
+  `alerts`) on `v1/users/ME/conversations/<channel>/properties`.
+- **Graph**: `GET /graph/v1.0/me` (the token's account), which the client reads before each account-own write.
+
+Who may do what, checked against the database on every request:
+
+| Who | May |
+|---|---|
+| a team's owner | edit, archive, restore and delete it; add, promote, demote and remove people; read, make and take away its code; answer join requests; change its settings, tag settings and picture; archive, restore, show by default and moderate standard channels; copy it |
+| a member | what the team's settings allow (`createTopic`, `updateTopic`, `deleteTopic`, `createPrivateSpace`); add members to a public team; ask a private team's owners to let people in; leave; tags when the tag settings allow it |
+| a private channel's owner | rename, archive, restore and delete it; add, change and remove its people |
+| anyone signed in | make a team; find and join public teams; join by a code; ask to join a private team by its group id |
+
+A team and a private channel always keep an owner (403 `LastOwnerCannotBeRemoved`). Someone outside a team gets
+404 `NotFound` for every route that names it, and someone outside a private channel for every route that names the
+channel. A refusal is `{"errorCode", "message"}`; the codes the client's dialogs word are Teams' own
+(`ChannelNameAlreadyExist`, `OperationNotAllowedOnArchivedTeam`, `NoPermissionToCreateChannel`,
+`CannotCreatePrivateChannelDueToUserPolicy`). A team's or channel's change is published to its people as a
+`ThreadUpdate` on `push:<mri>`.
+
+Not served yet: a channel's email address, team apps and templates, the default team picture, the user profile
+service's people search, channel moderation enforced on posts (the settings are kept and read back), and system
+messages (`ThreadActivity/…`) for a team's changes.
+
 ## Prefix table
 
 Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now and authz
@@ -187,13 +247,14 @@ hands out its GTM.
 | Admin API, first-admin setup | (the origin) | `/api/admin/v1/` | yes |
 | The account's own endpoints | (the origin) | `/api/account/v1/` | yes |
 | Chat service | `chatServiceAfd` | `/api/chatsvc/<region>/` | yes |
-| Middle tier | `middleTier` | `/api/mt/part/<partition>/` | no |
-| Chat service aggregator | `chatSvcAggAfd` | `/api/csa/<region>/` | no |
+| Middle tier | `middleTier` | `/api/mt/part/<partition>/` (the partition as `<letters>-<digits>`: `own-01`) | the team routes |
+| Chat service aggregator | `chatSvcAggAfd` | `/api/csa/<region>/` | yes |
+| Provisioning | `teamsAndChannelsProvisioningService` | `/fabric/<region>/templates/api/` (the client takes a region of letters only) | yes |
 | Presence | `presenceUPS` | `/ups/<geo>/` | no |
 | Registrar | (the origin) | `/registrar/prod/V2/` | no |
 | Trouter | (the origin) | `wss://<origin>/trouter/v4/c` | no |
 | AMS | `amsV2` | `/ams/` | no |
-| Graph | (the origin) | `/graph/v1.0/` | no |
+| Graph | (the origin) | `/graph/v1.0/` | `me` |
 | Files | (the origin) | `/sp/` | no |
 | Loki | (the origin) | `/loki/` | no |
 | Search | (the origin) | `/search/` | no |

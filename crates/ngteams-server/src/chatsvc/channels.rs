@@ -119,6 +119,7 @@ pub(super) fn thread(app: &App, tenant: &str, chat: &Chat, place: &Place, reader
     properties["tenantid"] = json!(tenant);
     if place.channel.general() {
         properties["spaceAdminSettings"] = json!(place.team.settings);
+        properties["RootResourceGroupId"] = json!(format!("92:{}", chat.id.trim_start_matches("19:")));
     }
     if let Some(settings) = &place.channel.settings {
         properties["channelSettings"] = json!(settings);

@@ -170,6 +170,10 @@ read from the current reference client; shared changes are checked against a fre
 one-attempt engine write path. Account-owned preferences and folders reach nobody else. Fresh CSA target/type/role
 checks and authenticated actor binding remain; lab reach is the agent's check before each live run.
 
+Own server (`crates/ngteams-server`, [server.md](../server.md#teams-and-channels)): serves every row of this table
+but a channel's email (`beta/channels/<channel>/email`, unanswered: the server takes no mail). The account-own rows
+need Graph's `GET me`, which it serves for the transport's actor check.
+
 | Method | Service and path | Purpose | Native request | Evidence |
 |---|---|---|---|---|
 | `PATCH`, `DELETE` | middle tier `beta/teams/<team>/channels/<channel>` | Standard channel name/description or deletion | `ChannelWrite` (`Edit`, `Delete`) | Reference bundle; synthetic protocol tests |
@@ -188,6 +192,11 @@ checks and authenticated actor binding remain; lab reach is the agent's check be
 ## Managing a team
 
 The team pages' writes and reads ([teams.md](teams.md)). Answers marked bundle-only remain unobserved; capture holds record request shapes without inventing a service response.
+
+Own server ([server.md](../server.md#teams-and-channels)): serves the team rows (create, edit, settings, people,
+join requests, codes, joining, archive, restore, delete, picture, copy, channels, invitations as none, analytics
+from its own messages) and the tag rows. Not served: the apps rows (`apps/…`), team templates (the list answers
+empty), `teamtemplates/v1.0/<id>/…`, `workflow/status/<id>`, `defaultProfilePicture` and `users/searchV2`.
 
 | Method | Path | What | Native | Notes | Seen |
 | --- | --- | --- | --- | --- | --- |
@@ -224,6 +233,10 @@ The team pages' writes and reads ([teams.md](teams.md)). Answers marked bundle-o
 
 The dialog's writes and reads ([channels.md](channels.md#creating-a-channel)). Current native entries are listed below.
 
+Own server: serves a standard and a private channel's creation (a private one's answer already names its
+`threadId`), its status read, its people and `setDefaultChannel`. Not served: `channelsWarmup` and the user profile
+service's `profilesearch`.
+
 | Method | Path | What | Native | Notes | Seen |
 | --- | --- | --- | --- | --- | --- |
 | `POST` | middle tier `beta/teams/<team>/channels` | a standard channel | Typed write (`CreateChannel`) | [channels.md](channels.md#creating-a-channel) | seen, held back (`channel-create`) |
@@ -238,6 +251,10 @@ The dialog's writes and reads ([channels.md](channels.md#creating-a-channel)). C
 ## CSA and the push service (`https://<teams origin>/api/csa/<region>/`, `…/api/tps/`)
 
 The CSA base is authz's `chatSvcAggAfd` GTM. `Service::Csa` uses the account's CSA base and its `chatsvcagg` token; the push metadata service is a separate browser endpoint.
+
+Own server: serves `api/v3/teams/users/me` (the teams, their channels and the account's `conversationFolders`;
+`chats` and `users` empty, since the chat list is the chat service's), the `conversationFolders` read and writes,
+and a team's tags. Not served: the `updates` read, CSA's posts reads, pins and the push metadata service.
 
 | Method | Path | What it does | Native | Notes · task | Evidence |
 | --- | --- | --- | --- | --- | --- |

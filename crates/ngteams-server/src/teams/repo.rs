@@ -312,6 +312,15 @@ pub(crate) async fn joined(db: &Db, user: &str, ids: &[String]) -> Result<Vec<St
         .await?))
 }
 
+/// Who made each of the threads `ids`.
+pub(crate) async fn creators(db: &Db, ids: &[String]) -> Result<Vec<(String, String)>, DbError> {
+    with_conn!(db, |conn| Ok(chats::table
+        .filter(chats::id.eq_any(ids))
+        .select((chats::id, chats::creator))
+        .load(conn)
+        .await?))
+}
+
 /// The account's own properties of the threads among `ids`.
 pub(crate) async fn own_properties(
     db: &Db,
