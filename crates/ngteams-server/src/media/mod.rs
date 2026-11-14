@@ -8,8 +8,12 @@
 //! account ever reaches the store.
 
 mod ams;
+mod drive;
+mod graph;
+mod people;
 mod repo;
 mod schema;
+mod thumbs;
 
 use std::sync::Arc;
 
@@ -25,11 +29,34 @@ use crate::db::users::{self, User};
 use crate::db::DbError;
 use crate::storage::StorageError;
 
+/// The largest body of a read by POST.
+const SMALL_BODY: usize = 64 * 1024;
+/// How long a read may take, and how long a file's or a picture's bytes may take to arrive or to start leaving.
+const SHORT: std::time::Duration = std::time::Duration::from_secs(30);
+const LONG: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// The chat service's audience, which AMS takes too.
 const IC3: &str = "https://ic3.teams.office.com";
 
 pub(crate) fn router(app: &App) -> Router<Arc<App>> {
-    ams::router(app)
+    let small = Router::new()
+        .merge(graph::router())
+        .route(
+            "/api/mt/part/{partition}/beta/users/fetchShortProfile",
+            axum::routing::post(people::short_profiles),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(SMALL_BODY))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            SHORT,
+        ));
+    let long = ams::router(app)
+        .merge(drive::router())
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            LONG,
+        ));
+    small.merge(long)
 }
 
 #[derive(Debug)]

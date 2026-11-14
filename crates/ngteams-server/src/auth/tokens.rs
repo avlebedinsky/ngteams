@@ -98,6 +98,15 @@ impl SkypeClaims {
     }
 }
 
+/// What a signed link carries ([`Issuer::link`]).
+#[derive(Serialize, Deserialize)]
+struct LinkClaims {
+    aud: String,
+    iss: String,
+    exp: i64,
+    sub: String,
+}
+
 /// A requested resource, as a token request's `scope` names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Requested {
@@ -265,6 +274,31 @@ impl Issuer {
     /// [`Invalid`]: not ours, not a skypetoken, or expired.
     pub async fn verify_skypetoken(&self, token: &str) -> Result<SkypeClaims, Invalid> {
         self.keys.verify(token, &self.validation(SKYPETOKEN_AUDIENCE)).await
+    }
+
+    /// A short-lived credential for one stored thing (`subject`), carried in a link's query: `audience` says what
+    /// the link is for. Signed like every token, so any node checks a link another node handed out.
+    ///
+    /// # Errors
+    /// No signing key, or signing fails.
+    pub fn link(&self, audience: &str, subject: &str, lifetime: Duration) -> Result<String, KeyError> {
+        self.keys.sign(&LinkClaims {
+            aud: audience.to_owned(),
+            iss: self.iss.clone(),
+            exp: now() + crate::db::seconds(lifetime),
+            sub: subject.to_owned(),
+        })
+    }
+
+    /// The subject of a link credential for `audience`.
+    ///
+    /// # Errors
+    /// [`Invalid`]: not ours, for something else, or expired.
+    pub async fn verify_link(&self, token: &str, audience: &str) -> Result<String, Invalid> {
+        let mut validation = self.validation(audience);
+        validation.leeway = 0;
+        let claims: LinkClaims = self.keys.verify(token, &validation).await?;
+        Ok(claims.sub)
     }
 
     fn validation(&self, audience: &str) -> Validation {

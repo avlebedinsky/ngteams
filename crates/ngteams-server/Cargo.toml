@@ -26,12 +26,15 @@ diesel-async.workspace = true
 diesel_migrations.workspace = true
 figment.workspace = true
 futures-util.workspace = true
+http-range-header.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 jsonwebtoken.workspace = true
 libsqlite3-sys.workspace = true
+mime_guess.workspace = true
 object_store.workspace = true
+percent-encoding.workspace = true
 redis.workspace = true
 rustls.workspace = true
 scraper.workspace = true
