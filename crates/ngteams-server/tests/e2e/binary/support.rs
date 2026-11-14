@@ -118,6 +118,15 @@ impl Node {
         child.wait_with_output().unwrap()
     }
 
+    /// A command that may fail: whether it succeeded, and what it wrote to its error output.
+    pub fn try_cli(&self, args: &[&str], input: &str) -> (bool, String) {
+        let output = self.cli_output(args, input);
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        )
+    }
+
     pub fn add_user(&self, upn: &str, password: &str) {
         let added = self.cli(&["user", "add", upn, "--name", "QA Operator"], &format!("{password}\n"));
         assert!(added.starts_with(&format!("added {upn} (")));

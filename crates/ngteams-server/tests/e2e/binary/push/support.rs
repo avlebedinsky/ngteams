@@ -59,12 +59,17 @@ impl Rig {
 
     /// `config`: TOML tables appended to each node's configuration.
     pub async fn start_with(backend: Backend, config: &str) -> Self {
-        eprintln!("real-binary push: {backend:?}");
         let redis = (backend == Backend::Postgres).then(redis_url).flatten();
         assert!(
             backend != Backend::Postgres || redis.is_some(),
             "Postgres QA requires Redis"
         );
+        Self::start_on(backend, config, redis).await
+    }
+
+    /// As [`Rig::start_with`], the nodes on the Redis at `redis`.
+    pub async fn start_on(backend: Backend, config: &str, redis: Option<String>) -> Self {
+        eprintln!("real-binary push: {backend:?}");
         let mut deployment = Deployment::new(backend, false, redis).await;
         deployment.origin = deployment.origin.replacen("http:", "https:", 1);
         let mut first = deployment.node("a");
@@ -156,6 +161,16 @@ impl User {
             options,
             dir: tempfile::tempdir().unwrap(),
         }
+    }
+
+    /// Signs the account in again on this client, with `password`, and starts it on its store: connected and
+    /// registered. What the client was before is closed.
+    pub async fn sign_in_again(&mut self, node: &Node, password: &str) {
+        self.close();
+        self.session = Arc::new(node.sign_in(&self.upn, password).await);
+        let mark = self.mark();
+        self.start();
+        self.online(mark).await;
     }
 
     pub fn store_path(&self) -> std::path::PathBuf {
@@ -464,6 +479,67 @@ impl Link {
 impl Drop for Link {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// The run's Redis that a test may stop: a podman container of its own, which no other test's nodes use.
+pub struct OwnRedis {
+    container: String,
+    pub url: String,
+}
+
+/// Names the container and its URL, as `<container>=<url>`.
+pub const OWN_REDIS_ENV: &str = "NGTEAMS_SERVER_STOP_REDIS";
+
+impl OwnRedis {
+    pub fn from_env() -> Option<Self> {
+        let named = std::env::var(OWN_REDIS_ENV).ok()?;
+        let (container, url) = named.split_once('=')?;
+        Some(Self {
+            container: container.into(),
+            url: url.into(),
+        })
+    }
+
+    fn podman(&self, args: &[&str]) {
+        let done = std::process::Command::new("podman")
+            .args(args)
+            .arg(&self.container)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(done.success(), "podman {args:?} {}", self.container);
+    }
+
+    async fn answers(&self) -> bool {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let address = self.url.strip_prefix("redis://").unwrap();
+        let Ok(mut stream) = TcpStream::connect(address).await else {
+            return false;
+        };
+        let mut answer = [0_u8; 5];
+        stream.write_all(b"PING\r\n").await.is_ok()
+            && matches!(
+                tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut answer)).await,
+                Ok(Ok(_))
+            )
+            && answer == *b"+PONG"
+    }
+
+    /// Stops Redis: nothing answers at its URL from here on.
+    pub async fn stop(&self) {
+        self.podman(&["stop", "-t", "2"]);
+        assert!(!self.answers().await, "Redis still answers");
+    }
+
+    /// Starts Redis (again) and waits until it answers.
+    pub async fn start(&self) {
+        self.podman(&["start"]);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while !self.answers().await {
+            assert!(tokio::time::Instant::now() < deadline, "Redis never answered");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 

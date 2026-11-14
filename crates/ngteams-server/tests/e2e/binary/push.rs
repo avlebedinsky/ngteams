@@ -12,7 +12,9 @@ use teams_proto::chat::MessageText;
 use teams_store::Store;
 use teams_trouter::{Down, Options, RegistrationReport, RegistrationTimes};
 
-use self::support::{IC3, Link, QUIET, Raw, Rig, SPACES, UNAUTHORIZED, User, brief, options, register, token};
+use self::support::{
+    IC3, Link, OWN_REDIS_ENV, OwnRedis, QUIET, Raw, Rig, SPACES, UNAUTHORIZED, User, brief, options, register, token,
+};
 use crate::support::{Backend, PASSWORD, backends};
 
 /// A 1:1 chat of `a` and `b` whose first message `b`'s client shows already.
@@ -180,6 +182,102 @@ async fn each_member_of_a_group_chat_gets_a_push_once_and_a_non_member_gets_noth
                 | Event::Typing { conversation, .. } if *conversation == group)
         });
         assert_eq!(about_the_group, 0, "{:?}", d.log.iter().map(brief).collect::<Vec<_>>());
+        assert!(d.engine().conversation(group.clone()).await.unwrap().is_none());
+        drop((a, b, c, d));
+        rig.stop().await;
+    }
+}
+
+/// How many messages each of the three members posts in the burst.
+const BURST: usize = 100;
+
+/// `user` posts its share of the burst, one message after the other as fast as the service takes them.
+async fn burst(user: &User, chat: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for n in 1..=BURST {
+        ids.push(user.send(chat, &format!("burst, {} {n}", user.upn)).await);
+    }
+    ids
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_member_of_a_group_gets_every_message_of_a_burst_once() {
+    for backend in backends() {
+        let rig = Rig::start(backend).await;
+        let mut a = rig.user(&rig.first, "a@own.test").await;
+        let mut b = rig.user(rig.other(), "b@own.test").await;
+        let mut c = rig.user(&rig.first, "c@own.test").await;
+        let mut d = rig.user(rig.other(), "d@own.test").await;
+        let group = a.create(&[&b, &c], Some("QA burst room")).await;
+        let first = a.send(&group, "burst, first").await;
+        b.eventually_stored(&group, &first).await;
+        c.eventually_stored(&group, &first).await;
+
+        // the three members post at the same time
+        let marks = [a.mark(), b.mark(), c.mark()];
+        let started = tokio::time::Instant::now();
+        let (from_a, from_b, from_c) = tokio::join!(burst(&a, &group), burst(&b, &group), burst(&c, &group));
+        let posted = started.elapsed();
+        let all: Vec<(&str, &String)> = [
+            ("a@own.test", &from_a),
+            ("b@own.test", &from_b),
+            ("c@own.test", &from_c),
+        ]
+        .into_iter()
+        .flat_map(|(sender, ids)| ids.iter().map(move |id| (sender, id)))
+        .collect();
+        assert_eq!(all.len(), 3 * BURST);
+        for user in [&mut a, &mut b, &mut c] {
+            for (_, id) in &all {
+                user.eventually_stored(&group, id).await;
+            }
+            user.settle().await;
+        }
+        d.settle().await;
+        eprintln!(
+            "burst: {} messages posted in {posted:?}, at every member after {:?}",
+            all.len(),
+            started.elapsed()
+        );
+
+        let mut shown: Vec<Vec<String>> = Vec::new();
+        for (user, mark) in [&a, &b, &c].into_iter().zip(marks) {
+            for (sender, id) in &all {
+                let pushes = user.pushes(mark, &group, id, MessageChange::New);
+                // a member's own post comes back to the client that made it at most once
+                assert!(
+                    pushes == 1 || (user.upn == *sender && pushes == 0),
+                    "{} got {id} of {sender} {pushes} times",
+                    user.upn
+                );
+            }
+            let stored = user.stored(&group, "burst, ").await;
+            assert_eq!(stored.len(), 1 + all.len(), "{}", user.upn);
+            shown.push(stored);
+        }
+        // every member shows the same messages in the same order, each sender's own in the order it posted them
+        assert_eq!(shown[0], shown[1]);
+        assert_eq!(shown[0], shown[2]);
+        for ids in [&from_a, &from_b, &from_c] {
+            let places: Vec<usize> = ids
+                .iter()
+                .map(|id| shown[0].iter().position(|shown| shown == id).unwrap())
+                .collect();
+            assert!(places.is_sorted(), "{places:?}");
+        }
+        for user in [&a, &b, &c, &d] {
+            let log: Vec<String> = user.log.iter().map(brief).collect();
+            assert_eq!(
+                user.count(0, |event| matches!(event, Event::PushStopped(_))),
+                0,
+                "{log:?}"
+            );
+        }
+        let about_the_group = d.count(0, |event| {
+            matches!(event, Event::Message { conversation, .. } | Event::ConversationChanged { conversation }
+                if *conversation == group)
+        });
+        assert_eq!(about_the_group, 0);
         assert!(d.engine().conversation(group.clone()).await.unwrap().is_none());
         drop((a, b, c, d));
         rig.stop().await;
@@ -483,17 +581,67 @@ async fn nothing_reached(b: &User, mark: usize, chat: &str, ids: &[String]) {
     );
 }
 
-/// The operator's `command` on b's account while b's client is connected: the service ends b's push at once, and
-/// nothing posted after the command returned is pushed to b.
-async fn the_operators_command_ends_the_clients_push(backend: Backend, command: &[&str], input: &str) {
-    let rig = Rig::start_with(backend, SHORT_TOKENS).await;
-    let a = User::sign_in(&rig.first, &rig.origin, "a@own.test", renewing()).await;
-    let mut b = User::sign_in(rig.other(), &rig.origin, "b@own.test", renewing()).await;
-    let (chat, _) = chat(&a, &mut b, "revoked, first").await;
+/// The line `user list` prints for `upn` says `state` (`enabled` or `disabled`).
+fn listed_as(node: &super::support::Node, upn: &str, state: &str) -> bool {
+    node.cli(&["user", "list"], "")
+        .lines()
+        .any(|line| line.starts_with(&format!("{upn}\t")) && line.contains(&format!("\t{state}\t")))
+}
+
+/// b signs in again on its client with `password`: what it missed is there, a new post is pushed to it once, and
+/// its answer is pushed to a.
+async fn the_push_is_back_after_a_new_sign_in(rig: &Rig, a: &mut User, b: &mut User, chat: &str, password: &str) {
+    let missed = a.send(chat, "revoked, posted before the new sign-in").await;
+    let again = b.mark();
+    b.sign_in_again(rig.other(), password).await;
+    b.eventually_stored(chat, &missed).await;
+    let live = a.send(chat, "revoked, live after the new sign-in").await;
+    b.pushed(again, chat, &live, MessageChange::New).await;
+    b.shows(chat, &live, "revoked, live after the new sign-in").await;
+    let from_b = a.mark();
+    let answer = b.send(chat, "revoked, an answer after the new sign-in").await;
+    a.pushed(from_b, chat, &answer, MessageChange::New).await;
+    b.settle().await;
+    assert_eq!(b.pushes(again, chat, &live, MessageChange::New), 1);
+    assert_eq!(b.count(again, |event| matches!(event, Event::PushStopped(_))), 0);
+}
+
+/// The token b held before the operator's command (it runs out in five minutes) opens no socket on either node.
+async fn a_token_from_before_opens_no_socket(rig: &Rig, held: &str) {
+    for node in [&rig.first, rig.other()] {
+        let mut socket = Raw::open(node, &rig.origin, "00000000-0000-4000-8000-0000000000b7").await;
+        socket.authenticate(held).await;
+        assert!(socket.ends_with(UNAUTHORIZED).await);
+    }
+}
+
+/// The way back for b: the user has the new password, or the operator enables the account. The password to sign in
+/// with.
+async fn the_way_back<'a>(rig: &Rig, new_password: Option<&'a str>) -> &'a str {
+    assert_ne!(rig.other().password("b@own.test", PASSWORD).await.status(), 200);
+    if let Some(password) = new_password {
+        return password;
+    }
+    assert!(listed_as(&rig.first, "b@own.test", "disabled"));
+    rig.first.cli(&["user", "enable", "b@own.test"], "");
+    assert!(listed_as(&rig.first, "b@own.test", "enabled"));
+    PASSWORD
+}
+
+/// The operator runs `command` at the first node: b's push is ended by the service within seconds, b's session is
+/// signed out, and b is pushed and shows nothing posted after the command returned.
+async fn the_command_signs_the_client_out(
+    rig: &Rig,
+    a: &User,
+    b: &mut User,
+    chat: &str,
+    command: &[&str],
+    input: &str,
+) {
     let mark = b.mark();
     rig.first.cli(command, input);
     let returned = tokio::time::Instant::now();
-    let just_after = a.send(&chat, "revoked, posted just after").await;
+    let just_after = a.send(chat, "revoked, posted just after").await;
     // long before its token's renewal (20 s) would have ended the socket
     b.since(mark, "the service's disconnect", |event| {
         matches!(event, Event::Disconnected { down: Down::ServiceDisconnect(Some(reason)), .. }
@@ -503,9 +651,25 @@ async fn the_operators_command_ends_the_clients_push(backend: Backend, command: 
     assert!(returned.elapsed() < Duration::from_secs(5), "{:?}", returned.elapsed());
     // its tokens can't be renewed: the client's session is signed out, as the app then shows it
     b.until_signed_out().await;
-    let unseen = a.send(&chat, "revoked, never shown").await;
+    let unseen = a.send(chat, "revoked, never shown").await;
     b.settle().await;
-    nothing_reached(&b, mark, &chat, &[just_after, unseen]).await;
+    nothing_reached(b, mark, chat, &[just_after, unseen]).await;
+}
+
+/// The operator's `command` on b's account while b's client is connected: the service ends b's push at once, and
+/// nothing posted after the command returned is pushed to b; a token b held before opens no socket. With the account
+/// enabled again, or with the `new_password` the command gave it, a new sign-in brings the push back.
+async fn the_operators_command_ends_the_clients_push(backend: Backend, command: &[&str], new_password: Option<&str>) {
+    let rig = Rig::start_with(backend, SHORT_TOKENS).await;
+    let mut a = User::sign_in(&rig.first, &rig.origin, "a@own.test", renewing()).await;
+    let mut b = User::sign_in(rig.other(), &rig.origin, "b@own.test", renewing()).await;
+    let (chat, _) = chat(&a, &mut b, "revoked, first").await;
+    let held = token(rig.other(), "b@own.test", IC3).await;
+    let input = new_password.map(|password| format!("{password}\n")).unwrap_or_default();
+    the_command_signs_the_client_out(&rig, &a, &mut b, &chat, command, &input).await;
+    a_token_from_before_opens_no_socket(&rig, &held).await;
+    let password = the_way_back(&rig, new_password).await;
+    the_push_is_back_after_a_new_sign_in(&rig, &mut a, &mut b, &chat, password).await;
     drop((a, b));
     rig.stop().await;
 }
@@ -513,7 +677,7 @@ async fn the_operators_command_ends_the_clients_push(backend: Backend, command: 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_of_an_account_the_operator_disabled_loses_its_push_at_once() {
     for backend in backends() {
-        the_operators_command_ends_the_clients_push(backend, &["user", "disable", "b@own.test"], "").await;
+        the_operators_command_ends_the_clients_push(backend, &["user", "disable", "b@own.test"], None).await;
     }
 }
 
@@ -521,8 +685,84 @@ async fn a_client_of_an_account_the_operator_disabled_loses_its_push_at_once() {
 async fn a_client_of_an_account_whose_password_the_operator_reset_loses_its_push_at_once() {
     for backend in backends() {
         let command = ["user", "reset-password", "b@own.test"];
-        the_operators_command_ends_the_clients_push(backend, &command, "another horse battery\n").await;
+        the_operators_command_ends_the_clients_push(backend, &command, Some("another horse battery")).await;
     }
+}
+
+/// Two nodes on Postgres and a Redis that is stopped while b's client is connected: the operator disables b (and
+/// gives d a new password) during the outage. Whatever the commands say of the sockets they couldn't tell, the
+/// account is disabled and the password replaced, and once Redis is back and the others' pushes are live again, b
+/// gets none and is signed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_disabled_while_redis_is_stopped_gets_no_push_when_redis_is_back() {
+    let Some(redis) = OwnRedis::from_env() else {
+        eprintln!("SKIP disable with Redis stopped: set {OWN_REDIS_ENV}=<podman container>=<its redis URL>");
+        return;
+    };
+    if !backends().contains(&Backend::Postgres) {
+        eprintln!("SKIP disable with Redis stopped: set {}", crate::support::PG_ENV);
+        return;
+    }
+    redis.start().await;
+    let rig = Rig::start_on(Backend::Postgres, SHORT_TOKENS, Some(redis.url.clone())).await;
+    let mut a = User::sign_in(&rig.first, &rig.origin, "a@own.test", renewing()).await;
+    let mut b = User::sign_in(rig.other(), &rig.origin, "b@own.test", renewing()).await;
+    let mut c = User::sign_in(rig.other(), &rig.origin, "c@own.test", renewing()).await;
+    let group = a.create(&[&b, &c], Some("QA outage room")).await;
+    let first = a.send(&group, "outage, first").await;
+    b.eventually_stored(&group, &first).await;
+    c.eventually_stored(&group, &first).await;
+
+    let (down_a, mark, down_c) = (a.mark(), b.mark(), c.mark());
+    redis.stop().await;
+    let (done, said) = rig.first.try_cli(&["user", "disable", "b@own.test"], "");
+    eprintln!("`user disable` with Redis stopped: success={done}, error output: {said:?}");
+    let disabled = listed_as(&rig.first, "b@own.test", "disabled");
+    // d, who has no client here, is given a new password in the same outage
+    let (reset_done, reset_said) = rig
+        .first
+        .try_cli(&["user", "reset-password", "d@own.test"], "another horse battery\n");
+    eprintln!("`user reset-password` with Redis stopped: success={reset_done}, error output: {reset_said:?}");
+    let db = Db::connect(&rig.database, 1).await.unwrap();
+    let d = ngteams_server::db::users::by_upn(&db, "d@own.test")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        disabled && d.password_version == 1,
+        "with Redis stopped the commands changed nothing: b disabled={disabled} (success={done}), d's password \
+         replaced {} times (success={reset_done}); `user disable` said: {said}",
+        d.password_version
+    );
+    // told so, when the sockets weren't: the operator knows the command did not reach the nodes
+    for (done, said) in [(done, &said), (reset_done, &reset_said)] {
+        assert!(done || said.contains("push sockets"), "{said}");
+    }
+
+    redis.start().await;
+    // the others are live again
+    a.online(down_a).await;
+    c.online(down_c).await;
+    let live = c.mark();
+    let after = a.send(&group, "outage, posted after Redis is back").await;
+    c.pushed(live, &group, &after, MessageChange::New).await;
+    b.until_signed_out().await;
+    b.settle().await;
+    let log: Vec<String> = b.log[mark..].iter().map(brief).collect();
+    eprintln!("b since Redis stopped: {log:?}");
+    assert_eq!(b.pushes(mark, &group, &after, MessageChange::New), 0, "{log:?}");
+    assert!(b.engine().message(&group, &after).await.unwrap().is_none(), "{log:?}");
+    // and it stays out
+    let out = b.mark();
+    let later = a.send(&group, "outage, posted later").await;
+    c.pushed(live, &group, &later, MessageChange::New).await;
+    b.settle().await;
+    nothing_reached(&b, out, &group, &[after, later]).await;
+
+    rig.first.cli(&["user", "enable", "b@own.test"], "");
+    the_push_is_back_after_a_new_sign_in(&rig, &mut a, &mut b, &group, PASSWORD).await;
+    drop((a, b, c));
+    rig.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
