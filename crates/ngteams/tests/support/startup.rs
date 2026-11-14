@@ -447,6 +447,7 @@ const STARTUP_CASES: &[&str] = &[
     "own-prompt-unserved",
     "unserved-own",
     "unserved-own-then-ready",
+    "ready-then-unserved-own",
     "forget-missing",
     "forget-pending",
     "forget-stored",
@@ -578,11 +579,7 @@ fn child() {
         "unserved-own" => {
             signed_own_as(&setup, READY_OWN_UPN);
         }
-        // the same account added before one that starts: it doesn't hold that one back
-        "unserved-own-then-ready" => {
-            signed_own_as(&setup, READY_OWN_UPN);
-            signed(&setup, "ready@example.test", 2, true);
-        }
+        "unserved-own-then-ready" | "ready-then-unserved-own" => unserved_beside_ready(&setup, &case),
         "empty" | "prompt-window-error" | "own-prompt-success" | "own-prompt-error" | "own-prompt-unserved" => {}
         other => panic!("unknown synthetic case {other}"),
     }
@@ -670,6 +667,18 @@ fn check_outcome(case: &str, outcome: &Result<Outcome, String>) {
     }
 }
 
+/// The unserved own server's account and a Microsoft 365 account that starts, in the order `case` names: added
+/// before it, the own one doesn't hold it back; added after it, the app runs on the Microsoft 365 one.
+fn unserved_beside_ready(setup: &Setup, case: &str) {
+    if case == "unserved-own-then-ready" {
+        signed_own_as(setup, READY_OWN_UPN);
+        signed(setup, "ready@example.test", 2, true);
+    } else {
+        signed(setup, "ready@example.test", 2, true);
+        signed_own_as(setup, READY_OWN_UPN);
+    }
+}
+
 /// What a case's run did besides its outcome.
 fn seen_after(case: &str) {
     let seen = calls().lock().unwrap();
@@ -721,8 +730,8 @@ fn seen_own(case: &str, seen: &[String]) {
             assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
             assert!(!seen.iter().any(|call| call.starts_with("sign-in-own:")), "{seen:?}");
         }
-        // left out, and the account after it runs the app: no sign-in screen stands in its way
-        "unserved-own-then-ready" => {
+        // left out, and the account beside it runs the app: no sign-in screen stands in its way
+        "unserved-own-then-ready" | "ready-then-unserved-own" => {
             assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
             assert!(seen.contains(&"start:ready@example.test".to_owned()), "{seen:?}");
             assert!(seen.iter().any(|call| call.starts_with("ctl-bound:")), "{seen:?}");
