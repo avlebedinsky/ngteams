@@ -2,7 +2,7 @@
 //! that account may see or change.
 
 use reqwest::Method;
-use serde_json::{Value, json};
+use serde_json::Value;
 use teams_proto::{CSA_AUDIENCE, GRAPH_AUDIENCE, IC3_AUDIENCE, MIDDLE_TIER_AUDIENCE, PROVISIONING_AUDIENCE};
 
 use super::{Seat, server};
@@ -45,26 +45,20 @@ async fn each_service_takes_only_its_own_audience_from_an_enabled_account() {
         (GRAPH_AUDIENCE, "/graph/v1.0/me".to_owned()),
     ];
     let other = token(&server, "ada@own.test", IC3_AUDIENCE).await;
+    let mut tokens = Vec::new();
     for (audience, path) in &routes {
         let own = token(&server, "ada@own.test", audience).await;
         assert_eq!(call(&server, &own, Method::GET, path, None).await.0, 200, "{path}");
         assert_eq!(call(&server, &other, Method::GET, path, None).await.0, 401, "{path}");
         assert_eq!(call(&server, "", Method::GET, path, None).await.0, 401, "{path}");
         assert_eq!(call(&server, "a.b.c", Method::GET, path, None).await.0, 401, "{path}");
+        tokens.push(own);
     }
-    let graph = token(&server, "ada@own.test", GRAPH_AUDIENCE).await;
-    let (_, me) = call(&server, &graph, Method::GET, "/graph/v1.0/me", None).await;
+    let (_, me) = call(&server, &tokens[5], Method::GET, "/graph/v1.0/me", None).await;
     assert_eq!(me["id"], ada.id.as_str());
     assert_eq!(me["userPrincipalName"], "ada@own.test");
 
     // a live token of a disabled account opens nothing
-    let tokens: Vec<String> = {
-        let mut tokens = Vec::new();
-        for (audience, _) in &routes {
-            tokens.push(token(&server, "ada@own.test", audience).await);
-        }
-        tokens
-    };
     ngteams_server::admin::set_disabled(&server.app.db, "ada@own.test", true)
         .await
         .unwrap();
@@ -75,411 +69,375 @@ async fn each_service_takes_only_its_own_audience_from_an_enabled_account() {
     server.stop().await;
 }
 
+/// Two teams of Ada's with Bert on both (the second public), a channel of the first, and Cora on neither.
+struct World {
+    server: TestServer,
+    seats: [Seat; 3],
+    names: Vec<(&'static str, String)>,
+}
+
+impl World {
+    async fn new() -> Self {
+        let server = server(Backend::Sqlite).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        let (other, other_group) = ada.make_team("Other", true).await;
+        ada.add(&team, &group, &[&bert]).await;
+        ada.add(&other, &other_group, &[&bert]).await;
+        let channel = ada.make_channel(&team, &group, "Launch", false).await;
+        let names = vec![
+            ("{MT}", MT.to_owned()),
+            ("{PROV}", PROV.to_owned()),
+            ("{CSA}", CSA.to_owned()),
+            ("{CHAT}", CHAT.to_owned()),
+            ("{team}", team),
+            ("{group}", group),
+            ("{other}", other),
+            ("{other_group}", other_group),
+            ("{channel}", channel),
+            ("{ada}", ada.mri.clone()),
+            ("{bert}", bert.mri.clone()),
+            ("{cora}", cora.mri.clone()),
+            ("{long}", "x".repeat(257)),
+            ("{guid}", uuid::Uuid::new_v4().to_string()),
+        ];
+        Self {
+            server,
+            seats: [ada, bert, cora],
+            names,
+        }
+    }
+
+    fn fill(&self, text: &str) -> String {
+        self.names
+            .iter()
+            .fold(text.to_owned(), |text, (name, value)| text.replace(name, value))
+    }
+
+    fn name(&self, name: &str) -> &str {
+        &self.names.iter().find(|(known, _)| *known == name).unwrap().1
+    }
+
+    /// Sends `method path` (their `{names}` filled in) as `who`, with the token of the path's service.
+    async fn send(&self, who: &str, method: &str, path: &str, body: &str) -> (u16, Value) {
+        let audience = match &path[..=path.find('}').unwrap()] {
+            "{MT}" => MIDDLE_TIER_AUDIENCE,
+            "{PROV}" => PROVISIONING_AUDIENCE,
+            "{CSA}" => CSA_AUDIENCE,
+            _ => IC3_AUDIENCE,
+        };
+        let token = token(&self.server, &format!("{who}@own.test"), audience).await;
+        let body = (!body.is_empty()).then(|| serde_json::from_str(&self.fill(body)).unwrap());
+        let method = Method::from_bytes(method.as_bytes()).unwrap();
+        call(&self.server, &token, method, &self.fill(path), body).await
+    }
+
+    async fn stop(self) {
+        for seat in self.seats {
+            seat.stop();
+        }
+        self.server.stop().await;
+    }
+}
+
+/// What someone on neither team tries: each answers 404 `NotFound`.
+const OUTSIDE: [(&str, &str, &str); 25] = [
+    (
+        "PATCH",
+        "{MT}/teams/{team}",
+        r#"{"displayName":"Mine","description":""}"#,
+    ),
+    ("DELETE", "{MT}/teams/{team}/delete", ""),
+    ("GET", "{MT}/teams/{team}/joinCode", ""),
+    ("PUT", "{MT}/teams/{team}/joinCode", ""),
+    (
+        "PUT",
+        "{MT}/teams/{team}/bulkUpdateRoledMembers",
+        r#"{"users":[{"mri":"{cora}","role":1}],"groupId":"{group}"}"#,
+    ),
+    ("POST", "{MT}/teams/{team}/channels", r#"{"displayName":"Mine"}"#),
+    (
+        "PATCH",
+        "{MT}/teams/{team}/channels/{channel}",
+        r#"{"displayName":"Mine"}"#,
+    ),
+    ("DELETE", "{MT}/teams/{team}/channels/{channel}", ""),
+    ("PUT", "{MT}/teams/{channel}/setDefaultChannel", ""),
+    ("POST", "{MT}/teams/sponsorJoinRequest/{group}", r#"["{cora}"]"#),
+    ("POST", "{MT}/teams/findJoinRequests", r#"{"GroupIdList":["{group}"]}"#),
+    ("GET", "{MT}/analytics/teams/{group}/summary-timeseries", ""),
+    (
+        "GET",
+        "{MT}/analytics/teams/{group}/channels/{channel}/summary-timeseries",
+        "",
+    ),
+    ("GET", "{MT}/users/{cora}/profilepicturev2/teams/{group}", ""),
+    ("GET", "{PROV}/groups/{group}/channels", ""),
+    ("POST", "{PROV}/groups/{group}/archive", ""),
+    ("POST", "{PROV}/groups/{group}/clone", r#"{"displayName":"Mine"}"#),
+    ("POST", "{PROV}/teams/{group}/channels", r#"{"displayName":"Mine"}"#),
+    ("POST", "{PROV}/teams/{group}/channels/{channel}/archive", ""),
+    ("PUT", "{PROV}/channels/{channel}/members", r#"{"users":[]}"#),
+    ("PUT", "{PROV}/team/{team}/hide", ""),
+    (
+        "PUT",
+        "{PROV}/conversations/show",
+        r#"{"teamIds":["{team}"],"channelIds":[]}"#,
+    ),
+    ("GET", "{CSA}/api/v1/teams/{team}/tagCards", ""),
+    (
+        "POST",
+        "{CSA}/api/v1/teams/{team}/tags",
+        r#"{"tagName":"x","memberIds":[]}"#,
+    ),
+    ("PUT", "{CSA}/api/v1/teams/{team}/tagSettings", "{}"),
+];
+
 #[tokio::test(flavor = "multi_thread")]
 async fn someone_outside_a_team_learns_nothing_of_it_and_changes_nothing() {
-    let server = server(Backend::Sqlite).await;
-    let ada = Seat::new(&server, "ada@own.test", "Ada").await;
-    let cora = Seat::new(&server, "cora@own.test", "Cora").await;
-    let (team, group) = ada.make_team("Rocket", false).await;
-    let channel = ada.make_channel(&team, &group, "Launch", true).await;
-    let mt = token(&server, "cora@own.test", MIDDLE_TIER_AUDIENCE).await;
-    let prov = token(&server, "cora@own.test", PROVISIONING_AUDIENCE).await;
-    let csa = token(&server, "cora@own.test", CSA_AUDIENCE).await;
-    let ic3 = token(&server, "cora@own.test", IC3_AUDIENCE).await;
-    let own = json!({"users": [{"mri": cora.mri, "role": 1}], "groupId": group});
-    let named = json!({"displayName": "Mine", "description": ""});
-    let attempts = [
-        (&mt, Method::PATCH, format!("{MT}/teams/{team}"), Some(named.clone())),
-        (&mt, Method::DELETE, format!("{MT}/teams/{team}/delete"), None),
-        (&mt, Method::GET, format!("{MT}/teams/{team}/joinCode"), None),
-        (&mt, Method::PUT, format!("{MT}/teams/{team}/joinCode"), None),
-        (
-            &mt,
-            Method::PUT,
-            format!("{MT}/teams/{team}/bulkUpdateRoledMembers"),
-            Some(own),
-        ),
-        (
-            &mt,
-            Method::POST,
-            format!("{MT}/teams/{team}/channels"),
-            Some(named.clone()),
-        ),
-        (
-            &mt,
-            Method::PATCH,
-            format!("{MT}/teams/{team}/channels/{channel}"),
-            Some(named.clone()),
-        ),
-        (
-            &mt,
-            Method::DELETE,
-            format!("{MT}/teams/{team}/channels/{channel}"),
-            None,
-        ),
-        (
-            &mt,
-            Method::PUT,
-            format!("{MT}/teams/{channel}/setDefaultChannel"),
-            None,
-        ),
-        (
-            &mt,
-            Method::POST,
-            format!("{MT}/teams/sponsorJoinRequest/{group}"),
-            Some(json!([cora.mri])),
-        ),
-        (
-            &mt,
-            Method::POST,
-            format!("{MT}/teams/findJoinRequests"),
-            Some(json!({"GroupIdList": [group]})),
-        ),
-        (
-            &mt,
-            Method::GET,
-            format!("{MT}/analytics/teams/{group}/summary-timeseries"),
-            None,
-        ),
-        (
-            &mt,
-            Method::GET,
-            format!("{MT}/analytics/teams/{group}/channels/{channel}/summary-timeseries"),
-            None,
-        ),
-        (
-            &mt,
-            Method::GET,
-            format!("{MT}/users/{}/profilepicturev2/teams/{group}", cora.mri),
-            None,
-        ),
-        (&prov, Method::GET, format!("{PROV}/groups/{group}/channels"), None),
-        (&prov, Method::POST, format!("{PROV}/groups/{group}/archive"), None),
-        (
-            &prov,
-            Method::POST,
-            format!("{PROV}/groups/{group}/clone"),
-            Some(named.clone()),
-        ),
-        (
-            &prov,
-            Method::POST,
-            format!("{PROV}/teams/{group}/channels"),
-            Some(named.clone()),
-        ),
-        (
-            &prov,
-            Method::POST,
-            format!("{PROV}/teams/{group}/channels/{channel}/archive"),
-            None,
-        ),
-        (
-            &prov,
-            Method::PUT,
-            format!("{PROV}/channels/{channel}/members"),
-            Some(json!({"users": []})),
-        ),
-        (&prov, Method::PUT, format!("{PROV}/team/{team}/hide"), None),
-        (
-            &prov,
-            Method::PUT,
-            format!("{PROV}/conversations/show"),
-            Some(json!({"teamIds": [team], "channelIds": []})),
-        ),
-        (&csa, Method::GET, format!("{CSA}/api/v1/teams/{team}/tagCards"), None),
-        (
-            &csa,
-            Method::POST,
-            format!("{CSA}/api/v1/teams/{team}/tags"),
-            Some(json!({"tagName": "x", "memberIds": []})),
-        ),
-        (
-            &csa,
-            Method::PUT,
-            format!("{CSA}/api/v1/teams/{team}/tagSettings"),
-            Some(json!({})),
-        ),
-    ];
-    for (token, method, path, body) in attempts {
-        let (status, answer) = call(&server, token, method.clone(), &path, body).await;
+    let world = World::new().await;
+    for (method, path, body) in OUTSIDE {
+        let (status, answer) = world.send("cora", method, path, body).await;
         assert_eq!(status, 404, "{method} {path}: {answer}");
         assert_eq!(answer["errorCode"], "NotFound", "{method} {path}");
     }
     // the chat service's own refusal for a thread one isn't in
-    let settings = json!({"spaceAdminSettings": "{\"userSettings\":{}}"});
-    let path = format!("{CHAT}/threads/{team}/properties?name=spaceAdminSettings");
-    assert_eq!(call(&server, &ic3, Method::PUT, &path, Some(settings)).await.0, 403);
-    let path = format!("{CHAT}/threads/{channel}/members/{}", cora.mri);
-    let interest = json!({"interest": "Interested"});
-    assert_eq!(call(&server, &ic3, Method::PUT, &path, Some(interest)).await.0, 403);
-    assert_eq!(ada.team(&team).await.channels.len(), 2);
-    assert_eq!(ada.team(&team).await.about.people, 1);
-    ada.stop();
-    cora.stop();
-    server.stop().await;
+    let settings = r#"{"spaceAdminSettings":"{\"userSettings\":{}}"}"#;
+    let path = "{CHAT}/threads/{team}/properties?name=spaceAdminSettings";
+    assert_eq!(world.send("cora", "PUT", path, settings).await.0, 403);
+    let path = "{CHAT}/threads/{channel}/members/{cora}";
+    assert_eq!(
+        world.send("cora", "PUT", path, r#"{"interest":"Interested"}"#).await.0,
+        403
+    );
+    let team = world.seats[0].team(world.name("{team}")).await;
+    assert_eq!((team.channels.len(), team.about.people), (2, 2));
+    world.stop().await;
 }
 
+/// Requests of the teams' owner the server refuses: who, method, path, body, status.
+const MALFORMED: [(&str, &str, &str, u16); 29] = [
+    (
+        "POST",
+        "{MT}/teams/create",
+        r#"{"displayName":"","accessType":1,"topicThreadTopic":"General"}"#,
+        400,
+    ),
+    (
+        "POST",
+        "{MT}/teams/create",
+        r#"{"displayName":"{long}","accessType":1,"topicThreadTopic":"General"}"#,
+        400,
+    ),
+    (
+        "POST",
+        "{MT}/teams/create",
+        r#"{"displayName":"Fine","accessType":2,"topicThreadTopic":"General"}"#,
+        400,
+    ),
+    ("POST", "{MT}/teams/create", r#""text""#, 400),
+    // a channel is made in the team the path names, whatever group the body claims
+    (
+        "POST",
+        "{MT}/teams/{team}/channels",
+        r#"{"displayName":"Side","groupId":"{other_group}","channelType":"Standard"}"#,
+        400,
+    ),
+    (
+        "POST",
+        "{MT}/teams/{team}/channels",
+        r#"{"displayName":"a/b","groupId":"{group}","channelType":"Standard"}"#,
+        400,
+    ),
+    (
+        "POST",
+        "{MT}/teams/{team}/channels",
+        r#"{"displayName":".hidden","groupId":"{group}","channelType":"Standard"}"#,
+        400,
+    ),
+    (
+        "POST",
+        "{MT}/teams/{team}/channels",
+        r#"{"displayName":"P","groupId":"{group}","channelType":"Private"}"#,
+        400,
+    ),
+    (
+        "POST",
+        "{MT}/teams/{team}/channels",
+        r#"{"displayName":"L","groupId":"{group}","channelType":"Standard","chatModalityType":"Grid"}"#,
+        400,
+    ),
+    (
+        "PATCH",
+        "{MT}/teams/{other}/channels/{channel}",
+        r#"{"displayName":"Moved","description":""}"#,
+        404,
+    ),
+    ("DELETE", "{MT}/teams/{team}/channels/{team}", "", 403),
+    ("PUT", "{MT}/teams/{team}/setDefaultChannel", "", 400),
+    (
+        "PUT",
+        "{MT}/teams/{team}/bulkUpdateRoledMembers",
+        r#"{"users":[],"groupId":"{other_group}"}"#,
+        400,
+    ),
+    (
+        "PUT",
+        "{MT}/teams/{team}/bulkUpdateRoledMembers",
+        r#"{"users":[{"mri":"{bert}","role":7}],"groupId":"{group}"}"#,
+        400,
+    ),
+    (
+        "PUT",
+        "{MT}/teams/{team}/members",
+        r#"{"userMri":"{bert}","updateType":"Left"}"#,
+        400,
+    ),
+    (
+        "PUT",
+        "{MT}/teams/{team}/members",
+        r#"{"userMri":"8:orgid:nobody","updateType":"Removed"}"#,
+        400,
+    ),
+    (
+        "PUT",
+        "{MT}/teams/{team}/members",
+        r#"{"userMri":"{cora}","updateType":"Removed"}"#,
+        404,
+    ),
+    ("POST", "{MT}/teams/joinByCode", r#""""#, 400),
+    (
+        "POST",
+        "{MT}/teams/joinRequestAdminAction",
+        r#"{"GroupId":"{group}","UserMri":"{bert}","ActionType":"Maybe"}"#,
+        400,
+    ),
+    (
+        "POST",
+        "{MT}/teams/joinRequestAdminAction",
+        r#"{"GroupId":"{group}","UserMri":"{cora}","ActionType":"Accept"}"#,
+        404,
+    ),
+    (
+        "GET",
+        "{MT}/analytics/teams/{group}/summary-timeseries?timeperiod=forever",
+        "",
+        400,
+    ),
+    (
+        "GET",
+        "{MT}/analytics/teams/{other_group}/channels/{channel}/summary-timeseries",
+        "",
+        404,
+    ),
+    (
+        "POST",
+        "{PROV}/groups/{group}/clone",
+        r#"{"displayName":"Copy","visibility":"Secret"}"#,
+        400,
+    ),
+    ("POST", "{PROV}/teams/{other_group}/channels/{channel}/archive", "", 404),
+    ("POST", "{PROV}/teams/{group}/channels/{team}/archive", "", 403),
+    ("PUT", "{PROV}/channels/{team}/members", r#"{"users":[]}"#, 403),
+    ("GET", "{PROV}/teams/{group}/channels/OID:{guid}@elsewhere", "", 404),
+    ("PUT", "{PROV}/conversations/show", r#"{"teamIds":"{team}"}"#, 400),
+    (
+        "PATCH",
+        "{CSA}/api/v1/teams/{team}/tags/{guid}",
+        r#"{"tagName":"x"}"#,
+        404,
+    ),
+];
+
+/// The chat service's thread routes refusing a property or an interest that isn't the thread's to take.
+const MISPLACED: [(&str, &str); 6] = [
+    (
+        "{CHAT}/threads/{channel}/properties?name=spaceAdminSettings",
+        r#"{"spaceAdminSettings":"{\"userSettings\":{}}"}"#,
+    ),
+    (
+        "{CHAT}/threads/{team}/properties?name=channelSettings",
+        r#"{"channelSettings":"{}"}"#,
+    ),
+    (
+        "{CHAT}/threads/{team}/properties?name=spaceAdminSettings",
+        r#"{"spaceAdminSettings":"[]"}"#,
+    ),
+    ("{CHAT}/threads/{team}/properties?name=topic", r#"{"topic":"{}"}"#),
+    ("{CHAT}/threads/{team}/properties", r#"{"topic":"{}"}"#),
+    ("{CHAT}/threads/{channel}/members/{ada}", r#"{"interest":"Maybe"}"#),
+];
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_request_names_its_target_exactly_and_grants_itself_nothing() {
-    let server = server(Backend::Sqlite).await;
-    let ada = Seat::new(&server, "ada@own.test", "Ada").await;
-    let bert = Seat::new(&server, "bert@own.test", "Bert").await;
-    let (team, group) = ada.make_team("Rocket", false).await;
-    let (other, other_group) = ada.make_team("Other", true).await;
-    ada.add(&team, &group, &[&bert]).await;
-    ada.add(&other, &other_group, &[&bert]).await;
-    let channel = ada.make_channel(&team, &group, "Launch", false).await;
-    let owner = token(&server, "ada@own.test", MIDDLE_TIER_AUDIENCE).await;
-    let member = token(&server, "bert@own.test", MIDDLE_TIER_AUDIENCE).await;
-    let owner_prov = token(&server, "ada@own.test", PROVISIONING_AUDIENCE).await;
-    let ic3 = token(&server, "ada@own.test", IC3_AUDIENCE).await;
-    let long = "x".repeat(257);
-    let create = |name: &str, access: Value| json!({"displayName": name, "description": "", "accessType": access, "topicThreadTopic": "General"});
-    let channel_named = |name: &str, group: &str| json!({"displayName": name, "description": "", "groupId": group, "channelType": "Standard"});
-    let post = Method::POST;
-    let refused = [
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/create"),
-            create("", json!(1)),
-            400,
-        ),
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/create"),
-            create(&long, json!(1)),
-            400,
-        ),
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/create"),
-            create("Fine", json!(2)),
-            400,
-        ),
-        (&owner, post.clone(), format!("{MT}/teams/create"), json!("text"), 400),
-        // a channel is made in the team the path names, whatever group the body claims
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/{team}/channels"),
-            channel_named("Side", &other_group),
-            400,
-        ),
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/{team}/channels"),
-            channel_named("a/b", &group),
-            400,
-        ),
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/{team}/channels"),
-            channel_named(".hidden", &group),
-            400,
-        ),
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/{team}/channels"),
-            json!({"displayName": "P", "groupId": group, "channelType": "Private"}),
-            400,
-        ),
-        (
-            &owner,
-            Method::PATCH,
-            format!("{MT}/teams/{other}/channels/{channel}"),
-            json!({"displayName": "Moved", "description": ""}),
-            404,
-        ),
-        (
-            &owner,
-            Method::DELETE,
-            format!("{MT}/teams/{team}/channels/{team}"),
-            json!(null),
-            403,
-        ),
-        (
-            &owner,
-            Method::PUT,
-            format!("{MT}/teams/{team}/setDefaultChannel"),
-            json!(null),
-            400,
-        ),
-        (
-            &owner,
-            Method::PUT,
-            format!("{MT}/teams/{team}/bulkUpdateRoledMembers"),
-            json!({"users": [], "groupId": other_group}),
-            400,
-        ),
-        (
-            &owner,
-            Method::PUT,
-            format!("{MT}/teams/{team}/bulkUpdateRoledMembers"),
-            json!({"users": [{"mri": bert.mri, "role": 7}], "groupId": group}),
-            400,
-        ),
-        (
-            &owner,
-            Method::PUT,
-            format!("{MT}/teams/{team}/members"),
-            json!({"userMri": bert.mri, "updateType": "Left"}),
-            400,
-        ),
-        (
-            &owner,
-            Method::PUT,
-            format!("{MT}/teams/{team}/members"),
-            json!({"userMri": "8:orgid:nobody", "updateType": "Removed"}),
-            400,
-        ),
-        (&owner, post.clone(), format!("{MT}/teams/joinByCode"), json!(""), 400),
-        (
-            &owner,
-            post.clone(),
-            format!("{MT}/teams/joinRequestAdminAction"),
-            json!({"GroupId": group, "UserMri": bert.mri, "ActionType": "Maybe"}),
-            400,
-        ),
-        (
-            &owner,
-            Method::GET,
-            format!("{MT}/analytics/teams/{group}/summary-timeseries?timeperiod=forever"),
-            json!(null),
-            400,
-        ),
-        (
-            &owner,
-            Method::GET,
-            format!("{MT}/analytics/teams/{other_group}/channels/{channel}/summary-timeseries"),
-            json!(null),
-            404,
-        ),
-        // a member doesn't make itself or anyone an owner, nor a public team's member someone's role
-        (
-            &member,
-            Method::PUT,
-            format!("{MT}/teams/{team}/members"),
-            json!({"userMri": bert.mri, "updateType": "Promoted"}),
-            403,
-        ),
-        (
-            &member,
-            Method::PUT,
-            format!("{MT}/teams/{channel}/setDefaultChannel"),
-            json!(null),
-            403,
-        ),
-        (
-            &member,
-            Method::PATCH,
-            format!("{MT}/teams/{team}"),
-            json!({"description": "mine"}),
-            403,
-        ),
-        (
-            &owner_prov,
-            post.clone(),
-            format!("{PROV}/groups/{group}/clone"),
-            json!({"displayName": "Copy", "visibility": "Secret"}),
-            400,
-        ),
-        (
-            &owner_prov,
-            post.clone(),
-            format!("{PROV}/teams/{other_group}/channels/{channel}/archive"),
-            json!(null),
-            404,
-        ),
-        (
-            &owner_prov,
-            post.clone(),
-            format!("{PROV}/teams/{group}/channels/{team}/archive"),
-            json!(null),
-            403,
-        ),
-        (
-            &owner_prov,
-            Method::PUT,
-            format!("{PROV}/channels/{team}/members"),
-            json!({"users": []}),
-            403,
-        ),
-        (
-            &owner_prov,
-            Method::GET,
-            format!("{PROV}/teams/{group}/channels/OID:{}@elsewhere", uuid::Uuid::new_v4()),
-            json!(null),
-            404,
-        ),
-        (
-            &ic3,
-            Method::PUT,
-            format!("{CHAT}/threads/{channel}/properties?name=spaceAdminSettings"),
-            json!({"spaceAdminSettings": "{\"userSettings\":{}}"}),
-            400,
-        ),
-        (
-            &ic3,
-            Method::PUT,
-            format!("{CHAT}/threads/{team}/properties?name=channelSettings"),
-            json!({"channelSettings": "{}"}),
-            400,
-        ),
-        (
-            &ic3,
-            Method::PUT,
-            format!("{CHAT}/threads/{team}/properties?name=topic"),
-            json!({"topic": "{}"}),
-            400,
-        ),
-        (
-            &ic3,
-            Method::PUT,
-            format!("{CHAT}/threads/{team}/properties"),
-            json!({"topic": "{}"}),
-            400,
-        ),
-        (
-            &ic3,
-            Method::PUT,
-            format!("{CHAT}/threads/{channel}/members/{}", ada.mri),
-            json!({"interest": "Maybe"}),
-            400,
-        ),
-    ];
-    for (token, method, path, body, expected) in refused {
-        let body = (!body.is_null()).then_some(body);
-        let (status, answer) = call(&server, token, method.clone(), &path, body).await;
+async fn a_request_names_its_target_exactly() {
+    let world = World::new().await;
+    for (method, path, body, expected) in MALFORMED {
+        let (status, answer) = world.send("ada", method, path, body).await;
         assert_eq!(status, expected, "{method} {path}: {answer}");
     }
-    // a public team's member adds a member, never an owner
-    let add = |seat: &Seat, role: u8| json!({"users": [{"mri": seat.mri, "role": role}], "groupId": other_group});
-    let cora = Seat::new(&server, "cora@own.test", "Cora").await;
-    let path = format!("{MT}/teams/{other}/bulkUpdateRoledMembers");
-    let (status, answer) = call(&server, &member, Method::PUT, &path, Some(add(&cora, 1))).await;
-    assert_eq!(
-        (status, answer["value"]["failedMembers"][0]["mri"].as_str()),
-        (200, Some(cora.mri.as_str()))
-    );
-    let (status, answer) = call(&server, &member, Method::PUT, &path, Some(add(&bert, 1))).await;
-    assert_eq!(
-        (status, answer["value"]["failedMembers"][0]["mri"].as_str()),
-        (200, Some(bert.mri.as_str()))
-    );
-    let (status, answer) = call(&server, &member, Method::PUT, &path, Some(add(&cora, 0))).await;
-    assert_eq!(
-        (status, answer["value"]["failedMembers"].as_array().map(Vec::len)),
-        (200, Some(0))
-    );
-    assert!(!cora.team(&other).await.owner && !bert.team(&other).await.owner);
-    for seat in [ada, bert, cora] {
-        seat.stop();
+    for (path, body) in MISPLACED {
+        assert_eq!(world.send("ada", "PUT", path, body).await.0, 400, "{path}");
     }
-    server.stop().await;
+    world.stop().await;
+}
+
+/// What a member tries beyond a member's part: method, path, body, status.
+const BEYOND: [(&str, &str, &str, u16); 9] = [
+    (
+        "PUT",
+        "{MT}/teams/{team}/members",
+        r#"{"userMri":"{bert}","updateType":"Promoted"}"#,
+        403,
+    ),
+    ("PUT", "{MT}/teams/{channel}/setDefaultChannel", "", 403),
+    ("PATCH", "{MT}/teams/{team}", r#"{"description":"mine"}"#, 403),
+    ("POST", "{MT}/teams/{team}/profilepicture?threadId={team}", "{}", 404),
+    ("POST", "{PROV}/groups/{group}/unarchive", "", 403),
+    (
+        "PUT",
+        "{PROV}/channels/{channel}/members",
+        r#"{"users":[{"id":"{bert}","isModerator":true}]}"#,
+        403,
+    ),
+    (
+        "PUT",
+        "{CHAT}/threads/{team}/properties?name=spaceAdminSettings",
+        r#"{"spaceAdminSettings":"{\"userSettings\":{}}"}"#,
+        403,
+    ),
+    (
+        "PUT",
+        "{CHAT}/threads/{channel}/properties?name=channelSettings",
+        r#"{"channelSettings":"{}"}"#,
+        403,
+    ),
+    (
+        "PUT",
+        "{CHAT}/threads/{channel}/members/{ada}",
+        r#"{"interest":"Interested"}"#,
+        403,
+    ),
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_grants_itself_nothing() {
+    let world = World::new().await;
+    for (method, path, body, expected) in BEYOND {
+        let (status, answer) = world.send("bert", method, path, body).await;
+        assert_eq!(status, expected, "{method} {path}: {answer}");
+    }
+    // a public team's member adds a member, never an owner, and changes nobody's role
+    let path = "{MT}/teams/{other}/bulkUpdateRoledMembers";
+    let add =
+        |who: &str, role: u8| format!(r#"{{"users":[{{"mri":"{who}","role":{role}}}],"groupId":"{{other_group}}"}}"#);
+    for (who, role, failed) in [("{cora}", 1, 1), ("{bert}", 1, 1), ("{cora}", 0, 0)] {
+        let (status, answer) = world.send("bert", "PUT", path, &add(who, role)).await;
+        let failures = answer["value"]["failedMembers"].as_array().map(Vec::len);
+        assert_eq!((status, failures), (200, Some(failed)), "{who} {role}: {answer}");
+    }
+    let other = world.name("{other}");
+    assert!(!world.seats[2].team(other).await.owner && !world.seats[1].team(other).await.owner);
+    world.stop().await;
 }

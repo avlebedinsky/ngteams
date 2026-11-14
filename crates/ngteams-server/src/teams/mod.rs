@@ -70,7 +70,7 @@ impl<A: Audience> FromRequestParts<Arc<App>> for Actor<A> {
         let user = users::by_id(&app.db, &bearer.claims.oid)
             .await
             .map_err(|error| Error::from(error).into_response())?;
-        if !user.is_some_and(|user| !user.disabled) {
+        if user.is_none_or(|user| user.disabled) {
             return Err(Error::FORBIDDEN.into_response());
         }
         Ok(Self {
@@ -239,7 +239,7 @@ pub(crate) async fn listed(db: &Db, thread: &str, user: &str) -> Result<(), DbEr
             let own = own.iter().find(|(id, _)| *id == channel.id).map(|(_, own)| own);
             shown(channel, own)
         });
-    repo::unhide(db, &channel.team_id, user, !any).await
+    repo::mark_hidden(db, &channel.team_id, user, !any).await
 }
 
 fn thread_id() -> String {

@@ -36,7 +36,7 @@ async fn an_account_keeps_channels_in_sections_of_its_own() {
         let mission = &made.sections[1];
         assert_eq!(mission.name, "Mission");
         assert!(!mission.favorite && mission.expanded);
-        assert_eq!(mission.items, [channel.clone()]);
+        assert_eq!(mission.items, std::slice::from_ref(&channel));
 
         let fold = ChannelSectionAction::Expanded {
             section: mission.id.clone(),
@@ -51,7 +51,7 @@ async fn an_account_keeps_channels_in_sections_of_its_own() {
         };
         ada.engine.channel_section(to_favorites.clone()).await.unwrap();
         let moved = sections(&ada).await;
-        assert_eq!(moved.sections[0].items, [channel.clone()]);
+        assert_eq!(moved.sections[0].items, std::slice::from_ref(&channel));
         assert!(moved.sections[1].items.is_empty());
         let answer = ada.client.read(&CsaTeams).await.unwrap();
         let listed = CsaTeams::read_answer(answer.body()).unwrap();

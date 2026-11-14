@@ -8,7 +8,7 @@ use crate::support::backends;
 const PNG: [u8; 12] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
 
 async fn send(seat: &Seat, conversation: &str, text: &str) -> String {
-    let sent = seat
+    let row = seat
         .engine
         .write(Action::Send {
             conversation: conversation.into(),
@@ -16,7 +16,7 @@ async fn send(seat: &Seat, conversation: &str, text: &str) -> String {
         })
         .await
         .unwrap();
-    sent.message_id.unwrap()
+    row.message_id.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -22,7 +22,6 @@ async fn engines_post_in_a_channel_and_reply_in_a_posts_thread() {
         let server = server(backend).await;
         let ada = Seat::new(&server, "ada@own.test", "Ada").await;
         let bert = Seat::new(&server, "bert@own.test", "Bert").await;
-        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
         let (team, group) = ada.make_team("Rocket", false).await;
         ada.add(&team, &group, &[&bert]).await;
         let channel = ada.make_channel(&team, &group, "Launch", true).await;
@@ -66,11 +65,7 @@ async fn engines_post_in_a_channel_and_reply_in_a_posts_thread() {
             let message = page.messages.iter().find(|message| message.id == id).unwrap();
             message.extra["conversationLink"].as_str().unwrap().to_owned()
         };
-        assert!(
-            link(&reply).ends_with(&format!("{channel};messageid={post}")),
-            "{}",
-            link(&reply)
-        );
+        assert!(link(&reply).ends_with(&format!("{channel};messageid={post}")));
         assert!(link(&second).ends_with(&format!("{channel};messageid={second}")));
         let chain_page = reads.messages(&chain, 200).await.unwrap();
         let ids: Vec<&str> = chain_page.messages.iter().map(|message| message.id.as_str()).collect();
@@ -106,20 +101,8 @@ async fn engines_post_in_a_channel_and_reply_in_a_posts_thread() {
                 .ends_with(&format!(";messageid={post}"))
         );
 
-        // nobody outside the team reads or writes it; a reply needs a post of the channel
-        let outsider = ChatReads::new(&*cora.client);
-        assert_eq!(outsider.messages(&channel, 200).await.unwrap_err().status(), Some(403));
-        assert_eq!(outsider.thread(&channel).await.unwrap_err().status(), Some(403));
-        for under in ["1", reply.as_str()] {
-            let chain = reply_chain_id(&channel, under).unwrap();
-            let author = Author::new(Mri::new(&ada.mri), "Ada");
-            let write = SendMessage::new(chain, author, MessageText::plain("Lost").unwrap());
-            let refused = ada.client.write(write).await.unwrap();
-            assert_eq!(refused.status(), 400);
-        }
-        for seat in [ada, bert, cora] {
-            seat.stop();
-        }
+        ada.stop();
+        bert.stop();
         server.stop().await;
     }
 }
@@ -183,6 +166,70 @@ async fn a_teams_general_channel_is_in_the_conversation_list_and_its_other_chann
         assert_ne!(send(&bert, &channel, "Too late").await.state, OutboxState::Sent);
         ada.stop();
         bert.stop();
+        server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_channel_is_read_by_its_people_and_a_reply_needs_a_post_of_it() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        ada.add(&team, &group, &[&bert]).await;
+        let channel = ada.make_channel(&team, &group, "Launch", true).await;
+        let post = send(&ada, &channel, "Fuel is loaded").await.message_id.unwrap();
+        bert.engine.sync_conversation(channel.as_str()).await.unwrap();
+        let chain = reply_chain_id(&channel, &post).unwrap();
+        let reply = send(&bert, &chain, "Go for launch").await.message_id.unwrap();
+
+        let outsider = ChatReads::new(&*cora.client);
+        assert_eq!(outsider.messages(&channel, 200).await.unwrap_err().status(), Some(403));
+        assert_eq!(outsider.thread(&channel).await.unwrap_err().status(), Some(403));
+        for under in ["1", reply.as_str()] {
+            let chain = reply_chain_id(&channel, under).unwrap();
+            let author = Author::new(Mri::new(&ada.mri), "Ada");
+            let write = SendMessage::new(chain, author, MessageText::plain("Lost").unwrap());
+            let refused = ada.client.write(write).await.unwrap();
+            assert_eq!(refused.status(), 400);
+        }
+        // a deleted post takes no more replies
+        let deleted = ada
+            .engine
+            .write(Action::Delete {
+                conversation: channel.clone(),
+                message_id: post.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(deleted.state, OutboxState::Sent, "{deleted:?}");
+        let author = Author::new(Mri::new(&bert.mri), "Bert");
+        let late = SendMessage::new(chain, author, MessageText::plain("Late").unwrap());
+        assert_eq!(bert.client.write(late).await.unwrap().status(), 400);
+        // and a chat has no reply chains
+        let chat = ada
+            .engine
+            .write(Action::CreateChat {
+                others: vec![Mri::new(&bert.mri)],
+                topic: None,
+            })
+            .await
+            .unwrap()
+            .message_id
+            .unwrap();
+        let author = Author::new(Mri::new(&ada.mri), "Ada");
+        let write = SendMessage::new(
+            format!("{chat};messageid={post}"),
+            author,
+            MessageText::plain("No").unwrap(),
+        );
+        let status = ada.client.write(write).await.map_or(400, |answer| answer.status());
+        assert_ne!(status, 201);
+        for seat in [ada, bert, cora] {
+            seat.stop();
+        }
         server.stop().await;
     }
 }

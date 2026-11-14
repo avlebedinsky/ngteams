@@ -7,6 +7,35 @@ use teams_store::OutboxState;
 use super::{Seat, new_channel, refusal, server};
 use crate::support::backends;
 
+/// An archived team takes no channel and nobody new.
+async fn archived_refuses(ada: &Seat, cora: &Seat, team: &str, group: &str) {
+    let refused = ada
+        .engine
+        .create_channel(ChannelDraft {
+            channel: new_channel(team, group, "Late", NewChannelKind::Standard),
+            show_by_default: false,
+        })
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(EngineError::ChannelNotCreated {
+                why: ChannelProblem::TeamArchived
+            })
+        ),
+        "{refused:?}"
+    );
+    let add = TeamWrite::AddMembers {
+        team: team.into(),
+        group: group.into(),
+        members: vec![(Mri::new(&cora.mri), TeamRole::Member)],
+    };
+    assert_eq!(
+        refusal(ada.engine.team_write(add, None).await).as_deref(),
+        Some("OperationNotAllowedOnArchivedTeam")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_edits_archives_restores_and_deletes_a_team() {
     for backend in backends() {
@@ -49,32 +78,7 @@ async fn an_owner_edits_archives_restores_and_deletes_a_team() {
         ada.engine.team_write(archive, None).await.unwrap();
         let archived = bert.team(&team).await;
         assert!(archived.archived && !archived.can_add_channel);
-        // an archived team takes no channel, nobody new and no post
-        let refused = ada
-            .engine
-            .create_channel(ChannelDraft {
-                channel: new_channel(&team, &group, "Late", NewChannelKind::Standard),
-                show_by_default: false,
-            })
-            .await;
-        assert!(
-            matches!(
-                refused,
-                Err(EngineError::ChannelNotCreated {
-                    why: ChannelProblem::TeamArchived
-                })
-            ),
-            "{refused:?}"
-        );
-        let add = TeamWrite::AddMembers {
-            team: team.clone(),
-            group: group.clone(),
-            members: vec![(Mri::new(&cora.mri), TeamRole::Member)],
-        };
-        assert_eq!(
-            refusal(ada.engine.team_write(add, None).await).as_deref(),
-            Some("OperationNotAllowedOnArchivedTeam")
-        );
+        archived_refuses(&ada, &cora, &team, &group).await;
         let post = |seat: &Seat, text: &str| {
             seat.engine.write(Action::Send {
                 conversation: channel.clone(),

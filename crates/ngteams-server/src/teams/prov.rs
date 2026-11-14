@@ -64,7 +64,7 @@ async fn create_channel(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(group): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let seat = Seat::of_group(&app.db, &actor.id, &group).await?;
     seat.active()?;
@@ -74,18 +74,18 @@ async fn create_channel(
             "CannotCreatePrivateChannelDueToUserPolicy",
         ));
     }
-    let sent = body(sent)?;
-    if sent["spaceThreadId"].as_str() != Some(seat.team.id.as_str()) || sent["channelType"] != "Private" {
+    let input = body(input)?;
+    if input["spaceThreadId"].as_str() != Some(seat.team.id.as_str()) || input["channelType"] != "Private" {
         return Err(Error::BAD_REQUEST);
     }
     let channel = Channel {
         id: super::thread_id(),
         team_id: seat.team.id.clone(),
         group_id: Some(uuid::Uuid::new_v4().to_string()),
-        name: channel_name(&sent["displayName"])?,
-        description: text(&sent["description"], 1024, false)?,
+        name: channel_name(&input["displayName"])?,
+        description: text(&input["description"], 1024, false)?,
         private: true,
-        layout: layout(&sent["chatModalityType"])?,
+        layout: layout(&input["chatModalityType"])?,
         archived: false,
         shown_by_default: false,
         settings: None,
@@ -145,14 +145,14 @@ async fn edit_channel(
     State(app): State<Arc<App>>,
     actor: Me,
     Path((group, channel)): Path<(String, String)>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let (_, channel) = owned(&app, &actor, &group, &channel).await?;
     if channel.archived {
         return Err(Error::FORBIDDEN);
     }
-    let sent = body(sent)?;
-    rename(&app, &actor.tenant, &channel, &sent).await
+    let input = body(input)?;
+    rename(&app, &actor.tenant, &channel, &input).await
 }
 
 async fn delete_channel(
@@ -175,14 +175,14 @@ async fn put_members(
     actor: Me,
     method: axum::http::Method,
     Path((group, channel)): Path<(String, String)>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let (seat, channel) = owned(&app, &actor, &group, &channel).await?;
-    let sent = body(sent)?;
+    let input = body(input)?;
     let people = repo::roster(&app.db, &seat.team.id).await?;
     let inside = repo::roles_of(&app.db, std::slice::from_ref(&channel.id)).await?;
     let mut failed = Vec::new();
-    for user in sent["users"].as_array().ok_or(Error::BAD_REQUEST)? {
+    for user in input["users"].as_array().ok_or(Error::BAD_REQUEST)? {
         let named = user["id"].as_str().ok_or(Error::BAD_REQUEST)?;
         let owner = match user["role"].as_u64() {
             Some(1) => false,
@@ -287,7 +287,7 @@ async fn moderators(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(channel): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let (seat, channel) = channel_of(&app.db, &actor.id, &channel).await?;
     seat.owner()?;
@@ -295,10 +295,10 @@ async fn moderators(
     if channel.private || channel.general() || channel.archived {
         return Err(Error::FORBIDDEN);
     }
-    let sent = body(sent)?;
+    let input = body(input)?;
     let people = repo::roster(&app.db, &seat.team.id).await?;
     let mut failed = Vec::new();
-    for user in sent["users"].as_array().ok_or(Error::BAD_REQUEST)? {
+    for user in input["users"].as_array().ok_or(Error::BAD_REQUEST)? {
         let id = user["id"].as_str().ok_or(Error::BAD_REQUEST)?;
         let moderator = user["isModerator"].as_bool().ok_or(Error::BAD_REQUEST)?;
         if people.iter().any(|person| person.user_id == id) {
@@ -356,13 +356,13 @@ async fn clone(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(group): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let seat = Seat::of_group(&app.db, &actor.id, &group).await?;
     seat.owner()?;
-    let sent = body(sent)?;
-    let flag = |key: &str| sent[key].as_bool() == Some(true);
-    let public = match sent["visibility"].as_str() {
+    let input = body(input)?;
+    let flag = |key: &str| input[key].as_bool() == Some(true);
+    let public = match input["visibility"].as_str() {
         Some("Public") => true,
         Some("Private") => false,
         _ => return Err(Error::BAD_REQUEST),
@@ -372,8 +372,8 @@ async fn clone(
     let team = Team {
         id: super::thread_id(),
         group_id: uuid::Uuid::new_v4().to_string(),
-        name: text(&sent["displayName"], 256, true)?,
-        description: text(&sent["description"], 1024, false)?,
+        name: text(&input["displayName"], 256, true)?,
+        description: text(&input["description"], 1024, false)?,
         public,
         archived: false,
         join_code: None,
@@ -424,10 +424,14 @@ async fn hide(State(app): State<Arc<App>>, actor: Me, Path(team): Path<String>) 
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
-async fn show(State(app): State<Arc<App>>, actor: Me, sent: Result<Json<Value>, JsonRejection>) -> Answer<Json<Value>> {
-    let sent = body(sent)?;
+async fn show(
+    State(app): State<Arc<App>>,
+    actor: Me,
+    input: Result<Json<Value>, JsonRejection>,
+) -> Answer<Json<Value>> {
+    let input = body(input)?;
     let ids = |key: &str| -> Answer<Vec<String>> {
-        sent[key]
+        input[key]
             .as_array()
             .ok_or(Error::BAD_REQUEST)?
             .iter()

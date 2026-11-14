@@ -80,14 +80,14 @@ fn public(access: &Value) -> Answer<bool> {
     }
 }
 
-async fn create(State(app): State<Arc<App>>, actor: Me, sent: Result<Json<Value>, JsonRejection>) -> Answer {
-    let sent = body(sent)?;
+async fn create(State(app): State<Arc<App>>, actor: Me, input: Result<Json<Value>, JsonRejection>) -> Answer {
+    let input = body(input)?;
     let team = Team {
         id: super::thread_id(),
         group_id: uuid::Uuid::new_v4().to_string(),
-        name: text(&sent["displayName"], 256, true)?,
-        description: text(&sent["description"], 1024, false)?,
-        public: public(&sent["accessType"])?,
+        name: text(&input["displayName"], 256, true)?,
+        description: text(&input["description"], 1024, false)?,
+        public: public(&input["accessType"])?,
         archived: false,
         join_code: None,
         settings: wire::default_settings(),
@@ -96,7 +96,7 @@ async fn create(State(app): State<Arc<App>>, actor: Me, sent: Result<Json<Value>
         created_at: 0,
         version: 0,
     };
-    let first = text(&sent["topicThreadTopic"], 50, true)?;
+    let first = text(&input["topicThreadTopic"], 50, true)?;
     let team = repo::create_team(&app.db, &team, &first, &actor.id).await?;
     announce(&app, &actor.tenant, &team.id).await;
     Ok((
@@ -117,18 +117,18 @@ async fn edit(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(id): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let seat = Seat::of(&app.db, &actor.id, &id).await?;
     seat.owner()?;
     seat.active()?;
-    let sent = body(sent)?;
-    let name = sent.get("displayName").map(|name| text(name, 256, true)).transpose()?;
-    let description = text(&sent["description"], 1024, false)?;
+    let input = body(input)?;
+    let name = input.get("displayName").map(|name| text(name, 256, true)).transpose()?;
+    let description = text(&input["description"], 1024, false)?;
     let edit = TeamEdit {
         name: name.as_deref(),
         description: Some(&description),
-        public: sent.get("accessType").map(public).transpose()?,
+        public: input.get("accessType").map(public).transpose()?,
         ..TeamEdit::NONE
     };
     repo::edit_team(&app.db, &id, &edit).await?;
@@ -157,7 +157,7 @@ async fn reset_code(State(app): State<Arc<App>>, actor: Me, Path(id): Path<Strin
     seat.active()?;
     let code: String = uuid::Uuid::new_v4().simple().to_string().chars().take(10).collect();
     let edit = TeamEdit {
-        join_code: Some(Some(&code)),
+        join_code: Some(repo::Code::Set(&code)),
         ..TeamEdit::NONE
     };
     repo::edit_team(&app.db, &id, &edit).await?;
@@ -167,7 +167,7 @@ async fn reset_code(State(app): State<Arc<App>>, actor: Me, Path(id): Path<Strin
 async fn remove_code(State(app): State<Arc<App>>, actor: Me, Path(id): Path<String>) -> Answer<Json<Value>> {
     Seat::of(&app.db, &actor.id, &id).await?.owner()?;
     let edit = TeamEdit {
-        join_code: Some(None),
+        join_code: Some(repo::Code::Gone),
         ..TeamEdit::NONE
     };
     repo::edit_team(&app.db, &id, &edit).await?;
@@ -189,20 +189,20 @@ async fn add_members(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(id): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let seat = Seat::of(&app.db, &actor.id, &id).await?;
     seat.active()?;
     if !seat.member.owner && !seat.team.public {
         return Err(Error::FORBIDDEN);
     }
-    let sent = body(sent)?;
-    if sent["groupId"].as_str() != Some(seat.team.group_id.as_str()) {
+    let input = body(input)?;
+    if input["groupId"].as_str() != Some(seat.team.group_id.as_str()) {
         return Err(Error::BAD_REQUEST);
     }
     let people = repo::roster(&app.db, &id).await?;
     let (mut added, mut failed) = (Vec::new(), Vec::new());
-    for user in sent["users"].as_array().ok_or(Error::BAD_REQUEST)? {
+    for user in input["users"].as_array().ok_or(Error::BAD_REQUEST)? {
         let named = user["mri"].as_str().ok_or(Error::BAD_REQUEST)?;
         let owner = match user["role"].as_u64() {
             Some(0) => false,
@@ -230,20 +230,23 @@ async fn update_member(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(id): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let seat = Seat::of(&app.db, &actor.id, &id).await?;
-    let sent = body(sent)?;
-    let user = sent["userMri"].as_str().and_then(object_id).ok_or(Error::BAD_REQUEST)?;
+    let input = body(input)?;
+    let user = input["userMri"]
+        .as_str()
+        .and_then(object_id)
+        .ok_or(Error::BAD_REQUEST)?;
     let own = user == actor.id;
-    let role = match sent["updateType"].as_str() {
+    let role = match input["updateType"].as_str() {
         Some("Promoted") => Some(true),
         Some("Demoted") => Some(false),
         Some("Removed") => None,
         Some("Left" | "DemotedAndLeft") if own => None,
         _ => return Err(Error::BAD_REQUEST),
     };
-    let leaving = own && role.is_none() && sent["updateType"] != "Removed";
+    let leaving = own && role.is_none() && input["updateType"] != "Removed";
     if !leaving {
         seat.owner()?;
         seat.active()?;
@@ -309,10 +312,10 @@ async fn join(State(app): State<Arc<App>>, actor: Me, Path(group): Path<String>)
 async fn join_by_code(
     State(app): State<Arc<App>>,
     actor: Me,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
-    let sent = body(sent)?;
-    let code = sent.as_str().map(str::trim).filter(|code| !code.is_empty());
+    let input = body(input)?;
+    let code = input.as_str().map(str::trim).filter(|code| !code.is_empty());
     let team = repo::team_by_code(&app.db, code.ok_or(Error::BAD_REQUEST)?)
         .await?
         .ok_or(Error::Code(StatusCode::NOT_FOUND, "InvalidJoinCode"))?;
@@ -323,12 +326,12 @@ async fn sponsor(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(group): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let seat = Seat::of_group(&app.db, &actor.id, &group).await?;
     seat.active()?;
-    let sent = body(sent)?;
-    for named in sent.as_array().ok_or(Error::BAD_REQUEST)? {
+    let input = body(input)?;
+    for named in input.as_array().ok_or(Error::BAD_REQUEST)? {
         let named = named.as_str().ok_or(Error::BAD_REQUEST)?;
         let user = account(&app, named).await?.ok_or(Error::BAD_REQUEST)?;
         if repo::membership(&app.db, &seat.team.id, &user).await?.is_none() {
@@ -341,11 +344,11 @@ async fn sponsor(
 async fn join_requests(
     State(app): State<Arc<App>>,
     actor: Me,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
-    let sent = body(sent)?;
+    let input = body(input)?;
     let mut per_team = serde_json::Map::new();
-    for group in sent["GroupIdList"].as_array().ok_or(Error::BAD_REQUEST)? {
+    for group in input["GroupIdList"].as_array().ok_or(Error::BAD_REQUEST)? {
         let group = group.as_str().ok_or(Error::BAD_REQUEST)?;
         let seat = Seat::of_group(&app.db, &actor.id, group).await?;
         seat.owner()?;
@@ -364,12 +367,15 @@ async fn join_requests(
 async fn answer_join_request(
     State(app): State<Arc<App>>,
     actor: Me,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
-    let sent = body(sent)?;
-    let group = sent["GroupId"].as_str().ok_or(Error::BAD_REQUEST)?;
-    let user = sent["UserMri"].as_str().and_then(object_id).ok_or(Error::BAD_REQUEST)?;
-    let accept = match sent["ActionType"].as_str() {
+    let input = body(input)?;
+    let group = input["GroupId"].as_str().ok_or(Error::BAD_REQUEST)?;
+    let user = input["UserMri"]
+        .as_str()
+        .and_then(object_id)
+        .ok_or(Error::BAD_REQUEST)?;
+    let accept = match input["ActionType"].as_str() {
         Some("Accept") => true,
         Some("Reject") => false,
         _ => return Err(Error::BAD_REQUEST),
@@ -434,25 +440,25 @@ async fn create_channel(
     State(app): State<Arc<App>>,
     actor: Me,
     Path(id): Path<String>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer {
     let seat = Seat::of(&app.db, &actor.id, &id).await?;
     seat.active()?;
     if !seat.may("createTopic") {
         return Err(Error::Code(StatusCode::FORBIDDEN, "NoPermissionToCreateChannel"));
     }
-    let sent = body(sent)?;
-    if sent["groupId"].as_str() != Some(seat.team.group_id.as_str()) || sent["channelType"] != "Standard" {
+    let input = body(input)?;
+    if input["groupId"].as_str() != Some(seat.team.group_id.as_str()) || input["channelType"] != "Standard" {
         return Err(Error::BAD_REQUEST);
     }
     let channel = Channel {
         id: super::thread_id(),
         team_id: id,
         group_id: None,
-        name: channel_name(&sent["displayName"])?,
-        description: text(&sent["description"], 1024, false)?,
+        name: channel_name(&input["displayName"])?,
+        description: text(&input["description"], 1024, false)?,
         private: false,
-        layout: layout(&sent["chatModalityType"])?,
+        layout: layout(&input["chatModalityType"])?,
         archived: false,
         shown_by_default: false,
         settings: None,
@@ -491,20 +497,20 @@ async fn edit_channel(
     State(app): State<Arc<App>>,
     actor: Me,
     Path((id, channel)): Path<(String, String)>,
-    sent: Result<Json<Value>, JsonRejection>,
+    input: Result<Json<Value>, JsonRejection>,
 ) -> Answer<Json<Value>> {
     let (seat, channel) = standard(&app, &actor, &id, &channel).await?;
     if !seat.may("updateTopic") || channel.archived {
         return Err(Error::FORBIDDEN);
     }
-    let sent = body(sent)?;
-    rename(&app, &actor.tenant, &channel, &sent).await
+    let input = body(input)?;
+    rename(&app, &actor.tenant, &channel, &input).await
 }
 
 /// A channel's new name and description.
-pub(super) async fn rename(app: &App, tenant: &str, channel: &Channel, sent: &Value) -> Answer<Json<Value>> {
-    let name = channel_name(&sent["displayName"])?;
-    let description = text(&sent["description"], 1024, false)?;
+pub(super) async fn rename(app: &App, tenant: &str, channel: &Channel, input: &Value) -> Answer<Json<Value>> {
+    let name = channel_name(&input["displayName"])?;
+    let description = text(&input["description"], 1024, false)?;
     let edit = ChannelEdit {
         name: Some(&name),
         description: Some(&description),

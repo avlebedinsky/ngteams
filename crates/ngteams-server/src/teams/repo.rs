@@ -364,8 +364,14 @@ pub(crate) struct TeamEdit<'a> {
     pub settings: Option<&'a str>,
     pub tag_settings: Option<&'a str>,
     pub picture_etag: Option<&'a str>,
-    /// `Some(None)` takes the code away.
-    pub join_code: Option<Option<&'a str>>,
+    pub join_code: Option<Code<'a>>,
+}
+
+/// A team's code made (or made anew), or taken away.
+#[derive(Clone, Copy)]
+pub(crate) enum Code<'a> {
+    Set(&'a str),
+    Gone,
 }
 
 impl TeamEdit<'_> {
@@ -410,8 +416,10 @@ pub(crate) async fn edit_team(db: &Db, id: &str, edit: &TeamEdit<'_>) -> Result<
             if let Some(etag) = edit.picture_etag {
                 etag.clone_into(&mut team.picture_etag);
             }
-            if let Some(code) = edit.join_code {
-                team.join_code = code.map(str::to_owned);
+            match edit.join_code {
+                Some(Code::Set(code)) => team.join_code = Some(code.to_owned()),
+                Some(Code::Gone) => team.join_code = None,
+                None => {}
             }
             team.public = edit.public.unwrap_or(team.public);
             team.archived = edit.archived.unwrap_or(team.archived);
@@ -524,37 +532,34 @@ pub(crate) async fn change_member(db: &Db, team: &str, user: &str, owner: Option
                     return Ok(Changed::LastOwner);
                 }
             }
-            match owner {
-                Some(owner) => {
-                    diesel::update(team_members::table.find((team, user)))
-                        .set(team_members::owner.eq(owner))
-                        .execute(conn)
-                        .await?;
-                }
-                None => {
-                    let threads: Vec<String> = channels::table
-                        .filter(channels::team_id.eq(team))
-                        .select(channels::id)
-                        .load(conn)
-                        .await?;
-                    diesel::delete(
-                        channel_roles::table
-                            .filter(channel_roles::channel_id.eq_any(&threads))
-                            .filter(channel_roles::user_id.eq(user)),
-                    )
+            if let Some(owner) = owner {
+                diesel::update(team_members::table.find((team, user)))
+                    .set(team_members::owner.eq(owner))
                     .execute(conn)
                     .await?;
-                    diesel::delete(
-                        chat_members::table
-                            .filter(chat_members::chat_id.eq_any(&threads))
-                            .filter(chat_members::user_id.eq(user)),
-                    )
+            } else {
+                let threads: Vec<String> = channels::table
+                    .filter(channels::team_id.eq(team))
+                    .select(channels::id)
+                    .load(conn)
+                    .await?;
+                diesel::delete(
+                    channel_roles::table
+                        .filter(channel_roles::channel_id.eq_any(&threads))
+                        .filter(channel_roles::user_id.eq(user)),
+                )
+                .execute(conn)
+                .await?;
+                diesel::delete(
+                    chat_members::table
+                        .filter(chat_members::chat_id.eq_any(&threads))
+                        .filter(chat_members::user_id.eq(user)),
+                )
+                .execute(conn)
+                .await?;
+                diesel::delete(team_members::table.find((team, user)))
                     .execute(conn)
                     .await?;
-                    diesel::delete(team_members::table.find((team, user)))
-                        .execute(conn)
-                        .await?;
-                }
             }
             touch_team!(conn, team, version);
             Ok(Changed::Done)
@@ -798,37 +803,24 @@ pub(crate) async fn set_moderator(db: &Db, channel: &str, user: &str, moderator:
         .await)
 }
 
-/// Hides or shows a team for `user` alone. `shown` are the channels in the account's list afterwards: none of a
-/// hidden team's, the general one of a team shown again.
+/// Hides or shows a team for `user` alone: none of a hidden team's channels is in the account's list afterwards,
+/// the general one of a team shown again is.
 pub(crate) async fn set_hidden(db: &Db, team: &str, user: &str, hidden: bool) -> Result<(), DbError> {
-    let ids: Vec<String> = with_conn!(db, |conn| channels::table
-        .filter(channels::team_id.eq(team))
-        .select(channels::id)
-        .load(conn)
-        .await?);
-    let ids = joined(db, user, &ids).await?;
-    with_conn!(db, |conn| {
-        diesel::update(team_members::table.find((team, user)))
-            .set(team_members::hidden.eq(hidden))
-            .execute(conn)
-            .await?;
-    });
-    for id in ids {
-        let general = id == team;
-        if hidden || general {
-            let name = if general {
-                "isGeneralChannelFavorite"
-            } else {
-                "favorite"
-            };
-            let value = if hidden { "false" } else { "true" };
-            crate::chatsvc::set_own_property(db, &id, user, name, value).await?;
+    let all = channels_of(db, &[team.to_owned()]).await?;
+    let ids: Vec<String> = all.into_iter().map(|channel| channel.id).collect();
+    mark_hidden(db, team, user, hidden).await?;
+    let value = if hidden { "false" } else { "true" };
+    for id in joined(db, user, &ids).await? {
+        if id == team {
+            crate::chatsvc::set_own_property(db, &id, user, "isGeneralChannelFavorite", value).await?;
+        } else if hidden {
+            crate::chatsvc::set_own_property(db, &id, user, "favorite", value).await?;
         }
     }
     Ok(())
 }
 
-pub(crate) async fn unhide(db: &Db, team: &str, user: &str, hidden: bool) -> Result<(), DbError> {
+pub(crate) async fn mark_hidden(db: &Db, team: &str, user: &str, hidden: bool) -> Result<(), DbError> {
     with_conn!(db, |conn| {
         diesel::update(team_members::table.find((team, user)))
             .set(team_members::hidden.eq(hidden))
@@ -941,30 +933,34 @@ pub(crate) async fn keep_folders(
     version: i64,
     body: &str,
 ) -> Result<bool, DbError> {
-    with_conn!(db, |conn| match read {
-        None => Ok(diesel::insert_into(conversation_folders::table)
-            .values((
-                conversation_folders::user_id.eq(user),
-                conversation_folders::version.eq(version),
-                conversation_folders::body.eq(body),
-            ))
-            .on_conflict_do_nothing()
-            .execute(conn)
-            .await?
-            > 0),
-        Some(read) => Ok(diesel::update(
-            conversation_folders::table
-                .find(user)
-                .filter(conversation_folders::version.eq(read))
-        )
-        .set((
+    let Some(read) = read else {
+        return first_folders(db, user, version, body).await;
+    };
+    with_conn!(db, |conn| Ok(diesel::update(
+        conversation_folders::table
+            .find(user)
+            .filter(conversation_folders::version.eq(read))
+    )
+    .set((
+        conversation_folders::version.eq(version),
+        conversation_folders::body.eq(body),
+    ))
+    .execute(conn)
+    .await?
+        > 0))
+}
+
+async fn first_folders(db: &Db, user: &str, version: i64, body: &str) -> Result<bool, DbError> {
+    with_conn!(db, |conn| Ok(diesel::insert_into(conversation_folders::table)
+        .values((
+            conversation_folders::user_id.eq(user),
             conversation_folders::version.eq(version),
             conversation_folders::body.eq(body),
         ))
+        .on_conflict_do_nothing()
         .execute(conn)
         .await?
-            > 0),
-    })
+        > 0))
 }
 
 /// What a team's or a channel's messages come to since `since`: posts, replies, reactions, mentions, and the
