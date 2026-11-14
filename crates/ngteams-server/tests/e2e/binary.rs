@@ -4,6 +4,7 @@ mod admin_api;
 mod chats;
 mod setup;
 mod support;
+mod teams;
 
 use std::time::Duration;
 

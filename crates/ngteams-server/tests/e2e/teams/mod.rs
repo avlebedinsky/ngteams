@@ -13,7 +13,7 @@ mod people;
 mod posts;
 mod private;
 mod sections;
-mod security;
+pub(crate) mod security;
 mod settings;
 mod tags;
 

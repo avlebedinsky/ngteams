@@ -143,7 +143,7 @@ impl World {
 }
 
 /// What someone on neither team tries: each answers 404 `NotFound`.
-const OUTSIDE: [(&str, &str, &str); 25] = [
+pub(crate) const OUTSIDE: [(&str, &str, &str); 25] = [
     (
         "PATCH",
         "{MT}/teams/{team}",
