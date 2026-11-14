@@ -6,6 +6,7 @@ CREATE TABLE media_objects (
     kind TEXT NOT NULL,
     filename TEXT NOT NULL,
     content_type TEXT,
+    blob TEXT,
     size BIGINT NOT NULL,
     created_at BIGINT NOT NULL
 );

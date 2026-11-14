@@ -5,6 +5,7 @@ diesel::table! {
         kind -> Text,
         filename -> Text,
         content_type -> Nullable<Text>,
+        blob -> Nullable<Text>,
         size -> BigInt,
         created_at -> BigInt,
     }

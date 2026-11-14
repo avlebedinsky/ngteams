@@ -31,6 +31,8 @@ pub(super) struct Object {
     pub kind: String,
     pub filename: String,
     pub content_type: Option<String>,
+    /// The version of its bytes the object reads from: each fill stores its own.
+    pub blob: Option<String>,
     pub size: i64,
     pub created_at: i64,
 }
@@ -83,49 +85,48 @@ pub(super) async fn object_chats(db: &Db, id: &str) -> Result<Vec<String>, DbErr
         .await?))
 }
 
-/// What an object held before it was filled.
-pub(super) struct Held {
-    pub content_type: Option<String>,
-    pub size: i64,
+/// What a fill took the place of.
+pub(super) struct Replaced {
+    /// The version of the bytes the object read from before, now read by nothing.
+    pub blob: Option<String>,
 }
 
-/// Records what `owner`'s object `id` holds now (`content_type`, `size`), when the owner's stored bytes stay within
-/// `quota` (0: no limit): what it held before, or `None` when they wouldn't. The owner is charged the difference
-/// from the size the row has inside the transaction, so fills of one object at once count its bytes once.
+/// Makes `object` hold the stored bytes `blob` (`content_type`, `size`), when its owner's stored bytes stay
+/// within `quota` (0: no limit): what they replace, or `None` when they wouldn't. The version, the type, the
+/// size and the owner's count change in one transaction that holds the row, so fills of one object at once leave it
+/// describing one fill's bytes, counted once.
 pub(super) async fn fill_object(
     db: &Db,
-    id: &str,
-    owner: &str,
-    content_type: Option<&str>,
+    object: &Object,
+    blob: &str,
+    content_type: &str,
     size: i64,
     quota: i64,
-) -> Result<Option<Held>, DbError> {
+) -> Result<Option<Replaced>, DbError> {
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
-            // changes nothing, but holds the row: another fill reads the size only after this one ends
-            diesel::update(media_objects::table.find(id))
+            // changes nothing, but holds the row: another fill reads it only after this one ends
+            diesel::update(media_objects::table.find(&object.id))
                 .set(media_objects::size.eq(media_objects::size))
                 .execute(conn)
                 .await?;
-            let (held_type, held_size): (Option<String>, i64) = media_objects::table
-                .find(id)
-                .select((media_objects::content_type, media_objects::size))
+            let (held_blob, held_size): (Option<String>, i64) = media_objects::table
+                .find(&object.id)
+                .select((media_objects::blob, media_objects::size))
                 .first(conn)
                 .await?;
-            if !charge!(conn, owner, size - held_size, quota) {
+            if !charge!(conn, &object.owner_id, size - held_size, quota) {
                 return Ok(None);
             }
-            diesel::update(media_objects::table.find(id))
+            diesel::update(media_objects::table.find(&object.id))
                 .set((
+                    media_objects::blob.eq(blob),
                     media_objects::content_type.eq(content_type),
                     media_objects::size.eq(size),
                 ))
                 .execute(conn)
                 .await?;
-            Ok(Some(Held {
-                content_type: held_type,
-                size: held_size,
-            }))
+            Ok(Some(Replaced { blob: held_blob }))
         })
         .await)
 }
@@ -226,10 +227,16 @@ pub(super) async fn revoke(db: &Db, item: &str, user: &str) -> Result<bool, DbEr
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod testing {
     use super::*;
     use crate::db::schema::users;
     use crate::db::users::User;
+
+    pub async fn db() -> (Db, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("server.sqlite").display());
+        (Db::connect(&url, 1).await.unwrap(), dir)
+    }
 
     async fn add_owner(db: &Db) -> Result<String, DbError> {
         let owner = User {
@@ -251,52 +258,55 @@ mod tests {
         Ok(owner.id)
     }
 
-    async fn object_of(db: &Db) -> Object {
+    /// An empty object of a new account.
+    pub async fn object_of(db: &Db) -> Object {
         let object = Object {
             id: "object".to_owned(),
             owner_id: add_owner(db).await.unwrap(),
             kind: "pish/image".to_owned(),
             filename: "picture.png".to_owned(),
             content_type: None,
+            blob: None,
             size: 0,
             created_at: 0,
         };
         create_object(db, &object, &[]).await.unwrap();
         object
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{db, object_of};
+    use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fills_that_started_from_the_same_size_count_the_objects_bytes_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let url = format!("sqlite://{}", dir.path().join("server.sqlite").display());
-        let db = Db::connect(&url, 1).await.unwrap();
+        let (db, _dir) = db().await;
         let object = object_of(&db).await;
-        let fill = async |content_type: Option<&str>, size: i64, quota: i64| {
-            fill_object(&db, &object.id, &object.owner_id, content_type, size, quota)
+        let fill = async |blob: &str, content_type: &str, size: i64, quota: i64| {
+            fill_object(&db, &object, blob, content_type, size, quota)
                 .await
                 .unwrap()
-                .map(|held| (held.content_type, held.size))
+                .map(|replaced| replaced.blob)
         };
 
         // two first fills, both begun while the object was empty
-        assert_eq!(fill(Some("image/png"), 10, 10).await, Some((None, 0)));
-        assert_eq!(
-            fill(Some("image/png"), 10, 10).await,
-            Some((Some("image/png".to_owned()), 10))
-        );
+        assert_eq!(fill("one", "image/png", 10, 10).await, Some(None));
+        assert_eq!(fill("two", "image/png", 10, 10).await, Some(Some("one".to_owned())));
         assert_eq!(used(&db, &object.owner_id).await.unwrap(), 10);
         // two replacements, both begun while it held 10 bytes
-        assert!(fill(Some("image/gif"), 1, 10).await.is_some());
-        assert!(fill(Some("image/gif"), 1, 10).await.is_some());
+        assert_eq!(fill("three", "image/gif", 1, 10).await, Some(Some("two".to_owned())));
+        assert_eq!(fill("four", "image/gif", 1, 10).await, Some(Some("three".to_owned())));
         assert_eq!(used(&db, &object.owner_id).await.unwrap(), 1);
 
-        assert_eq!(fill(Some("image/png"), 11, 10).await, None);
-        let held = fill(Some("image/png"), 7, 10).await.unwrap();
-        assert_eq!(held, (Some("image/gif".to_owned()), 1));
-        // what a fill whose bytes never reached the store puts back
-        assert!(fill(held.0.as_deref(), held.1, 0).await.is_some());
+        // a fill over the quota changes nothing
+        assert_eq!(fill("five", "image/png", 11, 10).await, None);
         let now = super::object(&db, &object.id).await.unwrap().unwrap();
-        assert_eq!((now.content_type.as_deref(), now.size), (Some("image/gif"), 1));
+        assert_eq!(
+            (now.blob.as_deref(), now.content_type.as_deref(), now.size),
+            (Some("four"), Some("image/gif"), 1)
+        );
         assert_eq!(used(&db, &object.owner_id).await.unwrap(), 1);
     }
 }

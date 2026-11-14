@@ -15,7 +15,9 @@ use serde_json::{Value, json};
 
 use super::{Error, IC3, account, quota, repo};
 use crate::app::App;
+use crate::db::Db;
 use crate::db::users::User;
+use crate::storage::Storage;
 use crate::teams::repo::joined;
 
 /// The largest body that makes an object.
@@ -45,8 +47,8 @@ pub(super) fn router(app: &App) -> Router<Arc<App>> {
         )
 }
 
-pub(super) fn key(object: &str) -> String {
-    format!("ams/{object}")
+fn key(object: &str, blob: &str) -> String {
+    format!("ams/{object}/{blob}")
 }
 
 async fn create(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json<Value>) -> Result<Response, Error> {
@@ -75,6 +77,7 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Jso
         kind: PICTURE.to_owned(),
         filename: filename.to_owned(),
         content_type: None,
+        blob: None,
         size: 0,
         created_at: crate::db::now(),
     };
@@ -94,16 +97,36 @@ async fn fill(
         return Err(Error::Forbidden);
     }
     let content_type = picture_type(&bytes).ok_or(Error::Unsupported)?;
-    let size = i64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
-    let held = repo::fill_object(&app.db, &id, &caller.id, Some(content_type), size, quota(&app))
-        .await?
-        .ok_or(Error::Quota)?;
-    if let Err(error) = app.storage.put(&key(&id), bytes).await {
-        // the bytes aren't there: the object and its owner's count go back to what they were
-        repo::fill_object(&app.db, &id, &caller.id, held.content_type.as_deref(), held.size, 0).await?;
-        return Err(error.into());
-    }
+    store(&app.db, app.storage.as_ref(), &object, content_type, bytes, quota(&app)).await?;
     Ok(StatusCode::CREATED.into_response())
+}
+
+/// Stores `bytes` as what `object` holds. Each fill's bytes go under a key of their own, and one transaction then
+/// names the key the object reads from with its type and size and charges the owner. So fills of one object at once
+/// leave it describing and counting the bytes it serves, and a fill that fails or goes over the quota changes
+/// nothing. A node that stops between the two leaves bytes nothing reads.
+async fn store(
+    db: &Db,
+    storage: &dyn Storage,
+    object: &repo::Object,
+    content_type: &str,
+    bytes: Bytes,
+    quota: i64,
+) -> Result<(), Error> {
+    let size = i64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
+    let blob = uuid::Uuid::new_v4().simple().to_string();
+    storage.put(&key(&object.id, &blob), bytes).await?;
+    let filled = repo::fill_object(db, object, &blob, content_type, size, quota).await;
+    let unread = match &filled {
+        Ok(Some(replaced)) => replaced.blob.clone(),
+        Ok(None) | Err(_) => Some(blob),
+    };
+    if let Some(unread) = unread
+        && let Err(error) = storage.delete(&key(&object.id, &unread)).await
+    {
+        tracing::warn!(%error, "a picture's unread bytes weren't cleared");
+    }
+    filled?.map(|_| ()).ok_or(Error::Quota)
 }
 
 /// The media type of a picture's bytes, by their signature: the formats the client shows.
@@ -160,15 +183,137 @@ async fn view(
     if !VIEWS.contains(&view.as_str()) {
         return Err(Error::Missing);
     }
-    let object = readable(&app, &caller, &id).await?;
-    let content_type = object.content_type.ok_or(Error::Missing)?;
-    let bytes = app.storage.get(&key(&id)).await?.ok_or(Error::Missing)?;
-    Ok((
-        [
-            (CONTENT_TYPE, content_type.as_str()),
-            (CACHE_CONTROL, "private, max-age=86400"),
-        ],
-        bytes,
-    )
-        .into_response())
+    // a fill may replace the bytes between the row's read and theirs: the row is then read once more
+    for _ in 0..2 {
+        let object = readable(&app, &caller, &id).await?;
+        let (Some(content_type), Some(blob)) = (object.content_type, object.blob) else {
+            break;
+        };
+        if let Some(bytes) = app.storage.get(&key(&id, &blob)).await? {
+            let headers = [
+                (CONTENT_TYPE, content_type.as_str()),
+                (CACHE_CONTROL, "private, max-age=86400"),
+            ];
+            return Ok((headers, bytes).into_response());
+        }
+    }
+    Err(Error::Missing)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use tokio::sync::{Notify, oneshot};
+
+    use super::*;
+    use crate::media::repo::testing::{db, object_of};
+    use crate::storage::{Blob, Incoming, StorageError};
+
+    /// A store whose put of `slow` bytes waits to be told whether it works.
+    #[derive(Debug)]
+    struct Held {
+        blobs: Mutex<BTreeMap<String, Bytes>>,
+        slow: usize,
+        started: Notify,
+        works: Mutex<Option<oneshot::Receiver<bool>>>,
+    }
+
+    impl Held {
+        fn new(slow: usize) -> (Self, oneshot::Sender<bool>) {
+            let (tell, works) = oneshot::channel();
+            let store = Self {
+                blobs: Mutex::default(),
+                slow,
+                started: Notify::new(),
+                works: Mutex::new(Some(works)),
+            };
+            (store, tell)
+        }
+
+        fn blobs(&self) -> BTreeMap<String, Bytes> {
+            self.blobs.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Storage for Held {
+        async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
+            let works = self.works.lock().unwrap().take_if(|_| bytes.len() == self.slow);
+            if let Some(works) = works {
+                self.started.notify_one();
+                if !works.await.unwrap() {
+                    return Err(StorageError::TooLarge);
+                }
+            }
+            self.blobs.lock().unwrap().insert(key.to_owned(), bytes);
+            Ok(())
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<Bytes>, StorageError> {
+            Ok(self.blobs.lock().unwrap().get(key).cloned())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.blobs.lock().unwrap().remove(key);
+            Ok(())
+        }
+
+        async fn put_stream(&self, _: &str, _: Incoming, _: u64) -> Result<u64, StorageError> {
+            Err(StorageError::Key)
+        }
+
+        async fn open(&self, _: &str, _: Option<std::ops::Range<u64>>) -> Result<Option<Blob>, StorageError> {
+            Err(StorageError::Key)
+        }
+    }
+
+    /// One fill of ten bytes whose put is held while a fill of one byte runs whole; the held put then works or not.
+    /// What the object describes, what the store holds for it, every blob in the store, and the owner's count.
+    async fn overtaken(works: bool) -> (Option<String>, i64, Option<Bytes>, usize, i64, bool) {
+        let (db, _dir) = db().await;
+        let object = object_of(&db).await;
+        let (storage, tell) = Held::new(10);
+        let slow = store(&db, &storage, &object, "image/png", Bytes::from(vec![1; 10]), 0);
+        let fast = async {
+            storage.started.notified().await;
+            store(&db, &storage, &object, "image/gif", Bytes::from(vec![2; 1]), 0)
+                .await
+                .unwrap();
+            tell.send(works).unwrap();
+        };
+        let (slow, ()) = tokio::join!(slow, fast);
+        let now = repo::object(&db, &object.id).await.unwrap().unwrap();
+        let served = storage
+            .get(&key(&object.id, now.blob.as_deref().unwrap()))
+            .await
+            .unwrap();
+        let used = repo::used(&db, &object.owner_id).await.unwrap();
+        (
+            now.content_type,
+            now.size,
+            served,
+            storage.blobs().len(),
+            used,
+            slow.is_ok(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fill_overtaken_by_another_leaves_the_object_describing_the_bytes_it_serves() {
+        let (content_type, size, served, blobs, used, filled) = overtaken(true).await;
+        assert!(filled);
+        assert_eq!((content_type.as_deref(), size, used), (Some("image/png"), 10, 10));
+        assert_eq!((served, blobs), (Some(Bytes::from(vec![1; 10])), 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fill_that_fails_after_another_filled_the_object_leaves_the_others_picture() {
+        let (content_type, size, served, blobs, used, filled) = overtaken(false).await;
+        assert!(!filled);
+        assert_eq!((content_type.as_deref(), size, used), (Some("image/gif"), 1, 1));
+        assert_eq!((served, blobs), (Some(Bytes::from(vec![2; 1])), 1));
+    }
 }

@@ -408,7 +408,8 @@ and so on. Without keys, `object_store` takes the instance's or the container's 
 exist. Uploads go as multipart uploads, so the store's rule for unfinished multipart uploads decides how long an
 aborted one stays.
 
-Keys in the bucket: `ams/<object>` (pictures), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails).
+Keys in the bucket: `ams/<object>/<version>` (pictures: each upload of an object's bytes gets a key of its own, and
+the database names the one the object reads from), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails).
 
 ## Pictures, files and link previews
 
