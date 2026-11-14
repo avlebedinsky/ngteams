@@ -3,12 +3,16 @@
 
 mod channels;
 mod create;
+mod join;
+mod manage;
 mod own_view;
+mod pages;
 mod people;
 mod posts;
 mod private;
 mod sections;
 mod settings;
+mod tags;
 
 use std::sync::Arc;
 use std::time::Duration;
