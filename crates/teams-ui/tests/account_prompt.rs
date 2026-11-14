@@ -94,7 +94,9 @@ fn a_failed_sign_in_opens_the_field_again_with_its_reason(cx: &mut TestAppContex
 
 // --- an own server ---
 
-use teams_ui::account_prompt::{NO_PASSWORD, NOT_A_SERVER, NOT_A_USER, SIGNING_IN_OWN};
+use teams_ui::account_prompt::{
+    NO_PASSWORD, NOT_A_SERVER, NOT_A_USER, OWN_PASSWORD_AGAIN, OWN_PASSWORD_FIRST, SIGNING_IN_OWN,
+};
 use teams_ui::{OwnSignIn, SignInKind};
 
 const SERVER: &str = "https://chat.example.test:8443";
@@ -239,6 +241,7 @@ fn an_own_servers_account_signed_out_is_asked_for_its_password_alone(cx: &mut Te
     let (view, events, mut cx) = prompt(None, cx);
     view.update_in(&mut cx, |view, window, cx| view.ask_own_again(SERVER, UPN, window, cx));
     cx.run_until_parked();
+    assert_eq!(cx.read(|cx| view.read(cx).asks()), OWN_PASSWORD_AGAIN);
     assert!(
         cx.debug_bounds("account-prompt-kind-own").is_none(),
         "no other place is offered"
@@ -248,6 +251,22 @@ fn an_own_servers_account_signed_out_is_asked_for_its_password_alone(cx: &mut Te
         (SERVER.to_owned(), UPN.to_owned())
     );
     // the password's field has the focus: typing and Enter sign in
+    cx.simulate_input(PASSWORD);
+    cx.simulate_keystrokes("enter");
+    let asked = own(&events);
+    assert_eq!(asked.len(), 1);
+    assert_eq!((asked[0].server.as_str(), asked[0].user.as_str()), (SERVER, UPN));
+}
+
+#[gpui::test]
+fn an_own_servers_account_that_never_signed_in_is_not_asked_again(cx: &mut TestAppContext) {
+    let (view, events, mut cx) = prompt(None, cx);
+    view.update_in(&mut cx, |view, window, cx| view.ask_own_first(SERVER, UPN, window, cx));
+    cx.run_until_parked();
+    assert_eq!(cx.read(|cx| view.read(cx).asks()), OWN_PASSWORD_FIRST);
+    assert!(!OWN_PASSWORD_FIRST.contains("again"));
+    // the same screen otherwise: its server and user name fixed, the password alone typed
+    assert!(cx.debug_bounds("account-prompt-kind-own").is_none());
     cx.simulate_input(PASSWORD);
     cx.simulate_keystrokes("enter");
     let asked = own(&events);

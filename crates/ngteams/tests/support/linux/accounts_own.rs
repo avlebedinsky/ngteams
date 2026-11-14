@@ -131,9 +131,10 @@ fn described(cx: &App) -> String {
     let (server, user) = prompt.own_fields(cx);
     let problem = prompt.problem().map_or_else(|| "-".to_owned(), ToString::to_string);
     format!(
-        "kind={kind} signing={} server={server} user={user} account={} problem={problem}",
+        "kind={kind} signing={} server={server} user={user} account={} asks={} problem={problem}",
         prompt.is_signing_in(),
         prompt.account(cx),
+        prompt.asks(),
     )
 }
 
@@ -416,7 +417,9 @@ pub fn child_again(is_dark: bool) -> SandboxResult {
 /// region its sign-in saved names no chat service, as an older server leaves it). The app's own check
 /// (`accounts::unserved`) gives what its sign-in screen says at the start, as `ngteams` opens that screen when the
 /// account can't start. The server is gone by then: the first password typed is the entry's as it is, with its
-/// `ca_file`; the second is the entry without one; each sign-in's reason is the app's own. A third quits.
+/// `ca_file`; before the second the `ca_file` line is taken out of the entry in `accounts.toml`, the screen still
+/// holding the entry as it read it; each sign-in's reason is the app's own, of the entry as the file has it then. A
+/// third quits.
 pub fn child_said(is_dark: bool) -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let dir = tempfile::tempdir()?;
@@ -458,14 +461,12 @@ pub fn child_said(is_dark: bool) -> SandboxResult {
                         return;
                     };
                     tries.set(tries.get() + 1);
-                    let account = match tries.get() {
-                        1 => account.clone(),
-                        2 => PersonalAccount {
-                            ca_file: None,
-                            ..account.clone()
-                        },
+                    match tries.get() {
+                        1 => {}
+                        2 => without_ca_file(&setup, &account),
                         _ => return cx.quit(),
-                    };
+                    }
+                    let account = account.clone();
                     let (setup, password) = (setup.clone(), Secret::new(typed.password.as_str()));
                     let signing =
                         cx.background_spawn(async move { accounts::sign_in_own(&setup, &account, &password) });
@@ -488,6 +489,101 @@ pub fn child_said(is_dark: bool) -> SandboxResult {
         }
     });
     Ok(())
+}
+
+/// Takes the `ca_file` line out of `account`'s entry in `accounts.toml`, as the user would by hand.
+fn without_ca_file(setup: &Setup, account: &PersonalAccount) {
+    let without = PersonalAccount {
+        ca_file: None,
+        ..account.clone()
+    };
+    if let Err(error) = without.save(&setup.paths) {
+        say(&format!("the entry can't be written: {error}"));
+    }
+}
+
+/// The child of the first-sign-in scene: an own server's entry written by hand that never signed in, without the
+/// server's certificate authority. Its screen (`OwnOffer::First`) asks its password with no "again". The first
+/// sign-in says where the CA file goes; the child then writes `ca_file` into the entry as the user would, the screen
+/// still open, and says `ca-file-written`. The next sign-in on the same screen (the app's own
+/// `accounts::sign_in_own`, handed the entry as the screen read it) reads the entry again and goes through: says
+/// `first-signed-in ready=<bool> ca_file=<bool>`, then quits.
+pub fn child_first(is_dark: bool) -> SandboxResult {
+    ngteams::read_only::window_allowed_here()?;
+    let dir = tempfile::tempdir()?;
+    let paths = PersonalPaths::new(dir.path().join("ngteams-config"), dir.path().join("ngteams-data"));
+    let setup = Setup::new(paths)?
+        .with_secrets(ngteams::secrets::AppSecrets::in_memory())
+        .with_own_servers(true);
+    let own = Own::start()?;
+    own.add_user(AGAIN_UPN, AGAIN_NAME)?;
+    let account = PersonalAccount::pending_on(AGAIN_UPN, &accounts_file::OwnServer::parse(own.origin(), "")?)?;
+    account.save(&setup.paths)?;
+    let written = PersonalAccount {
+        ca_file: Some(own.ca_file().to_path_buf()),
+        ..account.clone()
+    };
+    let offer = OwnOffer::First {
+        server: account.server.clone().unwrap_or_default(),
+        user: account.upn.clone(),
+    };
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
+        if is_dark {
+            teams_ui::theme::set_appearance(&dark(), cx);
+        }
+        let title = ngteams::app::TITLE.into();
+        match account_prompt::open_offering(cx, PERSONAL_APP_ID, title, None, &offer) {
+            Ok((window, prompt)) => {
+                cx.subscribe(&prompt, move |prompt, event, cx| {
+                    if let AccountPromptEvent::SignInOwn(typed) = event {
+                        let entries = (account.clone(), written.clone());
+                        sign_in_first(setup.clone(), entries, typed.password.to_string(), prompt, cx);
+                    }
+                })
+                .detach();
+                say_prompt(cx);
+                let _ = window.update(cx, |_, window, _| {
+                    after_frames(window, READY_FRAMES, |_, _| say("ready"));
+                });
+            }
+            Err(error) => {
+                say(&format!("the screen can't be opened: {error:#}"));
+                cx.quit();
+            }
+        }
+    });
+    drop(own);
+    Ok(())
+}
+
+/// Signs `shown` (the entry as the screen read it) in with `password` off the foreground; one that fails is said on
+/// `prompt`, and `written` (the entry with its `ca_file`) is saved over it (see [`child_first`]).
+fn sign_in_first(
+    setup: Setup,
+    (shown, written): (PersonalAccount, PersonalAccount),
+    password: String,
+    prompt: Entity<AccountPrompt>,
+    cx: &mut App,
+) {
+    let signing = cx.background_spawn(async move {
+        let signed = accounts::sign_in_own(&setup, &shown, &Secret::new(password)).inspect_err(|_| {
+            if written.save(&setup.paths).is_ok() {
+                say("ca-file-written");
+            }
+        })?;
+        let ready = accounts::ready(&setup, &signed)?;
+        say(&format!(
+            "first-signed-in ready={ready} ca_file={}",
+            signed.ca_file.is_some()
+        ));
+        Ok::<(), String>(())
+    });
+    cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
+        Ok(()) => cx.update(|cx| cx.quit()),
+        Err(error) => cx.update(|cx| prompt.update(cx, |prompt, cx| prompt.failed(error, cx))),
+    })
+    .detach();
 }
 
 /// Signs `account` in again with `password` off the foreground; said on `prompt` when it fails (see [`child_again`]).

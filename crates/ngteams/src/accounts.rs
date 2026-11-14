@@ -215,17 +215,26 @@ pub fn add_own(setup: &Setup, upn: &str, server: &OwnServer, password: &Secret) 
     })
 }
 
-/// Signs the own server's `account` in again with `password` (blocking), as [`signin::sign_in_own`].
+/// Signs the own server's `account` in again with `password` (blocking), as [`signin::sign_in_own_again`]: its entry
+/// in `accounts.toml` is read again first.
 ///
 /// # Errors
 /// Why the sign-in stored nothing, as the user is told it ([`signin::own_failure`]).
 pub fn sign_in_own(setup: &Setup, account: &PersonalAccount, password: &Secret) -> Result<PersonalAccount, String> {
     let store = setup.secrets();
-    runtime()?.block_on(async {
-        signin::sign_in_own(setup, account, password, &store)
-            .await
-            .map_err(|error| signin::own_failure(setup, account, &error))
-    })
+    runtime()?.block_on(signin::sign_in_own_again(setup, account, password, &store))
+}
+
+/// Asks the own server of `account` for its authz again (blocking), as [`signin::region_again`]: for an account
+/// whose saved region names no chat service ([`unserved`]), before that is said.
+///
+/// # Errors
+/// Why the region wasn't asked again; the one saved before stays.
+pub fn region_again(setup: &Setup, account: &PersonalAccount) -> Result<(), String> {
+    let store = setup.secrets();
+    runtime()?
+        .block_on(signin::region_again(setup, account, &store))
+        .map_err(|error| error.to_string())
 }
 
 /// Forgets the account `upn` (blocking), as `ngteams --forget` does: refused while its engine runs.

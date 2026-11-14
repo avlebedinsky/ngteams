@@ -291,20 +291,65 @@ async fn finish<S: SecretStore>(
         store.delete(&refresh_token_key(&id)).await?;
         return Err(error.into());
     }
+    save_authz(setup, &named, clients, store, AuthzKind::ExplicitLogin).await?;
+    Ok(named)
+}
+
+/// Asks `account`'s authz with its stored refresh token: its skypetoken stored, its region saved.
+async fn save_authz<S: SecretStore>(
+    setup: &Setup,
+    account: &PersonalAccount,
+    clients: &SignInClients,
+    store: &S,
+    kind: AuthzKind,
+) -> Result<(), SignInError> {
+    let id = account.id();
     let spaces = clients.token.refresh(store, &id, &Scope::spaces()).await?;
     let skypetoken = clients
         .authz
-        .exchange_and_store(
-            store,
-            &id,
-            &spaces.access_token,
-            spaces.expires_at,
-            AuthzKind::ExplicitLogin,
-        )
+        .exchange_and_store(store, &id, &spaces.access_token, spaces.expires_at, kind)
         .await?;
-    let region = setup.paths.region_file(&named).ok_or(PersonalError::NoAccount)?;
-    save_region(&region, &skypetoken.region)?;
-    Ok(named)
+    let region = setup.paths.region_file(account).ok_or(PersonalError::NoAccount)?;
+    save_region(&region, &skypetoken.region)
+}
+
+/// Asks the own server of `account` (signed in, its tokens there) for its authz again and saves the region it names
+/// now: a server updated since the sign-in may serve what it didn't then. Nothing is asked of Microsoft, and no
+/// password is needed while the account's refresh token is good.
+///
+/// # Errors
+/// [`SignInError`]: the account isn't an own server's or own servers are off, its server can't be reached or refused
+/// the stored token, or a file couldn't be written; the region saved before stays then.
+pub async fn region_again<S: SecretStore>(
+    setup: &Setup,
+    account: &PersonalAccount,
+    store: &S,
+) -> Result<(), SignInError> {
+    if account.server.is_none() {
+        return Err(SignInError::WrongCloud);
+    }
+    if !setup.own_servers() {
+        return Err(SignInError::OwnServersOff);
+    }
+    let clients = SignInClients::for_cloud(&account.cloud()?)?;
+    save_authz(setup, account, &clients, store, AuthzKind::TokenRefresh).await
+}
+
+/// Signs the own server's `account` in again with `password` ([`sign_in_own`]), as its entry in `accounts.toml` reads
+/// now ([`Setup::as_held`]): a `ca_file` the user wrote into it while the sign-in screen was open is used at once.
+///
+/// # Errors
+/// What the user is told ([`own_failure`], of the entry as read now).
+pub async fn sign_in_own_again<S: SecretStore>(
+    setup: &Setup,
+    account: &PersonalAccount,
+    password: &Secret,
+    store: &S,
+) -> Result<PersonalAccount, String> {
+    let account = setup.as_held(account).map_err(|error| error.to_string())?;
+    sign_in_own(setup, &account, password, store)
+        .await
+        .map_err(|error| own_failure(setup, &account, &error))
 }
 
 /// Adds the account `upn` (or takes up the entry held of it, as the user left it: [`Setup::ask_for`]) and signs it in

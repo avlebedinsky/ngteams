@@ -734,6 +734,7 @@ fn ready_accounts(setup: &Setup) -> Result<(Vec<PersonalAccount>, Vec<PersonalAc
     let (mut ready, mut unready) = (Vec::new(), Vec::new());
     for account in setup.signed_in_accounts().map_err(|error| error.to_string())? {
         if accounts::ready(setup, &account)? {
+            ask_unserved_again(setup, &account);
             ready.push(account);
         } else {
             eprintln!("teams: {} must sign in again", account.upn);
@@ -741,6 +742,24 @@ fn ready_accounts(setup: &Setup) -> Result<(Vec<PersonalAccount>, Vec<PersonalAc
         }
     }
     Ok((ready, unready))
+}
+
+/// An own server's account whose saved region names no chat service: its server's authz is asked again before the
+/// start says so, since the server may serve chats by now. One that can't be asked starts on the region it has.
+fn ask_unserved_again(setup: &Setup, account: &PersonalAccount) {
+    if accounts::unserved(setup, account).is_none() {
+        return;
+    }
+    match accounts::region_again(setup, account) {
+        Ok(()) => log::info!("an own server's region was asked again at the start"),
+        Err(error) => {
+            eprintln!(
+                "teams: {}: its server's region wasn't asked again: {error}",
+                account.upn
+            );
+            log::warn!("an own server's region wasn't asked again at the start");
+        }
+    }
 }
 
 /// The first sign-in screen (`teams_ui::account_prompt`): asks for the work account (`held`, or the last one typed
@@ -876,10 +895,7 @@ fn ask_own_password(
     restart: Rc<Cell<bool>>,
     cx: &mut App,
 ) {
-    let own = OwnOffer::Again {
-        server: account.server.clone().unwrap_or_default(),
-        user: account.upn.clone(),
-    };
+    let own = own_offer(&account);
     match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), None, &own) {
         Ok((_, prompt)) => {
             if let Some(said) = said {
@@ -897,6 +913,17 @@ fn ask_own_password(
             eprintln!("teams: the window can't be opened: {error:#}");
             log::warn!("the sign-in screen of an own server's account can't be opened");
         }
+    }
+}
+
+/// How the sign-in screen asks for the own server's `account`: "again" only when it signed in before (an entry
+/// written by hand never did).
+fn own_offer(account: &PersonalAccount) -> OwnOffer {
+    let (server, user) = (account.server.clone().unwrap_or_default(), account.upn.clone());
+    if account.is_signed_in() {
+        OwnOffer::Again { server, user }
+    } else {
+        OwnOffer::First { server, user }
     }
 }
 

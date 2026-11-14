@@ -144,6 +144,23 @@ pub(super) mod accounts {
         Ok(account.clone())
     }
 
+    /// The server asked for its authz again: in the `served-now` case it names a chat service by now.
+    pub fn region_again(setup: &Setup, account: &PersonalAccount) -> Result<(), String> {
+        record("region-again", &account.upn);
+        if !std::env::var(CASE).unwrap().ends_with("served-now") {
+            return Err("synthetic authz failure".to_owned());
+        }
+        std::fs::write(
+            setup.paths.region_file(account).unwrap(),
+            format!(
+                r#"{{"_synthetic":true,"region":"own","partition":null,"regionGtms":{{"chatServiceAfd":"{}/api/chatsvc/own"}}}}"#,
+                super::OWN_SERVER
+            ),
+        )
+        .unwrap();
+        Ok(())
+    }
+
     pub fn forget(_: &Setup, upn: &str) -> Result<ngteams::forget::Forgot, String> {
         record("forget", upn);
         match upn {
@@ -448,6 +465,7 @@ const STARTUP_CASES: &[&str] = &[
     "unserved-own",
     "unserved-own-then-ready",
     "ready-then-unserved-own",
+    "unserved-own-served-now",
     "forget-missing",
     "forget-pending",
     "forget-stored",
@@ -576,7 +594,7 @@ fn child() {
             signed_own(&setup);
         }
         // signed in before, on a server that serves no chats: nothing else to start
-        "unserved-own" => {
+        "unserved-own" | "unserved-own-served-now" => {
             signed_own_as(&setup, READY_OWN_UPN);
         }
         "unserved-own-then-ready" | "ready-then-unserved-own" => unserved_beside_ready(&setup, &case),
@@ -725,11 +743,29 @@ fn seen_own(case: &str, seen: &[String]) {
                 case == "own-again-running"
             );
         }
-        // the engine was tried, and its refusal is on the screen: nothing is asked of the server
+        _ => seen_unserved(case, seen),
+    }
+}
+
+/// What a case's run did with an own server's account whose saved region names no chat service.
+fn seen_unserved(case: &str, seen: &[String]) {
+    match case {
+        // the server's authz was asked again and named no chat service still (or wasn't reached): the engine was
+        // tried, and its refusal is on the screen; no sign-in is made
         "unserved-own" => {
+            assert_eq!(asked_again(seen), 1, "{seen:?}");
             assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
             assert!(!seen.iter().any(|call| call.starts_with("sign-in-own:")), "{seen:?}");
         }
+        // the server serves chats by now: asked again once, the account opens, and no password is asked
+        "unserved-own-served-now" => {
+            assert_eq!(asked_again(seen), 1, "{seen:?}");
+            assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
+            assert!(seen.iter().any(|call| call.starts_with("ctl-bound:")), "{seen:?}");
+            assert!(!seen.iter().any(|call| call.starts_with("sign-in-own:")), "{seen:?}");
+        }
+        // an account whose region names a chat service is never asked again
+        "ready" | "many" => assert_eq!(asked_again(seen), 0, "{seen:?}"),
         // left out, and the account beside it runs the app: no sign-in screen stands in its way
         "unserved-own-then-ready" | "ready-then-unserved-own" => {
             assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
@@ -738,6 +774,33 @@ fn seen_own(case: &str, seen: &[String]) {
         }
         _ => {}
     }
+}
+
+/// How many times the run asked the own server of [`READY_OWN_UPN`] for its authz again.
+fn asked_again(seen: &[String]) -> usize {
+    let asked = format!("region-again:{READY_OWN_UPN}");
+    seen.iter().filter(|call| **call == asked).count()
+}
+
+/// An own server's entry that never signed in (written by hand) is asked its password without "again"; one a sign-in
+/// named is asked again.
+#[test]
+fn only_an_account_that_signed_in_before_is_asked_again() {
+    use teams_ui::OwnOffer;
+    let server = ngteams::accounts_file::OwnServer::parse(OWN_SERVER, "").unwrap();
+    let written = PersonalAccount::pending_on(OWN_UPN, &server).unwrap();
+    let (server, user) = (OWN_SERVER.to_owned(), OWN_UPN.to_owned());
+    assert_eq!(
+        super::own_offer(&written),
+        OwnOffer::First {
+            server: server.clone(),
+            user: user.clone()
+        }
+    );
+    let signed = written
+        .signed_in_as("00000000-0000-4000-8000-0000000000a1", TID, None)
+        .unwrap();
+    assert_eq!(super::own_offer(&signed), OwnOffer::Again { server, user });
 }
 
 /// A second launch: handed to the app the runtime dir's socket names, or started as usual when nobody is behind it.

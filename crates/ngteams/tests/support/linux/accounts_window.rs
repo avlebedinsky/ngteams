@@ -34,7 +34,9 @@
 //! which asks for a Microsoft 365 account alone; an own server's account signed out, asked for its password again
 //! and forgotten as `ngteams --forget <server>/<UPN>` forgets it; an own server's account whose server serves no
 //! chats, told so on its sign-in screen, and what that screen says of a server that can't be reached (with and
-//! without a `ca_file` in its entry), in Teams Light and Dark; and an own server's account as the window shows
+//! without a `ca_file` in its entry, the entry read again at each sign-in), in Teams Light and Dark; an own server's
+//! entry written by hand that never signed in, asked its password with no "again" and signed in on the same screen
+//! once the `ca_file` it lacked is written into the entry; and an own server's account as the window shows
 //! one whose server isn't on loopback (its engine on the mock; nothing is sent to that address): `ngteamsctl accounts`
 //! names its server, its address `<server>/<UPN>` switches to it, Settings > General, its rail tile and its account
 //! menu name its server, and the Microsoft 365 account of the same user name beside it names none. And the choice of
@@ -134,6 +136,8 @@ pub(super) fn main() -> ExitCode {
         Ok("again-dark") => own::child_again(true),
         Ok("said") => own::child_said(false),
         Ok("said-dark") => own::child_said(true),
+        Ok("first") => own::child_first(false),
+        Ok("first-dark") => own::child_first(true),
         Ok(other) => match Mode::named(other) {
             Some(mode) => child_window(mode),
             None => Err(format!("unknown mode {other}").into()),
@@ -196,7 +200,7 @@ fn parent() -> SandboxResult {
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 11] = [
+const SCENES: [Scene; 13] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -212,6 +216,12 @@ const SCENES: [Scene; 11] = [
     ("own_sign_in_screen_says_why", |sandbox| said_reasons(sandbox, false)),
     ("own_sign_in_screen_says_why_dark", |sandbox| {
         said_reasons(sandbox, true)
+    }),
+    ("own_entry_written_by_hand_first_sign_in", |sandbox| {
+        first_sign_in(sandbox, false)
+    }),
+    ("own_entry_written_by_hand_first_sign_in_dark", |sandbox| {
+        first_sign_in(sandbox, true)
     }),
     ("own_account_shown_names_its_server", |sandbox| shown(sandbox, false)),
     ("own_account_shown_names_its_server_dark", |sandbox| {
@@ -792,8 +802,12 @@ fn password_again(sandbox: &Sandbox, dark: bool) -> SandboxResult {
     ensure(
         asked.contains("kind=own")
             && asked.contains("server=https://127.0.0.1:")
-            && asked.contains(&format!(" user={} ", own::AGAIN_UPN)),
-        || format!("the screen doesn't hold the account's server and user name: {asked}"),
+            && asked.contains(&format!(" user={} ", own::AGAIN_UPN))
+            && asked.contains(&format!(
+                " asks={} problem=",
+                teams_ui::account_prompt::OWN_PASSWORD_AGAIN
+            )),
+        || format!("the screen doesn't ask the account's password again: {asked}"),
     )?;
     shot(sandbox, &format!("ngteams-own-password-again{suffix}.png"))?;
     let mut input = sandbox.input()?;
@@ -818,6 +832,45 @@ fn password_again(sandbox: &Sandbox, dark: bool) -> SandboxResult {
         forgot == "forgot own_left=false microsoft_left=true token_left=false",
         || format!("forgotten by <server>/<UPN>: {forgot}"),
     )?;
+    let (status, stderr) = running.finish(WAIT)?;
+    ensure(status.success(), || format!("the app exited {status}: {stderr}"))
+}
+
+/// An own server's entry written by hand, never signed in, without the server's certificate authority: its screen
+/// asks its password with no "again"; the sign-in says where the CA file goes; with that line written into the entry
+/// while the screen is open, the password typed again on the same screen signs in, with no restart.
+fn first_sign_in(sandbox: &Sandbox, dark: bool) -> SandboxResult {
+    let (mode, suffix) = if dark { ("first-dark", "-dark") } else { ("first", "") };
+    let (running, _trace, _) = start(sandbox, mode)?;
+    let asked = prompt_now(sandbox, &running)?;
+    ensure(
+        asked.contains("kind=own")
+            && asked.contains(&format!(" user={} ", own::AGAIN_UPN))
+            && asked.contains(&format!(
+                " asks={} problem=-",
+                teams_ui::account_prompt::OWN_PASSWORD_FIRST
+            )),
+        || format!("the screen of an account that never signed in: {asked}"),
+    )?;
+    shot(sandbox, &format!("ngteams-own-first-sign-in{suffix}.png"))?;
+    let mut input = sandbox.input()?;
+    input.type_text(own::PASSWORD)?;
+    input.key(keys::ENTER)?;
+    running
+        .line_where(SIGN_IN, |line| line == "ca-file-written")
+        .map_err(|error| format!("the first sign-in went through without the CA file: {error:?}"))?;
+    prompt_line(&running, SIGN_IN, "where the CA file goes", |line| {
+        line.contains("can't be reached") && line.contains(ngteams::signin::CA_FILE_EXAMPLE)
+    })?;
+    shot(sandbox, &format!("ngteams-own-first-sign-in-ca-missing{suffix}.png"))?;
+    input.type_text(own::PASSWORD)?;
+    input.key(keys::ENTER)?;
+    let signed = running
+        .line_where(WAIT, |line| line.starts_with("first-signed-in "))
+        .map_err(|error| format!("the same screen didn't sign in once ca_file was written: {error:?}"))?;
+    ensure(signed == "first-signed-in ready=true ca_file=true", || {
+        format!("signed in on the same screen: {signed}")
+    })?;
     let (status, stderr) = running.finish(WAIT)?;
     ensure(status.success(), || format!("the app exited {status}: {stderr}"))
 }

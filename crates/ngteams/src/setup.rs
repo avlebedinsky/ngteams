@@ -135,6 +135,15 @@ impl Setup {
         Ok(self.accounts()?.into_iter().find(|held| held.is(account)))
     }
 
+    /// `account` as `accounts.toml` holds it now, with whatever the user wrote into its entry since it was read (its
+    /// `ca_file`, say, while its sign-in screen is open); as given when the file holds no entry of its server and UPN.
+    ///
+    /// # Errors
+    /// As [`Self::accounts`].
+    pub fn as_held(&self, account: &PersonalAccount) -> Result<PersonalAccount, SetupError> {
+        Ok(self.held(account)?.unwrap_or_else(|| account.clone()))
+    }
+
     /// The own server `server`'s account `upn`, to sign in: the one `accounts.toml` holds of that server and UPN (with
     /// whatever the user wrote into it, its `ca_file` say; a CA file given now replaces the entry's), else added after
     /// the others without an object id.

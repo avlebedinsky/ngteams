@@ -187,6 +187,88 @@ fn an_unreachable_server_with_a_ca_file_names_that_file() -> TestResult {
     Ok(())
 }
 
+/// The sign-in screen holds the entry as it was read when it opened: a `ca_file` the user writes into the entry
+/// meanwhile is used by the next "Sign in", with no restart.
+#[test]
+fn a_ca_file_written_while_the_screen_is_open_is_used_by_the_next_sign_in() -> TestResult {
+    let server = OwnServer::start()?;
+    server.add_user(UPN, NAME)?;
+    let dir = tempfile::tempdir()?;
+    let setup = setup_in(&dir);
+    let store = MemorySecretStore::new();
+    let password = Secret::new(PASSWORD);
+    // an entry written by hand without the server's certificate authority, as the screen read it
+    let shown = PersonalAccount::pending_on(UPN, &at(&server, false))?;
+    shown.save(&setup.paths)?;
+    let said = block_on(signin::sign_in_own_again(&setup, &shown, &password, &store)).unwrap_err();
+    assert!(said.contains(signin::CA_FILE_EXAMPLE), "{said}");
+
+    let written = PersonalAccount {
+        ca_file: Some(server.ca_file.clone()),
+        ..shown.clone()
+    };
+    written.save(&setup.paths)?;
+    let signed = block_on(signin::sign_in_own_again(&setup, &shown, &password, &store))?;
+    assert!(signed.is_signed_in());
+    assert_eq!(signed.ca_file.as_deref(), Some(server.ca_file.as_path()));
+    assert_eq!(PersonalAccount::load_all(&setup.paths)?, std::slice::from_ref(&signed));
+
+    // a file that isn't the server's certificate authority, written the same way, is the one named
+    let other = OwnServer::start()?;
+    PersonalAccount {
+        ca_file: Some(other.ca_file.clone()),
+        ..signed
+    }
+    .save(&setup.paths)?;
+    let said = block_on(signin::sign_in_own_again(&setup, &shown, &password, &store)).unwrap_err();
+    assert!(said.contains(&other.ca_file.display().to_string()), "{said}");
+    Ok(())
+}
+
+/// An account signed in while its server's authz named no chat service: once the server names one, asking its
+/// authz again with the stored session saves a region the engine starts on, and no password is typed.
+#[test]
+fn a_region_without_a_chat_service_is_asked_again_without_a_password() -> TestResult {
+    const NO_CHATS: &str = r#"{"_synthetic":true,"region":"own","partition":null,"regionGtms":{}}"#;
+    let server = OwnServer::start()?;
+    server.add_user(UPN, NAME)?;
+    let dir = tempfile::tempdir()?;
+    let setup = setup_in(&dir);
+    let store = MemorySecretStore::new();
+    let signed = block_on(signin::add_own(
+        &setup,
+        UPN,
+        &at(&server, true),
+        &Secret::new(PASSWORD),
+        &store,
+    ))?;
+    let region = setup.paths.region_file(&signed).ok_or("the region file")?;
+    std::fs::write(&region, NO_CHATS)?;
+    assert!(ngteams::accounts::unserved(&setup, &signed).is_some());
+
+    // not asked while own servers are off, nor of Microsoft for an account of theirs: the saved region stays
+    let off = Setup::new(setup.paths.clone())?;
+    let refused = block_on(signin::region_again(&off, &signed, &store));
+    assert!(matches!(refused, Err(SignInError::OwnServersOff)), "{refused:?}");
+    let microsoft = PersonalAccount::new(UPN, MICROSOFT_OID, TENANT)?;
+    let refused = block_on(signin::region_again(&setup, &microsoft, &store));
+    assert!(matches!(refused, Err(SignInError::WrongCloud)), "{refused:?}");
+    assert_eq!(std::fs::read_to_string(&region)?, NO_CHATS);
+
+    block_on(signin::region_again(&setup, &signed, &store))?;
+    assert!(ngteams::accounts::unserved(&setup, &signed).is_none());
+    let saved = Region::load(&region)?;
+    let chat = saved.base(teams_auth::authz::CHAT_BASE_GTM).ok_or("the chat base")?;
+    assert!(chat.starts_with(&server.origin), "{chat}");
+
+    // a session that is no longer there can't ask: the region saved before stays
+    std::fs::write(&region, NO_CHATS)?;
+    block_on(store.delete(&refresh_token_key(&signed.id())))?;
+    assert!(block_on(signin::region_again(&setup, &signed, &store)).is_err());
+    assert_eq!(std::fs::read_to_string(&region)?, NO_CHATS);
+    Ok(())
+}
+
 #[test]
 fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() -> TestResult {
     let server = OwnServer::start()?;

@@ -63,6 +63,10 @@ pub const NO_PASSWORD: &str = "Enter your password";
 
 /// What the screen says while an own server's sign-in is under way.
 pub const SIGNING_IN_OWN: &str = "Signing in…";
+/// Asked of an own server's account that signed in before.
+pub const OWN_PASSWORD_AGAIN: &str = "Enter your password to sign in again.";
+/// Asked of an own server's account that never signed in.
+pub const OWN_PASSWORD_FIRST: &str = "Enter your password to sign in.";
 
 /// Where the account is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,7 +142,10 @@ pub enum AccountPromptEvent {
 enum OwnAsk {
     No,
     Choice,
-    Again,
+    /// One own server's account, its server and user name fixed: `again` when it signed in before.
+    Account {
+        again: bool,
+    },
 }
 
 /// Whether, and how, the screen asks for an own server's account.
@@ -149,8 +156,10 @@ pub enum OwnOffer {
     No,
     /// The choice between Microsoft 365 and an own server.
     Choice,
-    /// This own server's account again: its password alone is asked.
+    /// This own server's account: its password alone is asked.
     Again { server: String, user: String },
+    /// As [`Self::Again`], for an account that never signed in (an entry written by hand): no "again" is said.
+    First { server: String, user: String },
 }
 
 /// The first sign-in screen (see the module docs).
@@ -163,7 +172,7 @@ pub struct AccountPrompt {
     /// The choice's segments' focus, which the arrows move.
     kinds: Handles,
     /// Whether the choice of where the account is shows ([`Self::offer_own_server`]), or an own server's account is
-    /// asked again, its server and user name fixed ([`Self::ask_own_again`]).
+    /// asked alone, its server and user name fixed ([`Self::ask_own_again`], [`Self::ask_own_first`]).
     own: OwnAsk,
     signing_in: bool,
     /// What the line under the field says, and the field's text when it was said: an edit clears it (the kit's input
@@ -240,8 +249,17 @@ impl AccountPrompt {
     /// Asks for the password of the own server `server`'s account `user` again: both shown, fixed, the password's
     /// field focused, and no choice of another place.
     pub fn ask_own_again(&mut self, server: &str, user: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_own(server, user, true, window, cx);
+    }
+
+    /// As [`Self::ask_own_again`] for an account that never signed in: the words don't say "again".
+    pub fn ask_own_first(&mut self, server: &str, user: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_own(server, user, false, window, cx);
+    }
+
+    fn ask_own(&mut self, server: &str, user: &str, again: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.kind = SignInKind::OwnServer;
-        self.own = OwnAsk::Again;
+        self.own = OwnAsk::Account { again };
         let (server, user) = (server.to_owned(), user.to_owned());
         self.server.update(cx, |field, cx| field.set_value(server, window, cx));
         self.user.update(cx, |field, cx| field.set_value(user, window, cx));
@@ -486,7 +504,7 @@ impl AccountPrompt {
                 .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(name))
                 .child(input)
         };
-        let fixed = self.signing_in || self.own == OwnAsk::Again;
+        let fixed = self.signing_in || matches!(self.own, OwnAsk::Account { .. });
         div()
             .flex()
             .flex_col()
@@ -518,11 +536,21 @@ impl AccountPrompt {
                 "Enter your work account. Microsoft's sign-in opens in a window of its own.",
                 SIGNING_IN,
             ),
-            SignInKind::OwnServer if self.own == OwnAsk::Again => {
-                ("Enter your password to sign in again.", SIGNING_IN_OWN)
+            SignInKind::OwnServer => {
+                let asked = match self.own {
+                    OwnAsk::Account { again: true } => OWN_PASSWORD_AGAIN,
+                    OwnAsk::Account { again: false } => OWN_PASSWORD_FIRST,
+                    OwnAsk::No | OwnAsk::Choice => "Enter your server's address and your account on it.",
+                };
+                (asked, SIGNING_IN_OWN)
             }
-            SignInKind::OwnServer => ("Enter your server's address and your account on it.", SIGNING_IN_OWN),
         }
+    }
+
+    /// What the screen asks for, as the line under its title says it.
+    #[must_use]
+    pub fn asks(&self) -> &'static str {
+        self.words().0
     }
 }
 
@@ -630,6 +658,7 @@ pub fn open_offering(
                 OwnOffer::No => {}
                 OwnOffer::Choice => prompt.offer_own_server(cx),
                 OwnOffer::Again { server, user } => prompt.ask_own_again(server, user, window, cx),
+                OwnOffer::First { server, user } => prompt.ask_own_first(server, user, window, cx),
             }
             prompt
         });
