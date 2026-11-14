@@ -93,7 +93,8 @@ function ConvertTo-NgteamsLiteral([string]$Value) {
 
 function Invoke-NgteamsRunner {
     param([string]$Root, [string]$Directory, [string]$ScopeName, [string]$Scope, [string]$App,
-        [int]$TimeoutSeconds, [switch]$Stop, [switch]$Status, [switch]$Serve, [string]$Script)
+        [int]$TimeoutSeconds, [switch]$Stop, [switch]$Status, [switch]$Serve, [string]$Script,
+        [hashtable]$Environment = @{})
     if (!$env:LOCALAPPDATA -or ![IO.Path]::IsPathFullyQualified($env:LOCALAPPDATA)) {
         throw 'LOCALAPPDATA must be absolute.'
     }
@@ -150,6 +151,11 @@ function Invoke-NgteamsRunner {
     # Manager. Never log on another user, ask for a password or use the highest run level.
     $command = '& ' + (ConvertTo-NgteamsLiteral $Script) + ' -Serve -' + $ScopeName + ' ' +
         (ConvertTo-NgteamsLiteral $Scope) + ' -TimeoutSeconds ' + $TimeoutSeconds
+    # The console task starts from the user's environment, not the caller's: hand these on by name (empty is unset).
+    foreach ($name in $Environment.Keys | Sort-Object) {
+        if ($name -cnotmatch '^[A-Z][A-Z0-9_]*$') { throw "Not an environment variable name: $name" }
+        $command = '$env:' + $name + ' = ' + (ConvertTo-NgteamsLiteral ([string]$Environment[$name])) + '; ' + $command
+    }
     if ($ScopeName -eq 'Account') { $command += ' -App ' + (ConvertTo-NgteamsLiteral $App) }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $action = New-ScheduledTaskAction -Execute (Get-Command pwsh -CommandType Application).Source `
