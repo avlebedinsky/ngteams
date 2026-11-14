@@ -13,7 +13,7 @@ use super::{Error, account, graph};
 use crate::app::App;
 use crate::db::users;
 
-const SPACES: &str = "https://api.spaces.skype.com";
+const SPACES: &str = <crate::auth::extract::Spaces as crate::auth::extract::Audience>::AUDIENCE;
 /// The MRIs one lookup names.
 const MAX_NAMES: usize = 500;
 

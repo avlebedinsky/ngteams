@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 
 use super::{Error, IC3, account, quota, repo};
 use crate::app::App;
-use crate::chatsvc;
 use crate::db::users::User;
+use crate::teams::repo::joined;
 
 /// The largest body that makes an object.
 const CREATE_BODY: usize = 16 * 1024;
@@ -62,15 +62,12 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Jso
         .as_object()
         .filter(|chats| (1..=MAX_CHATS).contains(&chats.len()))
         .ok_or(Error::Invalid("The object needs the chats that may read it."))?;
-    let mut chats = Vec::new();
-    for (chat, rights) in permissions {
-        if rights != &json!(["read"]) {
-            return Err(Error::Invalid("A chat may only read an object."));
-        }
-        if !chatsvc::is_member(&app.db, chat, &caller.id).await? {
-            return Err(Error::Forbidden);
-        }
-        chats.push(chat.clone());
+    if permissions.values().any(|rights| rights != &json!(["read"])) {
+        return Err(Error::Invalid("A chat may only read an object."));
+    }
+    let chats: Vec<String> = permissions.keys().cloned().collect();
+    if joined(&app.db, &caller.id, &chats).await?.len() != chats.len() {
+        return Err(Error::Forbidden);
     }
     let object = repo::Object {
         id: format!("0-{}-d1-{}", app.config.region, uuid::Uuid::new_v4().simple()),
@@ -98,13 +95,12 @@ async fn fill(
     }
     let content_type = picture_type(&bytes).ok_or(Error::Unsupported)?;
     let size = i64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
-    if !repo::fill_object(&app.db, &object, Some(content_type), size, quota(&app)).await? {
-        return Err(Error::Quota);
-    }
+    let held = repo::fill_object(&app.db, &id, &caller.id, Some(content_type), size, quota(&app))
+        .await?
+        .ok_or(Error::Quota)?;
     if let Err(error) = app.storage.put(&key(&id), bytes).await {
         // the bytes aren't there: the object and its owner's count go back to what they were
-        let filled = repo::Object { size, ..object.clone() };
-        repo::fill_object(&app.db, &filled, object.content_type.as_deref(), object.size, 0).await?;
+        repo::fill_object(&app.db, &id, &caller.id, held.content_type.as_deref(), held.size, 0).await?;
         return Err(error.into());
     }
     Ok(StatusCode::CREATED.into_response())
@@ -127,12 +123,11 @@ async fn readable(app: &App, caller: &User, id: &str) -> Result<repo::Object, Er
     if object.owner_id == caller.id {
         return Ok(object);
     }
-    for chat in repo::object_chats(&app.db, id).await? {
-        if chatsvc::is_member(&app.db, &chat, &caller.id).await? {
-            return Ok(object);
-        }
+    let chats = repo::object_chats(&app.db, id).await?;
+    if joined(&app.db, &caller.id, &chats).await?.is_empty() {
+        return Err(Error::Forbidden);
     }
-    Err(Error::Forbidden)
+    Ok(object)
 }
 
 async fn read(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<Value>, Error> {

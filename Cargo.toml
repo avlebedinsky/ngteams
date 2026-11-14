@@ -340,11 +340,11 @@ libsqlite3-sys = { version = "0.38.2", features = ["bundled"] }
 # redis-rs, not fred: fred 10's redis-protocol pins cookie-factory =0.3.2, PipeWire's libspa needs ^0.3.3
 redis = { version = "1.8.1", default-features = false, features = ["connection-manager", "tokio-comp", "tokio-rustls-comp"] }
 # its files: the local file system, memory or S3
+object_store = { version = "0.14.2", default-features = false, features = ["aws", "fs"] }
 # a file download's `Range` header, parsed and checked against the file's size (tower-http's own parser)
 http-range-header = "0.4.2"
 # a stored file's media type, from its name
 mime_guess = "2.0.5"
-object_store = { version = "0.14.2", default-features = false, features = ["aws", "fs"] }
 # its configuration: TOML plus NGTEAMS_SERVER_* environment variables
 figment = { version = "0.10.19", features = ["env", "toml"] }
 # its logs

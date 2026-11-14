@@ -23,13 +23,18 @@ const MAX_DECODED: u64 = 256 * 1024 * 1024;
 /// Pictures a node decodes at once: each may take [`MAX_DECODED`] of memory.
 static DECODERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// Runs `work` over `source` off the async threads, when a decoder is free in turn.
+/// Runs `work` over `source` off the async threads, when a decoder is free in turn. The decode holds its turn
+/// until it ends: a request that goes away leaves it running.
 pub(super) async fn decoding<T: Send + 'static>(
     source: Bytes,
     work: impl FnOnce(&[u8]) -> Option<T> + Send + 'static,
 ) -> Option<T> {
-    let _turn = DECODERS.acquire().await.ok()?;
-    tokio::task::spawn_blocking(move || work(&source)).await.ok().flatten()
+    let turn = DECODERS.acquire().await.ok()?;
+    let decode = tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        work(&source)
+    });
+    decode.await.ok().flatten()
 }
 
 /// What was made for a file: each size's width and height; none when the file has no thumbnail.
@@ -110,4 +115,43 @@ fn render(source: &[u8]) -> Option<Vec<(&'static str, u32, u32, Bytes)>> {
         .iter()
         .map(|(size, side)| jpeg(&picture, *side).map(|(width, height, bytes)| (*size, width, height, bytes)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_request_keeps_its_decoder_until_the_decode_ends() {
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let mut releases = Vec::new();
+        let mut requests = Vec::new();
+        for _ in 0..DECODERS.available_permits() {
+            let (release, held) = mpsc::channel::<()>();
+            let started = started.clone();
+            releases.push(release);
+            requests.push(tokio::spawn(decoding(Bytes::new(), move |_| {
+                started.send(()).unwrap();
+                held.recv().ok();
+                Some(())
+            })));
+        }
+        for request in requests {
+            starts.recv().await.unwrap();
+            request.abort();
+            assert!(request.await.unwrap_err().is_cancelled());
+        }
+
+        let mut next = tokio::spawn(decoding(Bytes::new(), |_| Some(())));
+        let waited = tokio::time::timeout(Duration::from_millis(300), &mut next).await;
+        assert!(
+            waited.is_err(),
+            "a decode started while the dropped requests' decodes still ran"
+        );
+        drop(releases);
+        assert_eq!(next.await.unwrap(), Some(()));
+    }
 }

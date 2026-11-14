@@ -625,9 +625,10 @@ the 1:1 chat and its history stay its two people's.
   another serves it. A download link one node signed opens on every node. Each account's stored bytes are counted
   in one row updated in a single statement, so two nodes can't both pass the quota.
 - Signing keys are rows in the database. A node rotates the key when it is due (checked hourly) and drops keys that
-  can no longer verify a live token. Retired keys are kept for the access lifetime plus three hourly reload intervals
-  and the verifier's 60-second clock allowance, covering two missed maintenance checks. Nodes that cannot reload
-  for longer than three hours should be taken out of service until their database connection recovers.
+  can no longer verify a live token or file link. Retired keys are kept for the access lifetime, or
+  `media.link_lifetime` when that is longer, plus three hourly reload intervals and the verifier's 60-second clock
+  allowance, covering two missed maintenance checks. Nodes that cannot reload for longer than three hours should be
+  taken out of service until their database connection recovers.
   `ngteams-server keys rotate` creates a key immediately; running nodes switch at their next hourly check, or
   earlier if verifying an unknown key triggers a reload. Rotation is serialized in the database across nodes.
 - Account administration keeps its state in the database: the setup code's digest, the admin role, the audit. A

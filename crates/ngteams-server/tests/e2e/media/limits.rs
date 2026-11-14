@@ -52,6 +52,47 @@ async fn an_account_stores_no_more_than_its_quota() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_picture_filled_many_times_at_once_counts_its_bytes_once() {
+    use reqwest::Method;
+
+    let (large, small) = (png(120, 120), png(8, 8));
+    let quota = large.len() as u64;
+    for backend in crate::support::backends() {
+        let trio = Trio::start_with(backend, |config| config.media.user_quota_bytes = quota).await;
+        let writer = client(&trio.server, "a@own.test", &trio.ids[0]).await;
+        let made = writer
+            .write(CreatePicture::new(&trio.chat, PastedFormat::Png).unwrap())
+            .await
+            .unwrap();
+        let object = CreatePicture::read_answer(made.body()).unwrap();
+        let ic3 = super::token(&trio.server, "a@own.test", super::IC3).await;
+        let path = format!("/ams/v1/objects/{object}/content/imgpsh");
+        let fill = |bytes: &[u8]| {
+            let filled = super::raw(&trio.server, Method::PUT, &path, Some(&ic3), &[], Some(bytes.to_vec()));
+            async { filled.await.0 }
+        };
+
+        let first = tokio::join!(fill(&large), fill(&large), fill(&large), fill(&large));
+        assert_eq!(
+            first,
+            (201, 201, 201, 201),
+            "the same bytes were counted more than once"
+        );
+        for _ in 0..4 {
+            let replaced = tokio::join!(fill(&small), fill(&small), fill(&small), fill(&small));
+            assert_eq!(replaced, (201, 201, 201, 201));
+            assert_eq!(fill(&large).await, 201);
+        }
+        assert_eq!(fill(&small).await, 201);
+        let rest = large.len() - small.len();
+        assert_eq!(upload(&trio, "rest.bin", &vec![7; rest]).await, Ok(rest as u64));
+        let refused = upload(&trio, "one-more.bin", b"x").await.unwrap_err();
+        assert!(refused.contains("507"), "{refused}");
+        trio.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pictures_and_files_over_their_size_limits_are_refused() {
     let large = png(120, 120);
     let limit = large.len() as u64 - 1;

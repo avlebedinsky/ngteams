@@ -3,10 +3,13 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::Router;
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, LOCATION};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use serde_json::Value;
 use teams_proto::LinkPreviewPicture;
@@ -35,6 +38,16 @@ async fn site() -> (String, Arc<AtomicUsize>) {
         )
         .route("/moved", get(|| async { (StatusCode::FOUND, [(LOCATION, "/page")]) }))
         .route("/text", get(|| async { "not a picture" }))
+        .route(
+            "/slow/{left}",
+            get(|Path(left): Path<u8>| async move {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                match left.checked_sub(1) {
+                    Some(left) => (StatusCode::FOUND, [(LOCATION, format!("/slow/{left}"))]).into_response(),
+                    None => PAGE.into_response(),
+                }
+            }),
+        )
         .layer(axum::middleware::from_fn(
             move |request, next: axum::middleware::Next| {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -103,6 +116,10 @@ async fn previews_refuse_private_loopback_and_link_local_addresses() {
         format!("http://[::1]:{port}/page"),
         format!("http://[::ffff:127.0.0.1]:{port}/page"),
         format!("http://2130706433:{port}/page"),
+        "http://localhost/page".to_owned(),
+        "http://127.0.0.1/page".to_owned(),
+        "http://[::1]/page".to_owned(),
+        "http://2130706433/page".to_owned(),
         "http://10.0.0.1/".to_owned(),
         "http://192.168.1.1/".to_owned(),
         "http://172.16.0.1/".to_owned(),
@@ -121,6 +138,22 @@ async fn previews_refuse_private_loopback_and_link_local_addresses() {
         }
     }
     assert_eq!(hits.load(Ordering::SeqCst), 0);
+    trio.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preview_has_one_deadline_for_all_its_redirects() {
+    let trio = Trio::start_with(Backend::Sqlite, |config| {
+        config.media.preview_allow_private_addresses = true;
+        config.media.preview_timeout = 1;
+    })
+    .await;
+    let (site, _) = site().await;
+    let token = token(&trio.server, "a@own.test", IC3).await;
+    let asked = std::time::Instant::now();
+    let (status, _) = ask(&trio.server, Some(&token), "info", &format!("{site}/slow/3")).await;
+    assert_eq!(status, 502);
+    assert!(asked.elapsed() < Duration::from_millis(1500), "{:?}", asked.elapsed());
     trio.stop().await;
 }
 

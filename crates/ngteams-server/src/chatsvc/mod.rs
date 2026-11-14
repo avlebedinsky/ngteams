@@ -85,14 +85,6 @@ pub(super) fn router() -> Router<Arc<App>> {
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
 }
 
-/// Whether `user` is a member of `chat` now: what media made for a chat is read by.
-pub(crate) async fn is_member(db: &crate::db::Db, chat: &str, user: &str) -> Result<bool, DbError> {
-    Ok(repo::members(db, chat)
-        .await?
-        .iter()
-        .any(|member| member.user_id == user))
-}
-
 struct Caller {
     id: String,
     tenant: String,

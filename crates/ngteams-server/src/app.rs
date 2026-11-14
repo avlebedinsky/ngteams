@@ -62,6 +62,17 @@ pub enum StartError {
     Previews(String),
 }
 
+/// How long a retired key is kept: as long as the longest-lived thing it signed, an access token or a file link,
+/// may still have to verify.
+fn key_retention(config: &Config) -> Duration {
+    let longest = config
+        .tokens
+        .access()
+        .max(Duration::from_secs(config.media.link_lifetime));
+    // Allow two missed maintenance ticks before other nodes reload their signer.
+    longest + 3 * MAINTENANCE + Duration::from_secs(crate::auth::tokens::LEEWAY)
+}
+
 impl App {
     /// Connects to the database (migrating it), Redis (when configured) and the file store, and loads the keys.
     ///
@@ -70,9 +81,7 @@ impl App {
     pub async fn start(config: Config) -> Result<Arc<Self>, StartError> {
         let db = Db::connect(&config.database_url, config.database_pool).await?;
         let tenant = crate::db::meta::tenant(&db).await?;
-        // Allow two missed maintenance ticks before other nodes reload their signer.
-        let keep = config.tokens.access() + 3 * MAINTENANCE + Duration::from_secs(crate::auth::tokens::LEEWAY);
-        let keys = KeyRing::load(db.clone(), config.tokens.rotation(), keep).await?;
+        let keys = KeyRing::load(db.clone(), config.tokens.rotation(), key_retention(&config)).await?;
         let issuer = Issuer::new(keys, &config.origin(), &tenant, &config.region, config.tokens.access());
         let setup_limits = LoginConfig {
             max_failures: config.setup.max_attempts,
@@ -197,5 +206,21 @@ async fn purge(app: &App) {
 async fn purge_registrations(app: &App) {
     if let Err(error) = crate::registrar::purge_expired(&app.db, crate::db::now()).await {
         tracing::warn!(%error, "expired push registrations weren't dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_retired_key_outlives_the_longest_token_or_link_it_signed() {
+        let allowance = 3 * MAINTENANCE + Duration::from_secs(crate::auth::tokens::LEEWAY);
+        let mut config = Config::default();
+        config.tokens.access_lifetime = 3600;
+        config.media.link_lifetime = 60;
+        assert_eq!(key_retention(&config), Duration::from_hours(1) + allowance);
+        config.media.link_lifetime = 86_400;
+        assert_eq!(key_retention(&config), Duration::from_hours(24) + allowance);
     }
 }

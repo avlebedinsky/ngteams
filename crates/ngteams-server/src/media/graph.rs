@@ -16,7 +16,7 @@ use super::{Error, account, drive, people, repo, thumbs};
 use crate::app::App;
 use crate::db::users::User;
 
-const GRAPH: &str = "https://graph.microsoft.com";
+const GRAPH: &str = <crate::routes::graph::Graph as crate::auth::extract::Audience>::AUDIENCE;
 /// The longest sharing token read.
 const MAX_SHARE: usize = 4096;
 

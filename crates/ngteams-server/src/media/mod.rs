@@ -4,7 +4,7 @@
 //! Every blob lives in [`crate::storage`], shared by all nodes; its row says who may read it. A picture is read by
 //! the members of the chats it was made for, checked against the database on every read. A file is read by the
 //! accounts its owner shared it with. A file's bytes and thumbnail go out only through short-lived links this server
-//! signs ([`links`]), on its own origin: the client takes no file link from any other host, and no token of an
+//! signs ([`drive`]), on its own origin: the client takes no file link from any other host, and no token of an
 //! account ever reaches the store.
 
 mod ams;
@@ -40,7 +40,7 @@ const SHORT: std::time::Duration = std::time::Duration::from_secs(30);
 const LONG: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// The chat service's audience, which AMS takes too.
-const IC3: &str = "https://ic3.teams.office.com";
+const IC3: &str = <crate::chatsvc::Ic3 as crate::auth::extract::Audience>::AUDIENCE;
 
 pub(crate) fn router(app: &App) -> Router<Arc<App>> {
     let small = Router::new()
