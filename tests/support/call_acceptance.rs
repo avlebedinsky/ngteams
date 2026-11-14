@@ -14,14 +14,8 @@ pub fn assert_operations(
         })
         .collect();
     assert!(http.len() <= 1, "one acceptance acknowledgement route: {operations:?}");
-    let acceptance = http.first().map(|_| {
-        operations
-            .iter()
-            .position(|operation| operation == "acknowledge")
-            .unwrap()
-    });
-    if let Some(at) = acceptance {
-        assert!(at > 1 && at < operations.len() - 1, "{operations:?}");
+    let acceptance = acceptance_position(operations, http.len());
+    if acceptance.is_some() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/calling/echo/answers.json")).unwrap();
         let expected = fixture["acceptance_callback"]["body"]["callAcceptance"]["links"]["acknowledgement"]
@@ -46,6 +40,24 @@ pub fn assert_operations(
     assert_eq!(ordered, expected);
     assert_eq!(responses + http.len(), 1, "one way, with no duplicate acknowledgement");
     !http.is_empty()
+}
+
+fn acceptance_position(operations: &[String], requests: usize) -> Option<usize> {
+    let mut positions = operations
+        .iter()
+        .enumerate()
+        .filter_map(|(at, operation)| (operation == "acceptanceAcknowledge").then_some(at));
+    let acceptance = positions.next();
+    assert!(positions.next().is_none(), "one acceptance operation: {operations:?}");
+    assert_eq!(usize::from(acceptance.is_some()), requests, "{operations:?}");
+    if let Some(at) = acceptance {
+        assert!(at > 1 && at < operations.len() - 1, "{operations:?}");
+        assert!(
+            operations[2..at].iter().all(|operation| operation == "add"),
+            "acceptance acknowledgement precedes later call operations: {operations:?}"
+        );
+    }
+    acceptance
 }
 
 fn assert_acknowledgement_payload(request: &wiremock::Request, requests: &[wiremock::Request]) {
@@ -115,4 +127,40 @@ fn acceptance_responses_exclude_camera_receipts_and_unrelated_frames() {
     for frame in ["3:::{\"status\":200,\"body\":\"\"}", "3:::{", "2::", ""] {
         assert!(!is_acceptance_response(frame));
     }
+}
+
+#[test]
+fn acceptance_positions_distinguish_setup_from_camera_receipts() {
+    let operations: Vec<_> = [
+        "start",
+        "updateEndpointMetadata",
+        "add",
+        "renegotiate",
+        "acknowledge",
+        "leave",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(acceptance_position(&operations, 0), None);
+    for at in [2, 3] {
+        let mut operations = operations.clone();
+        operations.insert(at, "acceptanceAcknowledge".into());
+        assert_eq!(acceptance_position(&operations, 1), Some(at));
+    }
+}
+
+#[test]
+#[should_panic(expected = "acceptance acknowledgement precedes later call operations")]
+fn an_acceptance_after_the_camera_receipt_is_rejected() {
+    let operations = [
+        "start",
+        "updateEndpointMetadata",
+        "add",
+        "renegotiate",
+        "acknowledge",
+        "acceptanceAcknowledge",
+        "leave",
+    ]
+    .map(String::from);
+    acceptance_position(&operations, 1);
 }

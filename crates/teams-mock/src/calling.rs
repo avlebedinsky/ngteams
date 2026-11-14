@@ -113,6 +113,7 @@ pub struct MockCall {
     pub legs: Vec<Leg>,
     /// Every request on the call, by its operation (`start`, `attach`, `progress`, `accept`, `reject`, `leave`, …), with
     /// the account that sent it, in order.
+    /// Acceptance acknowledgements use `acceptanceAcknowledge`; media-answer receipts use `acknowledge`.
     pub requests: Vec<(String, String)>,
     /// The tenant each `add` named for its invitation (`participantInvitationData.invitationData.meetingInfo.tenantId`,
     /// empty when it named none), in order.
@@ -834,7 +835,11 @@ fn controller_op(
     let leg_index = leg.parse::<usize>().ok().and_then(|leg| leg.checked_sub(1));
     // the call leg's own link takes the call's keep-alive (no operation after it)
     let op = op.unwrap_or(if kind == "active" { "keepAlive" } else { "" });
-    log(state, index, account, op);
+    let logged_op = match (kind, op) {
+        ("callAcceptance", "acknowledge") => "acceptanceAcknowledge",
+        _ => op,
+    };
+    log(state, index, account, logged_op);
     match (kind, op) {
         ("forked", "attach") => attach(state, index, leg_index?, body),
         ("incoming", "progress") => {
