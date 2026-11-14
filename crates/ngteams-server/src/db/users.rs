@@ -1,6 +1,6 @@
 //! Accounts: an object id (the `oid` and MRI `8:orgid:<id>`), a UPN (kept lowercase, unique), a name, an Argon2
-//! password hash, whether the account may sign in, whether it is an admin, and whether it must change its password
-//! before it signs in. A deleted account stays as a disabled row without a sign-in (`deleted_at`), so its id keeps
+//! password hash with the number of times it was replaced, whether the account may sign in, whether it is an admin,
+//! and whether it must change its password before it signs in. A deleted account stays as a disabled row without a sign-in (`deleted_at`), so its id keeps
 //! naming what it authored (`crate::admin::repo::delete`).
 
 use diesel::prelude::*;
@@ -17,6 +17,8 @@ pub struct User {
     pub upn: String,
     pub display_name: String,
     pub password_hash: String,
+    /// How many times the password was replaced: an access token names the one it was issued under.
+    pub password_version: i64,
     pub disabled: bool,
     pub created_at: i64,
     pub updated_at: i64,

@@ -36,6 +36,7 @@ impl NewUser {
             upn: self.upn,
             display_name: self.display_name,
             password_hash: self.password_hash,
+            password_version: 0,
             disabled: false,
             created_at: at,
             updated_at: at,
@@ -422,7 +423,9 @@ pub struct NewPassword<'a> {
     pub action: &'a str,
 }
 
-/// Replaces an account's password and revokes its refresh tokens.
+/// Replaces an account's password, raises its password version and revokes its refresh tokens, in one step: a
+/// token request sees the account either before all or after all, so no token of the new password's version comes
+/// of an older sign-in.
 ///
 /// # Errors
 /// [`AdminError::NoSuchUser`], [`AdminError::Credentials`]; a database failure.
@@ -446,6 +449,7 @@ pub async fn set_password(db: &Db, actor: Actor<'_>, id: &str, new: NewPassword<
             diesel::update(users::table.find(id))
                 .set((
                     users::password_hash.eq(new.hash),
+                    users::password_version.eq(users::password_version + 1),
                     users::must_change_password.eq(new.must_change),
                     users::updated_at.eq(now()),
                 ))

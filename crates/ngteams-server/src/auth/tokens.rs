@@ -1,7 +1,7 @@
 //! The tokens the server mints, in the shapes the client reads from Entra and authz (`docs/protocol/auth.md`):
 //!
 //! - an access token per audience: `aud` is the resource the client asked for (`<resource>/.default` mapped to
-//!   `<resource>`), with `oid`, `tid`, `upn`, `name`, `scp` and `exp`;
+//!   `<resource>`), with `oid`, `tid`, `upn`, `name`, `scp` and `exp`, and `pwd_ver`, the account's password version;
 //! - an ID token for the client (`aud` its client id) naming the account;
 //! - the skypetoken: `skypeid` (`orgid:<oid>`), `rgn` and the `exp` of the access token it was exchanged for.
 //!
@@ -51,6 +51,10 @@ pub struct AccessClaims {
     /// `["admin"]` for an admin; absent otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<String>,
+    /// The account's password version when the token was issued (ours, not Entra's): the push channel refuses a
+    /// token from before a password reset.
+    #[serde(default)]
+    pub pwd_ver: i64,
 }
 
 /// An ID token's claims.
@@ -195,6 +199,7 @@ impl Issuer {
             ver: "2.0".to_owned(),
             uti: uuid::Uuid::new_v4().simple().to_string(),
             roles: roles(user),
+            pwd_ver: user.password_version,
         };
         Ok(Minted {
             token: self.keys.sign(&claims)?,

@@ -294,9 +294,11 @@ public origin is refused.
 - **An account's end.** `user disable` and `user reset-password` close the account's open sockets at once with
   `unauthorized`, on every node: the command publishes the disconnect on Redis. Each socket also reads its account
   from the database once it listens, before each delivery and, on a node without Redis (which the command can't
-  reach), every second; it ends when the account is gone, disabled or has another password than at the connect. So
-  nothing posted after the command returned is pushed to the account. The client then asks for a new token, which
-  it doesn't get, and is signed out.
+  reach), every second, also while a replay to a slow reader is under way; it ends when the account is gone,
+  disabled or has another password than its token was issued under. An access token names its account's password
+  version (`pwd_ver`, a count of the resets), so a token from before a reset opens no socket either, though it is
+  good elsewhere until it runs out. So nothing posted after the command returned is pushed to the account. The
+  client then asks for a new token, which it doesn't get, and is signed out.
 - **Endpoint.** `trouter.connected` names the endpoint, its push URL (`<origin>/trouter/v4/f/<endpoint>/`), the
   `reconnectUrl` on the same origin and `connectparams` valid for seven days. The endpoint id is derived from the
   account, the client's `epid` and its stack, so the same client gets the same endpoint on every connect and on

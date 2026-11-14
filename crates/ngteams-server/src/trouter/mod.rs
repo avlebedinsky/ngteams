@@ -12,10 +12,12 @@
 //! registrar took, a newer socket of the same endpoint (the older one closes), an event the journal couldn't keep
 //! (the clients are told of a loss), a disconnect.
 //!
-//! A socket is its account's only while the account may sign in with the password it had: one that is disabled or
-//! given a new password is disconnected as a refused socket is ([`revoke`]). The word alone would not do: a node
-//! without Redis isn't reached by a command run beside it, and a word can pass a socket that is just connecting. So a
-//! socket reads its account once it listens, before each delivery, and, where there is no Redis, every second.
+//! A socket is its account's only while the account may sign in with the password its token was issued under (the
+//! token's `pwd_ver`): one that is disabled or given a new password is disconnected as a refused socket is
+//! ([`revoke`]), and a token from before the new password opens none. The word alone would not do: a node without
+//! Redis isn't reached by a command run beside it, and a word can pass a socket that is just connecting. So a socket
+//! reads its account once it listens, before each delivery, and, where there is no Redis, every second, a replay
+//! under way or not.
 
 mod delivery;
 mod frames;

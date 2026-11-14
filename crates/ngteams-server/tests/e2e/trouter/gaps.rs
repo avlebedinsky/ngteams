@@ -1,7 +1,7 @@
 //! What a replay must neither lose nor invent: no loss is reported to a socket that followed its account, one is
 //! reported for an event the journal couldn't keep, cursors are kept only for registered endpoints and only so many
-//! of them, a replay to a slow reader ends with its token, a break of the node's Redis subscription closes its
-//! sockets, and a reader with nothing left to read goes on from where that read stood.
+//! of them, a replay to a slow reader ends with its token or its account, a break of the node's Redis subscription
+//! closes its sockets, and a reader with nothing left to read goes on from where that read stood.
 
 use std::time::Duration;
 
@@ -215,37 +215,82 @@ async fn a_topic_keeps_only_so_many_readers_cursors() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_replay_to_a_reader_that_takes_nothing_ends_when_its_token_runs_out() {
-    const EVENTS: usize = 400;
-    let server = server_with(Backend::Sqlite, |config| config.tokens.access_lifetime = 4).await;
-    let id = server.add_user("a@own.test", "Ada").await;
-    let ic3 = token(&server, "a@own.test", IC3).await;
-    let topic = format!("push:8:orgid:{id}");
-    registered(&server, &id, &ic3, EPID).await;
-    // the endpoint is known, and its socket down while more arrives than a socket's buffers take
-    let mut socket = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+/// How many events [`behind`] leaves to replay: more than a socket's buffers take.
+const BACKLOG: usize = 400;
+
+/// A socket of a's registered endpoint that connected with [`BACKLOG`] events to replay and has read none of them.
+async fn behind(server: &TestServer, id: &str, topic: &str) -> Raw {
+    let ic3 = token(server, "a@own.test", IC3).await;
+    registered(server, id, &ic3, EPID).await;
+    // the endpoint is known, and its socket down while the events arrive
+    let mut socket = Raw::open(server, &query(EPID, "TeamsCDL")).await;
     socket.connect(&ic3).await;
     socket.send(PING).await;
     assert_eq!(socket.next().await.as_deref(), Some(PONG));
     socket.send("0::").await;
     assert!(socket.next().await.is_none());
-    let large = "x".repeat(64 * 1024);
-    for _ in 0..EVENTS {
-        server.app.fanout.publish(&topic, message(&large)).await.unwrap();
-    }
-    let ic3 = token(&server, "a@own.test", IC3).await;
-    let mut socket = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+    backlog(server, topic).await;
+    let ic3 = token(server, "a@own.test", IC3).await;
+    let mut socket = Raw::open(server, &query(EPID, "TeamsCDL")).await;
     socket.connect(&ic3).await;
-    // the client reads nothing until its token has run out
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    socket
+}
+
+async fn backlog(server: &TestServer, topic: &str) {
+    let large = "x".repeat(64 * 1024);
+    for _ in 0..BACKLOG {
+        server.app.fanout.publish(topic, message(&large)).await.unwrap();
+    }
+}
+
+/// Reads the socket to its end: whether that is `unauthorized`, before the whole backlog was replayed.
+async fn cut_short(socket: &mut Raw) -> bool {
     let (mut replayed, mut last) = (0, String::new());
     while let Some(frame) = socket.next().await {
         replayed += usize::from(frame.starts_with("3:::"));
         last = frame;
     }
-    assert_eq!(last, r#"0:::{"reason":"unauthorized"}"#);
-    assert!(replayed < EVENTS, "the replay went on past the token's end");
+    last == r#"0:::{"reason":"unauthorized"}"# && replayed < BACKLOG
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_to_a_reader_that_takes_nothing_ends_when_another_process_disables_its_account() {
+    let server = server(Backend::Sqlite).await;
+    let id = server.add_user("a@own.test", "Ada").await;
+    let topic = format!("push:8:orgid:{id}");
+    let mut socket = behind(&server, &id, &topic).await;
+    // the replay stands on a frame the client doesn't take
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(server.app.trouter.open(), 1);
+    // the database alone changes, as when the operator's command runs beside a node without Redis
+    ngteams_server::admin::set_disabled(
+        &server.app.db,
+        &ngteams_server::fanout::Local::new(),
+        "a@own.test",
+        true,
+    )
+    .await
+    .unwrap();
+    // the socket ends within moments, not when the frame's ten seconds are over
+    let ended = async {
+        while server.app.trouter.open() > 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(4), ended).await.unwrap();
+    assert!(cut_short(&mut socket).await);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replay_to_a_reader_that_takes_nothing_ends_when_its_token_runs_out() {
+    let server = server_with(Backend::Sqlite, |config| config.tokens.access_lifetime = 4).await;
+    let id = server.add_user("a@own.test", "Ada").await;
+    let topic = format!("push:8:orgid:{id}");
+    let mut socket = behind(&server, &id, &topic).await;
+    // the client reads nothing until its token has run out
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(cut_short(&mut socket).await, "the replay went on past the token's end");
     // what was written is not replayed again: the cursor was kept where the socket stopped
     let kept = kept_cursor(&server, &topic, &endpoint_id(&id, EPID, Stack::Messaging)).await;
     let end = server.app.journal.tail(&topic).await.unwrap();

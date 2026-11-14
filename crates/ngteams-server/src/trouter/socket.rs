@@ -121,14 +121,15 @@ struct Account {
     mri: String,
     /// When its token runs out (Unix seconds).
     expires_at: i64,
-    /// The password hash it had: a new password ends the socket.
-    password_hash: String,
+    /// The password version its token was issued under: a new password ends the socket.
+    password_version: i64,
     /// Whether the client sent back this endpoint's reconnect parameters: it was connected before.
     reconnect: bool,
 }
 
-/// Reads `user.authenticate` and checks its token: the account, if it is one of ours and not disabled. A token is
-/// run out at its `exp`, as on an open socket, without the clock skew its other checks allow.
+/// Reads `user.authenticate` and checks its token: the account, if it is one of ours, not disabled and still has the
+/// password the token was issued under. A token is run out at its `exp`, as on an open socket, without the clock
+/// skew its other checks allow.
 async fn authenticate(app: &App, first: &str, connect: &Connect) -> Option<Account> {
     let FromClient::Event { name, args, .. } = frames::read(first) else {
         return None;
@@ -137,7 +138,7 @@ async fn authenticate(app: &App, first: &str, connect: &Connect) -> Option<Accou
     let token = argument["headers"]["Authorization"].as_str()?.strip_prefix("Bearer ")?;
     let claims = app.issuer.verify_access(token.trim(), Ic3::AUDIENCE).await.ok()?;
     let user = users::by_id(&app.db, &claims.oid).await.ok()??;
-    if user.disabled || seconds_until(claims.exp) == 0 {
+    if user.disabled || user.password_version != claims.pwd_ver || seconds_until(claims.exp) == 0 {
         return None;
     }
     let endpoint = endpoint_id(&claims.oid, &connect.epid, connect.stack);
@@ -146,7 +147,7 @@ async fn authenticate(app: &App, first: &str, connect: &Connect) -> Option<Accou
         reconnect: argument["connectparams"]["sr"].as_str() == Some(endpoint.as_str()),
         oid: claims.oid,
         expires_at: claims.exp,
-        password_hash: user.password_hash,
+        password_version: claims.pwd_ver,
     })
 }
 
@@ -218,6 +219,26 @@ async fn next_of(subscription: Option<&mut Subscription>) -> Result<Bytes, Misse
     match subscription {
         Some(subscription) => subscription.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Ends a socket unless its account is still there, enabled, with the password its token was issued under.
+async fn holds(app: &App, oid: &str, password_version: i64) -> Result<(), End> {
+    let user = users::by_id(&app.db, oid).await?;
+    if user.is_some_and(|user| !user.disabled && user.password_version == password_version) {
+        Ok(())
+    } else {
+        Err(End::Tell(Some(UNAUTHORIZED)))
+    }
+}
+
+/// Reads the account at each tick of its check while the socket is busy: resolves when the socket has to end.
+async fn revoked(app: &App, oid: &str, password_version: i64, mut check: Option<&mut Interval>) -> End {
+    loop {
+        ticked(check.as_deref_mut()).await;
+        if let Err(end) = holds(app, oid, password_version).await {
+            return end;
+        }
     }
 }
 
@@ -432,9 +453,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
         }
     }
 
-    /// Does `work`, unless the socket has to end first: its token runs out, the node stops or the control topic
-    /// says so, however long a slow reader makes a replay take. What else the control topic says meanwhile is acted
-    /// on after.
+    /// Does `work`, unless the socket has to end first: its token runs out, the node stops, the control topic says
+    /// so or the account's check finds it ended, however long a slow reader makes a replay take. What else the
+    /// control topic says meanwhile is acted on after.
     async fn unless_ended(
         &mut self,
         mut work: Work,
@@ -443,12 +464,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
     ) -> Result<(), End> {
         loop {
             let claim = Arc::clone(&self.claim);
+            let (app, oid, version) = (self.app, self.account.oid.clone(), self.account.password_version);
             let mut noted = Noted::default();
             tokio::select! {
                 biased;
                 () = &mut waits.expired => return Err(End::Tell(Some(UNAUTHORIZED))),
                 _ = closing.changed() => return Err(End::Tell(None)),
                 end = overtaken(&mut waits.control, &claim, &mut noted) => return Err(end),
+                end = revoked(app, &oid, version, waits.account.as_mut()) => return Err(end),
                 done = self.work(work) => done?,
             }
             if noted == Noted::default() {
@@ -515,14 +538,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
         }
     }
 
-    /// Ends the socket unless its account is still there, enabled, with the password it authenticated under.
     async fn account_holds(&mut self) -> Result<(), End> {
-        let user = users::by_id(&self.app.db, &self.account.oid).await?;
-        if user.is_some_and(|user| !user.disabled && user.password_hash == self.account.password_hash) {
-            Ok(())
-        } else {
-            Err(End::Tell(Some(UNAUTHORIZED)))
-        }
+        holds(self.app, &self.account.oid, self.account.password_version).await
     }
 
     /// `trouter.connected`: the endpoint, its push URL and where and with what to reconnect.

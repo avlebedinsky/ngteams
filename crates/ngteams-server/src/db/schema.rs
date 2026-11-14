@@ -13,6 +13,7 @@ diesel::table! {
         upn -> Text,
         display_name -> Text,
         password_hash -> Text,
+        password_version -> BigInt,
         disabled -> Bool,
         created_at -> BigInt,
         updated_at -> BigInt,

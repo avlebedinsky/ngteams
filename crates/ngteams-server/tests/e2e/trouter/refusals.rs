@@ -19,13 +19,17 @@ pub(super) const IC3: &str = "https://ic3.teams.office.com";
 
 /// An access token of `upn` for `resource`, from the password grant.
 pub(super) async fn token(server: &TestServer, upn: &str, resource: &str) -> String {
+    token_with(server, upn, PASSWORD, resource).await
+}
+
+async fn token_with(server: &TestServer, upn: &str, password: &str, resource: &str) -> String {
     let answer: Value = reqwest::Client::new()
         .post(server.token_endpoint())
         .form(&[
             ("client_id", CLIENT_ID),
             ("grant_type", "password"),
             ("username", upn),
-            ("password", PASSWORD),
+            ("password", password),
             ("scope", &format!("{resource}/.default openid profile offline_access")),
         ])
         .send()
@@ -598,5 +602,32 @@ async fn an_event_posted_after_another_process_disabled_the_account_is_not_deliv
         pair.send("posted after the disable").await;
         ends_at_once(&mut socket).await;
         pair.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_from_before_a_password_reset_opens_no_socket() {
+    const NEW: &str = "another horse battery";
+    for backend in backends() {
+        let server = server(backend).await;
+        server.add_user("a@own.test", "Ada").await;
+        let before = token(&server, "a@own.test", IC3).await;
+        // no socket is open when the password is reset: the client comes back with the token it still holds
+        ngteams_server::admin::reset_password(&server.app.db, &*server.app.fanout, "a@own.test", NEW)
+            .await
+            .unwrap();
+        let mut socket = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+        socket.authenticate(&before, None).await;
+        assert!(socket.ends_with(UNAUTHORIZED).await);
+        assert_eq!(server.app.trouter.open(), 0);
+        // a sign-in with the new password is the account's again, and a second reset ends it in turn
+        let after = token_with(&server, "a@own.test", NEW, IC3).await;
+        let mut socket = Raw::open(&server, &query(EPID, "TeamsCDL")).await;
+        socket.connect(&after).await;
+        ngteams_server::admin::reset_password(&server.app.db, &*server.app.fanout, "a@own.test", PASSWORD)
+            .await
+            .unwrap();
+        ends_at_once(&mut socket).await;
+        server.stop().await;
     }
 }
