@@ -200,13 +200,24 @@ fn show_frame(stream: &pipewire::stream::Stream, showing: &mut Showing) {
 /// The pattern's I420 picture as `BGRx` (its chroma is neutral: each pixel the grey of its luma).
 fn to_bgrx(i420: &[u8], pattern: TestPattern) -> Vec<u8> {
     let pixels = to_usize(pattern.width) * to_usize(pattern.height);
-    let mut bgrx = Vec::with_capacity(pixels * 4);
-    for &luma in i420.iter().take(pixels) {
-        let grey = ((i32::from(luma) - BLACK) * 255 / (WHITE - BLACK)).clamp(0, 255);
+    let greys: [[u8; 4]; 256] = std::array::from_fn(|luma| {
+        let luma = i32::try_from(luma).unwrap_or_default();
+        let grey = ((luma - BLACK) * 255 / (WHITE - BLACK)).clamp(0, 255);
         let grey = u8::try_from(grey).unwrap_or(u8::MAX);
-        bgrx.extend_from_slice(&[grey, grey, grey, u8::MAX]);
+        [grey, grey, grey, u8::MAX]
+    });
+    let mut bgrx = Vec::with_capacity(pixels);
+    let mut previous: &[u8] = &[];
+    // Repeated pattern rows must not consume the screen clock's frame interval.
+    for row in i420[..pixels.min(i420.len())].chunks(to_usize(pattern.width).max(1)) {
+        if row == previous {
+            bgrx.extend_from_within(bgrx.len() - row.len()..);
+        } else {
+            bgrx.extend(row.iter().map(|luma| greys[usize::from(*luma)]));
+        }
+        previous = row;
     }
-    bgrx
+    bgrx.into_flattened()
 }
 
 /// The screen's one format: `BGRx` at the pattern's size, as niri offers it with the linear modifier, mandatory; in
@@ -305,6 +316,33 @@ fn buffers(cast: ScreenCast, pattern: TestPattern) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_changed_and_partial_rows_keep_their_pixels() {
+        let pattern = TestPattern::new(4, 4);
+        let luma = [16, 235, 64, 255, 16, 235, 64, 255, 0, 128, 234, 16, 235, 16];
+        let expected = [0, 255, 55, 255, 0, 255, 55, 255, 0, 130, 253, 0, 255, 0]
+            .map(|grey| [grey, grey, grey, u8::MAX])
+            .to_vec()
+            .into_flattened();
+        assert_eq!(to_bgrx(&luma, pattern), expected);
+        assert!(to_bgrx(&[], pattern).is_empty());
+    }
+
+    #[test]
+    fn every_luma_keeps_its_video_range_conversion_and_opaque_alpha() {
+        let pattern = TestPattern::new(256, 2);
+        let mut i420: Vec<u8> = (0..=u8::MAX).cycle().take(512).collect();
+        i420.extend([0; 256]);
+        let converted = to_bgrx(&i420, pattern);
+        assert_eq!(converted.len(), 512 * 4);
+        for (index, &pixel) in converted.as_chunks::<4>().0.iter().enumerate() {
+            let luma = i32::from(i420[index]);
+            let expected = ((luma - BLACK) * 255 / (WHITE - BLACK)).clamp(0, 255);
+            let expected = u8::try_from(expected).unwrap();
+            assert_eq!(pixel, [expected, expected, expected, u8::MAX]);
+        }
+    }
 
     #[test]
     fn the_pattern_s_greys_span_a_screen_s_full_range() {
