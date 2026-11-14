@@ -46,7 +46,10 @@ pub(crate) fn router(app: &App) -> Router<Arc<App>> {
     let small = Router::new()
         .merge(graph::router())
         .route(
-            "/api/mt/part/{partition}/beta/users/fetchShortProfile",
+            &format!(
+                "{}/beta/users/fetchShortProfile",
+                crate::services::middle_tier_prefix(&app.config)
+            ),
             axum::routing::post(people::short_profiles),
         )
         .layer(axum::extract::DefaultBodyLimit::max(SMALL_BODY))

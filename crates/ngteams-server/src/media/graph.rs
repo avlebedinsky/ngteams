@@ -1,4 +1,4 @@
-//! Graph's file reads under `/graph/v1.0/`: the account's drive, and a shared file by its sharing link
+//! Graph's file reads under `/graph/v1.0/` (`me` is `crate::routes::graph`'s): the account's drive, and a shared file by its sharing link
 //! (`docs/protocol/graph.md`, "A shared file's thumbnail" and "A shared file's content"). A file answers only the
 //! accounts it is shared with; its bytes and pictures are behind links signed for an hour ([`super::drive`]).
 
@@ -22,7 +22,6 @@ const MAX_SHARE: usize = 4096;
 
 pub(super) fn router() -> Router<Arc<App>> {
     Router::new()
-        .route("/graph/v1.0/me", get(crate::routes::graph::me))
         .route("/graph/v1.0/me/drive", get(own_drive))
         .route("/graph/v1.0/users/{id}", get(people::user))
         .route("/graph/v1.0/shares/{share}/driveItem", get(item))

@@ -56,3 +56,36 @@ async fn an_engine_pastes_a_picture_and_only_the_chats_members_read_it() {
         trio.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_pasted_in_a_channel_is_read_by_the_channels_people_alone() {
+    use crate::teams::Seat;
+
+    let (server, _blobs) = super::server(crate::support::Backend::Sqlite, |_| {}).await;
+    let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+    let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+    let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+    let (team, group) = ada.make_team("Rocket", false).await;
+    ada.add(&team, &group, &[&bert]).await;
+    let channel = ada.make_channel(&team, &group, "Launch", true).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sender = super::engine(&server, "ada@own.test", &ada.id, dir.path()).await;
+    let bytes = png(30, 20);
+    let picture = PastedPicture {
+        format: PastedFormat::Png,
+        bytes: bytes.clone(),
+    };
+    let object = sender.upload_picture(channel, picture).await.unwrap();
+    let src = sent_picture_in(&cloud(), &object, (30, 20)).unwrap().src;
+    let read = MessagePicture::of_in(&cloud(), &src).unwrap();
+    let member = super::client(&server, "bert@own.test", &bert.id).await;
+    assert_eq!(member.read(&read).await.unwrap().body(), bytes.as_slice());
+    let outsider = super::client(&server, "cora@own.test", &cora.id).await;
+    assert_eq!(status(&outsider.read(&read).await.unwrap_err()), Some(403));
+    sender.shutdown();
+    for seat in [ada, bert, cora] {
+        seat.stop();
+    }
+    server.stop().await;
+}

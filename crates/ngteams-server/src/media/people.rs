@@ -35,13 +35,9 @@ pub(super) async fn user(
 pub(super) async fn short_profiles(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    Path(partition): Path<String>,
     Json(names): Json<Vec<String>>,
 ) -> Result<Json<Value>, Error> {
     account(&app, &headers, SPACES).await?;
-    if partition != app.config.partition {
-        return Err(Error::Missing);
-    }
     if names.len() > MAX_NAMES {
         return Err(Error::Invalid("Too many accounts in one lookup."));
     }

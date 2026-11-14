@@ -468,10 +468,10 @@ and kept in the store. Other files have none (`value: []`), and the client draws
 
 The file's `webUrl` itself answers nothing: there is no web page to open a file in.
 
-Sharing needs two people reads the people service will own: `POST /api/mt/part/<partition>/beta/users/
-fetchShortProfile` (MRIs to names and addresses) and `GET /graph/v1.0/users/<id>`. Both are served in the smallest
-form file sharing needs. Authz doesn't hand out `middleTier` yet, so a client signed in through authz can paste
-pictures now and send files once the people service is served.
+Sharing needs two people reads the people service will own: `POST <middle tier>/beta/users/fetchShortProfile`
+(MRIs to names and addresses) and `GET /graph/v1.0/users/<id>`. Both are served in the smallest form file sharing
+needs. Authz hands out `middleTier` and `amsV2`, so a client signed in through authz pastes pictures and sends
+files.
 
 ### Link previews (`/ams/urlp/v1/url/`)
 

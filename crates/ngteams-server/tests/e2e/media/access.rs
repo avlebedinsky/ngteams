@@ -228,7 +228,6 @@ async fn two_nodes_share_files_pictures_and_link_credentials() {
         let shared = first.app.config.clone();
         let second = TestServer::start_with(backend, |config| {
             config.public_origin = shared.public_origin.clone();
-            config.partition = shared.partition.clone();
             config.database_url = shared.database_url.clone();
             config.storage_url = shared.storage_url.clone();
             config.storage_options = shared.storage_options.clone();

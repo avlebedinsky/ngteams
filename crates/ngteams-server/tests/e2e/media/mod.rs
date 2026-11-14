@@ -64,7 +64,6 @@ pub async fn server(backend: Backend, configure: impl FnOnce(&mut Config)) -> (T
     configure_storage(&mut storage, dir.path()).await;
     let server = TestServer::start_with(backend, |config| {
         config.public_origin = url::Url::parse(ORIGIN).unwrap();
-        config.partition = "own-01".to_owned();
         config.storage_url = storage.storage_url;
         config.storage_options = storage.storage_options;
         configure(config);
@@ -73,24 +72,36 @@ pub async fn server(backend: Backend, configure: impl FnOnce(&mut Config)) -> (T
     (server, dir)
 }
 
-pub fn transport_with(session: Arc<Session<MemorySecretStore>>, server: &TestServer, id: &str) -> Transport {
-    HttpTransport::for_cloud_with_mock_origin(session, &format!("{ORIGIN}/api/chatsvc/own"), cloud(), &server.origin)
+/// The transport as the account bring-up builds it: every base from authz's GTMs.
+pub async fn transport_with(session: Arc<Session<MemorySecretStore>>, server: &TestServer, id: &str) -> Transport {
+    session.skypetoken().await.unwrap();
+    let base = |gtm: &str| {
+        session
+            .service_base(gtm)
+            .unwrap_or_else(|| panic!("authz names no {gtm}"))
+    };
+    let (chat, ams, middle_tier) = (
+        base(teams_auth::authz::CHAT_BASE_GTM),
+        base(teams_core::account::AMS_GTM),
+        base(teams_core::account::MIDDLE_TIER_GTM),
+    );
+    HttpTransport::for_cloud_with_mock_origin(session, &chat, cloud(), &server.origin)
         .unwrap()
-        .with_ams(&format!("{ORIGIN}/ams"))
+        .with_ams(&ams)
         .unwrap()
-        .with_middle_tier(&format!("{ORIGIN}/api/mt/part/own-01"))
+        .with_middle_tier(&middle_tier)
         .unwrap()
         .for_account(Mri::new(format!("8:orgid:{id}")))
 }
 
 pub async fn client(server: &TestServer, upn: &str, id: &str) -> MediaClient {
-    Client::new(transport_with(Arc::new(server.session(upn).await), server, id))
+    Client::new(transport_with(Arc::new(server.session(upn).await), server, id).await)
 }
 
 pub async fn engine(server: &TestServer, upn: &str, id: &str, dir: &std::path::Path) -> EngineHandle {
     let session = Arc::new(server.session(upn).await);
-    let client = Arc::new(Client::new(transport_with(Arc::clone(&session), server, id)));
-    let transport = Arc::new(transport_with(session, server, id));
+    let client = Arc::new(Client::new(transport_with(Arc::clone(&session), server, id).await));
+    let transport = Arc::new(transport_with(session, server, id).await);
     engine::start(Parts {
         store: Store::open(&dir.join("account.sqlite")).unwrap(),
         client,
