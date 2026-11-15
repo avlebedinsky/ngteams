@@ -615,3 +615,56 @@ fn a_new_group_chat_s_people_are_locked_while_its_first_message_makes_it() {
     assert_eq!(others, [LAB_D, LAB_B]);
     assert_eq!(conversation, MADE);
 }
+
+/// The people the open flyout shows, after the account.
+fn shown_people(view: &Entity<ChatPeople>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|_, cx| {
+        let members = view.read(cx).members();
+        members.iter().skip(1).map(|person| person.mri.clone()).collect()
+    })
+}
+
+/// A group chat's open flyout follows its people as they change while it is open (someone added on another device,
+/// someone gone), as Teams' does, without being closed and opened again; a change of another chat leaves it be.
+#[test]
+fn an_open_group_chat_s_people_follow_a_change_of_its_people_live() {
+    let rig = seeded();
+    rig.core
+        .names
+        .lock()
+        .unwrap()
+        .insert(LAB_D.to_owned(), "Dee Synthetic".to_owned());
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    click(cx, "chat-header-people");
+    let view = people(&shell, cx);
+    assert_eq!(shown_people(&view, cx), [LAB_B, LAB_C]);
+    assert!(cx.debug_bounds("chat-people-member-3").is_none());
+
+    // d added: the store has the four, and the chat is told changed
+    let set = |members: &[&str]| {
+        let people = members.iter().map(|mri| Member::new(mri, None)).collect();
+        rig.core.members.lock().unwrap().insert(TALK.to_owned(), people);
+    };
+    set(&[LAB_A, LAB_B, LAB_C, LAB_D]);
+    rig.send(teams_core::Event::ConversationChanged {
+        conversation: TALK.to_owned(),
+    });
+    draw(cx);
+    assert_eq!(shown_people(&view, cx), [LAB_B, LAB_C, LAB_D]);
+    assert!(cx.debug_bounds("chat-people-member-3").is_some());
+
+    // c gone; a change of another chat alone doesn't read it again
+    set(&[LAB_A, LAB_B, LAB_D]);
+    rig.send(teams_core::Event::ConversationChanged {
+        conversation: AB.to_owned(),
+    });
+    draw(cx);
+    assert_eq!(shown_people(&view, cx), [LAB_B, LAB_C, LAB_D]);
+    rig.send(teams_core::Event::ConversationChanged {
+        conversation: TALK.to_owned(),
+    });
+    draw(cx);
+    assert_eq!(shown_people(&view, cx), [LAB_B, LAB_D]);
+    assert!(cx.update(|_, cx| shell.read(cx).people().is_some()), "still open");
+}

@@ -47,6 +47,7 @@ use teams_store::OutboxState;
 use crate::bridge::Core;
 use crate::chat_list::{self, ChatList, ChatRow, RowKind};
 use crate::icons::{Glyph, selected_by};
+use crate::models::Chats;
 use crate::new_chat::Recipient;
 use crate::people::{self, Picture, Shown};
 use crate::presence::Presences;
@@ -192,6 +193,9 @@ pub struct ChatPeople {
     of: PeopleOf,
     /// The account first, then the others as the store lists them (a 1:1 chat's partner when it lists nobody else).
     members: Vec<Person>,
+    /// The chat's change ([`Chats::changed_at`]) its people were last read at: a later one reads them again, so the
+    /// open flyout follows people added or gone as Teams' does.
+    read_at: u64,
     /// A 1:1 chat's partner, as the chat itself names them: always the last of a group chat started from it.
     partner: Option<Recipient>,
     /// The picker is open.
@@ -265,6 +269,8 @@ pub struct ChatPeopleParts {
     pub core: Arc<dyn Core>,
     pub trace: Arc<ViewTrace>,
     pub list: Entity<ChatList>,
+    /// What changed in the account's chats: a change of this chat reads its people again.
+    pub chats: Entity<Chats>,
     pub presence: Entity<Presences>,
     /// Where a person's face asks for their profile card.
     pub cards: Entity<CardAsks>,
@@ -295,7 +301,9 @@ impl ChatPeople {
                 }
             }),
             cx.observe(&parts.presence, |_, _, cx| cx.notify()),
+            cx.observe(&parts.chats, |this: &mut Self, chats, cx| this.on_chats(&chats, cx)),
         ];
+        let read_at = parts.chats.read(cx).changed_at(&chat);
         parts
             .trace
             .record(&TraceLine::new("chat-people", "opened").conversation(&chat));
@@ -311,6 +319,7 @@ impl ChatPeople {
             chat,
             of,
             members: Vec::new(),
+            read_at,
             partner,
             picking: false,
             query,
@@ -332,6 +341,19 @@ impl ChatPeople {
         };
         this.load(draft, cx);
         this
+    }
+
+    /// The account's chats changed: a change of this chat (people added or gone among what it may be) reads its people
+    /// again. A new group chat not made yet has no people to read.
+    fn on_chats(&mut self, chats: &Entity<Chats>, cx: &mut Context<Self>) {
+        if self.of == PeopleOf::Draft {
+            return;
+        }
+        let at = chats.read(cx).changed_at(&self.chat);
+        if at > self.read_at {
+            self.read_at = at;
+            self.load(Vec::new(), cx);
+        }
     }
 
     /// Reads the chat's people (a new group chat's are given), the account first, and asks their presence. A 1:1

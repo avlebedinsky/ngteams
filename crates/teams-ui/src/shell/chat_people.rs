@@ -61,6 +61,7 @@ impl Shell {
             core: Arc::clone(&self.core),
             trace: Arc::clone(&self.trace),
             list: self.list.clone(),
+            chats: self.models.chats.clone(),
             presence: self.models.presence.clone(),
             cards: self.models.cards.clone(),
             button: self.people.button.clone(),

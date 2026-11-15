@@ -390,6 +390,7 @@ impl NewChat {
             core: Arc::clone(&self.core),
             trace: Arc::clone(&self.trace),
             list: self.list.clone(),
+            chats: self.parts.models.chats.clone(),
             presence: self.parts.models.presence.clone(),
             cards: self.parts.models.cards.clone(),
             button: self.people_button.clone(),
