@@ -193,16 +193,23 @@ pub(super) async fn page(db: &Db, chat: &str, reader: &str, window: Window) -> R
     })
 }
 
-/// Which of `ids` are messages of `chat` that `reader` may read.
+/// Which of `ids` are messages of `chat` that `reader` may read and that aren't deleted.
 pub(super) async fn readable(db: &Db, chat: &str, reader: &str, ids: &[i64]) -> Result<Vec<i64>, DbError> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    with_conn!(db, |conn| Ok(within!(chat, reader)
+    let found: Vec<Message> = with_conn!(db, |conn| within!(chat, reader)
         .filter(chat_messages::id.eq_any(ids))
-        .select(chat_messages::id)
+        .select(Message::as_select())
         .load(conn)
-        .await?))
+        .await?);
+    let mut live = Vec::with_capacity(found.len());
+    for row in found {
+        if row.value()?["properties"].get("deletetime").is_none() {
+            live.push(row.id);
+        }
+    }
+    Ok(live)
 }
 
 pub(super) async fn latest(db: &Db, chat: &str, reader: &str) -> Result<Option<Message>, DbError> {

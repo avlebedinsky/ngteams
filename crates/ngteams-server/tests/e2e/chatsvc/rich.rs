@@ -322,6 +322,31 @@ async fn a_quoted_reply_reads_back_with_its_quote_checked_against_the_chat() {
             json!(elsewhere.parse::<u64>().unwrap())
         );
         assert_eq!(read["properties"]["hasValidMsgReferences"], false);
+
+        // a quote of a deleted message of the chat is judged as one of a missing message
+        pair.a
+            .write(Action::Delete {
+                conversation: pair.chat.clone(),
+                message_id: quoted.clone(),
+            })
+            .await
+            .unwrap();
+        let text = reply(&quoted, a, "Ada", "a made-up message, edited", "a reply to what went");
+        let id = send(&pair.b, &pair.chat, text).await;
+        let read = read_back(&pair.server, "a@own.test", a, &pair.chat, &id).await;
+        assert_eq!(
+            read["properties"]["qtdMsgs"],
+            json!([{
+                "messageId": quoted.parse::<u64>().unwrap(),
+                "sender": format!("8:orgid:{a}"),
+                "time": quoted.parse::<u64>().unwrap(),
+                "message": null,
+                "sharedRefId": null,
+                "replyChainId": null,
+                "validationResult": "Invalid",
+            }])
+        );
+        assert_eq!(read["properties"]["hasValidMsgReferences"], false);
         pair.stop().await;
     }
 }

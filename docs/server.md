@@ -768,8 +768,8 @@ every reader, the push channel and the sync see the same message (`src/chatsvc/r
   entry's `itemid` a number. A mention of everyone is an entry like any other, its `mri` the chat's id.
 - **Quotes.** `properties.qtdMsgs` (a JSON string as sent) is read back as a list of objects: `messageId` a number,
   `sender` and `time` as sent, `message`, `sharedRefId` and `replyChainId` null, and `validationResult` `Valid` for
-  a message of the same chat that the writer may read (`Invalid`, the server's own word, for any other: nothing is
-  told about a message elsewhere). `hasValidMsgReferences` is true only when there is at least one quote and every quote is valid (for an empty
+  a message of the same chat that the writer may read and that isn't deleted (`Invalid`, the server's own word, for
+  any other, a deleted one as a missing one: nothing is told about a message elsewhere). `hasValidMsgReferences` is true only when there is at least one quote and every quote is valid (for an empty
   list it is false, the server's own choice: the native client sends `qtdMsgs` only when it quotes). The quote in the HTML is
   kept as sent; Teams' line feed after it is not added (it changes nothing a reader parses).
 - **Edits** keep the message's id, client message id and arrival; `properties.edittime` is the edit's time and
