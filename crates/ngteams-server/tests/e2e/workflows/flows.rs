@@ -399,7 +399,27 @@ async fn share(ada: &Seat, bert: &Seat, cora: &Seat, environment: &str, id: &str
         .map(|owner| owner["properties"]["principal"]["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, [ada.id.as_str(), bert.id.as_str()]);
+    moved_only_where_each_owner_sees(ada, cora, &environment, &id).await;
     co_owner_controls(ada, bert, &environment, &id).await;
+}
+
+/// With Bert a co-owner, Ada can't move the workflow into her chat with Cora: Bert would read where it posts.
+async fn moved_only_where_each_owner_sees(ada: &Seat, cora: &Seat, environment: &str, id: &str) {
+    let chat = group_chat(ada, &[cora], "Ada and Cora").await;
+    let moved = save_body(
+        &template(ada, CHAT_TEMPLATE).await,
+        &Target::Chat(&chat),
+        &teams_connection(ada, environment).await,
+    );
+    let update = WorkflowRequest::Update {
+        environment: environment.to_owned(),
+        flow: id.to_owned(),
+        properties: moved,
+        expected_modified: None,
+    };
+    assert_eq!(ask(ada, update).await, Err(WorkflowFailure::Forbidden));
+    let read = ask(ada, flow_request(environment, id)).await.unwrap();
+    assert!(!read["properties"]["definition"].to_string().contains(&chat));
 }
 
 /// The co-owner has full control: it lists, reads and renames the workflow; the maker stays, Remove takes the

@@ -28,7 +28,6 @@ diesel_migrations.workspace = true
 figment.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
-getrandom.workspace = true
 governor.workspace = true
 http-range-header.workspace = true
 hyper.workspace = true

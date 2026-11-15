@@ -48,9 +48,9 @@ const MAX_DEPTH: usize = 16;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A new webhook secret: 256 random bits.
-pub(super) fn secret() -> Result<String, getrandom::Error> {
+pub(super) fn secret() -> Result<String, aws_lc_rs::error::Unspecified> {
     let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes)?;
+    aws_lc_rs::rand::fill(&mut bytes)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
@@ -116,8 +116,7 @@ async fn run(app: &App, flow: &str, trigger: &str, query: Option<&str>, body: &[
     let Some(flow) = repo::workflow(&app.db, flow).await? else {
         return Ok(refused(StatusCode::NOT_FOUND, "WorkflowNotFound"));
     };
-    let properties: Map<String, Value> = serde_json::from_str(&flow.properties).unwrap_or_default();
-    let read = properties.get("definition").and_then(definition::read);
+    let read = definition::read(&super::flows::stored_definition(&flow));
     let signed = sig.is_some_and(|(_, sig)| Sha256::digest(sig.as_bytes()) == Sha256::digest(flow.secret.as_bytes()));
     let Some((_, target)) = read.filter(|(name, _)| signed && name == trigger) else {
         return Ok(refused(StatusCode::NOT_FOUND, "WorkflowNotFound"));
@@ -181,12 +180,7 @@ async fn owner_may_post(app: &App, flow: &repo::Workflow, target: &Target) -> Re
         let enabled = users::by_id(&app.db, &owner)
             .await?
             .is_some_and(|user| !user.disabled && user.deleted_at.is_none());
-        let sees = match super::flows::sees(app, &owner, target).await {
-            Ok(sees) => sees,
-            Err(Error::Database(error)) => return Err(error),
-            Err(Error::Code(..)) => false,
-        };
-        if enabled && sees {
+        if enabled && super::flows::sees(app, &owner, target).await? {
             return Ok(true);
         }
     }

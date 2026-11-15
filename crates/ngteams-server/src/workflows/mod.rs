@@ -56,7 +56,7 @@ pub struct WorkflowsConfig {
     pub enabled: bool,
     /// The largest body a webhook takes, in bytes (Teams takes a message of about 28 KB).
     pub max_body_bytes: usize,
-    /// Posts a workflow's webhook takes in a minute, across every node.
+    /// Posts a workflow's webhook takes in a minute: across every node when the server has Redis, else per node.
     pub rate_per_minute: u32,
     /// The runs kept per workflow for its run history.
     pub runs_kept: u32,

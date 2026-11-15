@@ -20,6 +20,7 @@ diesel::table! {
         is_admin -> Bool,
         must_change_password -> Bool,
         deleted_at -> Nullable<BigInt>,
+        kind -> Text,
     }
 }
 

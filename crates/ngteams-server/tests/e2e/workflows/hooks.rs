@@ -338,6 +338,20 @@ async fn a_webhook_post_lands_in_the_channel_and_the_chat_and_shows_in_the_run_h
     }
 }
 
+/// Waits until the posts that follow fall in one of Redis' minute windows, which start on the minute.
+async fn within_one_redis_window() {
+    let second = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            % 60
+    };
+    while second() > 55 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_busy_webhook_is_held_off() {
     for backend in backends() {
@@ -354,6 +368,7 @@ async fn a_busy_webhook_is_held_off() {
         let flow = save(&ada, &environment, &Target::Chat(&chat)).await;
         let link = webhook_link(&ada, &environment, flow["name"].as_str().unwrap()).await;
         let payload = card_payload("Nightly").to_string();
+        within_one_redis_window().await;
         let mut statuses = Vec::new();
         for _ in 0..4 {
             statuses.push(post(&server, &link, payload.as_bytes()).await);
@@ -365,17 +380,27 @@ async fn a_busy_webhook_is_held_off() {
     }
 }
 
+/// Bert's chat holds no message from the Workflows bot.
+async fn nothing_posted(bert: &Seat, chat: &str) {
+    bert.engine.sync().await.unwrap();
+    let messages = bert.engine.messages(chat, None, 50).await.unwrap().messages;
+    assert!(messages.iter().all(|message| message.sender.as_deref() != Some(BOT)));
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_workflow_whose_only_owner_is_disabled_posts_nothing() {
+async fn a_workflow_whose_owners_may_no_longer_post_there_posts_nothing() {
     for backend in backends() {
         let server = server(backend).await;
         let ada = Seat::new(&server, "ada@own.test", "Ada").await;
         let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        // three, so that Ada can leave it
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
         let environment = environment(&ada).await;
-        let chat = group_chat(&ada, &[&bert], "Project room").await;
+        let chat = group_chat(&ada, &[&bert, &cora], "Project room").await;
         let flow = save(&ada, &environment, &Target::Chat(&chat)).await;
         let id = flow["name"].as_str().unwrap().to_owned();
         let link = webhook_link(&ada, &environment, &id).await;
+        let payload = card_payload("Nobody's").to_string();
         let ada_id = ada.id.clone();
         ada.stop();
 
@@ -384,41 +409,60 @@ async fn a_workflow_whose_only_owner_is_disabled_posts_nothing() {
             ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "ada@own.test", disabled)
         };
         disable(true).await.unwrap();
-        assert_eq!(
-            post(&server, &link, card_payload("Nobody's").to_string().as_bytes()).await,
-            202
-        );
-        bert.engine.sync().await.unwrap();
-        let messages = bert.engine.messages(&chat, None, 50).await.unwrap().messages;
-        assert!(messages.iter().all(|message| message.sender.as_deref() != Some(BOT)));
+        assert_eq!(post(&server, &link, payload.as_bytes()).await, 202);
+        nothing_posted(&bert, &chat).await;
         disable(false).await.unwrap();
         let ada = Seat::of(&server, "ada@own.test", ada_id).await;
-        assert_eq!(
-            runs(&ada, &environment, &id).await,
-            [("Failed".to_owned(), Some("Forbidden".to_owned()))]
-        );
+        let forbidden = ("Failed".to_owned(), Some("Forbidden".to_owned()));
+        assert_eq!(runs(&ada, &environment, &id).await, std::slice::from_ref(&forbidden));
+
+        // an owner who left the chat no longer sees it
+        let leave = crate::chatsvc::members::RemoveMember {
+            chat: chat.clone(),
+            member: ada.mri.clone(),
+        };
+        assert_eq!(ada.client.write(leave).await.unwrap().status(), 200);
+        assert_eq!(post(&server, &link, payload.as_bytes()).await, 202);
+        nothing_posted(&bert, &chat).await;
+        assert_eq!(runs(&ada, &environment, &id).await, [forbidden.clone(), forbidden]);
         ada.stop();
         bert.stop();
+        cora.stop();
         server.stop().await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn with_workflows_off_the_server_issues_no_flow_token_and_serves_no_webhook() {
+async fn with_workflows_off_a_node_issues_no_flow_token_and_serves_no_webhook() {
     for backend in backends() {
-        let server = crate::support::TestServer::start_with(backend, |config| {
+        let on = server(backend).await;
+        let url = on.app.config.database_url.clone();
+        let off = TestServer::start_with(backend, |config| {
+            config.database_url = url;
             config.public_origin = url::Url::parse(ORIGIN).unwrap();
             config.workflows.enabled = false;
         })
         .await;
-        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let ada = Seat::new(&on, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&on, "bert@own.test", "Bert").await;
+        let environment = environment(&ada).await;
+        let chat = group_chat(&ada, &[&bert], "Project room").await;
+        let flow = save(&ada, &environment, &Target::Chat(&chat)).await;
+        let link = webhook_link(&ada, &environment, flow["name"].as_str().unwrap()).await;
+        let payload = card_payload("Off").to_string();
+
+        let off_ada = Seat::of(&off, "ada@own.test", ada.id.clone()).await;
         assert_eq!(
-            ask(&ada, WorkflowRequest::Environments).await,
+            ask(&off_ada, WorkflowRequest::Environments).await,
             Err(teams_proto::WorkflowFailure::Authentication)
         );
-        let link = format!("{ORIGIN}/workflows/automations/direct/workflows/x/triggers/manual/paths/invoke?sig=y");
-        assert_eq!(post(&server, &link, b"{}").await, 404);
+        // the workflow and its secret are good: only the node that serves Workflows takes the post
+        assert_eq!(post(&off, &link, payload.as_bytes()).await, 404);
+        assert_eq!(post(&on, &link, payload.as_bytes()).await, 202);
+        off_ada.stop();
         ada.stop();
-        server.stop().await;
+        bert.stop();
+        off.stop().await;
+        on.stop().await;
     }
 }

@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use super::definition::{self, Target};
 use super::{Answer, Caller, Error, Flow, gallery, hook, repo};
 use crate::app::App;
-use crate::db::users;
+use crate::db::{DbError, users};
 
 /// The properties a save keeps; the rest of the workflow's resource is the server's.
 const KEPT: [&str; 6] = [
@@ -153,14 +153,18 @@ async fn change(
     if changes.contains_key("displayName") {
         flow.display_name = display_name(changes.get("displayName"))?;
     }
+    let owners = repo::owners(&app.db, &flow.id).await?;
     if changes.contains_key("definition") {
         let target = target(&changes)?;
-        if !sees(&app, &caller.id, &target).await? {
-            return Err(Error::FORBIDDEN);
+        // each owner reads where it posts, as `modify_owners` asks of a new one
+        for owner in &owners {
+            if !sees(&app, owner, &target).await? {
+                return Err(Error::FORBIDDEN);
+            }
         }
         flow.target_thread = target.thread().to_owned();
     }
-    connections_are(&app, &repo::owners(&app.db, &flow.id).await?, &changes).await?;
+    connections_are(&app, &owners, &changes).await?;
     kept_now.extend(kept(changes));
     flow.properties = Value::Object(kept_now).to_string();
     flow.updated_at = super::now().max(flow.updated_at + 1);
@@ -202,7 +206,9 @@ async fn turn(app: &App, caller: &Caller<Flow>, environment: &str, flow: &str, o
     let mut flow = owned(app, caller, environment, flow).await?;
     flow.enabled = on;
     flow.updated_at = super::now().max(flow.updated_at + 1);
-    repo::update(&app.db, &flow).await?;
+    if !repo::update(&app.db, &flow).await? {
+        return Err(Error::FLOW_NOT_FOUND);
+    }
     Ok(StatusCode::OK)
 }
 
@@ -299,8 +305,7 @@ async fn triggers(
     Path((environment, flow)): Path<(String, String)>,
 ) -> Answer<Json<Value>> {
     let flow = owned(&app, &caller, &environment, &flow).await?;
-    let properties = stored(&flow);
-    let definition = properties.get("definition").cloned().unwrap_or_default();
+    let definition = stored_definition(&flow);
     let name = definition::webhook_trigger(&definition).unwrap_or_else(|| "manual".to_owned());
     let kind = definition
         .pointer(&format!("/triggers/{name}/kind"))
@@ -327,8 +332,7 @@ async fn callback_url(
     Path((environment, flow, trigger)): Path<(String, String, String)>,
 ) -> Answer<Json<Value>> {
     let flow = owned(&app, &caller, &environment, &flow).await?;
-    let definition = stored(&flow).get("definition").cloned().unwrap_or_default();
-    if definition::webhook_trigger(&definition).as_deref() != Some(trigger.as_str()) {
+    if definition::webhook_trigger(&stored_definition(&flow)).as_deref() != Some(trigger.as_str()) {
         return Err(Error::Code(StatusCode::NOT_FOUND, "TriggerNotFound"));
     }
     Ok(Json(hook::callback(&app.config, &flow, &trigger)))
@@ -352,8 +356,7 @@ async fn runs(
 ) -> Answer<Json<Value>> {
     let flow = owned(&app, &caller, &environment, &flow).await?;
     let base = flow_id(&environment, &flow.id);
-    let trigger = definition::webhook_trigger(&stored(&flow).get("definition").cloned().unwrap_or_default())
-        .unwrap_or_else(|| "manual".to_owned());
+    let trigger = definition::webhook_trigger(&stored_definition(&flow)).unwrap_or_else(|| "manual".to_owned());
     let value: Vec<Value> = repo::runs(&app.db, &flow.id)
         .await?
         .iter()
@@ -431,6 +434,11 @@ fn stored(flow: &repo::Workflow) -> Map<String, Value> {
     serde_json::from_str(&flow.properties).unwrap_or_default()
 }
 
+/// The workflow's saved definition.
+pub(super) fn stored_definition(flow: &repo::Workflow) -> Value {
+    stored(flow).get("definition").cloned().unwrap_or_default()
+}
+
 fn display_name(value: Option<&Value>) -> Answer<String> {
     let name = value.and_then(Value::as_str).map(str::trim).unwrap_or_default();
     if name.is_empty() || name.chars().count() > MAX_NAME {
@@ -480,7 +488,7 @@ async fn connections_are(app: &App, owners: &[String], properties: &Map<String, 
 
 /// Whether `user` may post where `target` is: in the channel's team (and a private channel's own people), or in
 /// the chat; never into an archived team or channel.
-pub(super) async fn sees(app: &App, user: &str, target: &Target) -> Answer<bool> {
+pub(super) async fn sees(app: &App, user: &str, target: &Target) -> Result<bool, DbError> {
     let db = &app.db;
     match target {
         Target::Channel { group, channel } => {
@@ -522,7 +530,7 @@ fn flow_id(environment: &str, flow: &str) -> String {
 fn resource(flow: &repo::Workflow, caller: &Caller<Flow>) -> Value {
     let environment = caller.environment();
     let mut properties = stored(flow);
-    let definition = properties.get("definition").cloned().unwrap_or_default();
+    let definition = stored_definition(flow);
     let triggers: Vec<Value> = definition
         .get("triggers")
         .and_then(Value::as_object)
