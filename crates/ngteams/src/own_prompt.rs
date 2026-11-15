@@ -9,7 +9,8 @@
 //!   password the server takes only to have it replaced ([`crate::signin::PASSWORD_MUST_CHANGE`]) turns the screen to
 //!   its new-password form.
 //! - **The first administrator**: created ([`crate::own_admin::create_first_admin`]), then signed in as any account.
-//! - **A new password**: replaced on the server ([`crate::own_admin::change_password`]), then the sign-in with it.
+//! - **A new password**: replaced on the server ([`crate::own_admin::change_password`]) the account's entry names
+//!   (its CA file too), then the sign-in with it from the screen's sign-in form.
 //!
 //! Everything runs off GPUI's foreground. A sign-in that went through is handed to [`OwnPrompt::signed`]; whatever
 //! didn't is said on the screen. Nothing here asks a Microsoft host: a Microsoft 365 sign-in isn't this module's.
@@ -25,6 +26,9 @@ use crate::accounts_file::{OwnServer, PersonalAccount};
 use crate::own_admin;
 use crate::setup::Setup;
 use crate::signin::PASSWORD_MUST_CHANGE;
+
+/// Said after what kept the sign-in from going through once a password that had to change was replaced.
+pub const PASSWORD_CHANGED: &str = "Your new password is set: sign in with it.";
 
 /// What follows a sign-in that went through: the account, and the screen it was typed on (for what still keeps the
 /// account from showing).
@@ -202,25 +206,40 @@ impl OwnPrompt {
         .detach();
     }
 
+    /// Replaces the password that must change, then signs in with the new one. The server is the one the account's
+    /// entry in `accounts.toml` names now (its CA file too, which the new-password form has no field for), as the
+    /// sign-in reads it; once the change went through the screen is back on its sign-in form, so whatever keeps the
+    /// sign-in after it from going through asks for the new password.
     fn change_password(&self, own: OwnSignIn, new: Secret, prompt: Entity<AccountPrompt>, cx: &mut App) {
-        let server = match self.server(&own.server, &own.ca_file) {
-            Ok(server) => server,
-            Err(error) => {
-                prompt.update(cx, |prompt, cx| prompt.failed(error, cx));
-                return;
-            }
-        };
-        let (this, typed) = (self.clone_for_work(), own.server.clone());
+        let (work, typed) = (self.clone_for_work(), own.server.clone());
         let changing = cx.background_spawn(async move {
+            let server = work.held_server(&own)?;
             let current = Secret::new(own.password.as_str());
-            match own_admin::change_password(&server, &own.user, &current, &new) {
-                Ok(()) => this.signed_in(&server, &own.user, &new),
-                Err(error) => Ended::Failed(error),
-            }
+            own_admin::change_password(&server, &own.user, &current, &new)?;
+            Ok::<_, String>((server, own.user, new))
         });
         let this = self.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let ended = changing.await;
+            let (server, user, new) = match changing.await {
+                Ok(changed) => changed,
+                Err(error) => {
+                    cx.update(|cx| this.end(Ended::Failed(error), &typed, prompt, cx));
+                    return;
+                }
+            };
+            cx.update(|cx| prompt.update(cx, AccountPrompt::password_changed));
+            let work = this.clone_for_work();
+            let ended = cx
+                .background_executor()
+                .spawn(async move {
+                    match work.signed_in(&server, &user, &new) {
+                        Ended::Failed(error) => Ended::Failed(format!("{error} {PASSWORD_CHANGED}")),
+                        // the server asks the same of the password it was just given: said, not asked again
+                        Ended::MustChangePassword | Ended::NeedsAdmin(_) => Ended::Failed(PASSWORD_CHANGED.to_owned()),
+                        signed @ Ended::Signed(_) => signed,
+                    }
+                })
+                .await;
             cx.update(|cx| this.end(ended, &typed, prompt, cx));
         })
         .detach();
@@ -245,6 +264,31 @@ struct Work {
 }
 
 impl Work {
+    /// The server `own` was typed for as its entry in `accounts.toml` names it now: the account asked again's entry
+    /// read again, else the address typed with the CA file typed, or the one an entry of that server and user names
+    /// when none was typed (as [`crate::setup::Setup::ask_for_on`] takes it up).
+    fn held_server(&self, own: &OwnSignIn) -> Result<OwnServer, String> {
+        if let Some(account) = &self.again {
+            let held = self.setup.as_held(account).map_err(|error| error.to_string())?;
+            return held
+                .own_server()
+                .ok_or_else(|| format!("{} isn't an own server's account", held.upn));
+        }
+        let mut server = OwnServer::parse(&own.server, &own.ca_file).map_err(|error| error.to_string())?;
+        if server.ca_file.is_none() {
+            server.ca_file = self
+                .setup
+                .accounts()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|held| {
+                    held.server.as_deref() == Some(server.origin.as_str()) && held.upn.eq_ignore_ascii_case(&own.user)
+                })
+                .and_then(|held| held.ca_file);
+        }
+        Ok(server)
+    }
+
     /// Signs `user` in on `server` with `password`: the account asked again, else one added.
     fn signed_in(&self, server: &OwnServer, user: &str, password: &Secret) -> Ended {
         let signed = match &self.again {

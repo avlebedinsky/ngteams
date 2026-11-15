@@ -216,6 +216,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     cx.set_quit_mode(QuitMode::Explicit);
     let settings = shared_settings(settings, first.calls.as_ref(), cx);
     let first_session = Arc::clone(&first.engine.session);
+    let first_runtime = first.engine.handle.runtime();
     let (models, bridge) = bridge(first.engine.handle, first.calls.as_ref(), cx);
     watch_sign_out_saying(
         hint,
@@ -240,8 +241,8 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     };
     let desktop = cx.new(|cx| Desktop::new(parts, cx));
     if !read_only {
-        let own = (&first.account, &first_session);
-        offer_user_admin(&runner.setup, own, key.clone(), desktop.clone(), cx);
+        let own = (&first.account, &first_session, first_runtime);
+        offer_user_admin(&runner.setup, own, key.clone(), &desktop, cx);
     }
     limit_lab_accounts(&desktop, &runner, cx);
     let servers = own_server_of(&first.account, &key);
@@ -327,33 +328,93 @@ fn serve_ctl(path: &std::path::Path, running: &Entity<Running>, cx: &mut App) {
     }
 }
 
-/// Offers Manage users to `account` (its MRI `key`, its `session`) when it is an own server's and that server says
-/// it is an administrator: asked once, off the foreground, with the account's own token on its own server, and only
-/// of an account the app itself signed in (its region saved and its refresh token stored, so its session has a
-/// token to ask with). A Microsoft 365 account is asked nothing and offered nothing; neither is any account while
-/// own servers are off.
+/// How long the app waits before asking again whether an account is an administrator, after a question that got no
+/// answer; doubled after each, up to [`ADMIN_ASKED_AGAIN_AT_MOST`].
+const ADMIN_ASKED_AGAIN: std::time::Duration = std::time::Duration::from_secs(15);
+const ADMIN_ASKED_AGAIN_AT_MOST: std::time::Duration = std::time::Duration::from_mins(15);
+
+/// What the server said of an account being its administrator.
+enum AdminAnswer {
+    Yes,
+    No,
+    /// No answer (the server unreachable, a wait asked, the keyring unread): asked again later.
+    Unanswered(&'static str),
+}
+
+/// Whether the account behind `service` is an administrator of its server, asked only of an account the app itself
+/// signed in (blocking).
+fn admin_answer<S: SecretStore + 'static>(
+    setup: &crate::setup::Setup,
+    account: &PersonalAccount,
+    service: &AdminService<S>,
+) -> AdminAnswer {
+    match accounts::ready(setup, account) {
+        Ok(false) => return AdminAnswer::No,
+        Ok(true) => {}
+        Err(_) => return AdminAnswer::Unanswered("store"),
+    }
+    match service.is_admin() {
+        Ok(true) => AdminAnswer::Yes,
+        // an account signed out (or its engine stopped) gets nothing until it signs in again
+        Ok(false) | Err(teams_ui::user_admin::AdminProblem::SignedOut) => AdminAnswer::No,
+        Err(problem) => AdminAnswer::Unanswered(problem.kind()),
+    }
+}
+
+/// Offers Manage users to `account` (its MRI `key`, its `session`, whose requests run on `sessions`: the account's
+/// engine's runtime) when it is an own server's and that server says it is an administrator: asked off the
+/// foreground, with the account's own token on its own server, and only of an account the app itself signed in (its
+/// region saved and its refresh token stored, so its session has a token to ask with). A question that gets no answer
+/// is logged (its kind alone) and asked again later; a "no" is final for the run. Once the server says the account is
+/// no administrator any more (the page asked it), Manage users goes. A Microsoft 365 account is asked nothing and
+/// offered nothing; neither is any account while own servers are off.
 fn offer_user_admin<S: SecretStore + 'static>(
     setup: &crate::setup::Setup,
-    (account, session): (&PersonalAccount, &Arc<Session<S>>),
+    (account, session, sessions): (&PersonalAccount, &Arc<Session<S>>, tokio::runtime::Handle),
     key: String,
-    desktop: Entity<Desktop>,
+    desktop: &Entity<Desktop>,
     cx: &mut App,
 ) {
     if !setup.own_servers() {
         return;
     }
-    let Some(service) = AdminService::of(account, Arc::clone(session)) else {
+    let Some(service) = AdminService::of(account, Arc::clone(session), sessions) else {
         return;
     };
     let service = Arc::new(service);
-    let (asked, setup, account) = (Arc::clone(&service), setup.clone(), account.clone());
-    let asking = cx.background_spawn(async move {
-        accounts::ready(&setup, &account).unwrap_or(false) && asked.is_admin().unwrap_or(false)
-    });
+    let (setup, account, desktop) = (setup.clone(), account.clone(), desktop.downgrade());
     cx.spawn(async move |cx: &mut AsyncApp| {
-        if asking.await {
-            log::info!("an own server's account is an administrator: its settings offer Manage users");
-            cx.update(|cx| desktop.update(cx, |desktop, cx| desktop.set_user_admin(&key, Some(service), cx)));
+        let mut wait = ADMIN_ASKED_AGAIN;
+        loop {
+            let (asked, setup, account) = (Arc::clone(&service), setup.clone(), account.clone());
+            let answer = cx
+                .background_executor()
+                .spawn(async move { admin_answer(&setup, &account, &asked) })
+                .await;
+            match answer {
+                AdminAnswer::Yes => break,
+                AdminAnswer::No => return,
+                AdminAnswer::Unanswered(kind) => {
+                    log::warn!(
+                        "an own server didn't say whether its account is an administrator ({kind}): asked again in \
+                         {} s",
+                        wait.as_secs()
+                    );
+                    cx.background_executor().timer(wait).await;
+                    wait = (wait * 2).min(ADMIN_ASKED_AGAIN_AT_MOST);
+                    if desktop.upgrade().is_none() {
+                        return;
+                    }
+                }
+            }
+        }
+        log::info!("an own server's account is an administrator: its settings offer Manage users");
+        let mut demoted = service.demoted();
+        // the desktop holds the service from here: once the account goes, so does it, and the wait below ends
+        let offered = desktop.update(cx, |desktop, cx| desktop.set_user_admin(&key, Some(service), cx));
+        if offered.is_ok() && demoted.wait_for(|demoted| *demoted).await.is_ok() {
+            log::info!("an own server's account is no administrator any more: Manage users goes");
+            let _ = desktop.update(cx, |desktop, cx| desktop.set_user_admin(&key, None, cx));
         }
     })
     .detach();
@@ -497,7 +558,7 @@ impl Running {
             })
             .detach();
         }
-        let session = Arc::clone(&engine.session);
+        let (session, sessions) = (Arc::clone(&engine.session), engine.handle.runtime());
         let (models, bridge) = bridge(engine.handle, calls.as_ref(), cx);
         let hint = if self.read_only {
             READ_ONLY_SIGNED_OUT_HINT
@@ -522,8 +583,8 @@ impl Running {
         };
         self.desktop.update(cx, |desktop, cx| desktop.add_account(parts, cx));
         if !self.read_only {
-            let own = (&account, &session);
-            offer_user_admin(&self.runner.setup, own, key.clone(), self.desktop.clone(), cx);
+            let own = (&account, &session, sessions);
+            offer_user_admin(&self.runner.setup, own, key.clone(), &self.desktop, cx);
         }
         let id = account.id();
         if let Some(server) = account.server {

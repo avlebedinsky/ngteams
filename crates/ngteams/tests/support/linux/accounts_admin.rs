@@ -775,7 +775,13 @@ pub fn child_change(is_dark: bool) -> SandboxResult {
         AuthzClient::for_cloud(&cloud)?,
         region,
     );
-    let service = AdminService::of(&admin, Arc::new(session)).ok_or("the administrator's service")?;
+    // the session's requests on a runtime of their own, as the app's run on the account's engine's
+    let sessions = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()?;
+    let service =
+        AdminService::of(&admin, Arc::new(session), sessions.handle().clone()).ok_or("the administrator's service")?;
     let dana = NewAccount {
         upn: DANA.to_owned(),
         display_name: "Dana Doe".to_owned(),

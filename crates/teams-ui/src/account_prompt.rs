@@ -8,9 +8,11 @@
 //! **An own server** ([`AccountPrompt::offer_own_server`]): the screen then asks first where the account is,
 //! "Microsoft 365" (the default, the flow above) or "Own server", which shows the server's address, the user name and
 //! the password and asks the app to sign in there ([`AccountPromptEvent::SignInOwn`]); no Microsoft window opens for
-//! it. The password leaves the screen only in that event and is cleared from the field when a sign-in fails. An own
-//! server's account signed out is asked for its password alone ([`AccountPrompt::ask_own_again`]). A deployment with
-//! its own certificate authority names that file in the form's last field.
+//! it. Passwords (and a setup code) leave the screen only in [`AccountPromptEvent::SignInOwn`],
+//! [`AccountPromptEvent::CreateAdmin`] and [`AccountPromptEvent::ChangePassword`]; the sign-in's is cleared from the
+//! field when a sign-in fails. An own server's account signed out is asked for its password alone
+//! ([`AccountPrompt::ask_own_again`]). A deployment with its own certificate authority names that file in the form's
+//! last field.
 //!
 //! **A server without an administrator** ([`AccountPrompt::needs_admin`]): once the server's address is entered the
 //! screen asks the app about it ([`AccountPromptEvent::ServerEntered`]), and when the app says it has no administrator
@@ -19,7 +21,8 @@
 //!
 //! **A password that must change** ([`AccountPrompt::must_change_password`]): when the server takes the password
 //! only to have it replaced, the screen asks for the new one twice ([`Stage::NewPassword`]) and hands both to the app
-//! ([`AccountPromptEvent::ChangePassword`]), which changes it and signs in.
+//! ([`AccountPromptEvent::ChangePassword`]), which changes it and signs in; once the change went through the sign-in
+//! form is back ([`AccountPrompt::password_changed`]), so a sign-in that fails then asks for the new password.
 //!
 //! **The keyboard**: Tab walks the choice, the fields and the buttons in the order they show. The choice is a radio
 //! group ([`crate::keyboard`]): Tab stops on the place chosen, the arrows choose the other one with the keyboard
@@ -38,6 +41,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use zeroize::Zeroizing;
 
 use crate::keyboard::{self, Handles};
+use crate::user_admin::MIN_PASSWORD;
 use crate::window::{KitRoot, init};
 use crate::{app_icon, theme};
 
@@ -58,9 +62,6 @@ pub const SIGNING_IN: &str = "Finish signing in in Microsoft's window that opene
 
 /// The window's height with the choice of where the account is and an own server's fields.
 const OWN_HEIGHT: f32 = 740.0;
-
-/// The shortest password an own server takes.
-const MIN_PASSWORD: usize = 8;
 
 /// What the certificate authority's field asks for when it is empty.
 pub const CA_PLACEHOLDER: &str = if cfg!(windows) {
@@ -83,7 +84,7 @@ pub const NO_SETUP_CODE: &str = "Enter the setup code the server printed when it
 pub const NO_DISPLAY_NAME: &str = "Enter the name others see.";
 
 /// What the screen says of a password that is too short.
-pub const SHORT_PASSWORD: &str = "Use a password of at least 8 characters.";
+pub use crate::user_admin::SHORT_PASSWORD;
 
 /// What the screen says when the password typed twice differs.
 pub const PASSWORDS_DIFFER: &str = "The passwords don't match.";
@@ -547,6 +548,21 @@ impl AccountPrompt {
         self.problem = None;
         self.stage = Stage::NewPassword;
         self.owed.focus_first = true;
+        self.owed.clear_password = true;
+        cx.notify();
+    }
+
+    /// The password that had to change was replaced on the server (the app goes on to sign in with the new one): the
+    /// sign-in form is back, its password field empty, the sign-in still under way. Whatever ends the sign-in now is
+    /// said there ([`AccountPrompt::failed`]), so a sign-in that fails asks for the new password, never the old one
+    /// again. Nothing unless the new-password form is waiting on its change.
+    pub fn password_changed(&mut self, cx: &mut Context<Self>) {
+        if self.stage != Stage::NewPassword || !self.signing_in {
+            return;
+        }
+        self.stage = Stage::SignIn;
+        self.refused = None;
+        self.problem = None;
         self.owed.clear_password = true;
         cx.notify();
     }

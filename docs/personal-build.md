@@ -96,9 +96,13 @@ Settings: the server's accounts with a search and "Show more", "Add user", and f
 "Can sign in", "Administrator", "Reset password" (the new password is shown once, with "Ask for a new password at
 the next sign-in") and "Delete user" after a confirmation. What the server refuses (the only administrator, a user
 name already taken) is said in the dialog. The page's requests carry that account's token to that account's server
-only; a Microsoft 365 account, and an own server's account that is no administrator, has no such page, and nothing
-is asked for it. `ngteamsctl open settings users` opens it for an account that has it. An own server's account that is signed out is asked
-for its password again. Each "Sign in" on that screen reads the account's entry again, so a `ca_file` written while
+only. The app asks each own server's account's server (`/api/account/v1/me`) whether the account is an
+administrator when the account starts, and again later while the server gives no answer; once the page hears that
+the account is no administrator any more, the page goes. A Microsoft 365 account has no such page and nothing is
+asked for it; an own server's account that is no administrator has none either. `ngteamsctl open settings users`
+opens it for an account that has it.
+
+An own server's account that is signed out is asked for its password again. Each "Sign in" on that screen reads the account's entry again, so a `ca_file` written while
 the screen is open is used at once; the password goes only to the server the screen shows. Settings > General names the account's server, and `ngteamsctl accounts` lists it. Without
 `NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not started, and none is asked for its password.
 An account whose server serves no chats (an older or partial server) is signed in but can't be shown: its sign-in

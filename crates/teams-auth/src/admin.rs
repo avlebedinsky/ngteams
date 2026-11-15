@@ -1,4 +1,4 @@
-//! An own server's account management (`docs/server.md`, "Roles and the admin API"): whether the server still needs
+//! An own server's account management (`docs/server.md`, "Accounts and administration"): whether the server still needs
 //! its first administrator and creating that one (`/api/admin/v1/setup`, asked before any account exists), an account
 //! replacing its own password (`/api/account/v1/password`, by user name and current password: an account that must
 //! change it holds no token), and what an administrator does to the accounts (`/api/admin/v1/users…`) with the

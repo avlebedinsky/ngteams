@@ -1913,6 +1913,8 @@ pub struct EngineHandle {
     thread: Option<JoinHandle<()>>,
     /// Disconnected once the engine's thread has ended: nothing is ever sent on it.
     ended: std::sync::mpsc::Receiver<()>,
+    /// The engine's runtime ([`EngineHandle::runtime`]).
+    runtime: tokio::runtime::Handle,
 }
 
 impl Deref for EngineHandle {
@@ -1935,6 +1937,14 @@ impl EngineHandle {
     #[must_use]
     pub fn requests(&self) -> EngineRequests {
         self.requests.clone()
+    }
+
+    /// The engine's own tokio runtime, for work that must run where the engine's clients do: a request on the
+    /// account's `teams_auth::session::Session` from outside the engine (its token client's pooled connections are
+    /// driven by the runtime that opened them). Work spawned once the engine has stopped is cancelled, never run.
+    #[must_use]
+    pub fn runtime(&self) -> tokio::runtime::Handle {
+        self.runtime.clone()
     }
 
     /// The next event; `None` once the engine has stopped and every event was taken.
@@ -1995,6 +2005,7 @@ where
         .enable_all()
         .build()
         .map_err(EngineError::Runtime)?;
+    let handle = runtime.handle().clone();
     let me: Arc<str> = parts.outbox.me().mri().as_str().into();
     let read_only = parts.outbox.is_read_only();
     let (requests, received) = mpsc::unbounded_channel();
@@ -2028,6 +2039,7 @@ where
         events: taken,
         thread: Some(thread),
         ended,
+        runtime: handle,
     })
 }
 

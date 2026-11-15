@@ -199,9 +199,18 @@ fn the_form_says_what_it_lacks_then_asks(view: &Entity<AccountPrompt>, events: &
     assert!(!format!("{new:?}").contains(PASSWORD) && !format!("{new:?}").contains("aaaaa"));
     assert!(cx.read(|cx| view.read(cx).is_signing_in()));
     // nothing more is asked while it is being created
+    let asked = |events: &Events| {
+        events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, AccountPromptEvent::CreateAdmin(_)))
+            .count()
+    };
+    assert_eq!(asked(events), 1);
     cx.simulate_keystrokes("enter");
     view.update(cx, AccountPrompt::back);
     assert_eq!(stage(view, cx), Stage::Setup { code_required: true });
+    assert_eq!(asked(events), 1);
 }
 
 /// A wrong setup code, and a server that got its administrator meanwhile.
@@ -379,4 +388,43 @@ fn an_account_asked_again_changes_its_password_on_its_own_server(cx: &mut TestAp
     cx.run_until_parked();
     assert_eq!(stage(&view, &mut cx), Stage::SignIn);
     assert!(cx.debug_bounds("account-prompt-password").is_some());
+}
+
+#[gpui::test]
+fn a_sign_in_that_fails_after_the_change_asks_for_the_new_password(cx: &mut TestAppContext) {
+    let (view, events, mut cx) = own_prompt(cx);
+    // the change has nothing to go back to before one is asked
+    view.update(&mut cx, AccountPrompt::password_changed);
+    assert_eq!(stage(&view, &mut cx), Stage::SignIn);
+
+    signed_in(&view, &mut cx);
+    view.update(&mut cx, AccountPrompt::must_change_password);
+    cx.run_until_parked();
+    let new = "a made-up password 2";
+    cx.simulate_input(new);
+    type_into("account-prompt-confirm", new, &mut cx);
+    cx.simulate_keystrokes("enter");
+    assert!(matches!(
+        events.borrow().last(),
+        Some(AccountPromptEvent::ChangePassword { .. })
+    ));
+
+    // the change went through: the sign-in form is back, the sign-in with the new password under way
+    view.update(&mut cx, AccountPrompt::password_changed);
+    cx.run_until_parked();
+    assert_eq!(stage(&view, &mut cx), Stage::SignIn);
+    assert!(cx.read(|cx| view.read(cx).is_signing_in()));
+    // the sign-in after it fails: said there, and the next one sends what is typed, never the old password again
+    let said = "Too many attempts: wait a few minutes, then sign in again. Your new password is set: sign in with it.";
+    view.update(&mut cx, |view, cx| view.failed(said, cx));
+    cx.run_until_parked();
+    assert_eq!(stage(&view, &mut cx), Stage::SignIn);
+    assert_eq!(problem(&view, &mut cx).as_deref(), Some(said));
+    type_into("account-prompt-password", new, &mut cx);
+    cx.simulate_keystrokes("enter");
+    let again = events.borrow().last().cloned();
+    let Some(AccountPromptEvent::SignInOwn(own)) = again else {
+        panic!("no sign-in asked for: {again:?}");
+    };
+    assert_eq!((own.user.as_str(), own.password.as_str()), (UPN, new));
 }

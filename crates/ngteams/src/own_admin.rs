@@ -15,8 +15,10 @@ use std::sync::Arc;
 use teams_auth::admin::{AdminClient, AdminError, AdminUser, FirstAdmin, NewUser, Refusal, UserChanges, UserPage};
 use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
-use teams_auth::token::SPACES_RESOURCE;
-use teams_ui::user_admin::{AdminProblem, MIN_PASSWORD, NewAccount, UserAdmin};
+use teams_auth::token::{SPACES_RESOURCE, TokenError};
+use teams_ui::account_prompt::SAME_PASSWORD;
+use teams_ui::user_admin::{AdminProblem, NewAccount, UserAdmin};
+use tokio::sync::watch;
 
 use crate::accounts::runtime;
 use crate::accounts_file::{OwnServer, PersonalAccount};
@@ -70,10 +72,11 @@ fn said(server: &OwnServer, error: &AdminError) -> String {
             Refusal::SetupCode => WRONG_SETUP_CODE.to_owned(),
             Refusal::AdminExists => ADMIN_EXISTS.to_owned(),
             Refusal::InvalidCredentials => "The user name or password isn't right.".to_owned(),
-            Refusal::WeakPassword => format!("Use a password of at least {MIN_PASSWORD} characters."),
-            Refusal::SamePassword => "Choose a password that isn't the current one.".to_owned(),
-            Refusal::InvalidUpn => "Enter a user name like name@example.com.".to_owned(),
-            Refusal::InvalidName => "Enter a display name.".to_owned(),
+            Refusal::SamePassword => SAME_PASSWORD.to_owned(),
+            // said as the Manage users page says them
+            Refusal::WeakPassword => AdminProblem::WeakPassword.words().to_string(),
+            Refusal::InvalidUpn => AdminProblem::InvalidUpn.words().to_string(),
+            Refusal::InvalidName => AdminProblem::InvalidName.words().to_string(),
             _ => message.clone(),
         },
         AdminError::Throttled { .. } => "Too many attempts: wait a few minutes, then try again.".to_owned(),
@@ -139,12 +142,31 @@ pub fn change_password(server: &OwnServer, upn: &str, current: &Secret, new: &Se
     Ok(())
 }
 
+/// What the page says when the account's token wasn't had: a server that can't be reached or asks to wait is said
+/// so, an account whose sign-in is gone is signed out, and anything else (a locked keyring) is named.
+fn token_problem(error: &TokenError) -> AdminProblem {
+    match error {
+        TokenError::Http(_) => AdminProblem::Unreachable,
+        TokenError::Throttled { .. } => AdminProblem::Wait,
+        TokenError::NotSignedIn { .. } | TokenError::InvalidGrant(_) => AdminProblem::SignedOut,
+        other => {
+            log::warn!("an own server's account had no token for Manage users: {other}");
+            AdminProblem::Other(format!("Your sign-in couldn't be read: {other}"))
+        }
+    }
+}
+
 /// What the Manage users page of one own server's account asks (see the module docs).
 pub struct AdminService<S> {
     client: AdminClient,
     session: Arc<Session<S>>,
-    /// Its own runtime, for the page's requests alone: they never run on the engine's.
+    /// The runtime the session's own requests run on (the engine's): a token refresh asked here runs there, so the
+    /// token client's pooled connection stays driven by the runtime that opened it.
+    sessions: tokio::runtime::Handle,
+    /// Its own runtime, for the page's requests to the admin API alone.
     runtime: tokio::runtime::Runtime,
+    /// Set once the server said the account is no administrator any more ([`AdminService::demoted`]).
+    demoted: watch::Sender<bool>,
 }
 
 impl<S> std::fmt::Debug for AdminService<S> {
@@ -154,32 +176,51 @@ impl<S> std::fmt::Debug for AdminService<S> {
 }
 
 impl<S: SecretStore + 'static> AdminService<S> {
-    /// The service of `account` over its `session`; `None` for a Microsoft 365 account, or when its server's
-    /// address or CA file can't be used.
+    /// The service of `account` over its `session`, whose requests run on `sessions` (the account's engine's runtime,
+    /// `teams_core::EngineHandle::runtime`); `None` for a Microsoft 365 account, or when its server's address or CA
+    /// file can't be used.
     #[must_use]
-    pub fn of(account: &PersonalAccount, session: Arc<Session<S>>) -> Option<Self> {
+    pub fn of(account: &PersonalAccount, session: Arc<Session<S>>, sessions: tokio::runtime::Handle) -> Option<Self> {
         account.server.as_ref()?;
         let cloud = account.cloud().ok()?;
         Some(Self {
             client: AdminClient::for_cloud(&cloud).ok()?,
             session,
+            sessions,
             runtime: runtime().ok()?,
+            demoted: watch::Sender::new(false),
         })
     }
 
-    /// Runs `ask` with the account's access token.
+    /// Turns `true` once the server says the account is no administrator any more: Manage users then goes.
+    #[must_use]
+    pub fn demoted(&self) -> watch::Receiver<bool> {
+        self.demoted.subscribe()
+    }
+
+    /// Runs `ask` with the account's access token, taken on the session's own runtime.
     fn asked<T>(
         &self,
         ask: impl AsyncFnOnce(&AdminClient, &Secret) -> Result<T, AdminError>,
     ) -> Result<T, AdminProblem> {
-        self.runtime.block_on(async {
-            let token = self
-                .session
-                .access_token(SPACES_RESOURCE)
-                .await
-                .map_err(|_| AdminProblem::SignedOut)?;
-            ask(&self.client, &token.token).await.map_err(AdminProblem::from)
-        })
+        let session = Arc::clone(&self.session);
+        let token = self.runtime.block_on(
+            self.sessions
+                .spawn(async move { session.access_token(SPACES_RESOURCE).await }),
+        );
+        let token = match token {
+            Ok(token) => token.map_err(|error| token_problem(&error))?,
+            // the engine stopped: the account is being removed, or the app quits
+            Err(_) => return Err(AdminProblem::SignedOut),
+        };
+        let asked = self
+            .runtime
+            .block_on(ask(&self.client, &token.token))
+            .map_err(AdminProblem::from);
+        if asked.as_ref().is_err_and(|problem| *problem == AdminProblem::NotAdmin) {
+            self.demoted.send_replace(true);
+        }
+        asked
     }
 
     /// Whether the server says the account is an administrator now (blocking).

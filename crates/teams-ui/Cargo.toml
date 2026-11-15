@@ -43,9 +43,9 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 image-webp.workspace = true
 # a proposed correction's changes to a draft, word by word
 similar.workspace = true
-# the engine: its request side (behind `Core`), its events and its shutdown
 # an own server's account management, which the Manage users page asks (its types and refusals)
 teams-auth.workspace = true
+# the engine: its request side (behind `Core`), its events and its shutdown
 teams-core.workspace = true
 # the sign-in screen's password, zeroed when dropped
 zeroize.workspace = true
@@ -82,7 +82,8 @@ gpui-component = { workspace = true, features = ["test-support"] }
 gpui-pre-platform = { workspace = true, features = ["test-support"] }
 # the settings file, in a directory of its own per test
 tempfile.workspace = true
-# compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens, the mock chat service and
+# compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens (teams-auth, above), the mock
+# chat service and its Trouter reached through the test-support mock origins
 teams-mock.workspace = true
 teams-proto = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }

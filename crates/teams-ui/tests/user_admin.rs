@@ -522,6 +522,22 @@ fn a_user_is_deleted_after_a_confirmation(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_dialog_stays_until_its_change_is_answered(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("user-row-evan@example.test");
+    opened.click("user-dialog-delete");
+    let dialog = opened.dialog().expect("the confirmation");
+    // confirmed, its answer not in yet: Escape waits for it
+    opened.cx.update(|_, cx| dialog.update(cx, UserDialog::confirm));
+    assert!(opened.cx.read(|cx| !dialog.read(cx).can_confirm(cx)));
+    opened.keys("escape");
+    assert_eq!(server.asked()[1], "delete 00000000-0000-4000-8000-0000000000a3");
+    // the answer reached the page: the list is read again without the account
+    assert!(opened.dialog().is_none());
+    assert_eq!(opened.listed(), ["ada@example.test", "dana@example.test"]);
+}
+
+#[gpui::test]
 fn the_keyboard_walks_the_list_and_opens_a_user(cx: &mut TestAppContext) {
     let (server, mut opened) = page_opened(50, cx);
     opened.click("users-search");

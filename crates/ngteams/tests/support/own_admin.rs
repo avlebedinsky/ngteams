@@ -39,6 +39,15 @@ fn at(server: &OwnServer) -> accounts_file::OwnServer {
     accounts_file::OwnServer::parse(&server.origin, &server.ca_file.display().to_string()).unwrap()
 }
 
+/// The runtime the services' sessions run their requests on, as the app's run on the account's engine's.
+static SESSIONS: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+});
+
 /// The service of `account`, signed in under `setup`, as the app builds it over the account's session.
 fn service(setup: &Setup, account: &PersonalAccount) -> TestResult<AdminService<AppSecrets>> {
     let cloud = account.cloud()?;
@@ -50,7 +59,8 @@ fn service(setup: &Setup, account: &PersonalAccount) -> TestResult<AdminService<
         AuthzClient::for_cloud(&cloud)?,
         region,
     );
-    Ok(AdminService::of(account, Arc::new(session)).ok_or("an own server's account has a service")?)
+    Ok(AdminService::of(account, Arc::new(session), SESSIONS.handle().clone())
+        .ok_or("an own server's account has a service")?)
 }
 
 /// The administrator [`ADMIN`] of `server`, signed in under `setup`.
@@ -266,6 +276,6 @@ fn a_microsoft_365_account_has_no_such_service() -> TestResult {
         AuthzClient::with_endpoint("http://127.0.0.1:9/authz")?,
         Region::default(),
     );
-    assert!(AdminService::of(&account, Arc::new(session)).is_none());
+    assert!(AdminService::of(&account, Arc::new(session), SESSIONS.handle().clone()).is_none());
     Ok(())
 }

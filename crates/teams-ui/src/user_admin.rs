@@ -1,4 +1,4 @@
-//! Manage users: the settings page of an own server's administrator (`docs/server.md`, "Roles and the admin API").
+//! Manage users: the settings page of an own server's administrator (`docs/server.md`, "Accounts and administration").
 //! It lists the server's accounts with a search and more on demand, adds one, and opens one to edit its name, user
 //! name, whether it can sign in and whether it is an administrator, to reset its password or to delete it after a
 //! confirmation. Microsoft 365 has no counterpart in Teams itself (its accounts are managed in a web admin centre), so
@@ -9,8 +9,8 @@
 //! server refuses is said in the user's words ([`AdminProblem::words`]).
 //!
 //! **The keyboard**: Tab walks the search, "Add user" and the list; in the list Up, Down, Home and End move, Enter or
-//! Space opens the account. A dialog traps Tab, Enter in a field confirms, Escape closes; the search has the keyboard
-//! again once a dialog closes.
+//! Space opens the account. A dialog traps Tab, Enter in a field confirms, Escape closes (Escape and Cancel wait while
+//! its change is under way); the search has the keyboard again once a dialog closes.
 //!
 //! Traced: `user-admin shown`, `listed` (the accounts by id), `dialog`, `done` and `failed`, each with a kind, never
 //! a name or a password.
@@ -42,6 +42,10 @@ use crate::trace::{TraceLine, ViewTrace};
 const PAUSE: Duration = Duration::from_millis(250);
 /// The shortest password the server takes.
 pub const MIN_PASSWORD: usize = 8;
+/// What a password shorter than [`MIN_PASSWORD`] is told, wherever one is typed.
+pub const SHORT_PASSWORD: &str = "Use a password of at least 8 characters.";
+// the words name the minimum: they change with it
+const _: () = assert!(MIN_PASSWORD == 8, "SHORT_PASSWORD names another minimum");
 /// What the search asks for when it is empty.
 pub const SEARCH_PLACEHOLDER: &str = "Search by name or user name";
 
@@ -86,7 +90,7 @@ impl AdminProblem {
             Self::UpnTaken => "Another user already has this user name.".into(),
             Self::InvalidUpn => "Enter a user name like name@example.com.".into(),
             Self::InvalidName => "Enter a display name.".into(),
-            Self::WeakPassword => format!("Use a password of at least {MIN_PASSWORD} characters.").into(),
+            Self::WeakPassword => SHORT_PASSWORD.into(),
             Self::NotFound => "This user no longer exists.".into(),
             Self::NotAdmin => "You're no longer an administrator of this server.".into(),
             Self::SignedOut => "You're signed out of this server. Sign in again to manage users.".into(),
@@ -404,7 +408,7 @@ impl UserDialog {
         } else if names && name.is_empty() {
             Some("Enter a display name.")
         } else if passwords && password.chars().count() < MIN_PASSWORD {
-            Some("Use a password of at least 8 characters.")
+            Some(SHORT_PASSWORD)
         } else {
             None
         }
@@ -492,6 +496,10 @@ impl UserDialog {
         match event.keystroke.key.as_str() {
             "escape" => {
                 cx.stop_propagation();
+                // the write under way is waited for: its answer still reaches the page
+                if self.busy {
+                    return;
+                }
                 let closed = if self.given.is_some() {
                     UserDialogEvent::Changed
                 } else {
@@ -728,6 +736,7 @@ impl UserDialog {
                     Button::new("user-dialog-cancel")
                         .outline()
                         .label("Cancel")
+                        .disabled(self.busy)
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(UserDialogEvent::Closed))),
                 ))
             })
