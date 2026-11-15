@@ -1596,13 +1596,15 @@ impl Shell {
         self.status_menu
     }
 
-    /// Opens the account menu (under the title bar's avatar), or closes it when it is open.
+    /// Opens the account menu (under the title bar's avatar), or closes it when it is open, without moving the keyboard:
+    /// for tests and scenes that only need the menu shown. The avatars go through `status_avatar_clicked`, which also
+    /// gives the menu the keyboard.
     pub fn toggle_status_menu(&mut self, cx: &mut Context<Self>) {
         self.toggle_status_menu_at(MenuAnchor::TitleBar, cx);
     }
 
     /// Opens the account menu at `anchor`, or closes it when it is open.
-    pub fn toggle_status_menu_at(&mut self, anchor: MenuAnchor, cx: &mut Context<Self>) {
+    fn toggle_status_menu_at(&mut self, anchor: MenuAnchor, cx: &mut Context<Self>) {
         self.status_anchor = anchor;
         self.status_menu = !self.status_menu;
         let change = if self.status_menu { "opened" } else { "closed" };
@@ -1621,13 +1623,15 @@ impl Shell {
         }
     }
 
-    /// The account menu closed from inside it (a row picked, Escape, Tab): the keyboard back where it was.
+    /// The account menu closed from its keys (Escape, Tab): the keyboard back where it was. A picked row gives the
+    /// keyboard back itself.
     fn status_menu_done(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_status_menu(cx);
         self.status_focus.closed(window, cx);
     }
 
-    /// A press outside the account menu (not on the avatar it opened from) closes it, as in Teams.
+    /// Closes the account menu: on a press outside it (not on the avatar it opened from), as in Teams, and from its
+    /// keys through `status_menu_done`.
     fn close_status_menu(&mut self, cx: &mut Context<Self>) {
         if !self.status_menu {
             return;
