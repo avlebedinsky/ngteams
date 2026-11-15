@@ -2,12 +2,14 @@
 //! series' chat, and how a channel's moved occurrence is found.
 
 use teams_core::EventWrite;
+use teams_core::activity::{ActivityKind, MeetingChange};
 use teams_proto::{EventDraft, EventKind, EventResponse, EventTime, RsvpAnswer, ScheduledMeeting, Weekday};
 
 use super::channels::{place, refused, schedule};
 use super::events::{change, weekly};
 use super::meetings::{answers, create, invited, respond};
 use super::{DAY, HOUR, MONDAY, Seat, draft, server, week};
+use crate::chatsvc::activity::feed;
 use crate::support::backends;
 
 /// What the engine answers a calendar write.
@@ -176,6 +178,67 @@ async fn who_loses_the_last_invitation_to_a_series_leaves_its_chat() {
         assert!(week(&cora).await.is_empty());
         assert!(!in_chat(&cora).await);
         assert!(in_chat(&bert).await);
+        for seat in [ada, bert, cora] {
+            seat.stop();
+        }
+        server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_series_ended_is_cancelled_for_who_one_occurrence_alone_invites() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+        let canceled = async |seat: &Seat| {
+            let items = feed(&seat.engine).await.items;
+            items
+                .iter()
+                .filter(|item| item.kind == ActivityKind::Meeting(MeetingChange::Canceled))
+                .count()
+        };
+
+        // a series nobody else is invited to, but Cora to its Wednesday: cancelled, it stays, cancelled, on hers
+        let mut alone = meeting("Focus", SYNC, &[]);
+        alone.recurrence = sync(&bert).recurrence;
+        let master = create(&ada, alone).await;
+        let events = week(&ada).await;
+        change(&ada, &events[1].id, meeting("Focus", WEDNESDAY, &[("Cora", &cora)])).await;
+        let cancel = EventWrite::Cancel {
+            id: master.id.clone(),
+            chat: master.meeting_chat.clone(),
+            message: None,
+        };
+        ada.engine.write_event(cancel).await.unwrap();
+        let hers = week(&cora).await;
+        assert_eq!(hers.len(), 1);
+        assert!(hers[0].cancelled);
+        assert_eq!(canceled(&cora).await, 1);
+
+        // a series with Bert, Cora on its Wednesday alone: deleted by its organizer, both are told
+        let later = SYNC + 3 * HOUR;
+        let mut with_bert = meeting("Review", later, &[("Bert", &bert)]);
+        with_bert.recurrence = sync(&bert).recurrence;
+        let master = create(&ada, with_bert).await;
+        let wednesday = week(&ada)
+            .await
+            .into_iter()
+            .find(|event| event.start == EventTime::Instant(later + 2 * DAY));
+        let only_cora = [("Bert", &bert), ("Cora", &cora)];
+        change(
+            &ada,
+            &wednesday.unwrap().id,
+            meeting("Review", later + 2 * DAY, &only_cora),
+        )
+        .await;
+        ada.engine
+            .write_event(EventWrite::Delete { id: master.id.clone() })
+            .await
+            .unwrap();
+        assert_eq!(canceled(&cora).await, 2);
+        assert_eq!(canceled(&bert).await, 1);
         for seat in [ada, bert, cora] {
             seat.stop();
         }

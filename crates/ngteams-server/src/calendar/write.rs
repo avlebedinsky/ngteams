@@ -339,11 +339,17 @@ pub(super) async fn whole_changed(app: &App, found: &Found, draft: Draft, wanted
 }
 
 /// Ends the organizer's event: an event nobody else has is deleted; one that invites people stays, cancelled, on
-/// their calendars, and its chat is told; one occurrence is kept as cancelled under its series.
+/// their calendars, and its chat is told; one occurrence is kept as cancelled under its series. A whole series
+/// invites also who one occurrence kept under it invites.
 async fn end(app: &App, me: &Me, found: &Found, note: Option<&str>) -> Answer<()> {
     let at = crate::chatsvc::now();
-    let attendees = repo::attendees(&app.db, &found.event.id).await?;
-    let invited = !attendees.is_empty();
+    let told: Vec<String> = if found.one_of_a_series() {
+        let attendees = repo::attendees(&app.db, &found.event.id).await?;
+        attendees.into_iter().map(|(attendee, _)| attendee.user_id).collect()
+    } else {
+        repo::invited(&app.db, &found.event.id).await?
+    };
+    let invited = !told.is_empty();
     let mut row = found.own_row();
     row.cancelled = true;
     row.version = at;
@@ -363,7 +369,6 @@ async fn end(app: &App, me: &Me, found: &Found, note: Option<&str>) -> Answer<()
     {
         invite::cancelled(app, chat, &row, &meeting.join_link(app), &organizer, note).await?;
     }
-    let told: Vec<String> = attendees.into_iter().map(|(attendee, _)| attendee.user_id).collect();
     activity::tell(app, &told, Change::Canceled, &row, &organizer).await?;
     Ok(())
 }
