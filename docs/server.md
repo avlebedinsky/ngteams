@@ -18,7 +18,8 @@ requested time) under `/api/chatsvc/<region>/v1/`. These routes require an IC3 b
 disabled users are refused even while their token is live. A repeated 1:1 roster returns the existing chat, and
 group rosters and names persist in SQLite or PostgreSQL. Requests are limited to 64 KiB. Authz advertises
 `chatServiceAfd`. It also serves the account's own streams (notes, the activity feed, the mentions stream) and a
-group chat's people (below). Rich quote normalization is still being added.
+group chat's people (below). Mentions and quotes are stored as Teams gives them back
+([Rich messages](#rich-messages)).
 
 ## Stack
 
@@ -768,7 +769,8 @@ every reader, the push channel and the sync see the same message (`src/chatsvc/r
 - **Quotes.** `properties.qtdMsgs` (a JSON string as sent) is read back as a list of objects: `messageId` a number,
   `sender` and `time` as sent, `message`, `sharedRefId` and `replyChainId` null, and `validationResult` `Valid` for
   a message of the same chat that the writer may read (`Invalid`, the server's own word, for any other: nothing is
-  told about a message elsewhere). `hasValidMsgReferences` is true when every quote is valid. The quote in the HTML is
+  told about a message elsewhere). `hasValidMsgReferences` is true only when there is at least one quote and every quote is valid (for an empty
+  list it is false, the server's own choice: the native client sends `qtdMsgs` only when it quotes). The quote in the HTML is
   kept as sent; Teams' line feed after it is not added (it changes nothing a reader parses).
 - **Edits** keep the message's id, client message id and arrival; `properties.edittime` is the edit's time and
   `properties.composetime` the compose time the editing client sends, as Teams keeps it (`edit.json`).

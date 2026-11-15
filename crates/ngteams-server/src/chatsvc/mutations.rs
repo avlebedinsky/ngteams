@@ -31,10 +31,7 @@ pub(super) async fn edit(
         return Err(Error::Denied);
     }
     sent["from"] = caller.mri().into();
-    let mut draft = messages::draft(&app, &caller, chat, &sent)?;
-    draft.chat_id.clone_from(&found.id);
-    messages::quoted(&app, &caller, &mut draft).await?;
-    let draft = draft.value()?;
+    let draft = messages::draft(&app, &caller, chat, &found.id, &sent).await?.value()?;
     let composed = sent.get("composetime").filter(|time| time.is_string()).cloned();
     let change = message_repo::Change {
         chat: &found.id,

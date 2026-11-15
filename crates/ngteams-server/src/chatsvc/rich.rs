@@ -87,40 +87,48 @@ pub(super) fn mentions(value: &Value) -> Result<Value, Malformed> {
     serde_json::to_string(&list).map(Value::String).map_err(|_| Malformed)
 }
 
-/// The ids of the messages `qtdMsgs` names: those given as an id of digits.
-pub(super) fn quoted_ids(value: &Value) -> Result<Vec<i64>, Malformed> {
-    Ok(entries(value)?
-        .iter()
-        .filter_map(|entry| match numbered(entry.get("messageId").unwrap_or(&Value::Null)) {
-            Value::Number(number) => number.as_i64(),
-            _ => None,
-        })
-        .collect())
-}
+/// A sent `properties.qtdMsgs`: its entries, parsed once.
+pub(super) struct Quotes(Vec<Entry>);
 
-/// `properties.qtdMsgs` as read back, the quotes of the `valid` messages (of the chat, readable by the writer) marked
-/// so; and whether every quote is.
-pub(super) fn quotes(value: &Value, valid: &[i64]) -> Result<(Value, bool), Malformed> {
-    let mut all = true;
-    let list: Vec<Value> = entries(value)?
-        .into_iter()
-        .map(|entry| {
-            let id = numbered(entry.get("messageId").unwrap_or(&Value::Null));
-            let found = id.as_i64().is_some_and(|id| valid.contains(&id));
-            all &= found;
-            json!({
-                "messageId": id,
-                "sender": entry.get("sender").cloned().unwrap_or(Value::Null),
-                "time": entry.get("time").cloned().unwrap_or(Value::Null),
-                "message": null,
-                "validationResult": if found { "Valid" } else { "Invalid" },
-                "sharedRefId": null,
-                "replyChainId": null,
+impl Quotes {
+    pub(super) fn parse(value: &Value) -> Result<Self, Malformed> {
+        entries(value).map(Self)
+    }
+
+    /// The ids of the messages the quotes name: those given as an id of digits.
+    pub(super) fn ids(&self) -> Vec<i64> {
+        self.0
+            .iter()
+            .filter_map(|entry| numbered(entry.get("messageId").unwrap_or(&Value::Null)).as_i64())
+            .collect()
+    }
+
+    /// `properties.qtdMsgs` as read back, the quotes of the `valid` messages (of the chat, readable by the writer)
+    /// marked so; and `hasValidMsgReferences`: true only when there is at least one quote and every quote is valid
+    /// (an empty list is the server's own choice: the native client sends `qtdMsgs` only when it quotes).
+    pub(super) fn marked(self, valid: &[i64]) -> (Value, bool) {
+        let mut all = true;
+        let list: Vec<Value> = self
+            .0
+            .into_iter()
+            .map(|entry| {
+                let id = numbered(entry.get("messageId").unwrap_or(&Value::Null));
+                let found = id.as_i64().is_some_and(|id| valid.contains(&id));
+                all &= found;
+                json!({
+                    "messageId": id,
+                    "sender": entry.get("sender").cloned().unwrap_or(Value::Null),
+                    "time": entry.get("time").cloned().unwrap_or(Value::Null),
+                    "message": null,
+                    "validationResult": if found { "Valid" } else { "Invalid" },
+                    "sharedRefId": null,
+                    "replyChainId": null,
+                })
             })
-        })
-        .collect();
-    let any = !list.is_empty();
-    Ok((Value::Array(list), all && any))
+            .collect();
+        let any = !list.is_empty();
+        (Value::Array(list), all && any)
+    }
 }
 
 #[cfg(test)]
@@ -161,15 +169,21 @@ mod tests {
             mentions(&json!("[{\"z\":\"3\",\"itemid\":\"1\",\"a\":null}]")).unwrap(),
             json!("[{\"z\":\"3\",\"itemid\":1,\"a\":null}]")
         );
+        assert!(Quotes::parse(&json!("[7]")).is_err());
         assert_eq!(
-            quoted_ids(&json!("[{\"messageId\":\"5\"},{\"messageId\":6},{}]")).unwrap(),
+            Quotes::parse(&json!("[{\"messageId\":\"5\"},{\"messageId\":6},{}]"))
+                .unwrap()
+                .ids(),
             [5, 6]
         );
-        let (list, all) = quotes(&json!([{"messageId": "5"}, {"messageId": "x"}]), &[5]).unwrap();
+        let (list, all) = Quotes::parse(&json!([{"messageId": "5"}, {"messageId": "x"}]))
+            .unwrap()
+            .marked(&[5]);
         assert!(!all);
         assert_eq!(list[0]["validationResult"], "Valid");
         assert_eq!(list[1]["validationResult"], "Invalid");
         assert_eq!(list[1]["messageId"], "x");
-        assert!(!quotes(&json!("[]"), &[]).unwrap().1);
+        // no quote at all: no valid reference either
+        assert!(!Quotes::parse(&json!("[]")).unwrap().marked(&[]).1);
     }
 }

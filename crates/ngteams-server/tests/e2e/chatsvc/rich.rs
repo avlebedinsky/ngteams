@@ -5,12 +5,13 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use teams_core::engine::{Action, EngineHandle};
+use teams_core::engine::Action;
 use teams_proto::chat::{MessageText, Node, Quote, RichText, parse_html};
-use teams_proto::{Endpoint, Method, Mri, Read, Request, Service};
+use teams_proto::{Endpoint, Mri, Read, Service};
 use teams_store::OutboxState;
 
-use super::{client, engine, messages::Pair};
+use super::activity::{RawPost, Trio, send};
+use super::{client, messages::Pair};
 use crate::support::{Backend, TestServer, backends};
 
 const MENTION: &str = include_str!("../../../../../tests/fixtures/chatsvc/mention.json");
@@ -45,30 +46,6 @@ impl Read for Page {
         Endpoint::new(["v1", "users", "ME", "conversations", &self.chat, "messages"])
             .with_query("view", "msnp24Equivalent|supportsMessageProperties")
             .with_query("pageSize", "200")
-    }
-}
-
-/// A raw post of `body` to `chat`, outside the engine (a body the native composer can't build).
-struct Post {
-    chat: String,
-    body: Value,
-}
-
-impl Request for Post {
-    fn service(&self) -> Service {
-        Service::ChatService
-    }
-    fn method(&self) -> Method {
-        Method::Post
-    }
-    fn endpoint(&self) -> Endpoint {
-        Endpoint::new(["v1", "users", "ME", "conversations", &self.chat, "messages"])
-    }
-    fn body(&self) -> Option<Value> {
-        Some(self.body.clone())
-    }
-    fn is_write(&self) -> bool {
-        true
     }
 }
 
@@ -111,18 +88,6 @@ pub(super) fn served(mut golden: Value, actual: &Value) -> Value {
     }
     golden["properties"].as_object_mut().unwrap().remove("languageStamp");
     golden
-}
-
-async fn send(engine: &EngineHandle, chat: &str, text: MessageText) -> String {
-    let row = engine
-        .write(Action::Send {
-            conversation: chat.into(),
-            text,
-        })
-        .await
-        .unwrap();
-    assert_eq!(row.state, OutboxState::Sent, "{row:?}");
-    row.message_id.unwrap()
 }
 
 /// `<mention> <rest>` in one paragraph, the mention `item_id` 0 naming `mri`: as the compose box writes one.
@@ -216,74 +181,20 @@ async fn a_mention_reads_back_and_is_delivered_without_its_compose_wrapper_and_w
     }
 }
 
-/// A group chat of Ada, Bert and Cora, made by Ada's engine; its id and the three accounts' ids.
-struct Group {
-    server: TestServer,
-    ids: [String; 3],
-    chat: String,
-    engines: Vec<EngineHandle>,
-    _dirs: Vec<tempfile::TempDir>,
-}
-
-impl Group {
-    async fn start(backend: Backend) -> Self {
-        let server = TestServer::start_with(backend, |config| {
-            config.public_origin = url::Url::parse("https://own.example.test").unwrap();
-        })
-        .await;
-        let ids = [
-            server.add_user("a@own.test", "Ada").await,
-            server.add_user("b@own.test", "Bert").await,
-            server.add_user("c@own.test", "Cora").await,
-        ];
-        let mut engines = Vec::new();
-        let mut dirs = Vec::new();
-        for (upn, id) in ["a@own.test", "b@own.test", "c@own.test"].into_iter().zip(&ids) {
-            let dir = tempfile::tempdir().unwrap();
-            engines.push(engine(&server, upn, id, dir.path()).await);
-            dirs.push(dir);
-        }
-        let row = engines[0]
-            .write(Action::CreateChat {
-                others: vec![
-                    Mri::new(format!("8:orgid:{}", ids[1])),
-                    Mri::new(format!("8:orgid:{}", ids[2])),
-                ],
-                topic: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(row.state, OutboxState::Sent);
-        Self {
-            server,
-            ids,
-            chat: row.message_id.unwrap(),
-            engines,
-            _dirs: dirs,
-        }
-    }
-
-    fn group(&self) -> &str {
-        self.chat.trim_start_matches("19:").trim_end_matches("@thread.v2")
-    }
-
-    async fn stop(self) {
-        for engine in self.engines {
-            engine.shutdown();
-        }
-        self.server.stop().await;
-    }
+/// The group part of a group chat's id (`19:<group>@thread.v2`), as the fixtures name it.
+fn group_of(chat: &str) -> &str {
+    chat.trim_start_matches("19:").trim_end_matches("@thread.v2")
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_group_chats_mentions_of_a_member_and_of_everyone_read_back_numbered_and_reach_the_readers_client() {
     for backend in backends() {
-        let group = Group::start(backend).await;
-        let [a, b, c] = &group.ids;
+        let trio = Trio::start(backend).await;
+        let (a, b, c) = (&trio.pair.a_id, &trio.pair.b_id, &trio.c_id);
         let swaps = [
             ("<guid:a>", a.as_str()),
             ("<guid:b>", b.as_str()),
-            ("<group>", group.group()),
+            ("<group>", group_of(&trio.group)),
             ("Lab A", "Ada"),
             ("Lab B", "Bert"),
         ];
@@ -291,8 +202,8 @@ async fn a_group_chats_mentions_of_a_member_and_of_everyone_read_back_numbered_a
         let member = fixture(MENTION_GROUP, &swaps);
         let text = mention("Bert", "a made-up group mention", &format!("8:orgid:{b}"));
         assert_eq!(text.html(), member["request"]["body"]["content"]);
-        let id = send(&group.engines[0], &group.chat, text).await;
-        let read = read_back(&group.server, "c@own.test", c, &group.chat, &id).await;
+        let id = send(&trio.pair.a, &trio.group, text).await;
+        let read = read_back(&trio.pair.server, "c@own.test", c, &trio.group, &id).await;
         assert_eq!(read["content"], member["read_back"]["content"]);
         assert_eq!(
             parsed(read.clone())["properties"]["mentions"],
@@ -300,10 +211,10 @@ async fn a_group_chats_mentions_of_a_member_and_of_everyone_read_back_numbered_a
         );
 
         let everyone = fixture(MENTION_EVERYONE, &swaps);
-        let text = mention("Everyone", "a made-up mention of everyone", &group.chat);
+        let text = mention("Everyone", "a made-up mention of everyone", &trio.group);
         assert_eq!(text.html(), everyone["request"]["body"]["content"]);
-        let id = send(&group.engines[0], &group.chat, text).await;
-        let read = read_back(&group.server, "c@own.test", c, &group.chat, &id).await;
+        let id = send(&trio.pair.a, &trio.group, text).await;
+        let read = read_back(&trio.pair.server, "c@own.test", c, &trio.group, &id).await;
         assert_eq!(
             read["content"],
             "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"0\">Everyone</span>&nbsp;\
@@ -312,18 +223,18 @@ async fn a_group_chats_mentions_of_a_member_and_of_everyone_read_back_numbered_a
         let entries: Value = serde_json::from_str(read["properties"]["mentions"].as_str().unwrap()).unwrap();
         assert_eq!(
             entries,
-            json!([{"@type": "http://schema.skype.com/Mention", "itemid": 0, "mri": group.chat,
+            json!([{"@type": "http://schema.skype.com/Mention", "itemid": 0, "mri": trio.group,
                 "mentionType": "everyone", "displayName": "Everyone"}])
         );
 
         // Cora's client: the mention of everyone is a mention, of kind everyone
-        assert!(group.engines[2].sync().await.unwrap().failed.is_empty());
-        let stored = group.engines[2].message(&group.chat, &id).await.unwrap().unwrap();
+        assert!(trio.c.sync().await.unwrap().failed.is_empty());
+        let stored = trio.c.message(&trio.group, &id).await.unwrap().unwrap();
         assert_eq!(
             mentions_in(&parse_html(&stored.content).nodes),
             [("0".to_owned(), "Everyone".to_owned())]
         );
-        group.stop().await;
+        trio.stop().await;
     }
 }
 
@@ -487,7 +398,7 @@ async fn mentions_or_quotes_that_arent_a_list_of_entries_are_refused_and_plain_t
         let mut sent = body();
         sent["properties"][key] = value;
         let response = sender
-            .write(Post {
+            .write(RawPost {
                 chat: pair.chat.clone(),
                 body: sent,
             })
@@ -500,7 +411,7 @@ async fn mentions_or_quotes_that_arent_a_list_of_entries_are_refused_and_plain_t
     sent["content"] = "<readonly itemtype=\"http://schema.skype.com/Mention\">kept</readonly>".into();
     sent["properties"]["mentions"] = json!([]);
     let response = sender
-        .write(Post {
+        .write(RawPost {
             chat: pair.chat.clone(),
             body: sent.clone(),
         })

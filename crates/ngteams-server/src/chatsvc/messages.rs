@@ -16,7 +16,7 @@ type Params = HashMap<String, String>;
 /// The properties a post or an edit sets from what it sent.
 pub(super) const MESSAGE_PROPERTIES: [&str; 6] = ["mentions", "cards", "links", "files", "formatVariant", "qtdMsgs"];
 
-/// What the service adds beside them: whether every quote names a message of the chat ([`quoted`]).
+/// What the service adds beside them: whether every quote names a message of the chat ([`draft`]).
 pub(super) const VALID_QUOTES: &str = "hasValidMsgReferences";
 
 pub(super) async fn post(
@@ -40,9 +40,7 @@ pub(super) async fn post(
     if body["messagetype"].as_str() == Some("Control/Typing") {
         return typing(&app, &caller, chat, &found.id, &body).await;
     }
-    let mut draft = draft(&app, &caller, chat, &body)?;
-    draft.chat_id = found.id;
-    quoted(&app, &caller, &mut draft).await?;
+    let mut draft = draft(&app, &caller, chat, &found.id, &body).await?;
     if let Some(place) = &place {
         if !channels::writable(place) {
             return Err(Error::Denied);
@@ -76,7 +74,15 @@ pub(super) async fn post(
         .into_response())
 }
 
-pub(super) fn draft(app: &App, caller: &Caller, chat: &str, sent: &Value) -> Result<message_repo::Message, Error> {
+/// The message a post or an edit `sent` to `chat` (`chat_id` its row) stores, its quotes (`qtdMsgs`) checked against
+/// the messages of the chat the writer may read.
+pub(super) async fn draft(
+    app: &App,
+    caller: &Caller,
+    chat: &str,
+    chat_id: &str,
+    sent: &Value,
+) -> Result<message_repo::Message, Error> {
     let kind = sent["messagetype"].as_str().ok_or(Error::BadRequest)?;
     if !(kind == "Text" || kind == "RichText" || kind.starts_with("RichText/")) {
         return Err(Error::BadRequest);
@@ -101,9 +107,11 @@ pub(super) fn draft(app: &App, caller: &Caller, chat: &str, sent: &Value) -> Res
         let mentions = rich::mentions(mentions).map_err(|_| Error::BadRequest)?;
         properties.insert("mentions".into(), mentions);
     }
-    if let Some(quotes) = properties.get("qtdMsgs") {
-        rich::quoted_ids(quotes).map_err(|_| Error::BadRequest)?;
-    }
+    let quotes = properties
+        .get("qtdMsgs")
+        .map(rich::Quotes::parse)
+        .transpose()
+        .map_err(|_| Error::BadRequest)?;
     let mut body = json!({
         "type": "Message", "conversationid": chat,
         "conversationLink": format!("{}/v1/users/ME/conversations/{chat}", wire::base(app)),
@@ -126,8 +134,14 @@ pub(super) fn draft(app: &App, caller: &Caller, chat: &str, sent: &Value) -> Res
                 .to_owned(),
         ),
     };
+    if let Some(quotes) = quotes {
+        let valid = message_repo::readable(&app.db, chat_id, &caller.id, &quotes.ids()).await?;
+        let (quotes, all) = quotes.marked(&valid);
+        body["properties"]["qtdMsgs"] = quotes;
+        body["properties"][VALID_QUOTES] = all.into();
+    }
     Ok(message_repo::Message {
-        chat_id: chat.into(),
+        chat_id: chat_id.into(),
         id: 0,
         owner_id: caller.id.clone(),
         client_id,
@@ -135,21 +149,6 @@ pub(super) fn draft(app: &App, caller: &Caller, chat: &str, sent: &Value) -> Res
         body: body.to_string(),
         root_id: None,
     })
-}
-
-/// A draft's quotes (`qtdMsgs`) as read back: each checked against the messages of its chat its writer may read.
-pub(super) async fn quoted(app: &App, caller: &Caller, draft: &mut message_repo::Message) -> Result<(), Error> {
-    let mut body = draft.value()?;
-    let Some(quotes) = body["properties"].get("qtdMsgs").cloned() else {
-        return Ok(());
-    };
-    let ids = rich::quoted_ids(&quotes).map_err(|_| Error::BadRequest)?;
-    let valid = message_repo::readable(&app.db, &draft.chat_id, &caller.id, &ids).await?;
-    let (quotes, all) = rich::quotes(&quotes, &valid).map_err(|_| Error::BadRequest)?;
-    body["properties"]["qtdMsgs"] = quotes;
-    body["properties"][VALID_QUOTES] = all.into();
-    draft.body = body.to_string();
-    Ok(())
 }
 
 pub(super) async fn page(

@@ -4,8 +4,8 @@
 use serde_json::{Value, json};
 use teams_core::engine::Action;
 use teams_proto::chat::{MessageText, iso_millis};
-use teams_store::OutboxState;
 
+use super::activity::sent;
 use super::messages::Pair;
 use super::rich::{fixture, read_back, served};
 use crate::support::backends;
@@ -23,11 +23,6 @@ fn swaps(pair: &Pair) -> [(&str, &str); 4] {
     ]
 }
 
-async fn write(pair: &Pair, action: Action) {
-    let row = pair.a.write(action).await.unwrap();
-    assert_eq!(row.state, OutboxState::Sent, "{row:?}");
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn an_edited_and_a_deleted_message_read_back_as_edit_json_and_delete_json() {
     for backend in backends() {
@@ -35,8 +30,8 @@ async fn an_edited_and_a_deleted_message_read_back_as_edit_json_and_delete_json(
         let swaps = swaps(&pair);
 
         let id = pair.send("a made-up message").await;
-        write(
-            &pair,
+        sent(
+            &pair.a,
             Action::Edit {
                 conversation: pair.chat.clone(),
                 message_id: id.clone(),
@@ -61,8 +56,8 @@ async fn an_edited_and_a_deleted_message_read_back_as_edit_json_and_delete_json(
         );
 
         let id = pair.send("a made-up message to delete").await;
-        write(
-            &pair,
+        sent(
+            &pair.a,
             Action::Delete {
                 conversation: pair.chat.clone(),
                 message_id: id.clone(),
@@ -114,7 +109,7 @@ async fn every_quick_reaction_set_and_taken_back_reads_back_as_reactions_json() 
                 message_id: id.clone(),
                 key: key.clone(),
             };
-            write(&pair, react).await;
+            sent(&pair.a, react).await;
         }
         let all = read().await;
         assert_eq!(seen(&all), reactions(&golden["read_back_all_set"], &all));
@@ -130,7 +125,7 @@ async fn every_quick_reaction_set_and_taken_back_reads_back_as_reactions_json() 
                 message_id: id.clone(),
                 key: key.clone(),
             };
-            write(&pair, unreact).await;
+            sent(&pair.a, unreact).await;
             let golden = match round {
                 0 => &golden["read_back_first_taken_back"],
                 3 => &golden["read_back_all_taken_back"],
