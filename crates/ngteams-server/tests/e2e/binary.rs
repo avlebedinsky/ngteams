@@ -11,6 +11,7 @@ mod push;
 mod setup;
 pub(crate) mod support;
 mod teams;
+mod workflows;
 
 use std::time::Duration;
 

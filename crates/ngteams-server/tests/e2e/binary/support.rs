@@ -73,6 +73,7 @@ impl Deployment {
             config,
             endpoint,
             binary: PathBuf::from(env!("CARGO_BIN_EXE_ngteams-server")),
+            log_filter: "warn".into(),
             process: None,
             http: http_client(),
             _port: own,
@@ -85,6 +86,8 @@ pub struct Node {
     pub endpoint: String,
     /// The server binary the node and its commands run: this build's, unless a test runs another version.
     pub binary: PathBuf,
+    /// The node's `NGTEAMS_SERVER_LOG` filter: `warn` unless a test reads a fuller log.
+    pub log_filter: String,
     process: Option<Child>,
     pub http: reqwest::Client,
     _port: Option<Port>,
@@ -100,7 +103,7 @@ impl Node {
         }
         command.args(["--config", self.config.to_str().unwrap()]);
         command
-            .env("NGTEAMS_SERVER_LOG", "warn")
+            .env("NGTEAMS_SERVER_LOG", &self.log_filter)
             .env("TOKIO_WORKER_THREADS", "2");
         command
     }

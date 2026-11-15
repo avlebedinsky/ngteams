@@ -183,7 +183,7 @@ pub struct User {
     pub epid: String,
     pub log: Vec<Event>,
     /// Whether the client's requests reach the team services too.
-    teams: bool,
+    pub teams: bool,
     engine: Option<EngineHandle>,
     session: Arc<Session<MemorySecretStore>>,
     origin: String,
