@@ -101,8 +101,9 @@ async fn a_meeting_of_sixty_people_with_odd_names_reaches_each_with_its_subject_
         let details = trio.b.engine().meeting(chat).await.unwrap().unwrap();
         assert_eq!(details.title.as_deref(), Some(SUBJECT));
 
-        // the Scheduler reads all sixty in one ask
-        let monday = coming_monday();
+        // the Scheduler reads all sixty in one ask, in a week clear of the meeting (the read covers five days from a
+        // Monday a week or more ahead, which in late December 2026 would be the meeting's own week)
+        let monday = coming_monday().max(MONDAY + 7 * DAY);
         let asked: Vec<EventAttendee> = (0..PEOPLE)
             .map(|n| EventAttendee {
                 address: upn(n),
