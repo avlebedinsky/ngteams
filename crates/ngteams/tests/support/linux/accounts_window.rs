@@ -557,6 +557,20 @@ fn prompt_now(sandbox: &Sandbox, running: &Running) -> SandboxResult<String> {
         .map_err(|error| format!("the window asking for an account wasn't said: {error:?}").into())
 }
 
+/// Waits until the window asking for an account is the active one: a key pressed before that goes elsewhere.
+fn prompt_active(sandbox: &Sandbox, running: &Running) -> SandboxResult<String> {
+    let start = std::time::Instant::now();
+    loop {
+        let now = prompt_now(sandbox, running)?;
+        if now.contains(" active=true ") {
+            return Ok(now);
+        }
+        ensure(start.elapsed() < WAIT, || {
+            format!("the window asking for an account isn't the active one: {now}")
+        })?;
+    }
+}
+
 /// Empties the field at `at` of `typed` characters, then types `text` into it.
 fn retype(input: &mut VirtualInput, at: (u32, u32), typed: usize, text: &str) -> SandboxResult {
     input.click(at.0, at.1, keys::BTN_LEFT)?;
@@ -940,7 +954,7 @@ fn choice_by_keyboard(sandbox: &Sandbox, dark: bool) -> SandboxResult {
     accounts_shown(&mut trace, &mut running, &[LAB_A, LAB_B])?;
     let mut input = sandbox.input()?;
     input.click(RAIL_ADD_AT.0, RAIL_ADD_AT.1, keys::BTN_LEFT)?;
-    let asked = prompt_now(sandbox, &running)?;
+    let asked = prompt_active(sandbox, &running)?;
     ensure(asked.contains(MICROSOFT), || format!("the window: {asked}"))?;
 
     // Tab from the account's field: "Sign in", then round to the choice

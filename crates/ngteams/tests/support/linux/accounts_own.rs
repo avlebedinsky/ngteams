@@ -110,17 +110,23 @@ pub fn sandbox_dir() -> SandboxResult<PathBuf> {
     ))
 }
 
-/// The window asking for an account, if it is open.
-fn open_prompt(cx: &App) -> Option<Entity<AccountPrompt>> {
-    cx.windows()
+/// The window asking for an account, if it is open, and whether it is the active one (the keyboard's).
+fn open_prompt(cx: &mut App) -> Option<(Entity<AccountPrompt>, bool)> {
+    let (window, prompt) = cx
+        .windows()
         .into_iter()
         .filter_map(|window| window.downcast::<KitRoot>())
-        .find_map(|window| window.read(cx).ok()?.view().clone().downcast::<AccountPrompt>().ok())
+        .find_map(|window| {
+            let prompt = window.read(cx).ok()?.view().clone().downcast::<AccountPrompt>().ok()?;
+            Some((window, prompt))
+        })?;
+    let active = window.is_active(cx).unwrap_or(false);
+    Some((prompt, active))
 }
 
 /// What the window asking for an account holds, on one line.
-fn described(cx: &App) -> String {
-    let Some(prompt) = open_prompt(cx) else {
+fn described(cx: &mut App) -> String {
+    let Some((prompt, active)) = open_prompt(cx) else {
         return "closed".to_owned();
     };
     let prompt = prompt.read(cx);
@@ -131,7 +137,7 @@ fn described(cx: &App) -> String {
     let (server, user) = prompt.own_fields(cx);
     let problem = prompt.problem().map_or_else(|| "-".to_owned(), ToString::to_string);
     format!(
-        "kind={kind} signing={} server={server} user={user} account={} asks={} problem={problem}",
+        "active={active} kind={kind} signing={} server={server} user={user} account={} asks={} problem={problem}",
         prompt.is_signing_in(),
         prompt.account(cx),
         prompt.asks(),
@@ -150,7 +156,7 @@ pub fn say_prompt(cx: &mut App) {
         let mut last = "closed".to_owned();
         loop {
             cx.background_executor().timer(Duration::from_millis(100)).await;
-            let now = cx.update(|cx| described(cx));
+            let now = cx.update(described);
             if now != last {
                 say(&format!("prompt {now}"));
                 last.clone_from(&now);

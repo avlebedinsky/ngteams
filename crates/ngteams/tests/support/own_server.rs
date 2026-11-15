@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ngteams_server::admin::{self, Actor, NewAccount};
 use ngteams_server::app::{self, App};
 use ngteams_server::config::{Config, TlsConfig};
 use ngteams_server::serve::Listener;
@@ -86,9 +87,14 @@ impl OwnServer {
     /// Adds the user `upn`, named `name`, with [`PASSWORD`]; its object id.
     pub fn add_user(&self, upn: &str, name: &str) -> TestResult<String> {
         let runtime = self.runtime.as_ref().ok_or("the server's runtime")?;
-        Ok(runtime
-            .block_on(ngteams_server::admin::add_user(&self.app.db, upn, name, PASSWORD))?
-            .id)
+        let new = NewAccount {
+            upn,
+            display_name: name,
+            password: PASSWORD,
+            admin: false,
+            must_change_password: false,
+        };
+        Ok(runtime.block_on(admin::create_user(&self.app.db, Actor::CLI, &new))?.id)
     }
 }
 
