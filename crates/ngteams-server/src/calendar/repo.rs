@@ -834,6 +834,7 @@ mod tests {
             unique_roster: false,
             created_at: 1,
             version: 1,
+            roster_version: 1,
         };
         with_conn!(db, |conn| {
             diesel::insert_into(chats::table).values(&chat).execute(conn).await?;

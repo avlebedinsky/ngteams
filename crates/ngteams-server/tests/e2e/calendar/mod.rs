@@ -3,6 +3,7 @@
 mod channels;
 pub(crate) mod events;
 mod exceptions;
+mod feed;
 mod golden;
 pub(crate) mod meetings;
 mod nodes;

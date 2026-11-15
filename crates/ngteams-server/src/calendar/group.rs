@@ -137,7 +137,7 @@ pub(super) async fn create(
         .collect();
     repo::insert(&app.db, &event, &rows).await?;
     invite::posted(&app, &mut event, &organizer, |event| link(&app, event)).await?;
-    activity::tell(&app, &write::ids(&wanted), Change::Created, &event, &organizer).await;
+    activity::tell(&app, &write::ids(&wanted), Change::Created, &event, &organizer).await?;
     let book = book(&app, &[&event]).await?;
     let shown = Shown {
         reader: &me.id,
@@ -295,7 +295,7 @@ pub(super) async fn update(
     if !one {
         invite::changed(&app, &channel, &row, &link(&app, &row), &organizer).await?;
     }
-    activity::tell(&app, &write::ids(&wanted), Change::Updated, &row, &organizer).await;
+    activity::tell(&app, &write::ids(&wanted), Change::Updated, &row, &organizer).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -329,6 +329,6 @@ pub(super) async fn cancel(
     let channel = row.channel_id.clone().unwrap_or_default();
     invite::cancelled(&app, &channel, &row, &link(&app, &row), &organizer, note).await?;
     let told: Vec<String> = attendees.into_iter().map(|(attendee, _)| attendee.user_id).collect();
-    activity::tell(&app, &told, Change::Canceled, &row, &organizer).await;
+    activity::tell(&app, &told, Change::Canceled, &row, &organizer).await?;
     Ok(StatusCode::NO_CONTENT)
 }

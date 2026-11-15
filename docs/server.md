@@ -365,12 +365,14 @@ What reaches the invited accounts beside their calendars, on `push:<mri>`: the m
 the invitation, change and cancellation as that chat's (or the channel's) messages, and for each a `NewMessage` of
 the account's `48:notifications` stream: an activity item (`msGraph`, `privateMeetingCreated`,
 `privateMeetingUpdated`, `privateMeetingCanceled`, or `channelMeeting…`) naming who did it, the meeting's time and
-the event it opens.
+the event it opens. The item is kept in the account's activity feed as a mention's is (see "The account's own
+streams"), so a client that was away syncs it, and the account marks it read or removes it. An invitation is
+always written; a change or a cancellation is not written for an account that muted the meeting's chat or channel
+(`alerts` `false`), and nothing is written for a disabled account.
 
 Not served: mail of any kind (invitations, answers and their notes reach nobody by mail; an answer's note is not
 kept), the form's delete of an unused online meeting, `masterCategories`, an event by its join link, forwarding,
-reminders, and the options' enforcement in a call (the calls' part). The activity items are told live and
-replayed to a reconnecting socket; they are not kept in the feed.
+reminders, and the options' enforcement in a call (the calls' part).
 
 ## Prefix table
 

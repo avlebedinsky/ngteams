@@ -149,7 +149,7 @@ macro_rules! set_members {
         .await?;
         if changed > 0 {
             diesel::update(chats::table.find($thread))
-                .set(chats::version.eq(version))
+                .set((chats::version.eq(version), chats::roster_version.eq(version)))
                 .execute($conn)
                 .await?;
         }

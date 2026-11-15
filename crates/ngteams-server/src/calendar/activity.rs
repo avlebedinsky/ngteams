@@ -1,13 +1,15 @@
 //! A meeting's items in the activity feeds of the people it invites (`docs/protocol/chat.md`, "The activity feed":
 //! "A meeting item"): "<organizer> invited you", "updated", "canceled", each naming the meeting's time and the
-//! event it opens. An item is told on the account's push channel as a new message of its `48:notifications`
-//! stream.
+//! event it opens. The chat service keeps each item in the account's `48:notifications` stream and tells it on
+//! the account's push channel.
 
 use serde_json::{Value, json};
 
 use super::repo::Event;
 use super::wire::iso;
 use crate::app::App;
+use crate::chatsvc::service::{self, Activity};
+use crate::db::DbError;
 use crate::db::users::User;
 
 const FEED: &str = "48:notifications";
@@ -20,7 +22,7 @@ pub(super) enum Change {
     Canceled,
 }
 
-/// The feed message of `change` to `event` by `actor`, for the account `to`, made at `at`.
+/// The feed message of `change` to `event` by `actor`, for the account `to`, under the id `at` its feed gives it.
 fn item(app: &App, to: &str, change: Change, event: &Event, actor: &User, at: i64) -> Value {
     let fields: Value = serde_json::from_str(&event.body).unwrap_or_default();
     let place = if event.team_id.is_some() { "channel" } else { "private" };
@@ -62,14 +64,21 @@ fn item(app: &App, to: &str, change: Change, event: &Event, actor: &User, at: i6
     })
 }
 
-/// Tells each of `people` but `actor` of `change` to `event` in their activity feed.
-pub(super) async fn tell(app: &App, people: &[String], change: Change, event: &Event, actor: &User) {
-    for (place, to) in people.iter().filter(|to| **to != actor.id).enumerate() {
-        let at = crate::chatsvc::now() + i64::try_from(place).unwrap_or(0);
-        let payload = json!({"resourceType": "NewMessage", "resource": item(app, to, change, event, actor, at)});
-        let topic = format!("push:8:orgid:{to}");
-        if app.fanout.publish(&topic, payload.to_string().into()).await.is_err() {
-            tracing::warn!("calendar activity fan-out unavailable");
-        }
-    }
+/// Tells each of `people` but `actor` of `change` to `event` in their activity feed. An invitation names the
+/// account itself; a change or a cancellation is not told to who muted the meeting's chat or channel.
+pub(super) async fn tell(
+    app: &App,
+    people: &[String],
+    change: Change,
+    event: &Event,
+    actor: &User,
+) -> Result<(), DbError> {
+    let people: Vec<String> = people.iter().filter(|to| **to != actor.id).cloned().collect();
+    let told = Activity {
+        people: &people,
+        thread: event.meeting_chat.as_deref().or(event.channel_id.as_deref()),
+        personal: change == Change::Created,
+        item: &|to, id| item(app, to, change, event, actor, id),
+    };
+    service::tell_activity(app, told).await
 }

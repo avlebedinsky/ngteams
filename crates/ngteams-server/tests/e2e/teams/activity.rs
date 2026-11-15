@@ -36,7 +36,7 @@ async fn reply(seat: &Seat, channel: &str, post: &str, words: &str) -> String {
     send(&seat.engine, &reply_chain_id(channel, post).unwrap(), plain(words)).await
 }
 
-async fn set(seat: &Seat, conversation: &str, property: ChannelOwnProperty, value: &str) {
+pub(crate) async fn set(seat: &Seat, conversation: &str, property: ChannelOwnProperty, value: &str) {
     let write = OwnTeamView::ChannelProperty {
         channel: conversation.into(),
         property,

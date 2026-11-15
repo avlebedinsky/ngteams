@@ -134,7 +134,7 @@ pub(super) async fn create(
     };
     repo::insert(&app.db, &event, &invitations(&event.id, &wanted)).await?;
     tell(&app, &mut event, &organizer, &wanted, &[]).await?;
-    activity::tell(&app, &ids(&wanted), Change::Created, &event, &organizer).await;
+    activity::tell(&app, &ids(&wanted), Change::Created, &event, &organizer).await?;
     let book = book(&app, &[&event]).await?;
     let shown = Shown {
         reader: &me.id,
@@ -209,7 +209,7 @@ async fn one_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
     {
         service::announce(app, chat, organizer).await?;
     }
-    activity::tell(app, &ids(&wanted), Change::Updated, &row, organizer).await;
+    activity::tell(app, &ids(&wanted), Change::Updated, &row, organizer).await?;
     Ok(())
 }
 
@@ -230,9 +230,9 @@ async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
     let before: Vec<String> = before.into_iter().map(|(attendee, _)| attendee.user_id).collect();
     let (kept, new): (Vec<String>, Vec<String>) = ids(&wanted).into_iter().partition(|id| before.contains(id));
     tell(app, &mut row, organizer, &wanted, &gone).await?;
-    activity::tell(app, &kept, Change::Updated, &row, organizer).await;
-    activity::tell(app, &new, Change::Created, &row, organizer).await;
-    activity::tell(app, &gone, Change::Canceled, &row, organizer).await;
+    activity::tell(app, &kept, Change::Updated, &row, organizer).await?;
+    activity::tell(app, &new, Change::Created, &row, organizer).await?;
+    activity::tell(app, &gone, Change::Canceled, &row, organizer).await?;
     Ok(())
 }
 
@@ -332,7 +332,7 @@ async fn end(app: &App, me: &Me, found: &Found, note: Option<&str>) -> Answer<()
         invite::cancelled(app, chat, &row, &meeting.join_link(app), &organizer, note).await?;
     }
     let told: Vec<String> = attendees.into_iter().map(|(attendee, _)| attendee.user_id).collect();
-    activity::tell(app, &told, Change::Canceled, &row, &organizer).await;
+    activity::tell(app, &told, Change::Canceled, &row, &organizer).await?;
     Ok(())
 }
 
