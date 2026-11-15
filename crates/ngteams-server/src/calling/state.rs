@@ -148,6 +148,10 @@ pub(crate) struct Call {
     pub held_by: Option<Side>,
     /// The chat the call's start was written to.
     pub chat: Option<String>,
+    /// The `endpointId` the callee's acceptance named, when it named one: the endpoint of the callee's that is in the
+    /// call, as its own requests name it.
+    #[serde(default)]
+    pub accepted_as: Option<String>,
 }
 
 /// A delivery to one calling endpoint: `body` at `path` under its push URL (empty: its root).
@@ -299,6 +303,7 @@ impl Call {
         self.callee.active = Some(endpoint.to_owned());
         if let Some(by) = acceptance.get("acceptedBy").filter(|by| by.is_object()) {
             self.callee.participant = wire::named_by(by, &self.callee);
+            self.accepted_as = by.get("endpointId").and_then(Value::as_str).map(str::to_owned);
         }
         self.phase = Phase::Connected;
         self.connected_at = Some(at.now);
@@ -327,8 +332,13 @@ impl Call {
         Ok(())
     }
 
-    /// A party leaves: the caller's leave while it rings cancels the ring, anyone's once it is up ends the call.
+    /// A party leaves: the caller's leave while it rings cancels the ring, anyone's once it is up ends the call. Once
+    /// it is up, a leave of the callee's that names another endpoint than the one that answered changes nothing: it
+    /// comes from an endpoint whose answer lost to the other's.
     pub(crate) fn leave(&mut self, side: Side, body: &Value, at: At<'_>, out: &mut Out) {
+        if self.phase == Phase::Connected && side == Side::Callee && self.lost_fork(body) {
+            return;
+        }
         let code = body
             .pointer("/callTransactionEnd/code")
             .and_then(Value::as_i64)
@@ -347,6 +357,12 @@ impl Call {
                 self.finish(at, Outcome::Talked(talked.max(0)), out);
             }
         }
+    }
+
+    /// Whether `body` names an endpoint of the callee's other than the one whose acceptance is in the call.
+    fn lost_fork(&self, body: &Value) -> bool {
+        let leaver = body.pointer("/participants/from/endpointId").and_then(Value::as_str);
+        matches!((leaver, &self.accepted_as), (Some(leaver), Some(accepted)) if leaver != accepted)
     }
 
     /// What the sweeper makes of a call that is due: a ring nobody answered ends at both ends, a call whose
@@ -687,6 +703,7 @@ mod tests {
             answered: None,
             held_by: None,
             chat: None,
+            accepted_as: None,
         }
     }
 
@@ -865,6 +882,20 @@ mod tests {
     #[test]
     fn a_hang_up_ends_the_call_for_both_with_its_length() {
         let mut call = connected();
+        let mut out = Out::default();
+        // an endpoint of b's whose answer lost to B's leaves: the call goes on
+        let lost = json!({"participants": {"from": {"id": "8:orgid:b", "endpointId": "ep-b9"}}});
+        let before = call.clone();
+        call.leave(Side::Callee, &lost, at(1_010_500), &mut out);
+        assert!(call == before && out.deliveries.is_empty() && out.ended.is_none());
+        // the caller names its own endpoint: its leave ends the call whatever it names
+        let mut caller_left = call.clone();
+        caller_left.leave(Side::Caller, &lost, at(1_011_000), &mut out);
+        assert_eq!(caller_left.phase, Phase::Ended);
+        let mut out = Out::default();
+        let won = json!({"participants": {"from": {"id": "8:orgid:b", "endpointId": "ep-b2"}}});
+        call.clone().leave(Side::Callee, &won, at(1_011_000), &mut out);
+        assert_eq!(out.ended, Some(Outcome::Talked(1)));
         let mut out = Out::default();
         call.leave(Side::Callee, &json!({}), at(1_070_500), &mut out);
         assert_eq!(paths(&out), [("A", "end"), ("B", "end")]);

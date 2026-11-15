@@ -156,6 +156,7 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
         answered: None,
         held_by: None,
         chat,
+        accepted_as: None,
     };
     repo::insert(&app.db, &call).await?;
     // before anyone can end the call: the chat orders its events by when they were written
