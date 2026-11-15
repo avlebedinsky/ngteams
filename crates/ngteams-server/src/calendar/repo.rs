@@ -151,6 +151,17 @@ pub(super) async fn save(db: &Db, event: &Event) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Holds a series' row until the transaction ends: a change or a cancellation of the series, and another
+/// transaction that holds it, wait for this one.
+macro_rules! hold {
+    ($conn:expr, $series:expr) => {
+        diesel::update(calendar_events::table.find($series))
+            .set(calendar_events::version.eq(calendar_events::version))
+            .execute($conn)
+            .await?
+    };
+}
+
 type Changes<'a> = (
     diesel::dsl::Eq<calendar_events::start_ms, i64>,
     diesel::dsl::Eq<calendar_events::end_ms, i64>,
@@ -183,41 +194,51 @@ pub(super) async fn delete(db: &Db, id: &str) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Forgets the occurrences kept as rows of their own under `series`: its rule or its times changed.
-pub(super) async fn drop_own_rows(db: &Db, series: &str) -> Result<(), DbError> {
-    with_conn!(db, |conn| {
-        diesel::delete(calendar_events::table.filter(calendar_events::series_id.eq(series)))
-            .execute(conn)
-            .await?;
-    });
-    Ok(())
+/// What a change of a series does to the occurrences kept as rows of their own under it.
+pub(super) enum Kept<'a> {
+    /// Its rule or its times changed: they are forgotten.
+    Forgotten,
+    /// The ones without a change of their own take the series' new fields.
+    Given(&'a str),
 }
 
-/// Gives the series' new fields to its occurrences kept as rows without a change of their own.
-pub(super) async fn refresh_own_rows(db: &Db, series: &str, body: &str, version: i64) -> Result<(), DbError> {
-    with_conn!(db, |conn| {
-        diesel::update(
-            calendar_events::table
-                .filter(calendar_events::series_id.eq(series))
-                .filter(calendar_events::changed.eq(false)),
-        )
-        .set((calendar_events::body.eq(body), calendar_events::version.eq(version)))
-        .execute(conn)
-        .await?;
-    });
-    Ok(())
+/// Writes what can change of a series and brings the occurrences kept under it along. The series' row goes
+/// first, as in [`cancel`].
+pub(super) async fn save_series(db: &Db, series: &Event, kept: Kept<'_>) -> Result<(), DbError> {
+    let under = calendar_events::table.filter(calendar_events::series_id.eq(&series.id));
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            diesel::update(calendar_events::table.find(&series.id))
+                .set(changes(series))
+                .execute(conn)
+                .await?;
+            match kept {
+                Kept::Forgotten => diesel::delete(under).execute(conn).await?,
+                Kept::Given(body) => {
+                    diesel::update(under.filter(calendar_events::changed.eq(false)))
+                        .set((
+                            calendar_events::body.eq(body),
+                            calendar_events::version.eq(series.version),
+                        ))
+                        .execute(conn)
+                        .await?
+                }
+            };
+            Ok(())
+        })
+        .await)
 }
 
 /// Keeps one occurrence of a series as a row of its own, for its organizer's change of it: a new row takes the
 /// series' invitations as they stand, a row there already is written over.
 pub(super) async fn put_own_row(db: &Db, row: &Event) -> Result<(), DbError> {
-    own_row(db, row, Existing::WrittenOver).await
+    own_row(db, row, Existing::WrittenOver).await.map(|_| ())
 }
 
 /// Keeps one occurrence of a series as a row of its own, for an answer or a removal of it: a row there already
 /// stays as it is, since `row` is the series as its reader saw it and the organizer may have changed the
-/// occurrence since.
-pub(super) async fn keep_own_row(db: &Db, row: &Event) -> Result<(), DbError> {
+/// occurrence since. `false`, and no row, when the series itself changed or was cancelled since that read.
+pub(super) async fn keep_own_row(db: &Db, row: &Event) -> Result<bool, DbError> {
     own_row(db, row, Existing::Left).await
 }
 
@@ -227,25 +248,40 @@ enum Existing {
     Left,
 }
 
-async fn own_row(db: &Db, row: &Event, existing: Existing) -> Result<(), DbError> {
+async fn own_row(db: &Db, row: &Event, existing: Existing) -> Result<bool, DbError> {
     let Some(series) = row.series_id.as_deref() else {
-        return save(db, row).await;
+        return save(db, row).await.map(|()| true);
     };
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
+            let mut row = row.clone();
+            if existing == Existing::Left {
+                hold!(conn, series);
+                let now: Option<Event> = calendar_events::table
+                    .find(series)
+                    .select(Event::as_select())
+                    .first(conn)
+                    .await
+                    .optional()?;
+                let Some(now) = now.filter(|now| (now.version, now.cancelled) == (row.version, row.cancelled)) else {
+                    return Ok(false);
+                };
+                row.meeting_chat = now.meeting_chat;
+                row.post_id = now.post_id;
+            }
             let inserted = diesel::insert_into(calendar_events::table)
-                .values(row)
+                .values(&row)
                 .on_conflict_do_nothing()
                 .execute(conn)
                 .await?;
             if inserted == 0 {
                 if existing == Existing::WrittenOver {
                     diesel::update(calendar_events::table.find(&row.id))
-                        .set(changes(row))
+                        .set(changes(&row))
                         .execute(conn)
                         .await?;
                 }
-                return Ok(());
+                return Ok(true);
             }
             let invited: Vec<Attendee> = calendar_attendees::table
                 .filter(calendar_attendees::event_id.eq(series))
@@ -259,7 +295,7 @@ async fn own_row(db: &Db, row: &Event, existing: Existing) -> Result<(), DbError
                     .execute(conn)
                     .await?;
             }
-            Ok(())
+            Ok(true)
         })
         .await)
 }
@@ -273,11 +309,13 @@ pub(super) async fn own_row_ids(db: &Db, series: &str) -> Result<Vec<String>, Db
         .await?))
 }
 
-/// The occurrence of `series` its organizer gave a time of its own that now starts at `start_ms`.
+/// The occurrence of `series` its organizer gave a time of its own that now starts at `start_ms`: not a cancelled
+/// one, whose time another may since have taken.
 pub(super) async fn changed_row_at(db: &Db, series: &str, start_ms: i64) -> Result<Option<String>, DbError> {
     with_conn!(db, |conn| Ok(calendar_events::table
         .filter(calendar_events::series_id.eq(series))
         .filter(calendar_events::changed.eq(true))
+        .filter(calendar_events::cancelled.eq(false))
         .filter(calendar_events::start_ms.eq(start_ms))
         .order(calendar_events::id.asc())
         .select(calendar_events::id)
@@ -295,6 +333,35 @@ pub(super) async fn invited_under(db: &Db, id: &str) -> Result<Vec<String>, DbEr
         .distinct()
         .load(conn)
         .await?))
+}
+
+/// Makes a meeting's chat follow the invitations of its event `id` (a series with the occurrences kept under it)
+/// as they now stand: of `wanted` whoever it invites is put in, of `gone` whoever it doesn't is taken out. The
+/// event's row is held meanwhile, so two changes of its invitations settle the chat one after the other, each on
+/// what is true by then. Whether the chat changed.
+pub(super) async fn settle_chat(
+    db: &Db,
+    id: &str,
+    chat: &str,
+    wanted: &[String],
+    gone: &[String],
+) -> Result<bool, DbError> {
+    let at = crate::chatsvc::now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            hold!(conn, id);
+            let invited: Vec<String> = calendar_attendees::table
+                .inner_join(calendar_events::table.on(calendar_events::id.eq(calendar_attendees::event_id)))
+                .filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id)))
+                .select(calendar_attendees::user_id)
+                .distinct()
+                .load(conn)
+                .await?;
+            let wanted: Vec<&String> = wanted.iter().filter(|user| invited.contains(user)).collect();
+            let gone: Vec<&String> = gone.iter().filter(|user| !invited.contains(user)).collect();
+            Ok(crate::chatsvc::repo::set_members!(conn, chat, wanted, gone, at))
+        })
+        .await)
 }
 
 /// Whether an event already takes place in the meeting chat `chat`.
@@ -328,18 +395,26 @@ pub(super) async fn set_post(db: &Db, id: &str, post: i64) -> Result<(), DbError
     Ok(())
 }
 
-/// Cancels an event, a series with the occurrences kept under it.
+/// Cancels an event, a series with the occurrences kept under it. The series' row goes first: a row being kept
+/// under it ([`keep_own_row`]) is there by the time the occurrences are reached.
 pub(super) async fn cancel(db: &Db, id: &str, version: i64) -> Result<(), DbError> {
-    with_conn!(db, |conn| {
-        diesel::update(calendar_events::table.filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id))))
-            .set((
-                calendar_events::cancelled.eq(true),
-                calendar_events::version.eq(version),
-            ))
-            .execute(conn)
-            .await?;
-    });
-    Ok(())
+    let cancelled = (
+        calendar_events::cancelled.eq(true),
+        calendar_events::version.eq(version),
+    );
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            diesel::update(calendar_events::table.find(id))
+                .set(cancelled)
+                .execute(conn)
+                .await?;
+            diesel::update(calendar_events::table.filter(calendar_events::series_id.eq(id)))
+                .set(cancelled)
+                .execute(conn)
+                .await?;
+            Ok(())
+        })
+        .await)
 }
 
 /// Makes the invitations of each of `events` the accounts `wanted` (each with whether it is optional): who isn't
@@ -515,7 +590,7 @@ mod tests {
         };
         put_own_row(&db, &moved).await.unwrap();
 
-        keep_own_row(&db, &seen).await.unwrap();
+        assert!(keep_own_row(&db, &seen).await.unwrap());
         let (kept, mine) = event(&db, &seen.id, &bert).await.unwrap().unwrap();
         assert_eq!((kept.start_ms, kept.end_ms, kept.version), (8500, 9500, 2));
         assert!(kept.changed && kept.cancelled);
@@ -525,8 +600,9 @@ mod tests {
             "the series' invitations came with the row"
         );
         assert_eq!(
-            changed_row_at(&db, &series.id, 8500).await.unwrap().as_deref(),
-            Some("series.8000")
+            changed_row_at(&db, &series.id, 8500).await.unwrap(),
+            None,
+            "cancelled, it isn't the one that starts there"
         );
 
         // the organizer's own next change is written over it
@@ -540,14 +616,66 @@ mod tests {
         .await
         .unwrap();
         assert!(!event(&db, &seen.id, &bert).await.unwrap().unwrap().0.cancelled);
+        assert_eq!(
+            changed_row_at(&db, &series.id, 8500).await.unwrap().as_deref(),
+            Some("series.8000")
+        );
         // and a row kept for an occurrence that has none is made
         let other = Event {
             id: "series.20000".into(),
             original_start: Some(20000),
             ..seen
         };
-        keep_own_row(&db, &other).await.unwrap();
+        assert!(keep_own_row(&db, &other).await.unwrap());
         assert!(event(&db, &other.id, &bert).await.unwrap().unwrap().1.is_some());
         assert_eq!(invited_under(&db, &series.id).await.unwrap(), [bert]);
+    }
+
+    /// An attendee read an occurrence of a live series; the organizer cancelled the series; the attendee's answer
+    /// then makes no live row of it.
+    #[tokio::test]
+    async fn a_row_isnt_kept_from_a_series_read_before_it_was_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("calendar.sqlite").display());
+        let db = Db::connect(&url, 1).await.unwrap();
+        db.migrate().await.unwrap();
+        let (ada, bert) = (account(&db, "ada@own.test").await, account(&db, "bert@own.test").await);
+        let series = series(&ada);
+        let invited = Attendee {
+            event_id: series.id.clone(),
+            user_id: bert.clone(),
+            position: 0,
+            optional: false,
+            response: "None".into(),
+            responded_at: None,
+            removed: false,
+        };
+        insert(&db, &series, &[invited]).await.unwrap();
+        let occurrence = |start: i64, of: &Event| Event {
+            id: format!("series.{start}"),
+            series_id: Some(of.id.clone()),
+            original_start: Some(start),
+            start_ms: start,
+            end_ms: start + 1000,
+            until_ms: start + 1000,
+            recurring: false,
+            ..of.clone()
+        };
+        assert!(keep_own_row(&db, &occurrence(8000, &series)).await.unwrap());
+
+        cancel(&db, &series.id, 2).await.unwrap();
+        assert!(event(&db, "series.8000", &bert).await.unwrap().unwrap().0.cancelled);
+        assert!(!keep_own_row(&db, &occurrence(20000, &series)).await.unwrap());
+        assert!(event(&db, "series.20000", &bert).await.unwrap().is_none());
+
+        // read as it now is, the cancelled occurrence is kept for its removal
+        let (now, _) = event(&db, &series.id, &bert).await.unwrap().unwrap();
+        assert!(keep_own_row(&db, &occurrence(20000, &now)).await.unwrap());
+        assert!(event(&db, "series.20000", &bert).await.unwrap().unwrap().0.cancelled);
+
+        // the chat follows the invitations as they stand, not as a request saw them
+        let (added, taken) = ([account(&db, "cora@own.test").await], [bert]);
+        let settled = settle_chat(&db, &series.id, "19:meeting_none@thread.v2", &added, &taken);
+        assert!(!settled.await.unwrap());
     }
 }

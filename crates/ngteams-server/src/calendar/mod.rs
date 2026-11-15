@@ -91,6 +91,8 @@ pub(crate) enum Error {
 
 impl Error {
     const BAD_REQUEST: Self = Self::Code(StatusCode::BAD_REQUEST, "BadRequest");
+    /// The event kept changing under the request.
+    const CONFLICT: Self = Self::Code(StatusCode::CONFLICT, "Conflict");
     const FORBIDDEN: Self = Self::Code(StatusCode::FORBIDDEN, "Forbidden");
     const NOT_FOUND: Self = Self::Code(StatusCode::NOT_FOUND, "NotFound");
     /// An attendee that isn't an account of this server: it takes no mail.
@@ -328,18 +330,19 @@ impl Found {
 
 impl Found {
     /// The rows `user`'s answer or removal of the event touches: the row itself; a series' and every occurrence
-    /// kept under it; for an occurrence without a row, a row made for it.
-    async fn rows_for(&self, db: &Db) -> Result<Vec<String>, DbError> {
+    /// kept under it; for an occurrence without a row, a row made for it. `None` when the series changed since it
+    /// was read here: the occurrence has to be read again.
+    async fn rows_for(&self, db: &Db) -> Result<Option<Vec<String>>, DbError> {
         if self.occurrence.is_some() {
             let row = self.own_row();
-            repo::keep_own_row(db, &row).await?;
-            return Ok(vec![row.id]);
+            let kept = repo::keep_own_row(db, &row).await?;
+            return Ok(kept.then(|| vec![row.id]));
         }
         let mut rows = vec![self.event.id.clone()];
         if self.event.recurring {
             rows.extend(repo::own_row_ids(db, &self.event.id).await?);
         }
-        Ok(rows)
+        Ok(Some(rows))
     }
 }
 

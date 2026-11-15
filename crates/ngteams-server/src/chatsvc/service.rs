@@ -5,7 +5,7 @@
 use serde_json::{Map, Value, json};
 
 use super::repo::Chat;
-pub(crate) use super::repo::{set_members, set_topic};
+pub(crate) use super::repo::set_topic;
 use super::{Caller, events, message_repo, repo, wire};
 use crate::app::App;
 use crate::db::users::User;

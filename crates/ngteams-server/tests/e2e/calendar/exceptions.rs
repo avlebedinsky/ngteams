@@ -122,6 +122,17 @@ async fn who_loses_the_last_invitation_to_a_series_leaves_its_chat() {
         change(&ada, &events[2].id, meeting("Sync", SYNC + 4 * DAY, &[("Bert", &bert)])).await;
         assert!(!in_chat(&cora).await);
         assert!(in_chat(&bert).await);
+
+        // invited to Friday alone once more; the series moved forgets its Friday as it was, and her with it
+        let friday = [("Bert", &bert), ("Cora", &cora)];
+        change(&ada, &events[2].id, meeting("Sync", SYNC + 4 * DAY, &friday)).await;
+        assert!(in_chat(&cora).await);
+        let mut later = meeting("Sync, weekly", SYNC + HOUR, &[("Bert", &bert)]);
+        later.recurrence = sync(&bert).recurrence;
+        change(&ada, &master.id, later).await;
+        assert!(week(&cora).await.is_empty());
+        assert!(!in_chat(&cora).await);
+        assert!(in_chat(&bert).await);
         for seat in [ada, bert, cora] {
             seat.stop();
         }
@@ -175,19 +186,67 @@ async fn a_channels_moved_occurrence_asks_again_and_is_found_by_the_start_it_now
 
         // and cancelled there: the series' other occurrences stay
         let moved = week(&ada).await.remove(1);
-        let (meeting, post) = ScheduledMeeting::of_event(&moved).unwrap();
-        let cancel = EventWrite::CancelInChannel {
-            meeting: Box::new(meeting),
-            channel: place(&team, &group),
-            post,
-            message: None,
-        };
-        ada.engine.write_event(cancel).await.unwrap();
+        cancel_in_channel(&ada, &moved, place(&team, &group)).await;
         let after = week(&bert).await;
         assert_eq!(
             after.iter().map(|event| event.cancelled).collect::<Vec<_>>(),
             [false, true]
         );
+        assert_eq!(week(&ada).await.len(), 1);
+        ada.stop();
+        bert.stop();
+        server.stop().await;
+    }
+}
+
+/// The cancellation of one occurrence of a channel's series, named as the scheduler's calendar now reads it.
+async fn cancel_in_channel(ada: &Seat, moved: &teams_proto::CalendarEvent, channel: teams_proto::MeetingChannel) {
+    let (meeting, post) = ScheduledMeeting::of_event(moved).unwrap();
+    let cancel = EventWrite::CancelInChannel {
+        meeting: Box::new(meeting),
+        channel,
+        post,
+        message: None,
+    };
+    ada.engine.write_event(cancel).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_channels_occurrence_moved_to_where_a_cancelled_one_was_is_the_one_found_there() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        ada.add(&team, &group, &[&bert]).await;
+        let mut all_hands = draft("All hands", SYNC, 30);
+        all_hands.recurrence = Some(weekly(&[Weekday::Monday, Weekday::Wednesday, Weekday::Friday], None));
+        schedule(&ada, all_hands, place(&team, &group), true).await;
+        let events = week(&ada).await;
+        let (wednesday, friday) = (events[1].id.clone(), events[2].id.clone());
+        let thursday = SYNC + 3 * DAY + HOUR;
+
+        // Wednesday's moved to Thursday and cancelled there
+        let moved = draft("All hands", thursday, 30);
+        change_in_channel(&ada, &wednesday, moved, place(&team, &group)).await;
+        let there = week(&ada).await.remove(1);
+        assert_eq!(there.start, EventTime::Instant(thursday));
+        cancel_in_channel(&ada, &there, place(&team, &group)).await;
+        assert_eq!(week(&ada).await.len(), 2);
+
+        // Friday's moved to the same time is the one a change and a cancellation there reach
+        let moved = draft("All hands", thursday, 30);
+        change_in_channel(&ada, &friday, moved, place(&team, &group)).await;
+        let renamed = draft("All hands, moved", thursday, 30);
+        change_in_channel(&ada, &friday, renamed, place(&team, &group)).await;
+        let live = |events: Vec<teams_proto::CalendarEvent>| -> Vec<String> {
+            let live = events.into_iter().filter(|event| !event.cancelled);
+            live.map(|event| event.subject).collect()
+        };
+        assert_eq!(live(week(&bert).await), ["All hands", "All hands, moved"]);
+        let there = week(&ada).await.remove(1);
+        cancel_in_channel(&ada, &there, place(&team, &group)).await;
+        assert_eq!(live(week(&bert).await), ["All hands"]);
         assert_eq!(week(&ada).await.len(), 1);
         ada.stop();
         bert.stop();

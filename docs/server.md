@@ -306,7 +306,9 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   runs on the clock of the series' own zone (the `rrule` crate), so an occurrence keeps its time of day across a
   daylight-time change. An occurrence's id is the series' id, a dot and the occurrence's own start. One occurrence
   changed, answered, cancelled or taken off a calendar is kept as a row of its own under the series; a change of the
-  series' rule or times forgets those rows.
+  series' rule or times forgets those rows. An answer or a removal of an occurrence that meets a change or a
+  cancellation of its series is checked again against the series as it then is; one that keeps meeting changes is
+  refused (409 `Conflict`).
 - **Whom an event invites** are accounts of this server, named by MRI or by address (the sign-in name); another
   address is refused (400 `UnknownAttendee`), since the server sends no mail. Each of them has the event on its
   own calendar with its own answer (`respond`), reads whom it invites, and may take it off (`DELETE`). The
