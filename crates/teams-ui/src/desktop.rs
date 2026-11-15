@@ -929,7 +929,8 @@ impl Desktop {
     }
 
     /// Hands account `key` its own server's account management, which its settings' Manage users page asks
-    /// ([`crate::user_admin`]); the app does once the server says the account is an administrator.
+    /// ([`crate::user_admin`]); the app does once the server says the account is an administrator, and takes it away
+    /// (`None`) once the server says it is no administrator any more.
     pub fn set_user_admin(
         &mut self,
         key: &str,

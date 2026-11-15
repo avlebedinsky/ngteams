@@ -1,10 +1,12 @@
 //! Manage users (`teams_ui::user_admin`) in the settings, on GPUI's test context over a made-up server: the page shows
 //! only for an account that has the service; its list, search and "Show more"; the dialogs that add, edit, reset and
-//! delete, what each asks of the service and what a refusal says; the keyboard on the list; the trace.
+//! delete, what each asks of the service and what a refusal says; the keyboard on the list; the trace; the page going
+//! once the account is no administrator any more.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
+use std::cell::RefCell;
 use std::io::{self, Write};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -225,8 +227,17 @@ impl Opened {
     }
 }
 
+/// The account's service as the settings read it: the app hands it in or takes it away (`Accounts::set_admin`).
+type Held = Rc<RefCell<Option<Arc<dyn UserAdmin>>>>;
+
 /// The settings of an account whose service is `server` (none: a Microsoft 365 account's).
 fn opened(server: Option<Arc<Server>>, cx: &mut TestAppContext) -> Opened {
+    let admin: Option<Arc<dyn UserAdmin>> = server.map(|server| server as Arc<dyn UserAdmin>);
+    opened_with(&Rc::new(RefCell::new(admin)), cx)
+}
+
+/// The settings of an account whose service is what `held` holds when they read it.
+fn opened_with(held: &Held, cx: &mut TestAppContext) -> Opened {
     cx.update(teams_ui::window::init);
     cx.update(theme::init);
     let dir = tempfile::tempdir().unwrap();
@@ -236,15 +247,11 @@ fn opened(server: Option<Arc<Server>>, cx: &mut TestAppContext) -> Opened {
     let mut made = None;
     let window = cx.add_window(|window, cx| {
         let model = cx.new(|_| SettingsModel::load(file));
+        let held = Rc::clone(held);
         let view = cx.new(|cx| {
-            let view = SettingsView::new(model, cx).for_account(ME.to_owned());
-            match server {
-                Some(server) => {
-                    let admin: Arc<dyn UserAdmin> = server;
-                    view.with_admin(Rc::new(move |_| Some(Arc::clone(&admin))), trace)
-                }
-                None => view.with_admin(Rc::new(|_| None), trace),
-            }
+            SettingsView::new(model, cx)
+                .for_account(ME.to_owned())
+                .with_admin(Rc::new(move |_| held.borrow().clone()), trace)
         });
         made = Some(view.clone());
         teams_ui::window::KitRoot::new(view, window, cx)
@@ -287,6 +294,25 @@ fn the_page_is_offered_only_to_an_account_with_the_service(cx: &mut TestAppConte
     assert_eq!(microsoft.cx.read(|cx| view.read(cx).page()), Page::General);
     assert!(microsoft.cx.read(|cx| !view.read(cx).offers(Page::Users, cx)));
     assert!(microsoft.written.lines().is_empty());
+}
+
+#[gpui::test]
+fn the_page_goes_once_the_account_is_no_administrator(cx: &mut TestAppContext) {
+    let server: Arc<dyn UserAdmin> = Server::with(three(), 50);
+    let held: Held = Rc::new(RefCell::new(Some(server)));
+    let mut opened = opened_with(&held, cx);
+    opened.click("settings-page-users");
+    let view = opened.view.clone();
+    assert_eq!(opened.cx.read(|cx| view.read(cx).page()), Page::Users);
+    assert_eq!(opened.listed().len(), 3);
+
+    // the server said the account is no administrator any more: the app takes the service away
+    held.borrow_mut().take();
+    opened.cx.update(|_, cx| view.update(cx, |_, cx| cx.notify()));
+    opened.settle();
+    assert_eq!(opened.cx.read(|cx| view.read(cx).page()), Page::General);
+    assert!(!opened.shows("settings-page-users"));
+    assert!(opened.cx.read(|cx| view.read(cx).users().is_none()));
 }
 
 #[gpui::test]

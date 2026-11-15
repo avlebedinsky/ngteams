@@ -2,8 +2,9 @@
 //! `ngteams-server` over TLS (its certificate authority in the account's `ca_file`), the refresh token and skypetoken
 //! stored under the account's server and UPN together, its region saved from the server's authz, its entry in
 //! `accounts.toml` naming the server; what a wrong password, an untrusted certificate and own servers switched off
-//! leave behind; the forget. And the server's account management as the app asks it (`support/own_admin.rs`). Every
-//! value is made up and nothing leaves loopback.
+//! leave behind; the forget. And the server's account management as the app asks it (`support/own_admin.rs`), and a
+//! password that must change replaced from the sign-in screen (`support/own_prompt.rs`). Every value is made up and
+//! nothing leaves loopback.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -11,6 +12,8 @@
 
 #[path = "support/own_admin.rs"]
 mod own_admin;
+#[path = "support/own_prompt.rs"]
+mod own_prompt;
 #[path = "support/own_server.rs"]
 mod own_server;
 

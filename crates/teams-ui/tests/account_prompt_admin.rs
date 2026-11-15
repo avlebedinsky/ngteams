@@ -393,21 +393,32 @@ fn an_account_asked_again_changes_its_password_on_its_own_server(cx: &mut TestAp
 #[gpui::test]
 fn a_sign_in_that_fails_after_the_change_asks_for_the_new_password(cx: &mut TestAppContext) {
     let (view, events, mut cx) = own_prompt(cx);
-    // the change has nothing to go back to before one is asked
-    view.update(&mut cx, AccountPrompt::password_changed);
-    assert_eq!(stage(&view, &mut cx), Stage::SignIn);
-
     signed_in(&view, &mut cx);
     view.update(&mut cx, AccountPrompt::must_change_password);
     cx.run_until_parked();
     let new = "a made-up password 2";
     cx.simulate_input(new);
     type_into("account-prompt-confirm", new, &mut cx);
+    let changes = |events: &Events| {
+        events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, AccountPromptEvent::ChangePassword { .. }))
+            .count()
+    };
     cx.simulate_keystrokes("enter");
-    assert!(matches!(
-        events.borrow().last(),
-        Some(AccountPromptEvent::ChangePassword { .. })
-    ));
+    assert_eq!(changes(&events), 1);
+
+    // a change the server refused has nothing to go back to: its form and what was said stay
+    let refused = "The server said no.";
+    view.update(&mut cx, |view, cx| view.failed(refused, cx));
+    view.update(&mut cx, AccountPrompt::password_changed);
+    cx.run_until_parked();
+    assert_eq!(stage(&view, &mut cx), Stage::NewPassword);
+    assert_eq!(problem(&view, &mut cx).as_deref(), Some(refused));
+    // and the next try is still a change of the refused sign-in's password
+    cx.simulate_keystrokes("enter");
+    assert_eq!(changes(&events), 2);
 
     // the change went through: the sign-in form is back, the sign-in with the new password under way
     view.update(&mut cx, AccountPrompt::password_changed);

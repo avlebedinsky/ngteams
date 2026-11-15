@@ -127,6 +127,7 @@ fn an_administrator_manages_the_servers_users() -> TestResult {
     let setup = setup_in(&dir);
     let admin = admin_signed_in(&server, &setup)?;
     let service = service(&setup, &admin)?;
+    let demoted = service.demoted();
     assert_eq!(service.list("", None)?.users.len(), 1);
 
     let dana = service.add(&new_account(DANA, "Dana Doe", false))?;
@@ -156,6 +157,8 @@ fn an_administrator_manages_the_servers_users() -> TestResult {
         AdminProblem::LastAdmin
     );
     assert_eq!(service.delete(&own_id).unwrap_err(), AdminProblem::LastAdmin);
+    // a refusal for the administrator still being one keeps Manage users
+    assert!(!*demoted.borrow());
     let renamed = service.change(
         &dana.id,
         &UserChanges {
@@ -193,8 +196,13 @@ fn an_account_that_isnt_an_administrator_is_refused() -> TestResult {
     server.add_user(DANA, "Dana Doe")?;
     let dana = accounts::add_own(&setup, DANA, &at(&server), &Secret::new(PASSWORD))?;
     let service = service(&setup, &dana)?;
+    let demoted = service.demoted();
     assert!(!service.is_admin()?);
+    // the server said "no administrator" in a plain answer, not a refusal: nothing to take away yet
+    assert!(!*demoted.borrow());
     assert_eq!(service.list("", None).unwrap_err(), AdminProblem::NotAdmin);
+    // a refusal for not being one takes Manage users away (the app waits on it)
+    assert!(*demoted.borrow());
     assert_eq!(
         service
             .add(&new_account("eve@own.example.test", "Eve", false))

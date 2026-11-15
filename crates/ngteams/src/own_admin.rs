@@ -261,3 +261,7 @@ impl<S: SecretStore + 'static> UserAdmin for AdminService<S> {
         self.asked(async |client, token| client.reset_password(token, id, password, must_change).await)
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/own_admin_tokens.rs"]
+mod tests;

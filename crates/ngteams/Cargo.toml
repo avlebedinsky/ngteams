@@ -98,6 +98,8 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time
 wiremock.workspace = true
 # an own server's certificate authority, for its `ca_file` (`tests/accounts_file.rs`, `tests/accounts_window.rs`)
 rcgen = { workspace = true, features = ["pem"] }
+# a token request's own error, for what the Manage users page says of it (`tests/support/own_admin_tokens.rs`)
+reqwest.workspace = true
 
 
 # the own server in-process, for an own-server account's sign-in and start (`tests/own_server.rs`,
