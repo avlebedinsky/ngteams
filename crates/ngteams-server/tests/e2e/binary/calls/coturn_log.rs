@@ -4,8 +4,7 @@
 
 use std::path::PathBuf;
 
-/// The log of the run's coturn.
-pub const COTURN_LOG: &str = "NGTS_QA_COTURN_LOG";
+pub use crate::support::COTURN_LOG;
 
 /// One line of the log about a user: a request processed, or a session's traffic.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,8 +131,8 @@ impl CoturnLog {
             .unwrap_or(0)
     }
 
-    /// Every user coturn processed a request of: the running test's own (the rigs take turns while the log is named,
-    /// `support::take_turn`).
+    /// Every user coturn processed a request of: the running test's own (the tests that use coturn take turns while
+    /// the log is named, `crate::support::take_turn`).
     pub fn users(&self) -> Vec<String> {
         let mut users: Vec<String> = self.entries().iter().map(|entry| entry.user().to_owned()).collect();
         users.sort();

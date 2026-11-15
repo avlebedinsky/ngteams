@@ -30,9 +30,7 @@ use teams_trouter::{CallStack, Options, RegistrationReport, RegistrationTimes, T
 use tempfile::TempDir;
 
 use super::super::support::{Deployment, Node, http_client};
-use super::coturn_log::COTURN_LOG;
-use super::qa_net::DNS_LOG;
-use crate::support::{Backend, PASSWORD, redis_url};
+use crate::support::{Backend, PASSWORD, redis_url, take_turn};
 
 type Transport = HttpTransport<Session<MemorySecretStore>>;
 
@@ -90,20 +88,8 @@ pub struct Rig {
     logs: Option<PathBuf>,
     starts: u32,
     _deployment: Deployment,
-    /// The rig's turn while the run's records are shared ([`take_turn`]).
+    /// The rig's turn while the run's records are shared (`crate::support::take_turn`).
     _turn: Option<tokio::sync::MutexGuard<'static, ()>>,
-}
-
-/// The rigs take turns.
-static TURNS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// The rig's turn, when the run reads records every rig adds to: coturn's log ([`COTURN_LOG`]) or the QA network's
-/// ([`DNS_LOG`]). A test's checks of them then see only its own rig's doing. Otherwise none: the rigs run side by side.
-async fn take_turn() -> Option<tokio::sync::MutexGuard<'static, ()>> {
-    if std::env::var_os(COTURN_LOG).is_none() && std::env::var_os(DNS_LOG).is_none() {
-        return None;
-    }
-    Some(TURNS.lock().await)
 }
 
 impl Rig {

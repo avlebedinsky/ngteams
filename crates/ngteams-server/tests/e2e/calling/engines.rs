@@ -476,6 +476,7 @@ async fn a_call_is_relayed_by_coturn_with_the_credentials_made_from_its_secret()
     ) else {
         return;
     };
+    let _turn = crate::support::take_turn().await;
     let server = TestServer::start_with(crate::support::Backend::Sqlite, |config| {
         config.public_origin = url::Url::parse(ORIGIN).unwrap();
         config.calling.turn.secret = Some(secret);

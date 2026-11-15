@@ -3,7 +3,8 @@
 //! network (`qa/289` round 1, `pod-net.sh`) is a namespace with loopback only, a dummy default route, nftables sets
 //! `inet qa` `outside4`/`outside6`/`direct` that record (and drop) each such attempt, and a DNS listener that logs
 //! every name asked (`NGTS_QA_NET_DNS_LOG`) and answers none. Its records are the whole network's: a test reads them
-//! within its rig's life, while no other rig runs (`support::take_turn`).
+//! within its rig's life, while no other test that uses coturn runs (`crate::support::take_turn`). Only the calls
+//! tests run in it: it drops every other loopback UDP, an in-process relay's too.
 
 use std::collections::BTreeMap;
 use std::net::UdpSocket;
@@ -13,8 +14,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// The DNS listener's log of the QA network: set only for a run inside it.
-pub const DNS_LOG: &str = "NGTS_QA_NET_DNS_LOG";
+pub use crate::support::DNS_LOG;
 
 /// The QA network the test runs in.
 pub struct QaNet {
