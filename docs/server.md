@@ -753,10 +753,10 @@ token from after its last password reset.
   delivered. Presence deliveries go only to the sockets open now and are not kept for replay: the client subscribes
   again after each connect and gets a snapshot. A change of `isOutOfOffice` alone is not pushed; the next read or
   change carries it.
-- **State.** Everything is in Redis when `redis_url` is set, else in the node. The keys are
-  `ngts:presence:account:<account>` (a hash: the manual status, the last activity, each endpoint with its lapse
-  time), `ngts:presence:due:accounts` (a sorted set: the accounts with an endpoint, by their next lapse),
-  `ngts:presence:watchers:<mri>` and `ngts:presence:watching:<account>|<endpoint>` (sorted sets by the
+- **State.** Everything is in Redis when `redis_url` is set, else in the node. The keys, in the deployment's
+  [keyspace](#scaling) (`ngts:<namespace>:…`), are `presence:account:<account>` (a hash: the manual status, the last
+  activity, each endpoint with its lapse time), `presence:due:accounts` (a sorted set: the accounts with an endpoint,
+  by their next lapse), `presence:watchers:<mri>` and `presence:watching:<account>|<endpoint>` (sorted sets by the
   subscription's end, each forgotten whole when its last subscription ends). The node's own state forgets its keys
   as Redis does. A change is published on the watcher's `push:<mri>` as
   `{"resourceType": "Presence", "endpoints": […], "resource": <the delivery's body>}`.
@@ -958,9 +958,11 @@ the 1:1 chat and its history stay its two people's.
   When a node's Redis subscription breaks, its subscriptions end: a subscriber subscribes again.
 - Several deployments may share one Redis. Every Redis key and channel of a deployment is under its namespace,
   `ngts:<namespace>:<name>`: the sign-in and setup counters (`login:<hash>`, `setup:<hash>`), the fan-out's topics
-  (`push:<mri>`, `trouter:<mri>`) and the journal (`journal:<topic>`, `cursors:<topic>`). The namespace is
+  (`push:<mri>`, `trouter:<mri>`), the journal (`journal:<topic>`, `cursors:<topic>`) and presence
+  (`presence:account:<account>`, `presence:due:accounts`, `presence:watchers:<mri>`,
+  `presence:watching:<account>|<endpoint>`). The namespace is
   `redis_namespace`, or else the tenant id the nodes read from the database: the nodes of one deployment agree with
-  no configuration, and another deployment's sign-in holds, pushes and replays never meet them. The command line's
+  no configuration, and another deployment's sign-in holds, pushes, replays and presence never meet them. The command line's
   account commands reach the nodes in the same namespace. The names are built in one place,
   `fanout::keyspace` (`Keyspace::key`, and `Shared`, the only way to a node's Redis connection): new code that keeps
   anything in Redis names it there, never with a bare key.

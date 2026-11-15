@@ -1,12 +1,14 @@
 //! Where presence state lives: hashes and sorted sets, in Redis when the server has one (every node reads and writes
-//! the same state) or in the node. [`key`] names every Redis key the presence service uses.
+//! the same state) or in the node. [`key`] names every key the presence service uses; on Redis, [`Shared`] puts each
+//! name in the deployment's keyspace.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
 use redis::AsyncCommands as _;
-use redis::aio::ConnectionManager;
+
+use crate::fanout::keyspace;
 
 /// The presence state can't be reached.
 #[derive(Debug, thiserror::Error)]
@@ -19,10 +21,10 @@ impl From<redis::RedisError> for BoardError {
     }
 }
 
-/// The Redis key of the presence state `kind` of `id`. Every key of the service is made here.
+/// The name of the presence state `kind` of `id`. Every key of the service is named here.
 #[must_use]
 pub(super) fn key(kind: &str, id: &str) -> String {
-    format!("ngts:presence:{kind}:{id}")
+    format!("presence:{kind}:{id}")
 }
 
 /// The few hash and sorted-set commands the presence service needs.
@@ -230,25 +232,27 @@ for i = 1, #ARGV, 2 do
 end
 return removed";
 
-/// The state every node shares.
-pub(super) struct Shared(pub ConnectionManager);
+/// The state every node of the deployment shares, under its keyspace in Redis.
+#[derive(Debug)]
+pub(super) struct Shared(pub keyspace::Shared);
 
-impl std::fmt::Debug for Shared {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Shared")
+impl Shared {
+    /// The connection and the Redis key of the name `key`.
+    fn on(&self, key: &str) -> (redis::aio::ConnectionManager, String) {
+        (self.0.commands(), self.0.key(key))
     }
 }
 
 #[async_trait]
 impl Board for Shared {
     async fn hset(&self, key: &str, field: &str, value: &str, ttl: u64) -> Result<(), BoardError> {
-        let mut redis = self.0.clone();
+        let (mut redis, key) = self.on(key);
         let ttl = i64::try_from(ttl).unwrap_or(i64::MAX);
         let () = redis::pipe()
             .atomic()
-            .hset(key, field, value)
+            .hset(&key, field, value)
             .ignore()
-            .expire(key, ttl)
+            .expire(&key, ttl)
             .ignore()
             .query_async(&mut redis)
             .await?;
@@ -259,62 +263,71 @@ impl Board for Shared {
         if fields.is_empty() {
             return Ok(());
         }
-        Ok(self.0.clone().hdel(key, fields).await?)
+        let (mut redis, key) = self.on(key);
+        Ok(redis.hdel(key, fields).await?)
     }
 
     async fn hdel_unchanged(&self, key: &str, fields: &[(String, String)]) -> Result<usize, BoardError> {
         if fields.is_empty() {
             return Ok(0);
         }
+        let (mut redis, key) = self.on(key);
         let mut script = redis::cmd("EVAL");
         script.arg(HDEL_UNCHANGED).arg(1).arg(key);
         for (field, value) in fields {
             script.arg(field).arg(value);
         }
-        let removed: i64 = script.query_async(&mut self.0.clone()).await?;
+        let removed: i64 = script.query_async(&mut redis).await?;
         Ok(usize::try_from(removed).unwrap_or(0))
     }
 
     async fn hgetall(&self, key: &str) -> Result<Vec<(String, String)>, BoardError> {
-        Ok(self.0.clone().hgetall(key).await?)
+        let (mut redis, key) = self.on(key);
+        Ok(redis.hgetall(key).await?)
     }
 
     async fn zadd(&self, key: &str, member: &str, score: i64, ttl: Option<u64>) -> Result<(), BoardError> {
+        let (mut redis, key) = self.on(key);
         let Some(ttl) = ttl else {
-            return Ok(self.0.clone().zadd(key, member, score).await?);
+            return Ok(redis.zadd(key, member, score).await?);
         };
         let ttl = i64::try_from(ttl).unwrap_or(i64::MAX);
         let () = redis::pipe()
             .atomic()
-            .zadd(key, member, score)
+            .zadd(&key, member, score)
             .ignore()
-            .expire(key, ttl)
+            .expire(&key, ttl)
             .ignore()
-            .query_async(&mut self.0.clone())
+            .query_async(&mut redis)
             .await?;
         Ok(())
     }
 
     async fn zrem(&self, key: &str, member: &str) -> Result<bool, BoardError> {
-        let removed: i64 = self.0.clone().zrem(key, member).await?;
+        let (mut redis, key) = self.on(key);
+        let removed: i64 = redis.zrem(key, member).await?;
         Ok(removed > 0)
     }
 
     async fn zrange(&self, key: &str, min: i64, max: i64, limit: usize) -> Result<Vec<String>, BoardError> {
+        let (mut redis, key) = self.on(key);
         let limit = isize::try_from(limit).unwrap_or(isize::MAX);
-        Ok(self.0.clone().zrangebyscore_limit(key, min, max, 0, limit).await?)
+        Ok(redis.zrangebyscore_limit(key, min, max, 0, limit).await?)
     }
 
     async fn zscore(&self, key: &str, member: &str) -> Result<Option<i64>, BoardError> {
-        Ok(self.0.clone().zscore(key, member).await?)
+        let (mut redis, key) = self.on(key);
+        Ok(redis.zscore(key, member).await?)
     }
 
     async fn zprune(&self, key: &str, max: i64) -> Result<(), BoardError> {
-        Ok(self.0.clone().zrembyscore(key, i64::MIN, max).await?)
+        let (mut redis, key) = self.on(key);
+        Ok(redis.zrembyscore(key, i64::MIN, max).await?)
     }
 
     async fn del(&self, key: &str) -> Result<(), BoardError> {
-        Ok(self.0.clone().del(key).await?)
+        let (mut redis, key) = self.on(key);
+        Ok(redis.del(key).await?)
     }
 }
 
@@ -327,7 +340,9 @@ mod tests {
         let mut boards: Vec<Box<dyn Board>> = vec![Box::new(Memory::default())];
         if let Ok(url) = std::env::var("NGTEAMS_SERVER_REDIS_URL") {
             let redis = redis::Client::open(url).unwrap();
-            boards.push(Box::new(Shared(redis.get_connection_manager().await.unwrap())));
+            let keys = keyspace::Keyspace::new(&uuid::Uuid::new_v4().simple().to_string());
+            let shared = keyspace::Shared::new(redis.get_connection_manager().await.unwrap(), keys);
+            boards.push(Box::new(Shared(shared)));
         }
         boards
     }
@@ -335,7 +350,7 @@ mod tests {
     /// Keys nobody else uses.
     fn fresh() -> impl Fn(&str) -> String {
         let run = uuid::Uuid::new_v4().simple().to_string();
-        move |name| format!("ngts:test:{run}:{name}")
+        move |name| format!("test:{run}:{name}")
     }
 
     #[tokio::test]
@@ -370,7 +385,7 @@ mod tests {
             assert!(board.zrange(&z, 0, 99, 10).await.unwrap().is_empty());
         }
         assert!(format!("{:?}", Memory::default()).contains("Memory"));
-        assert_eq!(key("account", "x"), "ngts:presence:account:x");
+        assert_eq!(key("account", "x"), "presence:account:x");
     }
 
     #[tokio::test]

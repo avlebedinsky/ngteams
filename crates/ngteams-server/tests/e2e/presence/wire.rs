@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use ngteams_server::fanout::keyspace::Keyspace;
 use serde_json::{Value, json};
 use teams_proto::PRESENCE_AUDIENCE;
 
@@ -592,9 +593,10 @@ async fn what_an_endpoint_watches_is_kept_in_redis_only_for_the_subscription_lif
         .await
         .unwrap();
     let a_oid = a.strip_prefix("8:orgid:").unwrap();
+    let space = Keyspace::new(server.app.issuer.tenant());
     for pattern in [
-        format!("ngts:presence:watching:{a_oid}|*"),
-        format!("ngts:presence:watchers:{b}"),
+        space.key(&format!("presence:watching:{a_oid}|*")),
+        space.key(&format!("presence:watchers:{b}")),
     ] {
         let lifetimes = lifetimes(&mut redis, &pattern).await;
         assert_eq!(lifetimes.len(), 1, "{pattern}");

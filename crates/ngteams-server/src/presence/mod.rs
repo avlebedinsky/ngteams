@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
-use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -264,7 +263,12 @@ impl Presence {
     /// The service on Redis (`Some`: the state every node shares) or on the node's own state, sweeping lapsed
     /// endpoints until it is dropped.
     #[must_use]
-    pub fn start(redis: Option<ConnectionManager>, fanout: Arc<dyn Fanout>, db: Db, limits: PresenceConfig) -> Self {
+    pub fn start(
+        redis: Option<crate::fanout::keyspace::Shared>,
+        fanout: Arc<dyn Fanout>,
+        db: Db,
+        limits: PresenceConfig,
+    ) -> Self {
         let board: Box<dyn Board> = match redis {
             Some(redis) => Box::new(Shared(redis)),
             None => Box::new(Memory::default()),

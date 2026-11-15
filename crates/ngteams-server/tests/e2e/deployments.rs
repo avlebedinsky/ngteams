@@ -8,8 +8,13 @@ use ngteams_server::config::Config;
 use ngteams_server::fanout::Subscription;
 use ngteams_server::fanout::journal::EntryId;
 use teams_auth::token::Scope;
+use teams_core::Availability;
+use teams_core::engine::OwnStatus;
+use teams_proto::{Client, Mri, PresenceRead};
 
+use crate::presence::{Seat, Transport, watched};
 use crate::support::{Backend, PASSWORD, TestServer, backends, redis_url};
+use crate::trouter::ORIGIN;
 
 const UPN: &str = "a@own.test";
 const WAIT: Duration = Duration::from_secs(5);
@@ -155,6 +160,62 @@ async fn a_configured_namespace_parts_two_deployments_whose_databases_name_one_t
         assert!(hears_nothing(&mut on_one).await, "{backend:?}");
         copy_b.stop().await;
         copy.stop().await;
+        one.stop().await;
+    }
+}
+
+/// How `mri` shows to `client` on a read.
+async fn shown(client: &Client<Transport>, mri: &str) -> Option<String> {
+    let read = PresenceRead::new([Mri::new(mri.to_owned())]).unwrap();
+    let answer = client.post_read(read.clone()).await.unwrap();
+    read.read_answer(answer.body()).unwrap().remove(0).availability
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_kept_by_one_deployment_shows_on_its_nodes_and_on_no_other_deployment_on_the_same_redis() {
+    let Some(redis) = redis_url() else { return };
+    for backend in backends() {
+        let origin = |config: &mut Config| config.public_origin = url::Url::parse(ORIGIN).unwrap();
+        // one database for both, as a restored copy has: the same accounts under the same ids
+        let one = deployment(backend, &redis, origin).await;
+        let one_b = node_beside(&one, backend, |_| {}).await;
+        let namespace = format!("copy-{}", uuid::Uuid::new_v4().simple());
+        let copy = node_beside(&one, backend, |config| config.redis_namespace = Some(namespace)).await;
+        let a = one.add_user("pa@own.test", "Ada").await;
+        let b = one.add_user("pb@own.test", "Bert").await;
+        let ada = format!("8:orgid:{a}");
+
+        // Bert watches Ada from the first deployment's second node; its nodes share the watch, the copy has none
+        let mut bert = Seat::start(&one_b, &one_b, "pb@own.test", &b).await;
+        bert.engine.presence(ada.clone()).await.unwrap();
+        bert.sees(&ada, &Availability::Offline).await;
+        watched(&one, &ada).await;
+        assert_eq!(copy.app.presence.watchers(&ada).await.unwrap(), 0, "{backend:?}");
+
+        // Ada's client in the copy shows her there, and nowhere in the first deployment
+        let ada_in_copy = Seat::start(&copy, &copy, "pa@own.test", &a).await;
+        ada_in_copy.report(OwnStatus::Available).await;
+        assert_eq!(
+            shown(&ada_in_copy.client, &ada).await.as_deref(),
+            Some("Available"),
+            "{backend:?}"
+        );
+        assert_eq!(
+            shown(&bert.client, &ada).await.as_deref(),
+            Some("Offline"),
+            "{backend:?}"
+        );
+
+        // her client in the first deployment is what Bert is told of
+        let ada_in_one = Seat::start(&one, &one, "pa@own.test", &a).await;
+        ada_in_one.report(OwnStatus::Available).await;
+        bert.sees(&ada, &Availability::Available).await;
+        assert_eq!(copy.app.presence.watchers(&ada).await.unwrap(), 0, "{backend:?}");
+        for seat in [bert, ada_in_copy, ada_in_one] {
+            seat.engine.shutdown();
+        }
+        copy.stop().await;
+        one_b.stop().await;
         one.stop().await;
     }
 }

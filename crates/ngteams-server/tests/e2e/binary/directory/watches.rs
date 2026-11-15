@@ -11,7 +11,7 @@ use teams_proto::ManualAvailability;
 
 use super::super::push::support::{IC3, Raw, Rig, register, token};
 use super::super::support::Node;
-use super::support::{Seat, bearer};
+use super::support::{Seat, bearer, keyspace};
 use crate::support::{Backend, PASSWORD, PG_ENV, backends, redis_url};
 
 /// Every Redis key matching `pattern`, with the seconds it still lives (`-1`: for good).
@@ -83,7 +83,8 @@ async fn fifty_short_client_sessions_leave_nothing_behind_in_redis() {
             .unwrap()
             .to_owned()
     };
-    let watching = format!("ngts:presence:watching:{b_oid}|*");
+    let space = keyspace(&rig.first, "b@own.test").await;
+    let watching = space.key(&format!("presence:watching:{b_oid}|*"));
     let mut epids = Vec::new();
     let started = tokio::time::Instant::now();
     for n in 0..50 {
@@ -108,7 +109,7 @@ async fn fifty_short_client_sessions_leave_nothing_behind_in_redis() {
         assert!((0..=SUBSCRIPTION).contains(ttl), "{key} lives {ttl}");
     }
     for of in [&a.mri, &c.mri, &d.mri] {
-        let key = format!("ngts:presence:watchers:{of}");
+        let key = space.key(&format!("presence:watchers:{of}"));
         let ttl: i64 = redis::cmd("TTL").arg(&key).query_async(&mut redis).await.unwrap();
         assert!(ttl == -2 || (0..=SUBSCRIPTION).contains(&ttl), "{key} lives {ttl}");
         let named: i64 = redis::cmd("ZCARD").arg(&key).query_async(&mut redis).await.unwrap();
@@ -119,15 +120,13 @@ async fn fifty_short_client_sessions_leave_nothing_behind_in_redis() {
     tokio::time::sleep(Duration::from_secs(u64::try_from(SUBSCRIPTION).unwrap() + 2)).await;
     assert_eq!(keys(&mut redis, &watching).await, [], "b's ended sessions still watch");
     for of in [&a.mri, &c.mri, &d.mri] {
-        let key = format!("ngts:presence:watchers:{of}");
+        let key = space.key(&format!("presence:watchers:{of}"));
         let left = members(&mut redis, &key, &b_oid).await;
         assert_eq!(left, Vec::<String>::new(), "{key} still names b's ended sessions");
     }
-    let all = keys(&mut redis, "ngts:presence:*").await;
-    let forever: Vec<_> = all
-        .iter()
-        .filter(|(key, ttl)| *ttl == -1 && key != "ngts:presence:due:accounts")
-        .collect();
+    let all = keys(&mut redis, &space.key("presence:*")).await;
+    let due = space.key("presence:due:accounts");
+    let forever: Vec<_> = all.iter().filter(|(key, ttl)| *ttl == -1 && *key != due).collect();
     assert_eq!(forever, Vec::<&(String, i64)>::new(), "keys kept for good");
     for epid in &epids {
         let shown = all.iter().filter(|(key, _)| key.contains(epid.as_str())).count();

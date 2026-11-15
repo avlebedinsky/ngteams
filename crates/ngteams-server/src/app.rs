@@ -99,7 +99,7 @@ impl App {
                     let throttle = Throttle::redis(config.login.clone(), redis.shared(), "login");
                     let setup_throttle = Throttle::redis(setup_limits, redis.shared(), "setup");
                     let journal = RedisJournal::new(redis.shared());
-                    shared = Some(redis.shared().commands());
+                    shared = Some(redis.shared());
                     (Arc::new(redis), Arc::new(journal), throttle, setup_throttle)
                 }
                 None => (

@@ -328,3 +328,13 @@ pub async fn bearer(node: &Node, upn: &str, audience: &str) -> String {
     let session = node.sign_in(upn, PASSWORD).await;
     session.access_token(audience).await.unwrap().token.expose().to_owned()
 }
+
+/// The keyspace of `node`'s deployment in Redis: its tenant's, as `upn`'s access token names it.
+pub async fn keyspace(node: &Node, upn: &str) -> ngteams_server::fanout::keyspace::Keyspace {
+    use base64::Engine as _;
+    let answer: Value = node.password(upn, PASSWORD).await.json().await.unwrap();
+    let claims = answer["access_token"].as_str().unwrap().split('.').nth(1).unwrap();
+    let claims: Value =
+        serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims).unwrap()).unwrap();
+    ngteams_server::fanout::keyspace::Keyspace::new(claims["tid"].as_str().unwrap())
+}
