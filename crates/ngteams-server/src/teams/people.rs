@@ -13,6 +13,7 @@ use super::repo::{self, Person};
 use super::{Actor, Answer, Error, Seat, body, mri};
 use crate::app::App;
 use crate::auth::extract::Spaces;
+use crate::db::Db;
 
 /// How many people a picker lists at most.
 const LISTED: i64 = 15;
@@ -21,16 +22,23 @@ pub(super) fn routes() -> Router<Arc<App>> {
     Router::new().route("/api/v1.0/teams/{team}/users/profilesearch", post(in_team))
 }
 
-fn listed(tenant: &str, people: &[Person]) -> Vec<Value> {
-    people
+/// The people as a picker lists them, each with the job title its profile has.
+async fn listed(db: &Db, tenant: &str, people: &[Person]) -> Answer<Vec<Value>> {
+    let ids: Vec<&str> = people.iter().map(|person| person.id.as_str()).collect();
+    let titles = crate::people::job_titles(db, &ids).await?;
+    Ok(people
         .iter()
         .map(|person| {
-            json!({
+            let mut listed = json!({
                 "mri": mri(&person.id), "objectId": person.id, "displayName": person.name, "email": person.upn,
                 "userPrincipalName": person.upn, "tenantId": tenant, "type": "ADUser",
-            })
+            });
+            if let Some(title) = titles.get(&person.id) {
+                listed["jobTitle"] = json!(title);
+            }
+            listed
         })
-        .collect()
+        .collect())
 }
 
 /// The keyword a search names: at least one character that isn't a space.
@@ -49,7 +57,7 @@ pub(super) async fn addable(
         Some(keyword) => repo::people(&app.db, keyword, None, LISTED).await?,
         None => Vec::new(),
     };
-    Ok(Json(json!({"value": listed(&actor.tenant, &found)})))
+    Ok(Json(json!({"value": listed(&app.db, &actor.tenant, &found).await?})))
 }
 
 async fn in_team(
@@ -64,5 +72,5 @@ async fn in_team(
         Some(keyword) => repo::people(&app.db, keyword, Some(&seat.team.id), LISTED).await?,
         None => Vec::new(),
     };
-    Ok(Json(json!(listed(&actor.tenant, &found))))
+    Ok(Json(json!(listed(&app.db, &actor.tenant, &found).await?)))
 }

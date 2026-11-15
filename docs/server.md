@@ -263,7 +263,8 @@ token opens nothing.
 - **People pickers** (reads by `POST`, the middle tier's token): `beta/users/searchV2` with the text as a JSON
   string lists up to 15 accounts that can sign in whose name or address holds it (Add member's box);
   `<userProfileService>/api/v1.0/teams/<team>/users/profilesearch` with `{"keyword"}` lists the team's people the
-  same way, for the team's people (a private channel's box).
+  same way, for the team's people (a private channel's box). Each person carries its `jobTitle` when its
+  [profile](#people) has one.
 - **Graph**: `GET /graph/v1.0/me` (the token's account), which the client reads before each account-own write.
 
 Who may do what, checked against the database on every request:

@@ -109,6 +109,23 @@ pub async fn out_of_office(db: &Db, ids: &[String]) -> Result<HashSet<String>, D
     Ok(found.into_iter().collect())
 }
 
+/// The job title of each of the accounts `ids` that has one.
+///
+/// # Errors
+/// The database can't be read.
+pub async fn job_titles(db: &Db, ids: &[&str]) -> Result<HashMap<String, String>, DbError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let found: Vec<(String, Option<String>)> = with_conn!(db, |conn| user_profiles::table
+        .filter(user_profiles::user_id.eq_any(ids))
+        .filter(user_profiles::job_title.is_not_null())
+        .select((user_profiles::user_id, user_profiles::job_title))
+        .load(conn)
+        .await?);
+    Ok(found.into_iter().filter_map(|(id, title)| Some((id, title?))).collect())
+}
+
 async fn with_profiles(db: &Db, found: Vec<User>) -> Result<Vec<Person>, DbError> {
     let ids: Vec<&str> = found.iter().map(|user| user.id.as_str()).collect();
     let mut profiles: Vec<Profile> = if ids.is_empty() {

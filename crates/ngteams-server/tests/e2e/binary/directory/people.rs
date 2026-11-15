@@ -399,11 +399,13 @@ async fn people_search(dir: &Directory, reader: &Reader) {
         let found = a.engine().addable_people(upn.as_str()).await.unwrap();
         assert!(found.is_empty(), "{upn} can't sign in and is still found");
     }
-    let titled = a.engine().addable_people("crowd-002@").await.unwrap();
-    eprintln!(
-        "search crowd-002@: job title shown {:?}",
-        titled.first().map(|p| p.job_title.clone())
-    );
+    // a hit shows the job title the directory has for it, and none where it has none
+    for n in [2, 3] {
+        let found = a.engine().addable_people(format!("crowd-{n:03}@")).await.unwrap();
+        let titles: Vec<Option<String>> = found.iter().map(|person| person.job_title.clone()).collect();
+        let kept = dir.profiles[n].clone().unwrap_or_default().job_title;
+        assert_eq!(titles, [kept], "search crowd-{n:03}@");
+    }
 }
 
 /// Presence of a disabled and a deleted account.

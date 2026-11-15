@@ -21,7 +21,7 @@ use axum::routing::post;
 pub use edit::{ProfileChanges, ProfileError, account, update_profile};
 pub(crate) use picture::picture;
 pub use picture::{MAX_SOURCE, PictureError, remove_picture, set_picture};
-pub use repo::{Person, Profile, out_of_office};
+pub use repo::{Person, Profile, job_titles, out_of_office};
 
 use crate::app::App;
 use crate::auth::extract::{Audience, Bearer};
