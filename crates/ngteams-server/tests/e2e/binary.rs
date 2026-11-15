@@ -4,6 +4,7 @@ mod admin_api;
 mod calendar;
 mod calls;
 mod chats;
+mod directory;
 mod media;
 mod namespaces;
 mod push;

@@ -630,6 +630,11 @@ impl OwnRedis {
         })
     }
 
+    /// The podman container Redis runs in.
+    pub fn container(&self) -> &str {
+        &self.container
+    }
+
     fn podman(&self, args: &[&str]) {
         let done = std::process::Command::new("podman")
             .args(args)
