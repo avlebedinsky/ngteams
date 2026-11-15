@@ -645,8 +645,11 @@ fn an_own_servers_account_is_added(
     let unreachable = prompt_line(running, SIGN_IN, "the unreachable server's reason", |line| {
         line.contains("can't be reached")
     })?;
+    // the form has the address to check: no advice about accounts.toml
     ensure(
-        unreachable.contains("ca_file") && unreachable.contains("signing=false"),
+        unreachable.contains("Check the address")
+            && !unreachable.contains("accounts.toml")
+            && unreachable.contains("signing=false"),
         || format!("the unreachable server's reason: {unreachable}"),
     )?;
     shot(sandbox, "ngteams-accounts-own-unreachable.png")?;
@@ -896,7 +899,7 @@ fn first_sign_in(sandbox: &Sandbox, dark: bool) -> SandboxResult {
         .line_where(SIGN_IN, |line| line == "ca-file-written")
         .map_err(|error| format!("the first sign-in went through without the CA file: {error:?}"))?;
     prompt_line(&running, SIGN_IN, "where the CA file goes", |line| {
-        line.contains("can't be reached") && line.contains(ngteams::signin::CA_FILE_EXAMPLE)
+        line.contains("certificate isn't trusted") && line.contains(ngteams::signin::CA_FILE_EXAMPLE)
     })?;
     shot(sandbox, &format!("ngteams-own-first-sign-in-ca-missing{suffix}.png"))?;
     input.type_text(own::PASSWORD)?;

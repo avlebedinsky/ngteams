@@ -80,6 +80,11 @@ fn said(server: &OwnServer, error: &AdminError) -> String {
             _ => message.clone(),
         },
         AdminError::Throttled { .. } => "Too many attempts: wait a few minutes, then try again.".to_owned(),
+        AdminError::Http(error) if crate::signin::untrusted_certificate(error) => format!(
+            "{}'s certificate isn't trusted. If the server has its own certificate authority, enter its file under \
+             Certificate authority file.",
+            server.origin
+        ),
         AdminError::Http(_) => format!("{} can't be reached.", server.origin),
         other => other.to_string(),
     }

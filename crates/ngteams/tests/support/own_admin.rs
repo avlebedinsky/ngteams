@@ -270,6 +270,20 @@ fn a_server_that_isnt_there_says_so() -> TestResult {
     Ok(())
 }
 
+/// A server there whose certificate isn't trusted (its certificate authority not given) is said so, not unreachable.
+#[test]
+fn a_server_whose_certificate_isnt_trusted_says_so() -> TestResult {
+    let server = OwnServer::start()?;
+    let untrusted = accounts_file::OwnServer::parse(&server.origin, "")?;
+    let said = own_admin::needs_admin(&untrusted).unwrap_err();
+    assert!(
+        said.contains("certificate isn't trusted") && said.contains("Certificate authority file"),
+        "{said}"
+    );
+    assert!(!said.contains("can't be reached"), "{said}");
+    Ok(())
+}
+
 #[test]
 fn a_microsoft_365_account_has_no_such_service() -> TestResult {
     let account = PersonalAccount::new(

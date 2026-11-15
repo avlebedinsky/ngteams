@@ -388,6 +388,13 @@ fn untrusted_then_offered(
     })?;
     say(&format!("qa: without the CA file: {refused}"));
     evidence("ngteams-qa-no-ca-said.txt", &refused)?;
+    // the server is there, its certificate untrusted: the form's own field is where to fix it
+    ensure(
+        refused.contains("certificate isn't trusted")
+            && refused.contains("Certificate authority file")
+            && !refused.contains("accounts.toml"),
+        || format!("the untrusted server's reason: {refused}"),
+    )?;
     shot(sandbox, "ngteams-qa-no-ca.png")?;
     let left = own_entries(root)?;
     ensure(left.is_empty(), || {
@@ -602,7 +609,7 @@ pub fn manage_users_seeded(sandbox: &Sandbox) -> SandboxResult {
     quit_and_finish(sandbox, &mut trace, running)
 }
 
-/// Dana added (a name too long for the server first), and a user name taken.
+/// Dana added (a name too long refused in the dialog first, her password shown once), and a user name taken.
 fn added(
     sandbox: &Sandbox,
     input: &mut VirtualInput,
@@ -623,29 +630,27 @@ fn added(
     std::thread::sleep(Duration::from_secs(2));
     shot(sandbox, "ngteams-qa-add-name-too-long-typed.png")?;
     input.key(keys::ENTER)?;
-    // the keys reach the dialog slowly over a long list: up to four minutes
+    // refused in the dialog, before anything is sent: how long after Enter it is said is how far the keys lagged
+    // behind the typing over the 61 users listed
     let typed_at = Instant::now();
-    let mut refused = Err("not asked".into());
-    for _ in 0..8 {
-        refused = trace.next_where("the long name's answer", |line| {
-            line["view"] == "user-admin" && (line["change"] == "failed" || line["change"] == "done")
-        });
-        if refused.is_ok() {
-            break;
-        }
-        shot(sandbox, "ngteams-qa-add-name-too-long-waiting.png")?;
-    }
-    let said = trace.seen.last().cloned().unwrap_or_default();
+    let refused = admin_line(trace, running, "failed", "long-name");
+    let waited = typed_at.elapsed();
     say(&format!(
-        "qa: a 300-character display name, answered {} s after Enter: {said}",
-        typed_at.elapsed().as_secs()
+        "qa: a 300-character display name, refused in the dialog {} ms after Enter",
+        waited.as_millis()
     ));
     shot(sandbox, "ngteams-qa-add-name-too-long.png")?;
     refused?;
-    ensure(said["change"] == "failed", || {
-        format!("the server took a 300-character name: {said}")
+    evidence(
+        "ngteams-qa-add-name-too-long.txt",
+        &format!(
+            "refused in the dialog (long-name) {} ms after Enter",
+            waited.as_millis()
+        ),
+    )?;
+    ensure(waited < Duration::from_secs(30), || {
+        format!("the keys reached the dialog {} s after the typing", waited.as_secs())
     })?;
-    evidence("ngteams-qa-add-name-too-long.txt", &said.to_string())?;
     // a fresh dialog with a short name
     input.key(keys::ESC)?;
     input.key(keys::TAB)?;
@@ -658,6 +663,9 @@ fn added(
     input.type_text(GIVEN)?;
     input.key(keys::ENTER)?;
     admin_line(trace, running, "done", "add")?;
+    // the password given is shown once, with Copy: Done
+    shot(sandbox, "ngteams-qa-added-password.png")?;
+    input.key(keys::ENTER)?;
     listed_count(trace, running, 50)?;
     ensure(server_user(server, DANA)? == Some((true, false)), || {
         "Dana isn't on the server as an enabled user".to_owned()
@@ -820,7 +828,7 @@ fn roles_and_deletes(
     input.key(keys::ENTER)?;
     admin_line(trace, running, "dialog", "delete")?;
     shot(sandbox, "ngteams-qa-delete-self-confirm.png")?;
-    tabs(input, 2)?;
+    tabs(input, 1)?;
     input.key(keys::ENTER)?;
     admin_line(trace, running, "failed", "last-admin")?;
     shot(sandbox, "ngteams-qa-last-admin-delete.png")?;
@@ -831,7 +839,17 @@ fn roles_and_deletes(
     backspaces(input, "bot-a".len())?;
     listed_count(trace, running, 50)?;
 
-    // Evan: Escape on the confirmation keeps him; then Delete
+    evan_deleted(sandbox, input, trace, running, server)
+}
+
+/// Evan: Escape on the confirmation keeps him, so does Enter (the keyboard starts on Cancel); then Delete.
+fn evan_deleted(
+    sandbox: &Sandbox,
+    input: &mut VirtualInput,
+    trace: &mut TraceReader,
+    running: &Running,
+    server: &own::Own,
+) -> SandboxResult {
     found_and_opened(input, trace, running, (server, "evan", &[EVAN]))?;
     tabs(input, 5)?;
     input.key(keys::ENTER)?;
@@ -851,7 +869,19 @@ fn roles_and_deletes(
     tabs(input, 5)?;
     input.key(keys::ENTER)?;
     admin_line(trace, running, "dialog", "delete")?;
+    // the keyboard starts on Cancel: Enter keeps him
+    input.key(keys::ENTER)?;
+    std::thread::sleep(Duration::from_secs(1));
+    ensure(server_user(server, EVAN)?.is_some(), || {
+        "Enter on the confirmation's first button deleted Evan".to_owned()
+    })?;
     tabs(input, 2)?;
+    input.key(keys::ENTER)?;
+    admin_line(trace, running, "dialog", "edit")?;
+    tabs(input, 5)?;
+    input.key(keys::ENTER)?;
+    admin_line(trace, running, "dialog", "delete")?;
+    tabs(input, 1)?;
     input.key(keys::ENTER)?;
     admin_line(trace, running, "done", "delete")?;
     listed(trace, running, server, &[])?;
@@ -1090,6 +1120,9 @@ pub fn page_at(width: u32, dark: bool) -> SandboxResult {
     shot(&sandbox, &format!("ngteams-qa-add{suffix}.png"))?;
     input.key(keys::ENTER)?;
     shot(&sandbox, &format!("ngteams-qa-add-said{suffix}.png"))?;
+    if width >= 1280 {
+        long_name_over_three(&mut input, &mut trace, &running)?;
+    }
     input.key(keys::ESC)?;
     // the long user's dialogs (the search has the keyboard again)
     found_and_opened(&mut input, &mut trace, &running, (&server, "remarkably", &[LONG_UPN]))?;
@@ -1125,6 +1158,24 @@ pub fn page_at(width: u32, dark: bool) -> SandboxResult {
     listed(&mut trace, &running, &server, &[DANA])?;
     shot(&sandbox, &format!("ngteams-qa-after-dialog{suffix}.png"))?;
     quit_and_finish(&sandbox, &mut trace, running)
+}
+
+/// The long name typed as over the 61 users of `manage_users_seeded`, over 3: the time to be refused is the dialog's
+/// own, whatever the list behind it.
+fn long_name_over_three(input: &mut VirtualInput, trace: &mut TraceReader, running: &Running) -> SandboxResult {
+    input.type_text(DANA)?;
+    input.key(keys::TAB)?;
+    input.type_text(&"N".repeat(300))?;
+    input.key(keys::TAB)?;
+    input.type_text(GIVEN)?;
+    input.key(keys::ENTER)?;
+    let typed_at = Instant::now();
+    admin_line(trace, running, "failed", "long-name")?;
+    say(&format!(
+        "qa: a 300-character display name over 3 users, refused in the dialog {} ms after Enter",
+        typed_at.elapsed().as_millis()
+    ));
+    Ok(())
 }
 
 // --- the child's side ---

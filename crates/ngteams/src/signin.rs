@@ -103,6 +103,35 @@ pub const PASSWORD_MUST_CHANGE: &str = "Your password must be changed before you
 /// The server's word for a password that must change, in its refusal of the password grant.
 const PASSWORD_EXPIRED: &str = "user_password_expired";
 
+/// What the user is told when an administrator turned the account's sign-in off.
+pub const ACCOUNT_TURNED_OFF: &str = "An administrator turned off sign-in for this account.";
+
+/// `AADSTS50057`, the refusal of an account whose sign-in is turned off (an own server answers it too).
+pub const ACCOUNT_DISABLED_CODE: u32 = 50_057;
+
+/// Whether `error` (or what caused it) is a server certificate that isn't trusted, as against a server that can't be
+/// reached at all.
+#[must_use]
+pub fn untrusted_certificate(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut at = Some(error);
+    while let Some(error) = at {
+        // rustls's words for a certificate its verifier refused
+        if error.to_string().contains("invalid peer certificate") {
+            return true;
+        }
+        at = error.source();
+    }
+    false
+}
+
+/// The transport error under a failed sign-in, if that is why it failed.
+fn transport(error: &SignInError) -> Option<&(dyn std::error::Error + 'static)> {
+    match error {
+        SignInError::Token(TokenError::Http(error)) | SignInError::Authz(AuthzError::Http(error)) => Some(error),
+        _ => None,
+    }
+}
+
 /// What the user is told about an own server's account while own servers are off.
 pub const OWN_SERVERS_OFF: &str = "Own servers are turned off. Set NGTEAMS_OWN_SERVER=1 and start ngteams again.";
 
@@ -414,14 +443,38 @@ pub async fn add_own<S: SecretStore>(
             // made by this attempt alone, its CA file typed on the sign-in screen: nothing of it stays
             let _ = PersonalAccount::remove(&setup.paths, &account.id());
         }
-        own_failure(setup, &account, &error)
+        form_failure(setup, &account, server, &error)
     })
 }
 
+/// [`own_failure`] said on the sign-in form, which has the address and the certificate authority's field: a server
+/// not reached or not trusted points there, not at `accounts.toml`.
+fn form_failure(setup: &Setup, account: &PersonalAccount, server: &OwnServer, error: &SignInError) -> String {
+    let origin = &server.origin;
+    let Some(transport) = transport(error) else {
+        return own_failure(setup, account, error);
+    };
+    match (untrusted_certificate(transport), &server.ca_file) {
+        (false, _) => {
+            format!("{origin} can't be reached. Check the address and that the server is running, then sign in again.")
+        }
+        (true, None) => format!(
+            "{origin}'s certificate isn't trusted. If the server has its own certificate authority, enter its file \
+             under Certificate authority file, then sign in again."
+        ),
+        (true, Some(ca_file)) => format!(
+            "{origin}'s certificate isn't trusted by the certificate authority in {}. Check the file under \
+             Certificate authority file, then sign in again.",
+            ca_file.display()
+        ),
+    }
+}
+
 /// What the user is told when an own server's sign-in stored nothing: a password that must change
-/// ([`PASSWORD_MUST_CHANGE`]), a wrong user name or password, a wait the
-/// server asked for, a server that can't be reached (with where a self-signed deployment's certificate authority
-/// goes, or the one its entry names already), own servers turned off, else the error.
+/// ([`PASSWORD_MUST_CHANGE`]), an account turned off ([`ACCOUNT_TURNED_OFF`]), a wrong user name or password, a wait
+/// the server asked for, a certificate that isn't trusted or a server that can't be reached (with where a self-signed
+/// deployment's certificate authority goes, or the one its entry names already), own servers turned off, else the
+/// error.
 #[must_use]
 pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError) -> String {
     let server = account.server.as_deref().unwrap_or_default();
@@ -431,9 +484,31 @@ pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError
         {
             PASSWORD_MUST_CHANGE.to_owned()
         }
+        SignInError::Token(TokenError::InvalidGrant(refusal)) if refusal.codes.contains(&ACCOUNT_DISABLED_CODE) => {
+            ACCOUNT_TURNED_OFF.to_owned()
+        }
         SignInError::Token(TokenError::InvalidGrant(_)) => "The user name or password isn't right.".to_owned(),
         SignInError::Token(TokenError::Throttled { .. }) => {
             "Too many attempts: wait a few minutes, then sign in again.".to_owned()
+        }
+        SignInError::Token(TokenError::Http(error)) | SignInError::Authz(AuthzError::Http(error))
+            if untrusted_certificate(error) =>
+        {
+            let file = setup.paths.accounts_file();
+            match &account.ca_file {
+                Some(ca_file) => format!(
+                    "{server}'s certificate isn't trusted by the certificate authority in {} (ca_file in {}). Check \
+                     that file, then sign in again.",
+                    ca_file.display(),
+                    file.display(),
+                ),
+                None => format!(
+                    "{server}'s certificate isn't trusted. For a server with its own certificate authority, add \
+                     {CA_FILE_EXAMPLE} to an [[account]] entry with this user name and server in {}, then sign in \
+                     again.",
+                    file.display(),
+                ),
+            }
         }
         SignInError::Token(TokenError::Http(_)) | SignInError::Authz(AuthzError::Http(_)) => {
             let file = setup.paths.accounts_file();

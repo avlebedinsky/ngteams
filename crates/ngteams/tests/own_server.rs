@@ -170,8 +170,8 @@ fn engine_starts_or_names_the_missing_chat_service(
     }
 }
 
-/// A server that can't be reached whose entry names its certificate authority already isn't told to add one: the
-/// file it names is said.
+/// A server whose certificate the certificate authority typed doesn't vouch for is said untrusted, not unreachable:
+/// the file typed is named, and the form's field is where to fix it.
 #[test]
 fn an_unreachable_server_with_a_ca_file_names_that_file() -> TestResult {
     let server = OwnServer::start()?;
@@ -183,10 +183,15 @@ fn an_unreachable_server_with_a_ca_file_names_that_file() -> TestResult {
     let wrong_ca = accounts_file::OwnServer::parse(&server.origin, &other.ca_file.display().to_string())?;
     let said = block_on(signin::add_own(setup, UPN, &wrong_ca, &Secret::new(PASSWORD), &store)).unwrap_err();
     assert!(
-        said.contains("can't be reached") && said.contains(&other.ca_file.display().to_string()),
+        said.contains("certificate isn't trusted")
+            && said.contains(&other.ca_file.display().to_string())
+            && said.contains("Certificate authority file"),
         "{said}"
     );
-    assert!(!said.contains(signin::CA_FILE_EXAMPLE), "{said}");
+    assert!(
+        !said.contains("can't be reached") && !said.contains(signin::CA_FILE_EXAMPLE),
+        "{said}"
+    );
     for account in PersonalAccount::load_all(&setup.paths)? {
         PersonalAccount::remove(&setup.paths, &account.id())?;
     }
@@ -207,7 +212,11 @@ fn a_ca_file_written_while_the_screen_is_open_is_used_by_the_next_sign_in() -> T
     let shown = PersonalAccount::pending_on(UPN, &at(&server, false))?;
     shown.save(&setup.paths)?;
     let said = block_on(signin::sign_in_own_again(&setup, &shown, &password, &store)).unwrap_err();
-    assert!(said.contains(signin::CA_FILE_EXAMPLE), "{said}");
+    // the screen asks the password alone: where the certificate authority goes is the entry
+    assert!(
+        said.contains("certificate isn't trusted") && said.contains(signin::CA_FILE_EXAMPLE),
+        "{said}"
+    );
 
     let written = PersonalAccount {
         ca_file: Some(server.ca_file.clone()),
@@ -323,7 +332,7 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() 
 
     an_entry_written_by_hand_stays(&setup, &server, &store)?;
 
-    // the server's certificate isn't trusted without its certificate authority: said, with where the CA file goes,
+    // the server's certificate isn't trusted without its certificate authority: said, with the form's field to fill,
     // and the bare entry is taken out again
     let untrusted = block_on(signin::add_own(
         &setup,
@@ -334,7 +343,11 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() 
     ));
     let said = untrusted.unwrap_err();
     assert!(
-        said.contains("can't be reached") && said.contains(signin::CA_FILE_EXAMPLE),
+        said.contains("certificate isn't trusted") && said.contains("Certificate authority file"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("can't be reached") && !said.contains("accounts.toml"),
         "{said}"
     );
     assert!(PersonalAccount::load_all(&setup.paths)?.is_empty());

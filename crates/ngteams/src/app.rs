@@ -65,12 +65,15 @@ pub(crate) const fn shell_id(_: &crate::setup::Setup, _: bool, _: &App) -> &'sta
 /// The window's title and the app's name on its notifications and tray item.
 pub const TITLE: &str = "ngteams";
 
-/// What the window says once the account is signed out.
-pub const SIGNED_OUT_HINT: &str = "Signed out: sign in again in the window that opened";
+/// What the window says once the account is signed out, after "Signed out:" (`teams_ui::view::status_text`).
+pub const SIGNED_OUT_HINT: &str = "sign in again in the window that opened";
 
 /// What the read-only mode's window says once the account is signed out: it never signs in itself.
-pub const READ_ONLY_SIGNED_OUT_HINT: &str =
-    "Signed out: sign in again in your own Teams (this read-only window never signs in)";
+pub const READ_ONLY_SIGNED_OUT_HINT: &str = "sign in again in your own Teams (this read-only window never signs in)";
+
+/// What the window says once an administrator turned the account's sign-in off: no sign-in window opens, as the
+/// account couldn't sign in there.
+pub const TURNED_OFF_HINT: &str = "an administrator turned off sign-in for this account";
 
 /// Opens the sign-in window again once the account is signed out (see the module docs).
 pub type SignInAgain = Rc<dyn Fn(&mut App)>;
@@ -835,7 +838,8 @@ fn settings_entity(settings: SettingsModel, video: Option<VideoFeed>, cx: &mut A
 }
 
 /// Once `signed_out` says the session is signed out: shows [`SIGNED_OUT_HINT`], shuts the engine down (nothing more is
-/// sent) and, once it is down, opens the sign-in window again (`again`), once.
+/// sent) and, once it is down, opens the sign-in window again (`again`), once; for an account an administrator turned
+/// off, shows [`TURNED_OFF_HINT`] and opens nothing.
 pub fn watch_sign_out(
     signed_out: watch::Receiver<Option<SignedOut>>,
     bridge: WeakEntity<Bridge>,
@@ -856,16 +860,25 @@ pub fn watch_sign_out_saying(
 ) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         // the session dropped without signing out: nothing to watch
-        if signed_out.wait_for(Option::is_some).await.is_err() {
-            return;
-        }
+        let turned_off = match signed_out.wait_for(Option::is_some).await {
+            Ok(why) => turned_off(why.as_ref()),
+            Err(_) => return,
+        };
+        let hint = if turned_off { TURNED_OFF_HINT } else { hint };
         let Ok(stopped) = bridge.update(cx, |bridge, cx| bridge.sign_out(SharedString::from(hint), cx)) else {
             return;
         };
         stopped.await;
-        cx.update(|cx| again(cx));
+        if !turned_off {
+            cx.update(|cx| again(cx));
+        }
     })
     .detach();
+}
+
+/// Whether the session was signed out because an administrator turned the account off.
+fn turned_off(why: Option<&SignedOut>) -> bool {
+    matches!(why, Some(SignedOut::InvalidGrant(refusal)) if refusal.codes.contains(&crate::signin::ACCOUNT_DISABLED_CODE))
 }
 
 /// Each account's bridge as the app runs it, in the rail's order; none before the launch.

@@ -23,6 +23,8 @@ use ngteams::app::{self, Launch, SIGNED_OUT_HINT, SignInAgain};
 use ngteams::calling::PersonalCalls;
 use ngteams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
+use teams_auth::session::SignedOut;
+use teams_auth::token::EntraError;
 use teams_core::CallFloor;
 use teams_core::{CallAction, CallActionError, CallId, EngineError, Event, IncomingCall, RegistrationReport};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
@@ -100,6 +102,11 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
             hint: SIGNED_OUT_HINT.into()
         }
     );
+    // one sentence, said once
+    assert_eq!(
+        teams_ui::view::status_text(&status).as_ref(),
+        "Signed out: sign in again in the window that opened"
+    );
     assert_eq!(
         status.engine,
         Engine::Stopped,
@@ -111,6 +118,46 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
     assert!(matches!(after, Err(EngineError::Stopped)), "{after:?}");
     cx.run_until_parked();
     assert_eq!(asked.get(), 1, "the sign-in window is opened again once");
+}
+
+/// An account an administrator turned off (`AADSTS50057`, which an own server answers too) is said so, and no
+/// sign-in window opens for it: it couldn't sign in there.
+#[test]
+fn an_account_turned_off_is_said_so_and_no_sign_in_window_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let (setup, account) = signed_in_setup(&dir);
+    let engine = ngteams::engine::start(
+        &setup.paths,
+        &account,
+        teams_core::CallFloor::new(),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )
+    .unwrap();
+    let cx = TestAppContext::single();
+    let (models, bridge) = cx.update(|cx| app::bridge(engine.handle, None, cx));
+    let asked = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&asked);
+    let again: SignInAgain = Rc::new(move |_| counted.set(counted.get() + 1));
+    let (tell, told) = tokio::sync::watch::channel(None);
+    cx.update(|cx| app::watch_sign_out(told, bridge.downgrade(), again, cx));
+    let disabled = EntraError {
+        error: "invalid_grant".to_owned(),
+        codes: vec![50_057],
+        description: "The user account is disabled.".to_owned(),
+        correlation_id: None,
+        suberror: None,
+    };
+    tell.send(Some(SignedOut::InvalidGrant(Box::new(disabled)))).unwrap();
+    settle(&cx, |cx| !bridge.read_with(cx, |bridge, _| bridge.running()));
+    cx.run_until_parked();
+    let status = cx.read(|cx| models.status.read(cx).clone());
+    assert_eq!(
+        teams_ui::view::status_text(&status).as_ref(),
+        "Signed out: an administrator turned off sign-in for this account"
+    );
+    assert_eq!(asked.get(), 0, "no sign-in window opens for an account turned off");
 }
 
 /// What the models show of a call once the engine registered the calling endpoint and an invitation rang: whether

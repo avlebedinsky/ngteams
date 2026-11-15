@@ -268,6 +268,8 @@ fn user_added(
     }
     input.key(keys::ENTER)?;
     admin_line(trace, running, "done", "add")?;
+    // the password given is shown once: Done
+    input.key(keys::ENTER)?;
     listed(trace, running, server, all)
 }
 
@@ -394,8 +396,8 @@ fn roles_and_removal(
     input.key(keys::ENTER)?;
     admin_line(trace, running, "dialog", "delete")?;
     shot(sandbox, "ngteams-admin-delete-user.png")?;
-    // Cancel, then Delete
-    tabs(input, 2)?;
+    // the keyboard starts on Cancel: Delete is next
+    tabs(input, 1)?;
     input.key(keys::ENTER)?;
     admin_line(trace, running, "done", "delete")?;
     listed(trace, running, server, &[])?;
