@@ -556,17 +556,27 @@ impl Inner {
     }
 }
 
-/// Sweeps until the service is dropped.
+/// Sweeps until the service is dropped. A state that can't be reached is said once, not every second.
 async fn sweeping(presence: Weak<Inner>) {
     let mut every = tokio::time::interval(SWEEP);
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut failing = false;
     loop {
         every.tick().await;
         let Some(inner) = presence.upgrade() else { return };
-        if let Err(error) = inner.sweep().await {
-            tracing::warn!(%error, "lapsed presence endpoints weren't swept");
-        }
+        failing = swept(inner.sweep().await, failing);
     }
+}
+
+/// Whether the sweeps fail now, said when that changes.
+fn swept(sweep: Result<(), PresenceError>, failing: bool) -> bool {
+    match &sweep {
+        Ok(()) if failing => tracing::info!("lapsed presence endpoints are swept again"),
+        Ok(()) => {}
+        Err(error) if !failing => tracing::warn!(%error, "lapsed presence endpoints aren't swept"),
+        Err(_) => {}
+    }
+    sweep.is_err()
 }
 
 #[cfg(test)]
@@ -633,5 +643,14 @@ mod tests {
         assert_eq!(Taken::TooMany.status(), 40040);
         assert_eq!(object_id("8:orgid:nobody"), None);
         assert_eq!(millis(u64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn a_failing_sweep_is_said_when_it_starts_and_when_it_ends() {
+        let failed = || Err(PresenceError::TooManyEndpoints);
+        assert!(swept(failed(), false));
+        assert!(swept(failed(), true));
+        assert!(!swept(Ok(()), true));
+        assert!(!swept(Ok(()), false));
     }
 }
