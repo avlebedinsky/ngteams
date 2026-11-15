@@ -8,15 +8,18 @@ use super::meeting::Meeting;
 use super::repo::{Attendee, Event};
 use crate::app::App;
 use crate::db::users::User;
+use crate::teams::repo::Team;
 
 pub(super) const EVENT_TYPE: &str = "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent";
 
 /// The longest `bodyPreview`, in characters.
 const PREVIEW: usize = 255;
 
-/// What the events of one answer name beyond their own rows: their organizers and their meetings.
+/// What the events of one answer name beyond their own rows: their organizers, their meetings and, for a
+/// channel's meetings, their teams.
 pub(super) struct Book<'a> {
     pub app: &'a App,
+    pub teams: HashMap<String, Team>,
     pub users: HashMap<String, User>,
     pub meetings: HashMap<String, Meeting>,
 }
@@ -29,6 +32,8 @@ pub(super) struct Shown<'a> {
     pub occurrence: Option<i64>,
     pub mine: Option<&'a Attendee>,
     pub book: &'a Book<'a>,
+    /// Read from the team's calendar: the team's own view of its meeting, the same for whoever reads it.
+    pub team_view: bool,
 }
 
 impl Shown<'_> {
@@ -58,7 +63,28 @@ impl Shown<'_> {
     }
 
     fn organizes(&self) -> bool {
-        self.event.team_id.is_none() && self.event.owner_id == self.reader
+        self.team_view || (self.event.team_id.is_none() && self.event.owner_id == self.reader)
+    }
+
+    fn team(&self) -> Option<&Team> {
+        self.event.team_id.as_ref().and_then(|id| self.book.teams.get(id))
+    }
+
+    /// A channel's meeting: the team organizes it, its channel is its chat, and its link names its post there.
+    fn of_channel(&self, team: &Team, fields: &mut Map<String, Value>) {
+        let app = self.book.app;
+        let channel = self.event.channel_id.as_deref().unwrap_or_default();
+        let post = self.event.post_id.unwrap_or(0);
+        let link = super::meeting::join_link(app, channel, &post.to_string(), &self.event.owner_id);
+        let data = json!({"cid": channel, "uid": mri(&self.event.owner_id), "rid": post, "mid": post, "type": 0});
+        fields.insert("organizerName".into(), json!(team.name));
+        fields.insert("organizerAddress".into(), json!(mailbox(app, team)));
+        fields.insert("isOnlineMeeting".into(), json!(true));
+        fields.insert("skypeTeamsMeetingUrl".into(), json!(link));
+        fields.insert("skypeTeamsData".into(), json!(data.to_string()));
+        if fields.get("location").and_then(Value::as_str) == Some("") {
+            fields.insert("location".into(), json!("Microsoft Teams Meeting"));
+        }
     }
 
     fn response(&self) -> &'static str {
@@ -131,6 +157,9 @@ impl Shown<'_> {
             fields.insert("onlineMeetingConferenceId".into(), json!(meeting.code));
             fields.insert("skypeTeamsData".into(), json!(data.to_string()));
         }
+        if let Some(team) = self.team() {
+            self.of_channel(team, &mut fields);
+        }
         if self.kind() != "RecurringMaster" {
             fields.remove("eventRecurrencePattern");
             fields.remove("eventRecurrenceRange");
@@ -154,7 +183,12 @@ impl Shown<'_> {
             return entry;
         }
         let mut listed = Vec::new();
-        if let Some(owner) = self.book.users.get(&self.event.owner_id) {
+        if let Some(team) = self.team() {
+            listed.push(
+                json!({"address": mailbox(self.book.app, team), "name": team.name, "role": "User",
+                "type": "Organizer", "status": {"response": "Organizer", "time": iso(self.event.version)}}),
+            );
+        } else if let Some(owner) = self.book.users.get(&self.event.owner_id) {
             listed.push(attendee(owner, "Organizer", "Organizer", self.event.version));
         }
         for (invited, user) in attendees {
@@ -182,6 +216,12 @@ fn attendee(user: &User, kind: &str, response: &str, time: i64) -> Value {
         "address": user.upn, "name": user.display_name, "mri": mri(&user.id), "role": "Admin", "type": kind,
         "status": {"response": response, "time": iso(time)},
     })
+}
+
+/// A team's mailbox: what its group calendar is addressed by.
+fn mailbox(app: &App, team: &Team) -> String {
+    let host = app.config.public_origin.host_str().unwrap_or("localhost");
+    format!("{}@{host}", team.group_id)
 }
 
 fn mri(id: &str) -> String {

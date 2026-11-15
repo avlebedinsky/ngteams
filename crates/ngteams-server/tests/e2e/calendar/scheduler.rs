@@ -138,7 +138,11 @@ async fn the_scheduler_reads_each_persons_busy_times_and_the_starts_everyone_is_
             .iter()
             .map(|busy| (busy.start_ms - MONDAY) / MINUTE)
             .collect();
-        assert_eq!(starts, [600, 780, 1020, 2 * 24 * 60 + 1020]);
+        // a week asked for is read as two spans of five days
+        assert_eq!(
+            starts,
+            [600, 780, 1020, 2 * 1440 + 1020, 7 * 1440 + 1020, 9 * 1440 + 1020]
+        );
         assert_eq!(bert_week.busy[3].end_ms - bert_week.busy[3].start_ms, 30 * MINUTE);
         assert!(bert_week.busy.iter().all(|busy| busy.subject.is_none()));
         assert_eq!(MONDAY % DAY, 0);

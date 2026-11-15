@@ -121,8 +121,30 @@ pub(crate) struct Post<'a> {
     pub under: Option<i64>,
 }
 
+/// Who is in the thread.
+pub(crate) async fn members(db: &Db, thread: &str) -> Result<Vec<String>, DbError> {
+    let members = repo::members(db, thread).await?;
+    Ok(members.into_iter().map(|member| member.user_id).collect())
+}
+
 /// Posts it and tells the thread's people; its id, or `None` when the author isn't in the thread.
 pub(crate) async fn post(app: &App, post: Post<'_>) -> Result<Option<i64>, DbError> {
+    let (thread, author) = (post.thread, post.author);
+    let Some(row) = keep(app, post).await? else {
+        return Ok(None);
+    };
+    let members = repo::members(&app.db, thread).await?;
+    events::publish(app, &caller(app, author), &members, "NewMessage", &row.value()?).await;
+    Ok(Some(row.id))
+}
+
+/// Keeps it without telling anyone yet: for a message that names its own id, which [`set_property`] then tells
+/// as the new message it is. Its id, or `None` when the author isn't in the thread.
+pub(crate) async fn post_untold(app: &App, post: Post<'_>) -> Result<Option<i64>, DbError> {
+    Ok(keep(app, post).await?.map(|row| row.id))
+}
+
+async fn keep(app: &App, post: Post<'_>) -> Result<Option<message_repo::Message>, DbError> {
     let caller = caller(app, post.author);
     let base = wire::base(app);
     let body = json!({
@@ -143,23 +165,30 @@ pub(crate) async fn post(app: &App, post: Post<'_>) -> Result<Option<i64>, DbErr
         body: body.to_string(),
         root_id: in_channel.then_some(post.under.unwrap_or(0)),
     };
-    let Some((row, _)) = message_repo::insert(&app.db, &draft).await? else {
-        return Ok(None);
-    };
-    let members = repo::members(&app.db, post.thread).await?;
-    events::publish(app, &caller, &members, "NewMessage", &row.value()?).await;
-    Ok(Some(row.id))
+    Ok(message_repo::insert(&app.db, &draft).await?.map(|(row, _)| row))
 }
 
-/// Changes the properties of a message `author` posted, and tells the thread's people. Whether it was there.
-pub(crate) async fn set_property(
-    app: &App,
-    thread: &str,
-    message: i64,
-    author: &User,
-    name: &str,
-    value: &Value,
-) -> Result<bool, DbError> {
+/// One property of a message its author posted, set.
+pub(crate) struct Property<'a> {
+    pub thread: &'a str,
+    pub message: i64,
+    pub author: &'a User,
+    pub name: &'a str,
+    pub value: &'a Value,
+    /// What the thread's people are told it is: `MessageUpdate`, or `NewMessage` after [`post_untold`].
+    pub told_as: &'a str,
+}
+
+/// Sets it and tells the thread's people. Whether the message was there.
+pub(crate) async fn set_property(app: &App, set: Property<'_>) -> Result<bool, DbError> {
+    let Property {
+        thread,
+        message,
+        author,
+        name,
+        value,
+        told_as,
+    } = set;
     let changed = message_repo::update(
         &app.db,
         thread,
@@ -176,6 +205,6 @@ pub(crate) async fn set_property(
         return Ok(false);
     };
     let members = repo::members(&app.db, thread).await?;
-    events::publish(app, &caller(app, author), &members, "MessageUpdate", &row.value()?).await;
+    events::publish(app, &caller(app, author), &members, told_as, &row.value()?).await;
     Ok(true)
 }

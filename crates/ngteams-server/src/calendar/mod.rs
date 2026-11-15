@@ -5,10 +5,14 @@
 //! Whose an event is comes from the database on every request: its organizer changes and cancels it, an account
 //! it invites reads it, answers it and takes it off its own calendar, and nobody else learns that it exists.
 
+mod activity;
 mod draft;
+mod group;
 mod invite;
 mod meeting;
+mod options;
 mod people;
+mod places;
 mod recur;
 pub(crate) mod repo;
 mod scheduler;
@@ -55,6 +59,17 @@ pub(crate) fn routes() -> Router<Arc<App>> {
         .route("/v2.0/me/calendars/events/{id}/respond", put(write::respond))
         .route("/v2.0/me/calendars/findMeetingTimes", put(scheduler::meeting_times))
         .route("/v2.0/me/calendars/schedules", put(scheduler::schedules))
+        .route(
+            "/beta/meetings/v1/options/{tenant}/{organizer}/{chat}/0/0",
+            get(options::read).post(options::save),
+        )
+        .route("/v2.0/places/roomLists", get(places::lists))
+        .route("/v2.0/places/rooms", get(places::rooms))
+        .route("/v2.0/places/{list}/roomList/rooms", get(places::rooms_of))
+        .route("/v2.0/groups/{group}/calendars/default/events", post(group::create))
+        .route("/v2.0/groups/{group}/calendars/events/iCalUId/{uid}", get(group::read))
+        .route("/v2.0/groups/{group}/calendars/events/{uid}", put(group::update))
+        .route("/v2.0/groups/{group}/calendars/events/{uid}/cancel", put(group::cancel))
         .route(
             "/beta/me/calendarEvents/privateMeeting/schedulingService/create",
             post(meeting::create),
@@ -125,8 +140,17 @@ async fn book<'a>(app: &'a App, events: &[&Event]) -> Result<Book<'a>, DbError> 
     } else {
         meeting::of_chats(&app.db, &chats).await?
     };
+    let mut teams = HashMap::new();
+    for id in events.iter().filter_map(|event| event.team_id.as_ref()) {
+        if !teams.contains_key(id)
+            && let Some(team) = crate::teams::repo::team(&app.db, id).await?
+        {
+            teams.insert(id.clone(), team);
+        }
+    }
     Ok(Book {
         app,
+        teams,
         users: users.into_iter().map(|user| (user.id.clone(), user)).collect(),
         meetings: meetings
             .into_iter()
@@ -216,6 +240,7 @@ async fn view(State(app): State<Arc<App>>, me: Me, Query(query): Query<Params>) 
                 occurrence: placed.occurrence,
                 mine: placed.seen.1.as_ref(),
                 book: &book,
+                team_view: false,
             };
             shown.entry()
         })
@@ -332,6 +357,7 @@ async fn read(State(app): State<Arc<App>>, me: Me, Path(id): Path<String>) -> An
         occurrence: found.occurrence,
         mine: found.mine.as_ref(),
         book: &book,
+        team_view: false,
     };
     Ok(Json(shown.full(&attendees)))
 }

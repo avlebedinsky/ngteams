@@ -62,6 +62,8 @@ pub struct Config {
     pub trouter: TrouterConfig,
     pub media: MediaConfig,
     pub calling: crate::calling::config::CallingConfig,
+    /// The meeting rooms the scheduling form's room finder lists (`[[rooms]]`).
+    pub rooms: Vec<RoomConfig>,
 }
 
 impl std::fmt::Debug for Config {
@@ -223,6 +225,25 @@ impl TrouterConfig {
     }
 }
 
+/// A meeting room: a place an event can name. It is no account and takes no invitation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RoomConfig {
+    pub name: String,
+    /// Its mailbox, as the room finder names it.
+    pub address: String,
+    /// The room list (a building) it is in, by name.
+    pub list: Option<String>,
+    /// How many people it seats.
+    pub capacity: Option<u32>,
+    pub floor: Option<String>,
+    pub street: Option<String>,
+    pub audio_device: Option<String>,
+    pub video_device: Option<String>,
+    pub display_device: Option<String>,
+    pub wheelchair: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -244,6 +265,7 @@ impl Default for Config {
             trouter: TrouterConfig::default(),
             media: MediaConfig::default(),
             calling: crate::calling::config::CallingConfig::default(),
+            rooms: Vec::new(),
         }
     }
 }

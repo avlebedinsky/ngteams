@@ -3,7 +3,8 @@
 
 use serde_json::Value;
 
-use super::{Answer, Error};
+use super::{Answer, Error, places};
+use crate::app::App;
 use crate::db::users::{self, User};
 use crate::db::{Db, DbError};
 
@@ -16,8 +17,10 @@ pub(super) struct Invitee {
 }
 
 /// The accounts the `attendees` of a sent event name, in order, each once: not the organizer `me`, not an entry
-/// that names the organizer's own part, and not the mailbox `skip` (a channel meeting's team).
-pub(super) async fn invitees(db: &Db, me: &str, attendees: &Value, skip: Option<&str>) -> Answer<Vec<Invitee>> {
+/// that names the organizer's own part, and not a mailbox that is no account: a room's, or `skip` (a channel
+/// meeting's team).
+pub(super) async fn invitees(app: &App, me: &str, attendees: &Value, skip: Option<&str>) -> Answer<Vec<Invitee>> {
+    let db = &app.db;
     let entries = match attendees {
         Value::Null => return Ok(Vec::new()),
         Value::Array(entries) if entries.len() <= MOST => entries,
@@ -26,7 +29,8 @@ pub(super) async fn invitees(db: &Db, me: &str, attendees: &Value, skip: Option<
     let mut invited: Vec<Invitee> = Vec::new();
     for entry in entries {
         let address = entry["address"].as_str().map(str::trim).unwrap_or_default();
-        if entry["type"].as_str() == Some("Organizer") || skip.is_some_and(|skip| skip.eq_ignore_ascii_case(address)) {
+        let no_account = skip.is_some_and(|skip| skip.eq_ignore_ascii_case(address)) || places::is_room(app, address);
+        if entry["type"].as_str() == Some("Organizer") || no_account {
             continue;
         }
         let user = account(db, entry["mri"].as_str(), address)

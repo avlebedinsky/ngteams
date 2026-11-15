@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use super::repo::Event;
 use crate::app::App;
-use crate::chatsvc::service::{self, Post};
+use crate::chatsvc::service::{self, Post, Property};
 use crate::db::DbError;
 use crate::db::users::User;
 
@@ -73,6 +73,44 @@ pub(super) async fn scheduled(
     service::post(app, post).await
 }
 
+/// Posts a channel's meeting to its channel for who scheduled it. The meeting's link names its own post, so the
+/// post is kept first and told once it names the link `link` gives for it.
+pub(super) async fn posted(
+    app: &App,
+    event: &mut Event,
+    organizer: &User,
+    link: impl Fn(&Event) -> String,
+) -> Result<(), DbError> {
+    let Some(thread) = event.channel_id.clone() else {
+        return Ok(());
+    };
+    let mut properties = Map::new();
+    properties.insert("meeting".into(), meeting(app, event, "", false));
+    let post = Post {
+        thread: &thread,
+        author: organizer,
+        kind: "RichText/Html",
+        content: "Scheduled a meeting",
+        properties,
+        under: None,
+    };
+    let Some(post) = service::post_untold(app, post).await? else {
+        return Ok(());
+    };
+    super::repo::set_post(&app.db, &event.id, post).await?;
+    event.post_id = Some(post);
+    let set = Property {
+        thread: &thread,
+        message: post,
+        author: organizer,
+        name: "meeting",
+        value: &meeting(app, event, &link(event), false),
+        told_as: "NewMessage",
+    };
+    service::set_property(app, set).await?;
+    Ok(())
+}
+
 /// Writes the meeting as it now is over the message that told it.
 pub(super) async fn changed(
     app: &App,
@@ -82,8 +120,15 @@ pub(super) async fn changed(
     organizer: &User,
 ) -> Result<(), DbError> {
     if let Some(post) = event.post_id {
-        let meeting = meeting(app, event, link, false);
-        service::set_property(app, thread, post, organizer, "meeting", &meeting).await?;
+        let set = Property {
+            thread,
+            message: post,
+            author: organizer,
+            name: "meeting",
+            value: &meeting(app, event, link, false),
+            told_as: "MessageUpdate",
+        };
+        service::set_property(app, set).await?;
     }
     Ok(())
 }

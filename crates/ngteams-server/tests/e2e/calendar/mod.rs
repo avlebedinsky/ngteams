@@ -1,7 +1,10 @@
 //! The calendar: the real own-cloud engine's scheduling flows against the server's middle tier.
 
+mod channels;
 pub(crate) mod events;
 pub(crate) mod meetings;
+mod options;
+mod push;
 mod scheduler;
 
 use teams_proto::{CalendarEvent, EventDraft, EventShowAs, EventTime, Organizer, ZonedTime};

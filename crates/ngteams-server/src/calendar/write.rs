@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde_json::Value;
 
+use super::activity::{self, Change};
 use super::draft::Draft;
 use super::people::{self, Invitee};
 use super::repo::{self, Attendee, Event};
@@ -31,7 +32,7 @@ impl Asked {
     async fn read(app: &App, me: &str, sent: &Value, query: &Params, may_repeat: bool) -> Answer<Self> {
         Ok(Self {
             draft: Draft::read(sent, may_repeat)?,
-            invitees: people::invitees(&app.db, me, &sent["attendees"], None).await?,
+            invitees: people::invitees(app, me, &sent["attendees"], None).await?,
             online: query.get("isOnlineMeeting").map(String::as_str) == Some("true"),
         })
     }
@@ -134,6 +135,7 @@ pub(super) async fn create(
     };
     repo::insert(&app.db, &event, &invitations(&event.id, &wanted)).await?;
     tell(&app, &mut event, &organizer, &wanted, &[]).await?;
+    activity::tell(&app, &ids(&wanted), Change::Created, &event, &organizer).await;
     let book = book(&app, &[&event]).await?;
     let shown = Shown {
         reader: &me.id,
@@ -141,11 +143,16 @@ pub(super) async fn create(
         occurrence: None,
         mine: None,
         book: &book,
+        team_view: false,
     };
     Ok((StatusCode::CREATED, Json(wire::events(vec![shown.entry()]))).into_response())
 }
 
-fn invitations(event: &str, wanted: &[(String, bool)]) -> Vec<Attendee> {
+pub(super) fn ids(wanted: &[(String, bool)]) -> Vec<String> {
+    wanted.iter().map(|(id, _)| id.clone()).collect()
+}
+
+pub(super) fn invitations(event: &str, wanted: &[(String, bool)]) -> Vec<Attendee> {
     wanted
         .iter()
         .enumerate()
@@ -199,12 +206,12 @@ pub(super) async fn update(
     repo::sync_attendees(&app.db, &rows, &wanted, moved).await?;
     if one {
         // one occurrence: whoever it adds joins the series' chat; the series' own message stays the series'
-        if let Some(chat) = &row.meeting_chat {
-            let invited: Vec<String> = wanted.iter().map(|(id, _)| id.clone()).collect();
-            if service::set_members(&app.db, chat, &invited, &[]).await? {
-                service::announce(&app, chat, &organizer).await?;
-            }
+        if let Some(chat) = &row.meeting_chat
+            && service::set_members(&app.db, chat, &ids(&wanted), &[]).await?
+        {
+            service::announce(&app, chat, &organizer).await?;
         }
+        activity::tell(&app, &ids(&wanted), Change::Updated, &row, &organizer).await;
         return Ok(StatusCode::NO_CONTENT);
     }
     if online && row.meeting_chat.is_none() {
@@ -213,17 +220,18 @@ pub(super) async fn update(
         repo::set_meeting(&app.db, &row.id, &made.chat_id).await?;
         row.meeting_chat = Some(made.chat_id);
     }
-    let gone: Vec<String> = before
-        .into_iter()
-        .map(|(attendee, _)| attendee.user_id)
-        .filter(|id| !wanted.iter().any(|(kept, _)| kept == id))
-        .collect();
+    let before: Vec<String> = before.into_iter().map(|(attendee, _)| attendee.user_id).collect();
+    let (kept, new): (Vec<String>, Vec<String>) = ids(&wanted).into_iter().partition(|id| before.contains(id));
+    let gone: Vec<String> = before.into_iter().filter(|id| !kept.contains(id)).collect();
     tell(&app, &mut row, &organizer, &wanted, &gone).await?;
+    activity::tell(&app, &kept, Change::Updated, &row, &organizer).await;
+    activity::tell(&app, &new, Change::Created, &row, &organizer).await;
+    activity::tell(&app, &gone, Change::Canceled, &row, &organizer).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// One occurrence given fields of its own: kept as a row under its series.
-async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -> Answer<Event> {
+pub(super) async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -> Answer<Event> {
     let row = Event {
         start_ms: draft.start_ms,
         end_ms: draft.end_ms,
@@ -239,7 +247,7 @@ async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -> Answer<Ev
 
 /// An event or a whole series changed; whether a series' rule or times changed with it, which forgets what its
 /// occurrences were given on their own.
-async fn whole_changed(app: &App, found: &Found, draft: Draft) -> Answer<(Event, bool)> {
+pub(super) async fn whole_changed(app: &App, found: &Found, draft: Draft) -> Answer<(Event, bool)> {
     let at = crate::chatsvc::now();
     let before: Value = serde_json::from_str(&found.event.body).unwrap_or_default();
     let rule = |fields: &Value| {
@@ -278,7 +286,8 @@ async fn whole_changed(app: &App, found: &Found, draft: Draft) -> Answer<(Event,
 /// their calendars, and its chat is told; one occurrence is kept as cancelled under its series.
 async fn end(app: &App, me: &Me, found: &Found, note: Option<&str>) -> Answer<()> {
     let at = crate::chatsvc::now();
-    let invited = !repo::attendees(&app.db, &found.event.id).await?.is_empty();
+    let attendees = repo::attendees(&app.db, &found.event.id).await?;
+    let invited = !attendees.is_empty();
     let mut row = found.own_row();
     row.cancelled = true;
     row.version = at;
@@ -292,12 +301,14 @@ async fn end(app: &App, me: &Me, found: &Found, note: Option<&str>) -> Answer<()
     if !invited {
         return Ok(());
     }
+    let organizer = account(app, &me.id).await?;
     if let Some(chat) = &row.meeting_chat
         && let Some(meeting) = meeting::of_chat(&app.db, chat).await?
     {
-        let organizer = account(app, &me.id).await?;
         invite::cancelled(app, chat, &row, &meeting.join_link(app), &organizer, note).await?;
     }
+    let told: Vec<String> = attendees.into_iter().map(|(attendee, _)| attendee.user_id).collect();
+    activity::tell(app, &told, Change::Canceled, &row, &organizer).await;
     Ok(())
 }
 
