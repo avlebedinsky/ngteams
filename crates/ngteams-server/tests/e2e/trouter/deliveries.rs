@@ -233,12 +233,11 @@ async fn a_new_chat_is_delivered_to_its_members_as_a_thread_update() {
             .await
             .unwrap();
         assert_eq!(made.state, OutboxState::Sent, "{made:?}");
-        assert_eq!(
-            delivery(&mut push).await.event,
-            ChatEvent::Unknown {
-                resource_type: "ThreadUpdate".into()
-            }
-        );
+        let ChatEvent::ThreadUpdate { thread, roster_version } = delivery(&mut push).await.event else {
+            panic!("a thread update");
+        };
+        assert_eq!(Some(thread), made.message_id);
+        assert!(roster_version.is_some());
         push.stop().await;
         pair.stop().await;
     }

@@ -238,7 +238,7 @@ async fn remove_member(
         Changed::LastOwner => return Err(Error::LAST_OWNER),
     }
     super::folders::forget(&app.db, &actor.tenant, id, &channel.id).await;
-    announce(&app, &actor.tenant, &channel.id).await;
+    crate::chatsvc::channels::announce_with_gone(&app, &actor.tenant, &channel.id, id).await;
     Ok(Json(json!({"multipleStatus": [], "asyncOperations": []})))
 }
 

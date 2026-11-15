@@ -14,6 +14,9 @@
 //!   stores a carried bookmark even when `propertiesUpdated` does not name the horizon.
 //! - `CustomUserProperties`: the account's own properties that changed; its mark-all-read horizon when they name one
 //!   ([`ChatEvent::AppReadHorizon`], `docs/protocol/chat.md`), else [`ChatEvent::Unknown`].
+//! - `ThreadUpdate`: a thread changed (a chat's people, a team's or a channel's name, people or state, a thread made
+//!   or deleted), its `resource` the thread as a thread read gives it ([`ChatEvent::ThreadUpdate`]: its `id`, and its
+//!   `rosterVersion` when it carries one); one naming no thread is [`ChatEvent::Unknown`].
 //! - anything else is [`ChatEvent::Unknown`] with its `resourceType`, and logged by that kind only.
 //!
 //! A delivery is applied by conversation, message id and version: the service replays unanswered ones on connect
@@ -63,6 +66,11 @@ pub enum ChatEvent {
     AppReadHorizon(AppConsumptionHorizon),
     /// The chat changed (its last message, its thread properties, …).
     ConversationUpdate { conversation: Box<Conversation> },
+    /// A thread changed: its id, and the `rosterVersion` the delivery carries, when it carries one.
+    ThreadUpdate {
+        thread: String,
+        roster_version: Option<u64>,
+    },
     /// A delivery of another kind, or one whose body doesn't read: its `resourceType` (empty when there was none).
     Unknown { resource_type: String },
 }
@@ -107,6 +115,7 @@ impl ChatEvent {
             "NewMessage" => new_message(resource),
             "MessageUpdate" => message_update(resource),
             "ConversationUpdate" => conversation_update(resource),
+            "ThreadUpdate" => thread_update(resource),
             "CustomUserProperties" => AppConsumptionHorizon::from_properties(resource).map(ChatEvent::AppReadHorizon),
             _ => None,
         };
@@ -168,6 +177,14 @@ fn change_of(message: &Message) -> Change {
     } else {
         Change::Other
     }
+}
+
+fn thread_update(resource: &Value) -> Option<ChatEvent> {
+    let thread = resource["id"].as_str().filter(|id| !id.is_empty())?.to_owned();
+    Some(ChatEvent::ThreadUpdate {
+        thread,
+        roster_version: resource["rosterVersion"].as_u64(),
+    })
 }
 
 fn conversation_update(resource: &Value) -> Option<ChatEvent> {

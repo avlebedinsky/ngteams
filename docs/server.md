@@ -287,8 +287,10 @@ channel; the chat service's thread routes answer their own 403 to anyone not in 
 
 These changes are published to the team's or channel's people as a `ThreadUpdate` on `push:<mri>`: a team made,
 edited, archived, restored or deleted (the thread as it last was, with `isDeleted` true), its people and their
-roles, its settings, and a channel made, renamed, archived, restored, deleted, moderated or given other people. A
-channel's show-by-default, the team's picture, codes and tags reach other clients only with their next teams read.
+roles, its settings, and a channel made, renamed, archived, restored, deleted, moderated or given other people.
+Someone taken off a team or out of a private channel, or gone from it by themself, is told it too. A running client
+reads its teams again on each such update, so its team and channel lists follow live. A channel's show-by-default,
+the team's picture, codes and tags reach other clients only with their next teams read.
 
 Limits: 200 standard and 30 private channels a team (`MaxChannelLimitExceeded`,
 `MaxPrivateChannelLimitExceeded`), 200 tags a team, 200 sections an account and 1000 channels a section; a team's
@@ -997,8 +999,9 @@ are added (400). Someone already in the chat is no change (200).
   they read from where the new add says.
 - **Events.** Each change writes the thread's own message (`ThreadActivity/AddMember` with each target's
   `sharehistorytime`, `ThreadActivity/DeleteMember`), moves the thread's `rosterVersion`, and publishes the message
-  (`NewMessage`) and the thread (`ThreadUpdate`) to the people in the chat after the change. Someone taken out is
-  told the event of their going and nothing after it. A thread's own message can't be edited, deleted or reacted to.
+  (`NewMessage`) and the thread (`ThreadUpdate`) to the people in the chat after the change; each running client
+  reads the chat's people again on the update, so every member's list follows live. Someone taken out is told the
+  event of their going and nothing after it. A thread's own message can't be edited, deleted or reacted to.
 - **Concurrent changes.** A post, edit or reaction checks its sender's membership and reads the thread's people in
   its own transaction, under the shared version clock. Its event and its activity items go to those people and
   nobody else, so a member removed while the request ran is told nothing of a message written after their removal.

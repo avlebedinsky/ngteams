@@ -237,6 +237,8 @@ struct How {
     throttle_first_write: bool,
     /// The push channel's reconnect wait.
     backoff: Duration,
+    /// The reads reach CSA's teams read too.
+    csa: bool,
 }
 
 impl Default for How {
@@ -245,6 +247,7 @@ impl Default for How {
             push: true,
             throttle_first_write: false,
             backoff: Duration::from_millis(50),
+            csa: false,
         }
     }
 }
@@ -320,12 +323,14 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         failing: Arc::clone(&reads_fail),
         held: Arc::clone(&reads_held),
     });
-    let client = Arc::new(Client::new(
-        HttpTransport::with_mock_origin(reads, CHAT_BASE, &origin)
-            .unwrap()
-            .with_middle_tier(teams_mock::MIDDLE_TIER_BASE)
-            .unwrap(),
-    ));
+    let mut reads = HttpTransport::with_mock_origin(reads, CHAT_BASE, &origin)
+        .unwrap()
+        .with_middle_tier(teams_mock::MIDDLE_TIER_BASE)
+        .unwrap();
+    if how.csa {
+        reads = reads.with_csa(teams_mock::CSA_BASE).unwrap();
+    }
+    let client = Arc::new(Client::new(reads));
     let push = how.push.then(|| {
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
             .unwrap()
@@ -1875,6 +1880,7 @@ const QUIET: How = How {
     push: false,
     throttle_first_write: false,
     backoff: Duration::from_millis(50),
+    csa: false,
 };
 
 #[tokio::test]
@@ -4190,4 +4196,127 @@ async fn catch_up_publishes_notes_and_completion_before_slow_stored_copy_retries
     .expect("notes or catch-up completion waited for the copy retry");
     a.shutdown();
     assert_eq!(copy_reads(&lab, &blocked_shapes()).await, 1);
+}
+
+// --- a thread's change over the push channel ---
+
+/// A `ThreadUpdate` of `thread`, carrying `roster_version` when given, as the chat service delivers it.
+fn thread_update(thread: &str, roster_version: Option<u64>) -> Value {
+    let mut resource = json!({"id": thread, "type": "Thread"});
+    if let Some(version) = roster_version {
+        resource["rosterVersion"] = json!(version);
+    }
+    json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": resource})
+}
+
+/// The thread reads of `thread` the mock got.
+async fn thread_reads_of(lab: &Lab, thread: &str) -> usize {
+    let path = format!("/api/chatsvc/amer/v1/threads/{thread}");
+    let requests = lab.mock.received_requests().await;
+    let reads = requests
+        .iter()
+        .filter(|request| request.method.as_str() == "GET" && decoded(request.url.path()) == path);
+    reads.count()
+}
+
+/// The chat's members as `native`'s store lists them, sorted.
+async fn members_of(native: &Native, chat: &str) -> Vec<String> {
+    let members = native.handle.members(chat).await.unwrap();
+    let mut mris: Vec<String> = members.into_iter().map(|member| member.mri).collect();
+    mris.sort();
+    mris
+}
+
+/// Every delivery before it has been taken in once typing in `chat` delivered after them is told.
+async fn after_what_came_before(lab: &Lab, native: &mut Native, chat: &str) {
+    lab.trouter
+        .deliver_chat(native.me, &control_delivery(chat, LAB_A, "Control/Typing"));
+    native
+        .event(|event| matches!(event, Event::Typing { conversation, .. } if conversation == chat).then_some(()))
+        .await;
+}
+
+#[tokio::test]
+async fn a_thread_update_of_a_stored_group_chat_reads_its_people_again_unless_its_roster_is_no_newer() {
+    let lab = Lab::start().await;
+    let chat = lab.mock.add_group("Launch", &[LAB_A, LAB_B, LAB_C]).unwrap();
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    let mut three = vec![LAB_A.to_owned(), LAB_B.to_owned(), LAB_C.to_owned()];
+    three.sort();
+    assert_eq!(members_of(&b, &chat).await, three);
+
+    // a adds someone; b's client, which only looks on, learns of it from the thread's update alone
+    let added = a
+        .write(Action::AddMembers {
+            conversation: chat.clone(),
+            members: vec![Mri::new(OUTSIDER)],
+            history: ChatHistory::All,
+        })
+        .await;
+    assert_eq!(added.state, OutboxState::Sent, "{added:?}");
+    assert_eq!(members_of(&b, &chat).await, three, "nothing told b yet");
+    lab.trouter.deliver_chat(LAB_B, &thread_update(&chat, None));
+    b.event(|event| {
+        matches!(event, Event::ConversationChanged { conversation } if *conversation == chat).then_some(())
+    })
+    .await;
+    let mut four = three.clone();
+    four.push(OUTSIDER.to_owned());
+    four.sort();
+    assert_eq!(members_of(&b, &chat).await, four);
+
+    // an update whose roster is no newer than the stored one reads nothing
+    let reads = thread_reads_of(&lab, &chat).await;
+    lab.trouter.deliver_chat(LAB_B, &thread_update(&chat, Some(1)));
+    after_what_came_before(&lab, &mut b, &chat).await;
+    assert_eq!(thread_reads_of(&lab, &chat).await, reads);
+    a.shutdown();
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn a_thread_update_of_a_team_or_a_channel_reads_the_teams_again_and_of_a_1_1_chat_reads_nothing() {
+    let lab = Lab::start().await;
+    let mut a = native(
+        &lab,
+        LAB_A,
+        How {
+            csa: true,
+            ..How::default()
+        },
+    );
+    a.ready().await;
+    let csa_reads = || async {
+        let requests = lab.mock.received_requests().await;
+        let reads = requests
+            .iter()
+            .filter(|request| request.url.path() == "/api/csa/amer/api/v3/teams/users/me");
+        reads.count()
+    };
+    assert_eq!(a.handle.teams().await.unwrap(), None);
+    a.event(|event| matches!(event, Event::Teams).then_some(())).await;
+    assert_eq!(csa_reads().await, 1);
+
+    // a 1:1 chat's update reads neither the teams nor the chat
+    let one_to_one = thread_reads_of(&lab, AB_CHAT).await;
+    lab.trouter.deliver_chat(LAB_A, &thread_update(AB_CHAT, None));
+    after_what_came_before(&lab, &mut a, AB_CHAT).await;
+    assert_eq!(thread_reads_of(&lab, AB_CHAT).await, one_to_one);
+    assert_eq!(csa_reads().await, 1);
+
+    for (thread, reads) in [(teams_mock::CHANNEL, 2), (teams_mock::TEAM_CHANNEL, 3)] {
+        lab.trouter.deliver_chat(LAB_A, &thread_update(thread, None));
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while csa_reads().await < reads {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{thread}: the teams weren't read again"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    a.shutdown();
 }

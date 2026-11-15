@@ -260,8 +260,14 @@ carries `emotions` with neither (14 of 14: an edited message keeps its old `edit
 `propertiesUpdated` does not name the horizon. Any other delivery is the chat's update. A `CustomUserProperties`
 (`resourceLink` `/v1/users/ME/properties`, seen in a personal build's debug log with `recentReactions` and
 `inQuarantine`) carries the account's own properties that changed; it is read only when it names
-`appConsumptionHorizon` ([chat.md](chat.md#which-chats-are-unread)). Any other `resourceType` is kept as `Unknown` by
-its name. No delivery of another member's read receipt and none of a new chat were seen, so the mock
+`appConsumptionHorizon` ([chat.md](chat.md#which-chats-are-unread)). A `ThreadUpdate` is a thread's change: Teams
+sends one before a blocked message's copy ([chat.md](chat.md#messages-a-policy-blocked), its resource naming only the
+thread's `id`), and the own server sends one with the thread read's shape (`id`, `rosterVersion`, `members`,
+`properties`) for a chat made or its people changed and for a team or channel made, changed or removed
+([server.md](../server.md#chat-events)). The engine reads its `id` and `rosterVersion`: a team's or channel's thread
+reads the teams again once such updates pause (half a second without one, five seconds after the first at most), a stored group or meeting chat reads its people again unless the carried `rosterVersion` is no
+newer than the stored one, and any other thread (`48:generic`, a 1:1 chat, one not stored yet) reads nothing. Any
+other `resourceType` is kept as `Unknown` by its name. No delivery of another member's read receipt and none of a new chat were seen, so the mock
 doesn't deliver those (`teams_mock::TrouterMock`).
 
 ## Answering deliveries

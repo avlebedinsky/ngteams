@@ -171,8 +171,9 @@ pub(super) fn conversation(entry: &mut Value, caller: &Caller, chat: &Chat, plac
     entry["memberProperties"]["role"] = json!(roles.name(&caller.id));
 }
 
-/// The `ThreadUpdate` of `thread` for each of its people, by the channel it is published on.
-async fn updates(app: &App, tenant: &str, thread: &str, deleted: bool) -> Vec<(String, Value)> {
+/// The `ThreadUpdate` of `thread` for each of its people and for `gone` (someone just taken out of it or gone from
+/// it), by the channel it is published on.
+async fn updates(app: &App, tenant: &str, thread: &str, deleted: bool, gone: Option<&str>) -> Vec<(String, Value)> {
     let found = async {
         let Some(chat) = super::repo::chat(&app.db, thread).await? else {
             return Ok(None);
@@ -192,15 +193,19 @@ async fn updates(app: &App, tenant: &str, thread: &str, deleted: bool) -> Vec<(S
             return Vec::new();
         }
     };
-    members
-        .iter()
-        .map(|member| {
-            let mut resource = self::thread(app, tenant, &chat, &place, &member.user_id, &roles);
+    let mut readers: Vec<&str> = members.iter().map(|member| member.user_id.as_str()).collect();
+    if let Some(gone) = gone.filter(|gone| !readers.contains(gone)) {
+        readers.push(gone);
+    }
+    readers
+        .into_iter()
+        .map(|reader| {
+            let mut resource = self::thread(app, tenant, &chat, &place, reader, &roles);
             if deleted {
                 resource["isDeleted"] = json!(true);
             }
             (
-                format!("push:8:orgid:{}", member.user_id),
+                format!("push:8:orgid:{reader}"),
                 json!({"resourceType": "ThreadUpdate", "resource": resource}),
             )
         })
@@ -217,12 +222,18 @@ pub(crate) async fn publish(app: &App, updates: Vec<(String, Value)>) {
 
 /// Tells everyone in `thread` that it changed (a team's or channel's name, people, state), as a chat's creation does.
 pub(crate) async fn announce(app: &App, tenant: &str, thread: &str) {
-    publish(app, updates(app, tenant, thread, false).await).await;
+    publish(app, updates(app, tenant, thread, false, None).await).await;
+}
+
+/// As [`announce`], `gone` (taken off a team or out of a private channel, or gone by themself) told too, so their
+/// clients read their teams again and the team or channel leaves their lists.
+pub(crate) async fn announce_with_gone(app: &App, tenant: &str, thread: &str, gone: &str) {
+    publish(app, updates(app, tenant, thread, false, Some(gone)).await).await;
 }
 
 /// What tells everyone in `thread` that it is gone (`isDeleted`), read before the delete and published after it.
 pub(crate) async fn farewell(app: &App, tenant: &str, thread: &str) -> Vec<(String, Value)> {
-    updates(app, tenant, thread, true).await
+    updates(app, tenant, thread, true, None).await
 }
 
 type Params = HashMap<String, String>;

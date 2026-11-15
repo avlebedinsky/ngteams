@@ -273,7 +273,11 @@ async fn update_member(
     for channel in &handed {
         announce(&app, &actor.tenant, channel).await;
     }
-    announce(&app, &actor.tenant, &id).await;
+    if role.is_none() {
+        channels::announce_with_gone(&app, &actor.tenant, &id, user).await;
+    } else {
+        announce(&app, &actor.tenant, &id).await;
+    }
     Ok(Json(json!({"value": true})))
 }
 

@@ -3131,6 +3131,8 @@ where
         self.sync_favourite_notes().await;
         // a team the stored list doesn't name yet, as a read or delivery brought its thread
         self.note_noticed();
+        // team and channel changes pushed, once they pause
+        self.inbox.teams().read_pushed_if_due(Instant::now());
         // profile lookups that failed on the way, their wait over
         self.profiles.retry_due();
         // the watched people's presence, when a read is due
@@ -3282,8 +3284,41 @@ where
                 }
                 self.brought(source);
             }
+            ChatEvent::ThreadUpdate { thread, roster_version } => {
+                self.on_thread(&thread, roster_version).await;
+                self.brought(source);
+            }
             // logged by its kind where it was read
             ChatEvent::Unknown { .. } => {}
+        }
+    }
+
+    /// A thread changed (`ThreadUpdate`): a team's or a channel's thread reads the teams again from the tick once such
+    /// changes pause (a team or channel made, renamed or removed, people added or gone, [`Teams::note_pushed`]), and a
+    /// stored group or meeting chat reads its people again
+    /// unless the delivery's `rosterVersion` is no newer than the stored one. Any other thread (the service's stream
+    /// of blocked messages' copies, a 1:1 chat, a chat the store doesn't know yet) is left to what follows it.
+    async fn on_thread(&mut self, thread: &str, roster_version: Option<u64>) {
+        if chat::is_generic_stream(thread) {
+            return;
+        }
+        if teams_proto::is_team_thread_id(thread) {
+            self.inbox.teams().note_pushed(Instant::now());
+            return;
+        }
+        match self.store.conversation(thread) {
+            Ok(Some(stored)) if matches!(stored.kind, ConversationKind::Group | ConversationKind::Meeting) => {}
+            Ok(_) => return,
+            Err(error) => return self.missed("reading a changed thread's chat", error),
+        }
+        let delivered = roster_version.and_then(|version| i64::try_from(version).ok());
+        match self.store.roster_version(thread) {
+            Ok(Some(stored)) if delivered.is_some_and(|delivered| delivered <= stored) => return,
+            Ok(_) => {}
+            Err(error) => return self.missed("reading a changed chat's roster version", error),
+        }
+        if let Err(error) = self.catch_up.sync_members(&mut self.store, thread).await {
+            self.missed("reading a changed chat's people", error);
         }
     }
 

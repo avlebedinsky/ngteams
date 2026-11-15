@@ -13,7 +13,10 @@
 //!   at once, whatever the stored list's age ([`Teams::note_conversation`]), once per such thread a run, so a team the
 //!   account was added to shows in its list (and its channels' meetings are found) without waiting out
 //!   [`TEAMS_MAX_AGE`]. So does a team's activity delivered on its thread (`ThreadActivity/…`: people added or gone, a
-//!   channel made, renamed or deleted, [`Teams::note_activity`]), so a new channel shows too.
+//!   channel made, renamed or deleted, [`Teams::note_activity`]), so a new channel shows too; and a team's or
+//!   channel's `ThreadUpdate` (a team or channel made, renamed or removed, people added or gone, the account among
+//!   them, [`Teams::note_pushed`]), read from the tick once such changes pause, so a burst of them reads the teams a
+//!   few times rather than once each.
 //! - **And the favourites (chats and channels)**: the same answer's `Favorites` folder (the chats and channels Teams
 //!   lists under "Favorites" above its chats, in the user's order), stored with the teams when it could be read
 //!   ([`TeamsRead::favorites`]; a read that couldn't keeps the stored ones), a change told as
@@ -79,6 +82,13 @@ pub(crate) struct TeamsRead {
 /// How long a channel just made is kept in the list when a read doesn't name it yet.
 const CREATED_KEPT: Duration = Duration::from_mins(10);
 
+/// Team and channel changes pushed one after another (`ThreadUpdate`) are gathered into one read of the teams: it
+/// starts from the tick once none came for this long, ...
+pub(crate) const PUSHED_QUIET: Duration = Duration::from_millis(500);
+/// ... or this long after the first of them, however many follow, so a burst (an owner making many channels) reads
+/// the teams a few times, not once per change.
+pub(crate) const PUSHED_AT_MOST: Duration = Duration::from_secs(5);
+
 /// The background read of the teams.
 pub(crate) struct Teams<C> {
     client: Arc<Client<HttpTransport<C>>>,
@@ -96,6 +106,8 @@ pub(crate) struct Teams<C> {
     known: Option<HashSet<String>>,
     /// The team threads the stored list didn't name that read the teams again: each reads them once a run.
     asked: HashSet<String>,
+    /// The first and the last team or channel change pushed since the last read they started ([`Self::note_pushed`]).
+    pushed: Option<(Instant, Instant)>,
 }
 
 impl<C: Credentials + 'static> Teams<C> {
@@ -114,6 +126,31 @@ impl<C: Credentials + 'static> Teams<C> {
             changes: Vec::new(),
             known: None,
             asked: HashSet::new(),
+            pushed: None,
+        }
+    }
+
+    /// A team's or channel's change was pushed at `now` (its `ThreadUpdate`: a team or channel made, renamed or
+    /// removed, people added or gone, the account among them): the teams are read again from the tick, once the
+    /// changes come to a pause ([`Self::read_pushed_if_due`]).
+    pub(crate) fn note_pushed(&mut self, now: Instant) {
+        match &mut self.pushed {
+            Some((_, last)) => *last = now,
+            None => self.pushed = Some((now, now)),
+        }
+    }
+
+    /// From the tick: the read the pushed changes are owed starts at `now` when none came for [`PUSHED_QUIET`], or
+    /// [`PUSHED_AT_MOST`] after the first of them.
+    pub(crate) fn read_pushed_if_due(&mut self, now: Instant) {
+        let Some((first, last)) = self.pushed else {
+            return;
+        };
+        if now.saturating_duration_since(last) >= PUSHED_QUIET || now.saturating_duration_since(first) >= PUSHED_AT_MOST
+        {
+            self.pushed = None;
+            log::info!("a team's or channel's change was pushed: reading the teams again");
+            self.read_now();
         }
     }
 
@@ -542,5 +579,39 @@ mod tests {
         assert!(!teams.note_change(&mut store, None).expect("noted"), "nothing to store");
         assert!(teams.busy(), "a write with no change reads the teams again");
         assert!(matches!(teams.next().await, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn pushed_changes_read_the_teams_once_they_pause_or_at_most_a_while_after_the_first() {
+        use super::{PUSHED_AT_MOST, PUSHED_QUIET};
+        let mut teams = teams_without_csa();
+        let start = tokio::time::Instant::now();
+        teams.read_pushed_if_due(start + PUSHED_AT_MOST);
+        assert!(!teams.busy(), "nothing was pushed");
+
+        // three changes close together: one read, once they paused
+        for n in 0..3 {
+            teams.note_pushed(start + PUSHED_QUIET / 4 * n);
+        }
+        let last = start + PUSHED_QUIET / 2;
+        teams.read_pushed_if_due(last + PUSHED_QUIET / 2);
+        assert!(!teams.busy(), "they haven't paused yet");
+        teams.read_pushed_if_due(last + PUSHED_QUIET);
+        assert!(teams.busy(), "they paused: the teams are read");
+        assert!(matches!(teams.next().await, Some(Err(_))));
+        teams.read_pushed_if_due(last + PUSHED_AT_MOST);
+        assert!(!teams.busy(), "that read was the one owed");
+
+        // changes that never pause: a read once the first is old enough
+        let burst = start + PUSHED_AT_MOST * 2;
+        let mut now = burst;
+        while now < burst + PUSHED_AT_MOST {
+            teams.note_pushed(now);
+            teams.read_pushed_if_due(now);
+            assert!(!teams.busy(), "{:?} into the burst", now - burst);
+            now += PUSHED_QUIET / 5;
+        }
+        teams.read_pushed_if_due(now);
+        assert!(teams.busy(), "the first is old enough");
     }
 }

@@ -257,6 +257,37 @@ fn the_accounts_own_properties_are_read_only_for_its_mark_all_read_horizon() {
 }
 
 #[test]
+fn a_thread_update_names_its_thread_and_its_roster_version_and_one_naming_no_thread_is_unknown() {
+    let body = |resource: Value| json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": resource});
+    let read = |resource: Value| ChatEvent::from_body(&body(resource).to_string());
+    // the shape a policy-blocked message's stream update has (`tests/fixtures/chatsvc/policy-blocked.json`)
+    assert_eq!(
+        read(json!({"id": "48:generic"})),
+        ChatEvent::ThreadUpdate {
+            thread: "48:generic".to_owned(),
+            roster_version: None
+        }
+    );
+    let thread = json!({"id": "19:made-up@thread.v2", "type": "Thread", "rosterVersion": 1_760_000_000_123_u64,
+        "members": [{"id": "8:orgid:00000000-0000-0000-0000-00000000000a", "role": "Admin"}], "properties": {}});
+    assert_eq!(
+        read(thread),
+        ChatEvent::ThreadUpdate {
+            thread: "19:made-up@thread.v2".to_owned(),
+            roster_version: Some(1_760_000_000_123)
+        }
+    );
+    for resource in [json!({}), json!({"id": ""}), json!({"id": 7})] {
+        assert_eq!(
+            read(resource),
+            ChatEvent::Unknown {
+                resource_type: "ThreadUpdate".to_owned()
+            }
+        );
+    }
+}
+
+#[test]
 fn a_delivery_with_a_negative_id_is_read() {
     // the service's delivery ids are signed 32-bit numbers: about one in ten live ones is negative
     for id in ["-2134536761", "-1", "0", "2135268894"] {
