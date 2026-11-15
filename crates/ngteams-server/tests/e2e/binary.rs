@@ -5,6 +5,7 @@ mod calendar;
 mod calls;
 mod chats;
 mod media;
+mod namespaces;
 mod push;
 mod setup;
 mod support;

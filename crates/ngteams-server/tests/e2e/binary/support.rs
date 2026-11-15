@@ -72,6 +72,7 @@ impl Deployment {
         Node {
             config,
             endpoint,
+            binary: PathBuf::from(env!("CARGO_BIN_EXE_ngteams-server")),
             process: None,
             http: http_client(),
             _port: own,
@@ -82,6 +83,8 @@ impl Deployment {
 pub struct Node {
     pub config: PathBuf,
     pub endpoint: String,
+    /// The server binary the node and its commands run: this build's, unless a test runs another version.
+    pub binary: PathBuf,
     process: Option<Child>,
     pub http: reqwest::Client,
     _port: Option<Port>,
@@ -89,7 +92,7 @@ pub struct Node {
 
 impl Node {
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ngteams-server"));
+        let mut command = Command::new(&self.binary);
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("NGTEAMS_SERVER_") {
                 command.env_remove(key);
