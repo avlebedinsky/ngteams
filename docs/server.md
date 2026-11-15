@@ -793,12 +793,14 @@ podman stop ngts-pg ngts-redis ngts-s3
 ```
 
 With `NGTS_TEST_COTURN` (a coturn's `host:port`) and `NGTS_TEST_COTURN_SECRET` one more case relays a
-call through that coturn with the credentials made from its secret:
+call through that coturn with the credentials made from its secret (coturn relays between loopback peers only
+with `allow-loopback-peers`, which it takes only beside a password for its own CLI: `COTURN_CLI` is that option,
+any value):
 
 ```sh
 podman run -d --rm --name ngts-coturn --network host docker.io/coturn/coturn -n --listening-ip=127.0.0.1 \
   --listening-port=53478 --relay-ip=127.0.0.1 --use-auth-secret --static-auth-secret=test-secret \
-  --realm=rtcmedia --allow-loopback-peers --cli-password=unused
+  --realm=rtcmedia --allow-loopback-peers "$COTURN_CLI"
 NGTS_TEST_COTURN=127.0.0.1:53478 NGTS_TEST_COTURN_SECRET=test-secret \
   cargo test -p ngteams-server relayed_by_coturn
 podman stop ngts-coturn
