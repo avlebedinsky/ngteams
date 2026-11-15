@@ -119,7 +119,22 @@ async fn a_channels_reply_tells_the_threads_people_and_a_mention_the_people_it_n
             "another channel's mention is nobody's here"
         );
 
-        // a private channel's messages tell its own people alone
+        for seat in [ada, bert, cora, dan] {
+            seat.stop();
+        }
+        server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_private_channels_messages_tell_its_own_people_alone() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        ada.add(&team, &group, &[&bert, &cora]).await;
         let made = ada
             .engine
             .create_channel(teams_core::ChannelDraft {
@@ -135,17 +150,17 @@ async fn a_channels_reply_tells_the_threads_people_and_a_mention_the_people_it_n
             .unwrap();
         assert!(failed.is_empty());
         let private = made.thread.unwrap();
-        let before = feed(&cora.engine).await.items.len();
         send(&ada.engine, &private, mentioning(&cora.mri, "Cora", "crew only")).await;
         let wide = broad_mention(&private, "channel", &private, "504");
         assert_eq!(ada.client.write(wide).await.unwrap().status(), 201);
-        assert_eq!(
-            feed(&cora.engine).await.items.len(),
-            before,
+        assert!(
+            feed(&cora.engine).await.items.is_empty(),
             "cora isn't in the private channel"
         );
-        assert_eq!(feed(&bert.engine).await.items.len(), 4);
-        for seat in [ada, bert, cora, dan] {
+        let his = feed(&bert.engine).await;
+        assert_eq!(his.items.len(), 1, "{his:?}");
+        assert_eq!(his.items[0].kind, ActivityKind::Mention(Mention::Channel));
+        for seat in [ada, bert, cora] {
             seat.stop();
         }
         server.stop().await;

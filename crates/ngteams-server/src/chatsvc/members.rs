@@ -3,6 +3,7 @@
 //! team's channel takes and loses people through its team.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use axum::Json;
@@ -71,21 +72,7 @@ pub(super) async fn add(
     let invites = body.invites()?;
     let base = wire::base(&app);
     let event = |version: i64, added: &[(String, i64)]| {
-        let people: String = added
-            .iter()
-            .map(|(user, from)| {
-                // someone given no history reads from the event on, which says so by its own time
-                format!(
-                    "<target>8:orgid:{user}</target><detailedtargetinfo><id>8:orgid:{user}</id>\
-                     <sharehistorytime>{from}</sharehistorytime></detailedtargetinfo>"
-                )
-            })
-            .collect();
-        let content = format!(
-            "<addmember><eventtime>{version}</eventtime><initiator>{}</initiator>\
-             <rosterVersion>{version}</rosterVersion>{people}</addmember>",
-            caller.mri()
-        );
+        let content = event_content("addmember", &caller.mri(), version, added, true);
         event_body(&base, chat, version, "ThreadActivity/AddMember", &content)
     };
     let outcome = member_repo::add(&app.db, &found.id, &caller.id, &invites, &event).await?;
@@ -102,19 +89,7 @@ pub(super) async fn remove(
     let (found, _) = member_of(&app, &caller, chat).await?;
     let base = wire::base(&app);
     let event = |version: i64, gone: &[(String, i64)]| {
-        let people: String = gone
-            .iter()
-            .map(|(user, _)| {
-                format!(
-                    "<target>8:orgid:{user}</target><detailedtargetinfo><id>8:orgid:{user}</id></detailedtargetinfo>"
-                )
-            })
-            .collect();
-        let content = format!(
-            "<deletemember><eventtime>{version}</eventtime><initiator>{}</initiator>\
-             <rosterVersion>{version}</rosterVersion>{people}</deletemember>",
-            caller.mri()
-        );
+        let content = event_content("deletemember", &caller.mri(), version, gone, false);
         event_body(&base, chat, version, "ThreadActivity/DeleteMember", &content)
     };
     let outcome = member_repo::remove(&app.db, &found.id, &caller.id, target, &event).await?;
@@ -135,6 +110,27 @@ async fn finish(app: &App, caller: &Caller, outcome: Outcome) -> Result<StatusCo
     let thread = wire::thread(app, caller, &done.chat, &done.members);
     events::publish(app, caller, &done.members, "ThreadUpdate", &thread).await;
     Ok(StatusCode::OK)
+}
+
+/// A roster event's content, as Teams writes it: who did it, when, and each person it names. An added person's
+/// `sharehistorytime` is the first message they may read (`0`: all; the event's own time: none before it).
+fn event_content(tag: &str, initiator: &str, version: i64, people: &[(String, i64)], shares: bool) -> String {
+    let mut content = format!(
+        "<{tag}><eventtime>{version}</eventtime><initiator>{initiator}</initiator>\
+         <rosterVersion>{version}</rosterVersion>"
+    );
+    for (user, from) in people {
+        let _ = write!(
+            content,
+            "<target>8:orgid:{user}</target><detailedtargetinfo><id>8:orgid:{user}</id>"
+        );
+        if shares {
+            let _ = write!(content, "<sharehistorytime>{from}</sharehistorytime>");
+        }
+        content.push_str("</detailedtargetinfo>");
+    }
+    let _ = write!(content, "</{tag}>");
+    content
 }
 
 /// A thread's own event as a message: sent by the thread itself.
