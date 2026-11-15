@@ -183,11 +183,12 @@ pub async fn person(db: &Db, id: &str) -> Result<Option<Person>, DbError> {
     Ok(people(db, &[id.to_owned()]).await?.pop())
 }
 
-/// The accounts that report to `manager` and can sign in, by name, at most `limit`.
+/// The accounts that report to `manager` and can sign in, by name, at most `limit`. Sorted here, not by the
+/// database, so both backends order names alike whatever their collation.
 ///
 /// # Errors
 /// A database failure.
-pub async fn directs(db: &Db, manager: &str, limit: i64) -> Result<Vec<User>, DbError> {
+pub async fn directs(db: &Db, manager: &str, limit: usize) -> Result<Vec<User>, DbError> {
     let ids: Vec<String> = with_conn!(db, |conn| user_profiles::table
         .filter(user_profiles::manager_id.eq(manager))
         .select(user_profiles::user_id)
@@ -196,14 +197,15 @@ pub async fn directs(db: &Db, manager: &str, limit: i64) -> Result<Vec<User>, Db
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    with_conn!(db, |conn| Ok(users::table
+    let mut found: Vec<User> = with_conn!(db, |conn| users::table
         .filter(users::id.eq_any(&ids))
         .filter(users::disabled.eq(false))
-        .order((users::display_name.asc(), users::id.asc()))
-        .limit(limit)
         .select(User::as_select())
         .load(conn)
-        .await?))
+        .await?);
+    found.sort_by(|a, b| a.display_name.cmp(&b.display_name).then_with(|| a.id.cmp(&b.id)));
+    found.truncate(limit);
+    Ok(found)
 }
 
 /// The threads `user` is in now.

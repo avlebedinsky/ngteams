@@ -564,19 +564,30 @@ async fn sweeping(presence: Weak<Inner>) {
     loop {
         every.tick().await;
         let Some(inner) = presence.upgrade() else { return };
-        failing = swept(inner.sweep().await, failing);
+        failing = swept(&inner.sweep().await, failing);
     }
 }
 
 /// Whether the sweeps fail now, said when that changes.
-fn swept(sweep: Result<(), PresenceError>, failing: bool) -> bool {
-    match &sweep {
-        Ok(()) if failing => tracing::info!("lapsed presence endpoints are swept again"),
-        Ok(()) => {}
-        Err(error) if !failing => tracing::warn!(%error, "lapsed presence endpoints aren't swept"),
-        Err(_) => {}
+fn swept(sweep: &Result<(), PresenceError>, failing: bool) -> bool {
+    if let Err(error) = sweep {
+        if !failing {
+            sweeps_fail(error);
+        }
+        return true;
     }
-    sweep.is_err()
+    if failing {
+        sweeps_again();
+    }
+    false
+}
+
+fn sweeps_fail(error: &PresenceError) {
+    tracing::warn!(%error, "lapsed presence endpoints aren't swept");
+}
+
+fn sweeps_again() {
+    tracing::info!("lapsed presence endpoints are swept again");
 }
 
 #[cfg(test)]
@@ -648,9 +659,9 @@ mod tests {
     #[test]
     fn a_failing_sweep_is_said_when_it_starts_and_when_it_ends() {
         let failed = || Err(PresenceError::TooManyEndpoints);
-        assert!(swept(failed(), false));
-        assert!(swept(failed(), true));
-        assert!(!swept(Ok(()), true));
-        assert!(!swept(Ok(()), false));
+        assert!(swept(&failed(), false));
+        assert!(swept(&failed(), true));
+        assert!(!swept(&Ok(()), true));
+        assert!(!swept(&Ok(()), false));
     }
 }

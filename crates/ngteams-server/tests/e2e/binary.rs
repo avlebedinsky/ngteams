@@ -144,32 +144,20 @@ async fn check_region(session: &Session<MemorySecretStore>, origin: &str) {
     assert!(skype.expires_at <= access.expires_at);
     assert_eq!(session.region().name.as_deref(), Some("own"));
     assert_eq!(session.region().partition.as_deref(), Some("own01"));
-    assert_eq!(
-        session.service_base("authService"),
-        Some(format!("{origin}/api/authsvc"))
-    );
-    assert_eq!(
-        session.service_base("chatServiceAfd"),
-        Some(format!("{origin}/api/chatsvc/own"))
-    );
-    assert_eq!(
-        session.service_base("middleTier"),
-        Some(format!("{origin}/api/mt/part/own-01"))
-    );
-    assert_eq!(
-        session.service_base("chatSvcAggAfd"),
-        Some(format!("{origin}/api/csa/own"))
-    );
-    assert_eq!(
-        session.service_base("teamsAndChannelsProvisioningService"),
-        Some(format!("{origin}/fabric/own/templates/api"))
-    );
-    assert_eq!(
-        session.service_base("userProfileService"),
-        Some(format!("{origin}/api/userprofilesvc/own"))
-    );
-    assert_eq!(session.service_base("amsV2"), Some(format!("{origin}/ams")));
-    assert_eq!(session.region().endpoints.len(), 7);
+    let bases = [
+        ("authService", "/api/authsvc"),
+        ("chatServiceAfd", "/api/chatsvc/own"),
+        ("middleTier", "/api/mt/part/own-01"),
+        ("chatSvcAggAfd", "/api/csa/own"),
+        ("teamsAndChannelsProvisioningService", "/fabric/own/templates/api"),
+        ("userProfileService", "/api/userprofilesvc/own"),
+        ("amsV2", "/ams"),
+        ("presenceUPS", "/ups/own"),
+    ];
+    for (gtm, path) in bases {
+        assert_eq!(session.service_base(gtm), Some(format!("{origin}{path}")), "{gtm}");
+    }
+    assert_eq!(session.region().endpoints.len(), bases.len());
 }
 
 async fn rejects_an_untrusted_certificate(node: &Node) {

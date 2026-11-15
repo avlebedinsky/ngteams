@@ -30,7 +30,7 @@ impl Audience for Loki {
 /// The managers one card lists, nearest first.
 const MAX_MANAGERS: usize = 8;
 /// The direct reports one card lists.
-const MAX_DIRECTS: i64 = 256;
+const MAX_DIRECTS: usize = 256;
 /// The people a working-with read lists: what Teams' card asks for, and the most it may ask for.
 const WORKING_WITH: usize = 12;
 const MAX_WORKING_WITH: usize = 50;
