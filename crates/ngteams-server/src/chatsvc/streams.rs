@@ -1,6 +1,6 @@
-//! An account's own streams (`48:notes`, `48:notifications`, `48:mentions`) are each kept as a thread only that
-//! account is in, under an id no request can name: a request's `48:…` id always resolves to the caller's own stream,
-//! so the membership check that guards every chat keeps one account's stream from another.
+//! An account's own streams (`48:notes`, `48:notifications`, `48:mentions`, `48:calllogs`) are each kept as a thread
+//! only that account is in, under an id no request can name: a request's `48:…` id always resolves to the caller's
+//! own stream, so the membership check that guards every chat keeps one account's stream from another.
 
 use std::borrow::Cow;
 
@@ -15,8 +15,9 @@ use crate::db::{Db, DbError, with_conn};
 pub(super) const NOTES: &str = "48:notes";
 pub(super) const FEED: &str = "48:notifications";
 pub(super) const MENTIONS: &str = "48:mentions";
+pub(super) const CALL_LOG: &str = "48:calllogs";
 
-const NAMES: [&str; 3] = [NOTES, FEED, MENTIONS];
+const NAMES: [&str; 4] = [NOTES, FEED, MENTIONS, CALL_LOG];
 
 /// The stream a stored thread id is, when it is one.
 pub(super) fn name_of(stored: &str) -> Option<&'static str> {

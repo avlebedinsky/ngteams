@@ -59,8 +59,8 @@ pub(crate) enum Kind {
     Group,
 }
 
-/// Where a group call's party is. A 1:1 call's parties keep the default: whether they are in the call is whether
-/// they have an endpoint in it.
+/// Where a group call's party is. A 1:1 call's parties keep the default but a callee's decline: whether they are in
+/// the call is whether they have an endpoint in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Status {
@@ -454,6 +454,7 @@ impl Call {
         }
         let end = wire::end(code, "Declined", callee);
         out.call_back(at.origin, self.party(Seat::CALLER).link("end"), end);
+        self.party_mut(Seat::CALLEE).status = Status::Declined;
         self.finish(at, Outcome::Missed, out);
         Ok(())
     }

@@ -5,7 +5,10 @@
 mod client;
 mod engines;
 mod group_signaling;
+mod history;
 mod mixer;
+mod raw;
+mod redelivery;
 mod relay;
 mod signaling;
 

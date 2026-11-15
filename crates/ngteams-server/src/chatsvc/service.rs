@@ -213,6 +213,53 @@ pub(crate) struct Activity<'a> {
 /// want it, and tells each on its push channel. An item is a message of the account's own stream, as a mention's
 /// is: it is synced, marked read and removed the same way.
 pub(crate) async fn tell_activity(app: &App, activity: Activity<'_>) -> Result<(), DbError> {
+    keep_items(app, streams::FEED, activity).await
+}
+
+/// The account's activity feed and its call log, as [`stream_message`] names them.
+pub(crate) const FEED: &str = streams::FEED;
+pub(crate) const CALL_LOG: &str = streams::CALL_LOG;
+
+/// Writes one entry into the call log of each of `people` whose account is in use, and tells each on its push
+/// channel, as [`tell_activity`] does an activity item.
+pub(crate) async fn tell_call_log(
+    app: &App,
+    people: &[String],
+    entry: &(dyn Fn(&str, i64) -> Value + Sync),
+) -> Result<(), DbError> {
+    let logged = Activity {
+        people,
+        thread: None,
+        personal: true,
+        item: entry,
+    };
+    keep_items(app, streams::CALL_LOG, logged).await
+}
+
+/// A message of the account's own stream `stream` (its feed or its call log) under the id `at` the stream gives it,
+/// from `from` (an MRI), as the chat service delivers one.
+pub(crate) fn stream_message(
+    app: &App,
+    stream: &str,
+    (at, from): (i64, &str),
+    content: &str,
+    properties: Value,
+) -> Value {
+    let base = wire::base(app);
+    let time = wire::iso(at);
+    json!({
+        "type": "Message", "id": at.to_string(), "version": at.to_string(), "sequenceId": at,
+        "clientmessageid": at.to_string(), "messagetype": "Text", "contenttype": "Text", "content": content,
+        "conversationid": stream, "to": stream,
+        "threadtype": format!("streamof{}", stream.trim_start_matches("48:")),
+        "conversationLink": format!("{base}/v1/users/ME/conversations/{stream}"),
+        "from": format!("{base}/v1/users/ME/contacts/{from}"), "imdisplayname": "",
+        "composetime": time, "originalarrivaltime": time,
+        "properties": properties,
+    })
+}
+
+async fn keep_items(app: &App, stream_name: &'static str, activity: Activity<'_>) -> Result<(), DbError> {
     let at = wire::now();
     let told: Vec<Told> = with_conn!(&app.db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
@@ -240,7 +287,7 @@ pub(crate) async fn tell_activity(app: &App, activity: Activity<'_>) -> Result<(
                     continue;
                 }
                 let version: i64 = repo::advance!(conn, at);
-                let stream = streams::stored_id(streams::FEED, user);
+                let stream = streams::stored_id(stream_name, user);
                 streams::ensure_in!(conn, &stream, user, version);
                 let mut resource = (activity.item)(user, version);
                 resource["version"] = version.to_string().into();

@@ -28,7 +28,7 @@ pub(super) async fn post(
     let (chat, post) = channels::split(reads::target(&path)?)?;
     match chat {
         streams::NOTES => streams::ensure(&app.db, chat, &caller.id).await?,
-        streams::FEED | streams::MENTIONS => return Err(Error::Denied),
+        streams::FEED | streams::MENTIONS | streams::CALL_LOG => return Err(Error::Denied),
         _ => {}
     }
     let (found, _) = member_of(&app, &caller, chat).await?;

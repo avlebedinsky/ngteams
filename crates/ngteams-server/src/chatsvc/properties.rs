@@ -21,7 +21,7 @@ pub(super) async fn set_conversation(
 ) -> Result<StatusCode, Error> {
     let chat = reads::target(&path)?;
     // a feed nothing was written to yet still takes its own horizon and bookmark
-    if matches!(chat, streams::FEED | streams::MENTIONS) {
+    if matches!(chat, streams::FEED | streams::MENTIONS | streams::CALL_LOG) {
         streams::ensure(&app.db, chat, &caller.id).await?;
     }
     let (found, _) = member_of(&app, &caller, chat).await?;

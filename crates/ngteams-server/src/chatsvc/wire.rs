@@ -60,6 +60,7 @@ fn stream(app: &App, chat: &Chat, name: &str) -> Value {
     let product = match name {
         streams::NOTES => "StreamOfNotes",
         streams::MENTIONS => "StreamOfMentions",
+        streams::CALL_LOG => "StreamOfCallLogs",
         _ => "StreamOfNotifications",
     };
     json!({

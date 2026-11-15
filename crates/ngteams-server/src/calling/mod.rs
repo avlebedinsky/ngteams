@@ -17,6 +17,7 @@
 //! - **A call's events in its chat** (`Event/Call`: started, ended with its length, missed) are written through the
 //!   chat service ([`crate::chatsvc::call_events`]): a 1:1 call's when the two parties have their chat, a group
 //!   call's to its group chat.
+//! - **What a call leaves each party** ([`history`]): its call log entry, and a missed call's activity item.
 //!
 //! - **A group call** ([`group`]) is a group chat's: every member it names rings with the call's media node's offer,
 //!   the caller is in it at once with the node's answer, and each party answers, declines, joins and leaves alone;
@@ -26,6 +27,7 @@
 
 pub mod config;
 mod group;
+mod history;
 mod media;
 mod ops;
 mod repo;
@@ -244,6 +246,7 @@ async fn carry_out(app: &App, call: &Call, out: Out) {
     }
     if let Some(outcome) = out.ended {
         tell_chat_ended(app, call, outcome).await;
+        history::tell(app, call).await;
     }
 }
 

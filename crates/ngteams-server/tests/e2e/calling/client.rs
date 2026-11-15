@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use teams_auth::secrets::MemorySecretStore;
@@ -60,6 +61,8 @@ pub struct Client {
     events: mpsc::UnboundedReceiver<CallEvent>,
     /// Who else is in the call, as last told (whatever the test waited for then).
     participants: Vec<Participant>,
+    /// How many deliveries came at the endpoint's root (invitations, each redelivery too).
+    invitations: Arc<AtomicUsize>,
     task: JoinHandle<()>,
 }
 
@@ -129,6 +132,16 @@ pub fn identity(mri: &str, name: &str, tenant: &str, endpoint_id: &str) -> Ident
 impl Client {
     /// `account`'s client, its calling socket on `socket` and its requests through `http`, up and registered.
     pub async fn start(account: &Account, name: &str, socket: &TestServer, http: &TestServer) -> Self {
+        Self::start_holding(account, name, (socket, http), 0).await
+    }
+
+    /// [`Self::start`], its client holding back its first `held` responses to deliveries, as if they were lost.
+    pub async fn start_holding(
+        account: &Account,
+        name: &str,
+        (socket, http): (&TestServer, &TestServer),
+        held: usize,
+    ) -> Self {
         let cloud = Cloud::own(ORIGIN).unwrap();
         let tracker = Arc::new(Tracker::for_cloud(Mri::new(account.mri.clone()), cloud.clone()));
         let transport = Arc::new(account.transport(http).with_call_state(tracker.clone()));
@@ -145,6 +158,7 @@ impl Client {
         let (commands, commanded) = mpsc::unbounded_channel();
         let (told, events) = mpsc::unbounded_channel();
         let (ready, up) = tokio::sync::oneshot::channel();
+        let invitations = Arc::new(AtomicUsize::new(0));
         let driver = Driver {
             calls: Calls::for_cloud(identity, cloud),
             sink: Sink {
@@ -154,6 +168,8 @@ impl Client {
             },
             responders: HashMap::new(),
             told,
+            held,
+            invitations: Arc::clone(&invitations),
         };
         let task = tokio::spawn(driver.run(trouter.spawn(), commanded, ready));
         tokio::time::timeout(WAIT, up)
@@ -165,8 +181,14 @@ impl Client {
             commands,
             events,
             participants: Vec::new(),
+            invitations,
             task,
         }
+    }
+
+    /// How many deliveries came at the endpoint's root: each invitation, and each time it came again.
+    pub fn invitations(&self) -> usize {
+        self.invitations.load(Ordering::SeqCst)
     }
 
     fn command(&self, command: Command) {
@@ -304,6 +326,9 @@ struct Driver {
     sink: Sink,
     responders: HashMap<DeliveryKey, CallResponder>,
     told: mpsc::UnboundedSender<CallEvent>,
+    /// How many more responses are held back.
+    held: usize,
+    invitations: Arc<AtomicUsize>,
 }
 
 impl Driver {
@@ -342,6 +367,9 @@ impl Driver {
                     connection: delivery.delivery.connection.clone(),
                     id: delivery.delivery.id,
                 };
+                if !delivery.delivery.path.contains("callAgent") {
+                    self.invitations.fetch_add(1, Ordering::SeqCst);
+                }
                 self.responders.insert(key, delivery.responder());
                 self.calls
                     .on_delivery(&delivery.delivery, delivery.observed, Instant::now());
@@ -377,6 +405,7 @@ impl Driver {
                         self.calls.on_outcome(id, &outcome, Instant::now());
                     }
                 }
+                Effect::Respond { .. } if self.held > 0 => self.held -= 1,
                 Effect::Respond { delivery, reply } => {
                     let response = match reply {
                         DeliveryReply::Receipt(receipt) => CallResponse::from(receipt),
