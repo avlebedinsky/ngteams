@@ -1148,6 +1148,15 @@ impl PopupButton {
         }
     }
 
+    /// `button`, its bounds kept for [`Self::outside`], for a popup drawn elsewhere.
+    pub(crate) fn mark(&self, button: impl IntoElement) -> gpui::Div {
+        let laid_out = self.0.clone();
+        div()
+            .flex_none()
+            .on_children_prepainted(move |children, _, _| laid_out.set(children.first().copied()))
+            .child(button)
+    }
+
     /// `button` with its `popup` after it while open, the button's bounds kept for [`Self::outside`].
     pub(crate) fn hold(&self, button: impl IntoElement, popup: Option<impl IntoElement>) -> gpui::Div {
         let held = div();

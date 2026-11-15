@@ -814,3 +814,49 @@ fn an_account_menu_item_over_a_user_row_takes_the_click_alone() {
         "the row under the menu got the click too"
     );
 }
+
+#[test]
+fn a_press_outside_the_account_menu_closes_it_and_its_avatar_still_toggles_it() {
+    let d = TwoAccounts::start();
+    let window = d.open();
+    let shell = d.rig.cx.update(|cx| {
+        window::content(window, cx)
+            .unwrap()
+            .read(cx)
+            .shell_in(cx)
+            .unwrap()
+            .clone()
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), &d.rig.cx);
+    cx.run_until_parked();
+    let open = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| shell.read(cx).status_menu_open());
+    for avatar in ["rail-status", "title-account"] {
+        let Some(at) = cx.debug_bounds(avatar).map(|bounds| bounds.center()) else {
+            continue;
+        };
+        // the avatar opens the menu and closes it again: its own press doesn't close it first
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(open(&mut cx), "{avatar} opens the menu");
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(!open(&mut cx), "{avatar} closes it");
+        // a press anywhere else closes it, as in Teams
+        cx.simulate_click(at, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(open(&mut cx));
+        let menu = cx.debug_bounds("status-menu").expect("the menu is drawn");
+        let elsewhere = cx.update(|window, _| {
+            let viewport = window.viewport_size();
+            gpui::point(viewport.width - gpui::px(24.0), viewport.height * 0.6)
+        });
+        assert!(!menu.contains(&elsewhere));
+        cx.simulate_click(elsewhere, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(!open(&mut cx), "a press beside the menu closes it");
+    }
+    assert!(
+        d.traced("status-menu", "closed").len() >= 2,
+        "the avatar's and the outside press's closing are traced"
+    );
+}

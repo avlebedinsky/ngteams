@@ -1079,7 +1079,8 @@ fn prompts_for_a_while(running: &Running) -> Vec<String> {
 
 // --- the page at a width, light or dark ---
 
-/// The page and its dialogs in a sandbox `width` wide, in Teams Light or Dark, with the keyboard alone.
+/// The page and its dialogs in a sandbox `width` wide, in Teams Light or Dark, with the keyboard alone; at 1280 px and
+/// wider, also the account menu opened over the list and an item over a user's row clicked (`menu_over_the_list`).
 pub fn page_at(width: u32, dark: bool) -> SandboxResult {
     let options = SandboxOptions {
         width,

@@ -112,7 +112,8 @@ impl CalendarView {
     }
 
     /// The card as Teams' peek: beside the point `at` its event was clicked at (on its right, or its left where the
-    /// window has no room), the brand line along its top, the calendar left undimmed; a click beside it closes it.
+    /// window has no room), the brand line along its top, the calendar left undimmed; a click beside it closes it and
+    /// still reaches what it lands on, so another event opens its own peek and an event's second click edits it.
     fn peek(
         card: gpui::Stateful<gpui::Div>,
         at: gpui::Point<gpui::Pixels>,
@@ -134,7 +135,6 @@ impl CalendarView {
             .child(card);
         div()
             .id("calendar-card-backdrop")
-            .occlude()
             .absolute()
             .top_0()
             .left_0()

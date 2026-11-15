@@ -95,7 +95,7 @@ use crate::team_dialogs::{
 };
 use crate::team_menu::{TeamChoice, team_link};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
-use crate::teams_page::{TeamsPage, TeamsPageEvent};
+use crate::teams_page::{PopupButton, TeamsPage, TeamsPageEvent};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
@@ -355,6 +355,8 @@ pub struct Shell {
     status_menu: bool,
     /// Where it opened.
     status_anchor: MenuAnchor,
+    /// The avatar it opened from, whose press is its own: a press anywhere else closes the menu.
+    status_opener: PopupButton,
     /// What the chat's header was last traced showing.
     header_traced: Option<HeaderShown>,
     /// The incoming call's banner and the in-call strip.
@@ -459,6 +461,7 @@ impl Shell {
             own_presence: None,
             status_menu: false,
             status_anchor: MenuAnchor::Rail,
+            status_opener: PopupButton::default(),
             header_traced: None,
             call_bar,
             call_button_traced: None,
@@ -1601,6 +1604,25 @@ impl Shell {
         let change = if self.status_menu { "opened" } else { "closed" };
         self.trace.record(&TraceLine::new("status-menu", change));
         cx.notify();
+    }
+
+    /// A press outside the account menu (not on the avatar it opened from) closes it, as in Teams.
+    fn close_status_menu(&mut self, cx: &mut Context<Self>) {
+        if !self.status_menu {
+            return;
+        }
+        self.status_menu = false;
+        self.trace.record(&TraceLine::new("status-menu", "closed"));
+        cx.notify();
+    }
+
+    /// The avatar that opens the account menu at `anchor`, marked as the menu's own while the menu is open there.
+    pub(crate) fn status_opener(&self, anchor: MenuAnchor, avatar: AnyElement) -> AnyElement {
+        if self.status_menu && self.status_anchor == anchor {
+            self.status_opener.mark(avatar).into_any_element()
+        } else {
+            avatar
+        }
     }
 
     /// The user chose `status` in the account menu: handed to the own presence (which sends it, or sends it again when
@@ -2958,7 +2980,7 @@ impl Shell {
             }
         });
         let badge = (!shown && unread > 0).then(|| account_unread(index, unread));
-        div()
+        let avatar = div()
             .debug_selector({
                 let selector = selector.clone();
                 move || selector.to_string()
@@ -2990,7 +3012,12 @@ impl Shell {
             .child(face)
             .children(dot)
             .children(badge)
-            .into_any_element()
+            .into_any_element();
+        if shown {
+            self.status_opener(MenuAnchor::Rail, avatar)
+        } else {
+            avatar
+        }
     }
 
     /// The account menu's account: its name and what tells it apart above the statuses, and its "Sign out and remove"
@@ -3100,6 +3127,10 @@ impl Shell {
             .rounded_lg()
             .shadow_lg()
             .occlude()
+            .on_mouse_down_out(
+                self.status_opener
+                    .outside(cx.listener(|this, _, _, cx| this.close_status_menu(cx))),
+            )
             .children(header)
             .children(entries)
             .children(reported)

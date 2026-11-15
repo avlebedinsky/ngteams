@@ -1089,6 +1089,56 @@ fn a_clicked_event_s_card_opens_beside_it() {
     assert!(cx.update(|_, cx| view.read(cx).card().is_some()));
 }
 
+#[test]
+fn with_a_peek_open_another_event_opens_its_peek_and_a_double_click_edits_the_account_s_own() {
+    let rig = Rig::start();
+    rig.core.calendar.lock().unwrap().events = vec![event("early", 11), event("busy", 14)];
+    rig.core
+        .calendar
+        .lock()
+        .unwrap()
+        .full
+        .insert("busy".to_owned(), fixtures::full("busy", 14));
+    let (view, cx, _) = window(&rig);
+    let carded =
+        |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).card().map(|shown| shown.event.id.clone()));
+    // one click on another event while a peek is open shows that event's peek, as Teams does (the earlier event lies
+    // above the later one's peek)
+    click(cx, "calendar-event-busy");
+    assert_eq!(carded(cx).as_deref(), Some("busy"));
+    click(cx, "calendar-event-early");
+    assert_eq!(
+        carded(cx).as_deref(),
+        Some("early"),
+        "the other event's peek, in one click"
+    );
+    cx.update(|_, cx| view.update(cx, CalendarView::close_card));
+    draw(cx);
+    // a double click on the account's own event: the first click's peek doesn't swallow the second
+    let at = cx.debug_bounds("calendar-event-busy").unwrap().center();
+    for count in 1..=2 {
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            button: gpui::MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: count,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            button: gpui::MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: count,
+        });
+        draw(cx);
+    }
+    assert!(carded(cx).is_none(), "the peek gives way to the form");
+    cx.update(|_, cx| {
+        assert!(teams_ui::event_form::shown(cx).is_some(), "the event opens to edit");
+        teams_ui::event_form::close(cx);
+    });
+}
+
 /// Split view shows the account's calendar and the person's apart; closing theirs unticks it; adding them again says
 /// so; Remove takes them off the list.
 fn split_close_and_add_again(view: &Entity<CalendarView>, cx: &mut VisualTestContext) {

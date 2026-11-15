@@ -898,3 +898,63 @@ fn a_chat_s_video_keeps_its_own_bar() {
         assert!(cx.debug_bounds(selector).is_none(), "{selector}");
     }
 }
+
+/// A page under a chat's video player: counts the clicks that reach it.
+struct UnderPage {
+    player: Entity<VideoPlayer>,
+    clicks: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl Render for UnderPage {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let clicks = std::rc::Rc::clone(&self.clicks);
+        div()
+            .size_full()
+            .relative()
+            .child(
+                div()
+                    .id("under-page")
+                    .absolute()
+                    .size_full()
+                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+            )
+            .child(div().w(px(320.0)).child(self.player.clone()))
+    }
+}
+
+#[test]
+fn the_full_screen_video_takes_the_window_s_clicks_alone() {
+    let _playing = playing_slot();
+    let mut app = gpui::TestAppContext::single();
+    app.update(crate::window::init);
+    let source = PictureSource::of(Arc::new(Files::default()));
+    let file = SharedFile {
+        share_url: None,
+        object_url: None,
+        ..movie_file()
+    };
+    let clicks = std::rc::Rc::new(std::cell::Cell::new(0));
+    let page_clicks = std::rc::Rc::clone(&clicks);
+    let (page, cx) = app.add_window_view(move |_, cx| UnderPage {
+        player: cx.new(|cx| VideoPlayer::new("under".to_owned(), file, source, cx)),
+        clicks: page_clicks,
+    });
+    draw(cx);
+    let far = cx.update(|window, _| {
+        let viewport = window.viewport_size();
+        point(viewport.width - px(8.0), viewport.height * 0.5)
+    });
+    cx.simulate_click(far, gpui::Modifiers::none());
+    assert_eq!(clicks.get(), 1, "the page under the player takes a click");
+    let player = cx.update(|_, cx| page.read(cx).player.clone());
+    cx.update(|window, cx| player.update(cx, |player, cx| player.toggle_fullscreen(window, cx)));
+    draw(cx);
+    assert!(cx.update(|_, cx| player.read(cx).full_screen.on));
+    cx.simulate_click(far, gpui::Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        clicks.get(),
+        1,
+        "a click on the full-screen video never reaches the page under it"
+    );
+}

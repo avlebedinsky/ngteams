@@ -828,7 +828,8 @@ impl Render for VideoPlayer {
                 anchored()
                     .position_mode(gpui::AnchoredPositionMode::Window)
                     .position(point(px(0.0), px(0.0)))
-                    .child(div().w(viewport.width).h(viewport.height).child(screen)),
+                    // it takes every click, wheel and hover over the window: none reaches the page under it
+                    .child(div().w(viewport.width).h(viewport.height).occlude().child(screen)),
             )
             .with_priority(100)
         });

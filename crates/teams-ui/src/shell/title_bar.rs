@@ -455,7 +455,7 @@ impl Shell {
             (None, true) => "Your account and status (the last report failed)".into(),
         };
         let open = self.status_menu && self.status_anchor == super::MenuAnchor::TitleBar;
-        div()
+        let avatar = div()
             .debug_selector(|| "title-account".to_owned())
             .id("title-account")
             .relative()
@@ -472,7 +472,8 @@ impl Shell {
             }))
             .child(face)
             .children(dot)
-            .into_any_element()
+            .into_any_element();
+        self.status_opener(super::MenuAnchor::TitleBar, avatar)
     }
 }
 
