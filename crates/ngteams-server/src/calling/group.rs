@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::media::{MediaHome, MediaNodes, Sdp, drop_leg, drop_room};
 use super::repo::{self, Key};
-use super::state::{At, Call, Kind, Leg, Out, Party, Phase, Refusal, Seat};
+use super::state::{At, Call, Kind, Leg, Out, Party, Phase, Refusal, Reserved, Seat, Status};
 use super::wire;
 use super::{Caller, Failure, call_events, calling_endpoints, carry_out, needed_links, now_ms, own_links, publish};
 use super::{step, step_any};
@@ -91,12 +91,19 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
         Opened::Running(running) => return Ok(refuse(app, &running, refusal.as_deref()).await),
     };
     let origin = app.config.origin();
-    tell_chat_started(app, caller, &call, &origin).await;
+    let conversation = wire::conversation_url(&origin, &call.conversation, None);
+    super::ops::tell_chat_started(app, caller, &call, Some(&conversation)).await;
     let tenant = crate::db::meta::tenant(&app.db).await?;
     let region = &app.config.region;
     for ((seat, endpoints), offer) in rung.into_iter().zip(offers) {
-        let invitation = wire::group_invitation(&origin, &call, seat, (&tenant, region), &content(&offer));
-        ring(app, &call.id, &invitation, endpoints).await;
+        let invitation = wire::group_invitation(
+            &origin,
+            &call,
+            (Seat::CALLER, seat),
+            (&tenant, region),
+            &content(&offer),
+        );
+        super::ops::ring(app, &call.id, &invitation, endpoints).await;
     }
     carry_out(app, &call, out).await;
     Ok(Json(wire::conversation(&origin, region, &call)).into_response())
@@ -251,28 +258,6 @@ async fn refuse(app: &App, running: &Call, conversation_end: Option<&str>) -> Re
     Json(wire::unrun_conversation(&origin, &app.config.region, &never)).into_response()
 }
 
-/// Writes the call's start, with where it runs, to its chat.
-async fn tell_chat_started(app: &App, caller: &Caller, call: &Call, origin: &str) {
-    let Some(chat) = &call.chat else { return };
-    let conversation = wire::conversation_url(origin, &call.conversation, None);
-    let told = call_events::started(app, chat, (&caller.id, &caller.name), (&call.id, Some(&conversation))).await;
-    if let Err(error) = told {
-        tracing::warn!(%error, "a call's start wasn't written to its chat");
-    }
-}
-
-/// Delivers `invitation` to each of `endpoints`.
-async fn ring(app: &App, call: &str, invitation: &Value, endpoints: Vec<String>) {
-    for endpoint in endpoints {
-        let delivery = super::state::Delivery {
-            endpoint,
-            path: String::new(),
-            body: invitation.clone(),
-        };
-        publish(app, call, &delivery).await;
-    }
-}
-
 /// A ringing party's `accept`: its answer to the node's offer goes to its leg, then it is in the call.
 pub(super) async fn accept(app: &App, caller: &Caller, key: Key<'_>, body: &Value) -> Result<Response, Failure> {
     let (endpoint, links) = needed_links(app, caller, body).await?;
@@ -300,7 +285,7 @@ pub(super) async fn renegotiate(app: &App, caller: &Caller, key: Key<'_>, body: 
     let call = kept.call;
     let seat = call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
     call.in_call(seat)?;
-    if call.party(seat).answered.is_some() {
+    if call.waits_for_acknowledgement(seat, now_ms()) {
         step(app, key, caller, |call, seat, at, out| {
             call.turned_back(seat, &links, at, out);
             Ok(())
@@ -318,8 +303,8 @@ pub(super) async fn renegotiate(app: &App, caller: &Caller, key: Key<'_>, body: 
     Ok(StatusCode::OK.into_response())
 }
 
-/// `POST conv/<id>` on a group call: with a `callInvitation` a chat member joins it; without, a party hands out more
-/// callbacks, or a chat member follows the roster. Anyone not in the chat finds no call.
+/// `POST conv/<id>` on a group call: with a `callInvitation` a chat member joins it; without, a party that rings or is
+/// in it hands out more callbacks, or a chat member follows the roster. Anyone else finds no call.
 pub(super) async fn subscribe(
     app: &App,
     caller: &Caller,
@@ -330,8 +315,10 @@ pub(super) async fn subscribe(
     let joins = body
         .get("callInvitation")
         .is_some_and(|invitation| !invitation.is_null());
-    let party = call.seat_of(&caller.id).is_some() && !joins;
-    if !party && !member(app, call.chat.as_deref(), &caller.id).await? {
+    let present = call
+        .seat_of(&caller.id)
+        .is_some_and(|seat| matches!(call.party(seat).status, Status::Ringing | Status::InCall));
+    if (joins || !present) && !member(app, call.chat.as_deref(), &caller.id).await? {
         return Err(Refusal::Missing.into());
     }
     if joins {
@@ -372,29 +359,39 @@ async fn join(app: &App, caller: &Caller, key: Key<'_>, call: &Call, body: &Valu
         .ok_or(Refusal::Bad)?;
     let account = super::ops::party(&caller.id, &caller.name, named);
     let leg = uuid::Uuid::new_v4().to_string();
-    let (seat, sources, before) = step_any(app, key, |call, _, _| call.reserve(&account, &leg)).await?;
+    let reserved = step_any(app, key, |call, _, _| call.reserve(&account, &leg)).await?;
     let home = home_of(call)?;
-    let answer = match nodes.put_leg(home, &call.id, &leg, sources, Some(&offer)).await {
+    let made = nodes
+        .put_leg(home, &call.id, &leg, reserved.sources, Some(&offer))
+        .await;
+    let answer = match made {
         Ok(answer) => answer,
         Err(error) => {
-            unreserve(app, key, seat, &leg).await;
+            unreserve(app, key, call, &reserved, &leg).await;
             return Err(error.into());
         }
     };
     let region = &app.config.region;
     let joined = step_any(app, key, |call, at, out| {
-        call.join(seat, (&leg, &endpoint, links.clone()), &content(&answer), at, out)?;
+        call.join(
+            reserved.seat,
+            (&leg, &endpoint, links.clone()),
+            &content(&answer),
+            at,
+            out,
+        )?;
         Ok(wire::conversation(at.origin, region, call))
     })
     .await;
     let joined = match joined {
         Ok(joined) => joined,
         Err(failure) => {
-            drop_leg(nodes.as_ref(), home, &call.id, &leg).await;
+            unreserve(app, key, call, &reserved, &leg).await;
             return Err(failure);
         }
     };
-    if let Some(before) = before {
+    let before = reserved.before.map(|before| before.id);
+    if let Some(before) = before.filter(|before| *before != leg) {
         drop_leg(nodes.as_ref(), home, &call.id, &before).await;
     }
     Ok(Json(joined).into_response())
@@ -435,7 +432,7 @@ pub(super) async fn add(app: &App, caller: &Caller, key: Key<'_>, body: &Value) 
         add_failed(app, &call, failure.as_deref(), invitee).await;
     } else {
         let account = super::ops::party(&user.id, &user.display_name, named);
-        ring_added(app, key, &call, &account, endpoints).await?;
+        ring_added(app, key, &call, (seat, &account), endpoints).await?;
     }
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -454,22 +451,27 @@ async fn add_failed(app: &App, call: &Call, failure: Option<&str>, invitee: &str
     carry_out(app, call, out).await;
 }
 
-/// Seats `account` with a leg of its own, the node's offer to it, and rings it on `endpoints`.
+/// Seats `account` with a leg of its own, the node's offer to it, and rings it on `endpoints` with an invitation from
+/// its adder (the party at `adder`): the original caller added back must not be invited by itself, which its client
+/// ignores. One that still rings rings on as it is.
 async fn ring_added(
     app: &App,
     key: Key<'_>,
     call: &Call,
-    account: &Party,
+    (adder, account): (Seat, &Party),
     endpoints: Vec<String>,
 ) -> Result<(), Failure> {
     let nodes = nodes(app)?;
     let home = home_of(call)?;
     let leg = uuid::Uuid::new_v4().to_string();
-    let (seat, sources, before) = step_any(app, key, |call, _, _| call.reserve(account, &leg)).await?;
-    let offer = match nodes.put_leg(home, &call.id, &leg, sources, None).await {
+    let reserved = step_any(app, key, |call, _, _| call.reserve_added(account, &leg)).await?;
+    let Some(reserved) = reserved else {
+        return Ok(());
+    };
+    let offer = match nodes.put_leg(home, &call.id, &leg, reserved.sources, None).await {
         Ok(offer) => offer,
         Err(error) => {
-            unreserve(app, key, seat, &leg).await;
+            unreserve(app, key, call, &reserved, &leg).await;
             return Err(error.into());
         }
     };
@@ -477,11 +479,11 @@ async fn ring_added(
     let ring_due = now_ms() / 1000 + super::ring_seconds(app);
     let region = &app.config.region;
     let invitation = step_any(app, key, |call, at, _| {
-        call.ring(seat, &leg, ring_due)?;
+        call.ring(reserved.seat, &leg, ring_due)?;
         Ok(wire::group_invitation(
             at.origin,
             call,
-            seat,
+            (adder, reserved.seat),
             (&tenant, region),
             &content(&offer),
         ))
@@ -490,25 +492,36 @@ async fn ring_added(
     let invitation = match invitation {
         Ok(invitation) => invitation,
         Err(failure) => {
-            drop_leg(nodes.as_ref(), home, &call.id, &leg).await;
+            unreserve(app, key, call, &reserved, &leg).await;
             return Err(failure);
         }
     };
-    if let Some(before) = before {
+    let before = reserved.before.map(|before| before.id);
+    if let Some(before) = before.filter(|before| *before != leg) {
         drop_leg(nodes.as_ref(), home, &call.id, &before).await;
     }
-    ring(app, &call.id, &invitation, endpoints).await;
+    super::ops::ring(app, &call.id, &invitation, endpoints).await;
     Ok(())
 }
 
-/// A reservation whose leg the node didn't make is let go.
-async fn unreserve(app: &App, key: Key<'_>, seat: Seat, leg: &str) {
-    let undone = step_any(app, key, |call, _, _| {
-        call.unreserve(seat, leg);
-        Ok(())
-    })
-    .await;
-    if let Err(Failure::Database(error)) = undone {
-        tracing::warn!(%error, "a call's reserved seat wasn't let go");
+/// Undoes `reserved`, whose leg `leg` the node didn't make or whose step wasn't stored. The leg goes when the seat
+/// let go of it; else the seat's leg from before does, as nothing names it any more.
+async fn unreserve(app: &App, key: Key<'_>, call: &Call, reserved: &Reserved, leg: &str) {
+    let undone = step_any(app, key, |call, _, _| Ok(call.unreserve(reserved, leg))).await;
+    let (Ok(nodes), Ok(home)) = (nodes(app), home_of(call)) else {
+        return;
+    };
+    let gone = match undone {
+        Ok(true) => Some(leg),
+        Ok(false) => reserved.before.as_ref().map(|before| before.id.as_str()),
+        Err(failure) => {
+            if let Failure::Database(error) = failure {
+                tracing::warn!(%error, "a call's reserved seat wasn't let go");
+            }
+            None
+        }
+    };
+    if let Some(gone) = gone {
+        drop_leg(nodes.as_ref(), home, &call.id, gone).await;
     }
 }

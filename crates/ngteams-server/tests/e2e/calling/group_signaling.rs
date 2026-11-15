@@ -1,7 +1,8 @@
 //! A group call's signaling, with the client's call machine at every party and the call's media node a fixed one
 //! ([`super::mixer::FixedMixer`]): the start in a group chat ringing its other members with the node's offers, the
 //! caller accepted by the node at once, a callee's answer, a decline and a ring nobody answers, leaves and the last
-//! one, a member joining the running call it finds in the chat, a second start refused.
+//! one, a member joining the running call it finds in the chat, a second start refused (also when both come at once),
+//! adds, a media node that fails a join.
 
 use std::time::Duration;
 
@@ -50,6 +51,18 @@ impl Request for RemoveMember {
     fn is_write(&self) -> bool {
         true
     }
+}
+
+/// `writer`'s removal of `member` from the group chat `chat`.
+async fn remove_member(writer: &teams_proto::Client<crate::trouter::Transport>, chat: &str, member: &Person) {
+    let removed = writer
+        .write(RemoveMember {
+            chat: chat.to_owned(),
+            member: member.mri(),
+        })
+        .await
+        .unwrap();
+    assert!(removed.is_success(), "{}", removed.status());
 }
 
 /// A person of a test: the account and its calling client.
@@ -121,14 +134,7 @@ impl Group {
         let created = writer.write(create).await.unwrap();
         let body: Value = serde_json::from_slice(created.body()).unwrap();
         let chat = body["threadResource"]["id"].as_str().unwrap().to_owned();
-        let removed = writer
-            .write(RemoveMember {
-                chat: chat.clone(),
-                member: eve.mri(),
-            })
-            .await
-            .unwrap();
-        assert!(removed.is_success(), "{}", removed.status());
+        remove_member(&writer, &chat, &eve).await;
         Self {
             server,
             mixer,
@@ -717,4 +723,201 @@ async fn a_callee_who_declined_joins_later_and_its_own_leave_takes_it_out() {
         assert_eq!(group.open_call().await.phase, "connected", "Ada is still in it");
         group.server.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caller_who_left_rings_and_answers_when_added_back() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let (a, b) = (group.a.mri(), group.b.mri());
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        let placed = group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        group.b.client.answer(rings.call);
+        let answered = group.b.client.state(CallState::Connected).await;
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, std::slice::from_ref(&b)))
+            .await;
+        group.a.client.hang_up(placed);
+        assert_eq!(group.a.client.ended().await, End::HungUp);
+        group.b.client.participants_until(<[Participant]>::is_empty).await;
+        // Bert brings Ada back: hers is the caller's seat, and she rings and answers as anyone added does
+        group.b.client.add(answered, &a, &group.chat);
+        let back = group.a.client.incoming().await;
+        assert_eq!(back.caller.as_str(), b, "invited by whoever added her");
+        group.a.client.answer(back.call);
+        group.a.client.state(CallState::Connected).await;
+        group
+            .b
+            .client
+            .participants_until(|now| are(now, std::slice::from_ref(&a)))
+            .await;
+        let call = group.open_call().await;
+        assert_eq!(group.mixer.legs(&call.id).len(), 2, "Ada's new leg and Bert's");
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_a_member_who_still_rings_leaves_its_ring_as_it_was() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let b = group.b.mri();
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        let placed = group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        let call = group.open_call().await;
+        let offer = rings.offer.clone().unwrap().blob;
+        let rung = group
+            .mixer
+            .legs(&call.id)
+            .into_keys()
+            .find(|leg| offer == offer_to(leg));
+        let rung = rung.expect("Bert rings with the node's offer to his leg");
+        group.a.client.add(placed, &b, &group.chat);
+        let quiet = group.b.client.events_within(Duration::from_millis(500)).await;
+        assert!(
+            !quiet
+                .iter()
+                .any(|event| matches!(event, teams_call::CallEvent::Incoming(_))),
+            "{quiet:#?}"
+        );
+        group.b.client.answer(rings.call);
+        group.b.client.state(CallState::Connected).await;
+        let legs = group.mixer.legs(&call.id);
+        assert_eq!(legs.len(), 2, "{legs:?}");
+        assert!(
+            legs[&rung].answered,
+            "his answer reached the leg he rang with: {legs:?}"
+        );
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_the_media_node_fails_keeps_the_ring_and_a_later_join_takes_the_same_seat() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let (a, b, c) = (group.a.mri(), group.b.mri(), group.c.mri());
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        let call = group.open_call().await;
+        let offer = rings.offer.clone().unwrap().blob;
+        let rung = group
+            .mixer
+            .legs(&call.id)
+            .into_keys()
+            .find(|leg| offer == offer_to(leg));
+        let rung = rung.expect("Bert rings with the node's offer to his leg");
+        let running = group
+            .running_call(&group.c)
+            .await
+            .expect("the chat names its running call");
+        group.mixer.fail_legs(true);
+        // Bert, still rung, joins instead of answering (from another device of his), and Cora, never rung, joins:
+        // the node fails both
+        let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
+        let (_, base) = own_callbacks(&group.server, &group.b).await;
+        let join = json!({
+            "callInvitation": {
+                "mediaContent": {"blob": "v=0\r\ns=bert joins\r\n", "contentType": "application/sdp-ngc-1.0"},
+                "links": {"acceptance": format!("{base}acceptance/"), "end": format!("{base}end/")},
+            },
+            "participants": {"from": {"id": b, "displayName": "Bert"}},
+        });
+        let (status, _) = raw(&group.server, &group.b, reqwest::Method::POST, &conv, &join).await;
+        assert_eq!(status, 503);
+        group.c.client.join(&group.chat, running.clone());
+        assert_eq!(group.c.client.ended().await, End::Failed("join"));
+        group.mixer.fail_legs(false);
+        // Bert's ring is still his to answer, on the leg it rang with
+        group.b.client.answer(rings.call);
+        group.b.client.state(CallState::Connected).await;
+        assert!(group.mixer.legs(&call.id)[&rung].answered);
+        // Cora's next join takes her in
+        group.c.client.join(&group.chat, running);
+        group.c.client.state(CallState::Connected).await;
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, &[b.clone(), c.clone()]))
+            .await;
+        group
+            .c
+            .client
+            .participants_until(|now| are(now, &[a.clone(), b.clone()]))
+            .await;
+        let legs = group.mixer.legs(&call.id);
+        assert_eq!(legs.len(), 3, "Ada's, Bert's and Cora's: {legs:?}");
+        group.server.stop().await;
+    }
+}
+
+/// How `client`'s start comes out: up (`None`), or ended.
+async fn start_outcome(client: &mut Client) -> Option<End> {
+    client
+        .next(|event| match event {
+            teams_call::CallEvent::State {
+                state: CallState::Connected,
+                ..
+            } => Some(None),
+            teams_call::CallEvent::Ended { end, .. } => Some(Some(end)),
+            _ => None,
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn of_two_starts_at_once_in_a_chat_one_runs_and_the_others_room_is_dropped() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let b = group.b.mri();
+        // both starts are past the chat's check for a running call before either is stored
+        group.mixer.hold_rooms(2);
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        group.c.client.call_group(&group.chat, std::slice::from_ref(&b));
+        let (a, c) = tokio::join!(start_outcome(&mut group.a.client), start_outcome(&mut group.c.client));
+        let (winner, lost) = match (a, c) {
+            (None, Some(lost)) => (&group.a, lost),
+            (Some(lost), None) => (&group.c, lost),
+            outcomes => panic!("one start runs: {outcomes:?}"),
+        };
+        let End::Remote(end) = lost else {
+            panic!("the other ends as the service's: {lost:?}");
+        };
+        assert!(end.chat_has_running_call(), "{end:?}");
+        let call = group.open_call().await;
+        assert_eq!(call.caller, winner.id);
+        let named = end.conversation.unwrap_or_default();
+        assert!(named.ends_with(&format!("/conv/{}", call.conversation)), "{named}");
+        assert_eq!(group.mixer.rooms(), std::slice::from_ref(&call.id));
+        assert_eq!(group.mixer.dropped_rooms(), 1, "the other start's room");
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_former_party_no_longer_in_the_chat_follows_nothing() {
+    let mut group = Group::start(Backend::Sqlite).await;
+    let b = group.b.mri();
+    group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+    group.a.client.state(CallState::Connected).await;
+    let rings = group.b.client.incoming().await;
+    group.b.client.answer(rings.call);
+    let answered = group.b.client.state(CallState::Connected).await;
+    group.b.client.hang_up(answered);
+    assert_eq!(group.b.client.ended().await, End::HungUp);
+    let account = Account::sign_in(&group.server, &group.a.upn, &group.a.id).await;
+    remove_member(&account.client(&group.server), &group.chat, &group.b).await;
+    let call = group.open_call().await;
+    let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
+    let (_, base) = own_callbacks(&group.server, &group.b).await;
+    let watch =
+        json!({"conversationRequest": {"roster": {"type": "Delta", "rosterUpdate": format!("{base}rosterUpdate/")}}});
+    let (status, _) = raw(&group.server, &group.b, reqwest::Method::POST, &conv, &watch).await;
+    assert_eq!(status, 404, "Bert left the call and the chat");
+    group.server.stop().await;
 }

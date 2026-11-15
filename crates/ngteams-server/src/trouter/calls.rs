@@ -51,7 +51,8 @@ impl Sent {
     }
 }
 
-fn gzip_base64(text: &str) -> String {
+/// `text` gzipped, in base64 (a delivery's `cp`).
+pub(crate) fn gzip_base64(text: &str) -> String {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let compressed = encoder
         .write_all(text.as_bytes())

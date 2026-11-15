@@ -193,21 +193,30 @@ pub(crate) fn running_elsewhere(origin: &str, running: &Call) -> Value {
     })
 }
 
+/// A party as an invitation names it.
+fn named_in_invitation(party: &Party, tenant: &str) -> Value {
+    let mut named = party.participant.clone();
+    named["displayNameSource"] = json!("substrate");
+    named["hidden"] = json!(false);
+    named["tenantId"] = json!(tenant);
+    named["propertyBag"] = Value::Null;
+    named
+}
+
+/// An invitation's `from` (the party at `by` that calls or adds, with its region) and `to` (the party at `seat`, at
+/// no endpoint yet).
+fn invited(call: &Call, (by, seat): (Seat, Seat), (tenant, region): (&str, &str)) -> (Value, Value) {
+    let mut from = named_in_invitation(call.party(by), tenant);
+    from["region"] = json!(region);
+    let mut to = named_in_invitation(call.party(seat), tenant);
+    to["endpointId"] = json!(ZERO_ENDPOINT);
+    (from, to)
+}
+
 /// The callee's invitation: `{"evt": 107, "gp": <base64 JSON>}`, with the caller's offer.
 pub(crate) fn invitation(origin: &str, call: &Call, tenant: &str, region: &str) -> Value {
     let forked = |op: &str| controller_url(origin, (call, Seat::CALLEE), ("forked", "i1", 1), Some(op));
-    let party = |party: &Party| {
-        let mut named = party.participant.clone();
-        named["displayNameSource"] = json!("substrate");
-        named["hidden"] = json!(false);
-        named["tenantId"] = json!(tenant);
-        named["propertyBag"] = Value::Null;
-        named
-    };
-    let mut from = party(call.party(Seat::CALLER));
-    from["region"] = json!(region);
-    let mut to = party(call.party(Seat::CALLEE));
-    to["endpointId"] = json!(ZERO_ENDPOINT);
+    let (from, to) = invited(call, (Seat::CALLER, Seat::CALLEE), (tenant, region));
     let gp = json!({
         "callNotification": {
             "from": from,
@@ -477,29 +486,17 @@ pub(crate) fn roster(call: &Call, seats: &[Seat]) -> Value {
     json!({"participants": participants, "type": "Delta", "sequenceNumber": call.roster_sequence})
 }
 
-/// A group call's invitation of the party at `seat`: `{"evt": 109, "gp": <base64 JSON>}`, with the media node's offer
-/// to its leg (`deliveries.json`'s group invitation).
+/// A group call's invitation of the party at `seat` from the party at `by`: `{"evt": 109, "gp": <base64 JSON>}`, with
+/// the media node's offer to its leg (`deliveries.json`'s group invitation).
 pub(crate) fn group_invitation(
     origin: &str,
     call: &Call,
-    seat: Seat,
+    (by, seat): (Seat, Seat),
     (tenant, region): (&str, &str),
     offer: &Value,
 ) -> Value {
     let forked = |op: &str| controller_url(origin, (call, seat), ("forked", "i1", 1), Some(op));
-    let named = |party: &Party| {
-        let mut named = party.participant.clone();
-        named["displayNameSource"] = json!("substrate");
-        named["hidden"] = json!(false);
-        named["tenantId"] = json!(tenant);
-        named["propertyBag"] = Value::Null;
-        named
-    };
-    let caller = call.party(Seat::CALLER);
-    let mut from = named(caller);
-    from["region"] = json!(region);
-    let mut to = named(call.party(seat));
-    to["endpointId"] = json!(ZERO_ENDPOINT);
+    let (from, to) = invited(call, (by, seat), (tenant, region));
     let mut media = offer.clone();
     media["fromMixer"] = json!(true);
     media["mediaLegId"] = json!(call.party(seat).leg.as_ref().map(|leg| leg.id.as_str()));
@@ -528,7 +525,7 @@ pub(crate) fn group_invitation(
             "conversationController": conversation_url(origin, &call.conversation, None),
             "isMultiParty": true,
             "isBroadcast": false,
-            "groupCallInitiator": caller.mri(),
+            "groupCallInitiator": call.party(Seat::CALLER).mri(),
             "isHostless": true,
         },
         "debugContent": {
@@ -625,11 +622,7 @@ pub(crate) fn presence(origin: &str, call: &Call, evt: u64) -> Value {
         "conversationController": conversation_url(origin, &call.conversation, None),
         "participants": participants,
     });
-    let mut zipped = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    let packed = std::io::Write::write_all(&mut zipped, content.to_string().as_bytes())
-        .and_then(|()| zipped.finish())
-        .unwrap_or_default();
-    json!({"evt": evt, "cp": base64::engine::general_purpose::STANDARD.encode(packed)})
+    json!({"evt": evt, "cp": crate::trouter::gzip_base64(&content.to_string())})
 }
 
 #[cfg(test)]

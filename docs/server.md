@@ -697,7 +697,8 @@ without, it offers), takes a callee's answer and a renegotiation, and drops legs
 server yet, so **a group start is answered `501`** until one is installed (`App::mixers`); the e2e tests install one
 that answers fixed SDP. Each operation asks the node first (a leg's requests repeat safely by its id) and then makes
 the step that records what the node answered; a join or an add first reserves its seat, so the source ids the node
-gets are the ones the roster names.
+gets are the ones the roster names. A reservation whose leg or step fails is undone: the seat gets back the leg its
+ring was offered on, and a seat made for it goes.
 
 - **The start**: the caller must be in the chat (`403`), and only the chat's members it names ring, once each; a
   chat that doesn't exist is `404`. The caller is in the call at once: its acceptance, with the node's answer to its
@@ -715,13 +716,16 @@ gets are the ones the roster names.
   `callEnded` listing everyone who was in it. A leave from an endpoint whose answer lost changes nothing.
 - **Joining and following**: a chat member's `POST conv/<id>` with a `callInvitation` and its offer joins the
   call: its acceptance, with the node's answer, comes at its own `acceptance` callback. Without one, a member follows
-  the roster (the whole roster now, its changes after); a party hands out more callbacks. Anyone not in the chat
-  gets `404`.
+  the roster (the whole roster now, its changes after); a party that rings or is in the call hands out more
+  callbacks. Anyone else (a former party no longer in the chat too) gets `404`.
 - **Add** (`conv/<id>/add`, the conversation's `addParticipantAndModality` link): a party in the call rings a member
-  of the chat with the node's offer to a new leg; someone with no calling endpoint isn't brought in, and the adder
-  is told at its `addParticipantFailure` callback (`580` / `5205`); someone not in the chat is `403`.
+  of the chat with the node's offer to a new leg, invited by the adder (the caller added back after leaving rings
+  and answers as anyone else); one who still rings rings on as it is. Someone with no calling endpoint isn't
+  brought in, and the adder is told at its `addParticipantFailure` callback (`580` / `5205`); someone not in the
+  chat is `403`.
 - **Renegotiation** goes to the node, and its answer back to the party alone, at its `mediaAnswer` callback; the next
-  one waits for that answer's acknowledgement (`491` at its `rejection` callback). `updateMediaDescriptions` and
+  one waits for that answer's acknowledgement (`491` at its `rejection` callback), for 30 s at most, as an
+  acknowledgement may be lost and is never sent again. `updateMediaDescriptions` and
   `applyChannelParameters` are taken and change nothing. A group call has no hold (`403`, and no `hold` link).
 - **The roster** lists each party in the call with its main audio and main video (only taken, until the node
   forwards video) by the source ids signaling gave it (1000, 1010, … per party). Each change goes to every party in

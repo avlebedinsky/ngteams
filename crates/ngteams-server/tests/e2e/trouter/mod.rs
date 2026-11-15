@@ -22,7 +22,7 @@ use crate::support::{Backend, TestServer};
 pub const ORIGIN: &str = "https://own.example.test";
 const WAIT: Duration = Duration::from_secs(30);
 
-type Transport = HttpTransport<Session<MemorySecretStore>>;
+pub type Transport = HttpTransport<Session<MemorySecretStore>>;
 
 /// A server whose public origin is [`ORIGIN`], as the client's own cloud names it.
 pub async fn server(backend: Backend) -> TestServer {

@@ -47,6 +47,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 
+pub(crate) use calls::gzip_base64;
 pub use delivery::keep;
 
 use crate::app::App;

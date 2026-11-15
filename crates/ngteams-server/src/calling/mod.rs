@@ -10,11 +10,13 @@
 //!   invitation at the endpoint's root, everything else at the callback the party handed out.
 //! - **A party's callbacks** are taken only on calling endpoints the account itself registered, so no request makes
 //!   the server deliver to someone else's socket.
-//! - **Who may do what** is the token's account against the call's two parties; anyone else gets 404.
+//! - **Who may do what** is the token's account against the call's parties, and for a group call the members of its
+//!   chat too (a join, a roster-only subscription, an add); anyone else gets 404.
 //! - **The sweeper** ([`sweep`]) ends a ring nobody answered and a call whose keep-alives stopped, on whichever
 //!   serving node looks first, and drops the rows of calls that are over.
 //! - **A call's events in its chat** (`Event/Call`: started, ended with its length, missed) are written through the
-//!   chat service ([`crate::chatsvc::call_events`]), when the two parties have their chat.
+//!   chat service ([`crate::chatsvc::call_events`]): a 1:1 call's when the two parties have their chat, a group
+//!   call's to its group chat.
 //!
 //! - **A group call** ([`group`]) is a group chat's: every member it names rings with the call's media node's offer,
 //!   the caller is in it at once with the node's answer, and each party answers, declines, joins and leaves alone;

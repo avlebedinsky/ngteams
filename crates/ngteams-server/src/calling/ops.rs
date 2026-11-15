@@ -177,31 +177,31 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
     };
     repo::insert(&app.db, &call).await?;
     // before anyone can end the call: the chat orders its events by when they were written
-    tell_chat_started(&app, &caller, &call).await;
-    ring(&app, &call, &tenant, ringing).await;
+    tell_chat_started(&app, &caller, &call, None).await;
+    let invitation = wire::invitation(&app.config.origin(), &call, &tenant, &app.config.region);
+    ring(&app, &call.id, &invitation, ringing).await;
     let origin = app.config.origin();
     Ok(Json(wire::conversation(&origin, &app.config.region, &call)).into_response())
 }
 
-/// Writes the call's start to the chat of its two parties, when they have one.
-async fn tell_chat_started(app: &App, caller: &Caller, call: &Call) {
+/// Writes the call's start to its chat, when it has one: with where it runs, when `conversation` names it.
+pub(super) async fn tell_chat_started(app: &App, caller: &Caller, call: &Call, conversation: Option<&str>) {
     let Some(chat) = &call.chat else { return };
-    let told = call_events::started(app, chat, (&caller.id, &caller.name), (&call.id, None)).await;
+    let told = call_events::started(app, chat, (&caller.id, &caller.name), (&call.id, conversation)).await;
     if let Err(error) = told {
         tracing::warn!(%error, "a call's start wasn't written to its chat");
     }
 }
 
-/// Delivers the call's invitation to each of `endpoints`, the calling endpoints its callee registered.
-async fn ring(app: &App, call: &Call, tenant: &str, endpoints: Vec<String>) {
-    let invitation = wire::invitation(&app.config.origin(), call, tenant, &app.config.region);
+/// Delivers the call `call`'s `invitation` to each of `endpoints`, the calling endpoints its callee registered.
+pub(super) async fn ring(app: &App, call: &str, invitation: &Value, endpoints: Vec<String>) {
     for endpoint in endpoints {
         let delivery = super::state::Delivery {
             endpoint,
             path: String::new(),
             body: invitation.clone(),
         };
-        super::publish(app, &call.id, &delivery).await;
+        super::publish(app, call, &delivery).await;
     }
 }
 
@@ -337,8 +337,8 @@ pub(super) async fn controller(
     let (call, seat) = party_of(&app, key, &caller).await?;
     own_leg(&call, seat, &path)?;
     let kind = param(&path, "kind");
-    // the ringing leg is a callee's alone, whatever the request carries
-    if matches!(kind, "forked" | "incoming") && seat == Seat::CALLER {
+    // a 1:1 call's ringing leg is its callee's alone, whatever the request carries
+    if matches!(kind, "forked" | "incoming") && seat == Seat::CALLER && call.kind == Kind::OneToOne {
         return Err(Refusal::Forbidden.into());
     }
     let body = json(&body)?;

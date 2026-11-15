@@ -117,9 +117,30 @@ pub(crate) struct Party {
     pub ring_due: Option<i64>,
     #[serde(default)]
     pub leg: Option<Leg>,
-    /// The number of a group call party's renegotiation whose answer waits for its acknowledgement.
+    /// A group call party's renegotiation whose answer waits for its acknowledgement.
     #[serde(default)]
-    pub answered: Option<u64>,
+    pub answered: Option<Pending>,
+}
+
+/// A group call party's renegotiation the media node answered: its number, and when (Unix milliseconds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Pending {
+    pub number: u64,
+    pub at: i64,
+}
+
+/// What a join's or an add's reservation of a seat took ([`Call::reserve`]), to undo it if its leg or its step fails.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Reserved {
+    pub seat: Seat,
+    pub sources: Sources,
+    /// The seat's leg before (a ringing party's, which its invitation's offer is for): dropped once the step that
+    /// takes the new one is stored.
+    pub before: Option<Leg>,
+    /// How the seat named its party before (`participant`, `name`).
+    named: (Value, String),
+    /// The seat was made for it.
+    made: bool,
 }
 
 impl Party {
@@ -318,10 +339,10 @@ impl Call {
 
     pub(crate) fn ringing(&self, seat: Seat) -> Result<(), Refusal> {
         if self.kind == Kind::Group {
+            // whoever rings, the caller added back too
             return match (self.phase, self.party(seat).status) {
                 (Phase::Ended, _) => Err(Refusal::Gone),
-                (_, Status::Ringing) if seat != Seat::CALLER => Ok(()),
-                _ if seat == Seat::CALLER => Err(Refusal::Forbidden),
+                (_, Status::Ringing) => Ok(()),
                 _ => Err(Refusal::Gone),
             };
         }
@@ -507,7 +528,8 @@ impl Call {
         Ok(())
     }
 
-    /// A party's endpoint reports its state (its microphone): the roster tells both once the call is up.
+    /// A party's endpoint reports its state (its microphone): the roster tells the call's parties once the party is
+    /// in the call.
     pub(crate) fn endpoint_state(
         &mut self,
         seat: Seat,
@@ -658,7 +680,9 @@ impl Call {
     ) -> Result<(), Refusal> {
         self.in_call(seat)?;
         if self.kind == Kind::Group {
-            self.party_mut(seat).answered.take_if(|answered| *answered == number);
+            self.party_mut(seat)
+                .answered
+                .take_if(|answered| answered.number == number);
             return Ok(());
         }
         let answered = self
@@ -734,7 +758,7 @@ impl Call {
         self.send_roster(at.origin, &update, out);
     }
 
-    /// Tells both parties the roster's entries of `seats`.
+    /// Tells the call's parties the roster's entries of `seats` (a group call's ringing parties and followers too).
     fn tell_roster(&mut self, origin: &str, seats: &[Seat], out: &mut Out) {
         if self.kind == Kind::Group {
             self.tell_group(origin, seats, None, out);
