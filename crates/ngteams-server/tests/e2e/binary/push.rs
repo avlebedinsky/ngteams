@@ -8,7 +8,7 @@ mod notes;
 mod people;
 mod pictures;
 mod roster;
-mod support;
+pub mod support;
 
 use std::time::Duration;
 

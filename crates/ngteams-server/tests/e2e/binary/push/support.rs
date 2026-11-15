@@ -26,7 +26,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use super::super::support::{Deployment, Node};
 use crate::support::{Backend, CLIENT_ID, PASSWORD, redis_url};
 
-type Transport = HttpTransport<Session<MemorySecretStore>>;
+pub type Transport = HttpTransport<Session<MemorySecretStore>>;
 
 pub const WAIT: Duration = Duration::from_secs(40);
 pub const QUIET: Duration = Duration::from_millis(1200);
@@ -71,15 +71,28 @@ impl Rig {
 
     /// As [`Rig::start_with`], the nodes on the Redis at `redis`.
     pub async fn start_on(backend: Backend, config: &str, redis: Option<String>) -> Self {
+        Self::start_stored(backend, config, redis, None).await
+    }
+
+    /// As [`Rig::start_on`], the nodes' blobs in the store `storage` names (its root keys, then its tables) and
+    /// not in a directory of the deployment's.
+    pub async fn start_stored(
+        backend: Backend,
+        config: &str,
+        redis: Option<String>,
+        storage: Option<(&str, &str)>,
+    ) -> Self {
         eprintln!("real-binary push: {backend:?}");
         let mut deployment = Deployment::new(backend, false, redis).await;
         deployment.origin = deployment.origin.replacen("http:", "https:", 1);
-        let storage = format!(
+        let directory = format!(
             "storage_url = \"file://{}\"\n",
             deployment.dir.path().join("blobs").display()
         );
+        let (storage, tables) = storage.unwrap_or((&directory, ""));
+        let config = &format!("{config}\n{tables}");
         let mut first = deployment.node("a");
-        prepend(&first.config, &storage);
+        prepend(&first.config, storage);
         append(&first.config, config);
         first.cli(&["migrate"], "");
         for upn in ["a@own.test", "b@own.test", "c@own.test", "d@own.test"] {
@@ -88,7 +101,7 @@ impl Rig {
         first.start().await;
         let mut second = (backend == Backend::Postgres).then(|| deployment.node("b"));
         if let Some(node) = &mut second {
-            prepend(&node.config, &storage);
+            prepend(&node.config, storage);
             append(&node.config, config);
             node.start().await;
         }
@@ -237,6 +250,11 @@ impl User {
     /// The client's push socket goes through `link` from now on (its next start).
     pub fn through(&mut self, link: &Link) {
         self.socket = format!("ws://127.0.0.1:{}", link.port);
+    }
+
+    /// The client's session: what its tokens come from.
+    pub fn session(&self) -> &Session<MemorySecretStore> {
+        &self.session
     }
 
     fn transport(&self) -> Transport {
