@@ -3,7 +3,8 @@
 # [patch.crates-io]. The GPUI crates came with M0 Task 16 (approach (b) of the video spike), taken from agterm-rs
 # (scripts/vendor-gpui.sh) with its external-surfaces patches only, unchanged:
 #   gpui-pre       `ExternalSurface` (a dmabuf or CPU pixels) as the Linux payload of `PaintSurface`, and
-#                  `Window::paint_external_surface` (0001)
+#                  `Window::paint_external_surface` (0001); and, our own, no line break right after opening
+#                  punctuation (UAX #14 LB14), so `[[account]]` wraps whole (0002)
 #   gpui-pre-wgpu  the renderer's side: dmabufs imported through wgpu-hal Vulkan and copied on the GPU, CPU pixels
 #                  uploaded into a texture kept per surface, by damaged rectangle (0001); and, our own, a weight or
 #                  style the family has no face of drawn anyway: a variable face at that weight, else synthesized (0002)

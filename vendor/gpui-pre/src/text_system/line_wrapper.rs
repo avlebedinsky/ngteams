@@ -84,8 +84,13 @@ impl LineWrapper {
                                 last_candidate_width = width;
                             }
                         } else {
-                            // CJK may not be space separated, e.g.: `Hello world你好世界`
-                            if c != ' ' && first_non_whitespace_ix.is_some() {
+                            // CJK may not be space separated, e.g.: `Hello world你好世界`. Opening punctuation
+                            // never ends a line (UAX #14 LB14: no break after `(`, `[`, `{` or an opening quote), so
+                            // `[[account]]` and `((a))` wrap as one word.
+                            if c != ' '
+                                && first_non_whitespace_ix.is_some()
+                                && !Self::is_opening_punctuation(prev_c)
+                            {
                                 last_candidate_ix = ix;
                                 last_candidate_width = width;
                             }
@@ -540,6 +545,12 @@ impl LineWrapper {
         matches!(c, '\u{202F}' | '\u{00A0}' | '\u{2011}')
     }
 
+    /// Opening punctuation, after which no line ends (UAX #14 LB14).
+    #[inline(always)]
+    pub(crate) fn is_opening_punctuation(c: char) -> bool {
+        matches!(c, '(' | '[' | '{' | '“' | '«')
+    }
+
     #[inline(always)]
     fn width_for_char(&mut self, c: char) -> Pixels {
         if (c as u32) < 128 {
@@ -934,6 +945,18 @@ mod tests {
                 )
                 .collect::<Vec<_>>(),
             &[Boundary::new(12, 0),], // special chars above take up 3, 2 and 3 bytes, so boundary ends up at 12
+        );
+
+        // No break after opening punctuation: the line ends before `[[account]]`, never inside it
+        assert_eq!(
+            wrapper
+                .wrap_line(
+                    &[LineFragment::text("an [[account]] entry")],
+                    px(120.0),
+                    IndentAdjustment::default()
+                )
+                .collect::<Vec<_>>(),
+            &[Boundary::new(3, 0), Boundary::new(15, 0)],
         );
     }
 

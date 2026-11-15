@@ -332,3 +332,52 @@ fn tab_reaches_the_choice_and_enter_or_space_goes_on_to_the_first_field(cx: &mut
     cx.simulate_input(UPN);
     assert_eq!(cx.read(|cx| view.read(cx).account(cx)), UPN);
 }
+
+/// The untrusted-certificate refusal of an own server's account without a `ca_file`, as Windows words it.
+const NO_CA_FILE: &str = "https://192.168.122.1:8443's certificate isn't trusted. For a server with its own certificate \
+    authority, add ca_file = 'C:\\path\\to\\ca.pem' to an [[account]] entry with this user name and server in \
+    C:\\Users\\admin\\AppData\\Local\\ngteams-lab\\ownqa\\accounts.toml, then sign in again.";
+
+#[gpui::test]
+fn a_refusal_never_breaks_a_line_inside_the_accounts_files_table_name(cx: &mut TestAppContext) {
+    let (view, _, mut cx) = prompt(Some(UPN), cx);
+    view.update(&mut cx, |view, cx| view.failed(NO_CA_FILE, cx));
+    let said = problem(&view, &mut cx).expect("the refusal is said");
+    let token = said.find("[[account]]").expect("the table's name is said whole");
+    let inside = token + 1..token + "[[account]]".len();
+    // as the window draws it: shaped, then wrapped at each width
+    let breaks = cx.update(|window, _| {
+        let run = window.text_style().to_run(said.len());
+        (160..=720)
+            .step_by(4)
+            .flat_map(|width| {
+                let width = gpui::px(f32::from(u16::try_from(width).unwrap()));
+                let lines = window
+                    .text_system()
+                    .shape_text(
+                        said.clone().into(),
+                        gpui::px(14.0),
+                        std::slice::from_ref(&run),
+                        Some(width),
+                        None,
+                    )
+                    .unwrap();
+                lines
+                    .iter()
+                    .flat_map(|line| {
+                        line.wrap_boundaries()
+                            .iter()
+                            .map(|at| line.unwrapped_layout.runs[at.run_ix].glyphs[at.glyph_ix].index)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        breaks.contains(&token),
+        "some width ends a line just before the table's name"
+    );
+    let split: Vec<usize> = breaks.into_iter().filter(|ix| inside.contains(ix)).collect();
+    assert!(split.is_empty(), "a line ends inside [[account]] at {split:?}");
+}

@@ -218,7 +218,7 @@ const QA_PREFIX: &str = "qa_";
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 26] = [
+const SCENES: [Scene; 28] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -240,6 +240,12 @@ const SCENES: [Scene; 26] = [
     }),
     ("own_entry_written_by_hand_first_sign_in_dark", |sandbox| {
         first_sign_in(sandbox, true)
+    }),
+    ("own_entry_written_by_hand_first_sign_in_at_480", |_| {
+        first_sign_in_at_480(false)
+    }),
+    ("own_entry_written_by_hand_first_sign_in_at_480_dark", |_| {
+        first_sign_in_at_480(true)
     }),
     ("own_account_shown_names_its_server", |sandbox| shown(sandbox, false)),
     ("own_account_shown_names_its_server_dark", |sandbox| {
@@ -909,7 +915,25 @@ fn password_again(sandbox: &Sandbox, dark: bool) -> SandboxResult {
 /// asks its password with no "again"; the sign-in says where the CA file goes; with that line written into the entry
 /// while the screen is open, the password typed again on the same screen signs in, with no restart.
 fn first_sign_in(sandbox: &Sandbox, dark: bool) -> SandboxResult {
-    let (mode, suffix) = if dark { ("first-dark", "-dark") } else { ("first", "") };
+    first_sign_in_shot_as(sandbox, dark, "")
+}
+
+/// As [`first_sign_in`], in a sandbox as wide as the window asking for the password: the refusal wraps over several
+/// lines and keeps `[[account]]` whole.
+fn first_sign_in_at_480(dark: bool) -> SandboxResult {
+    let Some(sandbox) = admin::narrow()? else {
+        return Ok(());
+    };
+    first_sign_in_shot_as(&sandbox, dark, "-480")
+}
+
+/// [`first_sign_in`], its screenshots' names marked with `width` (empty at the sandbox's own width).
+fn first_sign_in_shot_as(sandbox: &Sandbox, dark: bool, width: &str) -> SandboxResult {
+    let (mode, suffix) = if dark {
+        ("first-dark", format!("{width}-dark"))
+    } else {
+        ("first", width.to_owned())
+    };
     let (running, _trace, _) = start(sandbox, mode)?;
     let asked = prompt_now(sandbox, &running)?;
     ensure(
