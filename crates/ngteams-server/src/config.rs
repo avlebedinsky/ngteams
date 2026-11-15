@@ -61,6 +61,7 @@ pub struct Config {
     pub setup: SetupConfig,
     pub trouter: TrouterConfig,
     pub media: MediaConfig,
+    pub calling: crate::calling::config::CallingConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -75,6 +76,7 @@ impl std::fmt::Debug for Config {
             .field("trouter", &self.trouter)
             .field("media", &self.media)
             .field("storage", &self.storage)
+            .field("calling", &self.calling)
             .finish_non_exhaustive()
     }
 }
@@ -241,6 +243,7 @@ impl Default for Config {
             setup: SetupConfig::default(),
             trouter: TrouterConfig::default(),
             media: MediaConfig::default(),
+            calling: crate::calling::config::CallingConfig::default(),
         }
     }
 }
@@ -340,6 +343,7 @@ impl Config {
             || self.login.window == 0
             || self.setup.window == 0
             || self.trouter.auth_timeout == 0
+            || !self.calling.usable()
         {
             return Err(ConfigError::Lifetime);
         }

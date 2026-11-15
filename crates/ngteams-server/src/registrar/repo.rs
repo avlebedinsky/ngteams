@@ -110,3 +110,20 @@ pub async fn purge_expired(db: &Db, before: i64) -> Result<usize, DbError> {
     .execute(conn)
     .await?))
 }
+
+/// The endpoints (`registrationId`s) `user` holds a live registration of `app_id` for.
+///
+/// # Errors
+/// A database failure.
+pub async fn registered(db: &Db, user: &str, app_id: &str) -> Result<Vec<String>, DbError> {
+    use push_registrations::dsl;
+    let now = crate::db::now();
+    with_conn!(db, |conn| Ok(dsl::push_registrations
+        .filter(dsl::user_id.eq(user))
+        .filter(dsl::app_id.eq(app_id))
+        .filter(dsl::expires_at.gt(now))
+        .order(dsl::registration_id.asc())
+        .select(dsl::registration_id)
+        .load::<String>(conn)
+        .await?))
+}

@@ -13,6 +13,7 @@ use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
+use super::calls;
 use super::delivery::{self, Kind, Target, Which};
 use super::frames::{self, FromClient};
 use super::{Control, Stack, UNAUTHORIZED, control_topic, endpoint_id, push_url, tell};
@@ -197,6 +198,7 @@ where
         loss_told: None,
         caught_up: false,
         gap: false,
+        calls: calls::Sent::default(),
     };
     let end = session.serve(&mut closing).await;
     // what was written to the socket is not replayed, however it ended
@@ -214,7 +216,7 @@ async fn ticked(interval: Option<&mut Interval>) {
     }
 }
 
-/// The next payload of a subscription a socket may not have (a calling stack's socket has no chat events).
+/// The next payload of a subscription a socket may not have.
 async fn next_of(subscription: Option<&mut Subscription>) -> Result<Bytes, Missed> {
     match subscription {
         Some(subscription) => subscription.recv().await,
@@ -421,17 +423,22 @@ struct Session<'a, S> {
     caught_up: bool,
     /// Whether an event passed the journal by, and the client isn't told yet.
     gap: bool,
+    /// A calling socket's call deliveries.
+    calls: calls::Sent,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
     async fn serve(&mut self, closing: &mut watch::Receiver<bool>) -> Result<std::convert::Infallible, End> {
         // subscribed before anything is read, so nothing published meanwhile is missed
         let control = self.app.fanout.subscribe(&control_topic(&self.account.mri)).await?;
-        let events = if self.connect.stack == Stack::Messaging {
-            Some(self.app.fanout.subscribe(&self.topic).await?)
-        } else {
-            None
+        let events = match self.connect.stack {
+            Stack::Messaging => self.app.fanout.subscribe(&self.topic).await?,
+            Stack::Calling => {
+                let topic = crate::calling::topic(&self.claim.endpoint);
+                self.app.fanout.subscribe(&topic).await?
+            }
         };
+        let events = Some(events);
         // read again now that the word of its end would be heard
         self.account_holds().await?;
         Arc::make_mut(&mut self.claim).at = unix_ms();
@@ -681,6 +688,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
     /// An event of the account, as the fan-out carried it: a kept one is read from the journal (in order, with what
     /// came before it), a transient one delivered as it is.
     async fn on_event(&mut self, payload: &[u8]) -> Result<(), End> {
+        if self.connect.stack == Stack::Calling {
+            return self.on_call(payload).await;
+        }
         let Ok(envelope) = serde_json::from_slice::<Value>(payload) else {
             return Ok(());
         };
@@ -697,6 +707,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             }
             Kind::Transient | Kind::Internal => Ok(()),
         }
+    }
+
+    /// A call delivery the controller published for this endpoint.
+    async fn on_call(&mut self, payload: &[u8]) -> Result<(), End> {
+        let Ok(published) = serde_json::from_slice::<calls::Published>(payload) else {
+            return Ok(());
+        };
+        self.account_holds().await?;
+        let id = self.calls.number(&published.call);
+        let delivery = calls::delivery(&self.host, &self.claim.endpoint, id, &published);
+        self.link.send(frames::delivery(&delivery)).await
     }
 
     async fn on_control(&mut self, payload: &[u8]) -> Result<(), End> {
@@ -733,8 +754,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
                 let args = if name == "ping" { json!(["pong"]) } else { json!([]) };
                 self.link.send(frames::ack(id, &args)).await
             }
-            FromClient::Response { id, status } => {
+            FromClient::Response { id, status, body } => {
                 tracing::debug!(id, status, "a delivery was answered");
+                if let (Some(call), Some(body)) = (self.calls.call_of(id).map(str::to_owned), body) {
+                    let (account, endpoint) = (&self.account.oid, &self.claim.endpoint);
+                    crate::calling::answered(self.app, &call, account, endpoint, &body).await;
+                }
                 Ok(())
             }
             FromClient::Event { .. } | FromClient::Other => Ok(()),

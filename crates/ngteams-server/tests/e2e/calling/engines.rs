@@ -1,0 +1,471 @@
+//! The client's engine (`teams-core`) calling through the server, with its calls' media (`teams-media`) on the file
+//! device backend, relayed through the loopback TURN server the server hands out the credentials of: a 1:1 call
+//! connects, a tone and video cross both ways, mute and hold show at the far end, and the chat tells the call. The
+//! same with each client on another node.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts, Push};
+use teams_core::{
+    CallAction, CallFloor, CallId, CallMedia, CallParts, CallStatus, CallVideo, CallView, End, IncomingCall, Outbox,
+    Relay, VideoOutput,
+};
+use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
+use teams_media::devices::{VideoSink, wav};
+use teams_media::processing::ProcessingConfig;
+use teams_media::relay::RelayServer;
+use teams_media::session::SessionConfig;
+use teams_media::test_turn::{self, TurnServer};
+use teams_media::tone::{Tone, level_at};
+use teams_media::video::codec::EncoderSettings;
+use teams_media::video::convert::MaxSize;
+use teams_proto::chat::ChatReads;
+use teams_proto::{Author, Client, Cloud, Mri};
+use teams_store::{OutboxState, Store};
+use teams_trouter::{CallStack, RegistrationReport, Trouter};
+
+use super::client::identity;
+use crate::support::{TestServer, backends, redis_url};
+use crate::trouter::{Account, ORIGIN, options};
+
+const WAIT: Duration = Duration::from_secs(40);
+/// How long the media runs once connected, before what was heard is judged.
+const TALK: Duration = Duration::from_secs(2);
+/// The far tone is heard at least this loud in a recording.
+const HEARD: f32 = 0.25;
+/// Frames a side must have decoded of the other's test pattern.
+const FRAMES: u64 = 20;
+const A_TONE: Tone = Tone {
+    hz: 440.0,
+    amplitude: 0.5,
+};
+const B_TONE: Tone = Tone {
+    hz: 660.0,
+    amplitude: 0.5,
+};
+
+/// What an engine's calls showed: the far end's decoded frames and its own camera's.
+#[derive(Clone, Default)]
+struct Shown {
+    remote: FrameCounter,
+    preview: FrameCounter,
+}
+
+impl VideoOutput for Shown {
+    fn remote(&self, _line: usize) -> Box<dyn VideoSink> {
+        Box::new(self.remote.clone())
+    }
+
+    fn preview(&self) -> Option<Box<dyn VideoSink>> {
+        Some(Box::new(self.preview.clone()))
+    }
+}
+
+/// One account's engine, its calls' media a tone in and a recording out.
+struct Engine {
+    mri: String,
+    handle: EngineHandle,
+    recording: PathBuf,
+    video: Shown,
+    _store: tempfile::TempDir,
+}
+
+impl Engine {
+    /// The account's engine: its sockets on `socket`, its requests through `http`, its media through `relay`.
+    async fn start(
+        account: &Account,
+        name: &str,
+        (socket, http): (&TestServer, &TestServer),
+        (relay, tone, dir): (std::net::SocketAddr, Tone, &Path),
+    ) -> Self {
+        let cloud = Cloud::own(ORIGIN).unwrap();
+        let mri = Mri::new(account.mri.clone());
+        let tracker = Arc::new(teams_call::Tracker::for_cloud(mri.clone(), cloud));
+        let transport = Arc::new(account.transport(http).with_call_state(tracker.clone()));
+        let trouter = || {
+            Trouter::with_mock_origin(
+                Arc::clone(&transport),
+                Arc::clone(&account.session),
+                &socket.origin.replace("http://", "ws://"),
+            )
+            .unwrap()
+            .with_options(options())
+        };
+        let recording = dir.join(format!("{name}.wav"));
+        let video = Shown::default();
+        let media = CallMedia {
+            devices: Arc::new(FileDevices {
+                input: AudioInput::Tone(tone),
+                recording: Some(recording.clone()),
+                camera: PatternCamera::default(),
+                pacing: Pacing::RealTime,
+            }),
+            relay: Relay::Fixed(vec![RelayServer::udp(relay)]),
+            session: SessionConfig {
+                processing: ProcessingConfig::OFF,
+            },
+            video: Some(CallVideo {
+                encoder: EncoderSettings::default(),
+                max_size: MaxSize::HD,
+                output: Arc::new(video.clone()),
+            }),
+        };
+        let tenant = ngteams_server::db::meta::tenant(&http.app.db).await.unwrap();
+        let calling = trouter().for_calls(CallStack::new(Arc::clone(&tracker)));
+        let calls = CallParts::new(calling, identity(&account.mri, name, &tenant, ""), media);
+        let store = tempfile::tempdir().unwrap();
+        let outbox = Outbox::new(Arc::clone(&transport), Author::new(mri, name)).with_calls(tracker, CallFloor::new());
+        let handle = engine::start(Parts {
+            calls: Some(calls),
+            store: Store::open(&store.path().join("store.sqlite")).unwrap(),
+            client: Arc::new(Client::new(account.transport(http))),
+            outbox,
+            push: Some(Push::new(trouter())),
+            options: EngineOptions {
+                tick: Duration::from_millis(50),
+                ..EngineOptions::default()
+            },
+            known_names: Vec::new(),
+        })
+        .unwrap();
+        let mut engine = Self {
+            mri: account.mri.clone(),
+            handle,
+            recording,
+            video,
+            _store: store,
+        };
+        engine.ready().await;
+        engine
+    }
+
+    /// Waits until both its sockets are registered.
+    async fn ready(&mut self) {
+        let (mut messaging, mut calling) = (false, false);
+        while !(messaging && calling) {
+            let which = self
+                .next(|event| match event {
+                    Event::Registration(RegistrationReport::Registered) => Some(true),
+                    Event::CallingRegistration(RegistrationReport::Registered) => Some(false),
+                    _ => None,
+                })
+                .await;
+            messaging |= which;
+            calling |= !which;
+        }
+    }
+
+    async fn next<T>(&mut self, mut pick: impl FnMut(&Event) -> Option<T>) -> T {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let event = tokio::time::timeout_at(deadline, self.handle.next_event())
+                .await
+                .unwrap_or_else(|_| panic!("{}: the event didn't come in time", self.mri))
+                .expect("the engine runs");
+            if let Some(picked) = pick(&event) {
+                return picked;
+            }
+        }
+    }
+
+    /// Asks `action`, again while the call can't take it yet (a renegotiation still settling), as a user's second
+    /// press would.
+    async fn call(&self, action: CallAction) -> CallId {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            match self.handle.requests().call(action.clone()).await {
+                Ok(call) => return call,
+                Err(error) if tokio::time::Instant::now() < deadline => {
+                    eprintln!("{}: {action:?} not taken yet: {error}", self.mri);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(error) => panic!("{action:?}: {error}"),
+            }
+        }
+    }
+
+    async fn status(&mut self, call: CallId, wanted: &CallStatus) {
+        self.next(|event| match event {
+            Event::Call { call: of, status } if *of == call && status == wanted => Some(()),
+            Event::Call {
+                call: of,
+                status: CallStatus::Ended(end),
+            } if *of == call => panic!("call {} ended ({end:?}) before {wanted:?}", call.get()),
+            _ => None,
+        })
+        .await;
+    }
+
+    async fn ended(&mut self, call: CallId) -> End {
+        self.next(|event| match event {
+            Event::Call {
+                call: of,
+                status: CallStatus::Ended(end),
+            } if *of == call => Some(end.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    async fn incoming(&mut self) -> IncomingCall {
+        self.next(|event| match event {
+            Event::IncomingCall(incoming) => Some(incoming.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    async fn view(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
+        self.next(|event| match event {
+            Event::CallParticipants { call: of, view } if *of == call && wanted(view) => Some(view.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    /// The next word of whether the far end holds `call`.
+    async fn held_by_far_end(&mut self, call: CallId) -> bool {
+        self.next(|event| match event {
+            Event::CallHeldByFarEnd { call: of, held } if *of == call => Some(*held),
+            _ => None,
+        })
+        .await
+    }
+
+    async fn shut_down(self) {
+        tokio::task::spawn_blocking(move || self.handle.shutdown())
+            .await
+            .unwrap();
+    }
+}
+
+/// The level of `tone` in the last `stretch` of the recording at `path`, leaving out its last 200 ms.
+fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
+    let samples = wav::read(path).unwrap();
+    let at = |span: Duration| usize::try_from(span.as_millis()).unwrap() * 48;
+    let end = samples.len().saturating_sub(at(Duration::from_millis(200)));
+    let start = end.saturating_sub(at(stretch));
+    assert!(
+        end - start >= 24_000,
+        "{} holds {} samples",
+        path.display(),
+        samples.len()
+    );
+    level_at(&samples[start..end], tone.hz)
+}
+
+async fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "{what} didn't happen in time");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The TURN relay's credentials the server hands out: the loopback test server's one user.
+fn relayed(config: &mut ngteams_server::config::Config) {
+    config.public_origin = url::Url::parse(ORIGIN).unwrap();
+    config.calling.turn.username = Some(test_turn::USER.to_owned());
+    config.calling.turn.password = Some(test_turn::PASSWORD.to_owned());
+}
+
+/// Two engines in a call: a's and b's, each with its own id of the call.
+struct Talk {
+    a: Engine,
+    b: Engine,
+    call: CallId,
+    answered: CallId,
+    chat: String,
+}
+
+/// The chat a makes with b, once b has it.
+async fn chat_of(a: &Engine, b: &Engine) -> String {
+    let create = Action::CreateChat {
+        others: vec![Mri::new(b.mri.clone())],
+        topic: None,
+    };
+    let row = a.handle.write(create).await.unwrap();
+    assert_eq!(row.state, OutboxState::Sent, "{row:?}");
+    assert!(b.handle.sync().await.unwrap().failed.is_empty());
+    row.message_id.unwrap()
+}
+
+/// a's engine on `node_a` and b's on `node_b`, both accounts new.
+async fn engines(
+    node_a: &TestServer,
+    node_b: &TestServer,
+    relay: std::net::SocketAddr,
+    dir: &Path,
+) -> (Engine, Engine) {
+    let a_id = node_a.add_user("a@own.test", "Ada").await;
+    let b_id = node_a.add_user("b@own.test", "Bert").await;
+    let a_account = Account::sign_in(node_a, "a@own.test", &a_id).await;
+    let b_account = Account::sign_in(node_b, "b@own.test", &b_id).await;
+    let a = Engine::start(&a_account, "Ada", (node_a, node_a), (relay, A_TONE, dir)).await;
+    let b = Engine::start(&b_account, "Bert", (node_b, node_b), (relay, B_TONE, dir)).await;
+    (a, b)
+}
+
+/// a calls b in their chat and b answers: both are connected and see each other.
+async fn connect(node_a: &TestServer, node_b: &TestServer, relay: std::net::SocketAddr, dir: &Path) -> Talk {
+    let (mut a, mut b) = engines(node_a, node_b, relay, dir).await;
+    let chat = chat_of(&a, &b).await;
+    let call = a.call(CallAction::Call { chat: chat.clone() }).await;
+    a.status(call, &CallStatus::Ringing).await;
+    let incoming = b.incoming().await;
+    assert_eq!(incoming.caller.as_str(), a.mri);
+    let answered = b.call(CallAction::Answer { call: incoming.call }).await;
+    b.status(answered, &CallStatus::Connected).await;
+    a.status(call, &CallStatus::Connected).await;
+    let shows = |who: String| move |view: &CallView| view.participants.iter().any(|party| party.mri == who);
+    a.view(call, shows(b.mri.clone())).await;
+    b.view(answered, shows(a.mri.clone())).await;
+    Talk {
+        a,
+        b,
+        call,
+        answered,
+        chat,
+    }
+}
+
+impl Talk {
+    /// a's camera, then b's: each renegotiation is forwarded, answered and acknowledged through the server.
+    async fn video_both_ways(&self) {
+        let (a, b) = (&self.a, &self.b);
+        let on = |call| CallAction::Camera { call, on: true };
+        a.call(on(self.call)).await;
+        wait_until("a's video at b", || b.video.remote.counts().frames >= FRAMES).await;
+        b.call(on(self.answered)).await;
+        wait_until("b's video at a", || a.video.remote.counts().frames >= FRAMES).await;
+        assert!(a.video.preview.counts().frames >= FRAMES, "a's self view");
+    }
+
+    /// b's mute shows on a; a's hold shows on b, and its end.
+    async fn mute_and_hold(&mut self) {
+        let (call, answered) = (self.call, self.answered);
+        let mute = |muted| CallAction::Mute { call: answered, muted };
+        self.b.call(mute(true)).await;
+        let b = self.b.mri.clone();
+        self.a
+            .view(call, |view| {
+                view.participants.iter().any(|party| party.mri == b && party.muted)
+            })
+            .await;
+        self.b.call(mute(false)).await;
+        self.a.call(CallAction::Hold { call, held: true }).await;
+        assert!(self.b.held_by_far_end(answered).await, "b sees itself held");
+        self.a.call(CallAction::Hold { call, held: false }).await;
+        assert!(!self.b.held_by_far_end(answered).await, "b sees the hold end");
+    }
+
+    /// a hangs up: both calls end, and each recording holds the other's tone.
+    async fn hang_up(&mut self) {
+        self.a.call(CallAction::HangUp { call: self.call }).await;
+        assert_eq!(self.a.ended(self.call).await, End::HungUp);
+        assert!(matches!(self.b.ended(self.answered).await, End::Remote(_)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let a_heard = heard(&self.a.recording, B_TONE, TALK);
+        let b_heard = heard(&self.b.recording, A_TONE, TALK);
+        eprintln!("a heard b at {a_heard:.3}, b heard a at {b_heard:.3}");
+        assert!(a_heard > HEARD && b_heard > HEARD);
+    }
+}
+
+/// The chat tells the call: its start, and its end with both in it.
+async fn chat_tells_the_call(node: &TestServer, chat: &str) {
+    let b_id = ngteams_server::db::users::by_upn(&node.app.db, "b@own.test")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let reader = Account::sign_in(node, "b@own.test", &b_id).await.client(node);
+    let page = ChatReads::new(&reader).messages(chat, 10).await.unwrap();
+    let events: Vec<&str> = page
+        .messages
+        .iter()
+        .filter(|message| message.message_type.as_str() == "Event/Call")
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(
+        events[0].contains("<ended/>") && events[0].contains("count=\"2\""),
+        "{events:?}"
+    );
+    assert!(events[1].contains("callStarted"), "{events:?}");
+}
+
+/// a calls b in their chat, b answers; a tone and video cross both ways; b's mute and a's hold show at the far end;
+/// a hangs up and the chat tells the call's length. a's client is on `node_a`, b's on `node_b`.
+async fn a_call_with_media(node_a: &TestServer, node_b: &TestServer, relay: std::net::SocketAddr) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut talk = connect(node_a, node_b, relay, dir.path()).await;
+    tokio::time::sleep(TALK).await;
+    talk.video_both_ways().await;
+    talk.mute_and_hold().await;
+    tokio::time::sleep(TALK).await;
+    talk.hang_up().await;
+    chat_tells_the_call(node_b, &talk.chat).await;
+    talk.a.shut_down().await;
+    talk.b.shut_down().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_connects_audio_and_video_through_the_servers_signaling() {
+    let turn = TurnServer::start().unwrap();
+    let server = TestServer::start_with(crate::support::Backend::Sqlite, relayed).await;
+    a_call_with_media(&server, &server, turn.udp).await;
+    assert!(
+        ngteams_server::calling::open_calls(&server.app.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_connects_audio_and_video_with_each_client_on_another_node() {
+    let Some(redis) = redis_url() else { return };
+    for backend in backends() {
+        let url = redis.clone();
+        let node_a = TestServer::start_with(backend, |config| {
+            relayed(config);
+            config.redis_url = Some(url);
+        })
+        .await;
+        let (shared, url) = (node_a.app.config.clone(), redis.clone());
+        let node_b = TestServer::start_with(backend, |config| {
+            relayed(config);
+            config.database_url = shared.database_url;
+            config.redis_url = Some(url);
+        })
+        .await;
+        let turn = TurnServer::start().unwrap();
+        a_call_with_media(&node_a, &node_b, turn.udp).await;
+        node_b.stop().await;
+        node_a.stop().await;
+    }
+}
+
+/// With a coturn running `use-auth-secret` (its address in `NGTS_TEST_COTURN`, its secret in
+/// `NGTS_TEST_COTURN_SECRET`; `docs/server.md`), the media is relayed with the credentials the server makes
+/// from that secret.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_is_relayed_by_coturn_with_the_credentials_made_from_its_secret() {
+    let (Ok(address), Ok(secret)) = (
+        std::env::var("NGTS_TEST_COTURN"),
+        std::env::var("NGTS_TEST_COTURN_SECRET"),
+    ) else {
+        return;
+    };
+    let server = TestServer::start_with(crate::support::Backend::Sqlite, |config| {
+        config.public_origin = url::Url::parse(ORIGIN).unwrap();
+        config.calling.turn.secret = Some(secret);
+    })
+    .await;
+    a_call_with_media(&server, &server, address.parse().unwrap()).await;
+    server.stop().await;
+}

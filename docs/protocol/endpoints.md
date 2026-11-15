@@ -381,6 +381,8 @@ query, under that origin's `/flightproxy/api/v2/ep/`. Both typed construction an
 on that origin; cloud-aware calendar, thread, invitation and call-post readers reject foreign meeting/controller
 links. Microsoft constructors and readers retain their default URLs and wire shapes.
 
+The own server serves 1:1 calls on these paths and `/trap/tokens` ([server.md](../server.md#calls)).
+
 Services behind the flight proxy are addressed as `ep/<service host>/…`, each URL handed out by the service. Typed call writes go through `Service::Calling` with the account's skypetoken; `teams-call` chooses actions and tracks invitations/callbacks, while `teams-core` shares the account call floor and sends through its outbox. Typed writes are single-attempt in the transport; the outbox manages explicit retry decisions and never blindly resends unknown outcomes. Calling delivery replies use the delivery's own connection.
 
 | Method | Path | What it does | Native | Notes · task | Evidence |

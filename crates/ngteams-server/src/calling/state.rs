@@ -1,0 +1,1130 @@
+//! A call as the controller keeps it, and what each operation makes of it: the next state and the deliveries its
+//! parties get. Nothing here reads a clock, the database or the network, so every node makes the same step from the
+//! same row ([`super::repo`] stores the step only if no other node made one meanwhile).
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::wire::{self, Links};
+
+/// The call's keep-alive interval, in seconds, as Teams hands it out.
+pub(crate) const KEEP_ALIVE: i64 = 2700;
+/// How long after its last keep-alive was due a call is given up, in seconds.
+const KEEP_ALIVE_SLACK: i64 = 600;
+/// How long a renegotiation may wait for its answer before another one takes its place, in milliseconds.
+const NEGOTIATION_WAIT_MS: i64 = 30_000;
+/// The app Teams lists in a held call's roster.
+pub(crate) const MUSIC_ON_HOLD: &str = "28:56aa0a8f-4cd3-446b-8146-0023476a5ff2";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Phase {
+    Ringing,
+    Connected,
+    Ended,
+}
+
+impl Phase {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Ringing => "ringing",
+            Self::Connected => "connected",
+            Self::Ended => "ended",
+        }
+    }
+}
+
+/// Which party of a 1:1 call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Side {
+    Caller,
+    Callee,
+}
+
+impl Side {
+    fn other(self) -> Self {
+        match self {
+            Self::Caller => Self::Callee,
+            Self::Callee => Self::Caller,
+        }
+    }
+}
+
+/// One of a party's endpoints: its Trouter endpoint and the callbacks it handed out, by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Endpoint {
+    pub endpoint: String,
+    pub links: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Party {
+    /// The account's object id.
+    pub id: String,
+    pub name: String,
+    /// The party as it names itself (`id`, `displayName`, `endpointId`, `participantId`, `languageId`).
+    pub participant: Value,
+    /// The caller's one endpoint; each endpoint of the callee that attached.
+    pub endpoints: Vec<Endpoint>,
+    /// The endpoint in the call: the caller's from the start, the callee's once it answered.
+    pub active: Option<String>,
+    pub muted: bool,
+    /// The endpoint state's own sequence number, as the client counts it.
+    pub state_sequence: u64,
+    /// When it came into the call (RFC 3339).
+    pub joined: Option<String>,
+}
+
+impl Party {
+    pub(crate) fn mri(&self) -> String {
+        format!("8:orgid:{}", self.id)
+    }
+
+    fn link_of(&self, endpoint: &str, name: &str) -> Option<&str> {
+        self.endpoints
+            .iter()
+            .find(|known| known.endpoint == endpoint)
+            .and_then(|known| known.links.get(name))
+            .map(String::as_str)
+    }
+
+    /// The callback `name` of the endpoint in the call.
+    fn link(&self, name: &str) -> Option<&str> {
+        self.link_of(self.active.as_deref()?, name)
+    }
+
+    /// Keeps `links` with `endpoint`'s other callbacks, the newer of a name in place of the older.
+    pub(crate) fn keep(&mut self, endpoint: &str, links: Links) {
+        if let Some(known) = self.endpoints.iter_mut().find(|known| known.endpoint == endpoint) {
+            known.links.extend(links);
+        } else {
+            self.endpoints.push(Endpoint {
+                endpoint: endpoint.to_owned(),
+                links,
+            });
+        }
+    }
+}
+
+/// A renegotiation forwarded to the far end, waiting for its answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Negotiation {
+    pub by: Side,
+    pub number: u64,
+    /// Unix milliseconds.
+    pub at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Call {
+    pub id: String,
+    pub conversation: String,
+    pub phase: Phase,
+    pub caller: Party,
+    pub callee: Party,
+    /// The caller's offer (`mediaContent`), as the invitation carries it.
+    pub offer: Value,
+    /// Unix milliseconds.
+    pub started_at: i64,
+    pub connected_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    /// When the sweeper looks at the call next (Unix seconds): the ring's end, the keep-alive's, the row's.
+    pub due_at: i64,
+    pub roster_sequence: u64,
+    pub negotiation: Option<Negotiation>,
+    pub negotiations: u64,
+    /// Whose answer to a renegotiation waits to be acknowledged.
+    pub answered_by: Option<Side>,
+    pub held_by: Option<Side>,
+    /// The chat the call's start was written to.
+    pub chat: Option<String>,
+}
+
+/// A delivery to one calling endpoint: `body` at `path` under its push URL (empty: its root).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Delivery {
+    pub endpoint: String,
+    pub path: String,
+    pub body: Value,
+}
+
+/// What the chat is told of a call that ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// It was up for this many seconds.
+    Talked(i64),
+    /// Nobody answered it: the callee missed it.
+    Missed,
+}
+
+/// What a step did besides changing the call.
+#[derive(Debug, Default)]
+pub(crate) struct Out {
+    pub deliveries: Vec<Delivery>,
+    pub ended: Option<Outcome>,
+}
+
+impl Out {
+    /// Queues `body` for the callback `link`, when the party handed one out.
+    fn call_back(&mut self, origin: &str, link: Option<&str>, body: Value) {
+        if let Some((endpoint, path)) = link.and_then(|link| wire::callback(origin, link)) {
+            self.deliveries.push(Delivery {
+                endpoint: endpoint.to_owned(),
+                path: path.to_owned(),
+                body,
+            });
+        }
+    }
+}
+
+/// Why a step wasn't made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// The request isn't one of the operation's.
+    Bad,
+    /// The account isn't who may do it.
+    Forbidden,
+    /// No such call, for this account.
+    Missing,
+    /// The call is over, or past the point the operation belongs to.
+    Gone,
+}
+
+/// When and where a step is made.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct At<'a> {
+    pub origin: &'a str,
+    /// Unix milliseconds.
+    pub now: i64,
+}
+
+impl At<'_> {
+    fn seconds(&self) -> i64 {
+        self.now / 1000
+    }
+}
+
+impl Call {
+    pub(crate) fn party(&self, side: Side) -> &Party {
+        match side {
+            Side::Caller => &self.caller,
+            Side::Callee => &self.callee,
+        }
+    }
+
+    pub(crate) fn party_mut(&mut self, side: Side) -> &mut Party {
+        match side {
+            Side::Caller => &mut self.caller,
+            Side::Callee => &mut self.callee,
+        }
+    }
+
+    /// Which party the account `id` is.
+    pub(crate) fn side_of(&self, id: &str) -> Option<Side> {
+        if self.caller.id == id {
+            Some(Side::Caller)
+        } else if self.callee.id == id {
+            Some(Side::Callee)
+        } else {
+            None
+        }
+    }
+
+    /// The party's side when it is in the call that is up.
+    fn in_call(&self, side: Side) -> Result<(), Refusal> {
+        match self.phase {
+            Phase::Connected if self.party(side).active.is_some() => Ok(()),
+            Phase::Ended => Err(Refusal::Gone),
+            _ => Err(Refusal::Forbidden),
+        }
+    }
+
+    fn ringing(&self, side: Side) -> Result<(), Refusal> {
+        match (self.phase, side) {
+            (Phase::Ringing, Side::Callee) => Ok(()),
+            (Phase::Ringing, Side::Caller) => Err(Refusal::Forbidden),
+            _ => Err(Refusal::Gone),
+        }
+    }
+
+    /// The callee's endpoint attaches to its leg while it rings: its callbacks kept; the leg's links answered.
+    pub(crate) fn attach(&mut self, side: Side, endpoint: &str, links: Links, at: At<'_>) -> Result<Value, Refusal> {
+        self.ringing(side)?;
+        if !links.contains_key("end") {
+            return Err(Refusal::Bad);
+        }
+        self.callee.keep(endpoint, links);
+        Ok(wire::attach_answer(at.origin, self))
+    }
+
+    /// A party in the call describes its media lines again or seeds its channel: nothing the far end is told.
+    pub(crate) fn described(&self, side: Side) -> Result<(), Refusal> {
+        self.in_call(side)
+    }
+
+    /// The callee's endpoint says it rings.
+    pub(crate) fn progress(&self, side: Side) -> Result<(), Refusal> {
+        self.ringing(side)
+    }
+
+    /// The callee's endpoint answers: the call is up, the caller gets the acceptance with the callee's answer, the
+    /// callee's other endpoints stop ringing and both parties get the roster.
+    pub(crate) fn accept(
+        &mut self,
+        side: Side,
+        endpoint: &str,
+        (links, body): (Links, &Value),
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<Value, Refusal> {
+        self.ringing(side)?;
+        let acceptance = body.get("callAcceptance").ok_or(Refusal::Bad)?;
+        let media = acceptance.get("mediaContent").filter(|media| media.is_object());
+        self.callee.keep(endpoint, links);
+        for other in self.callee.endpoints.iter().filter(|known| known.endpoint != endpoint) {
+            let end = wire::end(487, "Call cancelled as it was accepted by another fork.", None);
+            out.call_back(at.origin, other.links.get("end").map(String::as_str), end);
+        }
+        self.callee.endpoints.retain(|known| known.endpoint == endpoint);
+        self.callee.active = Some(endpoint.to_owned());
+        if let Some(by) = acceptance.get("acceptedBy").filter(|by| by.is_object()) {
+            self.callee.participant = wire::named_by(by, &self.callee);
+        }
+        self.phase = Phase::Connected;
+        self.connected_at = Some(at.now);
+        self.due_at = at.seconds() + KEEP_ALIVE + KEEP_ALIVE_SLACK;
+        let joined = wire::iso(at.now);
+        self.caller.joined = Some(joined.clone());
+        self.callee.joined = Some(joined);
+        let told = wire::acceptance(at.origin, self, media.ok_or(Refusal::Bad)?);
+        out.call_back(at.origin, self.caller.link("acceptance"), told);
+        self.tell_roster(at.origin, &[Side::Caller, Side::Callee], out);
+        Ok(wire::accept_answer(at.origin, self))
+    }
+
+    /// The callee declines: every endpoint of its that rang stops, and the caller's call ends as declined.
+    pub(crate) fn reject(&mut self, side: Side, body: &Value, at: At<'_>, out: &mut Out) -> Result<(), Refusal> {
+        self.ringing(side)?;
+        let code = body.pointer("/callEnd/code").and_then(Value::as_i64).unwrap_or(603);
+        let callee = Some(&self.callee.participant);
+        for known in &self.callee.endpoints {
+            let end = wire::end(code, "CallEndReasonLocalUserInitiated", callee);
+            out.call_back(at.origin, known.links.get("end").map(String::as_str), end);
+        }
+        let end = wire::end(code, "Declined", callee);
+        out.call_back(at.origin, self.caller.link("end"), end);
+        self.finish(at, Outcome::Missed, out);
+        Ok(())
+    }
+
+    /// A party leaves: the caller's leave while it rings cancels the ring, anyone's once it is up ends the call.
+    pub(crate) fn leave(&mut self, side: Side, body: &Value, at: At<'_>, out: &mut Out) {
+        let code = body
+            .pointer("/callTransactionEnd/code")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let leaver = self.party(side).participant.clone();
+        let end = wire::end(code, "CallEndReasonLocalUserInitiated", Some(&leaver));
+        match (self.phase, side) {
+            (Phase::Ended, _) | (Phase::Ringing, Side::Callee) => {}
+            (Phase::Ringing, Side::Caller) => {
+                self.end_for_all(at.origin, &end, &end, out);
+                self.finish(at, Outcome::Missed, out);
+            }
+            (Phase::Connected, _) => {
+                self.end_for_all(at.origin, &end, &end, out);
+                let talked = (at.now - self.connected_at.unwrap_or(at.now)) / 1000;
+                self.finish(at, Outcome::Talked(talked.max(0)), out);
+            }
+        }
+    }
+
+    /// What the sweeper makes of a call that is due: a ring nobody answered ends at both ends, a call whose
+    /// keep-alives stopped is given up. `false` when it isn't due (another node was first) or is over.
+    pub(crate) fn lapse(&mut self, at: At<'_>, out: &mut Out) -> bool {
+        if self.due_at > at.seconds() {
+            return false;
+        }
+        match self.phase {
+            Phase::Ended => false,
+            Phase::Ringing => {
+                let rung = wire::end(487, "Call cancelled on timeout.", None);
+                let placed = wire::end(480, "No answer", None);
+                self.end_for_all(at.origin, &placed, &rung, out);
+                self.finish(at, Outcome::Missed, out);
+                true
+            }
+            Phase::Connected => {
+                let end = wire::failure(408, "Call timed out without a keep-alive.");
+                self.end_for_all(at.origin, &end, &end, out);
+                let talked = (at.now - self.connected_at.unwrap_or(at.now)) / 1000;
+                self.finish(at, Outcome::Talked(talked.max(0)), out);
+                true
+            }
+        }
+    }
+
+    /// Ends the call at the caller's endpoint with `placed` and at each of the callee's with `rung`.
+    fn end_for_all(&self, origin: &str, placed: &Value, rung: &Value, out: &mut Out) {
+        out.call_back(origin, self.caller.link("end"), placed.clone());
+        for known in &self.callee.endpoints {
+            out.call_back(origin, known.links.get("end").map(String::as_str), rung.clone());
+        }
+    }
+
+    fn finish(&mut self, at: At<'_>, outcome: Outcome, out: &mut Out) {
+        self.phase = Phase::Ended;
+        self.ended_at = Some(at.now);
+        self.due_at = at.seconds() + super::KEPT_AFTER_END;
+        self.negotiation = None;
+        out.ended = Some(outcome);
+    }
+
+    /// The call's keep-alive from a party in it.
+    pub(crate) fn keep_alive(&mut self, side: Side, at: At<'_>) -> Result<(), Refusal> {
+        self.in_call(side)?;
+        self.due_at = at.seconds() + KEEP_ALIVE + KEEP_ALIVE_SLACK;
+        Ok(())
+    }
+
+    /// A party's endpoint reports its state (its microphone): the roster tells both once the call is up.
+    pub(crate) fn endpoint_state(
+        &mut self,
+        side: Side,
+        body: &Value,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
+        if self.phase == Phase::Ended {
+            return Ok(());
+        }
+        let state = body.get("endpointState").ok_or(Refusal::Bad)?;
+        let muted = state.pointer("/state/isMuted").and_then(Value::as_bool);
+        let sequence = state.get("endpointStateSequenceNumber").and_then(Value::as_u64);
+        let party = self.party_mut(side);
+        let changed = muted.is_some_and(|muted| muted != party.muted);
+        party.muted = muted.unwrap_or(party.muted);
+        party.state_sequence = sequence.unwrap_or(party.state_sequence + 1);
+        if changed && self.in_call(side).is_ok() {
+            self.tell_roster(at.origin, &[side], out);
+        }
+        Ok(())
+    }
+
+    /// A party's later callbacks (`notificationLinks`, the acknowledgement of its acceptance).
+    pub(crate) fn more_links(&mut self, side: Side, endpoint: &str, links: Links) {
+        let over = self.phase == Phase::Ended;
+        let party = self.party_mut(side);
+        if !over && party.endpoints.iter().any(|known| known.endpoint == endpoint) {
+            party.keep(endpoint, links);
+        }
+    }
+
+    /// A party offers the call's media again: the far end gets the offer at its own callback, with where its answer
+    /// goes; while another negotiation waits for its answer, the offer is turned away (`491`).
+    pub(crate) fn renegotiate(
+        &mut self,
+        side: Side,
+        endpoint: &str,
+        (links, body): (Links, &Value),
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
+        self.in_call(side)?;
+        let offered = body.get("mediaNegotiation").ok_or(Refusal::Bad)?;
+        let media = offered
+            .get("mediaContent")
+            .filter(|media| media.is_object())
+            .ok_or(Refusal::Bad)?;
+        if !links.contains_key("mediaAnswer") {
+            return Err(Refusal::Bad);
+        }
+        let rejection = links.get("rejection").cloned();
+        self.party_mut(side).keep(endpoint, links);
+        let waiting = self
+            .negotiation
+            .as_ref()
+            .is_some_and(|waiting| at.now - waiting.at < NEGOTIATION_WAIT_MS);
+        let far = self.party(side.other()).link("mediaRenegotiation").map(str::to_owned);
+        let (Some(far), false) = (far, waiting) else {
+            let (code, phrase) = if waiting {
+                (491, "Negotiation is in progress.")
+            } else {
+                (480, "The far end takes no renegotiation.")
+            };
+            out.call_back(at.origin, rejection.as_deref(), wire::negotiation_failure(code, phrase));
+            return Ok(());
+        };
+        self.negotiations += 1;
+        self.negotiation = Some(Negotiation {
+            by: side,
+            number: self.negotiations,
+            at: at.now,
+        });
+        let sender = self.party(side).participant.clone();
+        let forwarded = wire::negotiation(at.origin, self, &sender, offered, media);
+        out.call_back(at.origin, Some(&far), forwarded);
+        Ok(())
+    }
+
+    /// The far end answers a renegotiation: its answer goes to the party that offered, with where it is
+    /// acknowledged.
+    pub(crate) fn answer(
+        &mut self,
+        side: Side,
+        endpoint: &str,
+        (links, body): (Links, &Value),
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
+        self.in_call(side)?;
+        let answer = body.get("mediaAnswer").ok_or(Refusal::Bad)?;
+        let media = answer
+            .get("mediaContent")
+            .filter(|media| media.is_object())
+            .ok_or(Refusal::Bad)?;
+        let offered = self
+            .negotiation
+            .take_if(|waiting| waiting.by != side)
+            .ok_or(Refusal::Gone)?;
+        self.party_mut(side).keep(endpoint, links);
+        self.answered_by = Some(side);
+        let told = wire::media_answer(at.origin, self, &self.party(side).mri(), answer, media);
+        out.call_back(at.origin, self.party(offered.by).link("mediaAnswer"), told);
+        Ok(())
+    }
+
+    /// The far end turns a renegotiation away: the party that offered is told at its `rejection` callback.
+    pub(crate) fn turn_away(&mut self, side: Side, body: &Value, at: At<'_>, out: &mut Out) -> Result<(), Refusal> {
+        self.in_call(side)?;
+        let offered = self
+            .negotiation
+            .take_if(|waiting| waiting.by != side)
+            .ok_or(Refusal::Gone)?;
+        let failure = if body.is_object() {
+            body.clone()
+        } else {
+            wire::negotiation_failure(488, "The far end rejected the negotiation.")
+        };
+        out.call_back(at.origin, self.party(offered.by).link("rejection"), failure);
+        Ok(())
+    }
+
+    /// The party that offered acknowledges the answer: the answerer hears it at its own callback.
+    pub(crate) fn acknowledge_answer(&mut self, side: Side, at: At<'_>, out: &mut Out) -> Result<(), Refusal> {
+        self.in_call(side)?;
+        if let Some(answerer) = self.answered_by.take_if(|answerer| *answerer != side) {
+            let link = self.party(answerer).link("mediaAcknowledgement");
+            out.call_back(at.origin, link, wire::media_acknowledgement());
+        }
+        Ok(())
+    }
+
+    /// A party puts the call on hold: both rosters gain the music-on-hold app, the holder is told it is done and
+    /// where the hold is taken back.
+    pub(crate) fn hold(
+        &mut self,
+        side: Side,
+        endpoint: &str,
+        links: Links,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<Value, Refusal> {
+        self.in_call(side)?;
+        if self.held_by.is_some_and(|holder| holder != side) {
+            return Err(Refusal::Forbidden);
+        }
+        self.party_mut(side).keep(endpoint, links);
+        if self.held_by.is_none() {
+            self.held_by = Some(side);
+            self.tell_music(at, true, out);
+        }
+        out.call_back(
+            at.origin,
+            self.party(side).link("holdCompletion"),
+            wire::hold_completion(),
+        );
+        Ok(wire::hold_answer(at.origin, self))
+    }
+
+    /// The holder takes the call off hold: the music-on-hold app leaves both rosters.
+    pub(crate) fn resume(
+        &mut self,
+        side: Side,
+        endpoint: &str,
+        links: Links,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
+        self.in_call(side)?;
+        if self.held_by != Some(side) {
+            return Err(Refusal::Gone);
+        }
+        self.party_mut(side).keep(endpoint, links);
+        self.held_by = None;
+        self.tell_music(at, false, out);
+        out.call_back(
+            at.origin,
+            self.party(side).link("resumeCompletion"),
+            wire::resume_completion(),
+        );
+        Ok(())
+    }
+
+    fn tell_music(&mut self, at: At<'_>, playing: bool, out: &mut Out) {
+        self.roster_sequence += 1;
+        let entry = wire::music_entry(self.roster_sequence, playing);
+        let update = json!({
+            "participants": {MUSIC_ON_HOLD: entry}, "type": "Delta", "sequenceNumber": self.roster_sequence,
+        });
+        self.send_roster(at.origin, &update, out);
+    }
+
+    /// Tells both parties the roster's entries of `sides`.
+    fn tell_roster(&mut self, origin: &str, sides: &[Side], out: &mut Out) {
+        self.roster_sequence += 1;
+        let update = wire::roster(self, sides);
+        self.send_roster(origin, &update, out);
+    }
+
+    fn send_roster(&self, origin: &str, update: &Value, out: &mut Out) {
+        for party in [&self.caller, &self.callee] {
+            out.call_back(origin, party.link("rosterUpdate"), update.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Map;
+
+    use super::*;
+
+    const ORIGIN: &str = "https://own.example.test";
+
+    fn link(endpoint: &str, name: &str) -> String {
+        format!("{ORIGIN}/trouter/v4/f/{endpoint}/callAgent/agent/1/call/{name}/")
+    }
+
+    fn links(endpoint: &str, names: &[&str]) -> Links {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), link(endpoint, name)))
+            .collect()
+    }
+
+    fn party(id: &str, name: &str) -> Party {
+        Party {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            participant: json!({"id": format!("8:orgid:{id}"), "displayName": name, "endpointId": format!("ep-{id}"),
+                "participantId": format!("p-{id}")}),
+            endpoints: Vec::new(),
+            active: None,
+            muted: false,
+            state_sequence: 0,
+            joined: None,
+        }
+    }
+
+    fn at(now: i64) -> At<'static> {
+        At { origin: ORIGIN, now }
+    }
+
+    /// A call a placed to b at second 1000, ringing for 30 seconds.
+    fn ringing() -> Call {
+        let mut caller = party("a", "Ada");
+        caller.keep(
+            "A",
+            links("A", &["acceptance", "end", "rosterUpdate", "mediaAnswer", "rejection"]),
+        );
+        caller.active = Some("A".to_owned());
+        Call {
+            id: "call".to_owned(),
+            conversation: "conversation".to_owned(),
+            phase: Phase::Ringing,
+            caller,
+            callee: party("b", "Bert"),
+            offer: json!({"blob": "offer", "contentType": "application/sdp-ngc-1.0"}),
+            started_at: 1_000_000,
+            connected_at: None,
+            ended_at: None,
+            due_at: 1_030,
+            roster_sequence: 0,
+            negotiation: None,
+            negotiations: 0,
+            answered_by: None,
+            held_by: None,
+            chat: None,
+        }
+    }
+
+    fn acceptance() -> Value {
+        json!({"callAcceptance": {"acceptedBy": {"endpointId": "ep-b2", "participantId": "p-b"},
+            "mediaContent": {"blob": "answer", "contentType": "application/sdp-ngc-1.0"}}})
+    }
+
+    /// The call answered on b's endpoint `B` at second 1010, another endpoint of b's still ringing.
+    fn connected() -> Call {
+        let mut call = ringing();
+        for endpoint in ["B", "B2"] {
+            call.attach(
+                Side::Callee,
+                endpoint,
+                links(endpoint, &["end", "rosterUpdate"]),
+                at(1_005_000),
+            )
+            .unwrap();
+        }
+        let mut out = Out::default();
+        let accepted = links("B", &["mediaRenegotiation", "mediaAcknowledgement"]);
+        call.accept(Side::Callee, "B", (accepted, &acceptance()), at(1_010_000), &mut out)
+            .unwrap();
+        call
+    }
+
+    fn paths(out: &Out) -> Vec<(&str, &str)> {
+        out.deliveries
+            .iter()
+            .map(|delivery| {
+                let kind = delivery.path.trim_end_matches('/').rsplit('/').next().unwrap();
+                (delivery.endpoint.as_str(), kind)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_callee_attaches_and_only_while_it_rings() {
+        let mut call = ringing();
+        let end = links("B", &["end"]);
+        assert_eq!(
+            call.attach(Side::Caller, "A", end.clone(), at(1_001_000)).unwrap_err(),
+            Refusal::Forbidden
+        );
+        assert_eq!(
+            call.attach(Side::Callee, "B", links("B", &["rosterUpdate"]), at(1_001_000))
+                .unwrap_err(),
+            Refusal::Bad
+        );
+        let answer = call.attach(Side::Callee, "B", end.clone(), at(1_001_000)).unwrap();
+        assert!(
+            answer["callInvitation"]["links"]["acceptance"]
+                .as_str()
+                .unwrap()
+                .ends_with("/cc/v1/incoming/call/1/t/1/accept")
+        );
+        assert_eq!(call.progress(Side::Callee), Ok(()));
+        assert_eq!(call.progress(Side::Caller), Err(Refusal::Forbidden));
+        let call = connected();
+        assert_eq!(call.progress(Side::Callee), Err(Refusal::Gone));
+        assert_eq!(
+            connected().attach(Side::Callee, "B", end, at(1_011_000)).unwrap_err(),
+            Refusal::Gone
+        );
+    }
+
+    #[test]
+    fn an_answer_connects_the_call_tells_the_caller_and_ends_the_other_rings() {
+        let mut call = ringing();
+        for endpoint in ["B", "B2"] {
+            call.attach(
+                Side::Callee,
+                endpoint,
+                links(endpoint, &["end", "rosterUpdate"]),
+                at(1_005_000),
+            )
+            .unwrap();
+        }
+        let mut out = Out::default();
+        let no_media = json!({"callAcceptance": {}});
+        assert_eq!(
+            call.clone()
+                .accept(Side::Callee, "B", (Links::new(), &no_media), at(1_010_000), &mut out)
+                .unwrap_err(),
+            Refusal::Bad
+        );
+        assert_eq!(
+            call.clone()
+                .accept(Side::Callee, "B", (Links::new(), &json!({})), at(1_010_000), &mut out)
+                .unwrap_err(),
+            Refusal::Bad
+        );
+        let mut out = Out::default();
+        let answer = call
+            .accept(
+                Side::Callee,
+                "B",
+                (Links::new(), &acceptance()),
+                at(1_010_000),
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(answer["callAcceptanceAcknowledgement"]["callKeepAliveInterval"], 2700);
+        assert_eq!(
+            paths(&out),
+            [
+                ("B2", "end"),
+                ("A", "acceptance"),
+                ("A", "rosterUpdate"),
+                ("B", "rosterUpdate")
+            ]
+        );
+        assert_eq!(out.deliveries[0].body["callEnd"]["code"], 487);
+        assert_eq!(
+            out.deliveries[1].body["callAcceptance"]["mediaContent"]["blob"],
+            "answer"
+        );
+        assert_eq!(call.callee.participant["endpointId"], "ep-b2");
+        let roster = &out.deliveries[2].body;
+        assert_eq!(roster["participants"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            roster["participants"]["8:orgid:b"]["endpoints"]["ep-b2"]["participantId"],
+            "p-b"
+        );
+        assert_eq!((call.phase, call.due_at), (Phase::Connected, 1_010 + 2700 + 600));
+        // answered: nothing rings any more
+        assert_eq!(
+            call.accept(
+                Side::Callee,
+                "B2",
+                (Links::new(), &acceptance()),
+                at(1_011_000),
+                &mut out
+            )
+            .unwrap_err(),
+            Refusal::Gone
+        );
+    }
+
+    #[test]
+    fn a_decline_and_a_cancel_end_the_ring_as_a_missed_call() {
+        let mut call = ringing();
+        call.attach(Side::Callee, "B", links("B", &["end"]), at(1_005_000))
+            .unwrap();
+        let mut declined = call.clone();
+        let mut out = Out::default();
+        assert_eq!(
+            declined.reject(Side::Caller, &json!({}), at(1_006_000), &mut out),
+            Err(Refusal::Forbidden)
+        );
+        declined
+            .reject(Side::Callee, &json!({}), at(1_006_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("B", "end"), ("A", "end")]);
+        assert_eq!(out.deliveries[1].body["callEnd"]["code"], 603);
+        assert_eq!(out.deliveries[1].body["callEnd"]["sender"]["id"], "8:orgid:b");
+        assert_eq!(out.ended, Some(Outcome::Missed));
+        assert_eq!((declined.phase, declined.due_at), (Phase::Ended, 1_006 + 300));
+        // the callee's own leave while it rings changes nothing; the caller's cancels
+        let mut out = Out::default();
+        let before = call.clone();
+        call.leave(Side::Callee, &json!({}), at(1_006_000), &mut out);
+        assert!(call == before && out.deliveries.is_empty());
+        let leave = json!({"callTransactionEnd": {"code": 487}});
+        call.leave(Side::Caller, &leave, at(1_007_000), &mut out);
+        assert_eq!(paths(&out), [("A", "end"), ("B", "end")]);
+        assert_eq!(out.deliveries[1].body["callEnd"]["code"], 487);
+        assert_eq!(out.ended, Some(Outcome::Missed));
+        // over: a second leave tells nobody
+        let mut out = Out::default();
+        call.leave(Side::Caller, &leave, at(1_008_000), &mut out);
+        assert!(out.deliveries.is_empty() && out.ended.is_none());
+    }
+
+    #[test]
+    fn a_hang_up_ends_the_call_for_both_with_its_length() {
+        let mut call = connected();
+        let mut out = Out::default();
+        call.leave(Side::Callee, &json!({}), at(1_070_500), &mut out);
+        assert_eq!(paths(&out), [("A", "end"), ("B", "end")]);
+        assert_eq!(out.deliveries[0].body["callEnd"]["sender"]["id"], "8:orgid:b");
+        assert_eq!(out.ended, Some(Outcome::Talked(60)));
+        assert_eq!(call.keep_alive(Side::Caller, at(1_071_000)), Err(Refusal::Gone));
+    }
+
+    #[test]
+    fn the_sweeper_ends_a_ring_and_a_call_without_keep_alives_only_once_due() {
+        let mut call = ringing();
+        call.attach(Side::Callee, "B", links("B", &["end"]), at(1_005_000))
+            .unwrap();
+        let mut out = Out::default();
+        assert!(!call.lapse(at(1_029_000), &mut out));
+        assert!(call.lapse(at(1_030_000), &mut out));
+        assert_eq!(paths(&out), [("A", "end"), ("B", "end")]);
+        assert_eq!(out.deliveries[0].body["callEnd"]["code"], 480);
+        assert_eq!(
+            out.deliveries[1].body["callEnd"]["phrase"],
+            "Call cancelled on timeout."
+        );
+        assert_eq!(out.ended, Some(Outcome::Missed));
+        assert!(!call.lapse(at(9_999_000), &mut Out::default()), "it is over");
+
+        let mut call = connected();
+        assert_eq!(call.keep_alive(Side::Callee, at(2_000_000)), Ok(()));
+        assert_eq!(call.due_at, 2_000 + 2700 + 600);
+        let mut out = Out::default();
+        assert!(!call.lapse(at(5_299_000), &mut out));
+        assert!(call.lapse(at(5_300_000), &mut out));
+        assert_eq!(out.deliveries[0].body["callEnd"]["code"], 408);
+        assert_eq!(out.ended, Some(Outcome::Talked(4290)));
+        assert_eq!(
+            ringing().keep_alive(Side::Caller, at(1_001_000)),
+            Err(Refusal::Forbidden)
+        );
+    }
+
+    #[test]
+    fn a_mute_is_told_to_both_once_the_call_is_up() {
+        let muted = json!({"endpointState": {"state": {"isMuted": true}, "endpointStateSequenceNumber": 4}});
+        let mut call = ringing();
+        let mut out = Out::default();
+        call.endpoint_state(Side::Callee, &muted, at(1_001_000), &mut out)
+            .unwrap();
+        assert!(
+            call.callee.muted && out.deliveries.is_empty(),
+            "nobody is told while it rings"
+        );
+        assert_eq!(
+            call.endpoint_state(Side::Callee, &json!({}), at(1_001_000), &mut out),
+            Err(Refusal::Bad)
+        );
+        let mut call = connected();
+        call.endpoint_state(Side::Caller, &muted, at(1_020_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("A", "rosterUpdate"), ("B", "rosterUpdate")]);
+        let state = &out.deliveries[0].body["participants"]["8:orgid:a"]["endpoints"]["ep-a"]["endpointState"];
+        assert_eq!(state["state"]["isMuted"], true);
+        assert_eq!(state["endpointStateSequenceNumber"], 4);
+        // the same state again tells nobody
+        let mut out = Out::default();
+        call.endpoint_state(Side::Caller, &muted, at(1_021_000), &mut out)
+            .unwrap();
+        assert!(out.deliveries.is_empty());
+        call.leave(Side::Caller, &json!({}), at(1_022_000), &mut out);
+        // one that was on its way when the call ended is taken and tells nobody
+        let mut out = Out::default();
+        assert_eq!(
+            call.endpoint_state(Side::Caller, &muted, at(1_023_000), &mut out),
+            Ok(())
+        );
+        call.more_links(Side::Caller, "A", Links::new());
+        assert!(out.deliveries.is_empty());
+    }
+
+    #[test]
+    fn later_callbacks_are_kept_only_for_an_endpoint_of_the_call() {
+        let mut call = connected();
+        call.more_links(Side::Caller, "Other", links("Other", &["mediaRenegotiation"]));
+        assert!(call.caller.link("mediaRenegotiation").is_none());
+        call.more_links(Side::Caller, "A", links("A", &["mediaRenegotiation"]));
+        assert_eq!(
+            call.caller.link("mediaRenegotiation"),
+            Some(link("A", "mediaRenegotiation").as_str())
+        );
+    }
+
+    fn offer() -> Value {
+        json!({"mediaNegotiation": {"callModalities": ["Audio", "Video"],
+            "mediaContent": {"blob": "offer 2", "contentType": "application/sdp-ngc-1.0"}}})
+    }
+
+    #[test]
+    fn a_renegotiation_is_forwarded_answered_and_acknowledged() {
+        let mut call = connected();
+        let mut out = Out::default();
+        let from_a = links("A", &["mediaAnswer", "rejection"]);
+        assert_eq!(
+            call.renegotiate(Side::Caller, "A", (from_a.clone(), &json!({})), at(1_020_000), &mut out),
+            Err(Refusal::Bad)
+        );
+        assert_eq!(
+            call.renegotiate(Side::Caller, "A", (Links::new(), &offer()), at(1_020_000), &mut out),
+            Err(Refusal::Bad)
+        );
+        call.renegotiate(Side::Caller, "A", (from_a.clone(), &offer()), at(1_020_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("B", "mediaRenegotiation")]);
+        let told = &out.deliveries[0].body["mediaNegotiation"];
+        assert_eq!(told["mediaContent"]["blob"], "offer 2");
+        assert_eq!(told["callModalities"], json!(["Audio", "Video"]));
+        assert!(
+            told["links"]["mediaAnswer"]
+                .as_str()
+                .unwrap()
+                .ends_with("/cc/v1/negotiations/call/1/t/1/answer")
+        );
+        // another while it waits is turned away with 491, at the offerer's rejection callback
+        let mut out = Out::default();
+        call.renegotiate(Side::Caller, "A", (from_a.clone(), &offer()), at(1_021_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("A", "rejection")]);
+        assert_eq!(out.deliveries[0].body["mediaNegotiationFailure"]["code"], 491);
+    }
+
+    #[test]
+    fn a_renegotiations_answer_goes_back_and_its_acknowledgement_to_the_answerer() {
+        let mut call = connected();
+        let from_a = links("A", &["mediaAnswer", "rejection"]);
+        call.renegotiate(
+            Side::Caller,
+            "A",
+            (from_a, &offer()),
+            at(1_020_000),
+            &mut Out::default(),
+        )
+        .unwrap();
+        // only the far end answers it
+        let answer = json!({"mediaAnswer": {"mediaContent": {"blob": "answer 2", "contentType": "x"}}});
+        let mut out = Out::default();
+        assert_eq!(
+            call.answer(Side::Caller, "A", (Links::new(), &answer), at(1_022_000), &mut out),
+            Err(Refusal::Gone)
+        );
+        assert_eq!(
+            call.answer(Side::Callee, "B", (Links::new(), &json!({})), at(1_022_000), &mut out),
+            Err(Refusal::Bad)
+        );
+        call.answer(Side::Callee, "B", (Links::new(), &answer), at(1_022_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("A", "mediaAnswer")]);
+        assert_eq!(out.deliveries[0].body["mediaAnswer"]["sender"]["id"], "8:orgid:b");
+        assert!(
+            out.deliveries[0].body["mediaAnswer"]["links"]["mediaAcknowledgement"]
+                .as_str()
+                .unwrap()
+                .ends_with("/cc/v1/mediaAnswers/call/1/t/1/acknowledge")
+        );
+        // the answerer's own acknowledgement tells nobody; the offerer's tells the answerer
+        let mut out = Out::default();
+        call.acknowledge_answer(Side::Callee, at(1_023_000), &mut out).unwrap();
+        assert!(out.deliveries.is_empty());
+        call.acknowledge_answer(Side::Caller, at(1_023_000), &mut out).unwrap();
+        assert_eq!(paths(&out), [("B", "mediaAcknowledgement")]);
+        // settled: an answer now has nothing to answer
+        assert_eq!(
+            call.answer(Side::Callee, "B", (Links::new(), &answer), at(1_024_000), &mut out),
+            Err(Refusal::Gone)
+        );
+    }
+
+    #[test]
+    fn a_renegotiation_the_far_end_cant_take_or_turns_away_is_told_to_its_offerer() {
+        let mut call = connected();
+        let mut out = Out::default();
+        // the caller handed out no renegotiation callback yet: b's offer has nowhere to go
+        let from_b = links("B", &["mediaAnswer", "rejection"]);
+        call.renegotiate(Side::Callee, "B", (from_b, &offer()), at(1_020_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("B", "rejection")]);
+        assert_eq!(out.deliveries[0].body["mediaNegotiationFailure"]["code"], 480);
+        assert!(call.negotiation.is_none());
+        // a's is forwarded and b turns it away
+        let mut out = Out::default();
+        let from_a = links("A", &["mediaAnswer", "rejection"]);
+        call.renegotiate(Side::Caller, "A", (from_a.clone(), &offer()), at(1_021_000), &mut out)
+            .unwrap();
+        assert_eq!(
+            call.turn_away(Side::Caller, &Value::Null, at(1_022_000), &mut out),
+            Err(Refusal::Gone)
+        );
+        let mut out = Out::default();
+        call.turn_away(Side::Callee, &Value::Null, at(1_022_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("A", "rejection")]);
+        assert_eq!(out.deliveries[0].body["mediaNegotiationFailure"]["code"], 488);
+        // one left unanswered gives way to the next after its wait
+        call.renegotiate(Side::Caller, "A", (from_a.clone(), &offer()), at(1_030_000), &mut out)
+            .unwrap();
+        let mut out = Out::default();
+        call.renegotiate(Side::Caller, "A", (from_a, &offer()), at(1_061_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("B", "mediaRenegotiation")]);
+        let own = json!({"mediaNegotiationFailure": {"code": 488}});
+        let mut out = Out::default();
+        call.turn_away(Side::Callee, &own, at(1_062_000), &mut out).unwrap();
+        assert_eq!(out.deliveries[0].body, own);
+        assert_eq!(ringing().described(Side::Caller), Err(Refusal::Forbidden));
+        assert_eq!(call.described(Side::Caller), Ok(()));
+    }
+
+    #[test]
+    fn a_hold_brings_the_music_into_both_rosters_until_its_holder_resumes() {
+        let mut call = connected();
+        let mut out = Out::default();
+        let answer = call
+            .hold(
+                Side::Caller,
+                "A",
+                links("A", &["holdCompletion"]),
+                at(1_020_000),
+                &mut out,
+            )
+            .unwrap();
+        assert!(
+            answer["holdResponse"]["links"]["resume"]
+                .as_str()
+                .unwrap()
+                .ends_with("/cc/v1/holdSession/call/1/a6/1/resume")
+        );
+        assert_eq!(
+            paths(&out),
+            [("A", "rosterUpdate"), ("B", "rosterUpdate"), ("A", "holdCompletion")]
+        );
+        let music = &out.deliveries[1].body["participants"][MUSIC_ON_HOLD];
+        assert_eq!(music["state"], "active");
+        assert_eq!(music["endpoints"].as_object().unwrap().len(), 1);
+        // held: the far end neither holds nor resumes it; the holder's second hold tells the roster nothing new
+        let mut out = Out::default();
+        assert_eq!(
+            call.hold(Side::Callee, "B", Links::new(), at(1_021_000), &mut out)
+                .unwrap_err(),
+            Refusal::Forbidden
+        );
+        assert_eq!(
+            call.resume(Side::Callee, "B", Links::new(), at(1_021_000), &mut out),
+            Err(Refusal::Gone)
+        );
+        call.hold(Side::Caller, "A", Links::new(), at(1_021_000), &mut out)
+            .unwrap();
+        assert_eq!(paths(&out), [("A", "holdCompletion")]);
+        let mut out = Out::default();
+        call.resume(
+            Side::Caller,
+            "A",
+            links("A", &["resumeCompletion"]),
+            at(1_022_000),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            paths(&out),
+            [("A", "rosterUpdate"), ("B", "rosterUpdate"), ("A", "resumeCompletion")]
+        );
+        let music = &out.deliveries[0].body["participants"][MUSIC_ON_HOLD];
+        assert_eq!(
+            (music["state"].as_str(), music["endpoints"].as_object().map(Map::len)),
+            (Some("inactive"), Some(0))
+        );
+        assert_eq!(
+            call.resume(Side::Caller, "A", Links::new(), at(1_023_000), &mut out),
+            Err(Refusal::Gone)
+        );
+    }
+
+    #[test]
+    fn a_call_names_its_parties_sides_and_phases() {
+        let call = ringing();
+        assert_eq!(call.side_of("a"), Some(Side::Caller));
+        assert_eq!(call.side_of("b"), Some(Side::Callee));
+        assert_eq!(call.side_of("c"), None);
+        assert_eq!(
+            [Phase::Ringing, Phase::Connected, Phase::Ended].map(Phase::name),
+            ["ringing", "connected", "ended"]
+        );
+        let kept: Call = serde_json::from_str(&serde_json::to_string(&call).unwrap()).unwrap();
+        assert_eq!(kept, call);
+    }
+}

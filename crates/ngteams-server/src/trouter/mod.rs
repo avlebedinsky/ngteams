@@ -18,7 +18,11 @@
 //! Redis isn't reached by a command run beside it, and a word can pass a socket that is just connecting. So a socket
 //! reads its account once it listens, before each delivery, and, where there is no Redis, every second, a replay
 //! under way or not.
+//!
+//! A calling stack's socket gets its endpoint's call deliveries instead ([`calls`]): what the call controller
+//! published for the endpoint, on whichever node. Its client's answers with a body go back to the controller.
 
+mod calls;
 mod delivery;
 mod frames;
 mod socket;

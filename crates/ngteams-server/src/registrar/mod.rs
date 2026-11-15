@@ -17,7 +17,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::Value;
 
-pub use repo::{Registration, purge_expired, until};
+pub use repo::{Registration, purge_expired, registered, until};
 
 use crate::app::App;
 use crate::auth::extract::{Bearer, Ic3};

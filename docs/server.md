@@ -6,9 +6,10 @@ origin. The client sends a request to it only for an account signed in to that s
 
 What it serves today: sign-in (the token endpoint), authz, the chat service, teams and channels (CSA, the middle
 tier's and the provisioning service's team routes), pictures in messages, files sent in chats, link previews, account
-administration (the admin API and the first-admin setup), the registrar and the Trouter push socket. The registrar
-and Trouter have no GTM (the client finds them on the origin). Other services are added one at a time. Authz names
-only the services the server serves, so the client keeps every other service off.
+administration (the admin API and the first-admin setup), the registrar and the Trouter push socket, and 1:1 calls
+(the call controller behind `/flightproxy/api/v2/` and the TURN credentials). The registrar, Trouter and the
+calling surface have no GTM (the client finds them on the origin). Other services are added one at a time. Authz
+names only the services the server serves, so the client keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
 reactions, transient typing, account preferences and message pages (newest, backward, incremental and around a
@@ -111,6 +112,11 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `setup.require_code` | `true` | whether creating the first admin takes the setup code; turn it off only for an install nobody else reaches before its admin exists |
 | `setup.max_attempts`, `setup.window` | `5`, `300` | first-admin setup attempts a client address may make in the window (seconds) |
 | `trouter.auth_timeout` | `10` | seconds a push socket has to authenticate after it opened |
+| `calling.ring_timeout` | `30` | seconds a call rings before it ends unanswered |
+| `calling.turn.urls` | none | the TURN relay's URLs (`turn:<host>:3478?transport=udp`, `turns:<host>:5349`), handed out with the credentials |
+| `calling.turn.secret` | none | coturn's `static-auth-secret`: credentials are made from it per account and run out by themselves |
+| `calling.turn.username`, `calling.turn.password` | none | one long-term user of the relay (coturn's `user=`), used when no secret is set |
+| `calling.turn.realm`, `calling.turn.ttl` | `rtcmedia`, `86400` | coturn's `realm`; seconds a credential made from the secret holds |
 
 ## Sign-in and tokens
 
@@ -305,8 +311,8 @@ hands out its GTM where it has one.
 | Files | (the origin) | `/sp/` | yes |
 | Loki | (the origin) | `/loki/` | no |
 | Search | (the origin) | `/search/` | no |
-| Flight proxy | (the origin) | `/flightproxy/api/v2/` | no |
-| TURN credentials | (the origin) | `/trap/tokens` | no |
+| Flight proxy | (the origin) | `/flightproxy/api/v2/` | 1:1 calls |
+| TURN credentials | (the origin) | `/trap/tokens` | yes |
 
 ## Push: the registrar and Trouter
 
@@ -538,6 +544,81 @@ The account chooses the address, so the server guards every fetch against reques
 
 `media.link_previews = false` removes both routes.
 
+## Calls
+
+The server does a call's signaling and hands out the TURN relay's credentials. A 1:1 call's media goes between the
+two clients through the relay (their ICE is relay-only): the caller's offer travels in the callee's invitation, the
+callee's answer in the caller's acceptance. The wire is Teams' (`docs/protocol/calling.md`), every link under
+`<origin>/flightproxy/api/v2/ep/`; requests carry the account's skypetoken.
+
+- **The start** (`POST /flightproxy/api/v2/epconv`) from one account to one other. The answer is the conversation
+  with its links (`leave`, `updateEndpointState`, `updateEndpointMetadata`, `updateParticipantProperties`,
+  `notificationLinks`). The callee's registered calling endpoints (the `SkypeSpaces` stack's Trouter sockets, on
+  any node) get the invitation at their root: `{"evt": 107, "gp": <base64 JSON>}` with the caller, the leg's
+  `attach`, `progress` and `reject` links and the caller's offer. A group call's, a meeting's and the test call's
+  start is answered `501`: they need the call's mixer.
+- **While it rings**: `attach` (answered with the leg's `progress`, `acceptance` and `callLeg` links and the
+  conversation's), `progress`, `accept` (answered with the call leg's links and the keep-alive interval), `reject`.
+  An answer delivers the acceptance, with the callee's answer, at the caller's `acceptance` callback; the callee's
+  other endpoints get the call's end (`487`, "accepted by another fork"). A decline ends the call for the caller
+  (`603`, the callee as its sender): there is no voicemail. A ring nobody answers in `calling.ring_timeout` ends at
+  both ends (`487` "Call cancelled on timeout." at the callee, `480` at the caller); the caller's `leave` while it
+  rings cancels it.
+- **While it is up**: the call's keep-alive at the call leg's own link (`202`); `leave`, which ends the call for
+  the other party; `updateEndpointState`, whose mute both rosters then list; a renegotiation (`renegotiate`),
+  delivered at the far end's `mediaRenegotiation` callback with where its answer (`negotiations/…/answer`) or its
+  rejection goes, the answer delivered back with where it is acknowledged (`mediaAnswers/…/acknowledge`), and the
+  acknowledgement told to the answerer; a renegotiation while another waits for its answer is turned away with
+  `491` at its `rejection` callback. `updateMediaDescriptions` and `applyChannelParameters` are taken and change
+  nothing. The caller's `mediaRenegotiation` callback is read from its answer to the acceptance's delivery (its
+  `callAcceptanceAcknowledgement`), as Teams' call controller reads it.
+- **Hold and resume**: `hold` is answered `202` with the `resume` link; both rosters gain Teams' music-on-hold
+  app for as long as the hold lasts, which is how the held client knows, and the holder is told at its
+  `holdCompletion` and `resumeCompletion` callbacks. No music plays and the media isn't moved: that takes the
+  mixer.
+- **Deliveries** go to the callbacks each party handed out (`…/trouter/v4/f/<endpoint>/callAgent/…`), gzip'd in
+  base64 as Teams' call controller sends them. A request's callbacks are taken only when all are on one calling
+  endpoint the account itself registered (`403` otherwise), so no request makes the server deliver to someone
+  else's socket.
+- **Who may do what**: the token's account must be one of the call's two parties; anyone else gets `404` for every
+  link of the call. Only the callee attaches, answers and declines. A call controller operation on a call that is over gets
+  `410`; the conversation's own (`leave`, the endpoint's state and metadata) are answered `200` and change nothing,
+  as a write that was on its way when the far end hung up must not read as a failure.
+- **The chat** of the two parties, when they have one, gets the call's `Event/Call` messages from the caller:
+  its start, and its end listing who was in it and for how long. An end with the caller alone is a missed call
+  (unanswered, declined or cancelled).
+
+Not served yet: group calls and meetings, the test call, transfer, voicemail, adding someone to a call, the call
+log stream (`48:calllogs`) and a missed call's activity item.
+
+### The TURN relay (coturn)
+
+`GET /trap/tokens` (the account's `ic3` token) answers Teams' shape, `{"tokens": [{"realm", "username",
+"password"}], "expires"}`, and beside it `urls`, the relay's URLs from `calling.turn.urls`. With
+`calling.turn.secret` the credential is the TURN REST API's: the user name is `<expiry in Unix seconds>:<account
+id>` and the password the base64 HMAC-SHA1 of the user name under the secret, so coturn checks it without asking
+the server and it runs out after `calling.turn.ttl`. Without a secret, `calling.turn.username` and
+`calling.turn.password` name one long-term user. With neither the answer is `503` and calls have no media.
+
+A coturn for it:
+
+```
+listening-port=3478
+tls-listening-port=5349
+realm=rtcmedia
+use-auth-secret
+static-auth-secret=<the same secret as calling.turn.secret>
+cert=/etc/coturn/fullchain.pem
+pkey=/etc/coturn/privkey.pem
+no-multicast-peers
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+```
+
+Clients relay everything, so the relay needs its UDP range (`min-port`, `max-port`) open and enough bandwidth for
+every call's media twice. Several coturn instances with one secret serve any number of nodes.
+
 ## Chat events
 
 Chat creation publishes to every member, including the acting account's other endpoints, on `push:<mri>`.
@@ -677,6 +758,11 @@ the 1:1 chat and its history stay its two people's.
 - Account administration keeps its state in the database: the setup code's digest, the admin role, the audit. A
   setup code issued by one node is taken by any node. Setup attempts are counted in Redis when it is configured,
   else per node.
+- A call is a row (`calls`): its parties, their callbacks and where it stands, as JSON beside its version. A
+  request on any node reads the row, makes its step and stores it only if the version is still the one it read;
+  otherwise it reads again. What the step tells a party is published on `call:<endpoint>`, and the node that holds
+  that calling endpoint's socket delivers it. Every node looks twice a second for calls that are due (a ring's end,
+  a call whose keep-alives stopped, an ended call's row five minutes later); the version check lets one of them act.
 - Migrations take a Postgres advisory lock, so nodes starting together take turns.
 
 ## The client
@@ -688,7 +774,8 @@ the system doesn't trust gives its certificate authority to each account as `ca_
 ## Tests
 
 `cargo test -p ngteams-server` runs the e2e tests: the real client crates (`teams-auth`'s session and clients,
-`teams-core`'s account bring-up) against an in-process server on loopback, on SQLite. With `NGTEAMS_SERVER_PG_URL`
+`teams-core`'s account bring-up and engine, `teams-call`'s call machine, `teams-media` on its file device backend
+through its loopback TURN server) against an in-process server on loopback, on SQLite. With `NGTEAMS_SERVER_PG_URL`
 (a Postgres the tests may create databases on) the Postgres cases run too, and with `NGTEAMS_SERVER_REDIS_URL` the
 Redis cases. The picture and file tests keep their blobs in the S3 store `NGTEAMS_SERVER_S3_URL` names
 (`http://<access key>:<secret>@<host>:<port>/<bucket>`; they make the bucket), else in a temporary directory. CI's
@@ -703,4 +790,16 @@ NGTEAMS_SERVER_PG_URL=postgres://postgres:ngts@127.0.0.1:55432/postgres \
 NGTEAMS_SERVER_REDIS_URL=redis://127.0.0.1:56379 \
 NGTEAMS_SERVER_S3_URL=http://ngtsaccess:ngtssecret@127.0.0.1:59000/ngts-test cargo test -p ngteams-server
 podman stop ngts-pg ngts-redis ngts-s3
+```
+
+With `NGTS_TEST_COTURN` (a coturn's `host:port`) and `NGTS_TEST_COTURN_SECRET` one more case relays a
+call through that coturn with the credentials made from its secret:
+
+```sh
+podman run -d --rm --name ngts-coturn --network host docker.io/coturn/coturn -n --listening-ip=127.0.0.1 \
+  --listening-port=53478 --relay-ip=127.0.0.1 --use-auth-secret --static-auth-secret=test-secret \
+  --realm=rtcmedia --allow-loopback-peers --cli-password=unused
+NGTS_TEST_COTURN=127.0.0.1:53478 NGTS_TEST_COTURN_SECRET=test-secret \
+  cargo test -p ngteams-server relayed_by_coturn
+podman stop ngts-coturn
 ```

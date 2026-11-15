@@ -14,8 +14,8 @@ pub(super) enum FromClient {
         name: String,
         args: Vec<Value>,
     },
-    /// `3:::{"id":…,"status":…,…}`: the client's answer to a delivery.
-    Response { id: i64, status: u16 },
+    /// `3:::{"id":…,"status":…,…}`: the client's answer to a delivery, with its body when it has one.
+    Response { id: i64, status: u16, body: Option<String> },
     /// Anything else: left alone.
     Other,
 }
@@ -54,6 +54,10 @@ fn response(data: &str) -> Option<FromClient> {
     Some(FromClient::Response {
         id: value["id"].as_i64()?,
         status: u16::try_from(value["status"].as_u64()?).ok()?,
+        body: value["body"]
+            .as_str()
+            .filter(|body| !body.is_empty())
+            .map(str::to_owned),
     })
 }
 
@@ -108,7 +112,19 @@ mod tests {
         );
         assert_eq!(
             read(r#"3:::{"id":-7,"status":200,"headers":{},"body":""}"#),
-            FromClient::Response { id: -7, status: 200 }
+            FromClient::Response {
+                id: -7,
+                status: 200,
+                body: None
+            }
+        );
+        assert_eq!(
+            read(r#"3:::{"id":8,"status":200,"body":"{\"a\":1}"}"#),
+            FromClient::Response {
+                id: 8,
+                status: 200,
+                body: Some(r#"{"a":1}"#.into())
+            }
         );
         for other in [
             "",

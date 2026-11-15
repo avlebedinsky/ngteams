@@ -3,6 +3,7 @@
 //! appear in the next sync. No client-supplied author or roster can grant access to another account.
 
 mod activity;
+pub(crate) mod call_events;
 pub(crate) mod channels;
 mod create;
 mod events;

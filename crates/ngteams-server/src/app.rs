@@ -117,7 +117,7 @@ impl App {
         )?);
         let fetcher =
             crate::media::Fetcher::new(&config.media).map_err(|error| StartError::Previews(error.to_string()))?;
-        Ok(Arc::new(Self {
+        let app = Arc::new(Self {
             config,
             db,
             issuer,
@@ -129,7 +129,9 @@ impl App {
             storage,
             fetcher,
             clearing: crate::media::Clearing::default(),
-        }))
+        });
+        crate::calling::spawn_sweeper(&app);
+        Ok(app)
     }
 
     /// Waits, at most `limit`, for the store clears a message delete left running after its answer, as a node does
@@ -155,6 +157,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::teams::router(&app.config))
         .merge(crate::registrar::router())
         .merge(crate::trouter::router())
+        .merge(crate::calling::router())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
