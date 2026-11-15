@@ -3,7 +3,7 @@ use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use serde_json::{Map, Value};
 
 use super::repo::advance;
-use super::schema::{chat_members, chat_properties, chats, user_chat_properties};
+use super::schema::{chat_properties, chats, user_chat_properties};
 use super::wire;
 use crate::db::{Db, DbError, with_conn};
 
@@ -29,27 +29,22 @@ pub(super) async fn conversation(db: &Db, chat: &str, user: &str) -> Result<Map<
     decode(body)
 }
 
+/// Sets one of `user`'s own properties of a thread they are in: the people in the thread as the write found them,
+/// or `None` when `user` isn't one of them.
 pub(super) async fn set_conversation(
     db: &Db,
     chat: &str,
     user: &str,
     name: &str,
     value: &str,
-) -> Result<bool, DbError> {
+) -> Result<Option<Vec<String>>, DbError> {
     let at = wire::now();
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             let version: i64 = advance!(conn, at);
-            let member: bool = diesel::select(diesel::dsl::exists(
-                chat_members::table
-                    .filter(chat_members::chat_id.eq(chat))
-                    .filter(chat_members::user_id.eq(user))
-                    .filter(chat_members::left_at.is_null()),
-            ))
-            .get_result(conn)
-            .await?;
-            if !member {
-                return Ok(false);
+            let people: Vec<String> = super::repo::people!(conn, chat);
+            if !people.iter().any(|person| person == user) {
+                return Ok(None);
             }
             let body = chat_properties::table
                 .find((chat, user))
@@ -75,7 +70,7 @@ pub(super) async fn set_conversation(
                 .set(chats::version.eq(version))
                 .execute(conn)
                 .await?;
-            Ok(true)
+            Ok(Some(people))
         })
         .await)
 }

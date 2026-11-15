@@ -535,6 +535,73 @@ async fn a_message_racing_a_removal_tells_nobody_who_was_out_of_the_chat_when_it
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_racing_a_removal_gives_nothing_written_after_it() {
+    for backend in backends() {
+        let trio = Trio::start(backend).await;
+        let group = trio.group.as_str();
+        let ([own, bert, cora], [_, _, c_mri]) = seats(&trio).await;
+        let reads = ChatReads::new(&cora);
+        let ids = |page: teams_proto::chat::MessagePage| -> Vec<String> {
+            page.messages.into_iter().map(|message| message.id).collect()
+        };
+        for round in 0..ROUNDS {
+            let post = RawPost {
+                chat: group.into(),
+                body: json!({"messagetype": "Text", "content": "behind her back",
+                    "clientmessageid": format!("8{round}")}),
+            };
+            let go = async {
+                assert_eq!(own.write(removal(group, &c_mri)).await.unwrap().status(), 200);
+                assert_eq!(bert.write(post).await.unwrap().status(), 201);
+            };
+            let (page, around, ()) = tokio::join!(reads.messages(group, 200), reads.messages_around(group, 1, 200), go);
+
+            // what she may read now is all she could at any moment of the race
+            let hers = ids(reads.messages(group, 200).await.unwrap());
+            for (read, racing) in [("page", ids(page.unwrap())), ("around", ids(around.unwrap()))] {
+                let leaked: Vec<_> = racing.iter().filter(|id| !hers.contains(id)).collect();
+                assert!(leaked.is_empty(), "round {round}, {read}: {leaked:?}");
+            }
+            let back = AddChatMembers::new(group, vec![Mri::new(&c_mri)], SharedHistory::All).unwrap();
+            assert_eq!(own.write(back).await.unwrap().status(), 200);
+        }
+        trio.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_taken_back_after_its_messages_sender_left_changes_and_tells_them_nothing() {
+    for backend in backends() {
+        let trio = Trio::start(backend).await;
+        let (a, b, c) = (&trio.pair.a, &trio.pair.b, &trio.c);
+        let group = trio.group.as_str();
+        let ([_, bert, cora], [_, _, c_mri]) = seats(&trio).await;
+        let id = send(c, group, plain("before I go")).await;
+        sent_reaction(b, group, &id).await;
+        let before = ChatReads::new(&cora).messages(FEED, 200).await.unwrap();
+        assert_eq!(before.messages.len(), 1);
+        assert_eq!(bert.write(removal(group, &c_mri)).await.unwrap().status(), 200);
+        let fanout = &trio.pair.server.app.fanout;
+        let mut heard = fanout.subscribe(&format!("push:{c_mri}")).await.unwrap();
+
+        let back = Action::Unreact {
+            conversation: group.into(),
+            message_id: id.clone(),
+            key: "like".into(),
+        };
+        let row = b.write(back).await.unwrap();
+        assert_eq!(row.state, OutboxState::Sent, "{row:?}");
+        assert!(a.sync().await.unwrap().failed.is_empty());
+        assert!(a.reactions(group, &id).await.unwrap().is_empty());
+        let told = tokio::time::timeout(Duration::from_millis(300), heard.recv()).await;
+        assert!(told.is_err(), "{told:?}");
+        let after = ChatReads::new(&cora).messages(FEED, 200).await.unwrap();
+        assert_eq!(after.messages, before.messages, "her feed is as it was when she left");
+        trio.stop().await;
+    }
+}
+
 struct RawAdd {
     chat: String,
     body: Value,

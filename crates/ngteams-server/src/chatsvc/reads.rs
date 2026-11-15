@@ -80,8 +80,8 @@ pub(super) async fn conversations(
     let chats = repo::list(&app.db, &caller.id, after, until, size + 1).await?;
     let mut conversations = Vec::new();
     let mut bytes = 2;
-    for (chat, sight) in chats.iter().take(usize::try_from(size).unwrap_or(200)) {
-        let mut entry = conversation(&app, &caller, chat, *sight).await?;
+    for chat in chats.iter().take(usize::try_from(size).unwrap_or(200)) {
+        let mut entry = conversation(&app, &caller, chat).await?;
         let mut length = entry.to_string().len() + 1;
         if length + 2 > wire::MAX_PAGE_BYTES
             && let Some(preview) = entry["lastMessage"].as_object_mut()
@@ -102,26 +102,26 @@ pub(super) async fn conversations(
     {
         metadata["forwardLink"] = json!(format!(
             "{link}?syncState={since}&until={until}&after={}&pageSize={size}",
-            last.0.version
+            last.version
         ));
     }
     Ok(Json(json!({"conversations": conversations, "_metadata": metadata})))
 }
 
-async fn conversation(app: &App, caller: &Caller, chat: &repo::Chat, sight: repo::Sight) -> Result<Value, Error> {
+async fn conversation(app: &App, caller: &Caller, chat: &repo::Chat) -> Result<Value, Error> {
     let mut entry = wire::conversation(app, caller, chat);
     if let Some(place) = channels::place(&app.db, &chat.id).await? {
         let roles = channels::roles(&app.db, &place).await?;
         channels::conversation(&mut entry, caller, chat, &place, &roles);
     }
-    if let Some(message) = super::message_repo::latest(&app.db, &chat.id, sight).await? {
+    if let Some(message) = super::message_repo::latest(&app.db, &chat.id, &caller.id).await? {
         entry["lastMessage"] = message.value()?;
         if let Some(preview) = entry["lastMessage"].as_object_mut() {
             preview.remove("properties");
         }
         entry["properties"]["isemptyconversation"] = "False".into();
     }
-    if let Some((id, version)) = super::message_repo::last_updated(&app.db, &chat.id, sight).await? {
+    if let Some((id, version)) = super::message_repo::last_updated(&app.db, &chat.id, &caller.id).await? {
         entry["lastUpdatedMessageId"] = id.into();
         entry["lastUpdatedMessageVersion"] = version.into();
     }

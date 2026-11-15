@@ -108,7 +108,7 @@ async fn finish(app: &App, caller: &Caller, outcome: Outcome) -> Result<StatusCo
     };
     events::tell(app, "NewMessage", &done.event.value()?, &done.readers, &[]).await;
     let thread = wire::thread(app, caller, &done.chat, &done.members);
-    events::publish(app, caller, &done.members, "ThreadUpdate", &thread).await;
+    events::publish(app, &done.members, "ThreadUpdate", &thread).await;
     Ok(StatusCode::OK)
 }
 

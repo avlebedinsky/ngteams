@@ -24,7 +24,7 @@ pub(super) async fn set_conversation(
     if matches!(chat, streams::FEED | streams::MENTIONS) {
         streams::ensure(&app.db, chat, &caller.id).await?;
     }
-    let (found, members) = member_of(&app, &caller, chat).await?;
+    let (found, _) = member_of(&app, &caller, chat).await?;
     let name = query.get("name").map(String::as_str).ok_or(Error::BadRequest)?;
     if query
         .keys()
@@ -61,21 +61,15 @@ pub(super) async fn set_conversation(
     if !valid_preference(name, value) {
         return Err(Error::BadRequest);
     }
-    if !property_repo::set_conversation(&app.db, &found.id, &caller.id, name, value).await? {
-        return Err(Error::Denied);
-    }
+    let people = property_repo::set_conversation(&app.db, &found.id, &caller.id, name, value)
+        .await?
+        .ok_or(Error::Denied)?;
     if matches!(name, "favorite" | "isGeneralChannelFavorite") {
         crate::teams::listed(&app.db, chat, &caller.id).await?;
     }
     if name == "consumptionhorizon" {
-        events::publish(
-            &app,
-            &caller,
-            &members,
-            "ReadReceipt",
-            &json!({"id": chat, "mri": caller.mri(), "consumptionhorizon": value}),
-        )
-        .await;
+        let receipt = json!({"id": chat, "mri": caller.mri(), "consumptionhorizon": value});
+        events::others(&app, &caller, &people, "ReadReceipt", &receipt).await;
     }
     events::own(
         &app,

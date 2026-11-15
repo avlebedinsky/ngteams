@@ -3,13 +3,21 @@ use serde_json::{Value, json};
 use super::{Caller, activity::Told, repo::Member};
 use crate::app::App;
 
-pub(super) async fn publish(app: &App, caller: &Caller, members: &[Member], kind: &str, resource: &Value) {
-    let include_actor = kind != "ReadReceipt" && resource["messagetype"].as_str() != Some("Control/Typing");
-    let readers = members
-        .iter()
-        .map(|member| member.user_id.as_str())
-        .filter(|member| include_actor || *member != caller.id);
-    send(app, readers, kind, resource).await;
+pub(super) async fn publish(app: &App, members: &[Member], kind: &str, resource: &Value) {
+    send(
+        app,
+        members.iter().map(|member| member.user_id.as_str()),
+        kind,
+        resource,
+    )
+    .await;
+}
+
+/// Tells `people`, the thread's as the caller's write or moment of the clock found them, of something the caller
+/// isn't told of itself: a read receipt, typing.
+pub(super) async fn others(app: &App, caller: &Caller, people: &[String], kind: &str, resource: &Value) {
+    let others = people.iter().map(String::as_str).filter(|person| *person != caller.id);
+    send(app, others, kind, resource).await;
 }
 
 /// Tells a message's readers of it, and each account an activity item was written for of its item. Both lists are

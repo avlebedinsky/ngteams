@@ -169,12 +169,15 @@ async fn member_of(app: &App, caller: &Caller, id: &str) -> Result<(repo::Chat, 
     Ok((chat, members))
 }
 
-/// The stored thread `id` names and what the caller may read of it: someone who left still reads what they could.
-async fn reader_of(app: &App, caller: &Caller, id: &str) -> Result<(repo::Chat, repo::Sight), Error> {
+/// The stored thread `id` names, for someone with a seat in it: someone who left still reads what they could. What
+/// they may read is the message query's own to decide (`message_repo::within`).
+async fn reader_of(app: &App, caller: &Caller, id: &str) -> Result<repo::Chat, Error> {
     let stored = streams::stored(id, caller)?;
     let chat = repo::chat(&app.db, &stored).await?.ok_or(Error::Missing)?;
-    let seat = repo::seat(&app.db, &stored, &caller.id).await?.ok_or(Error::Denied)?;
-    Ok((chat, seat.sight()))
+    if !repo::seated(&app.db, &stored, &caller.id).await? {
+        return Err(Error::Denied);
+    }
+    Ok(chat)
 }
 
 pub(crate) fn now() -> i64 {
@@ -193,5 +196,6 @@ pub(crate) async fn set_own_property(
     name: &str,
     value: &str,
 ) -> Result<bool, DbError> {
-    property_repo::set_conversation(db, thread, user, name, value).await
+    let people = property_repo::set_conversation(db, thread, user, name, value).await?;
+    Ok(people.is_some())
 }

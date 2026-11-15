@@ -94,7 +94,7 @@ pub(super) async fn create(
     let (chat, members) = super::member_of(&app, &caller, &chat.id).await?;
     let thread = wire::thread(&app, &caller, &chat, &members);
     if inserted {
-        super::events::publish(&app, &caller, &members, "ThreadUpdate", &thread).await;
+        super::events::publish(&app, &members, "ThreadUpdate", &thread).await;
     }
     Ok((
         StatusCode::CREATED,

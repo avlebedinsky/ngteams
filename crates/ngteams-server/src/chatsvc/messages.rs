@@ -27,14 +27,14 @@ pub(super) async fn post(
         streams::FEED | streams::MENTIONS => return Err(Error::Denied),
         _ => {}
     }
-    let (found, members) = member_of(&app, &caller, chat).await?;
+    let (found, _) = member_of(&app, &caller, chat).await?;
     let Json(body) = body.map_err(|_| Error::BadRequest)?;
     let place = channels::place(&app.db, chat).await?;
     if post.is_some() && place.is_none() {
         return Err(Error::BadRequest);
     }
     if body["messagetype"].as_str() == Some("Control/Typing") {
-        return typing(&app, &caller, chat, &members, &body).await;
+        return typing(&app, &caller, chat, &found.id, &body).await;
     }
     let mut draft = draft(&app, &caller, chat, &body)?;
     draft.chat_id = found.id;
@@ -133,7 +133,7 @@ pub(super) async fn page(
 ) -> Result<Json<Value>, Error> {
     let target = reads::target(&path)?;
     let (chat, root) = channels::split(target)?;
-    let (found, sight) = reader_of(&app, &caller, chat).await?;
+    let found = reader_of(&app, &caller, chat).await?;
     let current = repo::watermark(&app.db).await?;
     let until = reads::number(&query, "until", current)?;
     let since = reads::number(&query, "syncState", 0)?;
@@ -146,6 +146,7 @@ pub(super) async fn page(
     let rows = message_repo::page(
         &app.db,
         &found.id,
+        &caller.id,
         message_repo::Window {
             since,
             until,
@@ -154,7 +155,6 @@ pub(super) async fn page(
             incremental,
             root,
         },
-        sight,
     )
     .await?;
     let (messages, more) = bounded_messages(&rows, size)?;
@@ -189,13 +189,13 @@ pub(super) async fn around(
     Query(query): Query<Params>,
 ) -> Result<Json<Value>, Error> {
     let chat = reads::target(&path)?;
-    let (found, sight) = reader_of(&app, &caller, chat).await?;
+    let found = reader_of(&app, &caller, chat).await?;
     let at = reads::number(&path, "time", 0)?;
     let size = reads::number(&query, "pageSize", 200)?.clamp(1, 200);
     if query.get("direction").map(String::as_str) != Some("BIDIRECTIONAL") {
         return Err(Error::BadRequest);
     }
-    let rows = message_repo::around(&app.db, &found.id, at, size, sight).await?;
+    let rows = message_repo::around(&app.db, &found.id, &caller.id, at, size).await?;
     let (messages, more) = bounded_messages(&rows, size)?;
     let mut metadata = json!({"lastCompleteSegmentStartTime": 0, "lastCompleteSegmentEndTime": 0});
     if more && let Some(last) = rows.get(messages.len().saturating_sub(1)) {
@@ -225,17 +225,12 @@ fn bounded_messages(rows: &[message_repo::Message], size: i64) -> Result<(Vec<Va
     Ok((messages, more))
 }
 
-async fn typing(
-    app: &App,
-    caller: &Caller,
-    chat: &str,
-    members: &[super::repo::Member],
-    body: &Value,
-) -> Result<Response, Error> {
+/// Typing is told to the people in the thread at its own moment of the clock, not to a roster read before it.
+async fn typing(app: &App, caller: &Caller, chat: &str, stored: &str, body: &Value) -> Result<Response, Error> {
     if body["content"].as_str() != Some("") {
         return Err(Error::BadRequest);
     }
-    let at = repo::tick(&app.db).await?;
+    let (at, people) = repo::tick(&app.db, stored, &caller.id).await?.ok_or(Error::Denied)?;
     let resource = json!({
         "type": "Message", "id": at.to_string(), "version": at.to_string(), "clientmessageid": at.to_string(),
         "conversationid": chat, "conversationLink": format!("{}/v1/users/ME/conversations/{chat}", wire::base(app)),
@@ -243,6 +238,6 @@ async fn typing(
         "messagetype": "Control/Typing", "contenttype": "Application/Message", "content": "",
         "properties": {"importance": "", "subject": ""},
     });
-    events::publish(app, caller, members, "NewMessage", &resource).await;
+    events::others(app, caller, &people, "NewMessage", &resource).await;
     Ok((StatusCode::CREATED, Json(json!({"OriginalArrivalTime": at}))).into_response())
 }

@@ -3,7 +3,7 @@ use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use serde_json::Value;
 
 use super::activity::{self, Told};
-use super::repo::{Sight, advance};
+use super::repo::advance;
 use super::schema::{chat_members, chat_messages, chats};
 use super::wire;
 use crate::db::{Db, DbError, with_conn};
@@ -139,24 +139,36 @@ pub(super) struct Window {
     pub root: Option<i64>,
 }
 
-/// The messages of `$chat` that `$sight` takes in, as a boxed query.
+/// The messages of `$chat` that `$reader` may read, as a boxed query. The statement reads the reader's seat itself,
+/// so no removal falls between a check of the seat and the read: someone who left sees no later message and no
+/// later change of an earlier one, and someone with no seat sees nothing.
 macro_rules! within {
-    ($chat:expr, $sight:expr) => {{
-        let mut query = chat_messages::table
+    ($chat:expr, $reader:expr) => {{
+        let seat = || chat_members::table.find(($chat, $reader));
+        chat_messages::table
             .filter(chat_messages::chat_id.eq($chat))
-            .filter(chat_messages::id.ge($sight.from))
-            .into_boxed();
-        // someone who left sees no later message and no later change of an earlier one
-        if let Some(until) = $sight.until {
-            query = query.filter(chat_messages::version.le(until));
-        }
-        query
+            .filter(
+                chat_messages::id
+                    .nullable()
+                    .ge(seat().select(chat_members::history_from).single_value()),
+            )
+            .filter(
+                chat_messages::version
+                    .nullable()
+                    .le(seat().select(until()).single_value()),
+            )
+            .into_boxed()
     }};
 }
 
-pub(super) async fn page(db: &Db, chat: &str, window: Window, sight: Sight) -> Result<Vec<Message>, DbError> {
+/// The last version a seat's person may read: the one they left at, or any.
+fn until() -> diesel::expression::SqlLiteral<diesel::sql_types::BigInt> {
+    diesel::dsl::sql("COALESCE(chat_members.left_at, 9223372036854775807)")
+}
+
+pub(super) async fn page(db: &Db, chat: &str, reader: &str, window: Window) -> Result<Vec<Message>, DbError> {
     with_conn!(db, |conn| {
-        let mut query = within!(chat, sight).filter(chat_messages::version.le(window.until));
+        let mut query = within!(chat, reader).filter(chat_messages::version.le(window.until));
         if let Some(root) = window.root {
             query = query.filter(chat_messages::root_id.eq(root));
         }
@@ -181,8 +193,8 @@ pub(super) async fn page(db: &Db, chat: &str, window: Window, sight: Sight) -> R
     })
 }
 
-pub(super) async fn latest(db: &Db, chat: &str, sight: Sight) -> Result<Option<Message>, DbError> {
-    with_conn!(db, |conn| Ok(within!(chat, sight)
+pub(super) async fn latest(db: &Db, chat: &str, reader: &str) -> Result<Option<Message>, DbError> {
+    with_conn!(db, |conn| Ok(within!(chat, reader)
         .order(chat_messages::id.desc())
         .select(Message::as_select())
         .first(conn)
@@ -190,8 +202,8 @@ pub(super) async fn latest(db: &Db, chat: &str, sight: Sight) -> Result<Option<M
         .optional()?))
 }
 
-pub(super) async fn last_updated(db: &Db, chat: &str, sight: Sight) -> Result<Option<(i64, i64)>, DbError> {
-    with_conn!(db, |conn| Ok(within!(chat, sight)
+pub(super) async fn last_updated(db: &Db, chat: &str, reader: &str) -> Result<Option<(i64, i64)>, DbError> {
+    with_conn!(db, |conn| Ok(within!(chat, reader)
         .order(chat_messages::version.desc())
         .select((chat_messages::id, chat_messages::version))
         .first(conn)
@@ -292,19 +304,11 @@ where
                 .execute(conn)
                 .await?;
             let scene = activity::scene!(conn, chat);
-            let told = match change.effect {
-                Effect::None => Vec::new(),
-                Effect::Reacted(key) => {
-                    let drafts: Vec<_> = scene.of_reaction(&row, actor, key).into_iter().collect();
-                    activity::put!(conn, at, change.base, &scene, &body, drafts)
-                }
-                Effect::Edited => {
-                    let drafts = scene.of_mentions(&row, &body);
-                    activity::put!(conn, at, change.base, &scene, &body, drafts)
-                }
-                Effect::Unreacted => activity::withdraw!(conn, at, scene.reaction_gone(&row, &body, actor)),
-                Effect::Deleted => activity::withdraw!(conn, at, scene.items_of(&row, &before)),
-            };
+            let plan = scene.plan(change.effect, &row, &before, &body, actor);
+            let mut told = activity::amend!(conn, at, plan.gone, activity::gone);
+            told.extend(activity::put!(conn, at, change.base, &scene, &body, plan.drafts));
+            let reword = |item: &mut Value, at: i64| activity::reworded(item, &body, at);
+            told.extend(activity::amend!(conn, at, plan.reworded, reword));
             Ok(Updated::Message(Changed {
                 readers: scene.readers(row.id),
                 row,
@@ -314,16 +318,16 @@ where
         .await)
 }
 
-pub(super) async fn around(db: &Db, chat: &str, at: i64, size: i64, sight: Sight) -> Result<Vec<Message>, DbError> {
+pub(super) async fn around(db: &Db, chat: &str, reader: &str, at: i64, size: i64) -> Result<Vec<Message>, DbError> {
     with_conn!(db, |conn| {
-        let mut past = within!(chat, sight)
+        let mut past = within!(chat, reader)
             .filter(chat_messages::id.le(at))
             .order(chat_messages::id.desc())
             .limit(size)
             .select(Message::as_select())
             .load::<Message>(conn)
             .await?;
-        let mut future = within!(chat, sight)
+        let mut future = within!(chat, reader)
             .filter(chat_messages::id.gt(at))
             .order(chat_messages::id.asc())
             .limit(size)

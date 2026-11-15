@@ -2,11 +2,12 @@
 //!
 //! An item is written in the transaction that writes its message, from the roster read there: nobody who isn't in
 //! the thread at that moment gets one, whatever the message's mentions name. An item carries a preview of its
-//! message, so a person who may not read the message is never given one either.
+//! message, so a person who may not read the message is never given one either. A change of the message changes
+//! the items of the people in the thread then, and no item of someone who left it.
 
 use serde_json::{Map, Value, json};
 
-use super::message_repo::Message;
+use super::message_repo::{Effect, Message};
 use super::repo::Chat;
 use super::{streams, wire};
 use crate::db::DbError;
@@ -82,11 +83,68 @@ pub(super) struct Draft {
     pub stream: &'static str,
     /// What makes the item one of a kind in its stream: a second write of the same finds it.
     pub key: String,
-    /// A reaction given again takes its item's place; any other item is written once.
-    pub renew: bool,
+    pub write: Write,
     what: What,
     subtype: String,
     pub actor: String,
+}
+
+/// What a draft does where its key already has an item.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Write {
+    /// Nothing: an item is written once.
+    Once,
+    /// It rewrites the item where it is, as read as it was; one its account removed stays removed.
+    Keep,
+    /// As [`Write::Keep`], and where the key has no item it writes none.
+    Revise,
+}
+
+/// What a write of a draft comes to.
+pub(super) enum Step {
+    Skip,
+    New,
+    /// The item is rewritten under its id, keeping its read mark.
+    Rewrite {
+        id: i64,
+        read: Value,
+    },
+}
+
+/// Where an item is: its stream's thread, its account and its key.
+pub(super) type Spot = (String, String, String);
+
+/// What a change of a message does to the items it made.
+#[derive(Default)]
+pub(super) struct Plan {
+    /// Items to remove, before anything is written.
+    pub gone: Vec<Spot>,
+    pub drafts: Vec<Draft>,
+    /// Items of an edited message that no draft writes: they take its new wording, or go when a mention made them.
+    pub reworded: Vec<Spot>,
+}
+
+impl Draft {
+    pub(super) fn spot(&self) -> Spot {
+        (
+            streams::stored_id(self.stream, &self.user),
+            self.user.clone(),
+            self.key.clone(),
+        )
+    }
+
+    /// What writing the draft does, given the item `existing` its key has.
+    pub(super) fn step(&self, existing: Option<&Message>) -> Result<Step, DbError> {
+        let was = existing.map(Message::value).transpose()?;
+        Ok(match (self.write, existing, was) {
+            (Write::Once | Write::Keep, None, _) => Step::New,
+            (Write::Keep | Write::Revise, Some(row), Some(was)) if live(&was) => Step::Rewrite {
+                id: row.id,
+                read: was["properties"]["isread"].clone(),
+            },
+            _ => Step::Skip,
+        })
+    }
 }
 
 /// An item as written, to be pushed to its account.
@@ -164,10 +222,48 @@ impl Scene {
         self.readable(row.id, drafts)
     }
 
+    /// What `effect`, a change `actor` made to `row`, does to the message's items: `before` is the message as it
+    /// was and `body` as it is now.
+    pub(super) fn plan(&self, effect: Effect<'_>, row: &Message, before: &Value, body: &Value, actor: &str) -> Plan {
+        match effect {
+            Effect::None => Plan::default(),
+            Effect::Reacted(key) => self.of_reaction(row, actor, key),
+            Effect::Unreacted => self.of_unreaction(row, body, actor),
+            Effect::Edited => self.of_edit(row, body),
+            Effect::Deleted => Plan {
+                gone: self.items_of(row, before),
+                ..Plan::default()
+            },
+        }
+    }
+
+    /// An edit's mentions rewrite the items they made and tell the people they newly name; the message's other
+    /// items take its new wording, and a mention's item of someone no longer named goes.
+    fn of_edit(&self, row: &Message, body: &Value) -> Plan {
+        let mut drafts = self.mentioned(row, body, true);
+        for draft in &mut drafts {
+            let quiet = self.person(&draft.user).is_some_and(Person::muted) && draft.what != PERSON;
+            draft.write = if quiet { Write::Revise } else { Write::Keep };
+        }
+        let mut reworded = self.items_of(row, body);
+        reworded.retain(|spot| drafts.iter().all(|draft| draft.spot() != *spot));
+        Plan {
+            drafts,
+            reworded,
+            ..Plan::default()
+        }
+    }
+
     /// The items of the people a message's mentions reach: named themselves, or taken in by one of everyone.
-    pub(super) fn of_mentions(&self, row: &Message, body: &Value) -> Vec<Draft> {
+    fn of_mentions(&self, row: &Message, body: &Value) -> Vec<Draft> {
+        self.mentioned(row, body, false)
+    }
+
+    /// [`Self::of_mentions`]; with `muted`, also of those a mention of everyone would reach had they not muted the
+    /// thread.
+    fn mentioned(&self, row: &Message, body: &Value, muted: bool) -> Vec<Draft> {
         let mut reached: Vec<(&Person, What)> = Vec::new();
-        for (person, what) in mentions(body).iter().flat_map(|mention| self.reach(mention)) {
+        for (person, what) in mentions(body).iter().flat_map(|mention| self.reach(mention, muted)) {
             if person.id == row.owner_id {
                 continue;
             }
@@ -190,7 +286,7 @@ impl Scene {
     }
 
     /// Whom one mention reaches: a person of the thread, or everyone in it when it names the thread itself.
-    fn reach(&self, mention: &Value) -> Vec<(&Person, What)> {
+    fn reach(&self, mention: &Value, muted: bool) -> Vec<(&Person, What)> {
         let Some(mri) = mention["mri"].as_str() else {
             return Vec::new();
         };
@@ -199,48 +295,68 @@ impl Scene {
             ("person", Some(id)) => self.person(id).map(|person| (person, PERSON)).into_iter().collect(),
             ("everyone" | "team" | "channel", None) if self.names(mri) && !self.chat.unique_roster => {
                 let what = What::Mention(broad(kind));
-                let wide = self.people.iter().filter(|person| !person.disabled && !person.muted());
+                let wide = self
+                    .people
+                    .iter()
+                    .filter(|person| !person.disabled && (muted || !person.muted()));
                 wide.map(|person| (person, what)).collect()
             }
             _ => Vec::new(),
         }
     }
 
-    /// The item `actor`'s reaction `key` to `row` makes for the message's sender.
-    pub(super) fn of_reaction(&self, row: &Message, actor: &str, key: &str) -> Option<Draft> {
-        if streams::name_of(&self.chat.id).is_some() || actor == row.owner_id {
-            return None;
+    /// `actor`'s reaction `key` to `row` is new activity for the message's sender: the item of an earlier reaction
+    /// of theirs goes, and a new one is written.
+    fn of_reaction(&self, row: &Message, actor: &str, key: &str) -> Plan {
+        let told = self.person(&row.owner_id).filter(|owner| !owner.muted());
+        let Some(draft) = told.and_then(|owner| self.reaction(owner, row, actor, key)) else {
+            return Plan::default();
+        };
+        Plan {
+            gone: vec![draft.spot()],
+            drafts: vec![draft],
+            ..Plan::default()
         }
-        let owner = self.person(&row.owner_id)?;
-        if owner.muted() || owner.from > row.id {
+    }
+
+    /// A reaction `actor` took back from `row`, now `body`: their item names the newest reaction of theirs that
+    /// stays, and goes with the last. The item of a sender who left the thread is no longer changed.
+    fn of_unreaction(&self, row: &Message, body: &Value, actor: &str) -> Plan {
+        let Some(owner) = self.people.iter().find(|person| person.id == row.owner_id) else {
+            return Plan::default();
+        };
+        let left = reaction_left(body, actor).unwrap_or_default();
+        let Some(mut draft) = self.reaction(owner, row, actor, &left) else {
+            return Plan::default();
+        };
+        if left.is_empty() {
+            return Plan {
+                gone: vec![draft.spot()],
+                ..Plan::default()
+            };
+        }
+        draft.write = Write::Revise;
+        Plan {
+            drafts: vec![draft],
+            ..Plan::default()
+        }
+    }
+
+    /// The item `actor`'s reaction `key` to `row` makes for the message's sender `owner`.
+    fn reaction(&self, owner: &Person, row: &Message, actor: &str, key: &str) -> Option<Draft> {
+        if streams::name_of(&self.chat.id).is_some() || actor == row.owner_id || owner.from > row.id {
             return None;
         }
         let mut draft = self.draft(owner, row, What::Reaction, FEED_KEY);
         draft.key = reaction_key(&self.chat.id, row.id, actor);
         key.clone_into(&mut draft.subtype);
         actor.clone_into(&mut draft.actor);
-        draft.renew = true;
         Some(draft)
     }
 
-    /// Where the item of `actor`'s reactions to `row` is, when `body` (the message now) holds none of theirs.
-    pub(super) fn reaction_gone(&self, row: &Message, body: &Value, actor: &str) -> Vec<(String, String, String)> {
-        let mri = format!("8:orgid:{actor}");
-        let emotions = body["properties"]["emotions"].as_array().into_iter().flatten();
-        let mut users = emotions.flat_map(|emotion| emotion["users"].as_array().into_iter().flatten());
-        if users.any(|user| user["mri"] == mri.as_str()) {
-            return Vec::new();
-        }
-        vec![(
-            streams::stored_id(streams::FEED, &row.owner_id),
-            row.owner_id.clone(),
-            reaction_key(&self.chat.id, row.id, actor),
-        )]
-    }
-
-    /// Where every item of `row` is, by stream thread, owner and key: its mentions', its replies' and its reactions'.
-    pub(super) fn items_of(&self, row: &Message, body: &Value) -> Vec<(String, String, String)> {
-        let mut found: Vec<(String, String, String)> = Vec::new();
+    /// Where every item of `row` is: its mentions', its replies' and its reactions'.
+    fn items_of(&self, row: &Message, body: &Value) -> Vec<Spot> {
+        let mut found: Vec<Spot> = Vec::new();
         for person in self.people.iter().filter(|person| person.id != row.owner_id) {
             for (stream, kind) in [(streams::FEED, FEED_KEY), (streams::MENTIONS, MENTIONS_KEY)] {
                 found.push((
@@ -275,7 +391,7 @@ impl Scene {
             user: person.id.clone(),
             stream: streams::FEED,
             key: item_key(kind, &self.chat.id, row.id),
-            renew: false,
+            write: Write::Once,
             what,
             subtype: subtype.to_owned(),
             actor: row.owner_id.clone(),
@@ -296,7 +412,7 @@ impl Scene {
         }
     }
 
-    /// The stream message of `draft` about the message `source`, with the item's own `id`, as of `version`.
+    /// The stream message of `draft` about the message `source`, with the item's own `id`.
     pub(super) fn item(&self, base: &str, draft: &Draft, source: &Value, actor_name: &str, id: i64) -> Value {
         let chat = &self.chat.id;
         let message = number(&source["id"]);
@@ -412,10 +528,41 @@ pub(super) fn removed(body: &mut Value, at: i64) {
     body["version"] = at.to_string().into();
 }
 
-pub(super) fn decode(body: &str) -> Result<Value, DbError> {
-    serde_json::from_str::<Map<String, Value>>(body)
-        .map(Value::Object)
-        .map_err(|_| super::property_repo::corrupt())
+/// [`removed`], as a change of an item that frees its key.
+pub(super) fn gone(item: &mut Value, at: i64) -> bool {
+    removed(item, at);
+    false
+}
+
+/// An item after its message's edit to `source`: a mention's goes, as the edit no longer makes it; any other takes
+/// the new wording. Whether the item stays.
+pub(super) fn reworded(item: &mut Value, source: &Value, at: i64) -> bool {
+    let kind = item["properties"]["activity"]["activityType"].as_str();
+    if matches!(kind, Some("mentions" | "mentionInChat" | "mention")) {
+        return gone(item, at);
+    }
+    let activity = &mut item["properties"]["activity"];
+    activity["messagePreview"] = preview(source).into();
+    activity["sourceMessageVersion"] = number(&source["version"]).into();
+    item["version"] = at.to_string().into();
+    true
+}
+
+/// Whether a stored item is still there: not removed by its account or by a change of its message.
+pub(super) fn live(item: &Value) -> bool {
+    item["properties"].get("deletetime").is_none()
+}
+
+/// The key of `actor`'s newest reaction in `body`.
+fn reaction_left(body: &Value, actor: &str) -> Option<String> {
+    let mri = format!("8:orgid:{actor}");
+    let emotions = body["properties"]["emotions"].as_array()?;
+    let theirs = emotions.iter().filter_map(|emotion| {
+        let users = emotion["users"].as_array()?;
+        let given = users.iter().find(|user| user["mri"] == mri.as_str())?;
+        Some((given["time"].as_i64()?, emotion["key"].as_str()?))
+    });
+    theirs.max_by_key(|(time, _)| *time).map(|(_, key)| key.to_owned())
 }
 
 /// Reads the [`Scene`] of thread `$chat` inside a transaction that holds the clock.
@@ -474,6 +621,7 @@ pub(super) use scene;
 /// Writes `$drafts` about the message `$source` (its body) into their streams; the [`Told`] of each one written.
 macro_rules! put {
     ($conn:expr, $at:expr, $base:expr, $scene:expr, $source:expr, $drafts:expr) => {{
+        use $crate::chatsvc::activity::Step;
         use $crate::chatsvc::schema::{chat_messages, chats};
         let actor_names: std::collections::HashMap<String, String> = $crate::db::schema::users::table
             .filter($crate::db::schema::users::id.eq_any($drafts.iter().map(|draft| &draft.actor)))
@@ -484,26 +632,35 @@ macro_rules! put {
             .collect();
         let mut told: Vec<$crate::chatsvc::activity::Told> = Vec::new();
         for draft in $drafts.iter() {
-            let stream = $crate::chatsvc::streams::stored_id(draft.stream, &draft.user);
-            let version: i64 = $crate::chatsvc::repo::advance!($conn, $at);
-            $crate::chatsvc::streams::ensure_in!($conn, &stream, &draft.user, version);
-            let existing: Option<i64> = chat_messages::table
+            let (stream, _, _) = draft.spot();
+            let existing: Option<$crate::chatsvc::message_repo::Message> = chat_messages::table
                 .filter(chat_messages::chat_id.eq(&stream))
                 .filter(chat_messages::owner_id.eq(&draft.user))
                 .filter(chat_messages::client_id.eq(&draft.key))
-                .select(chat_messages::id)
+                .select($crate::chatsvc::message_repo::Message::as_select())
                 .first($conn)
                 .await
                 .optional()?;
-            if existing.is_some() && !draft.renew {
+            let step = draft.step(existing.as_ref())?;
+            if matches!(step, Step::Skip) {
                 continue;
             }
+            let version: i64 = $crate::chatsvc::repo::advance!($conn, $at);
             let name = actor_names.get(&draft.actor).map_or("", String::as_str);
-            let mut resource = $scene.item($base, draft, $source, name, existing.unwrap_or(version));
+            let (id, kind) = match &step {
+                Step::Rewrite { id, .. } => (*id, "MessageUpdate"),
+                _ => (version, "NewMessage"),
+            };
+            let mut resource = $scene.item($base, draft, $source, name, id);
             resource["version"] = version.to_string().into();
+            if let Step::Rewrite { read, .. } = step {
+                resource["properties"]["isread"] = read;
+            } else {
+                $crate::chatsvc::streams::ensure_in!($conn, &stream, &draft.user, version);
+            }
             let row = $crate::chatsvc::message_repo::Message {
                 chat_id: stream.clone(),
-                id: existing.unwrap_or(version),
+                id,
                 owner_id: draft.user.clone(),
                 client_id: Some(draft.key.clone()),
                 version,
@@ -523,11 +680,7 @@ macro_rules! put {
                 .await?;
             told.push($crate::chatsvc::activity::Told {
                 user: draft.user.clone(),
-                kind: if existing.is_some() {
-                    "MessageUpdate"
-                } else {
-                    "NewMessage"
-                },
+                kind,
                 resource,
             });
         }
@@ -536,12 +689,14 @@ macro_rules! put {
 }
 pub(super) use put;
 
-/// Removes the items at `$items` (stream thread, owner, key) that are there; the [`Told`] of each one removed.
-macro_rules! withdraw {
-    ($conn:expr, $at:expr, $items:expr) => {{
+/// Changes the items at `$spots` that are there with `$change` (the item and the change's version; whether the
+/// item stays); the [`Told`] of each one changed. An item that goes, or is gone already, gives its key up: what
+/// its message makes later is a new item.
+macro_rules! amend {
+    ($conn:expr, $at:expr, $spots:expr, $change:expr) => {{
         use $crate::chatsvc::schema::{chat_messages, chats};
         let mut told: Vec<$crate::chatsvc::activity::Told> = Vec::new();
-        for (stream, user, key) in $items {
+        for (stream, user, key) in $spots {
             let found: Option<$crate::chatsvc::message_repo::Message> = chat_messages::table
                 .filter(chat_messages::chat_id.eq(&stream))
                 .filter(chat_messages::owner_id.eq(&user))
@@ -551,14 +706,19 @@ macro_rules! withdraw {
                 .await
                 .optional()?;
             let Some(row) = found else { continue };
-            let mut resource = $crate::chatsvc::activity::decode(&row.body)?;
-            if resource["properties"].get("deletetime").is_some() {
+            let mut resource = row.value()?;
+            if !$crate::chatsvc::activity::live(&resource) {
+                diesel::update(chat_messages::table.find((&stream, row.id)))
+                    .set(chat_messages::client_id.eq(None::<String>))
+                    .execute($conn)
+                    .await?;
                 continue;
             }
             let version: i64 = $crate::chatsvc::repo::advance!($conn, $at);
-            $crate::chatsvc::activity::removed(&mut resource, version);
+            let stays = ($change)(&mut resource, version);
             diesel::update(chat_messages::table.find((&stream, row.id)))
                 .set((
+                    chat_messages::client_id.eq(stays.then_some(key)),
                     chat_messages::version.eq(version),
                     chat_messages::body.eq(resource.to_string()),
                 ))
@@ -577,4 +737,4 @@ macro_rules! withdraw {
         told
     }};
 }
-pub(super) use withdraw;
+pub(super) use amend;

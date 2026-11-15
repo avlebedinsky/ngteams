@@ -30,25 +30,6 @@ impl Chat {
 pub(crate) struct Member {
     pub user_id: String,
     pub joined_at: i64,
-    pub history_from: i64,
-    pub left_at: Option<i64>,
-}
-
-/// What a person may read of a thread they are in or were in: its messages from `from` on, and for someone who
-/// left, nothing written or changed after `until`.
-#[derive(Clone, Copy)]
-pub(crate) struct Sight {
-    pub from: i64,
-    pub until: Option<i64>,
-}
-
-impl Member {
-    pub(crate) fn sight(&self) -> Sight {
-        Sight {
-            from: self.history_from,
-            until: self.left_at,
-        }
-    }
 }
 
 macro_rules! advance {
@@ -141,14 +122,13 @@ pub(super) async fn watermark(db: &Db) -> Result<i64, DbError> {
         .await?))
 }
 
-/// `user`'s place in the thread, also after they left it.
-pub(super) async fn seat(db: &Db, id: &str, user: &str) -> Result<Option<Member>, DbError> {
-    with_conn!(db, |conn| Ok(chat_members::table
-        .find((id, user))
-        .select(Member::as_select())
-        .first(conn)
-        .await
-        .optional()?))
+/// Whether `user` has a place in the thread, also after they left it.
+pub(super) async fn seated(db: &Db, id: &str, user: &str) -> Result<bool, DbError> {
+    with_conn!(db, |conn| Ok(diesel::select(diesel::dsl::exists(
+        chat_members::table.find((id, user))
+    ))
+    .get_result(conn)
+    .await?))
 }
 
 /// The version a thread has for one of its people: frozen at the moment they left it.
@@ -157,14 +137,8 @@ fn seen() -> diesel::expression::SqlLiteral<diesel::sql_types::BigInt> {
 }
 
 /// The account's threads that changed for it in a version window, each as the account may see it.
-pub(super) async fn list(
-    db: &Db,
-    user: &str,
-    after: i64,
-    until: i64,
-    limit: i64,
-) -> Result<Vec<(Chat, Sight)>, DbError> {
-    let rows: Vec<(Chat, i64, Option<i64>)> = with_conn!(db, |conn| chats::table
+pub(super) async fn list(db: &Db, user: &str, after: i64, until: i64, limit: i64) -> Result<Vec<Chat>, DbError> {
+    let rows: Vec<(Chat, Option<i64>)> = with_conn!(db, |conn| chats::table
         .inner_join(chat_members::table)
         .left_join(channels::table.on(channels::id.eq(chats::id)))
         .filter(chat_members::user_id.eq(user))
@@ -175,25 +149,44 @@ pub(super) async fn list(
         .filter(seen().le(until))
         .order(seen().asc())
         .limit(limit)
-        .select((Chat::as_select(), chat_members::history_from, chat_members::left_at))
+        .select((Chat::as_select(), chat_members::left_at))
         .load(conn)
         .await?);
     Ok(rows
         .into_iter()
-        .map(|(mut chat, from, until)| {
-            if let Some(left) = until {
+        .map(|(mut chat, left)| {
+            if let Some(left) = left {
                 chat.version = left;
                 chat.roster_version = chat.roster_version.min(left);
             }
-            (chat, Sight { from, until })
+            chat
         })
         .collect())
 }
 
-pub(super) async fn tick(db: &Db) -> Result<i64, DbError> {
+/// The ids of the people in thread `$chat` now, inside a transaction that holds the clock.
+macro_rules! people {
+    ($conn:expr, $chat:expr) => {
+        $crate::chatsvc::schema::chat_members::table
+            .filter($crate::chatsvc::schema::chat_members::chat_id.eq($chat))
+            .filter($crate::chatsvc::schema::chat_members::left_at.is_null())
+            .order($crate::chatsvc::schema::chat_members::position)
+            .select($crate::chatsvc::schema::chat_members::user_id)
+            .load($conn)
+            .await?
+    };
+}
+pub(super) use people;
+
+/// A moment of the clock for something `user` does in a thread that writes nothing, with the people in the thread
+/// at that moment; `None` when `user` isn't one of them.
+pub(super) async fn tick(db: &Db, chat: &str, user: &str) -> Result<Option<(i64, Vec<String>)>, DbError> {
     let at = super::wire::now();
-    with_conn!(db, |conn| {
-        let version: i64 = advance!(conn, at);
-        Ok(version)
-    })
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let version: i64 = advance!(conn, at);
+            let people: Vec<String> = people!(conn, chat);
+            Ok(people.iter().any(|person| person == user).then_some((version, people)))
+        })
+        .await)
 }

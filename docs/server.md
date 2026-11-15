@@ -422,17 +422,27 @@ the message's mentions name. A disabled account gets none. The sender gets none 
 
 | What happened | Who gets an item | `activityType` / `activitySubtype` |
 |---|---|---|
-| a mention of a person | that person; also in their `48:mentions` (`mentions` / `mention`) | 1:1 chat `mentions` / `mention`; group chat `mentionInChat` / `person`; channel `mention` / `person` |
+| a mention of a person | that person; also in their `48:mentions` (`mentions` / `mention` in a 1:1 chat, `person` in a group chat or channel) | 1:1 chat `mentions` / `mention`; group chat `mentionInChat` / `person`; channel `mention` / `person` |
 | a mention of everyone (`everyone`, `team`, `channel`) naming the thread itself (a channel: or its team) | everyone in the thread; none in a 1:1 chat | `mentionInChat` or `mention` / `everyone`, `team`, `channel` |
 | a reply in a channel post's thread | the people who wrote in that thread; people with "Follow all new threads" on (`followAllRc`) | `reply` / `reply` |
 | a post or reply in a channel | people whose `channelNotificationSettings` have `allNewPosts` `On` (replies: with `includeReplies`) | `follow` / `channelNewMessage` (the server's own names: no capture shows Teams') |
-| a reaction | the message's sender; one item per reactor, removed when they take their last reaction back | `reactionInChat` or `reaction` / the reaction's key |
+| a reaction | the message's sender; one item per reactor | `reactionInChat` or `reaction` / the reaction's key |
 
 The account's own settings of the thread apply: a muted thread (`alerts` `false`) tells of nothing but a mention of
-the account itself. A person named and also taken in by a mention of everyone gets one item, their own. An edit
-writes an item for someone it newly mentions and no second one for the same message. A deleted message's items are
-removed from every feed, so its text stays in no preview. A message edited or reacted to after someone left stays
-out of what they may read (below), and so does its item.
+the account itself. A person named and also taken in by a mention of everyone gets one item, their own.
+
+A change of the message changes the items it made, for the people in the thread at that moment:
+
+- **An edit** rewrites each item where it is, with the new wording and as read as it was; an item its account
+  removed stays removed. Someone it newly mentions gets an item, and a mention's item of someone it no longer
+  mentions is removed, in the feed and in `48:mentions`.
+- **A reaction** given again, or a second one of the same person, is new activity: the reactor's earlier item is
+  removed and a new one written, so it has the time of the new reaction. One taken back leaves the item on the
+  newest reaction of theirs that stays, at the time it had; the last one taken back removes the item.
+- **A delete** removes the message's items, so its text stays in no preview of theirs.
+
+Someone who left the thread keeps their items as they were then: a later edit, delete or reaction changes none of
+them and pushes them nothing, as it stays out of what they may read (below).
 
 ## A group chat's people
 
@@ -456,6 +466,9 @@ are added (400). Someone already in the chat is no change (200).
 - **Concurrent changes.** A post, edit or reaction checks its sender's membership and reads the thread's people in
   its own transaction, under the shared version clock. Its event and its activity items go to those people and
   nobody else, so a member removed while the request ran is told nothing of a message written after their removal.
+  A read receipt and typing go to the people their own write or moment of the clock finds, the same way. A message
+  read (a page, the page around a time, the conversation list's preview) takes the reader's seat in the statement
+  that reads the messages, so a removal never falls between a check and the read.
 
 A group started from a 1:1 chat is a new chat (`POST v1/threads` with the three people, as the client sends it);
 the 1:1 chat and its history stay its two people's.

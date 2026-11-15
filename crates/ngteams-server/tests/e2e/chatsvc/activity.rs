@@ -334,7 +334,66 @@ async fn a_reaction_tells_the_messages_sender_until_it_is_taken_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_deleted_message_takes_its_items_out_of_the_feeds_and_an_edit_tells_the_newly_mentioned() {
+async fn a_reaction_given_again_is_new_activity_and_one_taken_back_leaves_the_item_on_the_reaction_that_stays() {
+    for backend in backends() {
+        let trio = Trio::start(backend).await;
+        let (a, b, c) = (&trio.pair.a, &trio.pair.b, &trio.c);
+        let a_mri = format!("8:orgid:{}", trio.pair.a_id);
+        let id = send(a, &trio.group, MessageText::plain("we shipped").unwrap()).await;
+        for engine in [a, b, c] {
+            assert!(engine.sync().await.unwrap().failed.is_empty());
+        }
+        let unreact = |key: &str| Action::Unreact {
+            conversation: trio.group.clone(),
+            message_id: id.clone(),
+            key: key.into(),
+        };
+        sent(b, react(&trio.group, &id, "like")).await;
+        send(c, &trio.group, mentioning(&a_mri, "Ada", "well done")).await;
+        let mine = feed(a).await;
+        assert_eq!(mine.items.len(), 2, "{mine:?}");
+        assert_eq!(mine.items[1].kind, ActivityKind::Reaction("like".into()));
+        let (first, mention_at) = (mine.items[1].id.clone(), mine.items[0].at_ms);
+        sent(a, Action::ActivitySeen).await;
+        assert_eq!(feed(a).await.unseen(), 0);
+
+        // taken back and given again, it is what happened last: above the mention, and news to the feed
+        sent(b, unreact("like")).await;
+        assert_eq!(feed(a).await.items.len(), 1);
+        sent(b, react(&trio.group, &id, "heart")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let other_device = engine(&trio.pair.server, "a@own.test", &trio.pair.a_id, dir.path()).await;
+        for engine in [a, &other_device] {
+            let mine = feed(engine).await;
+            assert_eq!(mine.items.len(), 2, "{mine:?}");
+            let again = &mine.items[0];
+            assert_eq!(again.kind, ActivityKind::Reaction("heart".into()));
+            assert_ne!(again.id, first);
+            assert!(again.at_ms > mention_at, "{again:?}");
+            assert_eq!(mine.unseen(), 1);
+        }
+
+        // a second reaction of the same person is theirs to take back: the item then names the one that stays
+        sent(b, react(&trio.group, &id, "laugh")).await;
+        let mine = feed(a).await;
+        assert_eq!(mine.items[0].kind, ActivityKind::Reaction("laugh".into()));
+        let (item, at) = (mine.items[0].id.clone(), mine.items[0].at_ms);
+        sent(a, Action::ActivitySeen).await;
+        sent(b, unreact("laugh")).await;
+        for engine in [a, &other_device] {
+            let mine = feed(engine).await;
+            assert_eq!(mine.items.len(), 2, "{mine:?}");
+            assert_eq!(mine.items[0].kind, ActivityKind::Reaction("heart".into()));
+            assert_eq!((mine.items[0].id.as_str(), mine.items[0].at_ms), (item.as_str(), at));
+            assert_eq!(mine.unseen(), 0, "a reaction taken back is no news");
+        }
+        other_device.shutdown();
+        trio.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_rewrites_its_messages_items_and_a_deleted_message_takes_them_out_of_the_feeds() {
     for backend in backends() {
         let trio = Trio::start(backend).await;
         let (a, b, c) = (&trio.pair.a, &trio.pair.b, &trio.c);
@@ -345,26 +404,50 @@ async fn a_deleted_message_takes_its_items_out_of_the_feeds_and_an_edit_tells_th
             assert!(engine.sync().await.unwrap().failed.is_empty());
         }
         sent(c, react(&trio.group, &id, "like")).await;
-        assert_eq!(feed(b).await.items.len(), 1);
         assert_eq!(feed(a).await.items.len(), 1);
-
+        let item = feed(b).await.items[0].id.clone();
         sent(
-            a,
-            Action::Edit {
-                conversation: trio.group.clone(),
-                message_id: id.clone(),
-                text: mentioning(&c_mri, "Cora", "second wording"),
+            b,
+            Action::ActivityRead {
+                item: item.clone(),
+                read: true,
             },
         )
         .await;
+        let edit = |text: MessageText| Action::Edit {
+            conversation: trio.group.clone(),
+            message_id: id.clone(),
+            text,
+        };
+        let bert = client(&trio.pair.server, "b@own.test", &trio.pair.b_id).await;
+        let mentions = ChatReads::new(&bert);
+
+        // an edit that keeps the mention rewrites the items the message made, each where and as read as it was
+        sent(a, edit(mentioning(&b_mri, "Bert", "second wording"))).await;
+        let his = feed(b).await;
+        assert_eq!(his.items.len(), 1, "an edit writes no second item: {his:?}");
+        assert_eq!(his.items[0].preview, "Bert second wording");
+        assert_eq!(his.items[0].id, item);
+        assert!(his.is_read(&his.items[0]));
+        let stream = mentions.messages(MENTIONS, 200).await.unwrap();
+        assert_eq!(stream.messages.len(), 1);
+        assert!(stream.messages[0].content.contains("second wording"), "{stream:?}");
+        let mine = feed(a).await;
+        assert_eq!(mine.items.len(), 1);
+        assert_eq!(mine.items[0].preview, "Bert second wording", "the reaction's item too");
+
+        // one that mentions someone else instead tells them, and takes the item of the one no longer mentioned
+        sent(a, edit(mentioning(&c_mri, "Cora", "third wording"))).await;
         let hers = feed(c).await;
         assert_eq!(hers.items.len(), 1, "{hers:?}");
-        assert_eq!(hers.items[0].preview, "Cora second wording");
-        assert_eq!(
-            feed(b).await.items.len(),
-            1,
-            "an edit writes no second item for the same message"
-        );
+        assert_eq!(hers.items[0].preview, "Cora third wording");
+        let his = feed(b).await;
+        assert!(his.items.is_empty(), "{his:?}");
+        let stream = mentions.messages(MENTIONS, 200).await.unwrap();
+        assert_eq!(stream.messages.len(), 1);
+        assert_eq!(stream.messages[0].content, "");
+        assert!(stream.messages[0].properties.get("deletetime").is_some(), "{stream:?}");
+        assert_eq!(feed(a).await.items[0].preview, "Cora third wording");
 
         sent(
             a,
@@ -445,6 +528,12 @@ async fn an_account_marks_its_feed_items_read_or_unread_sees_the_feed_marks_all_
         .await;
         assert!(!read(&feed(&other_device).await, &older));
 
+        // b's item ids name nothing in the sender's streams: its mark of one changes nothing of b's
+        let other = client(&pair.server, "a@own.test", &pair.a_id).await;
+        let mark = teams_proto::SetActivityRead::new(&older, true).unwrap();
+        assert_eq!(other.write(mark).await.unwrap().status(), 404);
+        assert!(!read(&feed(&other_device).await, &older));
+
         sent(&pair.b, Action::ActivitySeen).await;
         let kept = feed(&other_device).await;
         assert_eq!(kept.seen_ms, Some(kept.items[0].at_ms));
@@ -468,12 +557,7 @@ async fn an_account_marks_its_feed_items_read_or_unread_sees_the_feed_marks_all_
         assert_eq!(kept.items.len(), 2);
         assert!(kept.item(&newer).is_none());
 
-        // the sender has no feed, and b's item ids name nothing in anyone else's
-        let other = client(&pair.server, "a@own.test", &pair.a_id).await;
         assert_eq!(other.write(RemoveItem(older.clone())).await.unwrap().status(), 404);
-        let mark = teams_proto::SetActivityRead::new(&older, true).unwrap();
-        assert_eq!(other.write(mark).await.unwrap().status(), 404);
-        assert!(!read(&feed(&other_device).await, &older) || kept.bookmark_ms.is_some());
         assert!(feed(&other_device).await.item(&older).is_some());
         other_device.shutdown();
         pair.stop().await;
