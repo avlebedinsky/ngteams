@@ -239,6 +239,13 @@ async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
 /// One occurrence given fields of its own: kept as a row under its series. Whether its time changed from the one
 /// it had, its own or the series'.
 pub(super) async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -> Answer<(Event, bool)> {
+    let (row, moved) = occurrence_row(found, draft);
+    repo::put_own_row(&app.db, &row).await?;
+    Ok((row, moved))
+}
+
+/// The row an occurrence's change makes of it, not yet written, and whether its time changed.
+pub(super) fn occurrence_row(found: &Found, draft: Draft) -> (Event, bool) {
     let had = found.own_row();
     let moved = (had.start_ms, had.end_ms) != (draft.start_ms, draft.end_ms);
     let row = Event {
@@ -250,8 +257,7 @@ pub(super) async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -
         version: crate::chatsvc::now(),
         ..had
     };
-    repo::put_own_row(&app.db, &row).await?;
-    Ok((row, moved))
+    (row, moved)
 }
 
 /// An event or a whole series as its change left it.

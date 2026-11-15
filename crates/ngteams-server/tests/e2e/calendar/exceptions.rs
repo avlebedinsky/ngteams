@@ -267,6 +267,53 @@ async fn a_channels_occurrence_isnt_moved_to_where_another_moved_one_of_its_seri
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_channels_occurrence_isnt_moved_to_the_start_another_of_its_series_still_has() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        let mut all_hands = draft("All hands", SYNC, 30);
+        all_hands.recurrence = Some(weekly(&[Weekday::Monday, Weekday::Wednesday, Weekday::Friday], None));
+        schedule(&ada, all_hands, place(&team, &group), true).await;
+        let events = week(&ada).await;
+        let (wednesday, friday) = (events[1].id.clone(), events[2].id.clone());
+
+        // Wednesday's, which nobody changed, is at its own start: Friday's can't take it
+        let early = draft("All hands, early", WEDNESDAY, 30);
+        refused(
+            changed_in_channel(&ada, &friday, early.clone(), place(&team, &group)).await,
+            "409",
+        );
+        let starts = |events: &[teams_proto::CalendarEvent]| -> Vec<EventTime> {
+            events.iter().map(|event| event.start).collect()
+        };
+        assert_eq!(
+            starts(&week(&ada).await),
+            [SYNC, WEDNESDAY, SYNC + 4 * DAY].map(EventTime::Instant)
+        );
+
+        // so Wednesday's is still changed where it is, and Friday's still can't come there
+        let renamed = draft("All hands, midweek", WEDNESDAY, 30);
+        change_in_channel(&ada, &wednesday, renamed, place(&team, &group)).await;
+        refused(
+            changed_in_channel(&ada, &friday, early.clone(), place(&team, &group)).await,
+            "409",
+        );
+
+        // once Wednesday's is cancelled its start is free
+        let there = week(&ada).await.remove(1);
+        assert_eq!(there.subject, "All hands, midweek");
+        cancel_in_channel(&ada, &there, place(&team, &group)).await;
+        change_in_channel(&ada, &friday, early, place(&team, &group)).await;
+        let after = week(&ada).await;
+        assert_eq!(starts(&after), [SYNC, WEDNESDAY].map(EventTime::Instant));
+        assert_eq!(after[1].subject, "All hands, early");
+        ada.stop();
+        server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_channels_cancelled_exception_named_again_doesnt_reach_the_occurrence_whose_time_it_took() {
     for backend in backends() {
         let server = server(backend).await;
@@ -277,13 +324,16 @@ async fn a_channels_cancelled_exception_named_again_doesnt_reach_the_occurrence_
         let mut all_hands = draft("All hands", SYNC, 30);
         all_hands.recurrence = Some(weekly(&[Weekday::Monday, Weekday::Wednesday, Weekday::Friday], None));
         schedule(&ada, all_hands, place(&team, &group), true).await;
-        let wednesday = week(&ada).await[1].id.clone();
+        let events = week(&ada).await;
+        let (wednesday, friday) = (events[1].id.clone(), events[2].id.clone());
 
-        // Wednesday's moved onto Friday's own time and cancelled there
-        let moved = draft("All hands", SYNC + 4 * DAY, 30);
+        // Friday's moved away, Wednesday's moved onto the time Friday's had and cancelled there
+        let away = draft("All hands", SYNC + 5 * DAY, 30);
+        change_in_channel(&ada, &friday, away, place(&team, &group)).await;
+        let moved = draft("All hands, early", SYNC + 4 * DAY, 30);
         change_in_channel(&ada, &wednesday, moved, place(&team, &group)).await;
         let events = week(&ada).await;
-        let there = events.iter().find(|event| event.kind == EventKind::Exception).unwrap();
+        let there = events.iter().find(|event| event.subject == "All hands, early").unwrap();
         cancel_in_channel(&ada, there, place(&team, &group)).await;
         assert_eq!(week(&ada).await.len(), 2);
 

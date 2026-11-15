@@ -333,8 +333,9 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   A change or cancellation of one occurrence names it by `fetchEventContract`: its kind and its start, which for
   an `Exception` is the start it was moved to. An `Exception` no live changed occurrence starts at
   answers 404: a cancelled one is not found again, and neither is the series' own occurrence at that time.
-  A change that would put an occurrence at the start another changed, live occurrence of its series has answers
-  409 `Conflict`, as does an `Exception` that two of them start at: the start alone would not tell them apart.
+  A change that would put an occurrence at the start another live occurrence of its series is at, moved there or
+  there by the series' rule, answers 409 `Conflict`: the start alone would not tell the two apart. An occurrence
+  cancelled or moved away leaves its start free.
 - **The Scheduler**: `PUT v2.0/me/calendars/schedules` (each person's busy times; what an event is about only
   for the caller's own) and `findMeetingTimes` (the half hours, 08:00 to 18:00 counted from the midnight the
   read starts at, at which everyone asked about is free).

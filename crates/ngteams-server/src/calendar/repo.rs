@@ -316,6 +316,14 @@ pub(super) async fn put_own_row(db: &Db, row: &Event) -> Result<(), DbError> {
     own_row(db, row, Existing::WrittenOver).await.map(|_| ())
 }
 
+/// As [`put_own_row`] for an occurrence of a channel's series, which is named by its start alone, unless another
+/// live occurrence of the series is at that start: one its organizer gave it, or the one the series' rule puts
+/// there (`own`, its id) while it isn't cancelled or moved away. The series' row is held from the check to the
+/// write, so of two changes to one start the second is refused. `false`: it is taken, and nothing is written.
+pub(super) async fn put_own_row_apart(db: &Db, row: &Event, own: Option<&str>) -> Result<bool, DbError> {
+    own_row(db, row, Existing::Apart(own)).await
+}
+
 /// Keeps one occurrence of a series as a row of its own, for an answer or a removal of it: a row there already
 /// stays as it is, since `row` is the series as its reader saw it and the organizer may have changed the
 /// occurrence since. `false`, and no row, when the series itself changed or was cancelled since that read.
@@ -324,12 +332,40 @@ pub(super) async fn keep_own_row(db: &Db, row: &Event) -> Result<bool, DbError> 
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Existing {
+enum Existing<'a> {
     WrittenOver,
     Left,
+    Apart(Option<&'a str>),
 }
 
-async fn own_row(db: &Db, row: &Event, existing: Existing) -> Result<bool, DbError> {
+/// Whether another live occurrence of `$series` is at the start of `$row`, as the transaction on `$conn` sees it
+/// ([`put_own_row_apart`]).
+macro_rules! taken {
+    ($conn:expr, $series:expr, $row:expr, $own:expr) => {{
+        let given: i64 = calendar_events::table
+            .filter(calendar_events::series_id.eq($series))
+            .filter(calendar_events::changed.eq(true))
+            .filter(calendar_events::cancelled.eq(false))
+            .filter(calendar_events::start_ms.eq($row.start_ms))
+            .filter(calendar_events::id.ne(&$row.id))
+            .count()
+            .get_result($conn)
+            .await?;
+        let mut taken = given > 0;
+        if let (false, Some(own)) = (taken, $own) {
+            let kept: Option<(bool, i64)> = calendar_events::table
+                .find(own)
+                .select((calendar_events::cancelled, calendar_events::start_ms))
+                .first($conn)
+                .await
+                .optional()?;
+            taken = kept.is_none_or(|(cancelled, start)| !cancelled && start == $row.start_ms);
+        }
+        taken
+    }};
+}
+
+async fn own_row(db: &Db, row: &Event, existing: Existing<'_>) -> Result<bool, DbError> {
     let Some(series) = row.series_id.as_deref() else {
         return save(db, row).await.map(|()| true);
     };
@@ -350,13 +386,19 @@ async fn own_row(db: &Db, row: &Event, existing: Existing) -> Result<bool, DbErr
                 row.meeting_chat = now.meeting_chat;
                 row.post_id = now.post_id;
             }
+            if let Existing::Apart(own) = existing {
+                hold!(conn, series);
+                if taken!(conn, series, row, own) {
+                    return Ok(false);
+                }
+            }
             let inserted = diesel::insert_into(calendar_events::table)
                 .values(&row)
                 .on_conflict_do_nothing()
                 .execute(conn)
                 .await?;
             if inserted == 0 {
-                if existing == Existing::WrittenOver {
+                if existing != Existing::Left {
                     diesel::update(calendar_events::table.find(&row.id))
                         .set(changes(&row))
                         .execute(conn)
@@ -699,6 +741,84 @@ mod tests {
         let (now, _) = event(&db, &series.id, &bert).await.unwrap().unwrap();
         assert!(keep_own_row(&db, &occurrence(20000, &now)).await.unwrap());
         assert!(event(&db, "series.20000", &bert).await.unwrap().unwrap().0.cancelled);
+    }
+
+    /// A channel's occurrence is written to a start only while no other live one of its series is there.
+    #[tokio::test]
+    async fn a_row_isnt_put_at_the_start_another_live_one_of_its_series_is_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("calendar.sqlite").display());
+        let db = Db::connect(&url, 1).await.unwrap();
+        db.migrate().await.unwrap();
+        let series = series(&account(&db, "ada@own.test").await);
+        insert(&db, &series, &[]).await.unwrap();
+        let moved = |from: i64, to: i64| Event {
+            id: format!("series.{from}"),
+            series_id: Some(series.id.clone()),
+            original_start: Some(from),
+            start_ms: to,
+            end_ms: to + 1000,
+            until_ms: to + 1000,
+            recurring: false,
+            changed: true,
+            version: 2,
+            ..series.clone()
+        };
+        let start_of = async |id: &str| event(&db, id, "").await.unwrap().map(|(row, _)| row.start_ms);
+
+        // the first to a free start is written, the second to the same start isn't
+        assert!(put_own_row_apart(&db, &moved(8000, 9500), None).await.unwrap());
+        assert!(!put_own_row_apart(&db, &moved(20000, 9500), None).await.unwrap());
+        assert_eq!(start_of("series.20000").await, None);
+        // the one that is there is written again where it is
+        assert!(put_own_row_apart(&db, &moved(8000, 9500), None).await.unwrap());
+
+        // the start the rule gives another one is taken while that one has no row, or an unchanged one
+        let unchanged = Event {
+            changed: false,
+            ..moved(32000, 32000)
+        };
+        assert!(
+            !put_own_row_apart(&db, &moved(20000, 32000), Some("series.32000"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            keep_own_row(
+                &db,
+                &Event {
+                    version: 1,
+                    ..unchanged.clone()
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !put_own_row_apart(&db, &moved(20000, 32000), Some("series.32000"))
+                .await
+                .unwrap()
+        );
+        // and free once that one is moved away, or cancelled
+        assert!(put_own_row_apart(&db, &moved(32000, 33000), None).await.unwrap());
+        assert!(
+            put_own_row_apart(&db, &moved(20000, 32000), Some("series.32000"))
+                .await
+                .unwrap()
+        );
+        // moved back to its own start, which another has since taken, it is refused
+        assert!(!put_own_row_apart(&db, &moved(32000, 32000), None).await.unwrap());
+        let cancelled = Event {
+            cancelled: true,
+            ..moved(8000, 8000)
+        };
+        put_own_row(&db, &cancelled).await.unwrap();
+        assert!(
+            put_own_row_apart(&db, &moved(20000, 8000), Some("series.8000"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(start_of("series.20000").await, Some(8000));
     }
 
     async fn invited_under(db: &Db, id: &str) -> Result<Vec<String>, DbError> {

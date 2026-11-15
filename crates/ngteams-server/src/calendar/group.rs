@@ -19,7 +19,7 @@ use super::draft::Draft;
 use super::repo::{self, Attendee, Event};
 use super::wire::{self, Shown, channel_link as link, mailbox};
 use super::write::{self, account};
-use super::{Answer, Error, Found, Me, body, book, invite, people};
+use super::{Answer, Error, Found, Me, body, book, draft, invite, people};
 use crate::app::App;
 use crate::chatsvc::service;
 use crate::teams::repo::{self as teams, Channel, Team};
@@ -219,19 +219,38 @@ async fn own(app: &App, me: &Me, group: &str, uid: &str, contract: &Value) -> An
     Ok((team, found))
 }
 
-/// One occurrence of a channel's series changed, with its invitations. It isn't given the start that another
-/// changed, live occurrence of its series has: a moved occurrence is named by its start alone, so two of a series
-/// can't have the same.
+/// One occurrence of a channel's series changed, with its invitations. It isn't given the start another live
+/// occurrence of its series is at, moved there or there by the series' rule: a change or a cancellation names an
+/// occurrence by its start alone, so two at one start are not told apart.
 async fn one_changed(app: &App, found: &Found, draft: Draft, wanted: &[(String, bool)]) -> Answer<Event> {
-    let here = found.own_row();
-    let series = here.series_id.clone().unwrap_or_else(|| here.id.clone());
-    let there = repo::changed_rows_at(&app.db, &series, draft.start_ms).await?;
-    if there.iter().any(|id| *id != here.id) {
+    let (row, moved) = write::occurrence_row(found, draft);
+    let series = row.series_id.clone().unwrap_or_else(|| row.id.clone());
+    let own = by_rule_at(app, found, &row).await?;
+    if !repo::put_own_row_apart(&app.db, &row, own.as_deref()).await? {
         return Err(Error::CONFLICT);
     }
-    let (row, moved) = write::occurrence_changed(app, found, draft).await?;
     repo::sync_attendees(&app.db, &series, &row.id, wanted, moved).await?;
     Ok(row)
+}
+
+/// The id of the occurrence the series' rule puts at the start `row` now has, when that is another one than `row`.
+async fn by_rule_at(app: &App, found: &Found, row: &Event) -> Answer<Option<String>> {
+    let Some(id) = row
+        .series_id
+        .as_deref()
+        .filter(|_| row.original_start != Some(row.start_ms))
+    else {
+        return Ok(None);
+    };
+    let series = if found.occurrence.is_some() {
+        found.event.clone()
+    } else {
+        let series = repo::event(&app.db, id, "").await?;
+        series.map(|(series, _)| series).ok_or(Error::NOT_FOUND)?
+    };
+    let fields = serde_json::from_str(&series.body).unwrap_or_default();
+    let there = draft::series_of(&fields, series.start_ms, series.end_ms).is_some_and(|rule| rule.has(row.start_ms));
+    Ok(there.then(|| wire::occurrence_id(id, row.start_ms)))
 }
 
 /// `PUT v2.0/groups/smtp:<mailbox>/calendars/events/<uid>` with `{"updatedCalendarEvent", "fetchEventContract"}`:
