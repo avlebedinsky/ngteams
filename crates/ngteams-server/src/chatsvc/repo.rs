@@ -205,7 +205,7 @@ pub(super) async fn list(db: &Db, user: &str, after: i64, until: i64, limit: i64
         .filter(chats::id.not_like("48:notes:%"))
         .filter(seen().gt(after))
         .filter(seen().le(until))
-        .order(seen().asc())
+        .order((seen().asc(), chats::id.asc()))
         .limit(limit)
         .select((Chat::as_select(), chat_members::left_at))
         .load(conn)

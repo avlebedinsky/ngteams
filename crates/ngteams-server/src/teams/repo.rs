@@ -935,25 +935,30 @@ pub(crate) async fn mark_hidden(db: &Db, team: &str, user: &str, hidden: bool) -
     Ok(())
 }
 
+/// Stamped from the server's clock, so requests asked together in one call read back in the order asked.
 pub(crate) async fn request_join(db: &Db, team: &str, user: &str) -> Result<(), DbError> {
-    with_conn!(db, |conn| {
-        diesel::insert_into(team_join_requests::table)
-            .values((
-                team_join_requests::team_id.eq(team),
-                team_join_requests::user_id.eq(user),
-                team_join_requests::created_at.eq(now()),
-            ))
-            .on_conflict_do_nothing()
-            .execute(conn)
-            .await?;
-    });
-    Ok(())
+    let at = now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let stamp: i64 = advance!(conn, at);
+            diesel::insert_into(team_join_requests::table)
+                .values((
+                    team_join_requests::team_id.eq(team),
+                    team_join_requests::user_id.eq(user),
+                    team_join_requests::created_at.eq(stamp),
+                ))
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await?;
+            Ok(())
+        })
+        .await)
 }
 
 pub(crate) async fn join_requests(db: &Db, team: &str) -> Result<Vec<String>, DbError> {
     with_conn!(db, |conn| Ok(team_join_requests::table
         .filter(team_join_requests::team_id.eq(team))
-        .order(team_join_requests::created_at.asc())
+        .order((team_join_requests::created_at.asc(), team_join_requests::user_id.asc()))
         .select(team_join_requests::user_id)
         .load(conn)
         .await?))

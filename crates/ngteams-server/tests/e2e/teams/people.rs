@@ -184,6 +184,48 @@ async fn a_private_teams_member_asks_its_owners_to_let_someone_in() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pending_join_requests_keep_the_order_asked_and_ties_read_one_way() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let one = Seat::new(&server, "one@own.test", "One").await;
+        let two = Seat::new(&server, "two@own.test", "Two").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        ada.add(&team, &group, &[&bert]).await;
+        // asked against the ids' order, so an id-ordered read can't pass for the asked one
+        let (low, high) = if one.id < two.id { (&one, &two) } else { (&two, &one) };
+        let ask = TeamWrite::RequestMembers {
+            group: group.clone(),
+            members: vec![Mri::new(&high.mri), Mri::new(&low.mri)],
+        };
+        bert.engine.team_write(ask, None).await.unwrap();
+        let asking = || async {
+            let asking = ada.engine.team_join_requests(group.as_str()).await.unwrap();
+            asking.into_iter().map(|member| member.mri).collect::<Vec<_>>()
+        };
+        assert_eq!(asking().await, [high.mri.clone(), low.mri.clone()], "the order asked");
+
+        stamp_join_requests_alike(&server).await;
+        assert_eq!(asking().await, [low.mri.clone(), high.mri.clone()], "a tie reads by id");
+        for seat in [ada, bert, one, two] {
+            seat.stop();
+        }
+        server.stop().await;
+    }
+}
+
+async fn stamp_join_requests_alike(server: &crate::support::TestServer) {
+    use diesel_async::SimpleAsyncConnection as _;
+    use ngteams_server::db::Pool;
+    const TIE: &str = "UPDATE team_join_requests SET created_at = 0";
+    match server.app.db.pool() {
+        Pool::Postgres(pool) => pool.get().await.unwrap().batch_execute(TIE).await.unwrap(),
+        Pool::Sqlite(pool) => pool.get().await.unwrap().batch_execute(TIE).await.unwrap(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_people_pickers_find_accounts_to_add_and_a_teams_own_people() {
     for backend in backends() {
         let server = server(backend).await;
