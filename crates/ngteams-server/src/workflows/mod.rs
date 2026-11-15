@@ -51,8 +51,7 @@ const BODY_LIMIT: usize = 256 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WorkflowsConfig {
-    /// Whether the Flow and Power Apps routes are served and their tokens issued: the client offers Workflows
-    /// for an account only then.
+    /// Whether the Flow and Power Apps routes are served and their tokens issued, even when `audiences` lists them.
     pub enabled: bool,
     /// The largest body a webhook takes, in bytes: 256 KB, the limit the client's Overview names.
     pub max_body_bytes: usize,
@@ -82,6 +81,12 @@ pub fn audiences(config: &Config) -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+/// Whether a token for `audience` is withheld: a Flow or Power Apps one while the server doesn't serve Workflows.
+#[must_use]
+pub fn withheld(config: &Config, audience: &str) -> bool {
+    !config.workflows.enabled && [FLOW_AUDIENCE, POWER_APPS_AUDIENCE].contains(&audience)
 }
 
 pub(crate) struct Flow;

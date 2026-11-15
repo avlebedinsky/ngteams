@@ -127,7 +127,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `calling.turn.secret` | none | coturn's `static-auth-secret`: credentials are made from it per account and run out by themselves |
 | `calling.turn.username`, `calling.turn.password` | none | one long-term user of the relay (coturn's `user=`), used when no secret is set |
 | `calling.turn.realm`, `calling.turn.ttl` | `rtcmedia`, `86400` | coturn's `realm`; seconds a credential made from the secret holds |
-| `workflows.enabled` | `true` | whether the server serves Workflows ([below](#workflows-with-incoming-webhooks)) and issues tokens for Power Automate's two audiences; the client offers Workflows only then |
+| `workflows.enabled` | `true` | whether the server serves Workflows ([below](#workflows-with-incoming-webhooks)) and issues tokens for Power Automate's two audiences, even when `audiences` lists them |
 | `workflows.max_body_bytes` | `262144` | the largest body a workflow's webhook takes: 256 KB, the limit the client's Overview names |
 | `workflows.rate_per_minute` | `60` | posts one workflow's webhook takes in a minute, across every node (counted in Redis when there is one) |
 | `workflows.runs_kept` | `100` | runs kept per workflow for its run history |
@@ -414,6 +414,11 @@ a chat" need:
 - **The webhook**: `POST <origin>/workflows/automations/direct/workflows/<id>/triggers/manual/paths/invoke?api-version=1&sp=…&sv=1.0&sig=<secret>`,
   with no token. It answers 202 and posts what it got into the channel or chat as the Workflows bot (`28:358f0194-…`,
   "Workflows"), through the chat service, so sync and push deliver it as any message.
+
+With `workflows.enabled = false` the server serves none of this and issues no token for those two audiences; authz
+names no Workflows service either way. The client doesn't hide a service the server leaves out yet, so it still
+offers Workflows: its lists say "Power Automate needs access to your account. Sign in again, then refresh.", and
+signing in again doesn't change that.
 
 | Who | May |
 | --- | --- |

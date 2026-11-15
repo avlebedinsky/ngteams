@@ -175,6 +175,7 @@ pub async fn token(
     let resource = requested(scope, &app.config.audiences)
         .or_else(|| requested(scope, &[app.config.origin()]))
         .or_else(|| requested(scope, &crate::workflows::audiences(&app.config)))
+        .filter(|wanted| !crate::workflows::withheld(&app.config, &wanted.audience))
         .ok_or_else(Refusal::scope)?;
     let (user, refresh) = match field("grant_type") {
         Some("password") => {

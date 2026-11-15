@@ -528,3 +528,34 @@ async fn with_redis_down_or_hung_a_post_is_answered_at_once_posted_once_and_kept
         }
     }
 }
+
+/// With Workflows off, nothing the client reads says the server has them: authz names no Workflows service, and no
+/// Flow or Power Apps token is issued, not even when the operator also lists those audiences in `audiences`.
+#[tokio::test(flavor = "multi_thread")]
+async fn with_workflows_off_nothing_announces_them() {
+    const AUDIENCES: [&str; 2] = [
+        ngteams_server::workflows::FLOW_AUDIENCE,
+        ngteams_server::workflows::POWER_APPS_AUDIENCE,
+    ];
+    for backend in backends() {
+        let server = TestServer::start_with(backend, |config| {
+            config.public_origin = url::Url::parse(ORIGIN).unwrap();
+            config.workflows.enabled = false;
+            config.audiences.extend(AUDIENCES.map(str::to_owned));
+        })
+        .await;
+        server.add_user("ada@own.test", "Ada").await;
+        for resource in AUDIENCES {
+            let scope = teams_auth::token::Scope::exact(format!("{resource}/.default openid profile offline_access"));
+            let (status, answer) = server
+                .password_grant("ada@own.test", crate::support::PASSWORD, &scope)
+                .await;
+            assert_ne!(status, 200, "{resource}: {answer}");
+        }
+        let session = server.session("ada@own.test").await;
+        session.skypetoken().await.unwrap();
+        let bases = format!("{:?}", session.region().endpoints).to_lowercase();
+        assert!(!bases.contains("flow") && !bases.contains("powerapps"), "{bases}");
+        server.stop().await;
+    }
+}
