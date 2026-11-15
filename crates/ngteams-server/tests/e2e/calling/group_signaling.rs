@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use teams_call::{CallState, End, Participant};
 use teams_proto::{CallLink, Cloud, Endpoint, Method, Mri, Request, Service};
 
@@ -448,4 +448,243 @@ async fn a_second_start_in_a_chat_with_a_running_call_is_refused_naming_it() {
         assert!(quiet.is_empty(), "{quiet:#?}");
         group.server.stop().await;
     }
+}
+
+/// A raw calling request with `person`'s skypetoken.
+async fn raw(server: &TestServer, person: &Person, method: reqwest::Method, path: &str, body: &Value) -> (u16, Value) {
+    let session = server.session(&person.upn).await;
+    let token = session.skypetoken().await.unwrap();
+    let response = reqwest::Client::new()
+        .request(method, server.url(path))
+        .header("x-skypetoken", token.token.expose())
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+/// `person`'s calling endpoint and a callback base on it.
+async fn own_callbacks(server: &TestServer, person: &Person) -> (String, String) {
+    let stack = ngteams_server::trouter::Stack::Calling;
+    let registered = ngteams_server::registrar::registered(&server.app.db, &person.id, stack.app_id())
+        .await
+        .unwrap();
+    let endpoint = ngteams_server::trouter::endpoint_id(&person.id, &registered[0], stack);
+    let base = format!("{ORIGIN}/trouter/v4/f/{endpoint}/callAgent/raw/");
+    (endpoint, base)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_start_is_not_served_without_a_media_node_nor_for_someone_outside_the_chat() {
+    let server = crate::trouter::server(Backend::Sqlite).await;
+    let a_id = server.add_user("a@own.test", "Ada").await;
+    let b_id = server.add_user("b@own.test", "Bert").await;
+    let c_id = server.add_user("c@own.test", "Cora").await;
+    let mut a = super::client(&server, &server, "a@own.test", &a_id, "Ada").await;
+    let account = Account::sign_in(&server, "a@own.test", &a_id).await;
+    let others = [Mri::new(mri(&b_id)), Mri::new(mri(&c_id))];
+    let create = teams_proto::CreateChat::group(Mri::new(mri(&a_id)), others).unwrap();
+    let created = account.client(&server).write(create).await.unwrap();
+    let body: Value = serde_json::from_slice(created.body()).unwrap();
+    let chat = body["threadResource"]["id"].as_str().unwrap().to_owned();
+    a.call_group(&chat, &[mri(&b_id)]);
+    assert_eq!(a.ended().await, End::Failed("start"), "no media node: 501");
+    server.stop().await;
+    // with one, someone outside the chat starts nothing in it, and a chat that doesn't exist has no call
+    let mut group = Group::start(Backend::Sqlite).await;
+    let chat = group.chat.clone();
+    group.o.client.call_group(&chat, std::slice::from_ref(&group.others[0]));
+    assert_eq!(group.o.client.ended().await, End::Failed("start"));
+    group
+        .o
+        .client
+        .call_group("19:nothing@thread.v2", std::slice::from_ref(&group.others[0]));
+    assert_eq!(group.o.client.ended().await, End::Failed("start"));
+    assert!(
+        ngteams_server::calling::open_calls(&group.server.app.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    group.server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_party_adds_a_member_who_rings_and_one_with_nothing_to_ring_isnt_brought_in() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let (a, b, c) = (group.a.mri(), group.b.mri(), group.c.mri());
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        let placed = group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        group.b.client.answer(rings.call);
+        group.b.client.state(CallState::Connected).await;
+        group.a.client.add(placed, &c, &group.chat);
+        let added = group.c.client.incoming().await;
+        assert_eq!(added.group_chat.as_deref(), Some(group.chat.as_str()));
+        let call = group.open_call().await;
+        let offer = added.offer.unwrap().blob;
+        assert!(
+            group.mixer.legs(&call.id).keys().any(|leg| offer == offer_to(leg)),
+            "{offer}"
+        );
+        group.c.client.answer(added.call);
+        group.c.client.state(CallState::Connected).await;
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, &[b.clone(), c.clone()]))
+            .await;
+        group
+            .c
+            .client
+            .participants_until(|now| are(now, &[a.clone(), b.clone()]))
+            .await;
+        // the member with no calling client has nothing to ring
+        let silent = group.others[3].clone();
+        group.a.client.add(placed, &silent, &group.chat);
+        let who = group
+            .a
+            .client
+            .next(|event| match event {
+                teams_call::CallEvent::AddFailed { who, .. } => Some(who),
+                _ => None,
+            })
+            .await;
+        assert_eq!(who.as_str(), silent);
+        // someone in no chat with them isn't added: the add isn't taken
+        group.a.client.add(placed, &group.o.mri(), &group.chat);
+        let who = group
+            .a
+            .client
+            .next(|event| match event {
+                teams_call::CallEvent::AddFailed { who, .. } => Some(who),
+                _ => None,
+            })
+            .await;
+        assert_eq!(who.as_str(), group.o.mri());
+        assert_eq!(group.mixer.legs(&call.id).len(), 3, "Ada's, Bert's and Cora's");
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partys_renegotiation_is_answered_by_the_media_node_and_a_hold_is_refused() {
+    let mut group = Group::start(Backend::Sqlite).await;
+    let b = group.b.mri();
+    group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+    group.a.client.remote_media().await;
+    let placed = group.a.client.state(CallState::Connected).await;
+    group.b.client.incoming().await;
+    let call = group.open_call().await;
+    group.a.client.renegotiate(placed);
+    let answer = group.a.client.remote_media().await;
+    assert!(
+        group
+            .mixer
+            .legs(&call.id)
+            .keys()
+            .any(|leg| answer.blob == answer_on(leg, 1)),
+        "the node's answer to the renegotiation: {answer:?}"
+    );
+    // acknowledged, the next one is answered too
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    group.a.client.renegotiate(placed);
+    let answer = group.a.client.remote_media().await;
+    assert!(
+        group
+            .mixer
+            .legs(&call.id)
+            .keys()
+            .any(|leg| answer.blob == answer_on(leg, 2)),
+        "{answer:?}"
+    );
+    // Bert, still ringing, hears nothing of it
+    let quiet = group.b.client.events_within(Duration::from_millis(300)).await;
+    assert!(
+        quiet
+            .iter()
+            .all(|event| matches!(event, teams_call::CallEvent::Participants { .. })),
+        "{quiet:#?}"
+    );
+    // a group call has no hold
+    let (_, base) = own_callbacks(&group.server, &group.a).await;
+    let hold = json!({"hold": {"links": {"holdCompletion": format!("{base}holdCompletion/")}}});
+    let path = format!("/flightproxy/api/v2/ep/cc.own/cc/v1/active/{}/0/a1/1/hold", call.id);
+    let (status, _) = raw(&group.server, &group.a, reqwest::Method::POST, &path, &hold).await;
+    assert_eq!(status, 403);
+    group.server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_follows_the_roster_without_joining_and_nobody_acts_on_anothers_seat() {
+    let mut group = Group::start(Backend::Sqlite).await;
+    let (a, b) = (group.a.mri(), group.b.mri());
+    group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+    group.a.client.state(CallState::Connected).await;
+    let rings = group.b.client.incoming().await;
+    let call = group.open_call().await;
+    let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
+    // Cora, a member, subscribes without media: the whole roster in the answer and at her callback
+    let (endpoint, base) = own_callbacks(&group.server, &group.c).await;
+    let mut told = group
+        .server
+        .app
+        .fanout
+        .subscribe(&ngteams_server::calling::topic(&endpoint))
+        .await
+        .unwrap();
+    let watch =
+        json!({"conversationRequest": {"roster": {"type": "Delta", "rosterUpdate": format!("{base}rosterUpdate/")}}});
+    let (status, answer) = raw(&group.server, &group.c, reqwest::Method::POST, &conv, &watch).await;
+    assert_eq!(status, 200);
+    assert!(answer["roster"]["participants"].get(&a).is_some(), "{answer}");
+    let first = tokio::time::timeout(super::client::WAIT, told.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&first).contains(&a));
+    // Bert answers: the watcher is told
+    group.b.client.answer(rings.call);
+    group.b.client.state(CallState::Connected).await;
+    let next = tokio::time::timeout(super::client::WAIT, told.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&next).contains(&b));
+    // someone in no chat with them learns nothing of the call
+    let (status, _) = raw(&group.server, &group.o, reqwest::Method::POST, &conv, &watch).await;
+    assert_eq!(status, 404);
+    // a party's links name its own seat: another's is none of its business
+    let cc = format!("/flightproxy/api/v2/ep/cc.own/cc/v1/active/{}", call.id);
+    let (status, _) = raw(
+        &group.server,
+        &group.a,
+        reqwest::Method::POST,
+        &format!("{cc}/1/a1/1"),
+        &Value::Null,
+    )
+    .await;
+    assert_eq!(status, 404, "Ada's keep-alive on Bert's seat");
+    let (status, _) = raw(
+        &group.server,
+        &group.a,
+        reqwest::Method::POST,
+        &format!("{cc}/0/a1/1"),
+        &Value::Null,
+    )
+    .await;
+    assert_eq!(status, 202, "her own");
+    let (status, _) = raw(
+        &group.server,
+        &group.b,
+        reqwest::Method::POST,
+        &format!("{cc}/0/a1/1/updateMediaDescriptions"),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, 404);
+    group.server.stop().await;
 }

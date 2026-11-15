@@ -44,6 +44,10 @@ enum Command {
     Place(Placement),
     /// Joins the chat's call at the conversation its events named.
     Join(String, CallLink),
+    /// Adds someone of the group chat to the call.
+    Add(CallId, Mri, String),
+    /// Offers the call's media again.
+    Renegotiate(CallId),
     Answer(CallId),
     Decline(CallId),
     HangUp(CallId),
@@ -188,6 +192,16 @@ impl Client {
     /// Joins the running call of the group chat `chat`, at `conversation`.
     pub fn join(&self, chat: &str, conversation: CallLink) {
         self.command(Command::Join(chat.to_owned(), conversation));
+    }
+
+    /// Adds `invitee` to the call `call` in the group chat `chat`.
+    pub fn add(&self, call: CallId, invitee: &str, chat: &str) {
+        self.command(Command::Add(call, Mri::new(invitee), chat.to_owned()));
+    }
+
+    /// Offers the media of `call` again (its answer comes as [`CallEvent::RemoteMedia`]).
+    pub fn renegotiate(&self, call: CallId) {
+        self.command(Command::Renegotiate(call));
     }
 
     pub fn answer(&self, call: CallId) {
@@ -340,6 +354,8 @@ impl Driver {
         let now = Instant::now();
         match command {
             Command::Place(placement) => self.calls.place(&placement, offer(), now).map(drop),
+            Command::Add(call, invitee, chat) => self.calls.add(call, &invitee, &chat),
+            Command::Renegotiate(call) => self.calls.renegotiate(call, &offer()),
             Command::Join(chat, conversation) => {
                 self.calls.posted_running(&chat, conversation);
                 self.calls.join(&chat, offer(), now).map(drop)
