@@ -75,7 +75,7 @@ impl Shown<'_> {
         let app = self.book.app;
         let channel = self.event.channel_id.as_deref().unwrap_or_default();
         let post = self.event.post_id.unwrap_or(0);
-        let link = super::meeting::join_link(app, channel, &post.to_string(), &self.event.owner_id);
+        let link = channel_link(app, self.event);
         let data = json!({"cid": channel, "uid": mri(&self.event.owner_id), "rid": post, "mid": post, "type": 0});
         fields.insert("organizerName".into(), json!(team.name));
         fields.insert("organizerAddress".into(), json!(mailbox(app, team)));
@@ -218,8 +218,15 @@ fn attendee(user: &User, kind: &str, response: &str, time: i64) -> Value {
     })
 }
 
+/// The join link of a channel's meeting: the channel and the meeting's own post.
+pub(super) fn channel_link(app: &App, event: &Event) -> String {
+    let channel = event.channel_id.as_deref().unwrap_or_default();
+    let post = event.post_id.unwrap_or(0).to_string();
+    super::meeting::join_link(app, channel, &post, &event.owner_id)
+}
+
 /// A team's mailbox: what its group calendar is addressed by.
-fn mailbox(app: &App, team: &Team) -> String {
+pub(super) fn mailbox(app: &App, team: &Team) -> String {
     let host = app.config.public_origin.host_str().unwrap_or("localhost");
     format!("{}@{host}", team.group_id)
 }

@@ -40,6 +40,15 @@ fn with(key: &str, value: Value) -> Value {
     json!({"calendarEvent": event})
 }
 
+/// A creation of a sound weekly series on the weekday `day`.
+fn weekly_on(day: &str) -> Value {
+    let mut event = sound();
+    event["eventRecurrencePattern"] =
+        json!({"patternType": "Weekly", "weekly": {"interval": 1, "daysOfTheWeek": [day]}});
+    event["eventRecurrenceRange"] = json!({"startDate": "2027-01-04T00:00:00+00:00"});
+    json!({"calendarEvent": event})
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_calendar_takes_only_an_enabled_accounts_own_middle_tier_token() {
     let server = server(Backend::Sqlite).await;
@@ -136,6 +145,8 @@ async fn an_event_is_taken_only_in_the_shape_the_form_sends() {
         with("utcOffset", json!(5000)),
         with("utcOffset", json!("three hours")),
         with("eventRecurrencePattern", json!({"patternType": 9})),
+        weekly_on("éé"),
+        weekly_on("Someday"),
         with("attendees", json!("everyone")),
         with("attendees", json!(many)),
         with("attendees", json!([{"address": "nobody@own.test", "type": "Required"}])),
@@ -170,6 +181,21 @@ async fn an_event_is_taken_only_in_the_shape_the_form_sends() {
         1,
         "an event of no length is in its window"
     );
+    ada.stop();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_takes_a_long_text_up_to_the_calendars_own_limit() {
+    let server = server(Backend::Sqlite).await;
+    let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+    let own = token(&server, "ada@own.test", MIDDLE_TIER_AUDIENCE).await;
+    // more than a team or channel request may be, less than the calendar's megabyte
+    let long = with("bodyContent", json!("x".repeat(200 * 1024)));
+    let (status, made) = call(&server, &own, Method::POST, NEW, Some(long)).await;
+    assert_eq!(status, 201, "{made}");
+    let too_long = with("bodyContent", json!("x".repeat(1024 * 1024)));
+    assert_eq!(call(&server, &own, Method::POST, NEW, Some(too_long)).await.0, 400);
     ada.stop();
     server.stop().await;
 }
@@ -379,9 +405,16 @@ async fn a_teams_meeting_is_made_and_taken_only_by_its_own_organizer() {
 async fn the_scheduler_takes_only_an_ask_in_its_own_shape() {
     let world = world().await;
     let [ada, _, _] = &world.tokens;
+    // a Monday still to come: no suggestion is of a time that is past
+    let monday = super::coming_monday();
+    let day = |days: i64| {
+        chrono::DateTime::from_timestamp_millis(monday + days * super::DAY)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
     let ask = |change: Value| {
-        let mut body = json!({"attendees": [{"type": "Organizer"}], "startTime": "2027-01-04T00:00:00.000Z",
-            "endTime": "2027-01-06T00:00:00.000Z", "numberOfDays": 2, "meetingDurationInMinutes": 30});
+        let mut body = json!({"attendees": [{"type": "Organizer"}], "startTime": day(0),
+            "endTime": day(2), "numberOfDays": 2, "meetingDurationInMinutes": 30});
         for (key, value) in change.as_object().unwrap() {
             body[key] = value.clone();
         }
@@ -392,8 +425,8 @@ async fn the_scheduler_takes_only_an_ask_in_its_own_shape() {
         json!({"startTime": null}),
         json!({"attendees": null}),
         json!({"attendees": people}),
-        json!({"endTime": "2027-01-03T00:00:00.000Z"}),
-        json!({"endTime": "2027-06-04T00:00:00.000Z"}),
+        json!({"endTime": day(-1)}),
+        json!({"endTime": day(151)}),
         json!({"meetingDurationInMinutes": 0}),
     ];
     for route in ["schedules", "findMeetingTimes"] {
@@ -408,21 +441,18 @@ async fn the_scheduler_takes_only_an_ask_in_its_own_shape() {
         );
         answered(&world.server, ada, &cases).await;
     }
-    // a window given by its days alone, and suggestions never past its end
+    // a window given by its days alone (a Tuesday and a Wednesday, which the world's events never take), and
+    // suggestions never past its end
     let path = format!("{MT}/v2.0/me/calendars/findMeetingTimes");
     let (_, times) = call(
         &world.server,
         ada,
         Method::PUT,
         &path,
-        Some(ask(json!({"endTime": null}))),
+        Some(ask(json!({"startTime": day(1), "endTime": null}))),
     )
     .await;
-    assert_eq!(
-        times["timeSuggestions"].as_array().unwrap().len(),
-        2 * 20 - 2,
-        "{times}"
-    );
+    assert_eq!(times["timeSuggestions"].as_array().unwrap().len(), 2 * 20, "{times}");
 
     world.stop().await;
 }

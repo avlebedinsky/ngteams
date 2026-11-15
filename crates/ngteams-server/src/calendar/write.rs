@@ -46,7 +46,7 @@ impl Asked {
 }
 
 /// The account behind a request, as the chat service names it on what the calendar posts for it.
-async fn account(app: &App, id: &str) -> Answer<User> {
+pub(super) async fn account(app: &App, id: &str) -> Answer<User> {
     users::by_id(&app.db, id).await?.ok_or(Error::FORBIDDEN)
 }
 
@@ -198,13 +198,18 @@ pub(super) async fn update(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// One occurrence changed: whoever it adds joins the series' chat; the series' own message stays the series'.
+/// One occurrence changed: a new time asks its people again; whoever it adds joins the series' chat, and whoever
+/// it was the last invitation of leaves it; the series' own message stays the series'.
 async fn one_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -> Answer<()> {
     let wanted = asked.wanted();
-    let row = occurrence_changed(app, found, asked.draft).await?;
-    repo::sync_attendees(&app.db, std::slice::from_ref(&row.id), &wanted, false).await?;
+    let (row, moved) = occurrence_changed(app, found, asked.draft).await?;
+    let series = row.series_id.clone().unwrap_or_else(|| row.id.clone());
+    let before = repo::invited_under(&app.db, &series).await?;
+    repo::sync_attendees(&app.db, std::slice::from_ref(&row.id), &wanted, moved).await?;
+    let still = repo::invited_under(&app.db, &series).await?;
+    let gone: Vec<String> = before.into_iter().filter(|id| !still.contains(id)).collect();
     if let Some(chat) = &row.meeting_chat
-        && service::set_members(&app.db, chat, &ids(&wanted), &[]).await?
+        && service::set_members(&app.db, chat, &ids(&wanted), &gone).await?
     {
         service::announce(app, chat, organizer).await?;
     }
@@ -217,6 +222,8 @@ async fn one_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
 async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -> Answer<()> {
     let wanted = asked.wanted();
     let online = asked.online;
+    // before the change forgets a series' occurrences: someone may be invited to one of them alone
+    let had_any = repo::invited_under(&app.db, &found.event.id).await?;
     let (mut row, reshaped) = whole_changed(app, found, asked.draft).await?;
     let moved = (found.event.start_ms, found.event.end_ms) != (row.start_ms, row.end_ms);
     let before = repo::attendees(&app.db, &row.id).await?;
@@ -233,7 +240,10 @@ async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
     }
     let before: Vec<String> = before.into_iter().map(|(attendee, _)| attendee.user_id).collect();
     let (kept, new): (Vec<String>, Vec<String>) = ids(&wanted).into_iter().partition(|id| before.contains(id));
-    let gone: Vec<String> = before.into_iter().filter(|id| !kept.contains(id)).collect();
+    let gone: Vec<String> = had_any
+        .into_iter()
+        .filter(|id| !kept.contains(id) && !new.contains(id))
+        .collect();
     tell(app, &mut row, organizer, &wanted, &gone).await?;
     activity::tell(app, &kept, Change::Updated, &row, organizer).await;
     activity::tell(app, &new, Change::Created, &row, organizer).await;
@@ -241,8 +251,11 @@ async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
     Ok(())
 }
 
-/// One occurrence given fields of its own: kept as a row under its series.
-pub(super) async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -> Answer<Event> {
+/// One occurrence given fields of its own: kept as a row under its series. Whether its time changed from the one
+/// it had, its own or the series'.
+pub(super) async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -> Answer<(Event, bool)> {
+    let had = found.own_row();
+    let moved = (had.start_ms, had.end_ms) != (draft.start_ms, draft.end_ms);
     let row = Event {
         start_ms: draft.start_ms,
         end_ms: draft.end_ms,
@@ -250,10 +263,10 @@ pub(super) async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -
         changed: true,
         body: Value::Object(draft.body).to_string(),
         version: crate::chatsvc::now(),
-        ..found.own_row()
+        ..had
     };
     repo::put_own_row(&app.db, &row).await?;
-    Ok(row)
+    Ok((row, moved))
 }
 
 /// An event or a whole series changed; whether a series' rule or times changed with it, which forgets what its
@@ -323,6 +336,15 @@ async fn end(app: &App, me: &Me, found: &Found, note: Option<&str>) -> Answer<()
     Ok(())
 }
 
+/// The note a cancellation is sent with (`cancellationMessage`).
+pub(super) fn note(input: &Value) -> Answer<Option<&str>> {
+    match &input["cancellationMessage"] {
+        Value::Null => Ok(None),
+        Value::String(note) if note.chars().count() <= 1000 => Ok(Some(note.as_str())),
+        _ => Err(Error::BAD_REQUEST),
+    }
+}
+
 /// `PUT v2.0/me/calendars/events/<id>/cancel` with `{"cancellationMessage"?}`: the organizer's cancellation.
 pub(super) async fn cancel(
     State(app): State<Arc<App>>,
@@ -335,12 +357,7 @@ pub(super) async fn cancel(
     if !found.organized_by(&me.id) {
         return Err(Error::FORBIDDEN);
     }
-    let note = match &input["cancellationMessage"] {
-        Value::Null => None,
-        Value::String(note) if note.chars().count() <= 1000 => Some(note.as_str()),
-        _ => return Err(Error::BAD_REQUEST),
-    };
-    end(&app, &me, &found, note).await?;
+    end(&app, &me, &found, note(&input)?).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

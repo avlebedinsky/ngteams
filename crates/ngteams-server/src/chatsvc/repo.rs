@@ -115,6 +115,65 @@ pub(super) async fn members(db: &Db, id: &str) -> Result<Vec<Member>, DbError> {
         .await?))
 }
 
+/// Sets who else is in the thread besides those it must keep: `wanted` are put in, and of `gone` whoever is there
+/// is taken out. Whether anything changed.
+pub(crate) async fn set_members(db: &Db, thread: &str, wanted: &[String], gone: &[String]) -> Result<bool, DbError> {
+    let at = super::wire::now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let version: i64 = advance!(conn, at);
+            let last: Option<i32> = chat_members::table
+                .filter(chat_members::chat_id.eq(thread))
+                .select(diesel::dsl::max(chat_members::position))
+                .first(conn)
+                .await?;
+            let mut changed = 0;
+            for (place, user) in wanted.iter().enumerate() {
+                let position = last.unwrap_or(0) + 1 + i32::try_from(place).unwrap_or(i32::MAX / 2);
+                changed += diesel::insert_into(chat_members::table)
+                    .values((
+                        chat_members::chat_id.eq(thread),
+                        chat_members::user_id.eq(user),
+                        chat_members::position.eq(position),
+                        chat_members::joined_at.eq(version),
+                    ))
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .await?;
+            }
+            changed += diesel::delete(
+                chat_members::table
+                    .filter(chat_members::chat_id.eq(thread))
+                    .filter(chat_members::user_id.eq_any(gone)),
+            )
+            .execute(conn)
+            .await?;
+            if changed > 0 {
+                diesel::update(chats::table.find(thread))
+                    .set(chats::version.eq(version))
+                    .execute(conn)
+                    .await?;
+            }
+            Ok(changed > 0)
+        })
+        .await)
+}
+
+/// Names the thread.
+pub(crate) async fn set_topic(db: &Db, thread: &str, topic: &str) -> Result<(), DbError> {
+    let at = super::wire::now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let version: i64 = advance!(conn, at);
+            diesel::update(chats::table.find(thread))
+                .set((chats::topic.eq(topic), chats::version.eq(version)))
+                .execute(conn)
+                .await?;
+            Ok(())
+        })
+        .await)
+}
+
 pub(super) async fn watermark(db: &Db) -> Result<i64, DbError> {
     with_conn!(db, |conn| Ok(chat_clock::table
         .select(chat_clock::version)

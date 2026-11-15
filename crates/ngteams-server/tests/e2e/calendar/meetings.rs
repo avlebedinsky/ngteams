@@ -19,13 +19,13 @@ pub(crate) fn invited(upn: &str, name: &str, mri: Option<&str>, required: bool) 
     }
 }
 
-async fn create(seat: &Seat, draft: teams_proto::EventDraft) -> CalendarEvent {
+pub(crate) async fn create(seat: &Seat, draft: teams_proto::EventDraft) -> CalendarEvent {
     let written = seat.engine.write_event(EventWrite::Create(draft)).await.unwrap();
     written.created.unwrap()
 }
 
 /// What an account's answer to the event `id` gives.
-async fn respond(seat: &Seat, id: &str, answer: RsvpAnswer) -> Result<(), EngineError> {
+pub(crate) async fn respond(seat: &Seat, id: &str, answer: RsvpAnswer) -> Result<(), EngineError> {
     seat.engine
         .write_event(EventWrite::Respond {
             id: id.into(),
@@ -326,7 +326,7 @@ async fn a_teams_meeting_reaches_whom_it_invites_with_its_chat_its_link_and_thei
     }
 }
 
-fn answers(events: &[CalendarEvent]) -> Vec<EventResponse> {
+pub(crate) fn answers(events: &[CalendarEvent]) -> Vec<EventResponse> {
     events.iter().map(|event| event.response.clone()).collect()
 }
 

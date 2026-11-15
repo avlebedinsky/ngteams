@@ -1,8 +1,9 @@
 //! A team's group calendar: a meeting scheduled in one of its channels (`docs/protocol/calling.md`, "Schedule a
 //! meeting"). The calendar is addressed by the team's mailbox (`smtp:<group id>@<host>`) and a meeting by its
-//! `iCalUID`. The meeting is the team's: it is posted to its channel, anyone on the team reads it there, and only
-//! who scheduled it changes or cancels it. That account has a copy on its own calendar, as has anyone it invites
-//! by name and, with personal invites, everyone in the channel.
+//! `iCalUID`. The meeting is the team's: it is posted to its channel, anyone in that channel reads it there (a
+//! private channel's meeting is its people's alone), and only who scheduled it changes or cancels it. That account
+//! has a copy on its own calendar, as has anyone it invites by name and, with personal invites, everyone in the
+//! channel.
 
 use std::sync::Arc;
 
@@ -16,11 +17,11 @@ use serde_json::Value;
 use super::activity::{self, Change};
 use super::draft::Draft;
 use super::repo::{self, Attendee, Event};
-use super::wire::{self, Shown};
-use super::{Answer, Error, Found, Me, body, book, invite, meeting, people, write};
+use super::wire::{self, Shown, channel_link as link, mailbox};
+use super::write::{self, account};
+use super::{Answer, Error, Found, Me, body, book, invite, people};
 use crate::app::App;
 use crate::chatsvc::service;
-use crate::db::users::{self, User};
 use crate::teams::repo::{self as teams, Channel, Team};
 
 /// The team whose mailbox a path names, when the caller is on it; anyone else learns only that it isn't there.
@@ -91,22 +92,6 @@ async fn wanted(app: &App, me: &str, sent: &Value, channel: &str, mailbox: &str)
         }
     }
     Ok(wanted)
-}
-
-fn mailbox(app: &App, team: &Team) -> String {
-    let host = app.config.public_origin.host_str().unwrap_or("localhost");
-    format!("{}@{host}", team.group_id)
-}
-
-async fn account(app: &App, id: &str) -> Answer<User> {
-    users::by_id(&app.db, id).await?.ok_or(Error::FORBIDDEN)
-}
-
-/// The join link of a channel's meeting: the channel and the meeting's own post.
-fn link(app: &App, event: &Event) -> String {
-    let channel = event.channel_id.as_deref().unwrap_or_default();
-    let post = event.post_id.unwrap_or(0).to_string();
-    meeting::join_link(app, channel, &post, &event.owner_id)
 }
 
 /// `POST v2.0/groups/smtp:<mailbox>/calendars/default/events` with the event itself: a meeting in a channel of the
@@ -196,7 +181,8 @@ pub(super) async fn read(
 }
 
 /// The meeting a change or a cancellation names, for who scheduled it: the whole of it, or the one occurrence its
-/// `fetchEventContract` names by its kind and start.
+/// `fetchEventContract` names by its kind and start. An `Exception`'s start is the one it was moved to, which is
+/// not the start its id is made of.
 async fn own(app: &App, me: &Me, group: &str, uid: &str, contract: &Value) -> Answer<(Team, Found)> {
     let team = team_of(app, me, group).await?;
     let event = meeting_of(app, me, &team, uid).await?;
@@ -217,7 +203,13 @@ async fn own(app: &App, me: &Me, group: &str, uid: &str, contract: &Value) -> An
         .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
         .map(|time| time.timestamp_millis())
         .ok_or(Error::BAD_REQUEST)?;
-    let found = Found::of(&app.db, &me.id, &wire::occurrence_id(&event.id, start)).await?;
+    let moved = if contract["eventType"].as_str() == Some("Exception") {
+        repo::changed_row_at(&app.db, &event.id, start).await?
+    } else {
+        None
+    };
+    let id = moved.unwrap_or_else(|| wire::occurrence_id(&event.id, start));
+    let found = Found::of(&app.db, &me.id, &id).await?;
     Ok((team, found))
 }
 
@@ -247,12 +239,14 @@ pub(super) async fn update(
     sent["inviteAllMembers"] = all.into();
     let channel = found.event.channel_id.clone().unwrap_or_default();
     let wanted = wanted(&app, &me.id, &sent, &channel, &mailbox(&app, &team)).await?;
-    let (row, reshaped) = if one {
-        (write::occurrence_changed(&app, &found, draft).await?, false)
+    let (row, reshaped, moved) = if one {
+        let (row, moved) = write::occurrence_changed(&app, &found, draft).await?;
+        (row, false, moved)
     } else {
-        write::whole_changed(&app, &found, draft).await?
+        let (row, reshaped) = write::whole_changed(&app, &found, draft).await?;
+        let moved = (found.event.start_ms, found.event.end_ms) != (row.start_ms, row.end_ms);
+        (row, reshaped, moved)
     };
-    let moved = (found.event.start_ms, found.event.end_ms) != (row.start_ms, row.end_ms) && found.occurrence.is_none();
     let mut rows = vec![row.id.clone()];
     if found.event.recurring && !reshaped {
         rows.extend(repo::own_row_ids(&app.db, &row.id).await?);
@@ -277,11 +271,7 @@ pub(super) async fn cancel(
 ) -> Answer<StatusCode> {
     let input = body(input)?;
     let (_, found) = own(&app, &me, &group, &uid, &input["fetchEventContract"]).await?;
-    let note = match &input["cancellationMessage"] {
-        Value::Null => None,
-        Value::String(note) if note.chars().count() <= 1000 => Some(note.as_str()),
-        _ => return Err(Error::BAD_REQUEST),
-    };
+    let note = write::note(&input)?;
     let at = crate::chatsvc::now();
     let mut row = found.own_row();
     row.cancelled = true;

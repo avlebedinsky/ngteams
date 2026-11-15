@@ -2,6 +2,7 @@
 
 mod channels;
 pub(crate) mod events;
+mod exceptions;
 mod golden;
 pub(crate) mod meetings;
 mod nodes;
@@ -20,6 +21,15 @@ pub(crate) const DAY: i64 = 24 * HOUR;
 
 /// Monday 2027-01-04 00:00 UTC.
 pub(crate) const MONDAY: i64 = 1_799_020_800_000;
+
+/// A Monday 00:00 UTC at least a week from now: for what the server answers by the clock (it suggests no time
+/// that is past).
+pub(crate) fn coming_monday() -> i64 {
+    const FIRST_MONDAY: i64 = 4 * DAY;
+    let now = i64::try_from(std::time::SystemTime::UNIX_EPOCH.elapsed().unwrap().as_millis()).unwrap();
+    let weeks = (now + 7 * DAY - FIRST_MONDAY).div_euclid(7 * DAY) + 1;
+    FIRST_MONDAY + weeks * 7 * DAY
+}
 
 /// An event from `start_ms` for `minutes`, as the scheduling form drafts it before the engine completes it.
 pub(crate) fn draft(subject: &str, start_ms: i64, minutes: i64) -> EventDraft {

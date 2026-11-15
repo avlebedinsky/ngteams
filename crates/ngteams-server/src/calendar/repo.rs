@@ -208,9 +208,26 @@ pub(super) async fn refresh_own_rows(db: &Db, series: &str, body: &str, version:
     Ok(())
 }
 
-/// Keeps one occurrence of a series as a row of its own: a new row takes the series' invitations as they stand,
-/// a row there already is written over.
+/// Keeps one occurrence of a series as a row of its own, for its organizer's change of it: a new row takes the
+/// series' invitations as they stand, a row there already is written over.
 pub(super) async fn put_own_row(db: &Db, row: &Event) -> Result<(), DbError> {
+    own_row(db, row, Existing::WrittenOver).await
+}
+
+/// Keeps one occurrence of a series as a row of its own, for an answer or a removal of it: a row there already
+/// stays as it is, since `row` is the series as its reader saw it and the organizer may have changed the
+/// occurrence since.
+pub(super) async fn keep_own_row(db: &Db, row: &Event) -> Result<(), DbError> {
+    own_row(db, row, Existing::Left).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Existing {
+    WrittenOver,
+    Left,
+}
+
+async fn own_row(db: &Db, row: &Event, existing: Existing) -> Result<(), DbError> {
     let Some(series) = row.series_id.as_deref() else {
         return save(db, row).await;
     };
@@ -222,10 +239,12 @@ pub(super) async fn put_own_row(db: &Db, row: &Event) -> Result<(), DbError> {
                 .execute(conn)
                 .await?;
             if inserted == 0 {
-                diesel::update(calendar_events::table.find(&row.id))
-                    .set(changes(row))
-                    .execute(conn)
-                    .await?;
+                if existing == Existing::WrittenOver {
+                    diesel::update(calendar_events::table.find(&row.id))
+                        .set(changes(row))
+                        .execute(conn)
+                        .await?;
+                }
                 return Ok(());
             }
             let invited: Vec<Attendee> = calendar_attendees::table
@@ -250,6 +269,30 @@ pub(super) async fn own_row_ids(db: &Db, series: &str) -> Result<Vec<String>, Db
     with_conn!(db, |conn| Ok(calendar_events::table
         .filter(calendar_events::series_id.eq(series))
         .select(calendar_events::id)
+        .load(conn)
+        .await?))
+}
+
+/// The occurrence of `series` its organizer gave a time of its own that now starts at `start_ms`.
+pub(super) async fn changed_row_at(db: &Db, series: &str, start_ms: i64) -> Result<Option<String>, DbError> {
+    with_conn!(db, |conn| Ok(calendar_events::table
+        .filter(calendar_events::series_id.eq(series))
+        .filter(calendar_events::changed.eq(true))
+        .filter(calendar_events::start_ms.eq(start_ms))
+        .order(calendar_events::id.asc())
+        .select(calendar_events::id)
+        .first(conn)
+        .await
+        .optional()?))
+}
+
+/// Everyone the event `id` invites, a series with the occurrences kept under it.
+pub(super) async fn invited_under(db: &Db, id: &str) -> Result<Vec<String>, DbError> {
+    with_conn!(db, |conn| Ok(calendar_attendees::table
+        .inner_join(calendar_events::table.on(calendar_events::id.eq(calendar_attendees::event_id)))
+        .filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id)))
+        .select(calendar_attendees::user_id)
+        .distinct()
         .load(conn)
         .await?))
 }
@@ -392,4 +435,119 @@ pub(super) async fn set_removed(db: &Db, events: &[String], user: &str) -> Resul
         .await?;
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::{self, Actor, NewAccount};
+
+    fn series(owner: &str) -> Event {
+        Event {
+            id: "series".into(),
+            owner_id: owner.to_owned(),
+            team_id: None,
+            channel_id: None,
+            post_id: None,
+            series_id: None,
+            original_start: None,
+            start_ms: 1000,
+            end_ms: 2000,
+            until_ms: i64::MAX,
+            recurring: true,
+            changed: false,
+            cancelled: false,
+            meeting_chat: None,
+            body: "{}".into(),
+            version: 1,
+        }
+    }
+
+    async fn account(db: &Db, upn: &str) -> String {
+        let new = NewAccount {
+            upn,
+            display_name: upn,
+            password: "correct horse battery",
+            admin: false,
+            must_change_password: false,
+        };
+        admin::create_user(db, Actor::CLI, &new).await.unwrap().id
+    }
+
+    /// An attendee read an occurrence before it had a row; the organizer moved it; the attendee's answer then
+    /// keeps the row for it.
+    #[tokio::test]
+    async fn a_row_kept_for_an_answer_leaves_the_organizers_change_of_the_occurrence() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("calendar.sqlite").display());
+        let db = Db::connect(&url, 1).await.unwrap();
+        db.migrate().await.unwrap();
+        let (ada, bert) = (account(&db, "ada@own.test").await, account(&db, "bert@own.test").await);
+        let series = series(&ada);
+        let invited = Attendee {
+            event_id: series.id.clone(),
+            user_id: bert.clone(),
+            position: 0,
+            optional: false,
+            response: "Accepted".into(),
+            responded_at: Some(5),
+            removed: false,
+        };
+        insert(&db, &series, &[invited]).await.unwrap();
+        let seen = Event {
+            id: "series.8000".into(),
+            series_id: Some(series.id.clone()),
+            original_start: Some(8000),
+            start_ms: 8000,
+            end_ms: 9000,
+            until_ms: 9000,
+            recurring: false,
+            ..series.clone()
+        };
+        let moved = Event {
+            start_ms: 8500,
+            end_ms: 9500,
+            until_ms: 9500,
+            changed: true,
+            cancelled: true,
+            version: 2,
+            ..seen.clone()
+        };
+        put_own_row(&db, &moved).await.unwrap();
+
+        keep_own_row(&db, &seen).await.unwrap();
+        let (kept, mine) = event(&db, &seen.id, &bert).await.unwrap().unwrap();
+        assert_eq!((kept.start_ms, kept.end_ms, kept.version), (8500, 9500, 2));
+        assert!(kept.changed && kept.cancelled);
+        assert_eq!(
+            mine.unwrap().response,
+            "Accepted",
+            "the series' invitations came with the row"
+        );
+        assert_eq!(
+            changed_row_at(&db, &series.id, 8500).await.unwrap().as_deref(),
+            Some("series.8000")
+        );
+
+        // the organizer's own next change is written over it
+        put_own_row(
+            &db,
+            &Event {
+                cancelled: false,
+                ..moved
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!event(&db, &seen.id, &bert).await.unwrap().unwrap().0.cancelled);
+        // and a row kept for an occurrence that has none is made
+        let other = Event {
+            id: "series.20000".into(),
+            original_start: Some(20000),
+            ..seen
+        };
+        keep_own_row(&db, &other).await.unwrap();
+        assert!(event(&db, &other.id, &bert).await.unwrap().unwrap().1.is_some());
+        assert_eq!(invited_under(&db, &series.id).await.unwrap(), [bert]);
+    }
 }

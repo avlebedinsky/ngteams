@@ -11,15 +11,15 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use diesel::prelude::*;
-use diesel_async::RunQueryDsl;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
+pub(super) use super::meeting_repo::{of_chat, of_chats};
 use super::schema::meetings;
-use super::{Answer, Error, Me, body, wire};
+use super::{Answer, Error, Me, body, meeting_repo, wire};
 use crate::app::App;
 use crate::chatsvc::service;
-use crate::db::{Db, DbError, conflict, with_conn};
+use crate::db::{Db, DbError};
 
 /// What a link's path segment or query value keeps as it is: letters, digits and `-._~`.
 const KEPT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
@@ -94,45 +94,18 @@ pub(super) async fn make(app: &App, organizer: &str, kind: &str, subject: Option
             created_at: crate::chatsvc::now(),
         };
         service::open_thread(&app.db, &meeting.chat_id, organizer, subject).await?;
-        let inserted: Result<usize, DbError> = with_conn!(&app.db, |conn| diesel::insert_into(meetings::table)
-            .values(&meeting)
-            .execute(conn)
-            .await
-            .map_err(conflict));
         tries += 1;
-        match inserted {
-            Ok(_) => return Ok(meeting),
+        match meeting_repo::insert(&app.db, &meeting).await {
+            Ok(()) => return Ok(meeting),
             Err(DbError::Conflict) if tries < 3 => {}
             Err(error) => return Err(error),
         }
     }
 }
 
-pub(crate) async fn of_chat(db: &Db, chat: &str) -> Result<Option<Meeting>, DbError> {
-    with_conn!(db, |conn| Ok(meetings::table
-        .find(chat)
-        .select(Meeting::as_select())
-        .first(conn)
-        .await
-        .optional()?))
-}
-
-pub(super) async fn of_chats(db: &Db, chats: &[String]) -> Result<Vec<Meeting>, DbError> {
-    with_conn!(db, |conn| Ok(meetings::table
-        .filter(meetings::chat_id.eq_any(chats))
-        .select(Meeting::as_select())
-        .load(conn)
-        .await?))
-}
-
 /// Names the meeting and its chat after its event.
 pub(super) async fn rename(db: &Db, chat: &str, subject: &str) -> Result<(), DbError> {
-    with_conn!(db, |conn| {
-        diesel::update(meetings::table.find(chat))
-            .set(meetings::subject.eq(subject))
-            .execute(conn)
-            .await?;
-    });
+    meeting_repo::set_subject(db, chat, subject).await?;
     service::set_topic(db, chat, subject).await
 }
 

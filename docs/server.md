@@ -300,7 +300,8 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   `…/cancel` and `…/respond`. Times are kept as instants and answered in UTC; an event keeps the zone it names
   (`eventTimeZone`, by the middle tier's names: `TurkeySt`) and `beta/me/calendarEvents/timeZoneSettingsWithOffset`
   names an IANA zone that way. What is kept of a sent event is a fixed list of the form's own fields; who
-  organizes it, who answered what and the meeting's links are the server's.
+  organizes it, who answered what and the meeting's links are the server's. A calendar request's body is at most
+  1 MiB (an event's text can be long); a larger one is refused (400 `BadRequest`).
 - **A series** (`eventRecurrencePattern`, `eventRecurrenceRange`) is one row, read as its occurrences: the rule
   runs on the clock of the series' own zone (the `rrule` crate), so an occurrence keeps its time of day across a
   daylight-time change. An occurrence's id is the series' id, a dot and the occurrence's own start. One occurrence
@@ -309,8 +310,8 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
 - **Whom an event invites** are accounts of this server, named by MRI or by address (the sign-in name); another
   address is refused (400 `UnknownAttendee`), since the server sends no mail. Each of them has the event on its
   own calendar with its own answer (`respond`), reads whom it invites, and may take it off (`DELETE`). The
-  organizer's change reaches everyone it now invites (a new time asks each of them again; who is taken off no
-  longer has it), and its cancellation leaves the event cancelled (`isCancelled`, `Canceled: …`) on their
+  organizer's change reaches everyone it now invites (a new time, of the event or of one occurrence, asks each of
+  them again; who is taken off no longer has it), and its cancellation leaves the event cancelled (`isCancelled`, `Canceled: …`) on their
   calendars until they take it off. An event nobody else has is deleted outright.
 - **A Teams meeting** is a chat-service thread, `19:meeting_<id>@thread.v2`, made by
   `POST beta/me/calendarEvents/privateMeeting/schedulingService/create` (`Scheduled` for the event the form then
@@ -318,7 +319,8 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   `<origin>/l/meetup-join/<chat>/0?context={"Tid","Oid"}` and its short link `<origin>/meet/<id>?p=<passcode>`;
   the thread's `properties.meeting` names its organizer, tenant, title and link. An event takes only a meeting its
   own organizer made and no other event uses; an event changed to a Teams meeting gets one. The people the event
-  invites are put in the chat, and the chat holds the invitation: a message whose `properties.meeting` names the
+  invites are put in the chat, those one occurrence of a series invites too; who no longer has an invitation to
+  the event or to any occurrence of it is taken out. The chat holds the invitation: a message whose `properties.meeting` names the
   meeting (`ScheduledMeetingCreated`), changed in place when the meeting is, with a cancellation
   (`ScheduledMeetingCancelled`) after it.
 - **A channel's meeting**: `POST v2.0/groups/smtp:<team mailbox>/calendars/default/events`, and for its `iCalUID`
@@ -326,6 +328,8 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   is `<group id>@<the origin's host>`. The meeting is posted to its channel (its link names the channel and that
   post), its change edits the post in place and its cancellation replies under it. Who scheduled it has an
   accepted copy on its own calendar, as has anyone it names and, with `inviteAllMembers`, everyone in the channel.
+  A change or cancellation of one occurrence names it by `fetchEventContract`: its kind and its start, which for
+  an `Exception` is the start it was moved to.
 - **The Scheduler**: `PUT v2.0/me/calendars/schedules` (each person's busy times; what an event is about only
   for the caller's own) and `findMeetingTimes` (the half hours, 08:00 to 18:00 counted from the midnight the
   read starts at, at which everyone asked about is free).
@@ -343,12 +347,13 @@ Who may do what, checked against the database on every request:
 | an event's organizer | read, change, cancel and delete it |
 | an account it invites | read it with whom it invites, answer it, take it off its own calendar |
 | who scheduled a channel's meeting | change and cancel it on the team's calendar |
-| anyone on the team | read a channel's meeting from the team's calendar; schedule one in a channel they are in, while neither the team nor the channel is archived |
+| anyone in a meeting's channel (for a standard channel, anyone on the team) | read the channel's meeting from the team's calendar; schedule one there, while neither the team nor the channel is archived |
 | the people in a meeting's or a group chat | read its meeting options; the organizer the path names saves them (a meeting's own organizer) |
 | anyone signed in | make an event or a meeting of its own; ask for any account's busy times; list the rooms |
 
-Anyone else gets 404 `NotFound` for an event, a meeting or a team's calendar: it learns nothing of it. An invited
-account that tries to change or cancel gets 403 `Forbidden`.
+Anyone else gets 404 `NotFound` for an event, a meeting or a team's calendar: it learns nothing of it. A private
+channel's meeting is hidden that way from the team's people outside the channel. An invited account that tries to
+change or cancel gets 403 `Forbidden`.
 
 What reaches the invited accounts beside their calendars, on `push:<mri>`: the meeting chat's `ThreadUpdate` and
 the invitation, change and cancellation as that chat's (or the channel's) messages, and for each a `NewMessage` of

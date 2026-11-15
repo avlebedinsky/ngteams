@@ -208,7 +208,7 @@ fn weekday(value: &Value) -> Option<Weekday> {
     }
     let name = value.as_str()?.trim().to_ascii_lowercase();
     DAYS.into_iter()
-        .find(|day| name.len() >= 3 && day.to_string().to_ascii_lowercase() == name[..3])
+        .find(|day| name.get(..3) == Some(day.to_string().to_ascii_lowercase().as_str()))
 }
 
 fn number(value: &Value) -> Option<u64> {

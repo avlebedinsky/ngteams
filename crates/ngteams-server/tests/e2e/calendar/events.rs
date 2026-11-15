@@ -134,13 +134,18 @@ async fn an_engine_changes_and_deletes_its_event_and_nobody_else_can() {
 }
 
 pub(crate) fn weekly(days: &[Weekday], last_day_ms: Option<i64>) -> Recurrence {
+    weekly_from(MONDAY, days, last_day_ms)
+}
+
+/// A weekly series whose first week starts at `first_ms`.
+pub(crate) fn weekly_from(first_ms: i64, days: &[Weekday], last_day_ms: Option<i64>) -> Recurrence {
     let at = |ms| ZonedTime { ms, offset_minutes: 0 };
     Recurrence {
         pattern: RecurrencePattern::Weekly {
             interval: 1,
             days: days.to_vec(),
         },
-        start: at(MONDAY),
+        start: at(first_ms),
         end: last_day_ms.map(at),
     }
 }
@@ -153,7 +158,7 @@ fn standup() -> teams_proto::EventDraft {
     standup
 }
 
-async fn change(seat: &Seat, id: &str, draft: teams_proto::EventDraft) {
+pub(crate) async fn change(seat: &Seat, id: &str, draft: teams_proto::EventDraft) {
     let whole = seat.engine.calendar_event(id.to_owned()).await.unwrap();
     seat.engine
         .write_event(EventWrite::Update {

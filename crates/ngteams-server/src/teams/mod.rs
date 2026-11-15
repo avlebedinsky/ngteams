@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::db::{Db, DbError, users};
 use repo::{Channel, Team, TeamMember};
 
-/// The largest JSON body a team or channel request takes.
+/// The largest JSON body a team or channel request takes; the calendar's routes, merged in below, set their own.
 const BODY_LIMIT: usize = 64 * 1024;
 
 /// CSA's audience.

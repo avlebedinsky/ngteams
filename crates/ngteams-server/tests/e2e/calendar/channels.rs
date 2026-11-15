@@ -11,7 +11,7 @@ fn mailbox(group: &str) -> String {
     format!("{group}@own.example.test")
 }
 
-fn place(channel: &str, group: &str) -> MeetingChannel {
+pub(crate) fn place(channel: &str, group: &str) -> MeetingChannel {
     MeetingChannel {
         channel: channel.into(),
         mailbox: mailbox(group),
@@ -34,7 +34,12 @@ async fn posts(seat: &Seat, channel: &str) -> Vec<(ScheduledMeeting, String, Str
     posts
 }
 
-async fn schedule(seat: &Seat, draft: teams_proto::EventDraft, channel: MeetingChannel, all: bool) -> CalendarEvent {
+pub(crate) async fn schedule(
+    seat: &Seat,
+    draft: teams_proto::EventDraft,
+    channel: MeetingChannel,
+    all: bool,
+) -> CalendarEvent {
     let write = EventWrite::CreateInChannel {
         draft,
         channel,

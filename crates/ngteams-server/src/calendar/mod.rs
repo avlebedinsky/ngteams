@@ -10,6 +10,7 @@ mod draft;
 mod group;
 mod invite;
 mod meeting;
+mod meeting_repo;
 mod options;
 mod people;
 mod places;
@@ -25,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -42,6 +43,9 @@ use wire::{Book, Shown};
 
 type Me = Actor<Spaces>;
 type Params = HashMap<String, String>;
+
+/// The largest JSON body a calendar request takes: an event's text can be long.
+const BODY_LIMIT: usize = 1024 * 1024;
 
 /// The widest window one calendar read takes (the client asks for 62 days at most).
 const WIDEST_WINDOW_MS: i64 = 100 * 24 * 3_600_000;
@@ -75,6 +79,7 @@ pub(crate) fn routes() -> Router<Arc<App>> {
             post(meeting::create),
         )
         .route("/beta/me/calendarEvents/timeZoneSettingsWithOffset", get(time_zone))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
 
 /// A refusal, with the code the client's log names.
@@ -327,7 +332,7 @@ impl Found {
     async fn rows_for(&self, db: &Db) -> Result<Vec<String>, DbError> {
         if self.occurrence.is_some() {
             let row = self.own_row();
-            repo::put_own_row(db, &row).await?;
+            repo::keep_own_row(db, &row).await?;
             return Ok(vec![row.id]);
         }
         let mut rows = vec![self.event.id.clone()];

@@ -58,7 +58,7 @@ impl Ask {
         if !sound || entries.len() > MOST_PEOPLE {
             return Err(Error::BAD_REQUEST);
         }
-        let own = users::by_id(&app.db, &me.id).await?.ok_or(Error::FORBIDDEN)?;
+        let own = super::write::account(app, &me.id).await?;
         let mut people: Vec<(String, Option<String>)> = Vec::new();
         for entry in entries {
             let address = entry["address"].as_str().map(str::trim).unwrap_or_default();

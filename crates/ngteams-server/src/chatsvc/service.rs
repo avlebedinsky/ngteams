@@ -2,16 +2,14 @@
 //! who is in it, and post or change a message as an account that is in it. Each goes through the same rows and
 //! the same fan-out as a client's request, so every reader and every sync sees it as one.
 
-use diesel::prelude::*;
-use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use serde_json::{Map, Value, json};
 
-use super::repo::{Chat, advance};
-use super::schema::{chat_members, chats};
+use super::repo::Chat;
+pub(crate) use super::repo::{set_members, set_topic};
 use super::{Caller, events, message_repo, repo, wire};
 use crate::app::App;
 use crate::db::users::User;
-use crate::db::{Db, DbError, with_conn};
+use crate::db::{Db, DbError};
 
 fn caller(app: &App, user: &User) -> Caller {
     Caller {
@@ -36,65 +34,6 @@ pub(crate) async fn open_thread(db: &Db, id: &str, creator: &str, topic: Option<
     } else {
         Err(DbError::Conflict)
     }
-}
-
-/// Sets who else is in the thread besides those it must keep: `wanted` are put in, and of `gone` whoever is there
-/// is taken out. Whether anything changed.
-pub(crate) async fn set_members(db: &Db, thread: &str, wanted: &[String], gone: &[String]) -> Result<bool, DbError> {
-    let at = wire::now();
-    with_conn!(db, |conn| conn
-        .transaction::<_, DbError, _>(async |conn| {
-            let version: i64 = advance!(conn, at);
-            let last: Option<i32> = chat_members::table
-                .filter(chat_members::chat_id.eq(thread))
-                .select(diesel::dsl::max(chat_members::position))
-                .first(conn)
-                .await?;
-            let mut changed = 0;
-            for (place, user) in wanted.iter().enumerate() {
-                let position = last.unwrap_or(0) + 1 + i32::try_from(place).unwrap_or(i32::MAX / 2);
-                changed += diesel::insert_into(chat_members::table)
-                    .values((
-                        chat_members::chat_id.eq(thread),
-                        chat_members::user_id.eq(user),
-                        chat_members::position.eq(position),
-                        chat_members::joined_at.eq(version),
-                    ))
-                    .on_conflict_do_nothing()
-                    .execute(conn)
-                    .await?;
-            }
-            changed += diesel::delete(
-                chat_members::table
-                    .filter(chat_members::chat_id.eq(thread))
-                    .filter(chat_members::user_id.eq_any(gone)),
-            )
-            .execute(conn)
-            .await?;
-            if changed > 0 {
-                diesel::update(chats::table.find(thread))
-                    .set(chats::version.eq(version))
-                    .execute(conn)
-                    .await?;
-            }
-            Ok(changed > 0)
-        })
-        .await)
-}
-
-/// Names the thread.
-pub(crate) async fn set_topic(db: &Db, thread: &str, topic: &str) -> Result<(), DbError> {
-    let at = wire::now();
-    with_conn!(db, |conn| conn
-        .transaction::<_, DbError, _>(async |conn| {
-            let version: i64 = advance!(conn, at);
-            diesel::update(chats::table.find(thread))
-                .set((chats::topic.eq(topic), chats::version.eq(version)))
-                .execute(conn)
-                .await?;
-            Ok(())
-        })
-        .await)
 }
 
 /// Tells everyone in the thread that it changed, as its creation told them.

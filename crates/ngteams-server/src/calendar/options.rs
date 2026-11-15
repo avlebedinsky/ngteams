@@ -8,15 +8,12 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
-use diesel::prelude::*;
-use diesel_async::RunQueryDsl;
 use serde_json::{Map, Value, json};
 
-use super::schema::meeting_options;
-use super::{Answer, Error, Me, body, meeting};
+use super::{Answer, Error, Me, body, meeting, meeting_repo};
 use crate::app::App;
 use crate::chatsvc::service;
-use crate::db::{Db, DbError, with_conn};
+use crate::db::{Db, DbError};
 
 /// Each option Controls shows: its name, its type, the values it takes, the first one a new meeting's.
 const OPTIONS: [(&str, &str, &[&str]); 4] = [
@@ -70,28 +67,10 @@ async fn chat_of(app: &App, me: &Me, (tenant, organizer, chat): &Target) -> Answ
 }
 
 async fn kept(db: &Db, chat: &str) -> Result<Map<String, Value>, DbError> {
-    let body: Option<String> = with_conn!(db, |conn| meeting_options::table
-        .find(chat)
-        .select(meeting_options::body)
-        .first(conn)
-        .await
-        .optional()?);
+    let body = meeting_repo::options(db, chat).await?;
     Ok(body
         .and_then(|body| serde_json::from_str(&body).ok())
         .unwrap_or_default())
-}
-
-async fn keep(db: &Db, chat: &str, text: &str) -> Result<(), DbError> {
-    with_conn!(db, |conn| {
-        diesel::insert_into(meeting_options::table)
-            .values((meeting_options::chat_id.eq(chat), meeting_options::body.eq(text)))
-            .on_conflict(meeting_options::chat_id)
-            .do_update()
-            .set(meeting_options::body.eq(text))
-            .execute(conn)
-            .await?;
-    });
-    Ok(())
 }
 
 fn entry(name: &str, kind: &str, values: &[&str], set: &Map<String, Value>) -> Value {
@@ -143,7 +122,7 @@ pub(super) async fn save(
     for ((name, _, _), value) in &changes {
         values.insert((*name).to_owned(), json!(value));
     }
-    keep(&app.db, chat, &Value::Object(values.clone()).to_string()).await?;
+    meeting_repo::set_options(&app.db, chat, &Value::Object(values.clone()).to_string()).await?;
     let options: Vec<Value> = changes
         .iter()
         .map(|((name, kind, allowed), _)| entry(name, kind, allowed, &values))
