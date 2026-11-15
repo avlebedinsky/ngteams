@@ -238,8 +238,8 @@ pub(super) mod testing {
         (Db::connect(&url, 1).await.unwrap(), dir)
     }
 
-    async fn add_owner(db: &Db) -> Result<String, DbError> {
-        let owner = User {
+    pub fn owner() -> User {
+        User {
             id: "owner".to_owned(),
             upn: "owner@own.test".to_owned(),
             display_name: "Owner".to_owned(),
@@ -250,7 +250,11 @@ pub(super) mod testing {
             is_admin: false,
             must_change_password: false,
             deleted_at: None,
-        };
+        }
+    }
+
+    async fn add_owner(db: &Db) -> Result<String, DbError> {
+        let owner = owner();
         with_conn!(db, |conn| diesel::insert_into(users::table)
             .values(&owner)
             .execute(conn)

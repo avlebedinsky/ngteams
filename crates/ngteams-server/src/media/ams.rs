@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 
 use super::{Error, IC3, account, quota, repo};
 use crate::app::App;
-use crate::db::Db;
 use crate::db::users::User;
+use crate::db::{Db, DbError};
 use crate::storage::Storage;
 use crate::teams::repo::joined;
 
@@ -104,7 +104,7 @@ async fn fill(
 /// Stores `bytes` as what `object` holds. Each fill's bytes go under a key of their own, and one transaction then
 /// names the key the object reads from with its type and size and charges the owner. So fills of one object at once
 /// leave it describing and counting the bytes it serves, and a fill that fails or goes over the quota changes
-/// nothing. A node that stops between the two leaves bytes nothing reads.
+/// nothing. A node that stops between the two leaves bytes nothing reads, as does a version that isn't cleared.
 async fn store(
     db: &Db,
     storage: &dyn Storage,
@@ -117,16 +117,33 @@ async fn store(
     let blob = uuid::Uuid::new_v4().simple().to_string();
     storage.put(&key(&object.id, &blob), bytes).await?;
     let filled = repo::fill_object(db, object, &blob, content_type, size, quota).await;
-    let unread = match &filled {
-        Ok(Some(replaced)) => replaced.blob.clone(),
-        Ok(None) | Err(_) => Some(blob),
-    };
+    let (unread, outcome) = settled(db, object, blob, filled).await;
     if let Some(unread) = unread
         && let Err(error) = storage.delete(&key(&object.id, &unread)).await
     {
         tracing::warn!(%error, "a picture's unread bytes weren't cleared");
     }
-    filled?.map(|_| ()).ok_or(Error::Quota)
+    outcome
+}
+
+/// The version nothing reads after a fill that stored `blob`, and the fill's outcome. A transaction may fail after
+/// its commit applied, so after a failure the row says whether the object reads `blob`; when the row can't be read
+/// either, the bytes stay.
+async fn settled(
+    db: &Db,
+    object: &repo::Object,
+    blob: String,
+    filled: Result<Option<repo::Replaced>, DbError>,
+) -> (Option<String>, Result<(), Error>) {
+    match filled {
+        Ok(Some(replaced)) => (replaced.blob, Ok(())),
+        Ok(None) => (Some(blob), Err(Error::Quota)),
+        Err(error) => match repo::object(db, &object.id).await {
+            Ok(Some(now)) if now.blob.as_deref() == Some(blob.as_str()) => (object.blob.clone(), Ok(())),
+            Ok(_) => (Some(blob), Err(error.into())),
+            Err(_) => (None, Err(error.into())),
+        },
+    }
 }
 
 /// The media type of a picture's bytes, by their signature: the formats the client shows.
@@ -141,13 +158,13 @@ pub(super) fn picture_type(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// The object when `caller` made it or is now in a chat it was made for.
-async fn readable(app: &App, caller: &User, id: &str) -> Result<repo::Object, Error> {
-    let object = repo::object(&app.db, id).await?.ok_or(Error::Missing)?;
+async fn readable(db: &Db, caller: &User, id: &str) -> Result<repo::Object, Error> {
+    let object = repo::object(db, id).await?.ok_or(Error::Missing)?;
     if object.owner_id == caller.id {
         return Ok(object);
     }
-    let chats = repo::object_chats(&app.db, id).await?;
-    if joined(&app.db, &caller.id, &chats).await?.is_empty() {
+    let chats = repo::object_chats(db, id).await?;
+    if joined(db, &caller.id, &chats).await?.is_empty() {
         return Err(Error::Forbidden);
     }
     Ok(object)
@@ -155,7 +172,7 @@ async fn readable(app: &App, caller: &User, id: &str) -> Result<repo::Object, Er
 
 async fn read(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<Value>, Error> {
     let caller = account(&app, &headers, IC3).await?;
-    let object = readable(&app, &caller, &id).await?;
+    let object = readable(&app.db, &caller, &id).await?;
     let contents = match &object.content_type {
         Some(_) => json!({"imgpsh": {"length": object.size}}),
         None => json!({}),
@@ -183,33 +200,44 @@ async fn view(
     if !VIEWS.contains(&view.as_str()) {
         return Err(Error::Missing);
     }
-    // a fill may replace the bytes between the row's read and theirs: the row is then read once more
-    for _ in 0..2 {
-        let object = readable(&app, &caller, &id).await?;
+    let (content_type, bytes) = served(&app.db, app.storage.as_ref(), &caller, &id).await?;
+    let headers = [
+        (CONTENT_TYPE, content_type.as_str()),
+        (CACHE_CONTROL, "private, max-age=86400"),
+    ];
+    Ok((headers, bytes).into_response())
+}
+
+/// The type and the bytes of the picture `caller` may read.
+async fn served(db: &Db, storage: &dyn Storage, caller: &User, id: &str) -> Result<(String, Bytes), Error> {
+    let mut gone = None;
+    // a fill may replace the bytes between the row's read and theirs: the row is read again until it names them
+    loop {
+        let object = readable(db, caller, id).await?;
         let (Some(content_type), Some(blob)) = (object.content_type, object.blob) else {
-            break;
+            return Err(Error::Missing);
         };
-        if let Some(bytes) = app.storage.get(&key(&id, &blob)).await? {
-            let headers = [
-                (CONTENT_TYPE, content_type.as_str()),
-                (CACHE_CONTROL, "private, max-age=86400"),
-            ];
-            return Ok((headers, bytes).into_response());
+        if gone.as_ref() == Some(&blob) {
+            return Err(Error::Missing);
         }
+        if let Some(bytes) = storage.get(&key(id, &blob)).await? {
+            return Ok((content_type, bytes));
+        }
+        gone = Some(blob);
     }
-    Err(Error::Missing)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use tokio::sync::{Notify, oneshot};
 
     use super::*;
-    use crate::media::repo::testing::{db, object_of};
+    use crate::media::repo::testing::{db, object_of, owner};
     use crate::storage::{Blob, Incoming, StorageError};
 
     /// A store whose put of `slow` bytes waits to be told whether it works.
@@ -315,5 +343,150 @@ mod tests {
         assert!(!filled);
         assert_eq!((content_type.as_deref(), size, used), (Some("image/gif"), 1, 1));
         assert_eq!((served, blobs), (Some(Bytes::from(vec![2; 1])), 1));
+    }
+
+    /// The row's version and size, every blob in the store, and the owner's count.
+    async fn held(db: &Db, storage: &Held, object: &repo::Object) -> (Option<String>, i64, Vec<String>, i64) {
+        let now = repo::object(db, &object.id).await.unwrap().unwrap();
+        let used = repo::used(db, &object.owner_id).await.unwrap();
+        (now.blob, now.size, storage.blobs().into_keys().collect(), used)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fill_over_the_quota_leaves_none_of_its_bytes() {
+        let (db, _dir) = db().await;
+        let object = object_of(&db).await;
+        let (storage, _tell) = Held::new(usize::MAX);
+        let filled = store(&db, &storage, &object, "image/png", Bytes::from(vec![1; 10]), 5).await;
+        assert!(matches!(filled, Err(Error::Quota)));
+        assert_eq!(held(&db, &storage, &object).await, (None, 0, vec![], 0));
+    }
+
+    /// The fills `first` then `second`, the second's transaction answered by a failure, applied or not.
+    async fn unanswered(applied: bool) -> (bool, (Option<String>, i64, Vec<String>, i64)) {
+        let (db, _dir) = db().await;
+        let object = object_of(&db).await;
+        let (storage, _tell) = Held::new(usize::MAX);
+        for blob in ["first", "second"] {
+            storage
+                .put(&key(&object.id, blob), Bytes::from(vec![1; blob.len()]))
+                .await
+                .unwrap();
+        }
+        repo::fill_object(&db, &object, "first", "image/png", 5, 0)
+            .await
+            .unwrap();
+        let object = repo::object(&db, &object.id).await.unwrap().unwrap();
+        if applied {
+            repo::fill_object(&db, &object, "second", "image/png", 6, 0)
+                .await
+                .unwrap();
+        }
+        let lost = Err(DbError::Pool("the answer was lost".to_owned()));
+        let (unread, outcome) = settled(&db, &object, "second".to_owned(), lost).await;
+        if let Some(unread) = unread {
+            storage.delete(&key(&object.id, &unread)).await.unwrap();
+        }
+        (outcome.is_ok(), held(&db, &storage, &object).await)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fill_whose_lost_answer_hid_a_commit_keeps_the_bytes_the_object_names() {
+        let (filled, held) = unanswered(true).await;
+        assert!(filled);
+        assert_eq!(
+            held,
+            (Some("second".to_owned()), 6, vec!["ams/object/second".to_owned()], 6)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fill_that_failed_in_the_database_leaves_none_of_its_bytes() {
+        let (filled, held) = unanswered(false).await;
+        assert!(!filled);
+        assert_eq!(
+            held,
+            (Some("first".to_owned()), 5, vec!["ams/object/first".to_owned()], 5)
+        );
+    }
+
+    /// A store whose first `fills` reads each come after a fill that replaced the bytes they ask for.
+    struct Replacing {
+        store: Held,
+        db: Db,
+        object: repo::Object,
+        fills: AtomicUsize,
+    }
+
+    impl std::fmt::Debug for Replacing {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Replacing").finish_non_exhaustive()
+        }
+    }
+
+    #[async_trait]
+    impl Storage for Replacing {
+        async fn put(&self, key: &str, bytes: Bytes) -> Result<(), StorageError> {
+            self.store.put(key, bytes).await
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<Bytes>, StorageError> {
+            let left = self.fills.load(Ordering::SeqCst);
+            if left > 0 {
+                self.fills.store(left - 1, Ordering::SeqCst);
+                store(
+                    &self.db,
+                    &self.store,
+                    &self.object,
+                    "image/gif",
+                    Bytes::from(vec![2; left]),
+                    0,
+                )
+                .await
+                .map_err(|_| StorageError::Key)?;
+            }
+            self.store.get(key).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.store.delete(key).await
+        }
+
+        async fn put_stream(&self, _: &str, _: Incoming, _: u64) -> Result<u64, StorageError> {
+            Err(StorageError::Key)
+        }
+
+        async fn open(&self, _: &str, _: Option<std::ops::Range<u64>>) -> Result<Option<Blob>, StorageError> {
+            Err(StorageError::Key)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_picture_replaced_twice_under_a_read_is_still_served() {
+        let (db, _dir) = db().await;
+        let object = object_of(&db).await;
+        let storage = Replacing {
+            store: Held::new(usize::MAX).0,
+            db: db.clone(),
+            object: object.clone(),
+            fills: AtomicUsize::new(2),
+        };
+        store(&db, &storage, &object, "image/png", Bytes::from(vec![1; 10]), 0)
+            .await
+            .unwrap();
+        let served = served(&db, &storage, &owner(), &object.id).await.unwrap();
+        assert_eq!(served, ("image/gif".to_owned(), Bytes::from(vec![2; 1])));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_picture_whose_bytes_are_gone_is_missing() {
+        let (db, _dir) = db().await;
+        let object = object_of(&db).await;
+        let (storage, _tell) = Held::new(usize::MAX);
+        repo::fill_object(&db, &object, "gone", "image/png", 5, 0)
+            .await
+            .unwrap();
+        let served = served(&db, &storage, &owner(), &object.id).await;
+        assert!(matches!(served, Err(Error::Missing)));
     }
 }
