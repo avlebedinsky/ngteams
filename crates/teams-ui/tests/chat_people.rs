@@ -667,4 +667,9 @@ fn an_open_group_chat_s_people_follow_a_change_of_its_people_live() {
     draw(cx);
     assert_eq!(shown_people(&view, cx), [LAB_B, LAB_D]);
     assert!(cx.update(|_, cx| shell.read(cx).people().is_some()), "still open");
+
+    // a read again asks the presence of a newcomer, and not again of those it showed already (d, whom only the
+    // flyout shows, was asked once over the two reads that showed d)
+    let asked = rig.core.presence_asked.lock().unwrap().clone();
+    assert_eq!(asked.iter().filter(|asked| *asked == LAB_D).count(), 1, "{asked:?}");
 }

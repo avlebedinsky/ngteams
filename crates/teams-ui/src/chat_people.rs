@@ -211,6 +211,8 @@ pub struct ChatPeople {
     problem: Option<SharedString>,
     asking: Option<Task<()>>,
     loading: Option<Task<()>>,
+    /// The chat's people were read once: a later read (a change of the chat) keeps them shown and Add lit meanwhile.
+    read: bool,
     adding: Option<Task<()>>,
     /// Where the picker, and its suggestions hanging under it, were last drawn: a press there isn't one outside.
     picker_at: Placed,
@@ -332,6 +334,7 @@ impl ChatPeople {
             problem: None,
             asking: None,
             loading: None,
+            read: false,
             adding: None,
             picker_at: Placed::default(),
             panel_at: Placed::default(),
@@ -363,6 +366,8 @@ impl ChatPeople {
         let me = core.me().to_owned();
         let (chat, of) = (self.chat.clone(), self.of);
         let partner = self.partner.clone();
+        // a read again asks only the presence of the people it didn't show before
+        let watched: Vec<String> = self.members.iter().map(|person| person.mri.clone()).collect();
         self.loading = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut mris: Vec<String> = if of == PeopleOf::Draft {
                 draft.iter().map(|person| person.mri.clone()).collect()
@@ -404,10 +409,11 @@ impl ChatPeople {
                 };
                 members.push(person);
             }
-            crate::presence::watch(core.as_ref(), mris.iter().skip(1));
+            crate::presence::watch(core.as_ref(), mris.iter().skip(1).filter(|mri| !watched.contains(mri)));
             let _ = this.update(cx, |this, cx| {
                 this.members = members;
                 this.loading = None;
+                this.read = true;
                 this.refresh_suggestions(cx);
                 cx.notify();
             });
@@ -767,7 +773,7 @@ impl ChatPeople {
     pub fn can_confirm(&self, cx: &gpui::App) -> bool {
         !self.picked.is_empty()
             && self.adding.is_none()
-            && self.loading.is_none()
+            && self.read
             && match self.of {
                 PeopleOf::OneToOne => self.partner.is_some(),
                 PeopleOf::Group => self.chat_history(cx).is_some(),
