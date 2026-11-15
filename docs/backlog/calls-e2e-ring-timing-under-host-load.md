@@ -1,4 +1,4 @@
-# Real-binary calls e2e: ring timing under a heavily loaded host
+# Real-binary calls e2e: ring timing and audio levels under a heavily loaded host
 
 On a host far past its cores (load average 40–55 on 16 cores), `binary::calls::flows`'
 `a_declined_a_cancelled_and_an_unanswered_call_are_missed_calls_in_the_chat` and
@@ -7,8 +7,12 @@ only the chat's message deliveries. Or b's client ended a ringing call with `Fai
 5-second ring timeout, so a starved client or node misses the ring window. `nodes`' ring-through-a-restart case once
 had Answer refused with "the call can't do that now" under the same load. That may be the same timing.
 
-The audio checks no longer flake under this load: they re-measure over later windows. These are signalling and ring
-deadlines. Find out whether the client's ring progress or the push delivery is starved, or whether the test's deadlines
+The audio checks re-measure over up to 3 later windows, and still flake now and then under this load. In one run at
+load 40, `own_relay`'s first call, `accounts`' own call and the credential-expiry call's last check heard the tone,
+but weakly: 0.06–0.18 after every re-measure, below `HEARD` (0.25). All three passed when rerun. Find out whether a
+starved client really drops the tone that long, or whether `HEARD` and the windows are too strict for such a host.
+
+The ring failures are signalling and ring deadlines. Find out whether the client's ring progress or the push delivery is starved, or whether the test's deadlines
 are too tight for such a host. Then either fix the client's timing, or scale the flow's ring timeout and `WAIT` for
 QA runs. To reproduce, run `binary::calls` with a coturn, Postgres and Redis (`docs/server.md`) on a heavily loaded
 host.
