@@ -7,7 +7,7 @@ use axum::http::{StatusCode, header::LOCATION};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value, json};
 
-use super::{Caller, Error, channels, events, member_of, message_repo, reads, repo, streams, wire};
+use super::{Caller, Error, channels, events, member_of, message_repo, reader_of, reads, repo, streams, wire};
 use crate::app::App;
 use crate::db::DbError;
 
@@ -133,7 +133,7 @@ pub(super) async fn page(
 ) -> Result<Json<Value>, Error> {
     let target = reads::target(&path)?;
     let (chat, root) = channels::split(target)?;
-    let (found, _) = member_of(&app, &caller, chat).await?;
+    let (found, sight) = reader_of(&app, &caller, chat).await?;
     let current = repo::watermark(&app.db).await?;
     let until = reads::number(&query, "until", current)?;
     let since = reads::number(&query, "syncState", 0)?;
@@ -154,6 +154,7 @@ pub(super) async fn page(
             incremental,
             root,
         },
+        sight,
     )
     .await?;
     let (messages, more) = bounded_messages(&rows, size)?;
@@ -188,13 +189,13 @@ pub(super) async fn around(
     Query(query): Query<Params>,
 ) -> Result<Json<Value>, Error> {
     let chat = reads::target(&path)?;
-    let (found, _) = member_of(&app, &caller, chat).await?;
+    let (found, sight) = reader_of(&app, &caller, chat).await?;
     let at = reads::number(&path, "time", 0)?;
     let size = reads::number(&query, "pageSize", 200)?.clamp(1, 200);
     if query.get("direction").map(String::as_str) != Some("BIDIRECTIONAL") {
         return Err(Error::BadRequest);
     }
-    let rows = message_repo::around(&app.db, &found.id, at, size).await?;
+    let rows = message_repo::around(&app.db, &found.id, at, size, sight).await?;
     let (messages, more) = bounded_messages(&rows, size)?;
     let mut metadata = json!({"lastCompleteSegmentStartTime": 0, "lastCompleteSegmentEndTime": 0});
     if more && let Some(last) = rows.get(messages.len().saturating_sub(1)) {

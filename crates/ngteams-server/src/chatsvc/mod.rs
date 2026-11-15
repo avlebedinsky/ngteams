@@ -6,6 +6,8 @@ mod activity;
 pub(crate) mod channels;
 mod create;
 mod events;
+mod member_repo;
+mod members;
 mod message_repo;
 mod messages;
 mod mutations;
@@ -36,10 +38,13 @@ pub(super) fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/chatsvc/{region}/v1/threads", post(create::create))
         .route("/api/chatsvc/{region}/v1/threads/{chat}", get(reads::thread))
-        .route("/api/chatsvc/{region}/v1/threads/{chat}/members", get(reads::members))
+        .route(
+            "/api/chatsvc/{region}/v1/threads/{chat}/members",
+            get(reads::members).put(members::add),
+        )
         .route(
             "/api/chatsvc/{region}/v1/threads/{chat}/members/{member}",
-            put(channels::set_interest),
+            put(channels::set_interest).delete(members::remove),
         )
         .route(
             "/api/chatsvc/{region}/v1/threads/{chat}/properties",
@@ -162,6 +167,14 @@ async fn member_of(app: &App, caller: &Caller, id: &str) -> Result<(repo::Chat, 
         return Err(Error::Denied);
     }
     Ok((chat, members))
+}
+
+/// The stored thread `id` names and what the caller may read of it: someone who left still reads what they could.
+async fn reader_of(app: &App, caller: &Caller, id: &str) -> Result<(repo::Chat, repo::Sight), Error> {
+    let stored = streams::stored(id, caller)?;
+    let chat = repo::chat(&app.db, &stored).await?.ok_or(Error::Missing)?;
+    let seat = repo::seat(&app.db, &stored, &caller.id).await?.ok_or(Error::Denied)?;
+    Ok((chat, seat.sight()))
 }
 
 pub(crate) fn now() -> i64 {

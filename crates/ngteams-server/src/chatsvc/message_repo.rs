@@ -3,7 +3,7 @@ use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use serde_json::Value;
 
 use super::activity::{self, Told};
-use super::repo::advance;
+use super::repo::{Sight, advance};
 use super::schema::{chat_members, chat_messages, chats};
 use super::wire;
 use crate::db::{Db, DbError, with_conn};
@@ -60,7 +60,8 @@ pub(super) async fn insert(db: &Db, draft: &Message, base: &str) -> Result<Optio
             let member: bool = diesel::select(diesel::dsl::exists(
                 chat_members::table
                     .filter(chat_members::chat_id.eq(&draft.chat_id))
-                    .filter(chat_members::user_id.eq(&draft.owner_id)),
+                    .filter(chat_members::user_id.eq(&draft.owner_id))
+                    .filter(chat_members::left_at.is_null()),
             ))
             .get_result(conn)
             .await?;
@@ -118,7 +119,7 @@ pub(super) async fn insert(db: &Db, draft: &Message, base: &str) -> Result<Optio
             let drafts = scene.of_post(&row, &body, &thread);
             let told = activity::put!(conn, at, base, &scene, &body, drafts);
             Ok(Some(Posted {
-                readers: scene.readers(),
+                readers: scene.readers(row.id),
                 row,
                 inserted: true,
                 told,
@@ -138,12 +139,24 @@ pub(super) struct Window {
     pub root: Option<i64>,
 }
 
-pub(super) async fn page(db: &Db, chat: &str, window: Window) -> Result<Vec<Message>, DbError> {
-    with_conn!(db, |conn| {
+/// The messages of `$chat` that `$sight` takes in, as a boxed query.
+macro_rules! within {
+    ($chat:expr, $sight:expr) => {{
         let mut query = chat_messages::table
-            .filter(chat_messages::chat_id.eq(chat))
-            .filter(chat_messages::version.le(window.until))
+            .filter(chat_messages::chat_id.eq($chat))
+            .filter(chat_messages::id.ge($sight.from))
             .into_boxed();
+        // someone who left sees no later message and no later change of an earlier one
+        if let Some(until) = $sight.until {
+            query = query.filter(chat_messages::version.le(until));
+        }
+        query
+    }};
+}
+
+pub(super) async fn page(db: &Db, chat: &str, window: Window, sight: Sight) -> Result<Vec<Message>, DbError> {
+    with_conn!(db, |conn| {
+        let mut query = within!(chat, sight).filter(chat_messages::version.le(window.until));
         if let Some(root) = window.root {
             query = query.filter(chat_messages::root_id.eq(root));
         }
@@ -168,9 +181,8 @@ pub(super) async fn page(db: &Db, chat: &str, window: Window) -> Result<Vec<Mess
     })
 }
 
-pub(super) async fn latest(db: &Db, chat: &str) -> Result<Option<Message>, DbError> {
-    with_conn!(db, |conn| Ok(chat_messages::table
-        .filter(chat_messages::chat_id.eq(chat))
+pub(super) async fn latest(db: &Db, chat: &str, sight: Sight) -> Result<Option<Message>, DbError> {
+    with_conn!(db, |conn| Ok(within!(chat, sight)
         .order(chat_messages::id.desc())
         .select(Message::as_select())
         .first(conn)
@@ -178,9 +190,8 @@ pub(super) async fn latest(db: &Db, chat: &str) -> Result<Option<Message>, DbErr
         .optional()?))
 }
 
-pub(super) async fn last_updated(db: &Db, chat: &str) -> Result<Option<(i64, i64)>, DbError> {
-    with_conn!(db, |conn| Ok(chat_messages::table
-        .filter(chat_messages::chat_id.eq(chat))
+pub(super) async fn last_updated(db: &Db, chat: &str, sight: Sight) -> Result<Option<(i64, i64)>, DbError> {
+    with_conn!(db, |conn| Ok(within!(chat, sight)
         .order(chat_messages::version.desc())
         .select((chat_messages::id, chat_messages::version))
         .first(conn)
@@ -240,29 +251,31 @@ where
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             let version: i64 = advance!(conn, at);
-            let member: bool = diesel::select(diesel::dsl::exists(
-                chat_members::table
-                    .filter(chat_members::chat_id.eq(chat))
-                    .filter(chat_members::user_id.eq(actor)),
-            ))
-            .get_result(conn)
-            .await?;
-            if !member {
+            let from: Option<i64> = chat_members::table
+                .filter(chat_members::chat_id.eq(chat))
+                .filter(chat_members::user_id.eq(actor))
+                .filter(chat_members::left_at.is_null())
+                .select(chat_members::history_from)
+                .first(conn)
+                .await
+                .optional()?;
+            let Some(from) = from else {
                 return Ok(Updated::Denied);
-            }
-            let Some(mut row) = chat_messages::table
+            };
+            let found = chat_messages::table
                 .find((chat, id))
                 .select(Message::as_select())
                 .first(conn)
                 .await
-                .optional()?
-            else {
+                .optional()?;
+            // a message from before the history the actor was given is none to them
+            let Some(mut row) = found.filter(|row: &Message| row.id >= from) else {
                 return Ok(Updated::Missing);
             };
-            if change.who == Who::Owner && row.owner_id != actor {
+            let before = row.value()?;
+            if (change.who == Who::Owner && row.owner_id != actor) || is_event(&before) {
                 return Ok(Updated::Denied);
             }
-            let before = row.value()?;
             let mut body = before.clone();
             if !transform(&mut body, version)? {
                 return Ok(Updated::Unchanged(row));
@@ -293,7 +306,7 @@ where
                 Effect::Deleted => activity::withdraw!(conn, at, scene.items_of(&row, &before)),
             };
             Ok(Updated::Message(Changed {
-                readers: scene.readers(),
+                readers: scene.readers(row.id),
                 row,
                 told,
             }))
@@ -301,18 +314,16 @@ where
         .await)
 }
 
-pub(super) async fn around(db: &Db, chat: &str, at: i64, size: i64) -> Result<Vec<Message>, DbError> {
+pub(super) async fn around(db: &Db, chat: &str, at: i64, size: i64, sight: Sight) -> Result<Vec<Message>, DbError> {
     with_conn!(db, |conn| {
-        let mut past = chat_messages::table
-            .filter(chat_messages::chat_id.eq(chat))
+        let mut past = within!(chat, sight)
             .filter(chat_messages::id.le(at))
             .order(chat_messages::id.desc())
             .limit(size)
             .select(Message::as_select())
             .load::<Message>(conn)
             .await?;
-        let mut future = chat_messages::table
-            .filter(chat_messages::chat_id.eq(chat))
+        let mut future = within!(chat, sight)
             .filter(chat_messages::id.gt(at))
             .order(chat_messages::id.asc())
             .limit(size)
@@ -329,6 +340,13 @@ pub(super) async fn around(db: &Db, chat: &str, at: i64, size: i64) -> Result<Ve
         past.sort_unstable_by_key(|row| std::cmp::Reverse(row.id));
         Ok(past)
     })
+}
+
+/// A thread's own event (`ThreadActivity/…`): written by the service, changed by nobody.
+fn is_event(body: &Value) -> bool {
+    body["messagetype"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("ThreadActivity/"))
 }
 
 /// Whether `post` is a post of the channel that replies can go under: there, a post itself, not deleted.

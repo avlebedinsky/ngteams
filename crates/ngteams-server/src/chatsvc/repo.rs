@@ -15,6 +15,14 @@ pub(crate) struct Chat {
     pub unique_roster: bool,
     pub created_at: i64,
     pub version: i64,
+    /// When the thread's people last changed; 0 for a thread whose people never did.
+    pub roster_version: i64,
+}
+
+impl Chat {
+    pub(crate) fn roster(&self) -> i64 {
+        self.roster_version.max(self.created_at)
+    }
 }
 
 #[derive(Queryable, Selectable)]
@@ -22,6 +30,25 @@ pub(crate) struct Chat {
 pub(crate) struct Member {
     pub user_id: String,
     pub joined_at: i64,
+    pub history_from: i64,
+    pub left_at: Option<i64>,
+}
+
+/// What a person may read of a thread they are in or were in: its messages from `from` on, and for someone who
+/// left, nothing written or changed after `until`.
+#[derive(Clone, Copy)]
+pub(crate) struct Sight {
+    pub from: i64,
+    pub until: Option<i64>,
+}
+
+impl Member {
+    pub(crate) fn sight(&self) -> Sight {
+        Sight {
+            from: self.history_from,
+            until: self.left_at,
+        }
+    }
 }
 
 macro_rules! advance {
@@ -62,6 +89,7 @@ pub(super) async fn create(db: &Db, chat: &Chat, members: &[String]) -> Result<b
             let mut chat = chat.clone();
             chat.version = version;
             chat.created_at = version;
+            chat.roster_version = version;
             let inserted = diesel::insert_into(chats::table)
                 .values(&chat)
                 .on_conflict_do_nothing()
@@ -95,9 +123,11 @@ pub(super) async fn chat(db: &Db, id: &str) -> Result<Option<Chat>, DbError> {
         .optional()?))
 }
 
+/// The people in the thread now: someone who left is no longer one of them.
 pub(super) async fn members(db: &Db, id: &str) -> Result<Vec<Member>, DbError> {
     with_conn!(db, |conn| Ok(chat_members::table
         .filter(chat_members::chat_id.eq(id))
+        .filter(chat_members::left_at.is_null())
         .order(chat_members::position)
         .select(Member::as_select())
         .load(conn)
@@ -111,21 +141,53 @@ pub(super) async fn watermark(db: &Db) -> Result<i64, DbError> {
         .await?))
 }
 
-pub(super) async fn list(db: &Db, user: &str, after: i64, until: i64, limit: i64) -> Result<Vec<Chat>, DbError> {
-    with_conn!(db, |conn| Ok(chats::table
+/// `user`'s place in the thread, also after they left it.
+pub(super) async fn seat(db: &Db, id: &str, user: &str) -> Result<Option<Member>, DbError> {
+    with_conn!(db, |conn| Ok(chat_members::table
+        .find((id, user))
+        .select(Member::as_select())
+        .first(conn)
+        .await
+        .optional()?))
+}
+
+/// The version a thread has for one of its people: frozen at the moment they left it.
+fn seen() -> diesel::expression::SqlLiteral<diesel::sql_types::BigInt> {
+    diesel::dsl::sql("COALESCE(chat_members.left_at, chats.version)")
+}
+
+/// The account's threads that changed for it in a version window, each as the account may see it.
+pub(super) async fn list(
+    db: &Db,
+    user: &str,
+    after: i64,
+    until: i64,
+    limit: i64,
+) -> Result<Vec<(Chat, Sight)>, DbError> {
+    let rows: Vec<(Chat, i64, Option<i64>)> = with_conn!(db, |conn| chats::table
         .inner_join(chat_members::table)
         .left_join(channels::table.on(channels::id.eq(chats::id)))
         .filter(chat_members::user_id.eq(user))
         // of a team's channels only the general one is in the list; the others are read by their id
         .filter(channels::id.is_null().or(channels::id.eq(channels::team_id)))
         .filter(chats::id.not_like("48:notes:%"))
-        .filter(chats::version.gt(after))
-        .filter(chats::version.le(until))
-        .order(chats::version.asc())
+        .filter(seen().gt(after))
+        .filter(seen().le(until))
+        .order(seen().asc())
         .limit(limit)
-        .select(Chat::as_select())
+        .select((Chat::as_select(), chat_members::history_from, chat_members::left_at))
         .load(conn)
-        .await?))
+        .await?);
+    Ok(rows
+        .into_iter()
+        .map(|(mut chat, from, until)| {
+            if let Some(left) = until {
+                chat.version = left;
+                chat.roster_version = chat.roster_version.min(left);
+            }
+            (chat, Sight { from, until })
+        })
+        .collect())
 }
 
 pub(super) async fn tick(db: &Db) -> Result<i64, DbError> {

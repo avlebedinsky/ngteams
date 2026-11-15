@@ -163,6 +163,13 @@ The mapped writes, and the carve-outs that reach nobody.
 | `PUT` | `v1/threads/<chat>/properties` `?name`, `v1/threads/<chat>/members/ALL` | thread properties (topic) and a property of every member | not used | [chat-service.md](chat-service.md#writes-and-capture-holds) · M0 T11 | bundle only |
 | various | `v1/threads/<chat>/livemessages`, `…/messages/forward`, `…/messages/move`, `rcmetadata`, `rc2s`, `v1/threads/<chat>/files`, `v1/users/ME/drafts`, `PUT`/`DELETE` on a conversation itself, any `48:` stream but the two feeds' read marks and the read horizon of the feeds and the call log (`48:notes`, `48:sharedcalllogs`, …), an `8:…` or `28:…` conversation | live and targeted messages, forwarding and moving, reply-chain metadata, file references, drafts and scheduled sends, conversations with a person or a bot by MRI | not used | [chat-service.md](chat-service.md#writes-and-capture-holds) · M0 T11 | bundle only |
 
+Own server (`crates/ngteams-server`, [server.md](../server.md#the-accounts-own-streams)): serves the `48:notes`,
+`48:notifications` and `48:mentions` rows above (messages, the conversation read, `isread`, the feed's horizon and
+bookmark, an item's removal) and writes the feed and the mentions stream itself, from mentions, channel replies and
+reactions. It serves `PUT v1/threads/<chat>/members` and `DELETE v1/threads/<chat>/members/<mri>` for group chats
+([server.md](../server.md#a-group-chats-people)); a member's role change, `members/ALL`, `48:calllogs` and
+`48:drafts` are not served.
+
 ## Managing a channel
 
 The channel menu's service paths ([channels.md](channels.md#managing-an-existing-channel)). The shapes below were

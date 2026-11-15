@@ -242,6 +242,11 @@ impl User {
             .unwrap()
     }
 
+    /// A typed client of the account, for a request no engine action makes.
+    pub fn client(&self) -> Client<Transport> {
+        Client::new(self.transport())
+    }
+
     /// Starts the client on its store: a new engine with a new push channel, as a start of ngteams makes them.
     pub fn start(&mut self) {
         assert!(self.engine.is_none());

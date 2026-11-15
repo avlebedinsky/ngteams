@@ -49,7 +49,7 @@ pub(super) fn thread(app: &App, caller: &Caller, chat: &Chat, members: &[Member]
         "copilotShareTokens": [], "eTag": format!("\"{}\"", chat.version), "encryptionType": "None",
         "fileReferences": {}, "id": chat.id, "members": members.iter().map(|m| member(app, m, true)).collect::<Vec<_>>(),
         "messages": format!("{}/v1/users/ME/conversations/{}/messages", base(app), chat.id),
-        "properties": properties, "rosterVersion": chat.created_at,
+        "properties": properties, "rosterVersion": chat.roster(),
         "tenantId": caller.tenant, "type": "Thread", "version": chat.version,
     })
 }
@@ -87,7 +87,7 @@ pub(super) fn conversation(app: &App, caller: &Caller, chat: &Chat) -> Value {
         "threadType": "chat", "productThreadType": if chat.unique_roster { "OneToOneChat" } else { "Chat" },
         "createdat": chat.created_at.to_string(), "isCreator": chat.creator == caller.id,
         "gapDetectionEnabled": "True", "lastjoinat": chat.created_at.to_string(),
-        "originalThreadId": chat.id, "rosterVersion": chat.created_at, "version": chat.version.to_string(),
+        "originalThreadId": chat.id, "rosterVersion": chat.roster(), "version": chat.version.to_string(),
     });
     if chat.unique_roster {
         properties["uniquerosterthread"] = json!("True");

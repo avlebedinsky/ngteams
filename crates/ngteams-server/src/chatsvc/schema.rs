@@ -13,6 +13,7 @@ diesel::table! {
         unique_roster -> Bool,
         created_at -> BigInt,
         version -> BigInt,
+        roster_version -> BigInt,
     }
 }
 
@@ -22,6 +23,8 @@ diesel::table! {
         user_id -> Text,
         position -> Integer,
         joined_at -> BigInt,
+        history_from -> BigInt,
+        left_at -> Nullable<BigInt>,
     }
 }
 

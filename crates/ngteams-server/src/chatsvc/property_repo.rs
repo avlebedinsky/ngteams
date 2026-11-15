@@ -43,7 +43,8 @@ pub(super) async fn set_conversation(
             let member: bool = diesel::select(diesel::dsl::exists(
                 chat_members::table
                     .filter(chat_members::chat_id.eq(chat))
-                    .filter(chat_members::user_id.eq(user)),
+                    .filter(chat_members::user_id.eq(user))
+                    .filter(chat_members::left_at.is_null()),
             ))
             .get_result(conn)
             .await?;

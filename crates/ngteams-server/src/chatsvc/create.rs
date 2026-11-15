@@ -88,6 +88,7 @@ pub(super) async fn create(
         unique_roster: body.properties.unique,
         created_at: 0,
         version: 0,
+        roster_version: 0,
     };
     let inserted = repo::create(&app.db, &chat, &members).await?;
     let (chat, members) = super::member_of(&app, &caller, &chat.id).await?;

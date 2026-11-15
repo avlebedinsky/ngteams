@@ -3,6 +3,7 @@
 //! shows came over its push channel or the catch-up the channel itself starts.
 
 mod channels;
+mod people;
 mod support;
 
 use std::time::Duration;

@@ -13,7 +13,7 @@ use super::messages::Pair;
 use super::{client, engine};
 use crate::support::{Backend, backends};
 
-pub(super) const FEED: &str = "48:notifications";
+pub(crate) const FEED: &str = "48:notifications";
 pub(super) const MENTIONS: &str = "48:mentions";
 
 /// a's and b's 1:1 chat ([`Pair`]) with a third account c and a group chat of the three.

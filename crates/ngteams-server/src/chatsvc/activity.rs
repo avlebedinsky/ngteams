@@ -31,6 +31,8 @@ pub(super) struct Place {
 pub(super) struct Person {
     pub id: String,
     pub disabled: bool,
+    /// The first message the person may read.
+    pub from: i64,
     /// The person's own properties of the thread: their notification preferences are among them.
     pub properties: Map<String, Value>,
 }
@@ -99,13 +101,21 @@ impl Scene {
         Self { chat, place, people }
     }
 
-    /// Everyone in the thread: who is told of a change of its messages.
-    pub(super) fn readers(&self) -> Vec<String> {
-        self.people.iter().map(|person| person.id.clone()).collect()
+    /// The people in the thread who may read `message`: who is told of it and of its changes.
+    pub(super) fn readers(&self, message: i64) -> Vec<String> {
+        let reading = self.people.iter().filter(|person| person.from <= message);
+        reading.map(|person| person.id.clone()).collect()
     }
 
     fn person(&self, id: &str) -> Option<&Person> {
         self.people.iter().find(|person| person.id == id && !person.disabled)
+    }
+
+    /// Drops the items of people who may not read `message`: an item carries its preview.
+    fn readable(&self, message: i64, mut drafts: Vec<Draft>) -> Vec<Draft> {
+        let readers = self.readers(message);
+        drafts.retain(|draft| readers.contains(&draft.user));
+        drafts
     }
 
     fn thread_type(&self) -> &'static str {
@@ -151,7 +161,7 @@ impl Scene {
             };
             drafts.push(self.draft(person, row, what, FEED_KEY));
         }
-        drafts
+        self.readable(row.id, drafts)
     }
 
     /// The items of the people a message's mentions reach: named themselves, or taken in by one of everyone.
@@ -176,7 +186,7 @@ impl Scene {
                 drafts.push(own);
             }
         }
-        drafts
+        self.readable(row.id, drafts)
     }
 
     /// Whom one mention reaches: a person of the thread, or everyone in it when it names the thread itself.
@@ -201,7 +211,10 @@ impl Scene {
         if streams::name_of(&self.chat.id).is_some() || actor == row.owner_id {
             return None;
         }
-        let owner = self.person(&row.owner_id).filter(|owner| !owner.muted())?;
+        let owner = self.person(&row.owner_id)?;
+        if owner.muted() || owner.from > row.id {
+            return None;
+        }
         let mut draft = self.draft(owner, row, What::Reaction, FEED_KEY);
         draft.key = reaction_key(&self.chat.id, row.id, actor);
         key.clone_into(&mut draft.subtype);
@@ -416,11 +429,12 @@ macro_rules! scene {
             .select($crate::chatsvc::repo::Chat::as_select())
             .first($conn)
             .await?;
-        let members: Vec<(String, bool)> = chat_members::table
+        let members: Vec<(String, bool, i64)> = chat_members::table
             .inner_join(users::table.on(users::id.eq(chat_members::user_id)))
             .filter(chat_members::chat_id.eq($chat))
+            .filter(chat_members::left_at.is_null())
             .order(chat_members::position)
-            .select((chat_members::user_id, users::disabled))
+            .select((chat_members::user_id, users::disabled, chat_members::history_from))
             .load($conn)
             .await?;
         let mut own: std::collections::HashMap<String, String> = chat_properties::table
@@ -438,11 +452,12 @@ macro_rules! scene {
             .await
             .optional()?;
         let mut people = Vec::new();
-        for (id, disabled) in members {
+        for (id, disabled, from) in members {
             let properties = $crate::chatsvc::property_repo::decode(own.remove(&id))?;
             people.push($crate::chatsvc::activity::Person {
                 id,
                 disabled,
+                from,
                 properties,
             });
         }

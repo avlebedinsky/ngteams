@@ -15,8 +15,8 @@ reactions, transient typing, account preferences and message pages (newest, back
 requested time) under `/api/chatsvc/<region>/v1/`. These routes require an IC3 bearer token and current membership;
 disabled users are refused even while their token is live. A repeated 1:1 roster returns the existing chat, and
 group rosters and names persist in SQLite or PostgreSQL. Requests are limited to 64 KiB. Authz advertises
-`chatServiceAfd`. Account streams (`48:notifications`, `48:mentions`, `48:notes`), rich quote normalization and
-membership changes are still being added.
+`chatServiceAfd`. It also serves the account's own streams (notes, the activity feed, the mentions stream) and a
+group chat's people (below). Rich quote normalization is still being added.
 
 ## Stack
 
@@ -368,6 +368,7 @@ The internal JSON envelope is
 wraps this internal event separately. A message post publishes `NewMessage` with the stored message as `resource`;
 an edit, soft deletion or reaction publishes `MessageUpdate` to the same recipients. Typing and peer read receipts
 exclude the acting account.
+An activity item is published to its account alone, as a `NewMessage` (or `MessageUpdate`) of its stream.
 Edits require message ownership and preserve its ID, client message ID, original arrival time and reactions. Publication happens after the transaction commits. The fan-out is at most
 once; a socket reads kept events from the journal instead (above), and clients catch up through conversation sync
 after a reported loss.
@@ -395,6 +396,69 @@ Own user properties persist `userGraphSettings` as its native JSON text and `app
 or an object. Mark-all-read may be reset, as in Teams. Writes retain the account's other properties and publish
 `CustomUserProperties` only to that account. An account with no own properties receives the native 404/subcode-1
 shape that the client treats as empty preferences.
+
+## The account's own streams
+
+`48:notes`, `48:notifications` and `48:mentions` are each kept as a thread only their account is in, under an id no
+request can name. A request's `48:…` id always resolves to the caller's own stream, so the membership check that
+guards every chat also keeps one account's stream from another. A stream is no thread: its thread and member reads
+answer 404, as does any other `48:` id (`48:generic`: 400).
+
+- **Notes** (`48:notes`): `POST …/48:notes/messages` writes a note, and its edit, delete and message pages work as
+  a chat's. They answer 404 until the first note is written, and are in no conversation list, as with Teams. A
+  note is pushed to the account's own endpoints.
+- **The activity feed** (`48:notifications`) and **the mentions stream** (`48:mentions`) are written by the server
+  only (a post there is refused, 403). They are in the conversation list once they hold an item, with their
+  `consumptionhorizon` and `consumptionHorizonBookmark`. The account marks an item read or unread (`PUT
+  …/messages/<item>/properties?name=isread`), removes it (`DELETE …/messages/<item>?behavior=softDelete`), moves
+  the feed's own horizon and marks all read (the two properties). Each change moves the item's or the stream's
+  version, so the account's other clients sync it.
+
+### Who gets an item
+
+An item is written in the transaction that writes its message, from the thread's people as they are then. It
+carries a preview of the message, so only someone who is in the thread and may read the message gets one, whatever
+the message's mentions name. A disabled account gets none. The sender gets none for their own message.
+
+| What happened | Who gets an item | `activityType` / `activitySubtype` |
+|---|---|---|
+| a mention of a person | that person; also in their `48:mentions` (`mentions` / `mention`) | 1:1 chat `mentions` / `mention`; group chat `mentionInChat` / `person`; channel `mention` / `person` |
+| a mention of everyone (`everyone`, `team`, `channel`) naming the thread itself (a channel: or its team) | everyone in the thread; none in a 1:1 chat | `mentionInChat` or `mention` / `everyone`, `team`, `channel` |
+| a reply in a channel post's thread | the people who wrote in that thread; people with "Follow all new threads" on (`followAllRc`) | `reply` / `reply` |
+| a post or reply in a channel | people whose `channelNotificationSettings` have `allNewPosts` `On` (replies: with `includeReplies`) | `follow` / `channelNewMessage` (the server's own names: no capture shows Teams') |
+| a reaction | the message's sender; one item per reactor, removed when they take their last reaction back | `reactionInChat` or `reaction` / the reaction's key |
+
+The account's own settings of the thread apply: a muted thread (`alerts` `false`) tells of nothing but a mention of
+the account itself. A person named and also taken in by a mention of everyone gets one item, their own. An edit
+writes an item for someone it newly mentions and no second one for the same message. A deleted message's items are
+removed from every feed, so its text stays in no preview. A message edited or reacted to after someone left stays
+out of what they may read (below), and so does its item.
+
+## A group chat's people
+
+`PUT v1/threads/<chat>/members` (`{"members": [{"id", "role": "Admin", "shareHistoryTime"}]}`) adds people to a
+group chat and `DELETE v1/threads/<chat>/members/<mri>` takes one out (the caller's own MRI: they leave). Anyone in
+the chat may do both, as in Teams, where a group chat's every member is an `Admin`. A 1:1 chat keeps its two
+people (400), a team's channel takes and loses people through its team (400), and only accounts that can sign in
+are added (400). Someone already in the chat is no change (200).
+
+- **History.** Each member has the first message they may read: all of it (`shareHistoryTime` `0`), from a time on
+  (a positive time), or from their joining (`-1`). Message pages, the page around a time, the conversation list's
+  preview, edits, reactions and activity items all keep to it. A message from before it answers 404.
+- **Leaving.** Someone removed or gone keeps reading what they could until then, the event of their going
+  included, and nothing written or changed after it; their thread and member reads and every write answer 403. The
+  chat stays in their conversation list at the version it had when they left and never moves again. Added back,
+  they read from where the new add says.
+- **Events.** Each change writes the thread's own message (`ThreadActivity/AddMember` with each target's
+  `sharehistorytime`, `ThreadActivity/DeleteMember`), moves the thread's `rosterVersion`, and publishes the message
+  (`NewMessage`) and the thread (`ThreadUpdate`) to the people in the chat after the change. Someone taken out is
+  told the event of their going and nothing after it. A thread's own message can't be edited, deleted or reacted to.
+- **Concurrent changes.** A post, edit or reaction checks its sender's membership and reads the thread's people in
+  its own transaction, under the shared version clock. Its event and its activity items go to those people and
+  nobody else, so a member removed while the request ran is told nothing of a message written after their removal.
+
+A group started from a 1:1 chat is a new chat (`POST v1/threads` with the three people, as the client sends it);
+the 1:1 chat and its history stay its two people's.
 
 ## Scaling
 

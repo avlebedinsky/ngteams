@@ -3,6 +3,7 @@
 pub(crate) mod activity;
 mod blocked;
 mod contract;
+pub(crate) mod members;
 pub(crate) mod messages;
 mod mutations;
 mod noops;
