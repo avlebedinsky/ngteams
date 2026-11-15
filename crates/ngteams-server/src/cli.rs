@@ -446,7 +446,7 @@ async fn user(
                 .ok()
                 .map(|storage| storage as &dyn crate::storage::Storage);
             let ended = crate::admin::delete_by_upn(&db, &nodes, opened, &upn).await;
-            if ended.is_ok()
+            if matches!(ended, Ok(()) | Err(AdminError::Sockets(_)))
                 && let Err(error) = &storage
             {
                 writeln!(

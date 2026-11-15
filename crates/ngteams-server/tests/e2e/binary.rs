@@ -92,6 +92,28 @@ async fn an_account_change_is_made_and_warned_about_when_redis_is_down() {
     // a command that changed nothing still fails
     let (done, said) = node.try_cli(&["user", "disable", "nobody@own.test"], "");
     assert!(!done && said.ends_with("no such account"), "{said}");
+
+    // a file store that can't be opened either: both are said
+    let blocker = deployment.dir.path().join("a file");
+    std::fs::write(&blocker, b"").unwrap();
+    let config = std::fs::read_to_string(&node.config).unwrap();
+    let store = format!("storage_url = \"file://{}/blobs\"\n", blocker.display());
+    std::fs::write(&node.config, store + &config).unwrap();
+    let (done, said) = node.try_cli(&["user", "delete", &ada], "");
+    assert!(done, "{said}");
+    let warnings: Vec<_> = said.lines().collect();
+    assert_eq!(warnings.len(), 2, "{said}");
+    assert!(
+        warnings[0].starts_with(&format!("warning: {ada} IS deleted, but its picture wasn't removed")),
+        "{said}"
+    );
+    assert!(
+        warnings[1].starts_with(&format!(
+            "warning: {ada} IS deleted, but the account's open push sockets weren't told"
+        )),
+        "{said}"
+    );
+    assert!(!node.cli(&["user", "list"], "").contains(&format!("{ada}\t")));
 }
 
 async fn operator_flow(backend: Backend, tls: bool) {

@@ -709,6 +709,11 @@ mod tests {
         let watched = key("watchers", "8:orgid:x");
         let now = now_ms();
         inner.board.zadd(&watched, "old|ep", now - 1, Some(60)).await.unwrap();
+        inner
+            .board
+            .zadd(&watched, "live|ep", now + 60_000, Some(60))
+            .await
+            .unwrap();
         let mut held = 0;
         let watching = key("watching", "me|ep");
         assert!(
@@ -718,6 +723,10 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(inner.board.zscore(&watched, "old|ep").await.unwrap(), None);
+        assert_eq!(
+            inner.board.zscore(&watched, "live|ep").await.unwrap(),
+            Some(now + 60_000)
+        );
         assert!(inner.board.zscore(&watched, "me|ep").await.unwrap().is_some());
     }
 

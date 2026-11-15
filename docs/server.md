@@ -69,7 +69,8 @@ With `redis_url` set, `user disable`, `user delete` and `user reset-password` ma
 and then tell the account's open push sockets through Redis. When Redis is down the change stays: the command prints
 a warning on standard error that says the account is disabled or deleted (the password is replaced) and exits 0.
 Nothing more is pushed to the account, as each of its open sockets, on every node, ends at its next delivery check;
-the command need not be run again. A command that changed nothing (no such account, a short password, no database)
+the command need not be run again. `user delete` also warns and exits 0 when the file store can't be opened: the
+account is deleted and its picture stays in the store, never served. A command that changed nothing (no such account, a short password, no database)
 exits 1 with the error. The admin API's same changes (and an account's own password change) end the sockets the
 same way; when Redis is down they answer as made and the node logs a warning. Errors and warnings carry colour codes
 only when standard error is a terminal.
@@ -794,7 +795,8 @@ The reads, each for any account that can sign in:
   `officeLocation`, `preferredLanguage`), or with `$select` only the properties it names. An account that was
   deleted answers 404 `Request_ResourceNotFound`. `GET /graph/v1.0/users/<id>/photos/96x96/$value` answers the
   picture (`image/jpeg`), or 404 `ImageNotFound` for an account without one, a deleted one and any other size.
-  Deleting an account takes its picture out of the file store.
+  Deleting an account takes its picture out of the file store. When the file store can't be opened, `user delete`
+  still deletes the account and leaves the picture (never served), warns on standard error and exits 0.
 - **The person card** (Loki, under `/loki/`, with the token of `https://loki.delve.office.com` and an
   `X-ClientType` header, else 400 `ClientTypeMissing`; `docs/protocol/loki.md`). The persona is `aadObjectId`
   (and the same account in `teamsMri` when that is sent); one that can't sign in answers 404.
