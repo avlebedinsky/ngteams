@@ -18,7 +18,6 @@ use tokio::sync::oneshot;
 
 pub const PG_ENV: &str = "NGTEAMS_SERVER_PG_URL";
 pub const REDIS_ENV: &str = "NGTEAMS_SERVER_REDIS_URL";
-/// The client id the native client signs in as.
 /// The log of the run's coturn, named only by a QA run that reads it (`binary::calls::coturn_log`).
 pub const COTURN_LOG: &str = "NGTS_QA_COTURN_LOG";
 /// The DNS listener's log of the QA network, set only for a run inside it (`binary::calls::qa_net`).
@@ -37,6 +36,7 @@ pub async fn take_turn() -> Option<tokio::sync::MutexGuard<'static, ()>> {
     Some(TURNS.lock().await)
 }
 
+/// The client id the native client signs in as.
 pub const CLIENT_ID: &str = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 pub const PASSWORD: &str = "correct horse battery";
 
