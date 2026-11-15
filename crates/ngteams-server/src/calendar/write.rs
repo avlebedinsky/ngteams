@@ -203,10 +203,7 @@ async fn one_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
     let wanted = asked.wanted();
     let (row, moved) = occurrence_changed(app, found, asked.draft).await?;
     let series = row.series_id.clone().unwrap_or_else(|| row.id.clone());
-    let before = repo::invited_under(&app.db, &series).await?;
-    repo::sync_attendees(&app.db, std::slice::from_ref(&row.id), &wanted, moved).await?;
-    let still = repo::invited_under(&app.db, &series).await?;
-    let gone: Vec<String> = before.into_iter().filter(|id| !still.contains(id)).collect();
+    let gone = repo::sync_attendees(&app.db, &series, &row.id, &wanted, moved).await?;
     if let Some(chat) = &row.meeting_chat
         && repo::settle_chat(&app.db, &series, chat, &ids(&wanted), &gone).await?
     {
@@ -221,16 +218,9 @@ async fn one_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
 async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -> Answer<()> {
     let wanted = asked.wanted();
     let online = asked.online;
-    // before the change forgets a series' occurrences: someone may be invited to one of them alone
-    let had_any = repo::invited_under(&app.db, &found.event.id).await?;
-    let (mut row, reshaped) = whole_changed(app, found, asked.draft).await?;
-    let moved = (found.event.start_ms, found.event.end_ms) != (row.start_ms, row.end_ms);
-    let before = repo::attendees(&app.db, &row.id).await?;
-    let mut rows = vec![row.id.clone()];
-    if found.event.recurring && !reshaped {
-        rows.extend(repo::own_row_ids(&app.db, &row.id).await?);
-    }
-    repo::sync_attendees(&app.db, &rows, &wanted, moved).await?;
+    let before = repo::attendees(&app.db, &found.event.id).await?;
+    let changed = whole_changed(app, found, asked.draft, &wanted).await?;
+    let (mut row, gone) = (changed.row, changed.gone);
     if online && row.meeting_chat.is_none() {
         let fields: Value = serde_json::from_str(&row.body).unwrap_or_default();
         let made = meeting::make(app, &organizer.id, "Scheduled", fields["subject"].as_str()).await?;
@@ -239,10 +229,6 @@ async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
     }
     let before: Vec<String> = before.into_iter().map(|(attendee, _)| attendee.user_id).collect();
     let (kept, new): (Vec<String>, Vec<String>) = ids(&wanted).into_iter().partition(|id| before.contains(id));
-    let gone: Vec<String> = had_any
-        .into_iter()
-        .filter(|id| !kept.contains(id) && !new.contains(id))
-        .collect();
     tell(app, &mut row, organizer, &wanted, &gone).await?;
     activity::tell(app, &kept, Change::Updated, &row, organizer).await;
     activity::tell(app, &new, Change::Created, &row, organizer).await;
@@ -268,9 +254,18 @@ pub(super) async fn occurrence_changed(app: &App, found: &Found, draft: Draft) -
     Ok((row, moved))
 }
 
-/// An event or a whole series changed; whether a series' rule or times changed with it, which forgets what its
-/// occurrences were given on their own.
-pub(super) async fn whole_changed(app: &App, found: &Found, draft: Draft) -> Answer<(Event, bool)> {
+/// An event or a whole series as its change left it.
+pub(super) struct Whole {
+    pub row: Event,
+    /// A series' rule or times changed, which forgot what its occurrences were given on their own.
+    pub reshaped: bool,
+    /// Who it no longer invites anywhere.
+    pub gone: Vec<String>,
+}
+
+/// An event or a whole series changed, with its invitations: `wanted` are who it now invites, asked again when
+/// its time changed.
+pub(super) async fn whole_changed(app: &App, found: &Found, draft: Draft, wanted: &[(String, bool)]) -> Answer<Whole> {
     let at = crate::chatsvc::now();
     let before: Value = serde_json::from_str(&found.event.body).unwrap_or_default();
     let rule = |fields: &Value| {
@@ -279,9 +274,9 @@ pub(super) async fn whole_changed(app: &App, found: &Found, draft: Draft) -> Ans
             fields["eventRecurrenceRange"].clone(),
         )
     };
-    let after = Value::Object(draft.body);
-    let reshaped =
-        (found.event.start_ms, found.event.end_ms) != (draft.start_ms, draft.end_ms) || rule(&before) != rule(&after);
+    let mut after = Value::Object(draft.body);
+    let moved = (found.event.start_ms, found.event.end_ms) != (draft.start_ms, draft.end_ms);
+    let reshaped = moved || rule(&before) != rule(&after);
     let row = Event {
         start_ms: draft.start_ms,
         end_ms: draft.end_ms,
@@ -291,19 +286,18 @@ pub(super) async fn whole_changed(app: &App, found: &Found, draft: Draft) -> Ans
         version: at,
         ..found.event.clone()
     };
-    if !found.event.recurring {
-        repo::save(&app.db, &row).await?;
-    } else if reshaped {
-        repo::save_series(&app.db, &row, Kept::Forgotten).await?;
-    } else {
-        let mut fields = after;
-        if let Some(fields) = fields.as_object_mut() {
-            fields.remove("eventRecurrencePattern");
-            fields.remove("eventRecurrenceRange");
-        }
-        repo::save_series(&app.db, &row, Kept::Given(&fields.to_string())).await?;
+    if let Some(fields) = after.as_object_mut() {
+        fields.remove("eventRecurrencePattern");
+        fields.remove("eventRecurrenceRange");
     }
-    Ok((row, reshaped))
+    let given = after.to_string();
+    let kept = match (found.event.recurring, reshaped) {
+        (false, _) => None,
+        (true, true) => Some(Kept::Forgotten),
+        (true, false) => Some(Kept::Given(&given)),
+    };
+    let gone = repo::save_whole(&app.db, &row, kept, wanted, moved).await?;
+    Ok(Whole { row, reshaped, gone })
 }
 
 /// Ends the organizer's event: an event nobody else has is deleted; one that invites people stays, cancelled, on
@@ -368,20 +362,20 @@ pub(super) async fn delete(State(app): State<Arc<App>>, me: Me, Path(id): Path<S
     if found.organized_by(&me.id) {
         end(&app, &me, &found, None).await?;
     } else {
-        let rows = invited_rows(&app, &me, &id, |_| Ok(())).await?;
+        let ((), rows) = invited_rows(&app, &me, &id, |_| Ok(())).await?;
         repo::set_removed(&app.db, &rows, &me.id).await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The rows an invited account's answer or removal of the event `id` touches, once `may` lets it through. A
+/// The rows an invited account's answer or removal of the event `id` touches, with what `may` let through. A
 /// series that changed under the read of one of its occurrences is read, and asked about, again.
-async fn invited_rows(app: &App, me: &Me, id: &str, may: impl Fn(&Found) -> Answer<()>) -> Answer<Vec<String>> {
+async fn invited_rows<T>(app: &App, me: &Me, id: &str, may: impl Fn(&Found) -> Answer<T>) -> Answer<(T, Vec<String>)> {
     for _ in 0..3 {
         let found = Found::of(&app.db, &me.id, id).await?;
-        may(&found)?;
+        let let_through = may(&found)?;
         if let Some(rows) = found.rows_for(&app.db).await? {
-            return Ok(rows);
+            return Ok((let_through, rows));
         }
     }
     Err(Error::CONFLICT)
@@ -406,13 +400,9 @@ pub(super) async fn respond(
         if found.organized_by(&me.id) || found.mine.is_none() {
             return Err(Error::FORBIDDEN);
         }
-        if response.is_none() || found.event.cancelled {
-            return Err(Error::BAD_REQUEST);
-        }
-        Ok(())
+        response.filter(|_| !found.event.cancelled).ok_or(Error::BAD_REQUEST)
     };
-    let rows = invited_rows(&app, &me, &id, may).await?;
-    let response = response.ok_or(Error::BAD_REQUEST)?;
+    let (response, rows) = invited_rows(&app, &me, &id, may).await?;
     repo::set_response(&app.db, &rows, &me.id, response, crate::chatsvc::now()).await?;
     Ok(StatusCode::NO_CONTENT)
 }

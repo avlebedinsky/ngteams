@@ -331,7 +331,8 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   post), its change edits the post in place and its cancellation replies under it. Who scheduled it has an
   accepted copy on its own calendar, as has anyone it names and, with `inviteAllMembers`, everyone in the channel.
   A change or cancellation of one occurrence names it by `fetchEventContract`: its kind and its start, which for
-  an `Exception` is the start it was moved to.
+  an `Exception` is the start it was moved to. An `Exception` no live changed occurrence starts at
+  answers 404: a cancelled one is not found again, and neither is the series' own occurrence at that time.
 - **The Scheduler**: `PUT v2.0/me/calendars/schedules` (each person's busy times; what an event is about only
   for the caller's own) and `findMeetingTimes` (the half hours, 08:00 to 18:00 counted from the midnight the
   read starts at, at which everyone asked about is free).

@@ -162,6 +162,71 @@ macro_rules! hold {
     };
 }
 
+/// Everyone the event `$id` invites, a series with the occurrences kept under it, as the transaction on `$conn`
+/// sees it.
+macro_rules! invited {
+    ($conn:expr, $id:expr) => {{
+        let invited: Vec<String> = calendar_attendees::table
+            .inner_join(calendar_events::table.on(calendar_events::id.eq(calendar_attendees::event_id)))
+            .filter(calendar_events::id.eq($id).or(calendar_events::series_id.eq($id)))
+            .select(calendar_attendees::user_id)
+            .distinct()
+            .load($conn)
+            .await?;
+        invited
+    }};
+}
+
+/// Makes the invitations of each of `$events` the accounts `$wanted` (each with whether it is optional), on the
+/// connection of the caller's transaction: who isn't among them loses the event, who is new is invited, and with
+/// `$reset` everyone is asked again.
+macro_rules! sync {
+    ($conn:expr, $events:expr, $wanted:expr, $reset:expr) => {{
+        let (events, wanted): (&[String], &[(String, bool)]) = ($events, $wanted);
+        let ids: Vec<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
+        diesel::delete(
+            calendar_attendees::table
+                .filter(calendar_attendees::event_id.eq_any(events))
+                .filter(calendar_attendees::user_id.ne_all(&ids)),
+        )
+        .execute($conn)
+        .await?;
+        if $reset {
+            diesel::update(calendar_attendees::table.filter(calendar_attendees::event_id.eq_any(events)))
+                .set((
+                    calendar_attendees::response.eq("None"),
+                    calendar_attendees::responded_at.eq(None::<i64>),
+                    calendar_attendees::removed.eq(false),
+                ))
+                .execute($conn)
+                .await?;
+        }
+        for event in events {
+            for (position, (user, optional)) in wanted.iter().enumerate() {
+                let row = Attendee {
+                    event_id: event.clone(),
+                    user_id: user.clone(),
+                    position: i32::try_from(position).unwrap_or(i32::MAX),
+                    optional: *optional,
+                    response: "None".into(),
+                    responded_at: None,
+                    removed: false,
+                };
+                diesel::insert_into(calendar_attendees::table)
+                    .values(&row)
+                    .on_conflict((calendar_attendees::event_id, calendar_attendees::user_id))
+                    .do_update()
+                    .set((
+                        calendar_attendees::position.eq(row.position),
+                        calendar_attendees::optional.eq(row.optional),
+                    ))
+                    .execute($conn)
+                    .await?;
+            }
+        }
+    }};
+}
+
 type Changes<'a> = (
     diesel::dsl::Eq<calendar_events::start_ms, i64>,
     diesel::dsl::Eq<calendar_events::end_ms, i64>,
@@ -202,29 +267,45 @@ pub(super) enum Kept<'a> {
     Given(&'a str),
 }
 
-/// Writes what can change of a series and brings the occurrences kept under it along. The series' row goes
-/// first, as in [`cancel`].
-pub(super) async fn save_series(db: &Db, series: &Event, kept: Kept<'_>) -> Result<(), DbError> {
-    let under = calendar_events::table.filter(calendar_events::series_id.eq(&series.id));
+/// Writes what can change of an event with its invitations, in one transaction that holds its row: a series
+/// (`kept`) brings the occurrences kept under it along, so none is made in between from the invitations as they
+/// were. The event's row goes first, as in [`cancel`]. Who lost the last invitation under it.
+pub(super) async fn save_whole(
+    db: &Db,
+    event: &Event,
+    kept: Option<Kept<'_>>,
+    wanted: &[(String, bool)],
+    reset: bool,
+) -> Result<Vec<String>, DbError> {
+    let under = calendar_events::table.filter(calendar_events::series_id.eq(&event.id));
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
-            diesel::update(calendar_events::table.find(&series.id))
-                .set(changes(series))
+            diesel::update(calendar_events::table.find(&event.id))
+                .set(changes(event))
                 .execute(conn)
                 .await?;
+            let before = invited!(conn, &event.id);
+            let mut rows = vec![event.id.clone()];
             match kept {
-                Kept::Forgotten => diesel::delete(under).execute(conn).await?,
-                Kept::Given(body) => {
+                None => {}
+                Some(Kept::Forgotten) => {
+                    diesel::delete(under).execute(conn).await?;
+                }
+                Some(Kept::Given(body)) => {
                     diesel::update(under.filter(calendar_events::changed.eq(false)))
                         .set((
                             calendar_events::body.eq(body),
-                            calendar_events::version.eq(series.version),
+                            calendar_events::version.eq(event.version),
                         ))
                         .execute(conn)
-                        .await?
+                        .await?;
+                    let own: Vec<String> = under.select(calendar_events::id).load(conn).await?;
+                    rows.extend(own);
                 }
-            };
-            Ok(())
+            }
+            sync!(conn, &rows, wanted, reset);
+            let still = invited!(conn, &event.id);
+            Ok(before.into_iter().filter(|user| !still.contains(user)).collect())
         })
         .await)
 }
@@ -324,17 +405,6 @@ pub(super) async fn changed_row_at(db: &Db, series: &str, start_ms: i64) -> Resu
         .optional()?))
 }
 
-/// Everyone the event `id` invites, a series with the occurrences kept under it.
-pub(super) async fn invited_under(db: &Db, id: &str) -> Result<Vec<String>, DbError> {
-    with_conn!(db, |conn| Ok(calendar_attendees::table
-        .inner_join(calendar_events::table.on(calendar_events::id.eq(calendar_attendees::event_id)))
-        .filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id)))
-        .select(calendar_attendees::user_id)
-        .distinct()
-        .load(conn)
-        .await?))
-}
-
 /// Makes a meeting's chat follow the invitations of its event `id` (a series with the occurrences kept under it)
 /// as they now stand: of `wanted` whoever it invites is put in, of `gone` whoever it doesn't is taken out. The
 /// event's row is held meanwhile, so two changes of its invitations settle the chat one after the other, each on
@@ -350,13 +420,7 @@ pub(super) async fn settle_chat(
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             hold!(conn, id);
-            let invited: Vec<String> = calendar_attendees::table
-                .inner_join(calendar_events::table.on(calendar_events::id.eq(calendar_attendees::event_id)))
-                .filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id)))
-                .select(calendar_attendees::user_id)
-                .distinct()
-                .load(conn)
-                .await?;
+            let invited = invited!(conn, id);
             let wanted: Vec<&String> = wanted.iter().filter(|user| invited.contains(user)).collect();
             let gone: Vec<&String> = gone.iter().filter(|user| !invited.contains(user)).collect();
             Ok(crate::chatsvc::repo::set_members!(conn, chat, wanted, gone, at))
@@ -417,58 +481,24 @@ pub(super) async fn cancel(db: &Db, id: &str, version: i64) -> Result<(), DbErro
         .await)
 }
 
-/// Makes the invitations of each of `events` the accounts `wanted` (each with whether it is optional): who isn't
-/// among them loses the event, who is new is invited, and with `reset` everyone is asked again.
+/// Makes the invitations of one occurrence kept as the row `event` under `series` the accounts `wanted`
+/// ([`sync!`]), holding the series' row: the invitations under a series change one request after the other. Who
+/// lost the last invitation under the series.
 pub(super) async fn sync_attendees(
     db: &Db,
-    events: &[String],
+    series: &str,
+    event: &str,
     wanted: &[(String, bool)],
     reset: bool,
-) -> Result<(), DbError> {
-    let ids: Vec<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
+) -> Result<Vec<String>, DbError> {
+    let events = [event.to_owned()];
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
-            diesel::delete(
-                calendar_attendees::table
-                    .filter(calendar_attendees::event_id.eq_any(events))
-                    .filter(calendar_attendees::user_id.ne_all(&ids)),
-            )
-            .execute(conn)
-            .await?;
-            if reset {
-                diesel::update(calendar_attendees::table.filter(calendar_attendees::event_id.eq_any(events)))
-                    .set((
-                        calendar_attendees::response.eq("None"),
-                        calendar_attendees::responded_at.eq(None::<i64>),
-                        calendar_attendees::removed.eq(false),
-                    ))
-                    .execute(conn)
-                    .await?;
-            }
-            for event in events {
-                for (position, (user, optional)) in wanted.iter().enumerate() {
-                    let row = Attendee {
-                        event_id: event.clone(),
-                        user_id: user.clone(),
-                        position: i32::try_from(position).unwrap_or(i32::MAX),
-                        optional: *optional,
-                        response: "None".into(),
-                        responded_at: None,
-                        removed: false,
-                    };
-                    diesel::insert_into(calendar_attendees::table)
-                        .values(&row)
-                        .on_conflict((calendar_attendees::event_id, calendar_attendees::user_id))
-                        .do_update()
-                        .set((
-                            calendar_attendees::position.eq(row.position),
-                            calendar_attendees::optional.eq(row.optional),
-                        ))
-                        .execute(conn)
-                        .await?;
-                }
-            }
-            Ok(())
+            hold!(conn, series);
+            let before = invited!(conn, series);
+            sync!(conn, &events, wanted, reset);
+            let still = invited!(conn, series);
+            Ok(before.into_iter().filter(|user| !still.contains(user)).collect())
         })
         .await)
 }
@@ -672,10 +702,125 @@ mod tests {
         let (now, _) = event(&db, &series.id, &bert).await.unwrap().unwrap();
         assert!(keep_own_row(&db, &occurrence(20000, &now)).await.unwrap());
         assert!(event(&db, "series.20000", &bert).await.unwrap().unwrap().0.cancelled);
+    }
 
-        // the chat follows the invitations as they stand, not as a request saw them
-        let (added, taken) = ([account(&db, "cora@own.test").await], [bert]);
-        let settled = settle_chat(&db, &series.id, "19:meeting_none@thread.v2", &added, &taken);
-        assert!(!settled.await.unwrap());
+    async fn invited_under(db: &Db, id: &str) -> Result<Vec<String>, DbError> {
+        with_conn!(db, |conn| Ok(invited!(conn, id)))
+    }
+
+    async fn chat_of(db: &Db, id: &str, creator: &str) -> Result<(), DbError> {
+        use crate::chatsvc::schema::chats;
+        let chat = crate::chatsvc::repo::Chat {
+            id: id.to_owned(),
+            creator: creator.to_owned(),
+            topic: None,
+            unique_roster: false,
+            created_at: 1,
+            version: 1,
+        };
+        with_conn!(db, |conn| {
+            diesel::insert_into(chats::table).values(&chat).execute(conn).await?;
+        });
+        Ok(())
+    }
+
+    async fn in_chat(db: &Db, chat: &str) -> Result<Vec<String>, DbError> {
+        use crate::chatsvc::schema::chat_members;
+        with_conn!(db, |conn| Ok(chat_members::table
+            .filter(chat_members::chat_id.eq(chat))
+            .order(chat_members::position.asc())
+            .select(chat_members::user_id)
+            .load(conn)
+            .await?))
+    }
+
+    /// The chat takes in only who is invited by now and loses only who isn't, whatever a request saw; and the
+    /// change that takes someone's last invitation is the one that names them gone.
+    #[tokio::test]
+    async fn a_chat_follows_the_invitations_as_they_stand() {
+        const CHAT: &str = "19:meeting_sync@thread.v2";
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("calendar.sqlite").display());
+        let db = Db::connect(&url, 1).await.unwrap();
+        db.migrate().await.unwrap();
+        let (ada, bert) = (account(&db, "ada@own.test").await, account(&db, "bert@own.test").await);
+        let cora = account(&db, "cora@own.test").await;
+        let series = series(&ada);
+        let invited = Attendee {
+            event_id: series.id.clone(),
+            user_id: bert.clone(),
+            position: 0,
+            optional: false,
+            response: "Accepted".into(),
+            responded_at: Some(5),
+            removed: false,
+        };
+        insert(&db, &series, &[invited]).await.unwrap();
+        chat_of(&db, CHAT, &ada).await.unwrap();
+        let (only_bert, only_cora) = ([bert.clone()], [cora.clone()]);
+        let both = [(bert.clone(), false), (cora.clone(), false)];
+        assert!(settle_chat(&db, &series.id, CHAT, &only_bert, &[]).await.unwrap());
+
+        // a request that saw Bert gone and Cora invited, when neither is so
+        assert!(
+            !settle_chat(&db, &series.id, CHAT, &only_cora, &only_bert)
+                .await
+                .unwrap()
+        );
+        assert_eq!(in_chat(&db, CHAT).await.unwrap(), only_bert);
+
+        // Cora on one occurrence alone, then off it: that change names her gone, and Bert keeps the series'
+        let friday = Event {
+            id: "series.8000".into(),
+            series_id: Some(series.id.clone()),
+            original_start: Some(8000),
+            start_ms: 8000,
+            end_ms: 9000,
+            until_ms: 9000,
+            recurring: false,
+            ..series.clone()
+        };
+        put_own_row(&db, &friday).await.unwrap();
+        let gone = sync_attendees(&db, &series.id, &friday.id, &both, false).await.unwrap();
+        assert!(gone.is_empty());
+        assert!(settle_chat(&db, &series.id, CHAT, &only_cora, &gone).await.unwrap());
+        let gone = sync_attendees(&db, &series.id, &friday.id, &both[1..], false)
+            .await
+            .unwrap();
+        assert!(gone.is_empty(), "Bert, off this occurrence, still has the series");
+        let gone = sync_attendees(&db, &series.id, &friday.id, &both[..1], true)
+            .await
+            .unwrap();
+        assert_eq!(gone, only_cora);
+        let (_, mine) = event(&db, &friday.id, &bert).await.unwrap().unwrap();
+        assert_eq!(mine.unwrap().response, "None", "asked again");
+        assert!(settle_chat(&db, &series.id, CHAT, &only_bert, &gone).await.unwrap());
+        assert_eq!(in_chat(&db, CHAT).await.unwrap(), only_bert);
+
+        // the series changed whole brings its occurrence's invitations along in the same step
+        sync_attendees(&db, &series.id, &friday.id, &both, false).await.unwrap();
+        let renamed = Event {
+            version: 2,
+            ..series.clone()
+        };
+        let gone = save_whole(&db, &renamed, Some(Kept::Given("{}")), &both[..1], false)
+            .await
+            .unwrap();
+        assert_eq!(gone, only_cora);
+        assert!(event(&db, &friday.id, &cora).await.unwrap().unwrap().1.is_none());
+        assert_eq!(event(&db, &friday.id, &bert).await.unwrap().unwrap().0.version, 2);
+
+        // and one given a new rule forgets the occurrence, and whoever it alone invited
+        sync_attendees(&db, &series.id, &friday.id, &both, false).await.unwrap();
+        let reshaped = Event {
+            version: 3,
+            ..series.clone()
+        };
+        let gone = save_whole(&db, &reshaped, Some(Kept::Forgotten), &both[..1], true)
+            .await
+            .unwrap();
+        assert_eq!(gone, only_cora);
+        assert!(event(&db, &friday.id, &bert).await.unwrap().is_none());
+        assert_eq!(invited_under(&db, &series.id).await.unwrap(), only_bert);
     }
 }

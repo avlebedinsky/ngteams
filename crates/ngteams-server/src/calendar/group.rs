@@ -203,12 +203,13 @@ async fn own(app: &App, me: &Me, group: &str, uid: &str, contract: &Value) -> An
         .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
         .map(|time| time.timestamp_millis())
         .ok_or(Error::BAD_REQUEST)?;
-    let moved = if contract["eventType"].as_str() == Some("Exception") {
-        repo::changed_row_at(&app.db, &event.id, start).await?
+    // an `Exception` is only a saved row: none that starts there is none at all, not the series' own at that time
+    let id = if contract["eventType"].as_str() == Some("Exception") {
+        let moved = repo::changed_row_at(&app.db, &event.id, start).await?;
+        moved.ok_or(Error::NOT_FOUND)?
     } else {
-        None
+        wire::occurrence_id(&event.id, start)
     };
-    let id = moved.unwrap_or_else(|| wire::occurrence_id(&event.id, start));
     let found = Found::of(&app.db, &me.id, &id).await?;
     Ok((team, found))
 }
@@ -239,19 +240,20 @@ pub(super) async fn update(
     sent["inviteAllMembers"] = all.into();
     let channel = found.event.channel_id.clone().unwrap_or_default();
     let wanted = wanted(&app, &me.id, &sent, &channel, &mailbox(&app, &team)).await?;
-    let (row, reshaped, moved) = if one {
+    let mut rows = Vec::new();
+    let row = if one {
         let (row, moved) = write::occurrence_changed(&app, &found, draft).await?;
-        (row, false, moved)
+        let series = row.series_id.clone().unwrap_or_else(|| row.id.clone());
+        repo::sync_attendees(&app.db, &series, &row.id, &wanted, moved).await?;
+        row
     } else {
-        let (row, reshaped) = write::whole_changed(&app, &found, draft).await?;
-        let moved = (found.event.start_ms, found.event.end_ms) != (row.start_ms, row.end_ms);
-        (row, reshaped, moved)
+        let changed = write::whole_changed(&app, &found, draft, &wanted).await?;
+        if found.event.recurring && !changed.reshaped {
+            rows = repo::own_row_ids(&app.db, &changed.row.id).await?;
+        }
+        changed.row
     };
-    let mut rows = vec![row.id.clone()];
-    if found.event.recurring && !reshaped {
-        rows.extend(repo::own_row_ids(&app.db, &row.id).await?);
-    }
-    repo::sync_attendees(&app.db, &rows, &wanted, moved).await?;
+    rows.push(row.id.clone());
     repo::set_response(&app.db, &rows, &me.id, "Accepted", row.version).await?;
     let organizer = account(&app, &me.id).await?;
     if !one {
