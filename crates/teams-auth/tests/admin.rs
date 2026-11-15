@@ -454,9 +454,9 @@ fn only_an_own_server_has_account_management() -> TestResult {
 #[test]
 fn a_suggested_password_is_long_and_new_each_time() -> TestResult {
     let (first, second) = (suggested_password()?, suggested_password()?);
-    assert_ne!(first.expose(), second.expose());
+    assert_ne!(first, second);
     for password in [first, second] {
-        let groups: Vec<&str> = password.expose().split('-').collect();
+        let groups: Vec<&str> = password.split('-').collect();
         assert_eq!(groups.len(), 4);
         assert!(
             groups

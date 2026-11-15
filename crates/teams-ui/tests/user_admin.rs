@@ -225,6 +225,18 @@ impl Opened {
         self.cx.simulate_keystrokes(keys);
         self.settle();
     }
+
+    /// `key` pressed and let go: a focused button takes Enter or Space as it is let go.
+    fn press(&mut self, key: &str) {
+        let keystroke = gpui::Keystroke::parse(key).unwrap();
+        self.cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        self.cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        self.settle();
+    }
 }
 
 /// The account's service as the settings read it: the app hands it in or takes it away (`Accounts::set_admin`).
@@ -313,6 +325,11 @@ fn the_page_goes_once_the_account_is_no_administrator(cx: &mut TestAppContext) {
     assert_eq!(opened.cx.read(|cx| view.read(cx).page()), Page::General);
     assert!(!opened.shows("settings-page-users"));
     assert!(opened.cx.read(|cx| view.read(cx).users().is_none()));
+    // why the page went stays on screen until another page is chosen
+    assert!(opened.shows("settings-admin-gone"));
+    opened.click("settings-page-appearance");
+    opened.click("settings-page-general");
+    assert!(!opened.shows("settings-admin-gone"));
 }
 
 #[gpui::test]
@@ -382,6 +399,20 @@ fn a_list_that_cant_be_read_says_why_and_reads_again(cx: &mut TestAppContext) {
     );
 }
 
+/// The password given shows once, with Copy (which copies `password`), as a reset shows it; Done closes.
+fn shown_once_then_done(opened: &mut Opened, password: &str) {
+    let dialog = opened.dialog().expect("the password given");
+    assert!(opened.cx.read(|cx| dialog.read(cx).shows_given()));
+    assert!(opened.shows("user-dialog-given") && opened.shows("user-dialog-copy"));
+    opened.click("user-dialog-copy");
+    assert_eq!(
+        opened.cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some(password)
+    );
+    opened.click("user-dialog-confirm");
+    assert!(opened.dialog().is_none());
+}
+
 #[gpui::test]
 fn a_user_is_added_once_the_form_reads(cx: &mut TestAppContext) {
     let (server, mut opened) = page_opened(50, cx);
@@ -415,7 +446,7 @@ fn a_user_is_added_once_the_form_reads(cx: &mut TestAppContext) {
 
     opened.click("user-dialog-admin");
     opened.click("user-dialog-confirm");
-    assert!(opened.dialog().is_none());
+    shown_once_then_done(&mut opened, "a made-up password");
     assert_eq!(
         server.asked()[2],
         "add frank@example.test name=Frank Poe password=a made-up password admin=true must_change=true"
@@ -586,4 +617,160 @@ fn the_keyboard_walks_the_list_and_opens_a_user(cx: &mut TestAppContext) {
     opened.keys("tab tab");
     opened.keys("end home space");
     assert!(opened.dialog().is_some());
+}
+
+/// `n` made-up users, in user name order, the first an administrator.
+fn many(n: u8) -> Vec<AdminUser> {
+    (0..n)
+        .map(|at| {
+            user(
+                at,
+                &format!("user-{at:02}@example.test"),
+                &format!("User {at:02}"),
+                at == 0,
+            )
+        })
+        .collect()
+}
+
+/// A display name of `n` characters.
+fn long_name(n: usize) -> String {
+    "Bartholomew Alexander ".chars().cycle().take(n).collect()
+}
+
+#[gpui::test]
+fn a_display_name_too_long_is_said_before_it_is_sent(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("users-add");
+    opened.fill("frank@example.test", &long_name(300), "a made-up password");
+    opened.click("user-dialog-confirm");
+    assert_eq!(
+        opened.dialog_problem().as_deref(),
+        Some("Use a display name of at most 256 characters.")
+    );
+    assert_eq!(server.asked().len(), 1, "nothing was asked of the server");
+    // the server's own refusal says the same
+    assert_eq!(
+        AdminProblem::InvalidName.words().as_ref(),
+        "Enter a display name of at most 256 characters."
+    );
+    opened.fill("frank@example.test", &long_name(256), "a made-up password");
+    opened.click("user-dialog-confirm");
+    assert!(
+        server.asked()[1].starts_with("add frank@example.test "),
+        "{:?}",
+        server.asked()
+    );
+}
+
+#[gpui::test]
+fn the_delete_confirmation_starts_on_cancel(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("user-row-evan@example.test");
+    opened.click("user-dialog-delete");
+    assert!(opened.dialog().is_some());
+    // Enter takes the safe choice the keyboard starts on
+    opened.press("enter");
+    assert!(opened.dialog().is_none());
+    assert_eq!(server.asked().len(), 1, "nothing was deleted");
+    // Tab then Enter: Delete
+    opened.click("user-row-evan@example.test");
+    opened.click("user-dialog-delete");
+    opened.keys("tab");
+    opened.press("enter");
+    assert_eq!(server.asked()[1], "delete 00000000-0000-4000-8000-0000000000a3");
+    // Escape closes it
+    opened.click("user-row-dana@example.test");
+    opened.click("user-dialog-delete");
+    opened.keys("escape");
+    assert!(opened.dialog().is_none());
+}
+
+#[gpui::test]
+fn a_long_name_keeps_the_dialog_titles_short(cx: &mut TestAppContext) {
+    let server = Server::with(vec![user(1, "long@example.test", &long_name(200), false)], 50);
+    let mut opened = opened(Some(server), cx);
+    opened.click("settings-page-users");
+    opened.click("user-row-long@example.test");
+    for open in [None, Some("user-dialog-reset")] {
+        if let Some(button) = open {
+            opened.click(button);
+        }
+        let title = opened.cx.debug_bounds("user-dialog-title").expect("the title");
+        assert!(title.size.height < gpui::px(64.0), "{open:?}: {title:?}");
+    }
+    opened.keys("escape");
+    opened.click("user-row-long@example.test");
+    opened.click("user-dialog-delete");
+    let title = opened.cx.debug_bounds("user-dialog-title").expect("the title");
+    assert!(title.size.height < gpui::px(64.0), "delete: {title:?}");
+}
+
+#[gpui::test]
+fn the_page_stays_readable_in_a_narrow_window(cx: &mut TestAppContext) {
+    let mut users = three();
+    users[1].enabled = false;
+    let server = Server::with(users, 50);
+    let mut opened = opened(Some(server), cx);
+    opened.cx.simulate_resize(gpui::size(gpui::px(400.0), gpui::px(800.0)));
+    opened.click("settings-page-users");
+    let width = gpui::px(400.0);
+    let add = opened.cx.debug_bounds("users-add").expect("Add user");
+    assert!(add.right() <= width, "{add:?}");
+    let search = opened.cx.debug_bounds("users-search").expect("the search");
+    assert!(search.size.width >= gpui::px(160.0), "{search:?}");
+    for (name, badge) in [
+        ("user-name-ada@example.test", "user-badges-ada@example.test"),
+        ("user-name-dana@example.test", "user-badges-dana@example.test"),
+    ] {
+        let name = opened.cx.debug_bounds(name).expect("a name");
+        assert!(name.size.width >= gpui::px(120.0), "{name:?}");
+        let badges = opened.cx.debug_bounds(badge).expect("its badges");
+        assert!(badges.right() <= width, "{badges:?}");
+    }
+}
+
+#[gpui::test]
+fn the_focused_show_more_scrolls_into_view(cx: &mut TestAppContext) {
+    let server = Server::with(many(60), 50);
+    let mut opened = opened(Some(server), cx);
+    opened.cx.simulate_resize(gpui::size(gpui::px(1024.0), gpui::px(600.0)));
+    opened.click("settings-page-users");
+    assert_eq!(opened.listed().len(), 50);
+    // the search, Add user, the list, Show more
+    opened.click("users-search");
+    opened.keys("tab tab");
+    opened.keys("end");
+    let row = opened
+        .cx
+        .debug_bounds("user-row-user-49@example.test")
+        .expect("the last row");
+    assert!(
+        row.bottom() <= gpui::px(600.0),
+        "the list's cursor row is out of sight: {row:?}"
+    );
+    opened.keys("tab");
+    let more = opened.cx.debug_bounds("users-more").expect("Show more");
+    assert!(more.bottom() <= gpui::px(600.0), "Show more is out of sight: {more:?}");
+    opened.press("enter");
+    assert_eq!(opened.listed().len(), 60);
+}
+
+#[gpui::test]
+fn typing_in_a_dialog_doesnt_draw_the_list_again(cx: &mut TestAppContext) {
+    let server = Server::with(many(61), 61);
+    let mut opened = opened(Some(server), cx);
+    opened.click("settings-page-users");
+    opened.click("users-add");
+    let users = opened.users();
+    // the first key settles the dialog's field (its caret): the page may draw once
+    opened.cx.simulate_input("d");
+    opened.settle();
+    let before = opened.cx.read(|cx| users.read(cx).drawn());
+    for key in "ana@example.test".chars() {
+        opened.cx.simulate_input(&key.to_string());
+        opened.settle();
+    }
+    let after = opened.cx.read(|cx| users.read(cx).drawn());
+    assert_eq!(after, before, "the page drew again while the dialog was typed in");
 }

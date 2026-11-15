@@ -25,7 +25,8 @@
 //!   ([`crate::user_admin`]).
 //!
 //! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
-//! [`SettingsModel`] (and so to the file, and a device's to the calls) at once.
+//! [`SettingsModel`] (and so to the file, and a device's to the calls) at once. In a narrow window ([`narrow`]) the
+//! page column shows its pages' icons alone, each named by its tooltip, so the page keeps its width.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -40,6 +41,7 @@ use gpui_component::button::Button;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::switch::Switch;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable as _, Sizable as _};
 use teams_core::{Choice, Reporting};
 use teams_log::diagnostics::WARNING;
@@ -71,8 +73,14 @@ pub const FOLLOW_SYSTEM: &str = "system";
 
 /// The page column's width, px.
 const NAV_WIDTH: f32 = 240.0;
+/// The page column's width in a narrow window, its pages' icons alone, px.
+const NAV_NARROW_WIDTH: f32 = 56.0;
+/// A window narrower than this is narrow ([`narrow`]), px.
+const NARROW_WINDOW: f32 = 720.0;
 /// The widest a page's content gets, px.
 const PAGE_WIDTH: f32 = 880.0;
+/// What Settings say once the account's Manage users went because it is no administrator any more.
+pub const ADMIN_GONE: &str = "You're no longer an administrator of this server, so Manage users was closed.";
 /// A theme tile's width, px.
 const TILE_WIDTH: f32 = 96.0;
 /// A theme tile's preview height, px.
@@ -351,6 +359,8 @@ pub struct SettingsView {
     admin: Option<(AccountAdmin, Arc<ViewTrace>)>,
     /// The Manage users page, made the first time it shows.
     users: Option<Entity<ManageUsers>>,
+    /// Manage users went while it showed: the General page says why until another page is chosen.
+    admin_gone: bool,
     /// The video effects' picker while the Calls page shows.
     effects: Option<Entity<EffectsPicker>>,
     /// The local AI choices' pickers (captions, then recaps), made the first time the Calls page shows.
@@ -385,6 +395,7 @@ impl SettingsView {
             server: None,
             admin: None,
             users: None,
+            admin_gone: false,
             effects: None,
             ai: None,
             chat_ai: None,
@@ -458,14 +469,29 @@ impl SettingsView {
     }
 
     /// The Manage users page, made when it first shows; none without the account's server's account management.
-    fn users_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn users_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<ManageUsers>> {
         let admin = self.user_admin(cx)?;
         let trace = self.admin.as_ref().map(|(_, trace)| Arc::clone(trace))?;
         let me = self.account.clone().unwrap_or_default();
         let users = self
             .users
             .get_or_insert_with(|| cx.new(|cx| ManageUsers::new(admin, trace, me, window, cx)));
-        Some(users.clone().into_any_element())
+        Some(users.clone())
+    }
+
+    /// The Manage users page in the pane, its problems above it. The page is drawn from its last frame until it
+    /// changes itself: a key typed in its dialog draws the dialog alone, however long the list.
+    fn users_pane(&mut self, problems: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let users = self.users_page(window, cx);
+        div()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .children(problems.map(|problems| div().px_8().pt_6().child(problems)))
+            .children(users.map(|users| users.cached(gpui::StyleRefinement::default().flex_1().w_full().min_h_0())))
+            .into_any_element()
     }
 
     /// The Manage users page's dialog over the settings, while one is open.
@@ -522,6 +548,7 @@ impl SettingsView {
     pub fn show_page(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page != page {
             self.page = page;
+            self.admin_gone = false;
             cx.notify();
         }
     }
@@ -1255,55 +1282,76 @@ impl SettingsView {
 
     // --- the frame ---
 
+    /// A page's row in the page column: its icon and title (its icon alone in a narrow window, the title its tooltip).
+    fn nav_row(
+        &self,
+        page: Page,
+        (focused, narrow): (bool, bool),
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let shown = page == self.page;
+        let id: SharedString = format!("settings-page-{}", page.key()).into();
+        let selector = id.to_string();
+        let mark = page_mark(&id, shown, palette, cx);
+        div()
+            .debug_selector(move || selector.clone())
+            .id(id)
+            .relative()
+            .h(px(36.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(rgb(if shown { palette.brand } else { palette.foreground }))
+            .when(shown, |row| {
+                row.bg(theme::gradient(
+                    palette.selected,
+                    theme::mix(palette.selected, palette.surface, 0.6),
+                    90.0,
+                ))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
+            .child(mark)
+            // where the keyboard is: the page shown, ringed while the column has the focus
+            .border_1()
+            .border_color(rgb(if shown && focused {
+                palette.brand
+            } else {
+                palette.surface
+            }))
+            .when(!shown, |row| row.hover(move |row| row.bg(rgb(palette.hover))))
+            .child(page.glyph().icon().size(px(18.0)))
+            .map(|row| {
+                if narrow {
+                    row.justify_center()
+                        .tooltip(move |window, cx| Tooltip::new(page.title()).build(window, cx))
+                } else {
+                    row.child(page.title())
+                }
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.focus.focus(window, cx);
+                this.show_page(page, cx);
+            }))
+    }
+
     /// The page column: its title, then a row per page (Calls only where it has something), the shown one marked.
     fn nav(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let focused = self.focus.is_focused(window);
-        let rows = self.pages(cx).into_iter().map(|page| {
-            let shown = page == self.page;
-            let id: SharedString = format!("settings-page-{}", page.key()).into();
-            let selector = id.to_string();
-            let mark = page_mark(&id, shown, palette, cx);
-            div()
-                .debug_selector(move || selector.clone())
-                .id(id)
-                .relative()
-                .h(px(36.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .gap_3()
-                .rounded_md()
-                .cursor_pointer()
-                .text_color(rgb(if shown { palette.brand } else { palette.foreground }))
-                .when(shown, |row| {
-                    row.bg(theme::gradient(
-                        palette.selected,
-                        theme::mix(palette.selected, palette.surface, 0.6),
-                        90.0,
-                    ))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                })
-                .child(mark)
-                // where the keyboard is: the page shown, ringed while the column has the focus
-                .border_1()
-                .border_color(rgb(if shown && focused {
-                    palette.brand
-                } else {
-                    palette.surface
-                }))
-                .when(!shown, |row| row.hover(move |row| row.bg(rgb(palette.hover))))
-                .child(page.glyph().icon().size(px(18.0)))
-                .child(page.title())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.focus.focus(window, cx);
-                    this.show_page(page, cx);
-                }))
-        });
+        let narrow = narrow(window);
+        let rows: Vec<_> = self
+            .pages(cx)
+            .into_iter()
+            .map(|page| self.nav_row(page, (focused, narrow), palette, cx))
+            .collect();
         div()
             .debug_selector(|| "settings-nav".to_owned())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::page_key))
-            .w(px(NAV_WIDTH))
+            .w(px(if narrow { NAV_NARROW_WIDTH } else { NAV_WIDTH }))
             .h_full()
             .flex_none()
             .flex()
@@ -1321,7 +1369,13 @@ impl SettingsView {
                     .items_center()
                     .text_lg()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child("Settings"),
+                    .map(|header| {
+                        if narrow {
+                            header.justify_center().child(Glyph::SETTINGS.icon().size(px(18.0)))
+                        } else {
+                            header.child("Settings")
+                        }
+                    }),
             )
             .children(rows)
             .into_any_element()
@@ -1341,6 +1395,9 @@ impl SettingsView {
                 if let Some(server) = self.server_box(palette, cx) {
                     boxes.insert(0, server);
                 }
+                if self.admin_gone {
+                    boxes.insert(0, note_box("settings-admin-gone", ADMIN_GONE, palette));
+                }
                 boxes.push(self.chat_ai_picker(cx).into_any_element());
                 boxes.push(self.correction_ai_picker(cx).into_any_element());
                 boxes.push(self.message_translation_ai_picker(cx).into_any_element());
@@ -1354,7 +1411,8 @@ impl SettingsView {
                 let model = self.model.clone();
                 self.diagnostics(settings, model.read(cx), palette)
             }
-            Page::Users => self.users_page(window, cx).into_iter().collect(),
+            // drawn by its own view ([`SettingsView::users_pane`])
+            Page::Users => Vec::new(),
         }
     }
 }
@@ -1742,6 +1800,63 @@ fn media_unavailable() -> AnyElement {
 pub const MEDIA_UNAVAILABLE: &str = "The app couldn't set up your microphone, speaker and camera, so you can't make or \
                                      answer calls. Restart the app to try again. Chats work as usual.";
 
+/// Whether `window` is narrow: the settings' page column shows its icons alone, a page's rows wrap.
+#[must_use]
+pub fn narrow(window: &Window) -> bool {
+    window.viewport_size().width < px(NARROW_WINDOW)
+}
+
+/// A page's column in the settings' pane: its title, then its boxes (less padded in a narrow window).
+pub(crate) fn page_column(title: &'static str, window: &Window) -> gpui::Div {
+    div()
+        .w_full()
+        .max_w(px(PAGE_WIDTH))
+        .map(|column| {
+            if narrow(window) {
+                column.px_4().pt_4()
+            } else {
+                column.px_8().pt_6()
+            }
+        })
+        .pb_8()
+        .flex()
+        .flex_col()
+        .gap_6()
+        .child(
+            div()
+                .text_size(px(22.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title),
+        )
+}
+
+/// `column`, the page `page`'s, fading in from a little below as the page is chosen.
+pub(crate) fn page_in(column: gpui::Div, page: Page, cx: &App) -> AnyElement {
+    crate::motion::rise(
+        column,
+        SharedString::from(format!("settings-in-{}", page.key())),
+        8.0,
+        cx,
+    )
+}
+
+/// A note, said in a box with the settings' own edge and a mark.
+fn note_box(selector: &'static str, words: &'static str, palette: Palette) -> AnyElement {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .flex()
+        .gap_3()
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .bg(rgb(palette.surface))
+        .text_sm()
+        .child(Glyph::INFO.icon().size(px(16.0)).text_color(rgb(palette.brand)))
+        .child(div().flex_1().min_w_0().child(words))
+        .into_any_element()
+}
+
 /// A problem, said in a box with Teams' red edge and a mark, a line per element.
 fn warning_box(selector: &'static str, lines: impl IntoIterator<Item = AnyElement>) -> AnyElement {
     div()
@@ -1768,15 +1883,37 @@ impl Render for SettingsView {
             self.put_away();
         }
         if self.user_admin(cx).is_none() {
-            // the account is no administrator (any more): its page and what it listed go
+            // the account is no administrator (any more): its page and what it listed go, and why is said
             self.users = None;
             if self.page == Page::Users {
                 self.page = Page::General;
+                self.admin_gone = true;
             }
         }
-        let settings = self.model.read(cx).settings().clone();
-        let content = self.page_content(&settings, palette, window, cx);
         let problems = problems(self.model.read(cx));
+        let pane = if self.page == Page::Users {
+            self.users_pane(problems, window, cx)
+        } else {
+            let settings = self.model.read(cx).settings().clone();
+            let content = self.page_content(&settings, palette, window, cx);
+            // scrolled: a page outgrows the pane at a large font size or in a small window
+            div()
+                .id("settings")
+                .debug_selector(|| "settings".to_owned())
+                .flex_1()
+                .h_full()
+                .min_w_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(page_in(
+                    page_column(self.page.title(), window)
+                        .children(problems)
+                        .children(content),
+                    self.page,
+                    cx,
+                ))
+                .into_any_element()
+        };
         let nav = self.nav(palette, window, cx);
         let user_dialog = self.user_dialog(cx);
         div()
@@ -1786,43 +1923,7 @@ impl Render for SettingsView {
             .flex()
             .bg(rgb(palette.background))
             .child(nav)
-            .child(
-                // scrolled: a page outgrows the pane at a large font size or in a small window
-                div()
-                    .id("settings")
-                    .debug_selector(|| "settings".to_owned())
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child({
-                        let page = div()
-                            .w_full()
-                            .max_w(px(PAGE_WIDTH))
-                            .px_8()
-                            .pt_6()
-                            .pb_8()
-                            .flex()
-                            .flex_col()
-                            .gap_6()
-                            .child(
-                                div()
-                                    .text_size(px(22.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(self.page.title()),
-                            )
-                            .children(problems)
-                            .children(content);
-                        // another page fades in from a little below
-                        crate::motion::rise(
-                            page,
-                            SharedString::from(format!("settings-in-{}", self.page.key())),
-                            8.0,
-                            cx,
-                        )
-                    }),
-            )
+            .child(pane)
             .children(user_dialog)
     }
 }

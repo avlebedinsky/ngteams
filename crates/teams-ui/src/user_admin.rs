@@ -8,20 +8,28 @@
 //! account, off the foreground, and only an account whose server says it is an administrator gets one. What the
 //! server refuses is said in the user's words ([`AdminProblem::words`]).
 //!
-//! **The keyboard**: Tab walks the search, "Add user" and the list; in the list Up, Down, Home and End move, Enter or
-//! Space opens the account. A dialog traps Tab, Enter in a field confirms, Escape closes (Escape and Cancel wait while
-//! its change is under way); the search has the keyboard again once a dialog closes.
+//! **The keyboard**: Tab walks the search, "Add user", the list and "Show more"; in the list Up, Down, Home and End
+//! move, Enter or Space opens the account; the row or button the keyboard is on is scrolled into sight. A dialog traps
+//! Tab, Enter in a field confirms, Escape closes (Escape and Cancel wait while its change is under way); the delete
+//! confirmation starts on Cancel. The search has the keyboard again once a dialog closes.
 //!
-//! Traced: `user-admin shown`, `listed` (the accounts by id), `dialog`, `done` and `failed`, each with a kind, never
-//! a name or a password.
+//! **Drawing**: the page is its own view, drawn from its last frame until it changes itself (the settings cache it),
+//! so a key typed in a dialog over a long list draws the dialog alone. In a narrow window a row's marks go under its
+//! user name and the search and "Add user" wrap.
+//!
+//! A password the administrator gave (a user added, a password reset) is shown once, with Copy, before the dialog
+//! closes.
+//!
+//! Traced: `user-admin shown`, `listed` (the accounts by id), `dialog`, `done` and `failed` (the server's refusal or
+//! the form's own), each with a kind, never a name or a password.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    AnyElement, App, AppContext as _, AsyncApp, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -48,6 +56,14 @@ pub const SHORT_PASSWORD: &str = "Use a password of at least 8 characters.";
 const _: () = assert!(MIN_PASSWORD == 8, "SHORT_PASSWORD names another minimum");
 /// What the search asks for when it is empty.
 pub const SEARCH_PLACEHOLDER: &str = "Search by name or user name";
+/// The longest display name and user name the server takes, in characters.
+pub const MAX_NAME: usize = 256;
+/// What a display name longer than [`MAX_NAME`] is told.
+pub const LONG_NAME: &str = "Use a display name of at most 256 characters.";
+/// What a user name longer than [`MAX_NAME`] is told.
+pub const LONG_UPN: &str = "Use a user name of at most 256 characters.";
+// the words name the limit: they change with it
+const _: () = assert!(MAX_NAME == 256, "LONG_NAME and LONG_UPN name another limit");
 
 /// A new account, as the administrator fills it in.
 #[derive(Clone, Debug)]
@@ -89,7 +105,8 @@ impl AdminProblem {
             }
             Self::UpnTaken => "Another user already has this user name.".into(),
             Self::InvalidUpn => "Enter a user name like name@example.com.".into(),
-            Self::InvalidName => "Enter a display name.".into(),
+            // the server refuses an empty name and one too long alike
+            Self::InvalidName => "Enter a display name of at most 256 characters.".into(),
             Self::WeakPassword => SHORT_PASSWORD.into(),
             Self::NotFound => "This user no longer exists.".into(),
             Self::NotAdmin => "You're no longer an administrator of this server.".into(),
@@ -180,6 +197,18 @@ pub trait UserAdmin: Send + Sync + 'static {
     fn reset_password(&self, id: &str, password: &Secret, must_change: bool) -> Result<(), AdminProblem>;
 }
 
+/// The most of a name a title or a sentence shows, in characters: a longer one ends in an ellipsis.
+const SHOWN_NAME: usize = 60;
+
+/// `name`, cut to [`SHOWN_NAME`] characters with an ellipsis.
+fn short(name: &str) -> String {
+    if name.chars().count() <= SHOWN_NAME {
+        return name.to_owned();
+    }
+    let cut: String = name.chars().take(SHOWN_NAME - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 /// Whether `text` reads as a user name (`name@domain`, no spaces).
 fn looks_like_upn(text: &str) -> bool {
     text.split_once('@').is_some_and(|(name, domain)| {
@@ -242,8 +271,10 @@ pub struct UserDialog {
     /// What the fields held when the problem was said: an edit clears it (the kit's input also tells a change after
     /// an Enter that changed nothing, which must not).
     said_for: (String, String, String),
-    /// The password a reset set, shown until the dialog closes.
-    given: Option<Secret>,
+    /// The password an add or a reset set, shown until the dialog closes, and to whom it goes.
+    given: Option<(String, String)>,
+    /// The confirmation takes the keyboard to its first button (Cancel) once it is drawn.
+    focus_first_button: bool,
     /// The dialog itself takes the keyboard at the next draw (the field that had it is gone).
     focus_dialog: bool,
     working: Option<Task<()>>,
@@ -312,6 +343,7 @@ impl UserDialog {
             problem: None,
             said_for: Default::default(),
             given: None,
+            focus_first_button: kind == DialogKind::Delete,
             focus_dialog: false,
             working: None,
             focus,
@@ -330,7 +362,7 @@ impl UserDialog {
         self.problem.as_ref()
     }
 
-    /// Whether a reset went through and its password shows.
+    /// Whether an add or a reset went through and its password shows.
     #[must_use]
     pub fn shows_given(&self) -> bool {
         self.given.is_some()
@@ -366,7 +398,6 @@ impl UserDialog {
     pub fn suggest_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match teams_auth::admin::suggested_password() {
             Ok(password) => {
-                let password = password.expose().to_owned();
                 self.password
                     .update(cx, |field, cx| field.set_value(password, window, cx));
                 self.problem = None;
@@ -398,17 +429,21 @@ impl UserDialog {
         }
     }
 
-    /// What keeps the form from being sent, said under it.
-    fn form_problem(&self, cx: &App) -> Option<&'static str> {
+    /// What keeps the form from being sent, said under it, and its name in the trace.
+    fn form_problem(&self, cx: &App) -> Option<(&'static str, &'static str)> {
         let (upn, name, password) = self.values(cx);
         let names = matches!(self.kind, DialogKind::Add | DialogKind::Edit);
         let passwords = matches!(self.kind, DialogKind::Add | DialogKind::Reset);
-        if names && !looks_like_upn(&upn) {
-            Some("Enter a user name like name@example.com.")
+        if names && upn.chars().count() > MAX_NAME {
+            Some((LONG_UPN, "long-upn"))
+        } else if names && !looks_like_upn(&upn) {
+            Some(("Enter a user name like name@example.com.", "invalid-upn"))
         } else if names && name.is_empty() {
-            Some("Enter a display name.")
+            Some(("Enter a display name.", "invalid-name"))
+        } else if names && name.chars().count() > MAX_NAME {
+            Some((LONG_NAME, "long-name"))
         } else if passwords && password.chars().count() < MIN_PASSWORD {
-            Some(SHORT_PASSWORD)
+            Some((SHORT_PASSWORD, "weak-password"))
         } else {
             None
         }
@@ -429,19 +464,24 @@ impl UserDialog {
         if !self.can_confirm(cx) {
             return;
         }
-        if let Some(words) = self.form_problem(cx) {
+        if let Some((words, kind)) = self.form_problem(cx) {
+            self.trace.record(&TraceLine::new("user-admin", "failed").kind(kind));
             self.say(words.into(), cx);
             return;
         }
-        let (upn, display_name, password) = self.values(cx);
-        let password = Secret::new(password);
+        let (upn, display_name, typed) = self.values(cx);
+        let given_to = match &self.user {
+            Some(_) => self.shown_name(),
+            None if display_name.is_empty() => upn.clone(),
+            None => display_name.clone(),
+        };
         let admin = Arc::clone(&self.admin);
         let id = self.user.as_ref().map(|user| user.id.clone()).unwrap_or_default();
         let (kind, must_change, changes) = (self.kind, self.ticks.must_change, self.changes(cx));
         let new = NewAccount {
             upn,
             display_name,
-            password: password.clone(),
+            password: Secret::new(typed.clone()),
             admin: self.ticks.admin,
             must_change_password: must_change,
         };
@@ -458,19 +498,19 @@ impl UserDialog {
         cx.notify();
         self.working = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = asked.await;
-            let _ = this.update(cx, |this, cx| this.answered(answer, password, cx));
+            let _ = this.update(cx, |this, cx| this.answered(answer, (typed, given_to), cx));
         }));
     }
 
-    fn answered(&mut self, answer: Result<(), AdminProblem>, password: Secret, cx: &mut Context<Self>) {
+    fn answered(&mut self, answer: Result<(), AdminProblem>, given: (String, String), cx: &mut Context<Self>) {
         self.working = None;
         self.busy = false;
         match answer {
             Ok(()) => {
                 self.trace
                     .record(&TraceLine::new("user-admin", "done").kind(self.kind.key()));
-                if self.kind == DialogKind::Reset {
-                    self.given = Some(password);
+                if matches!(self.kind, DialogKind::Add | DialogKind::Reset) {
+                    self.given = Some(given);
                     self.focus_dialog = true;
                     cx.notify();
                 } else {
@@ -507,7 +547,7 @@ impl UserDialog {
                 };
                 cx.emit(closed);
             }
-            // the password a reset set is read, then Enter closes
+            // the password given is read, then Enter closes
             "enter" if self.given.is_some() => {
                 cx.stop_propagation();
                 cx.emit(UserDialogEvent::Changed);
@@ -626,41 +666,45 @@ impl UserDialog {
         ]
     }
 
-    fn reset_form(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<gpui::Div> {
-        if let Some(given) = &self.given {
-            let copied = given.expose().to_owned();
-            return vec![
-                div().text_sm().child(format!(
-                    "Give {} this password. It isn't shown again.",
-                    self.shown_name()
+    /// The password given, shown once with Copy.
+    fn given_form(&self, palette: Palette) -> Option<Vec<gpui::Div>> {
+        let (given, to) = self.given.as_ref()?;
+        let copied = given.clone();
+        Some(vec![
+            div()
+                .text_sm()
+                .line_clamp(3)
+                .text_ellipsis()
+                .child(format!("Give {} this password. It isn't shown again.", short(to))),
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .debug_selector(|| "user-dialog-given".to_owned())
+                        .flex_1()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .bg(rgb(palette.background))
+                        .font_family("monospace")
+                        .child(given.clone()),
+                )
+                .child(selected_by(
+                    "user-dialog-copy",
+                    icon_button("user-dialog-copy", Glyph::COPY, "Copy password").on_click(
+                        move |_, _, cx: &mut App| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                        },
+                    ),
                 )),
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .debug_selector(|| "user-dialog-given".to_owned())
-                            .flex_1()
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(palette.border))
-                            .bg(rgb(palette.background))
-                            .font_family("monospace")
-                            .child(given.expose().to_owned()),
-                    )
-                    .child(selected_by(
-                        "user-dialog-copy",
-                        icon_button("user-dialog-copy", Glyph::COPY, "Copy password").on_click(
-                            move |_, _, cx: &mut App| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                            },
-                        ),
-                    )),
-            ];
-        }
+        ])
+    }
+
+    fn reset_form(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<gpui::Div> {
         vec![
             div()
                 .text_sm()
@@ -680,8 +724,9 @@ impl UserDialog {
 
     /// The dialog's title and its confirming button's word.
     fn words(&self) -> (String, &'static str) {
-        let name = self.shown_name();
+        let name = short(&self.shown_name());
         match self.kind {
+            DialogKind::Add if self.given.is_some() => ("User added".to_owned(), "Done"),
             DialogKind::Add => ("Add a user".to_owned(), "Add"),
             DialogKind::Edit => (format!("Edit {name}"), "Save"),
             DialogKind::Reset if self.given.is_some() => ("Password reset".to_owned(), "Done"),
@@ -750,21 +795,34 @@ impl Render for UserDialog {
         if std::mem::take(&mut self.focus_dialog) {
             self.focus.focus(window, cx);
         }
+        if std::mem::take(&mut self.focus_first_button) {
+            // the buttons' own focus exists once they are drawn: the safe choice, Cancel, comes first in the trap
+            let root = self.focus.clone();
+            window.defer(cx, move |window, cx| keyboard::move_within(&root, true, window, cx));
+        }
         let (heading, confirm) = self.words();
-        let form = match self.kind {
-            DialogKind::Add => self.add_form(cx),
-            DialogKind::Edit => self.edit_form(cx),
-            DialogKind::Reset => self.reset_form(palette, cx),
-            DialogKind::Delete => vec![div().text_sm().child(
-                "They're signed out everywhere and can't sign in again. Their messages stay. This can't be undone.",
-            )],
+        let form = match self.given_form(palette) {
+            Some(given) => given,
+            None => match self.kind {
+                DialogKind::Add => self.add_form(cx),
+                DialogKind::Edit => self.edit_form(cx),
+                DialogKind::Reset => self.reset_form(palette, cx),
+                DialogKind::Delete => vec![div().text_sm().child(
+                    "They're signed out everywhere and can't sign in again. Their messages stay. This can't be undone.",
+                )],
+            },
         };
         surface("user-dialog", palette, window)
             .w(px(480.0))
             .key_context("UserDialog")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
-            .child(title(heading))
+            .child(
+                title(heading)
+                    .debug_selector(|| "user-dialog-title".to_owned())
+                    .line_clamp(2)
+                    .text_ellipsis(),
+            )
             .children(form)
             .children(self.problem.clone().map(|words| {
                 div()
@@ -805,11 +863,21 @@ pub struct ManageUsers {
     /// The list's cursor row while the list has the keyboard.
     at: usize,
     list_focus: FocusHandle,
+    /// Holds "Show more": the page scrolls to it as the keyboard comes to it.
+    more_focus: FocusHandle,
+    /// Whether "Show more" had the keyboard at the last draw.
+    more_had_focus: bool,
+    /// The page's scrolling.
+    scroll: ScrollHandle,
+    /// Where the list's rows were drawn, to scroll the cursor row into sight.
+    rows: ScrollHandle,
     dialog: Option<(Entity<UserDialog>, Subscription)>,
     /// Counts the reads, so an older one's answer is dropped.
     read: u64,
     reading: Option<Task<()>>,
     shown: bool,
+    /// How many times the page drew.
+    drawn: u64,
     _search: Subscription,
 }
 
@@ -838,10 +906,15 @@ impl ManageUsers {
             problem: None,
             at: 0,
             list_focus: cx.focus_handle(),
+            more_focus: cx.focus_handle(),
+            more_had_focus: false,
+            scroll: ScrollHandle::new(),
+            rows: ScrollHandle::new(),
             dialog: None,
             read: 0,
             reading: None,
             shown: false,
+            drawn: 0,
             _search: searching,
         }
     }
@@ -868,6 +941,12 @@ impl ManageUsers {
     #[must_use]
     pub fn dialog(&self) -> Option<&Entity<UserDialog>> {
         self.dialog.as_ref().map(|(dialog, _)| dialog)
+    }
+
+    /// How many times the page drew (a dialog's typing draws the dialog alone).
+    #[must_use]
+    pub fn drawn(&self) -> u64 {
+        self.drawn
     }
 
     /// The search's field.
@@ -978,11 +1057,26 @@ impl ManageUsers {
         if let Some(to) = keyboard::list_step(event, self.users.len(), Some(self.at)) {
             cx.stop_propagation();
             self.at = to;
+            if let Some(row) = self.rows.bounds_for_item(to) {
+                self.reveal(row);
+            }
             cx.notify();
         } else if matches!(event.keystroke.key.as_str(), "enter" | "space") && !event.keystroke.modifiers.modified() {
             cx.stop_propagation();
             self.open_row(self.at, window, cx);
         }
+    }
+
+    /// Scrolls the page the least that shows `item` (as it was last drawn) whole.
+    fn reveal(&self, item: Bounds<Pixels>) {
+        let view = self.scroll.bounds();
+        let mut offset = self.scroll.offset();
+        if item.bottom() > view.bottom() {
+            offset.y -= item.bottom() - view.bottom();
+        } else if item.top() < view.top() {
+            offset.y += view.top() - item.top();
+        }
+        self.scroll.set_offset(offset);
     }
 
     fn badge(words: &'static str, color: u32) -> gpui::Div {
@@ -997,7 +1091,13 @@ impl ManageUsers {
             .child(words)
     }
 
-    fn row(&self, at: usize, user: &AdminUser, lit: bool, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn row(
+        &self,
+        (at, user): (usize, &AdminUser),
+        (lit, narrow): (bool, bool),
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let name: SharedString = if user.display_name.is_empty() {
             user.upn.clone().into()
         } else {
@@ -1005,6 +1105,28 @@ impl ManageUsers {
         };
         let own = self.me.ends_with(&user.id);
         let selector = format!("user-row-{}", user.upn);
+        let name_selector = format!("user-name-{}", user.upn);
+        let badges_selector = format!("user-badges-{}", user.upn);
+        // what marks the account, beside its name, or under it in a narrow window
+        let badges = div()
+            .debug_selector(move || badges_selector.clone())
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .when(own, |row| row.child(Self::badge("You", palette.muted_foreground)))
+            .when(user.admin, |row| row.child(Self::badge("Administrator", palette.brand)))
+            .when(user.must_change_password, |row| {
+                row.child(Self::badge("New password due", palette.muted_foreground))
+            })
+            .when(!user.enabled, |row| {
+                row.child(Self::badge("Can't sign in", theme::DANGER))
+            });
+        let marked = own || user.admin || user.must_change_password || !user.enabled;
+        let (under, beside) = match (marked, narrow) {
+            (false, _) => (None, None),
+            (true, true) => (Some(badges.pt_1()), None),
+            (true, false) => (None, Some(badges.flex_none())),
+        };
         div()
             .debug_selector(move || selector.clone())
             .id(("user-row", at))
@@ -1028,6 +1150,7 @@ impl ManageUsers {
                     .flex_col()
                     .child(
                         div()
+                            .debug_selector(move || name_selector.clone())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .truncate()
                             .child(name.clone()),
@@ -1038,16 +1161,10 @@ impl ManageUsers {
                             .text_color(rgb(palette.muted_foreground))
                             .truncate()
                             .child(user.upn.clone()),
-                    ),
+                    )
+                    .children(under),
             )
-            .when(own, |row| row.child(Self::badge("You", palette.muted_foreground)))
-            .when(user.admin, |row| row.child(Self::badge("Administrator", palette.brand)))
-            .when(user.must_change_password, |row| {
-                row.child(Self::badge("New password due", palette.muted_foreground))
-            })
-            .when(!user.enabled, |row| {
-                row.child(Self::badge("Can't sign in", theme::DANGER))
-            })
+            .children(beside)
             .child(
                 Glyph::CHEVRON_RIGHT
                     .icon()
@@ -1058,15 +1175,18 @@ impl ManageUsers {
             .into_any_element()
     }
 
+    /// The search and "Add user", which goes under it when both don't fit.
     fn toolbar(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_3()
             .child(
                 div()
                     .debug_selector(|| "users-search".to_owned())
                     .flex_1()
+                    .min_w(px(200.0))
                     .child(Input::new(&self.search).prefix(Glyph::SEARCH.icon().size(px(14.0)))),
             )
             .child(selected_by(
@@ -1120,16 +1240,18 @@ impl ManageUsers {
             return self.no_rows(palette, cx);
         }
         let focused = self.list_focus.is_focused(window);
+        let narrow = crate::settings_view::narrow(window);
         let rows: Vec<AnyElement> = self
             .users
             .iter()
             .enumerate()
-            .map(|(at, user)| self.row(at, user, focused && at == self.at, palette, cx))
+            .map(|(at, user)| self.row((at, user), (focused && at == self.at, narrow), palette, cx))
             .collect();
         div()
             .debug_selector(|| "users-list".to_owned())
             .id("users-list")
             .track_focus(&self.list_focus.clone().tab_stop(true))
+            .track_scroll(&self.rows)
             .on_key_down(cx.listener(Self::list_key))
             .p_1()
             .flex()
@@ -1143,41 +1265,81 @@ impl ManageUsers {
     }
 }
 
+impl ManageUsers {
+    /// "Show more", scrolled into sight as the keyboard comes to it.
+    fn more(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let more_focused = self.more_focus.contains_focused(window, cx);
+        if more_focused && !self.more_had_focus {
+            self.scroll.scroll_to_bottom();
+        }
+        self.more_had_focus = more_focused;
+        (self.next.is_some() && self.problem.is_none()).then(|| {
+            div()
+                .track_focus(&self.more_focus)
+                .flex()
+                .justify_center()
+                .child(selected_by(
+                    "users-more",
+                    Button::new("users-more")
+                        .outline()
+                        .label("Show more")
+                        .disabled(self.loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.read_more(cx))),
+                ))
+        })
+    }
+}
+
 impl Render for ManageUsers {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        self.drawn += 1;
         self.show(cx);
-        div()
-            .debug_selector(|| "manage-users".to_owned())
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child("Add the people who use this server, and choose who can manage it."),
-            )
-            .child(self.toolbar(cx))
-            .child(self.list(palette, window, cx))
-            .when(self.next.is_some() && self.problem.is_none(), |page| {
-                page.child(
-                    div().flex().justify_center().child(selected_by(
-                        "users-more",
-                        Button::new("users-more")
-                            .outline()
-                            .label("Show more")
-                            .disabled(self.loading)
-                            .on_click(cx.listener(|this, _, _, cx| this.read_more(cx))),
-                    )),
+        let more = self.more(window, cx);
+        let column = crate::settings_view::page_column(crate::settings_view::Page::Users.title(), window).child(
+            div()
+                .debug_selector(|| "manage-users".to_owned())
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child("Add the people who use this server, and choose who can manage it."),
                 )
-            })
+                .child(self.toolbar(cx))
+                .child(self.list(palette, window, cx))
+                .children(more),
+        );
+        div()
+            .id("users-page")
+            .debug_selector(|| "settings".to_owned())
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .child(crate::settings_view::page_in(
+                column,
+                crate::settings_view::Page::Users,
+                cx,
+            ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminProblem, looks_like_upn};
+    use super::{AdminProblem, SHOWN_NAME, looks_like_upn, short};
+
+    #[test]
+    fn a_long_name_is_cut_with_an_ellipsis() {
+        assert_eq!(short("Dana Doe"), "Dana Doe");
+        let exact = "a".repeat(SHOWN_NAME);
+        assert_eq!(short(&exact), exact);
+        let cut = short(&"Bartholomew ".repeat(20));
+        assert!(cut.ends_with("w…") || cut.ends_with('…'), "{cut}");
+        assert!(cut.chars().count() <= SHOWN_NAME, "{cut}");
+        assert!(!cut.contains(" …"), "{cut}");
+    }
 
     #[test]
     fn a_user_name_is_a_name_at_a_domain() {

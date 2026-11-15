@@ -455,11 +455,11 @@ impl AdminClient {
 const PASSWORD_ALPHABET: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
 
 /// A password made up for an account an administrator adds or resets: four groups of five letters and digits (100
-/// random bits), easy to read out and to type.
+/// random bits), easy to read out and to type. Plain text: it is made to be shown to the administrator and copied.
 ///
 /// # Errors
 /// When the system's random source fails.
-pub fn suggested_password() -> Result<Secret, getrandom::Error> {
+pub fn suggested_password() -> Result<String, getrandom::Error> {
     let mut random = [0_u8; 20];
     getrandom::fill(&mut random)?;
     let mut password = String::with_capacity(23);
@@ -469,7 +469,7 @@ pub fn suggested_password() -> Result<Secret, getrandom::Error> {
         }
         password.push(char::from(PASSWORD_ALPHABET[usize::from(byte & 31)]));
     }
-    Ok(Secret::from(password))
+    Ok(password)
 }
 
 fn bearer(request: reqwest::RequestBuilder, token: &Secret) -> reqwest::RequestBuilder {

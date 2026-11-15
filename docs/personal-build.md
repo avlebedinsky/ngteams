@@ -79,7 +79,8 @@ run side by side in one window, and each one keeps its own:
 A server with its own certificate authority names that file in the form's last field, "Certificate authority file
 (optional)", which writes `ca_file` into the account's entry; an entry written by hand with `upn`, `server` and
 `ca_file` is taken up the same way when its server and user name are typed. An entry written by hand that holds a
-`ca_file` stays when its sign-in fails; a bare one, and one the failed attempt itself made, is removed.
+`ca_file` stays when its sign-in fails; a bare one, and one the failed attempt itself made, is removed. A server whose
+certificate isn't trusted is said so (not "can't be reached"), pointing at that field.
 
 **A server without an administrator.** Once the server's address is entered (and again before a sign-in is sent),
 the app asks the server's setup endpoint. A new server answers that it has no administrator yet, and the window says
@@ -93,12 +94,13 @@ server (by user name and current password: such an account holds no token) and s
 
 **Manage users.** An own server's account that its server says is an administrator has a "Manage users" page in its
 Settings: the server's accounts with a search and "Show more", "Add user", and for each account its name, user name,
-"Can sign in", "Administrator", "Reset password" (the new password is shown once, with "Ask for a new password at
-the next sign-in") and "Delete user" after a confirmation. What the server refuses (the only administrator, a user
+"Can sign in", "Administrator", "Reset password" (with "Ask for a new password at the next sign-in") and "Delete
+user" after a confirmation that starts on Cancel. The password a new user or a reset gets is shown once, with Copy. What the server refuses (the only administrator, a user
 name already taken) is said in the dialog. The page's requests carry that account's token to that account's server
 only. The app asks each own server's account's server (`/api/account/v1/me`) whether the account is an
 administrator when the account starts, and again later while the server gives no answer; once the page hears that
-the account is no administrator any more, the page goes. A Microsoft 365 account has no such page and nothing is
+the account is no administrator any more, the page goes and Settings say why. An account an administrator turned
+off is signed out with that said, and no sign-in window opens for it. A Microsoft 365 account has no such page and nothing is
 asked for it; an own server's account that is no administrator has none either. `ngteamsctl open settings users`
 opens it for an account that has it.
 
