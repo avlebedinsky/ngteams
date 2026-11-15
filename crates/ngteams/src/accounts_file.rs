@@ -201,6 +201,25 @@ impl OwnServer {
         Ok(server)
     }
 
+    /// The server's cloud, trusting the certificate authority its CA file holds.
+    ///
+    /// # Errors
+    /// When the server isn't an HTTPS origin, or the CA file can't be read or holds no certificate.
+    pub fn cloud(&self) -> Result<Cloud, PersonalError> {
+        let cloud =
+            Cloud::own(&self.origin).map_err(|error| PersonalError::Account(format!("{}: {error}", self.origin)))?;
+        let Some(path) = &self.ca_file else {
+            return Ok(cloud);
+        };
+        let pem = fs::read(path).map_err(|source| PersonalError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        cloud
+            .trusting(&pem)
+            .map_err(|error| PersonalError::Account(format!("{}: {error}", path.display())))
+    }
+
     fn validate(&self) -> Result<(), PersonalError> {
         if Cloud::own(&self.origin).is_err() {
             return Err(PersonalError::Account(
@@ -375,20 +394,10 @@ impl PersonalAccount {
     /// # Errors
     /// When the server isn't an HTTPS origin, or the CA file can't be read or holds no certificate.
     pub fn cloud(&self) -> Result<Cloud, PersonalError> {
-        let Some(server) = &self.server else {
-            return Ok(Cloud::Microsoft);
-        };
-        let cloud = Cloud::own(server).map_err(|error| PersonalError::Account(format!("{}: {error}", self.upn)))?;
-        let Some(path) = &self.ca_file else {
-            return Ok(cloud);
-        };
-        let pem = fs::read(path).map_err(|source| PersonalError::Read {
-            path: path.clone(),
-            source,
-        })?;
-        cloud
-            .trusting(&pem)
-            .map_err(|error| PersonalError::Account(format!("{}: {error}", path.display())))
+        match self.own_server() {
+            Some(server) => server.cloud(),
+            None => Ok(Cloud::Microsoft),
+        }
     }
 
     /// The account `upn` as a sign-in named it: its object id and tenant.

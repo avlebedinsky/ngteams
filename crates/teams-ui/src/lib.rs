@@ -58,6 +58,7 @@
 //!   with Answer and Decline.
 //! - [`account_prompt`]: the personal build's first sign-in screen, a window of its own asking for the work account
 //!   before anything is signed in.
+//! - [`user_admin`]: Manage users, the settings page of an own server's administrator.
 //! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the
 //!   window (its font size as the rem size, its font family and colours) and hosts the kit's dialogs and tooltips.
 //! - [`theme`]: the UI kit's (`gpui-component`) theme in Teams-like colours and compact sizes, light and dark
@@ -176,6 +177,7 @@ pub mod trace;
 pub mod translate;
 pub mod tray;
 pub mod update;
+pub mod user_admin;
 pub mod video;
 pub mod video_player;
 mod video_surface;
@@ -185,7 +187,7 @@ pub mod workflow_dialog;
 pub mod workflow_run;
 pub mod workflows_app;
 
-pub use account_prompt::{AccountPrompt, AccountPromptEvent, OwnOffer, OwnSignIn, SignInKind};
+pub use account_prompt::{AccountPrompt, AccountPromptEvent, NewAdmin, OwnOffer, OwnSignIn, SignInKind, Stage};
 pub use accounts::{AccountParts, AccountTile, Accounts, AccountsEvent};
 pub use assets::AppAssets;
 pub use bridge::{Bridge, Core, EventSource, StoppedCore, Tap};

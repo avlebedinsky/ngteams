@@ -76,9 +76,28 @@ run side by side in one window, and each one keeps its own:
 - tokens: stored under `<server>/<UPN>`, never under the bare UPN, and sent only to that server;
 - store and region (`store/<oid>.sqlite`, `regions/<oid>.json`), keyed by the object id the server gave it.
 
-A server with its own certificate authority needs `ca_file` written by hand: add an `[[account]]` entry with `upn`,
-`server` and `ca_file`, then sign in with the same server and user name, which takes that entry up. An entry holding
-a `ca_file` stays when its sign-in fails; a bare one is removed. An own server's account that is signed out is asked
+A server with its own certificate authority names that file in the form's last field, "Certificate authority file
+(optional)", which writes `ca_file` into the account's entry; an entry written by hand with `upn`, `server` and
+`ca_file` is taken up the same way when its server and user name are typed. An entry written by hand that holds a
+`ca_file` stays when its sign-in fails; a bare one, and one the failed attempt itself made, is removed.
+
+**A server without an administrator.** Once the server's address is entered (and again before a sign-in is sent),
+the app asks the server's setup endpoint. A new server answers that it has no administrator yet, and the window says
+so and shows "Create the administrator account": the setup code the server printed when it started (when the server
+asks one), user name, display name, and the password twice. The account is created on the server and then signed in
+as any other.
+
+**A password that must change.** When an administrator set "must change at next sign-in", the server refuses the
+password grant with `user_password_expired`. The window then asks for a new password twice, replaces it on the
+server (by user name and current password: such an account holds no token) and signs in with the new one.
+
+**Manage users.** An own server's account that its server says is an administrator has a "Manage users" page in its
+Settings: the server's accounts with a search and "Show more", "Add user", and for each account its name, user name,
+"Can sign in", "Administrator", "Reset password" (the new password is shown once, with "Ask for a new password at
+the next sign-in") and "Delete user" after a confirmation. What the server refuses (the only administrator, a user
+name already taken) is said in the dialog. The page's requests carry that account's token to that account's server
+only; a Microsoft 365 account, and an own server's account that is no administrator, has no such page, and nothing
+is asked for it. `ngteamsctl open settings users` opens it for an account that has it. An own server's account that is signed out is asked
 for its password again. Each "Sign in" on that screen reads the account's entry again, so a `ca_file` written while
 the screen is open is used at once; the password goes only to the server the screen shows. Settings > General names the account's server, and `ngteamsctl accounts` lists it. Without
 `NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not started, and none is asked for its password.

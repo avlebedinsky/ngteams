@@ -86,15 +86,40 @@ impl OwnServer {
 
     /// Adds the user `upn`, named `name`, with [`PASSWORD`]; its object id.
     pub fn add_user(&self, upn: &str, name: &str) -> TestResult<String> {
+        self.add(upn, name, false)
+    }
+
+    /// Adds the administrator `upn`, named `name`, with [`PASSWORD`]; its object id.
+    pub fn add_admin(&self, upn: &str, name: &str) -> TestResult<String> {
+        self.add(upn, name, true)
+    }
+
+    fn add(&self, upn: &str, name: &str, admin: bool) -> TestResult<String> {
         let runtime = self.runtime.as_ref().ok_or("the server's runtime")?;
         let new = NewAccount {
             upn,
             display_name: name,
             password: PASSWORD,
-            admin: false,
+            admin,
             must_change_password: false,
         };
         Ok(runtime.block_on(admin::create_user(&self.app.db, Actor::CLI, &new))?.id)
+    }
+
+    /// A new one-time setup code, as `ngteams-server setup-code` prints one.
+    pub fn setup_code(&self) -> TestResult<String> {
+        let runtime = self.runtime.as_ref().ok_or("the server's runtime")?;
+        Ok(runtime.block_on(admin::setup::issue(&self.app.db))?)
+    }
+
+    /// The server's accounts as `ngteams-server user list` prints them: `(user name, id, enabled, admin)`.
+    pub fn users(&self) -> TestResult<Vec<(String, String, bool, bool)>> {
+        let runtime = self.runtime.as_ref().ok_or("the server's runtime")?;
+        let users = runtime.block_on(ngteams_server::db::users::list(&self.app.db))?;
+        Ok(users
+            .into_iter()
+            .map(|user| (user.upn, user.id, !user.disabled, user.is_admin))
+            .collect())
     }
 }
 

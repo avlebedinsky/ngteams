@@ -3,6 +3,8 @@
 //! [`accounts_file`] owns account metadata, XDG paths and legacy file migration. [`setup`] chooses accounts,
 //! [`signin`] performs host-gated sign-in, and [`engine`] starts one engine and store per account.
 //! [`accounts`] shares one call floor and device set across the accounts shown by [`app`].
+//! [`own_prompt`] does what the sign-in screen asks about an own server, and [`own_admin`] asks that server's
+//! account management: its first administrator, a password that must change, and the Manage users page.
 //!
 //! [`refusal`] rejects test-support and unmarked builds before opening anything; lab-marked builds only run lab mode.
 //! [`read_only`] runs snapshots in the UI sandbox with a get-only credential broker, no writes, calls or push.
@@ -24,6 +26,8 @@ pub mod handoff;
 pub mod lab;
 #[cfg(target_os = "macos")]
 pub mod mac_app;
+pub mod own_admin;
+pub mod own_prompt;
 pub mod read_only;
 pub mod refusal;
 pub mod restart;

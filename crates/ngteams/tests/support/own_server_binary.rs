@@ -114,24 +114,20 @@ impl BinaryServer {
 
     /// `ngteams-server user add <upn> --name <name>` with [`PASSWORD`] on standard input; the user's object id.
     pub fn add_user(&self, upn: &str, name: &str) -> TestResult<String> {
-        let mut adding = Command::new(&self.binary)
-            .arg("--config")
-            .arg(&self.config)
-            .args(["user", "add", upn, "--name", name])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        adding
-            .stdin
-            .take()
-            .ok_or("the command's standard input")?
-            .write_all(format!("{PASSWORD}\n").as_bytes())?;
-        let output = adding.wait_with_output()?;
-        let said = String::from_utf8_lossy(&output.stdout).into_owned();
-        if !output.status.success() {
-            return Err(format!("user add {upn}: {}", String::from_utf8_lossy(&output.stderr)).into());
+        self.add(upn, name, false)
+    }
+
+    /// The same with `--admin`.
+    pub fn add_admin(&self, upn: &str, name: &str) -> TestResult<String> {
+        self.add(upn, name, true)
+    }
+
+    fn add(&self, upn: &str, name: &str, admin: bool) -> TestResult<String> {
+        let mut args = vec!["user", "add", upn, "--name", name];
+        if admin {
+            args.push("--admin");
         }
+        let said = self.run(&args, Some(PASSWORD))?;
         // "added <upn> (<id>)"
         let id = said
             .trim()
@@ -139,6 +135,53 @@ impl BinaryServer {
             .and_then(|(_, id)| id.strip_suffix(')'))
             .ok_or_else(|| format!("user add said: {said}"))?;
         Ok(id.to_owned())
+    }
+
+    /// `ngteams-server setup-code`: the new one-time setup code (its first line).
+    pub fn setup_code(&self) -> TestResult<String> {
+        let said = self.run(&["setup-code"], None)?;
+        Ok(said.lines().next().ok_or("setup-code said nothing")?.trim().to_owned())
+    }
+
+    /// `ngteams-server user list`: `(user name, id, enabled, admin)` of each account.
+    pub fn users(&self) -> TestResult<Vec<(String, String, bool, bool)>> {
+        let said = self.run(&["user", "list"], None)?;
+        said.lines()
+            .map(|line| {
+                let fields: Vec<&str> = line.split('\t').collect();
+                match fields.as_slice() {
+                    [upn, id, state, _, role] => Ok((
+                        (*upn).to_owned(),
+                        (*id).to_owned(),
+                        *state == "enabled",
+                        *role == "admin",
+                    )),
+                    _ => Err(format!("user list said: {line}").into()),
+                }
+            })
+            .collect()
+    }
+
+    /// Runs the server's command line with `args` (and `input` on standard input); what it printed.
+    fn run(&self, args: &[&str], input: Option<&str>) -> TestResult<String> {
+        let mut running = Command::new(&self.binary)
+            .arg("--config")
+            .arg(&self.config)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdin = running.stdin.take().ok_or("the command's standard input")?;
+        if let Some(input) = input {
+            stdin.write_all(format!("{input}\n").as_bytes())?;
+        }
+        drop(stdin);
+        let output = running.wait_with_output()?;
+        if !output.status.success() {
+            return Err(format!("{args:?}: {}", String::from_utf8_lossy(&output.stderr)).into());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// What `serve` wrote to standard error so far.

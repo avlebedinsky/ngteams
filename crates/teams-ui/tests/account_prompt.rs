@@ -108,7 +108,7 @@ fn own(events: &Rc<RefCell<Vec<AccountPromptEvent>>>) -> Vec<OwnSignIn> {
         .iter()
         .filter_map(|event| match event {
             AccountPromptEvent::SignInOwn(own) => Some(own.clone()),
-            AccountPromptEvent::SignIn(_) => None,
+            _ => None,
         })
         .collect()
 }
@@ -187,7 +187,7 @@ fn an_own_servers_fields_say_what_they_lack_and_ask_nothing(cx: &mut TestAppCont
     cx.simulate_input(UPN);
     cx.simulate_keystrokes("enter");
     assert_eq!(problem(&view, &mut cx).as_deref(), Some(NO_PASSWORD));
-    assert!(events.borrow().is_empty());
+    assert!(own(&events).is_empty());
 }
 
 #[gpui::test]

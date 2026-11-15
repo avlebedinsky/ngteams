@@ -144,6 +144,12 @@ pub(super) mod accounts {
         Ok(account.clone())
     }
 
+    /// Every server of these cases has its administrator, and none is asked.
+    #[expect(clippy::unnecessary_wraps, reason = "the signature of the app's own")]
+    pub fn needs_admin(_: &ngteams::accounts_file::OwnServer) -> Result<Option<bool>, String> {
+        Ok(None)
+    }
+
     /// The server asked for its authz again: in the `served-now` case it names a chat service by now.
     pub fn region_again(setup: &Setup, account: &PersonalAccount) -> Result<(), String> {
         record("region-again", &account.upn);
@@ -350,6 +356,7 @@ pub(super) mod platform {
                     server: "chat.example.test".into(),
                     user: super::OWN_UPN.into(),
                     password: super::OWN_PASSWORD.to_owned().into(),
+                    ca_file: String::new(),
                 }));
             });
         });

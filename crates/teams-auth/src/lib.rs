@@ -1,6 +1,7 @@
 //! Native Teams sign-in: the PKCE code exchange, token refresh and storage, and the skypetoken. The interactive step
 //! always runs in a browser engine; this crate only handles the tokens.
 //!
+//! - [`admin`]: an own server's account management: its first administrator, the accounts, a password replaced;
 //! - [`authz`]: the skypetoken exchange and the account's region;
 //! - [`broker`]: the credential broker, one account's secrets served over a socket to a sandboxed process, and the
 //!   [`secrets::SecretStore`] that process uses;
@@ -19,6 +20,7 @@
 //! Filled in by M0 Tasks 2, 13 and 14 (`docs/plans/20261019-native-teams-m0-lab-and-spikes.md`), M1 Task 4 and M2
 //! Task 4 (the broker) and Task 24 (the sign-in window).
 
+pub mod admin;
 pub mod authz;
 pub mod broker;
 pub mod claims;

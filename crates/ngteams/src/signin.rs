@@ -96,6 +96,13 @@ pub enum SignInError {
     OwnServersOff,
 }
 
+/// What an own server's sign-in gives when the server took the password only to have it replaced: the sign-in screen
+/// asks for a new one instead of saying it ([`crate::own_prompt`]).
+pub const PASSWORD_MUST_CHANGE: &str = "Your password must be changed before you sign in.";
+
+/// The server's word for a password that must change, in its refusal of the password grant.
+const PASSWORD_EXPIRED: &str = "user_password_expired";
+
 /// What the user is told about an own server's account while own servers are off.
 pub const OWN_SERVERS_OFF: &str = "Own servers are turned off. Set NGTEAMS_OWN_SERVER=1 and start ngteams again.";
 
@@ -381,7 +388,8 @@ pub async fn add<S: SecretStore>(
 
 /// Adds the own server `server`'s account `upn` (or takes up the entry held of it: [`Setup::ask_for_on`]) and signs
 /// it in with `password` ([`sign_in_own`]); no sign-in window opens. One whose sign-in stores nothing is taken out
-/// again while it holds nothing the user wrote ([`Setup::abandon`]).
+/// again: an entry held before while it holds nothing the user wrote ([`Setup::abandon`]), one this attempt made
+/// whatever it holds.
 ///
 /// # Errors
 /// What the user is told ([`own_failure`]).
@@ -392,20 +400,37 @@ pub async fn add_own<S: SecretStore>(
     password: &Secret,
     store: &S,
 ) -> Result<PersonalAccount, String> {
+    let origin = Some(server.origin.as_str());
+    let held = setup
+        .accounts()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|held| held.server.as_deref() == origin && held.upn.eq_ignore_ascii_case(upn));
     let account = setup.ask_for_on(upn, server).map_err(|error| error.to_string())?;
     sign_in_own(setup, &account, password, store).await.map_err(|error| {
-        let _ = setup.abandon(&account.id());
+        if held {
+            let _ = setup.abandon(&account.id());
+        } else {
+            // made by this attempt alone, its CA file typed on the sign-in screen: nothing of it stays
+            let _ = PersonalAccount::remove(&setup.paths, &account.id());
+        }
         own_failure(setup, &account, &error)
     })
 }
 
-/// What the user is told when an own server's sign-in stored nothing: a wrong user name or password, a wait the
+/// What the user is told when an own server's sign-in stored nothing: a password that must change
+/// ([`PASSWORD_MUST_CHANGE`]), a wrong user name or password, a wait the
 /// server asked for, a server that can't be reached (with where a self-signed deployment's certificate authority
 /// goes, or the one its entry names already), own servers turned off, else the error.
 #[must_use]
 pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError) -> String {
     let server = account.server.as_deref().unwrap_or_default();
     match error {
+        SignInError::Token(TokenError::InvalidGrant(refusal))
+            if refusal.suberror.as_deref() == Some(PASSWORD_EXPIRED) =>
+        {
+            PASSWORD_MUST_CHANGE.to_owned()
+        }
         SignInError::Token(TokenError::InvalidGrant(_)) => "The user name or password isn't right.".to_owned(),
         SignInError::Token(TokenError::Throttled { .. }) => {
             "Too many attempts: wait a few minutes, then sign in again.".to_owned()

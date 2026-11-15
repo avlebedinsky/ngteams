@@ -928,6 +928,19 @@ impl Desktop {
         }
     }
 
+    /// Hands account `key` its own server's account management, which its settings' Manage users page asks
+    /// ([`crate::user_admin`]); the app does once the server says the account is an administrator.
+    pub fn set_user_admin(
+        &mut self,
+        key: &str,
+        admin: Option<Arc<dyn crate::user_admin::UserAdmin>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.accounts
+            .update(cx, |accounts, cx| accounts.set_admin(key, admin, cx));
+        cx.notify();
+    }
+
     /// Hands a notification server (the bus's, once it is up; a test's fake) to every account's notifier and call
     /// alert, and to the accounts added later.
     pub fn use_server(&mut self, server: Arc<dyn NotificationServer>, cx: &mut Context<Self>) {

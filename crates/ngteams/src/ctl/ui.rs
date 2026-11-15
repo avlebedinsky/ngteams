@@ -145,6 +145,19 @@ fn open(desktop: &Entity<Desktop>, mri: &str, target: &OpenTarget, cx: &mut App)
         OpenTarget::Activity => desktop.update(cx, |desktop, cx| desktop.show_activity_of(mri, cx)),
         OpenTarget::Settings { page } => {
             let page = page.as_deref().map(settings_page).transpose()?;
+            // an own server's administrator's alone
+            let manages = desktop
+                .read(cx)
+                .accounts()
+                .read(cx)
+                .tile(mri)
+                .is_some_and(|tile| tile.admin.is_some());
+            if page == Some(Page::Users) && !manages {
+                return Err(CtlError::new(
+                    ErrorCode::BadRequest,
+                    "this account has no Manage users page: it isn't an administrator of an own server",
+                ));
+            }
             desktop.update(cx, |desktop, cx| desktop.open_settings_of(mri, page, cx));
         }
         OpenTarget::Search { query } => {
@@ -168,6 +181,7 @@ fn settings_page(name: &str) -> Result<Page, CtlError> {
     let name = name.trim();
     Page::ALL
         .into_iter()
+        .chain([Page::Users])
         .find(|page| page.key().eq_ignore_ascii_case(name) || page.title().eq_ignore_ascii_case(name))
         .ok_or_else(|| {
             let pages: Vec<&str> = Page::ALL.iter().map(|page| page.key()).collect();

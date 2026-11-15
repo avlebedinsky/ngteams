@@ -27,6 +27,7 @@ use crate::own_presence::OwnPresence;
 use crate::people::{Picture, Shown};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::tray::Tray;
+use crate::user_admin::UserAdmin;
 
 /// What the app knows of an account when it adds it.
 #[derive(Clone)]
@@ -49,6 +50,9 @@ pub struct AccountTile {
     pub detail: SharedString,
     /// Its own server; `None` for a Microsoft 365 account.
     pub server: Option<SharedString>,
+    /// Its server's account management, once the app found the account to be an administrator there
+    /// ([`Accounts::set_admin`]); `None` for every other account.
+    pub admin: Option<Arc<dyn UserAdmin>>,
     pub core: Arc<dyn Core>,
     pub models: Models,
     /// Its unread total, counted as the tray counts it.
@@ -180,6 +184,7 @@ impl Accounts {
             name: parts.name,
             detail: parts.detail,
             server: parts.server,
+            admin: None,
             core: parts.core,
             models: parts.models,
             tray,
@@ -190,6 +195,15 @@ impl Accounts {
         });
         self.ask_pictures(cx);
         cx.notify();
+    }
+
+    /// Hands account `key` its server's account management (`None` takes it away): its settings then offer Manage
+    /// users.
+    pub fn set_admin(&mut self, key: &str, admin: Option<Arc<dyn UserAdmin>>, cx: &mut Context<Self>) {
+        if let Some(tile) = self.tiles.iter_mut().find(|tile| tile.key == key) {
+            tile.admin = admin;
+            cx.notify();
+        }
     }
 
     /// Hands account `key` its own presence (the desktop makes one per account).

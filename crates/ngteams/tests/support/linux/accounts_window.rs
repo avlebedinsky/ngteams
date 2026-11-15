@@ -60,6 +60,8 @@ use gpui::{App, AsyncApp, Window, WindowingModes};
 use ngteams::accounts::Started;
 use ngteams::app::{self, Launch};
 use ngteams::secrets::AppSecrets;
+#[path = "accounts_admin.rs"]
+mod admin;
 #[path = "accounts_own.rs"]
 mod own;
 #[path = "../own_server.rs"]
@@ -138,6 +140,10 @@ pub(super) fn main() -> ExitCode {
         Ok("said-dark") => own::child_said(true),
         Ok("first") => own::child_first(false),
         Ok("first-dark") => own::child_first(true),
+        Ok("setup") => admin::child_setup(false),
+        Ok("setup-dark") => admin::child_setup(true),
+        Ok("change") => admin::child_change(false),
+        Ok("change-dark") => admin::child_change(true),
         Ok(other) => match Mode::named(other) {
             Some(mode) => child_window(mode),
             None => Err(format!("unknown mode {other}").into()),
@@ -200,7 +206,7 @@ fn parent() -> SandboxResult {
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 13] = [
+const SCENES: [Scene; 19] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -232,6 +238,14 @@ const SCENES: [Scene; 13] = [
     }),
     ("sign_in_choice_by_keyboard_dark", |sandbox| {
         choice_by_keyboard(sandbox, true)
+    }),
+    ("admin_first_run_and_manage_users", admin::first_admin_and_manage_users),
+    ("admin_manage_users_dark", admin::manage_users_in_dark),
+    ("admin_first_run_at_480", |_| admin::first_admin_at_480(false)),
+    ("admin_first_run_at_480_dark", |_| admin::first_admin_at_480(true)),
+    ("admin_password_change_at_480", |_| admin::password_change_at_480(false)),
+    ("admin_password_change_at_480_dark", |_| {
+        admin::password_change_at_480(true)
     }),
 ];
 
@@ -990,12 +1004,15 @@ fn choice_by_keyboard(sandbox: &Sandbox, dark: bool) -> SandboxResult {
     )?;
     shot(sandbox, &format!("ngteams-accounts-keys-own-field{suffix}.png"))?;
 
-    // back on the choice: Tab walks the server's address, the user name, the password, "Sign in", and round
+    // back on the choice: Tab walks the server's address, the user name, the password, the certificate authority's
+    // file, "Sign in", and round
     input.key_with(&[Modifier::Shift], keys::TAB)?;
     input.key(keys::TAB)?;
     input.type_text("1")?;
     input.key(keys::TAB)?;
     input.type_text("2")?;
+    // the password, the certificate authority's file, "Sign in", and round
+    input.key(keys::TAB)?;
     input.key(keys::TAB)?;
     input.key(keys::TAB)?;
     input.key(keys::TAB)?;
@@ -1300,6 +1317,10 @@ enum Mode {
     ShownDark,
     /// The app again on [`Mode::Window`]'s files and server: the own server's account started from its entry.
     Restart,
+    /// As [`Mode::Window`] on a server without any account: nothing of it is written beforehand.
+    Admin,
+    /// Teams Dark, the parent's own server's administrator signed in and shown beside a and b.
+    AdminDark,
 }
 
 impl Mode {
@@ -1312,6 +1333,8 @@ impl Mode {
             "shown" => Some(Self::Shown),
             "shown-dark" => Some(Self::ShownDark),
             "restart" => Some(Self::Restart),
+            "admin" => Some(Self::Admin),
+            "admin-dark" => Some(Self::AdminDark),
             _ => None,
         }
     }
@@ -1323,7 +1346,7 @@ impl Mode {
 
     /// Teams Dark, whatever the system says.
     fn dark(self) -> bool {
-        matches!(self, Self::Dark | Self::ShownDark)
+        matches!(self, Self::Dark | Self::ShownDark | Self::AdminDark)
     }
 
     fn shown(self) -> bool {
@@ -1337,7 +1360,7 @@ impl Mode {
 
     /// The parent's own server is the one the window's account is on.
     fn on_own_server(self) -> bool {
-        matches!(self, Self::Window | Self::Restart)
+        matches!(self, Self::Window | Self::Restart | Self::Admin | Self::AdminDark)
     }
 }
 
@@ -1411,9 +1434,7 @@ fn child_window(mode: Mode) -> SandboxResult {
     let mut held = vec![a.account.clone()];
     held.extend(others.iter().map(|started| started.account.clone()));
     let runner = runner_of(&lab.root, mode, &held, server.as_ref())?;
-    if mode == Mode::Restart {
-        others.push(own::come_back(&runner)?);
-    }
+    others.extend(own_started(mode, &runner, server.as_ref())?);
     let watched = runner.setup.clone();
     let origins = match &server {
         Some(_) => Some((std::env::var(OWN_ORIGIN_ENV)?, dead_origin()?)),
@@ -1466,6 +1487,20 @@ fn child_window(mode: Mode) -> SandboxResult {
     Ok(())
 }
 
+/// The own server's account a mode starts with: the first run's come back ([`Mode::Restart`]), or the server's
+/// administrator signed in beforehand ([`Mode::AdminDark`]).
+fn own_started(
+    mode: Mode,
+    runner: &ngteams::accounts::Runner,
+    server: Option<&ngteams::accounts_file::OwnServer>,
+) -> SandboxResult<Option<Started>> {
+    match (mode, server) {
+        (Mode::Restart, _) => Ok(Some(own::come_back(runner)?)),
+        (Mode::AdminDark, Some(server)) => Ok(Some(admin::signed_in(runner, server)?)),
+        _ => Ok(None),
+    }
+}
+
 /// What the child does and says for the parent while the app runs: c's post when asked, the window asking for an
 /// account, and with an own server running (`origins`: its origin and the one nothing listens on) the account signed
 /// in and where the requests went.
@@ -1512,7 +1547,7 @@ fn runner_of(
     for account in held.iter().filter(|account| account.server.is_none()) {
         account.save(&setup.paths)?;
     }
-    if let Some(server) = server.filter(|_| mode == Mode::Window) {
+    if let Some(server) = server.filter(|_| matches!(mode, Mode::Window | Mode::AdminDark)) {
         setup.ask_for_on(OWN_UPN, server)?;
     }
     if !mode.own_servers() {

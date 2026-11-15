@@ -1007,7 +1007,14 @@ the 1:1 chat and its history stay its two people's.
 
 `ngteams` signs in to this server from its account window ("Own server": address, user name, password), behind
 `NGTEAMS_OWN_SERVER=1`: [personal-build.md](personal-build.md#own-server-accounts). A deployment with a certificate
-the system doesn't trust gives its certificate authority to each account as `ca_file`.
+the system doesn't trust gives its certificate authority to each account as `ca_file` (the form's "Certificate
+authority file" field).
+
+The client also uses the [first-admin setup](#the-first-admin), the [admin API](#admin-api) and the
+[account's own endpoints](#the-accounts-own-endpoints): the account window asks `GET /api/admin/v1/setup` for a
+server's address and creates the first administrator there; it replaces a password that must change with
+`POST /api/account/v1/password`; and an administrator's Settings have a "Manage users" page over
+`/api/admin/v1/users` (the page is offered when `GET /api/account/v1/me` says `admin`).
 
 ## Tests
 

@@ -9,9 +9,19 @@
 //! "Microsoft 365" (the default, the flow above) or "Own server", which shows the server's address, the user name and
 //! the password and asks the app to sign in there ([`AccountPromptEvent::SignInOwn`]); no Microsoft window opens for
 //! it. The password leaves the screen only in that event and is cleared from the field when a sign-in fails. An own
-//! server's account signed out is asked for its password alone ([`AccountPrompt::ask_own_again`]).
+//! server's account signed out is asked for its password alone ([`AccountPrompt::ask_own_again`]). A deployment with
+//! its own certificate authority names that file in the form's last field.
 //!
-//! **The keyboard**: Tab walks the choice, the fields and "Sign in" in the order they show. The choice is a radio
+//! **A server without an administrator** ([`AccountPrompt::needs_admin`]): once the server's address is entered the
+//! screen asks the app about it ([`AccountPromptEvent::ServerEntered`]), and when the app says it has no administrator
+//! yet the screen says so and shows the form that creates one ([`Stage::Setup`]: the setup code when the server asks
+//! one, user name, display name, the password twice; [`AccountPromptEvent::CreateAdmin`]).
+//!
+//! **A password that must change** ([`AccountPrompt::must_change_password`]): when the server takes the password
+//! only to have it replaced, the screen asks for the new one twice ([`Stage::NewPassword`]) and hands both to the app
+//! ([`AccountPromptEvent::ChangePassword`]), which changes it and signs in.
+//!
+//! **The keyboard**: Tab walks the choice, the fields and the buttons in the order they show. The choice is a radio
 //! group ([`crate::keyboard`]): Tab stops on the place chosen, the arrows choose the other one with the keyboard
 //! staying on it, and Enter or Space goes on to the chosen place's first field.
 
@@ -46,8 +56,44 @@ pub const NOT_AN_ACCOUNT: &str = "Enter your work account, like name@company.com
 /// What the screen says while Microsoft's sign-in window is open.
 pub const SIGNING_IN: &str = "Finish signing in in Microsoft's window that opened.";
 
-/// The window's height with the choice of where the account is and an own server's three fields.
-const OWN_HEIGHT: f32 = 600.0;
+/// The window's height with the choice of where the account is and an own server's fields.
+const OWN_HEIGHT: f32 = 740.0;
+
+/// The shortest password an own server takes.
+const MIN_PASSWORD: usize = 8;
+
+/// What the certificate authority's field asks for when it is empty.
+pub const CA_PLACEHOLDER: &str = if cfg!(windows) {
+    r"C:\path\to\ca.pem"
+} else {
+    "/path/to/ca.pem"
+};
+
+/// What the screen says of a server that has no administrator yet.
+pub const NO_ADMIN_YET: &str =
+    "This server has no administrator yet. Create the administrator account to finish setting it up.";
+
+/// What the screen says to a user whose password must change.
+pub const MUST_CHANGE: &str = "Your administrator asks you to choose a new password before you sign in.";
+
+/// What the screen says when the setup code's field is empty.
+pub const NO_SETUP_CODE: &str = "Enter the setup code the server printed when it started.";
+
+/// What the screen says when the display name's field is empty.
+pub const NO_DISPLAY_NAME: &str = "Enter the name others see.";
+
+/// What the screen says of a password that is too short.
+pub const SHORT_PASSWORD: &str = "Use a password of at least 8 characters.";
+
+/// What the screen says when the password typed twice differs.
+pub const PASSWORDS_DIFFER: &str = "The passwords don't match.";
+
+/// What the screen says when the new password is the one that must change.
+pub const SAME_PASSWORD: &str = "Choose a password that isn't the current one.";
+
+/// What the screen says while the first administrator is being created, and while a password is being changed.
+pub const CREATING_ADMIN: &str = "Creating the account…";
+pub const CHANGING_PASSWORD: &str = "Changing your password…";
 
 /// What the server's field asks for when it is empty.
 pub const SERVER_PLACEHOLDER: &str = "https://chat.example.com";
@@ -78,10 +124,11 @@ pub enum SignInKind {
 /// The places, in the order the choice shows them.
 const KINDS: [SignInKind; 2] = [SignInKind::Microsoft, SignInKind::OwnServer];
 
-/// Tab's order in the window: the choice, the fields (an own server's three count on from [`TAB_FIELDS`]), "Sign in".
+/// Tab's order in the window: the choice, the fields (a form's count on from [`TAB_FIELDS`]), then its buttons.
 const TAB_CHOICE: isize = 0;
 const TAB_FIELDS: isize = 1;
-const TAB_SIGN_IN: isize = 4;
+const TAB_SIGN_IN: isize = 6;
+const TAB_BACK: isize = 7;
 
 impl SignInKind {
     /// Its key, in its segment's selector.
@@ -109,6 +156,52 @@ pub struct OwnSignIn {
     pub user: String,
     /// The password as typed, zeroed when dropped; never logged or shown.
     pub password: Zeroizing<String>,
+    /// The deployment's certificate authority file as typed, trimmed; empty for none.
+    pub ca_file: String,
+}
+
+/// The first administrator of an own server, as the form holds it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NewAdmin {
+    pub server: String,
+    pub ca_file: String,
+    /// The setup code, when the server asks one.
+    pub code: Option<Zeroizing<String>>,
+    pub user: String,
+    pub name: String,
+    pub password: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for NewAdmin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewAdmin")
+            .field("server", &self.server)
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Which form the screen shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// The sign-in.
+    SignIn,
+    /// The server's first administrator is created; with the setup code when the server asks one.
+    Setup { code_required: bool },
+    /// The password that must change is replaced.
+    NewPassword,
+}
+
+impl Stage {
+    /// Its name, for a test's log.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::SignIn => "sign-in",
+            Self::Setup { .. } => "setup",
+            Self::NewPassword => "new-password",
+        }
+    }
 }
 
 impl std::fmt::Debug for OwnSignIn {
@@ -122,7 +215,10 @@ impl std::fmt::Debug for OwnSignIn {
 
 impl PartialEq for OwnSignIn {
     fn eq(&self, other: &Self) -> bool {
-        self.server == other.server && self.user == other.user && *self.password == *other.password
+        self.server == other.server
+            && self.user == other.user
+            && *self.password == *other.password
+            && self.ca_file == other.ca_file
     }
 }
 
@@ -135,6 +231,13 @@ pub enum AccountPromptEvent {
     SignIn(String),
     /// Sign this own server's account in with its password.
     SignInOwn(OwnSignIn),
+    /// An own server's address was entered (with this certificate authority file, or none): the app says whether it
+    /// still needs its first administrator ([`AccountPrompt::needs_admin`]).
+    ServerEntered { server: String, ca_file: String },
+    /// Create this own server's first administrator, then sign it in.
+    CreateAdmin(NewAdmin),
+    /// Replace the password of this own server's account (`own` holds the current one) with `new`, then sign it in.
+    ChangePassword { own: OwnSignIn, new: Zeroizing<String> },
 }
 
 /// How the screen stands to own servers.
@@ -162,12 +265,37 @@ pub enum OwnOffer {
     First { server: String, user: String },
 }
 
+/// What a draw owes the screen's fields.
+#[derive(Clone, Copy, Debug, Default)]
+struct Owed {
+    /// A failed sign-in's password is cleared from its field.
+    clear_password: bool,
+    /// A wrong setup code is cleared from its field, and the field takes the keyboard.
+    clear_code: bool,
+    /// The form's first field takes the keyboard.
+    focus_first: bool,
+}
+
 /// The first sign-in screen (see the module docs).
 pub struct AccountPrompt {
     input: Entity<InputState>,
     server: Entity<InputState>,
     user: Entity<InputState>,
     password: Entity<InputState>,
+    ca_file: Entity<InputState>,
+    /// The setup code, the display name, and a new password typed twice: the forms of [`Stage::Setup`] and
+    /// [`Stage::NewPassword`].
+    code: Entity<InputState>,
+    name: Entity<InputState>,
+    new_password: Entity<InputState>,
+    confirm: Entity<InputState>,
+    stage: Stage,
+    /// The server and certificate authority file the app was last asked about ([`AccountPromptEvent::ServerEntered`]).
+    asked_about: Option<(String, String)>,
+    /// The sign-in the server refused for a password that must change, kept until it is replaced.
+    refused: Option<OwnSignIn>,
+    /// What the next draw owes the fields (they need the window).
+    owed: Owed,
     kind: SignInKind,
     /// The choice's segments' focus, which the arrows move.
     kinds: Handles,
@@ -178,9 +306,7 @@ pub struct AccountPrompt {
     /// What the line under the field says, and the field's text when it was said: an edit clears it (the kit's input
     /// also tells a change after an Enter that changed nothing, which must not).
     problem: Option<(SharedString, String)>,
-    /// A failed sign-in's password is cleared from its field at the next draw (the field needs the window).
-    clear_password: bool,
-    _input_events: [Subscription; 4],
+    _input_events: [Subscription; 9],
     /// The theme following the window's appearance ([`open_offering`] makes it so).
     appearance: Option<Subscription>,
 }
@@ -199,14 +325,31 @@ impl AccountPrompt {
         let server = cx.new(|cx| InputState::new(window, cx).placeholder(SERVER_PLACEHOLDER));
         let user = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
         let password = cx.new(|cx| InputState::new(window, cx).masked(true));
-        let input_events = [&input, &server, &user, &password].map(|field| {
+        let ca_file = cx.new(|cx| InputState::new(window, cx).placeholder(CA_PLACEHOLDER));
+        let code = cx.new(|cx| InputState::new(window, cx).placeholder("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"));
+        let name = cx.new(|cx| InputState::new(window, cx));
+        let new_password = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let confirm = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let fields = [
+            &input,
+            &server,
+            &user,
+            &password,
+            &ca_file,
+            &code,
+            &name,
+            &new_password,
+            &confirm,
+        ];
+        let input_events = fields.map(|field| {
             cx.subscribe_in(
                 field,
                 window,
                 |this: &mut Self, _, event: &InputEvent, _, cx| match event {
                     InputEvent::PressEnter { .. } => this.submit(cx),
                     InputEvent::Change => this.clear_problem_once_edited(cx),
-                    _ => {}
+                    InputEvent::Blur => this.server_entered(cx),
+                    InputEvent::Focus => {}
                 },
             )
         });
@@ -216,12 +359,20 @@ impl AccountPrompt {
             server,
             user,
             password,
+            ca_file,
+            code,
+            name,
+            new_password,
+            confirm,
+            stage: Stage::SignIn,
+            asked_about: None,
+            refused: None,
+            owed: Owed::default(),
             kind: SignInKind::Microsoft,
             kinds: Handles::default(),
             own: OwnAsk::No,
             signing_in: false,
             problem: None,
-            clear_password: false,
             _input_events: input_events,
             appearance: None,
         }
@@ -276,7 +427,7 @@ impl AccountPrompt {
     /// Chooses where the account is and focuses its first field; nothing while a sign-in is open, or for an account
     /// asked again.
     pub fn choose(&mut self, kind: SignInKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.signing_in || self.own != OwnAsk::Choice {
+        if self.signing_in || self.own != OwnAsk::Choice || self.stage != Stage::SignIn {
             return;
         }
         self.set_kind(kind, cx);
@@ -331,6 +482,107 @@ impl AccountPrompt {
         )
     }
 
+    /// The certificate authority file the own server's form names, trimmed; empty for none.
+    #[must_use]
+    pub fn ca_file(&self, cx: &App) -> String {
+        self.ca_file.read(cx).value().trim().to_owned()
+    }
+
+    /// Which form shows.
+    #[must_use]
+    pub fn stage(&self) -> Stage {
+        self.stage
+    }
+
+    /// The display name the first administrator's form holds, trimmed.
+    #[must_use]
+    pub fn display_name(&self, cx: &App) -> String {
+        self.name.read(cx).value().trim().to_owned()
+    }
+
+    /// Asks the app about the own server the fields name, once per address and certificate authority file, while
+    /// the sign-in form of the choice shows.
+    fn server_entered(&mut self, cx: &mut Context<Self>) {
+        if self.kind != SignInKind::OwnServer
+            || self.own != OwnAsk::Choice
+            || self.stage != Stage::SignIn
+            || self.signing_in
+        {
+            return;
+        }
+        let (server, _) = self.own_fields(cx);
+        let entered = (server, self.ca_file(cx));
+        if !looks_like_server(&entered.0) || self.asked_about.as_ref() == Some(&entered) {
+            return;
+        }
+        self.asked_about = Some(entered.clone());
+        cx.emit(AccountPromptEvent::ServerEntered {
+            server: entered.0,
+            ca_file: entered.1,
+        });
+    }
+
+    /// The own server `server` has no administrator yet (the app's answer to
+    /// [`AccountPromptEvent::ServerEntered`], or to a sign-in there): the form that creates one shows, with the setup
+    /// code's field when `code_required`. Nothing when the fields name another server by now.
+    pub fn needs_admin(&mut self, server: &str, code_required: bool, cx: &mut Context<Self>) {
+        let (held, _) = self.own_fields(cx);
+        if self.kind != SignInKind::OwnServer || self.own != OwnAsk::Choice || held != server {
+            return;
+        }
+        self.signing_in = false;
+        self.problem = None;
+        self.stage = Stage::Setup { code_required };
+        self.owed.focus_first = true;
+        cx.notify();
+    }
+
+    /// The sign-in was refused because the password must change: the form asking for a new one shows. Nothing
+    /// unless a sign-in of an own server's account is under way.
+    pub fn must_change_password(&mut self, cx: &mut Context<Self>) {
+        if self.refused.is_none() {
+            return;
+        }
+        self.signing_in = false;
+        self.problem = None;
+        self.stage = Stage::NewPassword;
+        self.owed.focus_first = true;
+        self.owed.clear_password = true;
+        cx.notify();
+    }
+
+    /// The first administrator wasn't created (`reason`, said under the form): a wrong setup code (`code`) is cleared
+    /// and asked again; a server that has an administrator by now (`admin_exists`) gets the sign-in form back.
+    pub fn setup_failed(
+        &mut self,
+        reason: impl Into<SharedString>,
+        code: bool,
+        admin_exists: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.signing_in = false;
+        if admin_exists {
+            self.stage = Stage::SignIn;
+            self.owed.focus_first = true;
+        }
+        self.owed.clear_code = code;
+        self.say(reason.into(), cx);
+    }
+
+    /// Back to the sign-in form, from the first administrator's or the new password's.
+    pub fn back(&mut self, cx: &mut Context<Self>) {
+        if self.signing_in || self.stage == Stage::SignIn {
+            return;
+        }
+        self.stage = Stage::SignIn;
+        self.refused = None;
+        self.problem = None;
+        // the server is asked again when its address is entered again
+        self.asked_about = None;
+        self.owed.focus_first = true;
+        cx.notify();
+    }
+
     /// The account the field holds, trimmed.
     #[must_use]
     pub fn account(&self, cx: &App) -> String {
@@ -352,7 +604,10 @@ impl AccountPrompt {
     /// The sign-in stored nothing (`reason`, said under the field): the field is open again.
     pub fn failed(&mut self, reason: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.signing_in = false;
-        self.clear_password = true;
+        if self.stage == Stage::SignIn {
+            self.owed.clear_password = true;
+            self.refused = None;
+        }
         self.say(reason.into(), cx);
     }
 
@@ -371,15 +626,97 @@ impl AccountPrompt {
         }
     }
 
-    /// What the fields of the place chosen hold, to tell an edit by (the password by its length alone).
+    /// What the fields of the form shown hold, to tell an edit by (a password by its length alone).
     fn typed(&self, cx: &App) -> String {
-        match self.kind {
-            SignInKind::Microsoft => self.account(cx),
-            SignInKind::OwnServer => {
+        let length = |field: &Entity<InputState>| field.read(cx).unmask_value().len();
+        match (self.kind, self.stage) {
+            (SignInKind::Microsoft, _) => self.account(cx),
+            (SignInKind::OwnServer, Stage::SignIn) => {
                 let (server, user) = self.own_fields(cx);
-                let password = self.password.read(cx).unmask_value().len();
-                format!("{server}\n{user}\n{password}")
+                format!("{server}\n{user}\n{}\n{}", length(&self.password), self.ca_file(cx))
             }
+            (SignInKind::OwnServer, Stage::Setup { .. }) => {
+                let (_, user) = self.own_fields(cx);
+                format!(
+                    "{user}\n{}\n{}\n{}\n{}",
+                    self.display_name(cx),
+                    length(&self.code),
+                    length(&self.new_password),
+                    length(&self.confirm)
+                )
+            }
+            (SignInKind::OwnServer, Stage::NewPassword) => {
+                format!("{}\n{}", length(&self.new_password), length(&self.confirm))
+            }
+        }
+    }
+
+    /// The new password typed twice, unless it is too short or the two differ.
+    fn new_password(&self, cx: &App) -> Result<Zeroizing<String>, &'static str> {
+        let new = Zeroizing::new(self.new_password.read(cx).unmask_value().to_string());
+        let confirm = Zeroizing::new(self.confirm.read(cx).unmask_value().to_string());
+        if new.chars().count() < MIN_PASSWORD {
+            Err(SHORT_PASSWORD)
+        } else if *new != *confirm {
+            Err(PASSWORDS_DIFFER)
+        } else {
+            Ok(new)
+        }
+    }
+
+    /// Asks the app to create the server's first administrator, unless a field doesn't hold what it asks for.
+    fn submit_setup(&mut self, code_required: bool, cx: &mut Context<Self>) {
+        let (server, user) = self.own_fields(cx);
+        let name = self.display_name(cx);
+        let code = Zeroizing::new(self.code.read(cx).value().trim().to_owned());
+        let password = if code_required && code.is_empty() {
+            Err(NO_SETUP_CODE)
+        } else if !looks_like_account(&user) {
+            Err(NOT_A_USER)
+        } else if name.is_empty() {
+            Err(NO_DISPLAY_NAME)
+        } else {
+            self.new_password(cx)
+        };
+        match password {
+            Ok(password) => {
+                self.signing_in = true;
+                self.problem = None;
+                cx.emit(AccountPromptEvent::CreateAdmin(NewAdmin {
+                    server,
+                    ca_file: self.ca_file(cx),
+                    code: code_required.then_some(code),
+                    user,
+                    name,
+                    password,
+                }));
+                cx.notify();
+            }
+            Err(problem) => self.say(problem.into(), cx),
+        }
+    }
+
+    /// Asks the app to replace the password that must change, unless the new one doesn't do.
+    fn submit_new_password(&mut self, cx: &mut Context<Self>) {
+        let Some(own) = self.refused.clone() else {
+            self.back(cx);
+            return;
+        };
+        let new = self.new_password(cx).and_then(|new| {
+            if *new == *own.password {
+                Err(SAME_PASSWORD)
+            } else {
+                Ok(new)
+            }
+        });
+        match new {
+            Ok(new) => {
+                self.signing_in = true;
+                self.problem = None;
+                cx.emit(AccountPromptEvent::ChangePassword { own, new });
+                cx.notify();
+            }
+            Err(problem) => self.say(problem.into(), cx),
         }
     }
 
@@ -402,7 +739,15 @@ impl AccountPrompt {
         }
         self.signing_in = true;
         self.problem = None;
-        cx.emit(AccountPromptEvent::SignInOwn(OwnSignIn { server, user, password }));
+        let own = OwnSignIn {
+            server,
+            user,
+            password,
+            ca_file: self.ca_file(cx),
+        };
+        // kept in case the server takes the password only to have it replaced
+        self.refused = Some(own.clone());
+        cx.emit(AccountPromptEvent::SignInOwn(own));
         cx.notify();
     }
 
@@ -412,7 +757,11 @@ impl AccountPrompt {
             return;
         }
         if self.kind == SignInKind::OwnServer {
-            self.submit_own(cx);
+            match self.stage {
+                Stage::SignIn => self.submit_own(cx),
+                Stage::Setup { code_required } => self.submit_setup(code_required, cx),
+                Stage::NewPassword => self.submit_new_password(cx),
+            }
             return;
         }
         let account = self.account(cx);
@@ -493,85 +842,259 @@ impl AccountPrompt {
             .children(segments)
     }
 
-    /// An own server's three fields, each under its name.
-    fn own_form(&self, palette: theme::Palette) -> impl IntoElement {
-        let field = |key: &'static str, name: &'static str, input: Input| {
-            div()
-                .debug_selector(move || format!("account-prompt-{key}"))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(name))
-                .child(input)
-        };
+    /// A field under its name.
+    fn field(key: &'static str, name: &'static str, input: Input, palette: theme::Palette) -> gpui::Div {
+        div()
+            .debug_selector(move || format!("account-prompt-{key}"))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(name))
+            .child(input)
+    }
+
+    /// An own server's fields, each under its name: its address, the user name, the password and, while the place is
+    /// chosen here, the deployment's certificate authority file.
+    fn own_form(&self, palette: theme::Palette) -> gpui::Div {
         let fixed = self.signing_in || matches!(self.own, OwnAsk::Account { .. });
         div()
             .flex()
             .flex_col()
             .gap_3()
-            .child(field(
+            .child(Self::field(
                 "server",
                 "Server address",
                 Input::new(&self.server).disabled(fixed).tab_index(TAB_FIELDS),
+                palette,
             ))
-            .child(field(
+            .child(Self::field(
                 "user",
                 "User name",
                 Input::new(&self.user).disabled(fixed).tab_index(TAB_FIELDS + 1),
+                palette,
             ))
-            .child(field(
+            .child(Self::field(
                 "password",
                 "Password",
                 Input::new(&self.password)
                     .mask_toggle()
                     .disabled(self.signing_in)
                     .tab_index(TAB_FIELDS + 2),
+                palette,
             ))
+            .when(self.own == OwnAsk::Choice, |form| {
+                form.child(Self::field(
+                    "ca-file",
+                    "Certificate authority file (optional)",
+                    Input::new(&self.ca_file)
+                        .disabled(self.signing_in)
+                        .tab_index(TAB_FIELDS + 3),
+                    palette,
+                ))
+            })
     }
 
-    /// The words under the title, and what the status line says while a sign-in is under way.
-    fn words(&self) -> (&'static str, &'static str) {
-        match self.kind {
-            SignInKind::Microsoft => (
+    /// The server a form other than the sign-in's is about, on a line.
+    fn server_line(&self, palette: theme::Palette, cx: &App) -> gpui::Div {
+        let (server, _) = self.own_fields(cx);
+        div()
+            .debug_selector(|| "account-prompt-server-line".to_owned())
+            .text_sm()
+            .text_color(rgb(palette.muted_foreground))
+            .child(format!("Server: {server}"))
+    }
+
+    /// A new password typed twice, the first field at Tab's place `at`.
+    fn new_password_fields(&self, at: isize, palette: theme::Palette) -> [gpui::Div; 2] {
+        [
+            Self::field(
+                "new-password",
+                "Password",
+                Input::new(&self.new_password)
+                    .mask_toggle()
+                    .disabled(self.signing_in)
+                    .tab_index(at),
+                palette,
+            ),
+            Self::field(
+                "confirm",
+                "Confirm password",
+                Input::new(&self.confirm)
+                    .mask_toggle()
+                    .disabled(self.signing_in)
+                    .tab_index(at + 1),
+                palette,
+            ),
+        ]
+    }
+
+    /// The first administrator's form: the setup code when the server asks one, the user name, the display name and
+    /// the password twice.
+    fn setup_form(&self, code_required: bool, palette: theme::Palette, cx: &App) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.server_line(palette, cx))
+            .when(code_required, |form| {
+                form.child(Self::field(
+                    "code",
+                    "Setup code",
+                    Input::new(&self.code).disabled(self.signing_in).tab_index(TAB_FIELDS),
+                    palette,
+                ))
+            })
+            .child(Self::field(
+                "user",
+                "User name",
+                Input::new(&self.user)
+                    .disabled(self.signing_in)
+                    .tab_index(TAB_FIELDS + 1),
+                palette,
+            ))
+            .child(Self::field(
+                "name",
+                "Display name",
+                Input::new(&self.name)
+                    .disabled(self.signing_in)
+                    .tab_index(TAB_FIELDS + 2),
+                palette,
+            ))
+            .children(self.new_password_fields(TAB_FIELDS + 3, palette))
+    }
+
+    /// The form of a password that must change: the new one twice.
+    fn new_password_form(&self, palette: theme::Palette, cx: &App) -> gpui::Div {
+        let (_, user) = self.own_fields(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.server_line(palette, cx))
+            .child(
+                div()
+                    .debug_selector(|| "account-prompt-user-line".to_owned())
+                    .text_sm()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(format!("User name: {user}")),
+            )
+            .children(self.new_password_fields(TAB_FIELDS, palette))
+    }
+
+    /// The title, the words under it, what the status line says while the app works, and the button's word.
+    fn words(&self) -> [&'static str; 4] {
+        match (self.kind, self.stage) {
+            (SignInKind::Microsoft, _) => [
+                "Sign in to Teams",
                 "Enter your work account. Microsoft's sign-in opens in a window of its own.",
                 SIGNING_IN,
-            ),
-            SignInKind::OwnServer => {
+                "Sign in",
+            ],
+            (SignInKind::OwnServer, Stage::SignIn) => {
                 let asked = match self.own {
                     OwnAsk::Account { again: true } => OWN_PASSWORD_AGAIN,
                     OwnAsk::Account { again: false } => OWN_PASSWORD_FIRST,
                     OwnAsk::No | OwnAsk::Choice => "Enter your server's address and your account on it.",
                 };
-                (asked, SIGNING_IN_OWN)
+                ["Sign in to Teams", asked, SIGNING_IN_OWN, "Sign in"]
             }
+            (SignInKind::OwnServer, Stage::Setup { .. }) => [
+                "Create the administrator account",
+                NO_ADMIN_YET,
+                CREATING_ADMIN,
+                "Create account",
+            ],
+            (SignInKind::OwnServer, Stage::NewPassword) => [
+                "Choose a new password",
+                MUST_CHANGE,
+                CHANGING_PASSWORD,
+                "Change password and sign in",
+            ],
         }
     }
 
     /// What the screen asks for, as the line under its title says it.
     #[must_use]
     pub fn asks(&self) -> &'static str {
-        self.words().0
+        self.words()[1]
+    }
+
+    /// What a draw owes the fields: a failed sign-in's password and a wrong setup code cleared, and the keyboard on
+    /// the form's first field after the form changed.
+    fn settle_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.owed.clear_password) {
+            self.password.update(cx, |field, cx| field.set_value("", window, cx));
+        }
+        if std::mem::take(&mut self.owed.clear_code) {
+            self.code.update(cx, |field, cx| {
+                field.set_value("", window, cx);
+                field.focus(window, cx);
+            });
+        }
+        if std::mem::take(&mut self.owed.focus_first) {
+            let first = match (self.kind, self.stage) {
+                (SignInKind::Microsoft, _) => &self.input,
+                (SignInKind::OwnServer, Stage::SignIn) => match self.own {
+                    OwnAsk::Account { .. } => &self.password,
+                    OwnAsk::No | OwnAsk::Choice => &self.server,
+                },
+                (SignInKind::OwnServer, Stage::Setup { code_required: true }) => &self.code,
+                (SignInKind::OwnServer, Stage::Setup { code_required: false }) => &self.user,
+                (SignInKind::OwnServer, Stage::NewPassword) => &self.new_password,
+            };
+            first.update(cx, |field, cx| field.focus(window, cx));
+        }
+    }
+
+    /// The form's buttons: the one that sends it and, off the sign-in form, "Back".
+    fn buttons(&self, send: &'static str, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div().debug_selector(|| "account-prompt-sign-in".to_owned()).child(
+                    Button::new("account-prompt-sign-in")
+                        .primary()
+                        .label(send)
+                        .tab_index(TAB_SIGN_IN)
+                        .disabled(self.signing_in)
+                        .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                ),
+            )
+            .when(self.stage != Stage::SignIn, |row| {
+                row.child(
+                    div().debug_selector(|| "account-prompt-back".to_owned()).child(
+                        Button::new("account-prompt-back")
+                            .outline()
+                            .label("Back")
+                            .tab_index(TAB_BACK)
+                            .disabled(self.signing_in)
+                            .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
+                    ),
+                )
+            })
     }
 }
 
 impl Render for AccountPrompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
-        if std::mem::take(&mut self.clear_password) {
-            self.password.update(cx, |field, cx| field.set_value("", window, cx));
-        }
-        let (words, signing_in) = self.words();
+        self.settle_fields(window, cx);
+        let [title, words, working, send] = self.words();
         let status = if self.signing_in {
-            Some(SharedString::from(signing_in))
+            Some(SharedString::from(working))
         } else {
             self.problem.as_ref().map(|(problem, _)| problem.clone())
         };
-        let fields = match self.kind {
-            SignInKind::Microsoft => div()
+        let sign_in = self.stage == Stage::SignIn || self.kind == SignInKind::Microsoft;
+        let fields = match (self.kind, self.stage) {
+            (SignInKind::Microsoft, _) => div()
                 .debug_selector(|| "account-prompt-field".to_owned())
-                .child(Input::new(&self.input).disabled(self.signing_in).tab_index(TAB_FIELDS))
-                .into_any_element(),
-            SignInKind::OwnServer => self.own_form(palette).into_any_element(),
+                .child(Input::new(&self.input).disabled(self.signing_in).tab_index(TAB_FIELDS)),
+            (SignInKind::OwnServer, Stage::SignIn) => self.own_form(palette),
+            (SignInKind::OwnServer, Stage::Setup { code_required }) => self.setup_form(code_required, palette, cx),
+            (SignInKind::OwnServer, Stage::NewPassword) => self.new_password_form(palette, cx),
         };
         let card = div()
             .size_full()
@@ -582,19 +1105,24 @@ impl Render for AccountPrompt {
             .rounded(px(theme::SHEET_RADIUS))
             .bg(rgb(palette.background))
             .shadow(theme::glow(palette, 0x0000_0000, 0.35, 32.0, 10.0))
-            .child(
-                img(app_icon::image())
-                    .debug_selector(|| "account-prompt-logo".to_owned())
-                    .size(px(LOGO))
-                    .flex_none(),
-            )
+            .when(sign_in, |card| {
+                card.child(
+                    img(app_icon::image())
+                        .debug_selector(|| "account-prompt-logo".to_owned())
+                        .size(px(LOGO))
+                        .flex_none(),
+                )
+            })
             .child(
                 div()
+                    .debug_selector(|| "account-prompt-title".to_owned())
                     .text_xl()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child("Sign in to Teams"),
+                    .child(title),
             )
-            .when(self.own == OwnAsk::Choice, |card| card.child(self.choice(palette, cx)))
+            .when(self.own == OwnAsk::Choice && sign_in, |card| {
+                card.child(self.choice(palette, cx))
+            })
             .child(div().text_sm().text_color(rgb(palette.muted_foreground)).child(words))
             .child(fields)
             .children(status.map(|status| {
@@ -603,16 +1131,7 @@ impl Render for AccountPrompt {
                     .text_sm()
                     .child(status)
             }))
-            .child(
-                div().debug_selector(|| "account-prompt-sign-in".to_owned()).child(
-                    Button::new("account-prompt-sign-in")
-                        .primary()
-                        .label("Sign in")
-                        .tab_index(TAB_SIGN_IN)
-                        .disabled(self.signing_in)
-                        .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
-                ),
-            );
+            .child(self.buttons(send, cx));
         // on the frame, the card rising in as the window opens
         div()
             .debug_selector(|| "account-prompt".to_owned())

@@ -1,0 +1,547 @@
+//! Manage users (`teams_ui::user_admin`) in the settings, on GPUI's test context over a made-up server: the page shows
+//! only for an account that has the service; its list, search and "Show more"; the dialogs that add, edit, reset and
+//! delete, what each asks of the service and what a refusal says; the keyboard on the list; the trace.
+
+// test code throughout (its helpers unwrap like the tests do)
+#![cfg(test)]
+
+use std::io::{self, Write};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use teams_auth::admin::{AdminUser, UserChanges, UserPage};
+use teams_auth::secrets::Secret;
+use teams_ui::settings::{SettingsFile, SettingsModel};
+use teams_ui::settings_view::{Page, SettingsView};
+use teams_ui::user_admin::{AdminProblem, DialogKind, ManageUsers, NewAccount, UserAdmin, UserDialog};
+use teams_ui::{ViewTrace, theme};
+
+const ME: &str = "8:orgid:00000000-0000-4000-8000-0000000000a1";
+
+fn user(n: u8, upn: &str, name: &str, admin: bool) -> AdminUser {
+    AdminUser {
+        id: format!("00000000-0000-4000-8000-0000000000a{n}"),
+        upn: upn.to_owned(),
+        display_name: name.to_owned(),
+        enabled: true,
+        admin,
+        must_change_password: false,
+    }
+}
+
+/// A made-up server: its accounts, a page size, what it was asked, and a refusal for the next change.
+#[derive(Default)]
+struct Server {
+    users: Mutex<Vec<AdminUser>>,
+    page: usize,
+    asked: Mutex<Vec<String>>,
+    refuse: Mutex<Option<AdminProblem>>,
+}
+
+impl Server {
+    fn with(users: Vec<AdminUser>, page: usize) -> Arc<Self> {
+        Arc::new(Self {
+            users: Mutex::new(users),
+            page,
+            ..Self::default()
+        })
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    fn refuse_next(&self, problem: AdminProblem) {
+        *self.refuse.lock().unwrap() = Some(problem);
+    }
+
+    fn note(&self, asked: String) -> Result<(), AdminProblem> {
+        self.asked.lock().unwrap().push(asked);
+        self.refuse.lock().unwrap().take().map_or(Ok(()), Err)
+    }
+}
+
+impl UserAdmin for Server {
+    fn list(&self, query: &str, after: Option<&str>) -> Result<UserPage, AdminProblem> {
+        self.note(format!("list q={query} after={}", after.unwrap_or("-")))?;
+        let users = self.users.lock().unwrap();
+        let mut found: Vec<AdminUser> = users
+            .iter()
+            .filter(|user| user.upn.contains(query) && after.is_none_or(|after| user.upn.as_str() > after))
+            .cloned()
+            .collect();
+        let more = found.len() > self.page;
+        found.truncate(self.page);
+        let next = more.then(|| found.last().map(|user| user.upn.clone())).flatten();
+        Ok(UserPage { users: found, next })
+    }
+
+    fn add(&self, new: &NewAccount) -> Result<AdminUser, AdminProblem> {
+        self.note(format!(
+            "add {} name={} password={} admin={} must_change={}",
+            new.upn,
+            new.display_name,
+            new.password.expose(),
+            new.admin,
+            new.must_change_password
+        ))?;
+        let added = AdminUser {
+            admin: new.admin,
+            must_change_password: new.must_change_password,
+            ..user(9, &new.upn, &new.display_name, false)
+        };
+        self.users.lock().unwrap().push(added.clone());
+        Ok(added)
+    }
+
+    fn change(&self, id: &str, changes: &UserChanges) -> Result<AdminUser, AdminProblem> {
+        self.note(format!("change {id} {changes:?}"))?;
+        let mut users = self.users.lock().unwrap();
+        let user = users
+            .iter_mut()
+            .find(|user| user.id == id)
+            .ok_or(AdminProblem::NotFound)?;
+        if let Some(admin) = changes.admin {
+            user.admin = admin;
+        }
+        if let Some(enabled) = changes.enabled {
+            user.enabled = enabled;
+        }
+        if let Some(name) = &changes.display_name {
+            user.display_name.clone_from(name);
+        }
+        Ok(user.clone())
+    }
+
+    fn delete(&self, id: &str) -> Result<(), AdminProblem> {
+        self.note(format!("delete {id}"))?;
+        self.users.lock().unwrap().retain(|user| user.id != id);
+        Ok(())
+    }
+
+    fn reset_password(&self, id: &str, password: &Secret, must_change: bool) -> Result<(), AdminProblem> {
+        self.note(format!(
+            "reset {id} password={} must_change={must_change}",
+            password.expose()
+        ))
+    }
+}
+
+/// What the trace wrote.
+#[derive(Clone, Default)]
+struct Written(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Written {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Written {
+    /// Each line's change, kinds and people.
+    fn lines(&self) -> Vec<(String, Vec<String>, usize)> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|line| line["view"] == "user-admin")
+            .map(|line| {
+                let kinds = line["kinds"]
+                    .as_array()
+                    .map(|kinds| kinds.iter().map(|kind| kind.as_str().unwrap().to_owned()).collect())
+                    .unwrap_or_default();
+                let people = line["people"].as_array().map_or(0, Vec::len);
+                (line["change"].as_str().unwrap().to_owned(), kinds, people)
+            })
+            .collect()
+    }
+}
+
+struct Opened {
+    view: Entity<SettingsView>,
+    written: Written,
+    cx: VisualTestContext,
+    _dir: tempfile::TempDir,
+}
+
+impl Opened {
+    fn settle(&mut self) {
+        self.cx.executor().advance_clock(Duration::from_millis(300));
+        self.cx.run_until_parked();
+    }
+
+    fn click(&mut self, selector: &'static str) {
+        let bounds = self
+            .cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("no {selector}"));
+        self.cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        self.settle();
+    }
+
+    fn shows(&mut self, selector: &'static str) -> bool {
+        self.cx.debug_bounds(selector).is_some()
+    }
+
+    fn users(&mut self) -> Entity<ManageUsers> {
+        let view = self.view.clone();
+        self.cx.read(|cx| view.read(cx).users().cloned()).expect("the page")
+    }
+
+    fn listed(&mut self) -> Vec<String> {
+        let users = self.users();
+        self.cx
+            .read(|cx| users.read(cx).users().iter().map(|user| user.upn.clone()).collect())
+    }
+
+    fn dialog(&mut self) -> Option<Entity<UserDialog>> {
+        let users = self.users();
+        self.cx.read(|cx| users.read(cx).dialog().cloned())
+    }
+
+    fn dialog_problem(&mut self) -> Option<String> {
+        let dialog = self.dialog()?;
+        self.cx.read(|cx| dialog.read(cx).problem().map(ToString::to_string))
+    }
+
+    fn fill(&mut self, upn: &str, name: &str, password: &str) {
+        let dialog = self.dialog().expect("a dialog");
+        self.cx.update(|window, cx| {
+            dialog.update(cx, |dialog, cx| dialog.fill(upn, name, password, window, cx));
+        });
+        self.settle();
+    }
+
+    fn keys(&mut self, keys: &str) {
+        self.cx.simulate_keystrokes(keys);
+        self.settle();
+    }
+}
+
+/// The settings of an account whose service is `server` (none: a Microsoft 365 account's).
+fn opened(server: Option<Arc<Server>>, cx: &mut TestAppContext) -> Opened {
+    cx.update(teams_ui::window::init);
+    cx.update(theme::init);
+    let dir = tempfile::tempdir().unwrap();
+    let file = SettingsFile::new(dir.path().join("settings.toml"));
+    let written = Written::default();
+    let trace = Arc::new(ViewTrace::new(written.clone()));
+    let mut made = None;
+    let window = cx.add_window(|window, cx| {
+        let model = cx.new(|_| SettingsModel::load(file));
+        let view = cx.new(|cx| {
+            let view = SettingsView::new(model, cx).for_account(ME.to_owned());
+            match server {
+                Some(server) => {
+                    let admin: Arc<dyn UserAdmin> = server;
+                    view.with_admin(Rc::new(move |_| Some(Arc::clone(&admin))), trace)
+                }
+                None => view.with_admin(Rc::new(|_| None), trace),
+            }
+        });
+        made = Some(view.clone());
+        teams_ui::window::KitRoot::new(view, window, cx)
+    });
+    let mut opened = Opened {
+        view: made.unwrap(),
+        written,
+        cx: VisualTestContext::from_window(window.into(), cx),
+        _dir: dir,
+    };
+    opened.settle();
+    opened
+}
+
+fn three() -> Vec<AdminUser> {
+    vec![
+        user(1, "ada@example.test", "Ada Admin", true),
+        user(2, "dana@example.test", "Dana Doe", false),
+        user(3, "evan@example.test", "Evan Roe", false),
+    ]
+}
+
+/// The page shown for a server of [`three`] users, `page` to a page.
+fn page_opened(page: usize, cx: &mut TestAppContext) -> (Arc<Server>, Opened) {
+    let server = Server::with(three(), page);
+    let mut opened = opened(Some(Arc::clone(&server)), cx);
+    opened.click("settings-page-users");
+    (server, opened)
+}
+
+#[gpui::test]
+fn the_page_is_offered_only_to_an_account_with_the_service(cx: &mut TestAppContext) {
+    let mut microsoft = opened(None, cx);
+    assert!(!microsoft.shows("settings-page-users"));
+    let view = microsoft.view.clone();
+    microsoft
+        .cx
+        .update(|_, cx| view.update(cx, |view, cx| view.show_page(Page::Users, cx)));
+    microsoft.settle();
+    assert_eq!(microsoft.cx.read(|cx| view.read(cx).page()), Page::General);
+    assert!(microsoft.cx.read(|cx| !view.read(cx).offers(Page::Users, cx)));
+    assert!(microsoft.written.lines().is_empty());
+}
+
+#[gpui::test]
+fn the_administrator_sees_the_servers_users(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    let view = opened.view.clone();
+    assert!(opened.cx.read(|cx| view.read(cx).offers(Page::Users, cx)));
+    assert_eq!(
+        opened.listed(),
+        ["ada@example.test", "dana@example.test", "evan@example.test"]
+    );
+    for row in [
+        "user-row-ada@example.test",
+        "user-row-dana@example.test",
+        "users-search",
+        "users-add",
+    ] {
+        assert!(opened.shows(row), "{row}");
+    }
+    assert!(!opened.shows("users-more"));
+    assert_eq!(server.asked(), ["list q= after=-"]);
+    assert_eq!(
+        opened.written.lines(),
+        [("shown".to_owned(), vec![], 0), ("listed".to_owned(), vec![], 3)]
+    );
+}
+
+#[gpui::test]
+fn the_list_is_searched_and_shows_more_on_demand(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(2, cx);
+    assert_eq!(opened.listed().len(), 2);
+    let users = opened.users();
+    assert!(opened.cx.read(|cx| users.read(cx).has_more()));
+    opened.click("users-more");
+    assert_eq!(opened.listed().len(), 3);
+    assert!(!opened.shows("users-more"));
+    assert_eq!(server.asked()[1], "list q= after=dana@example.test");
+
+    opened.click("users-search");
+    opened.cx.simulate_input("dana");
+    opened.settle();
+    assert_eq!(opened.listed(), ["dana@example.test"]);
+    opened.cx.simulate_input("x");
+    opened.settle();
+    assert!(opened.listed().is_empty());
+    assert!(opened.shows("users-none"));
+}
+
+#[gpui::test]
+fn a_list_that_cant_be_read_says_why_and_reads_again(cx: &mut TestAppContext) {
+    let server = Server::with(three(), 50);
+    server.refuse_next(AdminProblem::Unreachable);
+    let mut opened = opened(Some(Arc::clone(&server)), cx);
+    opened.click("settings-page-users");
+    assert!(opened.shows("users-problem"));
+    let users = opened.users();
+    assert_eq!(
+        opened.cx.read(|cx| users.read(cx).problem().cloned()),
+        Some(AdminProblem::Unreachable)
+    );
+    opened.click("users-retry");
+    assert!(!opened.shows("users-problem"));
+    assert_eq!(opened.listed().len(), 3);
+    assert_eq!(
+        opened.written.lines()[1],
+        ("failed".to_owned(), vec!["unreachable".to_owned()], 0)
+    );
+}
+
+#[gpui::test]
+fn a_user_is_added_once_the_form_reads(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("users-add");
+    assert!(opened.shows("user-dialog"));
+    opened.keys("enter");
+    assert_eq!(
+        opened.dialog_problem().as_deref(),
+        Some("Enter a user name like name@example.com.")
+    );
+    opened.fill("frank@example.test", "", "");
+    opened.click("user-dialog-confirm");
+    assert_eq!(opened.dialog_problem().as_deref(), Some("Enter a display name."));
+    opened.fill("frank@example.test", "Frank Poe", "short");
+    opened.click("user-dialog-confirm");
+    assert_eq!(
+        opened.dialog_problem().as_deref(),
+        Some("Use a password of at least 8 characters.")
+    );
+    assert_eq!(server.asked().len(), 1, "nothing was asked of the server yet");
+
+    // a user name another account has
+    opened.fill("frank@example.test", "Frank Poe", "a made-up password");
+    server.refuse_next(AdminProblem::UpnTaken);
+    opened.click("user-dialog-confirm");
+    assert_eq!(
+        opened.dialog_problem().as_deref(),
+        Some("Another user already has this user name.")
+    );
+    assert!(opened.shows("user-dialog-problem"));
+
+    opened.click("user-dialog-admin");
+    opened.click("user-dialog-confirm");
+    assert!(opened.dialog().is_none());
+    assert_eq!(
+        server.asked()[2],
+        "add frank@example.test name=Frank Poe password=a made-up password admin=true must_change=true"
+    );
+    assert_eq!(opened.listed().len(), 4);
+    let lines = opened.written.lines();
+    assert!(lines.contains(&("dialog".to_owned(), vec!["add".to_owned()], 0)));
+    assert!(lines.contains(&("failed".to_owned(), vec!["upn-taken".to_owned()], 0)));
+    assert!(lines.contains(&("done".to_owned(), vec!["add".to_owned()], 0)));
+    assert!(
+        !opened
+            .written
+            .0
+            .lock()
+            .unwrap()
+            .windows(4)
+            .any(|bytes| bytes == b"made")
+    );
+}
+
+#[gpui::test]
+fn a_user_is_edited_and_the_only_administrator_stays_one(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("user-row-dana@example.test");
+    let dialog = opened.dialog().expect("the edit dialog");
+    assert_eq!(opened.cx.read(|cx| dialog.read(cx).kind()), DialogKind::Edit);
+    assert!(
+        opened.cx.read(|cx| !dialog.read(cx).can_confirm(cx)),
+        "nothing changed yet"
+    );
+    opened.click("user-dialog-admin");
+    opened.click("user-dialog-enabled");
+    opened.click("user-dialog-confirm");
+    assert!(opened.dialog().is_none());
+    assert_eq!(
+        server.asked()[1],
+        "change 00000000-0000-4000-8000-0000000000a2 UserChanges { display_name: None, upn: None, enabled: \
+         Some(false), admin: Some(true) }"
+    );
+
+    opened.click("user-row-ada@example.test");
+    opened.click("user-dialog-admin");
+    server.refuse_next(AdminProblem::LastAdmin);
+    opened.click("user-dialog-confirm");
+    assert_eq!(
+        opened.dialog_problem().as_deref(),
+        Some("This is the server's only administrator. Make another user an administrator first.")
+    );
+    opened.keys("escape");
+    assert!(opened.dialog().is_none());
+    assert!(
+        opened
+            .written
+            .lines()
+            .contains(&("failed".to_owned(), vec!["last-admin".to_owned()], 0))
+    );
+
+    // the name changed alone, with Cancel first
+    opened.click("user-row-evan@example.test");
+    opened.click("user-dialog-cancel");
+    assert!(opened.dialog().is_none());
+    opened.click("user-row-evan@example.test");
+    opened.fill("evan@example.test", "Evan R.", "");
+    opened.keys("enter");
+    assert!(
+        server
+            .asked()
+            .iter()
+            .any(|asked| asked.contains("display_name: Some(\"Evan R.\"), upn: None")),
+        "{:?}",
+        server.asked()
+    );
+}
+
+#[gpui::test]
+fn a_password_is_reset_and_shown_once(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("user-row-dana@example.test");
+    opened.click("user-dialog-reset");
+    let dialog = opened.dialog().expect("the reset dialog");
+    assert_eq!(opened.cx.read(|cx| dialog.read(cx).kind()), DialogKind::Reset);
+    opened.click("user-dialog-confirm");
+    assert_eq!(
+        opened.dialog_problem().as_deref(),
+        Some("Use a password of at least 8 characters.")
+    );
+    opened.click("user-dialog-suggest");
+    assert_eq!(opened.dialog_problem(), None);
+    opened.click("user-dialog-must-change");
+    opened.click("user-dialog-confirm");
+    let asked = server.asked().last().unwrap().clone();
+    assert!(
+        asked.starts_with("reset 00000000-0000-4000-8000-0000000000a2 password=")
+            && asked.ends_with("must_change=false"),
+        "{asked}"
+    );
+    assert!(opened.cx.read(|cx| dialog.read(cx).shows_given()));
+    assert!(opened.shows("user-dialog-given") && opened.shows("user-dialog-copy"));
+    assert!(!opened.shows("user-dialog-cancel"));
+    opened.click("user-dialog-copy");
+    let copied = opened.cx.read_from_clipboard().and_then(|item| item.text()).unwrap();
+    assert!(asked.contains(&format!("password={copied} ")), "{copied}");
+    opened.keys("escape");
+    assert!(opened.dialog().is_none());
+    assert_eq!(server.asked().last().unwrap(), "list q= after=-");
+
+    // again, read and closed with Enter: the dialog has the keyboard once the password shows
+    opened.click("user-row-evan@example.test");
+    opened.click("user-dialog-reset");
+    opened.cx.simulate_input("a made-up password");
+    opened.keys("enter");
+    assert!(opened.shows("user-dialog-given"));
+    opened.keys("enter");
+    assert!(opened.dialog().is_none());
+}
+
+#[gpui::test]
+fn a_user_is_deleted_after_a_confirmation(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("user-row-evan@example.test");
+    opened.click("user-dialog-delete");
+    let dialog = opened.dialog().expect("the confirmation");
+    assert_eq!(opened.cx.read(|cx| dialog.read(cx).kind()), DialogKind::Delete);
+    assert_eq!(server.asked().len(), 1, "nothing is deleted before the confirmation");
+    opened.click("user-dialog-confirm");
+    assert!(opened.dialog().is_none());
+    assert_eq!(server.asked()[1], "delete 00000000-0000-4000-8000-0000000000a3");
+    assert_eq!(opened.listed(), ["ada@example.test", "dana@example.test"]);
+    assert!(!opened.shows("user-row-evan@example.test"));
+}
+
+#[gpui::test]
+fn the_keyboard_walks_the_list_and_opens_a_user(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    opened.click("users-search");
+    opened.keys("tab tab");
+    opened.keys("down down down up");
+    opened.keys("enter");
+    let dialog = opened.dialog().expect("the second row's dialog");
+    assert_eq!(opened.cx.read(|cx| dialog.read(cx).kind()), DialogKind::Edit);
+    opened.click("user-dialog-enabled");
+    opened.click("user-dialog-confirm");
+    assert!(
+        server.asked()[1].starts_with("change 00000000-0000-4000-8000-0000000000a2 "),
+        "{:?}",
+        server.asked()
+    );
+    // the search has the keyboard again
+    opened.cx.simulate_input("ada");
+    opened.settle();
+    assert_eq!(opened.listed(), ["ada@example.test"]);
+    opened.keys("tab tab");
+    opened.keys("end home space");
+    assert!(opened.dialog().is_some());
+}

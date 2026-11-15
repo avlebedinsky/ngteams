@@ -215,6 +215,15 @@ pub fn add_own(setup: &Setup, upn: &str, server: &OwnServer, password: &Secret) 
     })
 }
 
+/// Whether the own server `server` still needs its first administrator (blocking), as
+/// [`crate::own_admin::needs_admin`].
+///
+/// # Errors
+/// What kept the server from answering.
+pub fn needs_admin(server: &OwnServer) -> Result<Option<bool>, String> {
+    crate::own_admin::needs_admin(server)
+}
+
 /// Signs the own server's `account` in again with `password` (blocking), as [`signin::sign_in_own_again`]: its entry
 /// in `accounts.toml` is read again first.
 ///

@@ -94,6 +94,30 @@ impl Own {
         }
     }
 
+    /// Adds the administrator `upn`, named `name`, with [`PASSWORD`].
+    pub fn add_admin(&self, upn: &str, name: &str) -> SandboxResult<String> {
+        match self {
+            Self::Binary(server) => server.add_admin(upn, name),
+            Self::InProcess(server) => Ok(server.add_admin(upn, name).map_err(|error| error.to_string())?),
+        }
+    }
+
+    /// A new one-time setup code, as the operator reads it off the server.
+    pub fn setup_code(&self) -> SandboxResult<String> {
+        match self {
+            Self::Binary(server) => server.setup_code(),
+            Self::InProcess(server) => Ok(server.setup_code().map_err(|error| error.to_string())?),
+        }
+    }
+
+    /// The server's accounts: `(user name, id, enabled, admin)`.
+    pub fn users(&self) -> SandboxResult<Vec<(String, String, bool, bool)>> {
+        match self {
+            Self::Binary(server) => server.users(),
+            Self::InProcess(server) => Ok(server.users().map_err(|error| error.to_string())?),
+        }
+    }
+
     /// The account's entry as a user of a self-signed deployment writes it: its server and its `ca_file`.
     pub fn entry(&self) -> SandboxResult<accounts_file::OwnServer> {
         Ok(accounts_file::OwnServer::parse(
@@ -137,7 +161,9 @@ fn described(cx: &mut App) -> String {
     let (server, user) = prompt.own_fields(cx);
     let problem = prompt.problem().map_or_else(|| "-".to_owned(), ToString::to_string);
     format!(
-        "active={active} kind={kind} signing={} server={server} user={user} account={} asks={} problem={problem}",
+        "active={active} stage={} kind={kind} signing={} server={server} user={user} account={} asks={} \
+         problem={problem}",
+        prompt.stage().key(),
         prompt.is_signing_in(),
         prompt.account(cx),
         prompt.asks(),

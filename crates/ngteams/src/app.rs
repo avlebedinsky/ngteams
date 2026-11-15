@@ -10,7 +10,8 @@
 //! is signed in through the sign-in window off GPUI's foreground ([`crate::accounts::add`]), and once that goes through
 //! its engine starts ([`Runner::start`]) and the window shows it; nothing else restarts. With own servers on, the
 //! window asks first where the account is: an own server's is signed in with its password on that server alone
-//! ([`crate::accounts::add_own`]) and runs beside the Microsoft 365 accounts, its tokens, store and services its own. **Removing one** ("Sign out
+//! ([`crate::own_prompt`]) and runs beside the Microsoft 365 accounts, its tokens, store and services its own; one
+//! that is an administrator of its server gets Manage users in its settings ([`offer_user_admin`]). **Removing one** ("Sign out
 //! and remove" in its account menu): its engine is shut down, then it is forgotten as `ngteams --forget` forgets it,
 //! then it leaves the window; the last one removed quits the app.
 //!
@@ -29,8 +30,8 @@ use std::sync::Arc;
 
 use crate::accounts_file::{OwnServer, PersonalAccount};
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
-use teams_auth::secrets::{Secret, SecretStore};
-use teams_auth::session::SignedOut;
+use teams_auth::secrets::SecretStore;
+use teams_auth::session::{Session, SignedOut};
 use teams_core::EngineHandle;
 use teams_log::diagnostics::Source as DiagnosticsSource;
 use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent, OwnOffer, OwnSignIn};
@@ -45,6 +46,8 @@ use tokio::sync::watch;
 use crate::accounts::{self, Runner, Started};
 use crate::calling::PersonalCalls;
 use crate::engine::display_name;
+use crate::own_admin::AdminService;
+use crate::own_prompt::{OwnPrompt, Signed};
 use crate::secrets::AppSecrets;
 
 #[cfg(windows)]
@@ -212,6 +215,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down
     cx.set_quit_mode(QuitMode::Explicit);
     let settings = shared_settings(settings, first.calls.as_ref(), cx);
+    let first_session = Arc::clone(&first.engine.session);
     let (models, bridge) = bridge(first.engine.handle, first.calls.as_ref(), cx);
     watch_sign_out_saying(
         hint,
@@ -235,14 +239,12 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         ..desktop_parts(app_id, parts, &first.account, read_only)
     };
     let desktop = cx.new(|cx| Desktop::new(parts, cx));
+    if !read_only {
+        let own = (&first.account, &first_session);
+        offer_user_admin(&runner.setup, own, key.clone(), desktop.clone(), cx);
+    }
     limit_lab_accounts(&desktop, &runner, cx);
-    let servers = first
-        .account
-        .server
-        .clone()
-        .map(|server| (key.clone(), server))
-        .into_iter()
-        .collect();
+    let servers = own_server_of(&first.account, &key);
     let running = cx.new(|_| Running {
         desktop: desktop.clone(),
         bridges: vec![(key, first.account.id(), bridge)],
@@ -275,6 +277,16 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     #[cfg(target_os = "macos")]
     crate::mac_app::install(cx);
     Ok(Launched { window, desktop })
+}
+
+/// The own server's origin of `account` (its MRI `key`), by that MRI; nothing for a Microsoft 365 account.
+fn own_server_of(account: &PersonalAccount, key: &str) -> std::collections::HashMap<String, String> {
+    account
+        .server
+        .clone()
+        .map(|server| (key.to_owned(), server))
+        .into_iter()
+        .collect()
 }
 
 /// The first account watched for the event streams, the `others` started after it, and the app's own events watched;
@@ -313,6 +325,38 @@ fn serve_ctl(path: &std::path::Path, running: &Entity<Running>, cx: &mut App) {
             log::warn!("no control socket: {error}");
         }
     }
+}
+
+/// Offers Manage users to `account` (its MRI `key`, its `session`) when it is an own server's and that server says
+/// it is an administrator: asked once, off the foreground, with the account's own token on its own server, and only
+/// of an account the app itself signed in (its region saved and its refresh token stored, so its session has a
+/// token to ask with). A Microsoft 365 account is asked nothing and offered nothing; neither is any account while
+/// own servers are off.
+fn offer_user_admin<S: SecretStore + 'static>(
+    setup: &crate::setup::Setup,
+    (account, session): (&PersonalAccount, &Arc<Session<S>>),
+    key: String,
+    desktop: Entity<Desktop>,
+    cx: &mut App,
+) {
+    if !setup.own_servers() {
+        return;
+    }
+    let Some(service) = AdminService::of(account, Arc::clone(session)) else {
+        return;
+    };
+    let service = Arc::new(service);
+    let (asked, setup, account) = (Arc::clone(&service), setup.clone(), account.clone());
+    let asking = cx.background_spawn(async move {
+        accounts::ready(&setup, &account).unwrap_or(false) && asked.is_admin().unwrap_or(false)
+    });
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        if asking.await {
+            log::info!("an own server's account is an administrator: its settings offer Manage users");
+            cx.update(|cx| desktop.update(cx, |desktop, cx| desktop.set_user_admin(&key, Some(service), cx)));
+        }
+    })
+    .detach();
 }
 
 /// A lab alias can forget its current account, but its single-account broker cannot add another one.
@@ -453,6 +497,7 @@ impl Running {
             })
             .detach();
         }
+        let session = Arc::clone(&engine.session);
         let (models, bridge) = bridge(engine.handle, calls.as_ref(), cx);
         let hint = if self.read_only {
             READ_ONLY_SIGNED_OUT_HINT
@@ -476,6 +521,10 @@ impl Running {
             server: account.server_host().map(Into::into),
         };
         self.desktop.update(cx, |desktop, cx| desktop.add_account(parts, cx));
+        if !self.read_only {
+            let own = (&account, &session);
+            offer_user_admin(&self.runner.setup, own, key.clone(), self.desktop.clone(), cx);
+        }
         let id = account.id();
         if let Some(server) = account.server {
             self.servers.insert(key.clone(), server);
@@ -514,39 +563,53 @@ impl Running {
             }
         };
         self.adding = Some(window);
-        cx.subscribe(&prompt, |running, prompt, event, cx| match event {
+        let own = self.own_prompt(cx);
+        cx.subscribe(&prompt, move |running, prompt, event, cx| match event {
             AccountPromptEvent::SignIn(upn) => running.sign_in_added(upn.clone(), prompt, cx),
-            AccountPromptEvent::SignInOwn(own) => running.sign_in_own_added(own.clone(), prompt, cx),
+            AccountPromptEvent::SignInOwn(typed) if running.own_added_already(typed, &prompt, cx) => {}
+            event => {
+                if running.can_add_account() {
+                    own.handle(event, prompt, cx);
+                }
+            }
         })
         .detach();
     }
 
-    /// Signs the own server's account the prompt named in with its password, on its server alone (no sign-in
-    /// window), then starts it beside the others ([`Running::ask_account`]).
-    fn sign_in_own_added(&mut self, own: OwnSignIn, prompt: Entity<AccountPrompt>, cx: &mut gpui::Context<Self>) {
-        if !self.can_add_account() {
-            return;
+    /// What the window asking for an account does about an own server ([`crate::own_prompt`]): an account signed in
+    /// there is started beside the others and shown, and one that can't start is said on the window.
+    fn own_prompt(&self, cx: &mut gpui::Context<Self>) -> OwnPrompt {
+        let this = cx.weak_entity();
+        let signed: Signed = Rc::new(move |account, prompt, cx| {
+            let _ = this.update(cx, |running, cx| match running.runner.start(&account) {
+                Ok(started) => running.added(started, cx),
+                Err(error) => {
+                    log::warn!("an own server's account wasn't added");
+                    prompt.update(cx, |prompt, cx| prompt.failed(String::from(error), cx));
+                }
+            });
+        });
+        OwnPrompt {
+            setup: self.runner.setup.clone(),
+            sign_ins: crate::own_prompt::SignIns::app(),
+            again: None,
+            signed,
         }
-        let server = match OwnServer::parse(&own.server, "") {
-            Ok(server) => server,
-            Err(error) => {
-                prompt.update(cx, |prompt, cx| prompt.failed(error.to_string(), cx));
-                return;
-            }
+    }
+
+    /// Whether the own server's account the prompt named runs already: said on the prompt then.
+    fn own_added_already(&self, own: &OwnSignIn, prompt: &Entity<AccountPrompt>, cx: &mut gpui::Context<Self>) -> bool {
+        let Ok(server) = OwnServer::parse(&own.server, "") else {
+            return false;
         };
         let id = format!("{}/{}", server.origin, own.user);
-        if self.bridges.iter().any(|(_, held, _)| held.eq_ignore_ascii_case(&id)) {
+        let added = self.bridges.iter().any(|(_, held, _)| held.eq_ignore_ascii_case(&id));
+        if added {
             prompt.update(cx, |prompt, cx| {
                 prompt.failed(format!("{} is added already", own.user), cx);
             });
-            return;
         }
-        let setup = self.runner.setup.clone();
-        let signing = cx.background_spawn(async move {
-            let password = Secret::new(own.password.as_str());
-            accounts::add_own(&setup, &own.user, &server, &password)
-        });
-        Self::start_signed(signing, prompt, cx);
+        added
     }
 
     /// Once `signing` went through, starts the account and shows it; one that didn't is said on `prompt`.

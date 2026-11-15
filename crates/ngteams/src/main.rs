@@ -14,7 +14,7 @@ use clap::Parser as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity};
 #[cfg(not(test))]
 use ngteams::accounts::{self, Runner, StartFailed, Started};
-use ngteams::accounts_file::{OwnServer, PersonalAccount, PersonalPaths};
+use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 #[cfg(not(test))]
 use ngteams::app;
 use ngteams::app::{Launch, SignInAgain};
@@ -23,6 +23,7 @@ use ngteams::cli::{Cli, Command as Subcommand, LabMode, ReadOnlyMode};
 use ngteams::descriptors::{RawDescriptor, adopt_socket, adopt_trace};
 use ngteams::forget::Forgot;
 use ngteams::handoff::{self, HandOff};
+use ngteams::own_prompt::{OwnPrompt, SignIns};
 use ngteams::setup::Setup;
 use ngteams::{KEYRING_APPLICATION, lab, read_only, secrets, snapshot};
 use teams_auth::secrets::LazyKeyring;
@@ -30,7 +31,7 @@ use teams_core::CallFloor;
 use teams_media::devices::Reach;
 #[cfg(not(test))]
 use teams_ui::account_prompt;
-use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent, OwnOffer, OwnSignIn};
+use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent, OwnOffer};
 use teams_ui::window::PERSONAL_APP_ID;
 use teams_ui::{SettingsFile, ViewTrace};
 use teams_update::Restart;
@@ -788,8 +789,8 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
                     let (setup, restart) = (setup.clone(), Rc::clone(&restart_in_app));
                     match event {
                         AccountPromptEvent::SignIn(upn) => sign_in_from_prompt(setup, upn.clone(), prompt, restart, cx),
-                        AccountPromptEvent::SignInOwn(own) => {
-                            sign_in_own_from_prompt(setup, own.clone(), None, prompt, restart, cx);
+                        event => {
+                            own_prompt(&setup, None, &restart).handle(event, prompt, cx);
                         }
                     }
                 })
@@ -836,63 +837,40 @@ fn sign_in_from_prompt(
     .detach();
 }
 
-/// Signs an own server's account in from a sign-in screen with the password typed, off GPUI's foreground: `again`
-/// when it is an account signed out before ([`accounts::sign_in_own`]), else added ([`accounts::add_own`]). One that
-/// goes through quits the app to start it afresh; one that doesn't is said on `prompt`.
-fn sign_in_own_from_prompt(
-    setup: Setup,
-    own: OwnSignIn,
-    again: Option<PersonalAccount>,
-    prompt: Entity<AccountPrompt>,
-    restart: Rc<Cell<bool>>,
-    cx: &mut App,
-) {
-    let signing = cx.background_spawn(async move {
-        let password = teams_auth::secrets::Secret::new(own.password.as_str());
-        signed_in_own(&setup, &own, again, &password)
-    });
-    cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
-        Ok(_) => {
-            log::info!("an own server's account was signed in: the app restarts");
-            restart.set(true);
-            cx.update(app::quit);
-        }
-        Err(error) => {
-            eprintln!("teams: {error}");
-            cx.update(|cx| prompt.update(cx, |prompt, cx| prompt.failed(error, cx)));
-        }
-    })
-    .detach();
-}
-
-/// The own server's account signed in with `password`, as [`sign_in_own_from_prompt`] does it: one whose server
-/// serves no chats is signed in and can't be shown, which is said like a sign-in that didn't go through, so the
-/// screen stays instead of the app restarting into nothing.
-fn signed_in_own(
-    setup: &Setup,
-    own: &OwnSignIn,
-    again: Option<PersonalAccount>,
-    password: &teams_auth::secrets::Secret,
-) -> Result<PersonalAccount, String> {
-    let signed = if let Some(account) = again {
-        accounts::sign_in_own(setup, &account, password)?
-    } else {
-        let server = OwnServer::parse(&own.server, "").map_err(|error| error.to_string())?;
-        accounts::add_own(setup, &own.user, &server, password)?
-    };
-    match accounts::unserved(setup, &signed) {
-        Some(unserved) => Err(unserved),
-        None => Ok(signed),
+/// What a sign-in screen does about an own server ([`ngteams::own_prompt`]): `again` is the account it asks again
+/// (signed out, or never signed in), none where an account is added. A sign-in that goes through quits the app to
+/// start it afresh; one whose server serves no chats is signed in and can't be shown, which is said like a sign-in
+/// that didn't go through, so the screen stays instead of the app restarting into nothing.
+fn own_prompt(setup: &Setup, again: Option<PersonalAccount>, restart: &Rc<Cell<bool>>) -> OwnPrompt {
+    let (held, restart) = (setup.clone(), Rc::clone(restart));
+    OwnPrompt {
+        setup: setup.clone(),
+        sign_ins: SignIns {
+            add_own: accounts::add_own,
+            sign_in_own: accounts::sign_in_own,
+            needs_admin: accounts::needs_admin,
+        },
+        again,
+        signed: Rc::new(move |account, prompt, cx| {
+            if let Some(unserved) = accounts::unserved(&held, &account) {
+                eprintln!("teams: {unserved}");
+                prompt.update(cx, |prompt, cx| prompt.failed(unserved, cx));
+            } else {
+                log::info!("an own server's account was signed in: the app restarts");
+                restart.set(true);
+                app::quit(cx);
+            }
+        }),
     }
 }
 
 /// The screen asking for the password of the own server's `account` again (signed out, or not signed in yet), with
 /// `said` under its fields when there is why it is shown: a sign-in that goes through restarts the app.
 fn ask_own_password(
-    setup: Setup,
+    setup: &Setup,
     account: PersonalAccount,
     said: Option<String>,
-    restart: Rc<Cell<bool>>,
+    restart: &Rc<Cell<bool>>,
     cx: &mut App,
 ) {
     let own = own_offer(&account);
@@ -901,11 +879,9 @@ fn ask_own_password(
             if let Some(said) = said {
                 prompt.update(cx, |prompt, cx| prompt.failed(said, cx));
             }
+            let own = own_prompt(setup, Some(account), restart);
             cx.subscribe(&prompt, move |prompt, event, cx| {
-                if let AccountPromptEvent::SignInOwn(own) = event {
-                    let (setup, restart) = (setup.clone(), Rc::clone(&restart));
-                    sign_in_own_from_prompt(setup, own.clone(), Some(account.clone()), prompt, restart, cx);
-                }
+                own.handle(event, prompt, cx);
             })
             .detach();
         }
@@ -933,7 +909,7 @@ fn own_screen(setup: Setup, account: PersonalAccount, said: Option<String>) -> O
     let restart = Rc::new(Cell::new(false));
     let restart_in_app = Rc::clone(&restart);
     let application = platform::application().with_assets(teams_ui::AppAssets);
-    application.run(move |cx: &mut App| ask_own_password(setup, account, said, restart_in_app, cx));
+    application.run(move |cx: &mut App| ask_own_password(&setup, account, said, &restart_in_app, cx));
     if restart.get() {
         Outcome::Restart { opened: None }
     } else {
@@ -1001,7 +977,7 @@ fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>
         let (setup, account, restart) = (setup.clone(), account.clone(), Rc::clone(&restart));
         if account.server.is_some() {
             // an own server's account never sees Microsoft's window: its password is asked again
-            ask_own_password(setup, account, None, restart, cx);
+            ask_own_password(&setup, account, None, &restart, cx);
             return;
         }
         let windows = ngteams::signin::windows_for(&setup, cx);

@@ -21,6 +21,8 @@
 //!   "Save live captions of every call" ([`crate::call_transcript`]), then the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
 //!   the same control ([`ai_picker::AiPicker`]).
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
+//! - **Manage users** (an own server's administrator alone, [`SettingsView::with_admin`]): the server's accounts
+//!   ([`crate::user_admin`]).
 //!
 //! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
 //! [`SettingsModel`] (and so to the file, and a device's to the calls) at once.
@@ -53,6 +55,7 @@ use crate::settings_view::ai_picker::AiPicker;
 use crate::shell::shown_as;
 use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
 use crate::trace::ViewTrace;
+use crate::user_admin::{ManageUsers, UserAdmin};
 
 pub mod ai_picker;
 pub mod sounds;
@@ -118,6 +121,10 @@ pub type TestCallState = Rc<dyn Fn(&App) -> TestCallOffer>;
 /// The own server of the view's account, as the shell tells it ([`SettingsView::with_server`]); `None` for a
 /// Microsoft 365 account.
 pub type AccountServer = Rc<dyn Fn(&App) -> Option<SharedString>>;
+
+/// The account's own server's account management, when the account is an administrator there
+/// ([`SettingsView::with_admin`]).
+pub type AccountAdmin = Rc<dyn Fn(&App) -> Option<Arc<dyn UserAdmin>>>;
 
 /// What the settings view asks of the shell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,9 +229,12 @@ pub enum Page {
     Privacy,
     Calls,
     Diagnostics,
+    /// An own server's accounts, for its administrator ([`crate::user_admin`]).
+    Users,
 }
 
 impl Page {
+    /// The pages every account has ([`Page::Users`] is an own server's administrator's alone).
     pub const ALL: [Self; 6] = [
         Self::General,
         Self::Appearance,
@@ -244,6 +254,7 @@ impl Page {
             Self::Privacy => "privacy",
             Self::Calls => "calls",
             Self::Diagnostics => "diagnostics",
+            Self::Users => "users",
         }
     }
 
@@ -256,6 +267,7 @@ impl Page {
             Self::Privacy => "Privacy",
             Self::Calls => "Calls and devices",
             Self::Diagnostics => "Diagnostics",
+            Self::Users => "Manage users",
         }
     }
 
@@ -267,6 +279,7 @@ impl Page {
             Self::Privacy => Glyph::SHIELD,
             Self::Calls => Glyph::HEADPHONES,
             Self::Diagnostics => Glyph::BUG,
+            Self::Users => Glyph::USERS,
         }
     }
 }
@@ -333,6 +346,11 @@ pub struct SettingsView {
     test_call: Option<TestCallState>,
     /// The account's own server, as the shell tells it ([`SettingsView::with_server`]).
     server: Option<AccountServer>,
+    /// The account's server's account management as the shell tells it, and the trace its page records to
+    /// ([`SettingsView::with_admin`]).
+    admin: Option<(AccountAdmin, Arc<ViewTrace>)>,
+    /// The Manage users page, made the first time it shows.
+    users: Option<Entity<ManageUsers>>,
     /// The video effects' picker while the Calls page shows.
     effects: Option<Entity<EffectsPicker>>,
     /// The local AI choices' pickers (captions, then recaps), made the first time the Calls page shows.
@@ -365,6 +383,8 @@ impl SettingsView {
             fonts: None,
             test_call: None,
             server: None,
+            admin: None,
+            users: None,
             effects: None,
             ai: None,
             chat_ai: None,
@@ -410,6 +430,62 @@ impl SettingsView {
     pub fn with_server(mut self, server: AccountServer) -> Self {
         self.server = Some(server);
         self
+    }
+
+    /// The view offering Manage users while `admin` gives the account's server's account management (an own
+    /// server's administrator; nothing for any other account), its page recording to `trace`.
+    #[must_use]
+    pub fn with_admin(mut self, admin: AccountAdmin, trace: Arc<ViewTrace>) -> Self {
+        self.admin = Some((admin, trace));
+        self
+    }
+
+    /// The account's server's account management now, if it has one.
+    fn user_admin(&self, cx: &App) -> Option<Arc<dyn UserAdmin>> {
+        self.admin.as_ref().and_then(|(admin, _)| admin(cx))
+    }
+
+    /// Whether the settings list `page` for this account now.
+    #[must_use]
+    pub fn offers(&self, page: Page, cx: &App) -> bool {
+        self.pages(cx).contains(&page)
+    }
+
+    /// The Manage users page, once it showed.
+    #[must_use]
+    pub fn users(&self) -> Option<&Entity<ManageUsers>> {
+        self.users.as_ref()
+    }
+
+    /// The Manage users page, made when it first shows; none without the account's server's account management.
+    fn users_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let admin = self.user_admin(cx)?;
+        let trace = self.admin.as_ref().map(|(_, trace)| Arc::clone(trace))?;
+        let me = self.account.clone().unwrap_or_default();
+        let users = self
+            .users
+            .get_or_insert_with(|| cx.new(|cx| ManageUsers::new(admin, trace, me, window, cx)));
+        Some(users.clone().into_any_element())
+    }
+
+    /// The Manage users page's dialog over the settings, while one is open.
+    fn user_dialog(&self, cx: &App) -> Option<gpui::Stateful<gpui::Div>> {
+        let users = self.users.as_ref().filter(|_| self.page == Page::Users)?;
+        let dialog = users.read(cx).dialog()?.clone();
+        Some(
+            div()
+                .id("user-dialog-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(dialog),
+        )
     }
 
     /// The General page's box naming the account's own server; none for a Microsoft 365 account.
@@ -477,12 +553,15 @@ impl SettingsView {
         self.focus.focus(window, cx);
     }
 
-    /// The pages the column lists: Calls only where it has something.
+    /// The pages the column lists: Calls only where it has something, Manage users only for an own server's
+    /// administrator.
     fn pages(&self, cx: &App) -> Vec<Page> {
         let calls = self.has_calls(cx);
+        let users = self.user_admin(cx).map(|_| Page::Users);
         Page::ALL
             .into_iter()
             .filter(|page| *page != Page::Calls || calls)
+            .chain(users)
             .collect()
     }
 
@@ -1275,6 +1354,7 @@ impl SettingsView {
                 let model = self.model.clone();
                 self.diagnostics(settings, model.read(cx), palette)
             }
+            Page::Users => self.users_page(window, cx).into_iter().collect(),
         }
     }
 }
@@ -1687,12 +1767,21 @@ impl Render for SettingsView {
         if self.page != Page::Calls {
             self.put_away();
         }
+        if self.user_admin(cx).is_none() {
+            // the account is no administrator (any more): its page and what it listed go
+            self.users = None;
+            if self.page == Page::Users {
+                self.page = Page::General;
+            }
+        }
         let settings = self.model.read(cx).settings().clone();
         let content = self.page_content(&settings, palette, window, cx);
         let problems = problems(self.model.read(cx));
         let nav = self.nav(palette, window, cx);
+        let user_dialog = self.user_dialog(cx);
         div()
             .debug_selector(|| "settings-view".to_owned())
+            .relative()
             .size_full()
             .flex()
             .bg(rgb(palette.background))
@@ -1734,5 +1823,6 @@ impl Render for SettingsView {
                         )
                     }),
             )
+            .children(user_dialog)
     }
 }

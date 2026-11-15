@@ -2,12 +2,15 @@
 //! `ngteams-server` over TLS (its certificate authority in the account's `ca_file`), the refresh token and skypetoken
 //! stored under the account's server and UPN together, its region saved from the server's authz, its entry in
 //! `accounts.toml` naming the server; what a wrong password, an untrusted certificate and own servers switched off
-//! leave behind; the forget. Every value is made up and nothing leaves loopback.
+//! leave behind; the forget. And the server's account management as the app asks it (`support/own_admin.rs`). Every
+//! value is made up and nothing leaves loopback.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 #![cfg(target_os = "linux")]
 
+#[path = "support/own_admin.rs"]
+mod own_admin;
 #[path = "support/own_server.rs"]
 mod own_server;
 
@@ -269,6 +272,24 @@ fn a_region_without_a_chat_service_is_asked_again_without_a_password() -> TestRe
     Ok(())
 }
 
+/// An entry the user wrote by hand with a CA file stays for the next try when its sign-in stores nothing.
+fn an_entry_written_by_hand_stays(setup: &Setup, server: &OwnServer, store: &MemorySecretStore) -> TestResult {
+    PersonalAccount::pending_on(UPN, &at(server, true))?.save(&setup.paths)?;
+    let wrong = block_on(signin::add_own(
+        setup,
+        UPN,
+        &at(server, true),
+        &Secret::new("not it"),
+        store,
+    ));
+    assert_eq!(wrong.unwrap_err(), "The user name or password isn't right.");
+    let kept = PersonalAccount::load_all(&setup.paths)?;
+    assert_eq!(kept.len(), 1, "the entry written by hand holds its CA file");
+    assert!(!kept[0].is_signed_in() && kept[0].ca_file.is_some());
+    PersonalAccount::remove(&setup.paths, &kept[0].id())?;
+    Ok(())
+}
+
 #[test]
 fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() -> TestResult {
     let server = OwnServer::start()?;
@@ -293,17 +314,11 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() 
         &store,
     ));
     assert_eq!(unknown.unwrap_err(), "The user name or password isn't right.");
-    // an entry the user wrote a CA file into stays for the next try; nothing is stored for it
-    let kept = PersonalAccount::load_all(&setup.paths)?;
-    assert_eq!(kept.len(), 2, "both entries hold the CA file the sign-in gave");
-    assert!(
-        kept.iter()
-            .all(|account| !account.is_signed_in() && account.ca_file.is_some())
-    );
+    // an entry the failed attempt itself made goes with it, the CA file typed for it too; nothing is stored
+    assert!(PersonalAccount::load_all(&setup.paths)?.is_empty());
     assert!(block_on(store.get(&refresh_token_key(&format!("{}/{UPN}", server.origin))))?.is_none());
-    for account in kept {
-        PersonalAccount::remove(&setup.paths, &account.id())?;
-    }
+
+    an_entry_written_by_hand_stays(&setup, &server, &store)?;
 
     // the server's certificate isn't trusted without its certificate authority: said, with where the CA file goes,
     // and the bare entry is taken out again

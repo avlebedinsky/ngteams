@@ -410,7 +410,7 @@ impl Shell {
         let opened = Self::opened(&list, window, cx);
         let (teams, [channel_opened, kept_channel]) = Self::teams_list(&core, &models, &trace, window, cx);
         let (sidebar, new_message_asked) = Self::make_sidebar(&list, &teams, &models, &trace, window, cx);
-        let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
+        let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, &trace, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
@@ -805,6 +805,7 @@ impl Shell {
     fn make_settings_view(
         core: &Arc<dyn Core>,
         settings: &Entity<SettingsModel>,
+        trace: &Arc<ViewTrace>,
         cx: &mut Context<Self>,
     ) -> (Entity<SettingsView>, Subscription) {
         let account = core.me().to_owned();
@@ -821,11 +822,20 @@ impl Shell {
             let (accounts, _) = shell.accounts.as_ref()?;
             accounts.read(cx).tile(shell.core.me())?.server.clone()
         });
+        let shell = cx.weak_entity();
+        let admin: crate::settings_view::AccountAdmin = Rc::new(move |cx: &App| {
+            let shell = shell.upgrade()?;
+            let shell = shell.read(cx);
+            let (accounts, _) = shell.accounts.as_ref()?;
+            accounts.read(cx).tile(shell.core.me())?.admin.clone()
+        });
+        let trace = Arc::clone(trace);
         let view = cx.new(|cx| {
             SettingsView::new(settings.clone(), cx)
                 .for_account(account)
                 .with_test_call(offer)
                 .with_server(server)
+                .with_admin(admin, trace)
         });
         let asked = cx.subscribe(&view, |this: &mut Self, _, event, cx| match event {
             SettingsViewEvent::MakeTestCall => this.ask_call(Ask::TestCall, cx),
