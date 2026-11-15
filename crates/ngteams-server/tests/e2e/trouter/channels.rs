@@ -37,6 +37,27 @@ async fn updated<'a>(socket: &mut Raw, threads: &[&'a str]) -> Vec<&'a str> {
     told
 }
 
+/// The `ThreadUpdate` frames of `thread` that came until the socket was quiet.
+async fn updates_of(socket: &mut Raw, thread: &str) -> Vec<String> {
+    let mut told = Vec::new();
+    while let Ok(Some(frame)) = socket.next_within(Duration::from_millis(700)).await {
+        if frame.contains("ThreadUpdate") && frame.contains(&format!("/v1/threads/{thread}")) {
+            told.push(frame);
+        }
+    }
+    told
+}
+
+/// After someone's removal from `team`: the one removed is told it as someone no longer in it, a member as one of its
+/// people.
+async fn told_of_removal(on_gone: &mut Raw, gone: &Seat, on_member: &mut Raw, member: &Seat, team: &str) {
+    let told = updates_of(on_gone, team).await;
+    assert!(!told.is_empty());
+    assert!(told.iter().all(|frame| !frame.contains(&gone.mri)), "{told:?}");
+    let told = updates_of(on_member, team).await;
+    assert!(told.iter().any(|frame| frame.contains(&member.mri)), "{told:?}");
+}
+
 fn sorted<'a>(threads: &[&'a str]) -> Vec<&'a str> {
     let mut threads = threads.to_vec();
     threads.sort_unstable();
@@ -121,8 +142,7 @@ async fn a_teams_and_a_channels_changes_reach_the_sockets_of_the_people_in_them_
             update: MemberUpdate::Removed,
         };
         ada.engine.team_write(removed, None).await.unwrap();
-        updated(&mut on_cora, &all).await;
-        updated(&mut on_bert, &all).await;
+        told_of_removal(&mut on_cora, &cora, &mut on_bert, &bert, &team).await;
         let write = channel_write(&team, &group, &launch, rename("Orbit"));
         ada.engine.team_write(write, None).await.unwrap();
         ada.engine.team_write(hush, None).await.unwrap();

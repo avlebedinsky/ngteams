@@ -194,15 +194,18 @@ async fn updates(app: &App, tenant: &str, thread: &str, deleted: bool, gone: Opt
         }
     };
     let mut readers: Vec<&str> = members.iter().map(|member| member.user_id.as_str()).collect();
-    if let Some(gone) = gone.filter(|gone| !readers.contains(gone)) {
-        readers.push(gone);
-    }
+    let gone = gone.filter(|gone| !readers.contains(gone));
+    readers.extend(gone);
     readers
         .into_iter()
         .map(|reader| {
             let mut resource = self::thread(app, tenant, &chat, &place, reader, &roles);
             if deleted {
                 resource["isDeleted"] = json!(true);
+            }
+            // out of the thread now: its thread read answers 403, so its update names no member
+            if gone == Some(reader) {
+                resource["members"] = json!([]);
             }
             (
                 format!("push:8:orgid:{reader}"),
