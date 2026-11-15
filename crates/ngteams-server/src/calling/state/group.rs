@@ -134,7 +134,11 @@ impl Call {
     pub(crate) fn group_leave(&mut self, seat: Seat, body: &Value, at: At<'_>, out: &mut Out) {
         let party = self.party(seat);
         let named = body.pointer("/participants/from/endpointId").and_then(Value::as_str);
-        let own = party.participant.get("endpointId").and_then(Value::as_str);
+        let own = party
+            .participant
+            .get("endpointId")
+            .and_then(Value::as_str)
+            .filter(|own| *own != wire::ZERO_ENDPOINT);
         let lost_fork = matches!((named, own), (Some(named), Some(own)) if named != own);
         if self.phase == Phase::Ended || party.status != Status::InCall || lost_fork {
             return;
@@ -240,7 +244,12 @@ impl Call {
         }
         let seat = match self.seat_of(&account.id) {
             Some(seat) if self.party(seat).status == Status::InCall => return Err(Refusal::Forbidden),
-            Some(seat) => seat,
+            Some(seat) => {
+                let party = self.party_mut(seat);
+                party.participant = account.participant.clone();
+                party.name.clone_from(&account.name);
+                seat
+            }
             None => {
                 self.parties.push(Party {
                     status: Status::Left,
@@ -772,6 +781,8 @@ mod tests {
     #[test]
     fn a_ringing_callee_joins_instead_of_answering_with_a_new_leg() {
         let (mut call, _) = started();
+        // rung, c is named by its invitation, which names no endpoint of its
+        call.party_mut(Seat(2)).participant["endpointId"] = json!(wire::ZERO_ENDPOINT);
         // a ringing c joins instead of answering: its new leg replaces the one it rang with
         let (seat, _, before) = call.reserve(&party("c"), "leg-c2").unwrap();
         assert_eq!((seat, before.as_deref()), (Seat(2), Some("leg2")));
@@ -785,10 +796,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paths(&out)[0], ("C", "end"));
+        assert_eq!(call.party(seat).participant["endpointId"], "ep-c", "named as it joined");
+        let named = json!({"participants": {"from": {"endpointId": "ep-c"}}});
         assert_eq!(
             call.join(seat, ("leg-c2", "C9", Links::new()), &answer(), at(1_003_000), &mut out),
             Err(Refusal::Forbidden)
         );
+        call.leave(seat, &named, at(1_004_000), &mut Out::default());
+        assert_eq!(call.party(seat).status, Status::Left, "its own leave takes it out");
     }
 
     #[test]

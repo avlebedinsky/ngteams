@@ -82,7 +82,7 @@ pub(crate) fn conversation_url(origin: &str, conversation: &str, op: Option<&str
 }
 
 /// The `endpointId` of an endpoint nobody named.
-const ZERO_ENDPOINT: &str = "00000000-0000-0000-0000-000000000000";
+pub(crate) const ZERO_ENDPOINT: &str = "00000000-0000-0000-0000-000000000000";
 
 /// The leg a call controller link names: a 1:1 call's are all `1`, a group call's the party's seat.
 pub(crate) fn leg_of(call: &Call, seat: Seat) -> usize {

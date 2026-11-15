@@ -688,3 +688,33 @@ async fn a_member_follows_the_roster_without_joining_and_nobody_acts_on_anothers
     assert_eq!(status, 404);
     group.server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callee_who_declined_joins_later_and_its_own_leave_takes_it_out() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let b = group.b.mri();
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        group.b.client.decline(rings.call);
+        assert_eq!(group.b.client.ended().await, End::Declined);
+        let running = group
+            .running_call(&group.b)
+            .await
+            .expect("the chat names its running call");
+        group.b.client.join(&group.chat, running);
+        group.b.client.remote_media().await;
+        let joined = group.b.client.state(CallState::Connected).await;
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, std::slice::from_ref(&b)))
+            .await;
+        group.b.client.hang_up(joined);
+        assert_eq!(group.b.client.ended().await, End::HungUp);
+        group.a.client.participants_until(<[Participant]>::is_empty).await;
+        assert_eq!(group.open_call().await.phase, "connected", "Ada is still in it");
+        group.server.stop().await;
+    }
+}
