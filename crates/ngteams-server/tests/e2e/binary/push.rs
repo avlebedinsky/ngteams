@@ -7,6 +7,7 @@ mod feed;
 mod notes;
 mod people;
 mod pictures;
+mod rich;
 mod roster;
 pub mod support;
 
