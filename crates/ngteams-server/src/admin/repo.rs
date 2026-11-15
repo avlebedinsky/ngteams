@@ -10,6 +10,7 @@ use super::{Actor, AdminError, Changes};
 use crate::db::schema::{admin_audit, refresh_tokens, server_meta, users};
 use crate::db::users::User;
 use crate::db::{Db, DbError, conflict, lower, now, with_conn};
+use crate::presence::presence_manual;
 
 /// The `server_meta` row the guarded changes lock (made by the migration).
 const ADMIN_LOCK: &str = "admin_lock";
@@ -403,6 +404,8 @@ pub async fn delete(db: &Db, actor: Actor<'_>, id: &str) -> Result<(), AdminErro
             diesel::delete(refresh_tokens::table.filter(refresh_tokens::user_id.eq(id)))
                 .execute(conn)
                 .await?;
+            // the row stays, so the cascade of the manual status never runs
+            diesel::delete(presence_manual::table.find(id)).execute(conn).await?;
             record!(conn, &NewEntry::new(actor, "user.delete", id, &user.upn, &json!({})));
             Ok(user.upn)
         })

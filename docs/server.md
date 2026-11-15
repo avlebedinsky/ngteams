@@ -746,7 +746,8 @@ token from after its last password reset.
 - **An endpoint lapses** `presence.endpoint_ttl` after its last report: the client sends none when it quits, so
   an account shows offline up to that long after its last client stopped. Each node looks for lapsed endpoints
   every second. A manual status stays until it is cleared or 30 days after it was set, over restarts of the
-  nodes and of Redis.
+  nodes and of Redis; when it expires, its watchers are told what the account shows then. Deleting an account
+  deletes its manual status.
 - **Deliveries.** A subscription holds for `presence.subscription_ttl`. Right after it, the endpoint gets a
   snapshot of the people it newly watches (`"isSnapshot": true`); then each change of what one of them shows, as a
   `3:::` delivery at `/trouter/v4/f/<endpoint>/unifiedPresenceService` with UPS's body
@@ -758,7 +759,7 @@ token from after its last password reset.
   is in Redis when `redis_url` is set, else in the node. The keys, in the deployment's
   [keyspace](#scaling) (`ngts:<namespace>:…`), are `presence:account:<account>` (a hash: the last activity, each
   endpoint with its lapse time), `presence:due:accounts` (a sorted set: the accounts with an endpoint,
-  by their next lapse), `presence:watchers:<mri>` and `presence:watching:<account>|<endpoint>` (sorted sets by the
+  by their next lapse, of an endpoint or of the manual status), `presence:watchers:<mri>` and `presence:watching:<account>|<endpoint>` (sorted sets by the
   subscription's end, each forgotten whole when its last subscription ends). The node's own state forgets its keys
   as Redis does. A change is published on the watcher's `push:<mri>` as
   `{"resourceType": "Presence", "endpoints": […], "resource": <the delivery's body>}`.

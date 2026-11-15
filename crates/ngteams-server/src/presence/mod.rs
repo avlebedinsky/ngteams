@@ -33,6 +33,9 @@ use crate::db::schema::users;
 use crate::db::{Db, DbError, with_conn};
 use crate::fanout::Fanout;
 use board::{Board, Memory, Shared, key};
+use manual::Manual;
+
+pub(crate) use manual::presence_manual;
 
 /// How long an account's hash lives after its last write: its last activity is forgotten after this long.
 const ACCOUNT_TTL: u64 = 30 * 86_400;
@@ -88,7 +91,7 @@ struct Endpoint {
 /// An account's state as the board holds it.
 #[derive(Debug, Default)]
 struct State {
-    manual: Option<String>,
+    manual: Option<Manual>,
     last_active: Option<i64>,
     endpoints: BTreeMap<String, Endpoint>,
     /// Each endpoint's value as it was read.
@@ -97,7 +100,7 @@ struct State {
 
 impl State {
     /// The state of the board's `fields` under the `manual` status the database keeps.
-    fn read(fields: Vec<(String, String)>, manual: Option<String>) -> Self {
+    fn read(fields: Vec<(String, String)>, manual: Option<Manual>) -> Self {
         let mut state = Self {
             manual,
             ..Self::default()
@@ -115,11 +118,16 @@ impl State {
         state
     }
 
-    /// What the account shows at `now`, with the endpoints that lapsed by then left out.
+    /// What the account shows at `now`, with the endpoints and the manual status that lapsed by then left out.
     fn shown(&self, now: i64) -> Shown {
         let live = self.endpoints.values().filter(|endpoint| endpoint.until > now);
         let first = live.min_by_key(|endpoint| rank(&endpoint.availability));
-        let (availability, activity, device) = match (first, &self.manual) {
+        let manual = self
+            .manual
+            .as_ref()
+            .filter(|manual| manual.until > now)
+            .map(|manual| &manual.availability);
+        let (availability, activity, device) = match (first, manual) {
             (None, _) => ("Offline".to_owned(), "Offline".to_owned(), None),
             (Some(endpoint), Some(manual)) => (manual.clone(), manual.clone(), endpoint.device.clone()),
             (Some(endpoint), None) => (
@@ -372,8 +380,8 @@ impl Presence {
         let now = now_ms();
         let mut state = inner.state(oid).await?;
         let before = state.shown(now);
-        manual::set(&inner.db, oid, manual).await?;
-        state.manual = manual.map(str::to_owned);
+        state.manual = manual::set(&inner.db, oid, manual).await?;
+        inner.schedule(oid, &state).await?;
         inner.told_if_changed(oid, &before, &state.shown(now)).await
     }
 
@@ -426,7 +434,7 @@ impl Presence {
 struct Known {
     out_of_office: bool,
     /// Its manual status.
-    manual: Option<String>,
+    manual: Option<Manual>,
 }
 
 /// The object id `mri` names and what is known of it, when it is an account that can sign in.
@@ -476,7 +484,7 @@ impl Inner {
     }
 
     /// The account's state under the `manual` status read with its other facts.
-    async fn state_under(&self, oid: &str, manual: Option<String>) -> Result<State, BoardError> {
+    async fn state_under(&self, oid: &str, manual: Option<Manual>) -> Result<State, BoardError> {
         Ok(State::read(self.board.hgetall(&key("account", oid)).await?, manual))
     }
 
@@ -523,12 +531,17 @@ impl Inner {
         Ok(())
     }
 
-    /// Puts the account on the set of those with an endpoint, at its next lapse.
+    /// Puts the account on the set of those with an endpoint, at its next lapse: of an endpoint, or of its manual
+    /// status, which then changes what it shows.
     async fn schedule(&self, oid: &str, state: &State) -> Result<(), BoardError> {
-        match state.endpoints.values().map(|endpoint| endpoint.until).min() {
-            Some(next) => self.board.zadd(&key("due", "accounts"), oid, next, None).await,
-            None => Ok(()),
-        }
+        let Some(endpoint) = state.endpoints.values().map(|endpoint| endpoint.until).min() else {
+            return Ok(());
+        };
+        let next = state
+            .manual
+            .as_ref()
+            .map_or(endpoint, |manual| manual.until.min(endpoint));
+        self.board.zadd(&key("due", "accounts"), oid, next, None).await
     }
 
     async fn told_if_changed(&self, oid: &str, before: &Shown, after: &Shown) -> Result<(), PresenceError> {
@@ -548,11 +561,9 @@ impl Inner {
         if watchers.is_empty() {
             return Ok(());
         }
-        let out_of_office = self
-            .people(std::slice::from_ref(&mri))
+        let out_of_office = !crate::people::out_of_office(&self.db, &[oid.to_owned()])
             .await?
-            .get(oid)
-            .is_some_and(|known| known.out_of_office);
+            .is_empty();
         let mut endpoints: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for watcher in &watchers {
             if let Some((account, endpoint)) = watcher.split_once('|') {
@@ -585,9 +596,13 @@ impl Inner {
                 continue;
             }
             let mut state = self.state(&oid).await?;
-            // as it showed just before its first endpoint lapsed
+            // as it showed just before its first endpoint or its manual status lapsed
             let before = state.shown(i64::MIN);
             self.drop_lapsed(&key("account", &oid), &mut state, now).await?;
+            if state.manual.as_ref().is_some_and(|manual| manual.until <= now) {
+                manual::forget_expired(&self.db, &oid).await?;
+                state.manual = None;
+            }
             self.schedule(&oid, &state).await?;
             self.told_if_changed(&oid, &before, &state.shown(now)).await?;
         }
@@ -661,8 +676,14 @@ mod tests {
         assert_eq!(shown.last_active, Some(7));
         assert_eq!(state.shown(60).availability, "Away");
         assert_eq!(state.shown(100).availability, "Offline");
-        let manual = State::read(fields(None), Some("DoNotDisturb".to_owned()));
+        let set = Manual {
+            availability: "DoNotDisturb".to_owned(),
+            until: 70,
+        };
+        let manual = State::read(fields(None), Some(set));
         assert_eq!(manual.shown(10).activity, "DoNotDisturb");
+        // an expired manual status shows the endpoints again
+        assert_eq!(manual.shown(70).availability, "Away");
         assert_eq!(manual.shown(100).availability, "Offline");
         assert!(shown.same(&state.shown(11)));
         assert!(!shown.same(&state.shown(60)));

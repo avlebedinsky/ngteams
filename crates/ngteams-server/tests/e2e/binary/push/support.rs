@@ -611,22 +611,28 @@ impl Drop for Link {
     }
 }
 
-/// The run's Redis that a test may stop: a podman container of its own, which no other test's nodes use.
+/// The run's Redis that a test may stop: a podman container of its own, which no other test's nodes use. One test
+/// at a time holds it.
 pub struct OwnRedis {
     container: String,
     pub url: String,
+    _held: tokio::sync::MutexGuard<'static, ()>,
 }
+
+static OWN_REDIS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Names the container and its URL, as `<container>=<url>`.
 pub const OWN_REDIS_ENV: &str = "NGTEAMS_SERVER_STOP_REDIS";
 
 impl OwnRedis {
-    pub fn from_env() -> Option<Self> {
+    /// The Redis [`OWN_REDIS_ENV`] names, once no other test holds it.
+    pub async fn take() -> Option<Self> {
         let named = std::env::var(OWN_REDIS_ENV).ok()?;
         let (container, url) = named.split_once('=')?;
         Some(Self {
             container: container.into(),
             url: url.into(),
+            _held: OWN_REDIS.lock().await,
         })
     }
 

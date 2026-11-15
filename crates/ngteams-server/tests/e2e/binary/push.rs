@@ -704,7 +704,7 @@ async fn a_client_of_an_account_whose_password_the_operator_reset_loses_its_push
 /// gets none and is signed out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_account_disabled_while_redis_is_stopped_gets_no_push_when_redis_is_back() {
-    let Some(redis) = OwnRedis::from_env() else {
+    let Some(redis) = OwnRedis::take().await else {
         eprintln!("SKIP disable with Redis stopped: set {OWN_REDIS_ENV}=<podman container>=<its redis URL>");
         return;
     };

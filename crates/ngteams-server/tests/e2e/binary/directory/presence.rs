@@ -10,7 +10,7 @@ use teams_core::engine::OwnStatus;
 use teams_proto::ManualAvailability;
 
 use super::super::push::support::{OWN_REDIS_ENV, OwnRedis, Rig};
-use super::support::{SHORT_PRESENCE, Seat, reads_as};
+use super::support::{SHORT_PRESENCE, Seat, manual_expires, manual_row, reads_as};
 use crate::support::{Backend, PASSWORD, PG_ENV, backends};
 
 /// Longer than an endpoint's lifetime in [`SHORT_PRESENCE`] and the sweep after it.
@@ -156,7 +156,7 @@ async fn still_pushed(a: &Seat, b: &mut Seat, status: ManualAvailability, shown:
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn presence_comes_back_right_after_each_node_and_redis_restart() {
-    let Some(redis) = OwnRedis::from_env() else {
+    let Some(redis) = OwnRedis::take().await else {
         eprintln!("SKIP presence over restarts: set {OWN_REDIS_ENV}=<podman container>=<its redis URL>");
         return;
     };
@@ -239,15 +239,31 @@ async fn a_status_set_by_hand_outlasts_a_restart_of_a_single_node() {
     a.online(a_mark).await;
     b.online(b_mark).await;
     // the app's refresh reports Available again; the status a chose is what Teams goes on showing
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    b.idle_for(Duration::from_secs(3)).await;
     let shown = c.reads(&a.mri).await;
-    eprintln!(
-        "after the node restart a reads as {shown:?}; b was told {:?}",
-        b.told(b_mark, &a.mri)
-    );
-    b.idle_for(Duration::from_secs(15)).await;
-    eprintln!("15 s later b was told {:?}", b.told(b_mark, &a.mri));
     assert_eq!(shown.as_deref(), Some("Busy"), "a's Busy was forgotten by the restart");
+    let told = b.told(b_mark, &a.mri);
+    assert!(!told.contains(&Availability::Available), "b was told {told:?}");
+    a.close();
+    drop((a, b, c));
+    rig.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_status_set_by_hand_ends_when_it_expires_and_watchers_are_told() {
+    let rig = Rig::start_with(Backend::Sqlite, SHORT_PRESENCE).await;
+    let (mut a, mut b, c) = busy_and_watched(&rig).await;
+    let (_, expires) = manual_row(&rig.database, a.oid()).await.unwrap();
+    let set = chrono::Utc::now().timestamp();
+    assert!(
+        (set + 30 * 86_400 - 5..=set + 30 * 86_400).contains(&expires),
+        "{expires}"
+    );
+    // the 30 days run out while a's client keeps reporting Available
+    let mark = b.mark();
+    manual_expires(&rig.database, a.oid(), chrono::Utc::now().timestamp() + 2).await;
+    b.sees(mark, &a.mri, &Availability::Available).await;
+    reads_as(&c, &a.mri, "Available").await;
     a.close();
     drop((a, b, c));
     rig.stop().await;

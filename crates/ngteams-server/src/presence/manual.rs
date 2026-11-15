@@ -23,13 +23,30 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-/// Sets the manual status of the account `oid` for [`LIFETIME`], or clears it.
-pub(super) async fn set(db: &Db, oid: &str, manual: Option<&str>) -> Result<(), DbError> {
+/// A manual status and when it expires.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Manual {
+    pub availability: String,
+    /// Unix milliseconds.
+    pub until: i64,
+}
+
+impl Manual {
+    fn of(availability: String, expires_at: i64) -> Self {
+        Self {
+            availability,
+            until: expires_at.saturating_mul(1000),
+        }
+    }
+}
+
+/// Sets the manual status of the account `oid` for [`LIFETIME`], or clears it; the status it now has.
+pub(super) async fn set(db: &Db, oid: &str, manual: Option<&str>) -> Result<Option<Manual>, DbError> {
     let Some(availability) = manual else {
         with_conn!(db, |conn| diesel::delete(presence_manual::table.find(oid))
             .execute(conn)
             .await?);
-        return Ok(());
+        return Ok(None);
     };
     let expires_at = now().saturating_add(LIFETIME);
     with_conn!(db, |conn| diesel::insert_into(presence_manual::table)
@@ -46,20 +63,39 @@ pub(super) async fn set(db: &Db, oid: &str, manual: Option<&str>) -> Result<(), 
         ))
         .execute(conn)
         .await?);
-    Ok(())
+    Ok(Some(Manual::of(availability.to_owned(), expires_at)))
 }
 
-/// The manual status of each of the accounts `oids` that has one that hasn't expired.
-pub(super) async fn of(db: &Db, oids: &[&str]) -> Result<HashMap<String, String>, DbError> {
+/// The manual status of each of the accounts `oids` that has one, expired or not: the sweep tells the watchers of
+/// one that expired.
+pub(super) async fn of(db: &Db, oids: &[&str]) -> Result<HashMap<String, Manual>, DbError> {
     if oids.is_empty() {
         return Ok(HashMap::new());
     }
-    let now = now();
-    let found: Vec<(String, String)> = with_conn!(db, |conn| presence_manual::table
+    let found: Vec<(String, String, i64)> = with_conn!(db, |conn| presence_manual::table
         .filter(presence_manual::user_id.eq_any(oids))
-        .filter(presence_manual::expires_at.gt(now))
-        .select((presence_manual::user_id, presence_manual::availability))
+        .select((
+            presence_manual::user_id,
+            presence_manual::availability,
+            presence_manual::expires_at,
+        ))
         .load(conn)
         .await?);
-    Ok(found.into_iter().collect())
+    Ok(found
+        .into_iter()
+        .map(|(oid, availability, expires_at)| (oid, Manual::of(availability, expires_at)))
+        .collect())
+}
+
+/// Forgets the manual status of the account `oid` when it expired.
+pub(super) async fn forget_expired(db: &Db, oid: &str) -> Result<(), DbError> {
+    let now = now();
+    with_conn!(db, |conn| diesel::delete(
+        presence_manual::table
+            .find(oid)
+            .filter(presence_manual::expires_at.le(now))
+    )
+    .execute(conn)
+    .await?);
+    Ok(())
 }

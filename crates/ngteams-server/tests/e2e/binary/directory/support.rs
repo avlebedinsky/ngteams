@@ -338,3 +338,38 @@ pub async fn keyspace(node: &Node, upn: &str) -> ngteams_server::fanout::keyspac
         serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims).unwrap()).unwrap();
     ngteams_server::fanout::keyspace::Keyspace::new(claims["tid"].as_str().unwrap())
 }
+
+diesel::table! {
+    /// The server's table of the statuses set by hand (`migrations/*/..._presence_manual`).
+    presence_manual (user_id) {
+        user_id -> Text,
+        availability -> Text,
+        expires_at -> BigInt,
+    }
+}
+
+/// The status set by hand that the database of `database` keeps for the account `oid`, and when it expires (Unix
+/// seconds).
+pub async fn manual_row(database: &str, oid: &str) -> Option<(String, i64)> {
+    use diesel::{OptionalExtension as _, QueryDsl as _};
+    use diesel_async::RunQueryDsl as _;
+    let db = ngteams_server::db::Db::connect(database, 1).await.unwrap();
+    let query = presence_manual::table
+        .find(oid.to_owned())
+        .select((presence_manual::availability, presence_manual::expires_at));
+    let row: Result<_, ngteams_server::db::DbError> =
+        async { ngteams_server::with_conn!(&db, |conn| Ok(query.first(conn).await.optional()?)) }.await;
+    row.unwrap()
+}
+
+/// Makes the status set by hand that the database of `database` keeps for the account `oid` expire at `at` (Unix
+/// seconds), as if it had been set that long ago.
+pub async fn manual_expires(database: &str, oid: &str, at: i64) {
+    use diesel::{ExpressionMethods as _, QueryDsl as _};
+    use diesel_async::RunQueryDsl as _;
+    let db = ngteams_server::db::Db::connect(database, 1).await.unwrap();
+    let query = diesel::update(presence_manual::table.find(oid.to_owned())).set(presence_manual::expires_at.eq(at));
+    let changed: Result<usize, ngteams_server::db::DbError> =
+        async { ngteams_server::with_conn!(&db, |conn| Ok(query.execute(conn).await?)) }.await;
+    assert_eq!(changed.unwrap(), 1, "{oid} has a status set by hand");
+}

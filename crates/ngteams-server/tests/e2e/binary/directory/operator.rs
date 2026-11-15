@@ -5,11 +5,12 @@
 use std::io::Cursor;
 
 use serde_json::{Value, json};
-use teams_proto::{GRAPH_AUDIENCE, GraphPicture, LokiOrganization, Mri, ShortProfileLookup};
+use teams_core::engine::OwnStatus;
+use teams_proto::{GRAPH_AUDIENCE, GraphPicture, LokiOrganization, ManualAvailability, Mri, ShortProfileLookup};
 
 use super::super::media::support::Stage;
 use super::super::support::Node;
-use super::support::{Seat, bearer};
+use super::support::{Seat, bearer, manual_row};
 use crate::support::backends;
 
 /// `format`'s encoding of a `width` by `height` picture.
@@ -354,7 +355,10 @@ async fn refusals(scene: &Scene, before: &[String]) {
         desk.file("exactly.png", &bytes)
     };
     let (done, said) = desk.node().try_cli(&["profile", "picture", "b@own.test", &exactly], "");
-    eprintln!("picture of exactly 4 MiB: taken={done} {said}");
+    assert!(done, "a picture of exactly 4 MiB is taken: {said}");
+    let taken = desk.pictures(b.oid()).await;
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert_ne!(taken, before, "the picture of exactly 4 MiB replaced the one before");
     assert!(
         client.read(&read).await.is_ok(),
         "the server still serves after the refusals"
@@ -385,14 +389,22 @@ async fn deleted(scene: &mut Scene) {
     let file = desk.file("again.png", &picture(96, 96, image::ImageFormat::Png));
     desk.run(&["profile", "picture", "b@own.test", &file]);
     assert_eq!(desk.pictures(b.oid()).await.len(), 1);
+    b.report(OwnStatus::Manual(ManualAvailability::Busy)).await;
+    let database = &desk.stage.rig.database;
+    assert!(manual_row(database, b.oid()).await.is_some());
     let (b_mri, b_oid) = (b.mri.clone(), b.oid().to_owned());
     b.close();
     desk.run(&["user", "delete", "b@own.test"]);
     assert!(client.read(&read).await.is_err());
     assert_eq!(desk.pictures(&b_oid).await, Vec::<String>::new());
-    assert_eq!(a.read(&[&b_mri]).await[0].availability, None);
-    // the engine shows an empty card (or none): no name, title, office or presence of b's
-    if let Ok(card) = a.engine().profile_card(b_mri.clone()).await {
+    assert_eq!(manual_row(database, &b_oid).await, None, "b's status set by hand stays");
+    shows_nobody(a, &b_mri).await;
+}
+
+/// `a` reads no presence of `mri`, and its engine shows an empty card (or none): no name, title, office or presence.
+async fn shows_nobody(a: &Seat, mri: &str) {
+    assert_eq!(a.read(&[mri]).await[0].availability, None);
+    if let Ok(card) = a.engine().profile_card(mri.to_owned()).await {
         assert_eq!((card.name, card.job_title, card.office), (None, None, None));
         assert_eq!(card.presence.map(|p| p.availability), None);
     }

@@ -182,8 +182,7 @@ async fn other_ids(ours: &Rig, tokens: &Tokens, a: &Seat, b: &mut Seat) {
     let Tokens { presence, .. } = tokens;
     // raw requests naming other ids
     b.in_use().await;
-    b.report(OwnStatus::Manual(ManualAvailability::Busy)).await;
-    reads_as(a, &b.mri, "Busy").await;
+    reads_as(a, &b.mri, "Available").await;
     // a reports "Away" for b's endpoint id: a's own presence, never b's
     let endpoint = json!({"id": b.epid, "availability": "Away", "activity": "Away", "activityReporting": "Transport",
         "deviceType": "Web"});
@@ -197,6 +196,8 @@ async fn other_ids(ours: &Rig, tokens: &Tokens, a: &Seat, b: &mut Seat) {
     )
     .await;
     eprintln!("a reports b's endpoint id: {status}");
+    assert_eq!(a.reads(&b.mri).await.as_deref(), Some("Available"));
+    b.report(OwnStatus::Manual(ManualAvailability::Busy)).await;
     reads_as(a, &b.mri, "Busy").await;
     // a subscribes b's endpoint, or a's own endpoint to b's push URL: refused
     let subscription = |epid: &str, uri: String| {
