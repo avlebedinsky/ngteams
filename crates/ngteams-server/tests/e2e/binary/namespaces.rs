@@ -391,18 +391,16 @@ async fn wrong_setup_codes_on_a_restored_copy_hold_off_nothing_on_the_original_o
     x.stop().await;
 }
 
-/// Message pushes (live or replayed) the client got since `mark`, of any chat.
+/// Message pushes (live or replayed) the client got since `mark`, of any chat, and pushes it failed to take in. A
+/// push for a chat the client's own server doesn't have (another deployment's, on a restored copy with the same
+/// account ids) ends in a failure, not a message: "adding a delivery's conversation", or another delivery failure.
 fn heard(user: &User, mark: usize) -> Vec<String> {
     user.log[mark..]
         .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                Event::Message {
-                    source: Source::Delivery | Source::Replay,
-                    ..
-                }
-            )
+        .filter(|event| match event {
+            Event::Message { source, .. } => matches!(source, Source::Delivery | Source::Replay),
+            Event::Failed { during, .. } => during.contains("deliver"),
+            _ => false,
         })
         .map(brief)
         .collect()
@@ -762,7 +760,7 @@ async fn a_bad_redis_namespace_stops_the_server_at_start_and_good_ones_start() {
     const SAID: &str = "redis_namespace must be 1 to 64 letters, digits, '.', '_' or '-'";
     let redis = redis_url();
     let deployment = Deployment::new(Backend::Sqlite, false, redis).await;
-    let node = deployment.node("a");
+    let mut node = deployment.node("a");
     node.cli(&["migrate"], "");
     let original = std::fs::read_to_string(&node.config).unwrap();
     let too_long = "n".repeat(65);
@@ -791,8 +789,8 @@ async fn a_bad_redis_namespace_stops_the_server_at_start_and_good_ones_start() {
     }
     let longest = "A.b_c-9".repeat(10)[..64].to_owned();
     for good in ["x", longest.as_str()] {
+        // the same node: `Deployment::node` would write its configuration again, without the namespace
         std::fs::write(&node.config, format!("redis_namespace = \"{good}\"\n{original}")).unwrap();
-        let mut node = deployment.node("a");
         node.start().await;
         assert_eq!(node.status("/health/ready").await, Some(204), "{good:?}");
         node.stop().await;
