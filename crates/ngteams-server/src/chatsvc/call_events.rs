@@ -84,10 +84,9 @@ async fn post(app: &App, chat: &str, (id, name): (&str, &str), content: &str) ->
         body: body.to_string(),
         root_id: None,
     };
-    let Some((row, _)) = message_repo::insert(&app.db, &draft).await? else {
+    let Some(posted) = message_repo::insert(&app.db, &draft, &wire::base(app)).await? else {
         return Ok(());
     };
-    let members = repo::members(&app.db, chat).await?;
-    events::publish(app, &caller, &members, "NewMessage", &row.value()?).await;
+    events::tell(app, "NewMessage", &posted.row.value()?, &posted.readers, &posted.told).await;
     Ok(())
 }
