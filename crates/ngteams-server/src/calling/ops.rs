@@ -136,6 +136,9 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
     from.keep(&endpoint, links);
     from.active = Some(endpoint);
     let chat = call_events::chat_of(&app, &caller.id, &invited.id).await?;
+    // read before the call exists: a start that fails leaves no call ringing and no event in the chat
+    let tenant = crate::db::meta::tenant(&app.db).await?;
+    let ringing = calling_endpoints(&app, &invited.id).await?;
     let call = Call {
         id: uuid::Uuid::new_v4().to_string(),
         conversation: uuid::Uuid::new_v4().simple().to_string(),
@@ -157,7 +160,7 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
     repo::insert(&app.db, &call).await?;
     // before anyone can end the call: the chat orders its events by when they were written
     tell_chat_started(&app, &caller, &call).await;
-    ring(&app, &call).await?;
+    ring(&app, &call, &tenant, ringing).await;
     let origin = app.config.origin();
     Ok(Json(wire::conversation(&origin, &app.config.region, &call)).into_response())
 }
@@ -171,11 +174,10 @@ async fn tell_chat_started(app: &App, caller: &Caller, call: &Call) {
     }
 }
 
-/// Delivers the call's invitation to each calling endpoint its callee registered.
-async fn ring(app: &App, call: &Call) -> Result<(), Failure> {
-    let tenant = crate::db::meta::tenant(&app.db).await?;
-    let invitation = wire::invitation(&app.config.origin(), call, &tenant, &app.config.region);
-    for endpoint in calling_endpoints(app, &call.callee.id).await? {
+/// Delivers the call's invitation to each of `endpoints`, the calling endpoints its callee registered.
+async fn ring(app: &App, call: &Call, tenant: &str, endpoints: Vec<String>) {
+    let invitation = wire::invitation(&app.config.origin(), call, tenant, &app.config.region);
+    for endpoint in endpoints {
         let delivery = super::state::Delivery {
             endpoint,
             path: String::new(),
@@ -183,7 +185,6 @@ async fn ring(app: &App, call: &Call) -> Result<(), Failure> {
         };
         super::publish(app, &call.id, &delivery).await;
     }
-    Ok(())
 }
 
 /// `POST conv/<id>`: a party's subscription to its call's conversation. A 1:1 call takes no one else in.
