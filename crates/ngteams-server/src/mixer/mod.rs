@@ -158,7 +158,7 @@ impl MediaNode {
         let (lost, losses) = tokio::sync::mpsc::unbounded_channel();
         let thread = std::thread::Builder::new()
             .name("mixer".into())
-            .spawn(move || node::run(socket, settings, commanded, lost))
+            .spawn(move || node::run(socket, settings, &commanded, lost))
             .map_err(MixerError::Listen)?;
         let api = api::router(Arc::new(api::Internal {
             app: Arc::clone(app),
@@ -263,16 +263,7 @@ impl MediaNode {
                 let Some(load) = Self::load(&commands).await else {
                     return;
                 };
-                for call in load.rooms {
-                    match crate::calling::room_wanted(&app, &call, &home).await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            let (reply, _) = oneshot::channel();
-                            let _ = commands.send(Command::DeleteRoom { call, reply });
-                        }
-                        Err(error) => tracing::warn!(%error, "a media room's call couldn't be read"),
-                    }
-                }
+                drop_unwanted(&app, &commands, &home, load.rooms).await;
             }
         }
     }
@@ -315,6 +306,20 @@ impl MediaNode {
         client::Local {
             home: self.home.clone(),
             alive: Arc::clone(&self.alive),
+        }
+    }
+}
+
+/// Drops each of `rooms` whose call is over, missing or in another node's room.
+async fn drop_unwanted(app: &App, commands: &mpsc::Sender<Command>, home: &MediaHome, rooms: Vec<String>) {
+    for call in rooms {
+        match crate::calling::room_wanted(app, &call, home).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let (reply, _) = oneshot::channel();
+                let _ = commands.send(Command::DeleteRoom { call, reply });
+            }
+            Err(error) => tracing::warn!(%error, "a media room's call couldn't be read"),
         }
     }
 }

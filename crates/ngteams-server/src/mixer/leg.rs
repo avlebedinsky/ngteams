@@ -33,6 +33,8 @@ const RENEGOTIATION_WINDOW: Duration = Duration::from_mins(1);
 const BITRATE: i32 = 32_000;
 /// The largest Opus packet written.
 const MAX_PACKET: usize = 1500;
+/// The most samples one Opus packet decodes to (120 ms).
+const MOST_DECODED: usize = 5760;
 /// An Opus packet this short is a DTX frame: nothing to send.
 const DTX_PACKET: usize = 2;
 
@@ -113,6 +115,8 @@ pub(crate) struct Leg {
     encoder: opus::Encoder,
     clip: opus::SoftClip,
     buffer: Buffer,
+    /// What a packet decodes into.
+    pcm: Vec<f32>,
     /// Whether a packet was decoded yet: a gap before the first is no loss.
     decoded: bool,
     sent_samples: u64,
@@ -195,6 +199,7 @@ impl Leg {
             encoder,
             clip: opus::SoftClip::new(opus::Channels::Mono),
             buffer: Buffer::default(),
+            pcm: vec![0.0; MOST_DECODED],
             decoded: false,
             sent_samples: 0,
             health: Health {
@@ -351,14 +356,14 @@ impl Leg {
 
     /// An Opus packet that came: decoded into the buffer, the frame lost before it first from its in-band FEC.
     fn decode(&mut self, packet: &[u8], contiguous: bool) {
-        let mut pcm = [0.0_f32; 5760];
+        let pcm = &mut self.pcm;
         if !contiguous
             && self.decoded
             && let Ok(recovered) = self.decoder.decode_float(packet, &mut pcm[..FRAME], true)
         {
             self.buffer.push(&pcm[..recovered]);
         }
-        match self.decoder.decode_float(packet, &mut pcm, false) {
+        match self.decoder.decode_float(packet, pcm, false) {
             Ok(decoded) => {
                 self.decoded = true;
                 self.buffer.push(&pcm[..decoded]);
@@ -375,25 +380,33 @@ impl Leg {
     }
 
     /// This tick's mix for the leg's participant (`None`: silence), encoded and sent.
-    pub(crate) fn send(&mut self, mix: Option<[f32; FRAME]>, now: Instant) {
-        let mut frame = mix.unwrap_or([0.0; FRAME]);
+    pub(crate) fn send(&mut self, mix: Option<&[f32; FRAME]>, now: Instant) {
+        let mut frame = mix.copied().unwrap_or([0.0; FRAME]);
         self.clip.apply(&mut frame);
         let time = MediaTime::new(self.sent_samples, Frequency::FORTY_EIGHT_KHZ);
         self.sent_samples += FRAME as u64;
         let Some(mid) = self.audio else { return };
-        let mut packet = [0_u8; MAX_PACKET];
-        let length = match self.encoder.encode_float(&frame, &mut packet) {
-            Ok(length) if length > DTX_PACKET => length,
-            Ok(_) => return,
-            Err(error) => {
-                tracing::debug!(%error, "a mix didn't encode");
-                return;
-            }
-        };
+        let Some(packet) = self.encode(&frame) else { return };
         let Some(pt) = self.opus_pt(mid) else { return };
         let Some(writer) = self.rtc.writer(mid) else { return };
-        if let Err(error) = writer.write(pt, now, time, packet[..length].to_vec()) {
+        if let Err(error) = writer.write(pt, now, time, packet) {
             tracing::debug!(%error, "a mix wasn't sent");
+        }
+    }
+
+    /// `frame` in Opus; `None` for a DTX frame, which isn't sent.
+    fn encode(&mut self, frame: &[f32; FRAME]) -> Option<Vec<u8>> {
+        let mut packet = vec![0_u8; MAX_PACKET];
+        match self.encoder.encode_float(frame, &mut packet) {
+            Ok(length) if length > DTX_PACKET => {
+                packet.truncate(length);
+                Some(packet)
+            }
+            Ok(_) => None,
+            Err(error) => {
+                tracing::debug!(%error, "a mix didn't encode");
+                None
+            }
         }
     }
 
@@ -402,7 +415,7 @@ impl Leg {
         writer
             .payload_params()
             .find(|params| params.spec().codec == str0m::format::Codec::Opus)
-            .map(|params| params.pt())
+            .map(str0m::format::PayloadParams::pt)
     }
 
     /// Tells the leg's participant the dominant speakers, once its control plane is up.
@@ -490,7 +503,7 @@ mod tests {
         let mut leg = Leg::new(&making(), SOURCES, Some(&client().2), now).unwrap();
         for n in 0..RENEGOTIATIONS {
             let mut offer = client().2;
-            offer.blob.push_str(&format!("a=x-test:{n}\r\n"));
+            offer.blob = format!("{}a=x-test:{n}\r\n", offer.blob);
             leg.renegotiate(&offer, now).unwrap();
         }
         assert!(matches!(leg.renegotiate(&client().2, now), Err(LegError::TooOften)));

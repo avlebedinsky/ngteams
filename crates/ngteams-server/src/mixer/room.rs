@@ -79,7 +79,7 @@ impl Room {
             heard.push(Heard { frame, active });
         }
         for (listener, leg) in self.legs.values_mut().enumerate() {
-            leg.send(audio::mix_for(listener, &heard), now);
+            leg.send(audio::mix_for(listener, &heard).as_ref(), now);
         }
         self.tell_speakers(now);
     }

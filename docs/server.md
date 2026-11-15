@@ -800,7 +800,7 @@ on (also when several reservations of it overlap), and a seat made for it goes w
 otherwise it stays, without a leg and in no roster, for that account's next try. With no media node to take a new
 room (`--role api` without Redis or a live node, or every node full) the start is answered `503`.
 
-**The media node** is str0m (ICE-lite, DTLS, SRTP and the data channel, on one UDP socket, `mixer.udp_listen`)
+**The media node** is str0m (ICE, DTLS, SRTP and the data channel, on one UDP socket, `mixer.udp_listen`)
 with libopus: each party's audio is decoded into a buffer of its own (played once 60 ms are in, concealed for three
 20 ms ticks when it runs dry, trimmed back past 200 ms), and every 20 ms each party gets the sum of every other
 active party (above −50 dBFS within 200 ms), soft-clipped and encoded (32 kb/s, in-band FEC, DTX). A party is never

@@ -346,16 +346,33 @@ async fn step_any<T>(
 pub async fn keep_sweeping(app: Arc<App>) {
     let mut every = tokio::time::interval(SWEEP);
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    for round in 0_u32.. {
+    let mut round = 0_u32;
+    loop {
         every.tick().await;
-        if let Err(error) = sweep(&app).await {
-            tracing::warn!(%error, "the calls' sweep failed");
-        }
-        if round % SWEEPS_PER_MEDIA_LOOK == 0
-            && let Err(error) = sweep_media(&app).await
-        {
-            tracing::warn!(%error, "the group calls' media nodes weren't looked at");
-        }
+        sweep_round(&app, round).await;
+        round = round.wrapping_add(1);
+    }
+}
+
+/// The sweeper's round `round`: the calls that are due, and now and then the group calls' media nodes.
+async fn sweep_round(app: &App, round: u32) {
+    warn_failed(sweep(app).await, "the calls' sweep failed");
+    if round.is_multiple_of(SWEEPS_PER_MEDIA_LOOK) {
+        warn_failed(sweep_media(app).await, "the group calls' media nodes weren't looked at");
+    }
+}
+
+fn warn_failed(result: Result<(), DbError>, what: &'static str) {
+    if let Err(error) = result {
+        tracing::warn!(%error, "{what}");
+    }
+}
+
+/// Whether the media node `call`'s row names is known to be gone (one that can't be judged now isn't).
+async fn media_gone(nodes: &dyn MediaNodes, call: &Call) -> bool {
+    match &call.media {
+        Some(home) => matches!(nodes.alive(home).await, Ok(false)),
+        None => false,
     }
 }
 
@@ -369,11 +386,16 @@ pub async fn sweep_media(app: &App) -> Result<(), DbError> {
         return Ok(());
     };
     for kept in repo::open_groups(&app.db).await? {
-        let Some(home) = &kept.call.media else { continue };
-        if !matches!(nodes.alive(home).await, Ok(false)) {
+        if !media_gone(nodes.as_ref(), &kept.call).await {
             continue;
         }
-        tracing::info!(call = %kept.call.id, node = %home.node, "a group call's media node is gone: the call ends");
+        let home = kept
+            .call
+            .media
+            .as_ref()
+            .map(|home| home.node.as_str())
+            .unwrap_or_default();
+        tracing::info!(call = %kept.call.id, node = %home, "a group call's media node is gone: the call ends");
         let ended = step_any(
             app,
             Key::Id(&kept.call.id),

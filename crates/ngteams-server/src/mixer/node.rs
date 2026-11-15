@@ -128,7 +128,7 @@ struct Node {
 pub(crate) fn run(
     socket: UdpSocket,
     settings: Settings,
-    commands: Receiver<Command>,
+    commands: &Receiver<Command>,
     lost: mpsc::UnboundedSender<Lost>,
 ) {
     let Some(destination) = settings.making.candidates.first().copied() else {

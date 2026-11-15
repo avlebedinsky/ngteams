@@ -1,7 +1,7 @@
 //! A room's audio math, without a codec: each leg's sample buffer, the mix each listener hears, who is active and who
 //! speaks. Everything runs on the room's 20 ms tick.
 //!
-//! The buffer is the one piece of media logic of our own (libwebrtc's NetEq has no maintained Rust equivalent): it
+//! The buffer is the one piece of media logic of our own (libwebrtc's `NetEq` has no maintained Rust equivalent): it
 //! holds samples, not packets, so any packet length works; it starts playing once [`TARGET`] is buffered, is concealed
 //! for a few ticks when it runs dry, and is trimmed back to [`TARGET`] when a sender's clock runs ahead of ours.
 
@@ -93,7 +93,8 @@ pub(crate) fn dbfs(frame: &[f32]) -> f32 {
     if frame.is_empty() {
         return FLOOR_DBFS;
     }
-    let power = frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32;
+    let length = f32::from(u16::try_from(frame.len()).unwrap_or(u16::MAX));
+    let power = frame.iter().map(|sample| sample * sample).sum::<f32>() / length;
     if power <= 0.0 {
         return FLOOR_DBFS;
     }
@@ -203,8 +204,11 @@ mod tests {
 
     fn tone(amplitude: f32) -> [f32; FRAME] {
         let mut frame = [0.0; FRAME];
-        for (n, sample) in frame.iter_mut().enumerate() {
-            *sample = amplitude * (std::f32::consts::TAU * 440.0 * n as f32 / RATE as f32).sin();
+        let step = std::f32::consts::TAU * 440.0 / 48_000.0;
+        let mut phase = 0.0_f32;
+        for sample in &mut frame {
+            *sample = amplitude * phase.sin();
+            phase += step;
         }
         frame
     }
@@ -248,13 +252,13 @@ mod tests {
             assert_eq!(buffer.take(&mut frame), Took::Conceal);
         }
         assert_eq!(buffer.take(&mut frame), Took::Silent);
-        assert_eq!(frame, [0.0; FRAME]);
+        assert!(frame.iter().all(|sample| sample.abs() < f32::EPSILON));
         buffer.push(&[0.25; FRAME]);
         assert_eq!(buffer.take(&mut frame), Took::Silent);
         // fast: past 200 ms it is trimmed to 60 ms, the oldest going
         let mut fast = Buffer::default();
-        fast.push(&[0.1; 5 * FRAME]);
-        fast.push(&[0.9; 6 * FRAME]);
+        fast.push(&vec![0.1; 5 * FRAME]);
+        fast.push(&vec![0.9; 6 * FRAME]);
         assert_eq!(fast.len(), TARGET);
         assert_eq!(fast.take(&mut frame), Took::Played);
         assert!((frame[0] - 0.9).abs() < 1e-6);
