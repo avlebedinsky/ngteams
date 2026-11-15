@@ -77,6 +77,29 @@ pub(crate) enum Status {
 pub(crate) struct Leg {
     pub id: String,
     pub sources: Sources,
+    /// While it is reserved: the seat's leg it was reserved over (its own `before` the one that leg was).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Box<Leg>>,
+}
+
+impl Leg {
+    /// This leg's id and the ids of the legs it was reserved over.
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> {
+        std::iter::successors(Some(self), |leg| leg.before.as_deref()).map(|leg| leg.id.as_str())
+    }
+
+    /// Takes the leg `gone` out of the ones it was reserved over, the one before it taking its place.
+    fn forget(&mut self, gone: &str) {
+        let Some(before) = self.before.as_mut() else {
+            return;
+        };
+        if before.id == gone {
+            let earlier = before.before.take();
+            self.before = earlier;
+        } else {
+            before.forget(gone);
+        }
+    }
 }
 
 /// A chat member who follows a group call's roster without being in it: its endpoint and callbacks.
@@ -117,6 +140,9 @@ pub(crate) struct Party {
     pub ring_due: Option<i64>,
     #[serde(default)]
     pub leg: Option<Leg>,
+    /// How many times a group call rang it: its invitation's links name its ring, so one ring's isn't another's.
+    #[serde(default)]
+    pub rings: u64,
     /// A group call party's renegotiation whose answer waits for its acknowledgement.
     #[serde(default)]
     pub answered: Option<Pending>,
@@ -134,9 +160,6 @@ pub(crate) struct Pending {
 pub(crate) struct Reserved {
     pub seat: Seat,
     pub sources: Sources,
-    /// The seat's leg before (a ringing party's, which its invitation's offer is for): dropped once the step that
-    /// takes the new one is stored.
-    pub before: Option<Leg>,
     /// How the seat named its party before (`participant`, `name`).
     named: (Value, String),
     /// The seat was made for it.

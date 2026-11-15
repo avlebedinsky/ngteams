@@ -2,7 +2,7 @@
 //! ([`super::mixer::FixedMixer`]): the start in a group chat ringing its other members with the node's offers, the
 //! caller accepted by the node at once, a callee's answer, a decline and a ring nobody answers, leaves and the last
 //! one, a member joining the running call it finds in the chat, a second start refused (also when both come at once),
-//! adds, a media node that fails a join.
+//! adds (a callee added back rings anew), a media node that fails a join.
 
 use std::time::Duration;
 
@@ -756,6 +756,51 @@ async fn the_caller_who_left_rings_and_answers_when_added_back() {
             .await;
         let call = group.open_call().await;
         assert_eq!(group.mixer.legs(&call.id).len(), 2, "Ada's new leg and Bert's");
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callee_the_same_member_adds_back_rings_anew_after_a_decline_and_after_a_leave() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let b = group.b.mri();
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        let placed = group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        group.b.client.decline(rings.call);
+        assert_eq!(group.b.client.ended().await, End::Declined);
+        // Ada adds Bert back: a ring of its own, not the one he declined
+        group.a.client.add(placed, &b, &group.chat);
+        let again = group.b.client.incoming().await;
+        group.b.client.answer(again.call);
+        let answered = group.b.client.state(CallState::Connected).await;
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, std::slice::from_ref(&b)))
+            .await;
+        group.b.client.hang_up(answered);
+        assert_eq!(group.b.client.ended().await, End::HungUp);
+        group.a.client.participants_until(<[Participant]>::is_empty).await;
+        // and again once he left
+        group.a.client.add(placed, &b, &group.chat);
+        let third = group.b.client.incoming().await;
+        // the links of an earlier ring of his are over
+        let call = group.open_call().await;
+        let forked = format!("/flightproxy/api/v2/ep/cc.own/cc/v1/forked/{}/1/i1", call.id);
+        let progress = |ring: u64| format!("{forked}/{ring}/progress");
+        let (status, _) = raw(&group.server, &group.b, reqwest::Method::POST, &progress(1), &json!({})).await;
+        assert_eq!(status, 410);
+        let (status, _) = raw(&group.server, &group.b, reqwest::Method::POST, &progress(3), &json!({})).await;
+        assert_eq!(status, 200);
+        group.b.client.answer(third.call);
+        group.b.client.state(CallState::Connected).await;
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, std::slice::from_ref(&b)))
+            .await;
         group.server.stop().await;
     }
 }

@@ -341,6 +341,10 @@ pub(super) async fn controller(
     if matches!(kind, "forked" | "incoming") && seat == Seat::CALLER && call.kind == Kind::OneToOne {
         return Err(Refusal::Forbidden.into());
     }
+    // a group call's invitation links name the party's ring: an earlier ring's are over
+    if kind == "forked" && call.kind == Kind::Group && param(&path, "number") != call.party(seat).rings.to_string() {
+        return Err(Refusal::Gone.into());
+    }
     let body = json(&body)?;
     let asked = Leg {
         app: &app,

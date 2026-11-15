@@ -69,6 +69,7 @@ impl Call {
             } else {
                 party.status = Status::Ringing;
                 party.ring_due = Some(ring_due);
+                party.rings += 1;
             }
         }
         self.reschedule();
@@ -108,6 +109,7 @@ impl Call {
         party.status = Status::InCall;
         party.ring_due = None;
         party.joined = Some(wire::iso(at.now));
+        Self::settle(party, out);
         self.reschedule();
         self.tell_group(at.origin, &[seat], Some(seat), out);
         self.tell_presence(at.origin, wire::JOINED, seat, out);
@@ -179,7 +181,14 @@ impl Call {
     fn let_go(party: &mut Party, out: &mut Out) {
         party.ring_due = None;
         if let Some(leg) = party.leg.take() {
-            out.released.push(leg.id);
+            out.released.extend(leg.ids().map(str::to_owned));
+        }
+    }
+
+    /// The party's leg is its own now: the legs it was reserved over go.
+    fn settle(party: &mut Party, out: &mut Out) {
+        if let Some(before) = party.leg.as_mut().and_then(|leg| leg.before.take()) {
+            out.released.extend(before.ids().map(str::to_owned));
         }
     }
 
@@ -236,8 +245,9 @@ impl Call {
         changed
     }
 
-    /// Makes `account` a seat with a new leg `leg`: the first step of a join or an add, before the media node is asked
-    /// for the leg. Someone in the call already is refused.
+    /// Makes `account` a seat with a new leg `leg`, reserved over the seat's leg (a ringing party's, which its
+    /// invitation's offer is for): the first step of a join or an add, before the media node is asked for the leg.
+    /// Someone in the call already is refused.
     pub(crate) fn reserve(&mut self, account: &Party, leg: &str) -> Result<Reserved, Refusal> {
         if self.phase == Phase::Ended {
             return Err(Refusal::Gone);
@@ -259,14 +269,15 @@ impl Call {
             std::mem::replace(&mut party.participant, account.participant.clone()),
             std::mem::replace(&mut party.name, account.name.clone()),
         );
-        let before = party.leg.replace(Leg {
+        let before = party.leg.take().map(Box::new);
+        party.leg = Some(Leg {
             id: leg.to_owned(),
             sources,
+            before,
         });
         Ok(Reserved {
             seat,
             sources,
-            before,
             named,
             made,
         })
@@ -284,23 +295,33 @@ impl Call {
         self.reserve(account, leg).map(Some)
     }
 
-    /// Undoes `reserved`, whose leg `leg` the media node didn't make or whose step wasn't stored: the seat gets back
-    /// the leg and the name it had, and a seat made for it goes. `false` when the leg isn't the seat's any more (a
-    /// later step took it over or let it go), so the leg it had is nobody's now.
-    pub(crate) fn unreserve(&mut self, reserved: &Reserved, leg: &str) -> bool {
+    /// Undoes `reserved`, whose leg `leg` the media node didn't make or whose step wasn't stored, and lets `leg` go.
+    /// The seat gets back the leg and the name it had; a seat made for it goes when no seat was made after it (else it
+    /// stays, without a leg and in no roster, for that account's next try). A later reservation over `leg` is over
+    /// the leg `leg` was reserved over instead. A party that got in on `leg` keeps it.
+    pub(crate) fn unreserve(&mut self, reserved: &Reserved, leg: &str, out: &mut Out) {
         let seat = reserved.seat;
         let party = self.party_mut(seat);
-        let current = party.leg.as_ref().is_some_and(|kept| kept.id == leg);
-        if !current || party.status == Status::InCall {
-            return false;
+        let Some(kept) = party.leg.as_mut() else {
+            out.released.push(leg.to_owned());
+            return;
+        };
+        if kept.id != leg {
+            kept.forget(leg);
+            out.released.push(leg.to_owned());
+            return;
         }
-        party.leg.clone_from(&reserved.before);
+        if party.status == Status::InCall {
+            return;
+        }
+        let before = kept.before.take();
+        party.leg = before.map(|before| *before);
         party.participant.clone_from(&reserved.named.0);
         party.name.clone_from(&reserved.named.1);
+        out.released.push(leg.to_owned());
         if reserved.made && seat.0 + 1 == self.parties.len() {
             self.parties.pop();
         }
-        true
     }
 
     /// The party at `seat`, its leg `leg` made, joins with its endpoint: the media node's `answer` goes to its
@@ -334,6 +355,7 @@ impl Call {
         party.status = Status::InCall;
         party.ring_due = None;
         party.joined = Some(wire::iso(at.now));
+        Self::settle(party, out);
         let accepted = wire::mixer_acceptance(at.origin, self, seat, answer);
         out.call_back(at.origin, self.party(seat).link("acceptance"), accepted);
         self.reschedule();
@@ -342,9 +364,9 @@ impl Call {
         Ok(())
     }
 
-    /// The party at `seat`, its leg `leg` made with the media node's offer, rings until `ring_due` (someone added
+    /// The party at `seat`, its leg `leg` made with the media node's offer, rings anew until `ring_due` (someone added
     /// it to the call).
-    pub(crate) fn ring(&mut self, seat: Seat, leg: &str, ring_due: i64) -> Result<(), Refusal> {
+    pub(crate) fn ring(&mut self, seat: Seat, leg: &str, ring_due: i64, out: &mut Out) -> Result<(), Refusal> {
         let party = self.party(seat);
         if self.phase == Phase::Ended || party.leg.as_ref().is_none_or(|kept| kept.id != leg) {
             return Err(Refusal::Gone);
@@ -355,8 +377,10 @@ impl Call {
         let party = self.party_mut(seat);
         party.status = Status::Ringing;
         party.ring_due = Some(ring_due);
+        party.rings += 1;
         party.endpoints.clear();
         party.active = None;
+        Self::settle(party, out);
         self.reschedule();
         Ok(())
     }
@@ -564,6 +588,7 @@ mod tests {
             call.party_mut(Seat(seat)).leg = Some(Leg {
                 id: format!("leg{seat}"),
                 sources,
+                before: None,
             });
         }
         call.started_group(at(1_000_000), 1_030);
@@ -588,6 +613,18 @@ mod tests {
         call.group_accept(Seat(seat), endpoint, (links, &body), at(now), &mut out)
             .unwrap();
         out
+    }
+
+    /// The ids of the seat's leg and of the legs it was reserved over.
+    fn legs(call: &Call, seat: Seat) -> Vec<&str> {
+        call.party(seat).leg.iter().flat_map(Leg::ids).collect()
+    }
+
+    /// The legs an undone reservation lets go of.
+    fn undo(call: &mut Call, reserved: &Reserved, leg: &str) -> Vec<String> {
+        let mut out = Out::default();
+        call.unreserve(reserved, leg, &mut out);
+        out.released
     }
 
     fn paths(out: &Out) -> Vec<(&str, &str)> {
@@ -792,7 +829,8 @@ mod tests {
         // e joins: a new seat, then in the call with the node's answer at its own acceptance
         let reserved = call.reserve(&party("e"), "leg-e").unwrap();
         let seat = reserved.seat;
-        assert_eq!((seat, reserved.sources.audio, reserved.before), (Seat(4), 1040, None));
+        assert_eq!((seat, reserved.sources.audio), (Seat(4), 1040));
+        assert_eq!(legs(&call, seat), ["leg-e"]);
         assert_eq!(
             call.join(
                 seat,
@@ -824,8 +862,8 @@ mod tests {
         // a ringing c joins instead of answering: its new leg replaces the one it rang with
         let reserved = call.reserve(&party("c"), "leg-c2").unwrap();
         let seat = reserved.seat;
-        let before = reserved.before.map(|leg| leg.id);
-        assert_eq!((seat, before.as_deref()), (Seat(2), Some("leg2")));
+        assert_eq!(seat, Seat(2));
+        assert_eq!(legs(&call, seat), ["leg-c2", "leg2"]);
         let mut out = Out::default();
         call.join(
             seat,
@@ -836,6 +874,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paths(&out)[0], ("C", "end"));
+        assert_eq!(
+            (legs(&call, seat), &out.released[..]),
+            (vec!["leg-c2"], &["leg2".to_owned()][..])
+        );
         assert_eq!(call.party(seat).participant["endpointId"], "ep-c", "named as it joined");
         let named = json!({"participants": {"from": {"endpointId": "ep-c"}}});
         assert_eq!(
@@ -860,24 +902,25 @@ mod tests {
         .unwrap();
         // f is added: it rings with the leg reserved for it
         let seat = call.reserve(&party("f"), "leg-f").unwrap().seat;
-        assert_eq!(call.ring(seat, "other", 1_050), Err(Refusal::Gone));
-        call.ring(seat, "leg-f", 1_050).unwrap();
+        let mut out = Out::default();
+        assert_eq!(call.ring(seat, "other", 1_050, &mut out), Err(Refusal::Gone));
+        call.ring(seat, "leg-f", 1_050, &mut out).unwrap();
         assert_eq!(call.party(seat).status, Status::Ringing);
-        assert_eq!(call.ring(Seat(4), "leg-e", 1_050), Err(Refusal::Forbidden));
+        assert_eq!(call.ring(Seat(4), "leg-e", 1_050, &mut out), Err(Refusal::Forbidden));
         // f rings: a second add leaves its ring as it is
         assert_eq!(call.reserve_added(&party("f"), "leg-f2"), Ok(None));
         assert_eq!(call.party(seat).leg.as_ref().map(|leg| leg.id.as_str()), Some("leg-f"));
         // a reservation the node didn't make a leg for is let go, and the seat made for it goes
         let reserved = call.reserve_added(&party("g"), "leg-g").unwrap().unwrap();
-        assert!(!call.unreserve(&reserved, "other"));
+        assert_eq!(undo(&mut call, &reserved, "other"), ["other"]);
         assert_eq!(call.parties.len(), 7);
-        assert!(call.unreserve(&reserved, "leg-g"));
+        assert_eq!(undo(&mut call, &reserved, "leg-g"), ["leg-g"]);
         assert_eq!(call.parties.len(), 6);
         let mut over = call.clone();
         over.phase = Phase::Ended;
         assert_eq!(over.reserve(&party("h"), "leg-h").unwrap_err(), Refusal::Gone);
         assert_eq!(over.reserve_added(&party("f"), "leg-h").unwrap_err(), Refusal::Gone);
-        assert_eq!(over.ring(Seat(5), "leg-f", 1_050), Err(Refusal::Gone));
+        assert_eq!(over.ring(Seat(5), "leg-f", 1_050, &mut out), Err(Refusal::Gone));
         assert_eq!(
             over.watch("h", "H", Links::new(), at(1_004_000), &mut Out::default()),
             Err(Refusal::Gone)
@@ -891,7 +934,7 @@ mod tests {
         joining.participant["endpointId"] = json!("ep-c9");
         let reserved = call.reserve(&joining, "leg-c2").unwrap();
         assert_eq!(call.party(Seat(2)).participant["endpointId"], "ep-c9");
-        assert!(call.unreserve(&reserved, "leg-c2"));
+        assert_eq!(undo(&mut call, &reserved, "leg-c2"), ["leg-c2"]);
         let party = call.party(Seat(2));
         assert_eq!(party.leg.as_ref().map(|leg| leg.id.as_str()), Some("leg2"));
         assert_eq!(party.participant["endpointId"], "ep-c");
@@ -902,23 +945,52 @@ mod tests {
     }
 
     #[test]
-    fn a_reservation_a_later_step_took_over_isnt_undone() {
+    fn overlapping_failed_reservations_give_the_ring_back_the_leg_it_rang_with() {
         let (mut call, _) = started();
         let first = call.reserve(&party("c"), "leg-c2").unwrap();
         let second = call.reserve(&party("c"), "leg-c3").unwrap();
-        assert_eq!(second.before.as_ref().map(|leg| leg.id.as_str()), Some("leg-c2"));
-        assert!(
-            !call.unreserve(&first, "leg-c2"),
-            "the leg it had before is nobody's now"
-        );
-        assert_eq!(
-            call.party(Seat(2)).leg.as_ref().map(|leg| leg.id.as_str()),
-            Some("leg-c3")
-        );
+        assert_eq!(legs(&call, Seat(2)), ["leg-c3", "leg-c2", "leg2"]);
+        // the first fails while the second holds the seat: the second is over the leg the first was over
+        assert_eq!(undo(&mut call, &first, "leg-c2"), ["leg-c2"]);
+        assert_eq!(legs(&call, Seat(2)), ["leg-c3", "leg2"]);
+        assert_eq!(undo(&mut call, &second, "leg-c3"), ["leg-c3"]);
+        assert_eq!(legs(&call, Seat(2)), ["leg2"]);
+        accepted(&mut call, 2, "C", 1_003_000);
+        assert_eq!(call.party(Seat(2)).status, Status::InCall);
+        // or the second fails first: the first still gives the ring its leg back
+        let first = call.reserve(&party("d"), "leg-d2").unwrap();
+        let second = call.reserve(&party("d"), "leg-d3").unwrap();
+        assert_eq!(undo(&mut call, &second, "leg-d3"), ["leg-d3"]);
+        assert_eq!(undo(&mut call, &first, "leg-d2"), ["leg-d2"]);
+        assert_eq!(legs(&call, Seat(3)), ["leg3"]);
+        assert_eq!(call.party(Seat(3)).status, Status::Ringing);
+        // three at once: the first to fail may be deep under the others
+        let first = call.reserve(&party("d"), "leg-d4").unwrap();
+        call.reserve(&party("d"), "leg-d5").unwrap();
+        call.reserve(&party("d"), "leg-d6").unwrap();
+        assert_eq!(undo(&mut call, &first, "leg-d4"), ["leg-d4"]);
+        assert_eq!(legs(&call, Seat(3)), ["leg-d6", "leg-d5", "leg3"]);
+    }
+
+    #[test]
+    fn a_ring_that_runs_out_during_a_reservation_lets_every_leg_go_and_the_late_one_too() {
+        let (mut call, _) = started();
+        let reserved = call.reserve(&party("c"), "leg-c2").unwrap();
+        let mut out = Out::default();
+        assert!(call.group_lapse(at(1_030_000), &mut out));
+        assert!(out.released.contains(&"leg-c2".to_owned()) && out.released.contains(&"leg2".to_owned()));
+        // the join's leg, made after its ring ran out, goes once the join fails
+        assert_eq!(undo(&mut call, &reserved, "leg-c2"), ["leg-c2"]);
+        assert_eq!(call.party(Seat(2)).status, Status::Missed);
+    }
+
+    #[test]
+    fn a_reservation_a_later_step_took_over_isnt_undone() {
+        let (mut call, _) = started();
         // a seat made for someone that isn't the last one stays, without a leg, in nobody's roster
         let e = call.reserve(&party("e"), "leg-e").unwrap();
         call.reserve(&party("f"), "leg-f").unwrap();
-        assert!(call.unreserve(&e, "leg-e"));
+        assert_eq!(undo(&mut call, &e, "leg-e"), ["leg-e"]);
         assert_eq!(call.parties.len(), 6);
         assert!(call.party(e.seat).leg.is_none());
         assert!(!call.rostered().contains(&e.seat));
@@ -932,7 +1004,7 @@ mod tests {
             &mut Out::default(),
         )
         .unwrap();
-        assert!(!call.unreserve(&g, "leg-g"));
+        assert!(undo(&mut call, &g, "leg-g").is_empty());
         assert_eq!(call.party(g.seat).status, Status::InCall);
     }
 
@@ -944,7 +1016,7 @@ mod tests {
         assert_eq!(call.ringing(Seat::CALLER), Err(Refusal::Gone));
         let reserved = call.reserve_added(&party("a"), "leg-a2").unwrap().unwrap();
         assert_eq!(reserved.seat, Seat::CALLER);
-        call.ring(Seat::CALLER, "leg-a2", 1_050).unwrap();
+        call.ring(Seat::CALLER, "leg-a2", 1_050, &mut Out::default()).unwrap();
         assert_eq!(call.ringing(Seat::CALLER), Ok(()));
         let mut out = Out::default();
         call.attach(Seat::CALLER, "A2", links("A2", &["end"]), at(1_004_000))
@@ -959,6 +1031,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(call.party(Seat::CALLER).status, Status::InCall);
+    }
+
+    #[test]
+    fn each_ring_of_a_party_has_links_of_its_own() {
+        let (mut call, _) = started();
+        let attach = |call: &Call| {
+            let offer = json!({"blob": "offer", "contentType": "application/sdp-ngc-1.0"});
+            let invitation = wire::group_invitation(ORIGIN, call, (Seat::CALLER, Seat(2)), ("t", "own"), &offer);
+            let gp = base64::engine::general_purpose::STANDARD
+                .decode(invitation["gp"].as_str().unwrap())
+                .unwrap();
+            let gp: Value = serde_json::from_slice(&gp).unwrap();
+            gp["callNotification"]["links"]["attach"].as_str().unwrap().to_owned()
+        };
+        assert!(attach(&call).ends_with("/forked/call/2/i1/1/attach"));
+        call.reject(Seat(2), &json!({}), at(1_005_000), &mut Out::default())
+            .unwrap();
+        let reserved = call.reserve_added(&party("c"), "leg-c2").unwrap().unwrap();
+        call.ring(reserved.seat, "leg-c2", 1_050, &mut Out::default()).unwrap();
+        assert!(attach(&call).ends_with("/forked/call/2/i1/2/attach"));
     }
 
     #[test]

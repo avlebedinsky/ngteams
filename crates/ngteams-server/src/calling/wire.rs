@@ -487,7 +487,8 @@ pub(crate) fn roster(call: &Call, seats: &[Seat]) -> Value {
 }
 
 /// A group call's invitation of the party at `seat` from the party at `by`: `{"evt": 109, "gp": <base64 JSON>}`, with
-/// the media node's offer to its leg (`deliveries.json`'s group invitation).
+/// the media node's offer to its leg (`deliveries.json`'s group invitation). Its links name the party's ring, so the
+/// client doesn't take a later ring of the party for another delivery of an earlier one.
 pub(crate) fn group_invitation(
     origin: &str,
     call: &Call,
@@ -495,7 +496,8 @@ pub(crate) fn group_invitation(
     (tenant, region): (&str, &str),
     offer: &Value,
 ) -> Value {
-    let forked = |op: &str| controller_url(origin, (call, seat), ("forked", "i1", 1), Some(op));
+    let ring = call.party(seat).rings;
+    let forked = |op: &str| controller_url(origin, (call, seat), ("forked", "i1", ring), Some(op));
     let (from, to) = invited(call, (by, seat), (tenant, region));
     let mut media = offer.clone();
     media["fromMixer"] = json!(true);

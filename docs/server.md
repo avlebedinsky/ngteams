@@ -697,8 +697,9 @@ without, it offers), takes a callee's answer and a renegotiation, and drops legs
 server yet, so **a group start is answered `501`** until one is installed (`App::mixers`); the e2e tests install one
 that answers fixed SDP. Each operation asks the node first (a leg's requests repeat safely by its id) and then makes
 the step that records what the node answered; a join or an add first reserves its seat, so the source ids the node
-gets are the ones the roster names. A reservation whose leg or step fails is undone: the seat gets back the leg its
-ring was offered on, and a seat made for it goes.
+gets are the ones the roster names. A reservation whose leg or step fails is undone and its leg dropped: the seat
+gets back the leg its ring was offered on (also when several reservations of it overlap), and a seat made for it
+goes when no seat was made after it; otherwise it stays, without a leg and in no roster, for that account's next try.
 
 - **The start**: the caller must be in the chat (`403`), and only the chat's members it names ring, once each; a
   chat that doesn't exist is `404`. The caller is in the call at once: its acceptance, with the node's answer to its
@@ -720,7 +721,9 @@ ring was offered on, and a seat made for it goes.
   callbacks. Anyone else (a former party no longer in the chat too) gets `404`.
 - **Add** (`conv/<id>/add`, the conversation's `addParticipantAndModality` link): a party in the call rings a member
   of the chat with the node's offer to a new leg, invited by the adder (the caller added back after leaving rings
-  and answers as anyone else); one who still rings rings on as it is. Someone with no calling endpoint isn't
+  and answers as anyone else); one who still rings rings on as it is. Each ring of a party has its own invitation
+  links (`…/forked/<call>/<seat>/i1/<ring>/…`), as the client takes an invitation equal to an earlier one for its
+  redelivery; an earlier ring's link is `410`. Someone with no calling endpoint isn't
   brought in, and the adder is told at its `addParticipantFailure` callback (`580` / `5205`); someone not in the
   chat is `403`.
 - **Renegotiation** goes to the node, and its answer back to the party alone, at its `mediaAnswer` callback; the next

@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::future::try_join_all;
 use serde_json::{Value, json};
 
-use super::media::{MediaHome, MediaNodes, Sdp, drop_leg, drop_room};
+use super::media::{MediaHome, MediaNodes, Sdp, drop_room};
 use super::repo::{self, Key};
 use super::state::{At, Call, Kind, Leg, Out, Party, Phase, Refusal, Reserved, Seat, Status};
 use super::wire;
@@ -158,6 +158,7 @@ async fn open(
         call.party_mut(Seat(seat)).leg = Some(Leg {
             id: uuid::Uuid::new_v4().to_string(),
             sources,
+            before: None,
         });
     }
     let origin = app.config.origin();
@@ -286,12 +287,13 @@ pub(super) async fn renegotiate(app: &App, caller: &Caller, key: Key<'_>, body: 
     let seat = call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
     call.in_call(seat)?;
     if call.waits_for_acknowledgement(seat, now_ms()) {
-        step(app, key, caller, |call, seat, at, out| {
-            call.turned_back(seat, &links, at, out);
-            Ok(())
+        let turned_back = step(app, key, caller, |call, seat, at, out| {
+            Ok(call.turned_back(seat, &links, at, out))
         })
         .await?;
-        return Ok(StatusCode::OK.into_response());
+        if turned_back {
+            return Ok(StatusCode::OK.into_response());
+        }
     }
     let answer = nodes(app)?
         .renegotiate_leg(home_of(&call)?, &call.id, &leg_of(&call, seat)?.id, &offer)
@@ -367,7 +369,7 @@ async fn join(app: &App, caller: &Caller, key: Key<'_>, call: &Call, body: &Valu
     let answer = match made {
         Ok(answer) => answer,
         Err(error) => {
-            unreserve(app, key, call, &reserved, &leg).await;
+            unreserve(app, key, &reserved, &leg).await;
             return Err(error.into());
         }
     };
@@ -383,18 +385,13 @@ async fn join(app: &App, caller: &Caller, key: Key<'_>, call: &Call, body: &Valu
         Ok(wire::conversation(at.origin, region, call))
     })
     .await;
-    let joined = match joined {
-        Ok(joined) => joined,
+    match joined {
+        Ok(joined) => Ok(Json(joined).into_response()),
         Err(failure) => {
-            unreserve(app, key, call, &reserved, &leg).await;
-            return Err(failure);
+            unreserve(app, key, &reserved, &leg).await;
+            Err(failure)
         }
-    };
-    let before = reserved.before.map(|before| before.id);
-    if let Some(before) = before.filter(|before| *before != leg) {
-        drop_leg(nodes.as_ref(), home, &call.id, &before).await;
     }
-    Ok(Json(joined).into_response())
 }
 
 /// `POST conv/<id>/add` of a party in a group call: a member of the call's chat rings as a callee, with the node's
@@ -463,6 +460,7 @@ async fn ring_added(
 ) -> Result<(), Failure> {
     let nodes = nodes(app)?;
     let home = home_of(call)?;
+    let tenant = crate::db::meta::tenant(&app.db).await?;
     let leg = uuid::Uuid::new_v4().to_string();
     let reserved = step_any(app, key, |call, _, _| call.reserve_added(account, &leg)).await?;
     let Some(reserved) = reserved else {
@@ -471,15 +469,14 @@ async fn ring_added(
     let offer = match nodes.put_leg(home, &call.id, &leg, reserved.sources, None).await {
         Ok(offer) => offer,
         Err(error) => {
-            unreserve(app, key, call, &reserved, &leg).await;
+            unreserve(app, key, &reserved, &leg).await;
             return Err(error.into());
         }
     };
-    let tenant = crate::db::meta::tenant(&app.db).await?;
     let ring_due = now_ms() / 1000 + super::ring_seconds(app);
     let region = &app.config.region;
-    let invitation = step_any(app, key, |call, at, _| {
-        call.ring(reserved.seat, &leg, ring_due)?;
+    let invitation = step_any(app, key, |call, at, out| {
+        call.ring(reserved.seat, &leg, ring_due, out)?;
         Ok(wire::group_invitation(
             at.origin,
             call,
@@ -492,36 +489,23 @@ async fn ring_added(
     let invitation = match invitation {
         Ok(invitation) => invitation,
         Err(failure) => {
-            unreserve(app, key, call, &reserved, &leg).await;
+            unreserve(app, key, &reserved, &leg).await;
             return Err(failure);
         }
     };
-    let before = reserved.before.map(|before| before.id);
-    if let Some(before) = before.filter(|before| *before != leg) {
-        drop_leg(nodes.as_ref(), home, &call.id, &before).await;
-    }
     super::ops::ring(app, &call.id, &invitation, endpoints).await;
     Ok(())
 }
 
-/// Undoes `reserved`, whose leg `leg` the node didn't make or whose step wasn't stored. The leg goes when the seat
-/// let go of it; else the seat's leg from before does, as nothing names it any more.
-async fn unreserve(app: &App, key: Key<'_>, call: &Call, reserved: &Reserved, leg: &str) {
-    let undone = step_any(app, key, |call, _, _| Ok(call.unreserve(reserved, leg))).await;
-    let (Ok(nodes), Ok(home)) = (nodes(app), home_of(call)) else {
-        return;
-    };
-    let gone = match undone {
-        Ok(true) => Some(leg),
-        Ok(false) => reserved.before.as_ref().map(|before| before.id.as_str()),
-        Err(failure) => {
-            if let Failure::Database(error) = failure {
-                tracing::warn!(%error, "a call's reserved seat wasn't let go");
-            }
-            None
-        }
-    };
-    if let Some(gone) = gone {
-        drop_leg(nodes.as_ref(), home, &call.id, gone).await;
+/// Undoes `reserved`, whose leg `leg` the node didn't make (or made late) or whose step wasn't stored; the leg is
+/// dropped once that is stored.
+async fn unreserve(app: &App, key: Key<'_>, reserved: &Reserved, leg: &str) {
+    let undone = step_any(app, key, |call, _, out| {
+        call.unreserve(reserved, leg, out);
+        Ok(())
+    })
+    .await;
+    if let Err(Failure::Database(error)) = undone {
+        tracing::warn!(%error, "a call's reserved seat wasn't let go");
     }
 }
