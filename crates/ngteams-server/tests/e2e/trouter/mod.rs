@@ -6,7 +6,7 @@ mod connect;
 mod deliveries;
 mod gaps;
 mod nodes;
-mod refusals;
+pub(crate) mod refusals;
 mod replay;
 
 use std::sync::Arc;

@@ -24,6 +24,7 @@ pub fn region_gtms(config: &Config) -> BTreeMap<&'static str, String> {
         ),
         ("userProfileService", format!("{origin}{}", user_profile_prefix(config))),
         ("amsV2", format!("{origin}/ams")),
+        ("presenceUPS", format!("{origin}{}", presence_prefix(config))),
     ])
 }
 
@@ -31,6 +32,13 @@ pub fn region_gtms(config: &Config) -> BTreeMap<&'static str, String> {
 #[must_use]
 pub fn csa_prefix(config: &Config) -> String {
     format!("/api/csa/{}", config.region)
+}
+
+/// The presence service's path under the origin. The client takes a geo of lowercase letters only.
+#[must_use]
+pub fn presence_prefix(config: &Config) -> String {
+    let geo: String = config.region.chars().filter(char::is_ascii_lowercase).collect();
+    format!("/ups/{}", if geo.is_empty() { "own" } else { &geo })
 }
 
 /// The user profile service's path under the origin.

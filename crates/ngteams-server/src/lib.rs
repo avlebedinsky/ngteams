@@ -14,6 +14,8 @@
 //!   [`admin`]: account administration (the admin API, the first-admin setup, the account commands);
 //! - `calendar`: events, series and meetings (the middle tier's calendar routes);
 //! - [`calling`]: the call controller (a 1:1 call's signaling across nodes) and the TURN credentials;
+//! - [`presence`]: who shows as what (UPS), pushed to the endpoints that watch; [`people`]: the directory's profiles
+//!   and the reads people are named and drawn from;
 //! - `teams`: teams and channels (CSA, the middle tier's and the provisioning service's team routes); a channel
 //!   is a thread of the chat service.
 
@@ -28,6 +30,8 @@ pub mod config;
 pub mod db;
 pub mod fanout;
 mod media;
+pub mod people;
+pub mod presence;
 pub mod registrar;
 pub mod routes;
 pub mod serve;

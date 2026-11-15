@@ -64,6 +64,7 @@ pub struct Config {
     pub login: LoginConfig,
     pub setup: SetupConfig,
     pub trouter: TrouterConfig,
+    pub presence: PresenceConfig,
     pub media: MediaConfig,
     pub calling: crate::calling::config::CallingConfig,
     /// The meeting rooms the scheduling form's room finder lists (`[[rooms]]`).
@@ -80,6 +81,7 @@ impl std::fmt::Debug for Config {
             .field("login", &self.login)
             .field("setup", &self.setup)
             .field("trouter", &self.trouter)
+            .field("presence", &self.presence)
             .field("media", &self.media)
             .field("storage", &self.storage)
             .field("calling", &self.calling)
@@ -229,6 +231,31 @@ impl TrouterConfig {
     }
 }
 
+/// Presence (`crate::presence`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PresenceConfig {
+    /// Seconds an endpoint shows as it was last reported; the client reports again every two minutes.
+    pub endpoint_ttl: u64,
+    /// Seconds a presence subscription holds; the client renews its own every 55 minutes.
+    pub subscription_ttl: u64,
+    /// The people one endpoint may watch.
+    pub max_subscriptions: usize,
+    /// The endpoints one account may report at once.
+    pub max_endpoints: usize,
+}
+
+impl Default for PresenceConfig {
+    fn default() -> Self {
+        Self {
+            endpoint_ttl: 320,
+            subscription_ttl: 7200,
+            max_subscriptions: 650,
+            max_endpoints: 32,
+        }
+    }
+}
+
 /// A meeting room: a place an event can name. It is no account and takes no invitation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -268,6 +295,7 @@ impl Default for Config {
             login: LoginConfig::default(),
             setup: SetupConfig::default(),
             trouter: TrouterConfig::default(),
+            presence: PresenceConfig::default(),
             media: MediaConfig::default(),
             calling: crate::calling::config::CallingConfig::default(),
             rooms: Vec::new(),
@@ -381,6 +409,8 @@ impl Config {
             || self.login.window == 0
             || self.setup.window == 0
             || self.trouter.auth_timeout == 0
+            || self.presence.endpoint_ttl == 0
+            || self.presence.subscription_ttl == 0
         {
             return Err(ConfigError::Lifetime);
         }

@@ -16,6 +16,7 @@ mod deployments;
 mod media;
 mod migrations;
 mod node;
+mod presence;
 mod shared;
 mod sign_in;
 mod support;

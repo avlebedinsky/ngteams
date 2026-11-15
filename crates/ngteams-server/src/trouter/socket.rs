@@ -705,7 +705,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
                 let delivery = delivery::delivery(&self.target(), &envelope, &Which::Once);
                 self.link.send(frames::delivery(&delivery)).await
             }
-            Kind::Transient | Kind::Internal => Ok(()),
+            Kind::Presence if self.registered() => match delivery::presence(&self.target(), &envelope) {
+                Some(delivery) => {
+                    self.account_holds().await?;
+                    self.link.send(frames::delivery(&delivery)).await
+                }
+                None => Ok(()),
+            },
+            Kind::Transient | Kind::Presence | Kind::Internal => Ok(()),
         }
     }
 

@@ -70,9 +70,11 @@ async fn the_account_bring_up_reads_its_bases_from_the_servers_authz_and_keeps_a
         Some("https://own.example.test/api/userprofilesvc/own")
     );
     assert_eq!(region.base(account::AMS_GTM), Some("https://own.example.test/ams"));
-    for gtm in [account::PRESENCE_GTM, account::MCPS_GTM] {
-        assert_eq!(region.base(gtm), None, "{gtm} isn't served yet");
-    }
+    assert_eq!(
+        region.base(account::PRESENCE_GTM),
+        Some("https://own.example.test/ups/own")
+    );
+    assert_eq!(region.base(account::MCPS_GTM), None, "mcps isn't served yet");
     let dir = tempfile::tempdir().unwrap();
     let mri = format!("8:{}", session.skypetoken().await.unwrap().skype_id.unwrap());
     let started = account::start_for_cloud(

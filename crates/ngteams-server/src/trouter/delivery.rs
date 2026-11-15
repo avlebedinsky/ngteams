@@ -13,6 +13,9 @@ pub(crate) enum Kind {
     Kept,
     /// Delivered to the sockets open now and never again: typing and other controls.
     Transient,
+    /// Others' presence, for the endpoints the envelope names: delivered to the sockets open now, at the endpoint's
+    /// presence path (`crate::presence`).
+    Presence,
     /// Not a delivery Teams makes: stays inside the server.
     Internal,
 }
@@ -31,6 +34,9 @@ const CHANNEL_THREAD: &str = "@thread.tacv2";
 
 pub(crate) fn kind(envelope: &Value) -> Kind {
     let resource_type = envelope["resourceType"].as_str().unwrap_or_default();
+    if resource_type == crate::presence::RESOURCE_TYPE {
+        return Kind::Presence;
+    }
     if !DELIVERED.contains(&resource_type) {
         return Kind::Internal;
     }
@@ -111,6 +117,38 @@ pub(super) fn delivery(target: &Target<'_>, envelope: &Value, which: &Which) -> 
     })
 }
 
+/// The presence delivery (`3:::`'s JSON) of `envelope` to `target`, when the envelope names that endpoint: UPS's
+/// `POST` to the endpoint's `unifiedPresenceService` path, its body the envelope's resource
+/// (`docs/protocol/trouter.md`, "The subscription and its deliveries").
+pub(super) fn presence(target: &Target<'_>, envelope: &Value) -> Option<Value> {
+    let named = envelope["endpoints"]
+        .as_array()?
+        .iter()
+        .any(|endpoint| endpoint.as_str() == Some(target.endpoint));
+    if !named {
+        return None;
+    }
+    let body = envelope["resource"].to_string();
+    let guid = uuid::Uuid::new_v4();
+    let request = json!({"id": uuid::Uuid::new_v4().to_string(), "src": "127.0.0.1", "port": 443});
+    Some(json!({
+        "id": i64::from(guid.as_fields().0.cast_signed()),
+        "method": "POST",
+        "url": format!("/trouter/v4/f/{}/unifiedPresenceService", target.endpoint),
+        "headers": {
+            "Host": target.host,
+            "User-Agent": "Microsoft.Skype.Presence.App/1.0",
+            "Content-Type": "application/json",
+            "Content-Length": body.len().to_string(),
+            "Trouter-Timeout": "117000",
+            "X-Trouter-Delivery-Control": "async; ttl=600",
+            "X-Microsoft-Skype-Message-ID": "0",
+            "trouter-request": request.to_string(),
+        },
+        "body": body,
+    }))
+}
+
 /// A delivery's number: a signed 32-bit one, as Teams', the same for an entry every time.
 fn number(id: EntryId) -> i64 {
     let mixed = id.ms.wrapping_mul(1000).wrapping_add(id.seq);
@@ -171,6 +209,19 @@ mod tests {
         assert_eq!(kind(&typing), Kind::Transient);
         assert_eq!(kind(&receipt), Kind::Internal);
         assert_eq!(kind(&json!({})), Kind::Internal);
+        let presence = json!({"resourceType": "Presence", "endpoints": ["Endpoint"], "resource": {"presence": []}});
+        assert_eq!(kind(&presence), Kind::Presence);
+        assert!(!keep("push:8:orgid:a", presence.to_string().as_bytes()));
+        let target = |endpoint: &'static str| Target {
+            endpoint,
+            chat_base: "https://own.example.test/api/chatsvc/own",
+            host: "own.example.test",
+        };
+        let delivery = super::presence(&target("Endpoint"), &presence).unwrap();
+        assert_eq!(delivery["url"], "/trouter/v4/f/Endpoint/unifiedPresenceService");
+        assert_eq!(delivery["body"], r#"{"presence":[]}"#);
+        assert!(super::presence(&target("Other"), &presence).is_none());
+        assert!(super::presence(&target("Endpoint"), &json!({"resourceType": "Presence"})).is_none());
         assert!(keep("push:8:orgid:a", message.to_string().as_bytes()));
         assert!(!keep("push:8:orgid:a", typing.to_string().as_bytes()));
         assert!(!keep("push:8:orgid:a", receipt.to_string().as_bytes()));

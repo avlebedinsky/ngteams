@@ -44,6 +44,7 @@ pub struct App {
     pub journal: Arc<dyn Journal>,
     pub trouter: Arc<Hub>,
     pub storage: Arc<dyn Storage>,
+    pub presence: crate::presence::Presence,
     /// What reads pages and pictures for link previews.
     pub(crate) fetcher: crate::media::Fetcher,
     pub(crate) clearing: crate::media::Clearing,
@@ -89,6 +90,7 @@ impl App {
             max_failures: config.setup.max_attempts,
             window: config.setup.window,
         };
+        let mut shared = None;
         let (fanout, journal, throttle, setup_throttle): (Arc<dyn Fanout>, Arc<dyn Journal>, Throttle, Throttle) =
             match &config.redis_url {
                 Some(url) => {
@@ -97,6 +99,7 @@ impl App {
                     let throttle = Throttle::redis(config.login.clone(), redis.shared(), "login");
                     let setup_throttle = Throttle::redis(setup_limits, redis.shared(), "setup");
                     let journal = RedisJournal::new(redis.shared());
+                    shared = Some(redis.shared().commands());
                     (Arc::new(redis), Arc::new(journal), throttle, setup_throttle)
                 }
                 None => (
@@ -112,6 +115,8 @@ impl App {
             crate::trouter::keep,
             crate::trouter::unkept,
         ));
+        let presence =
+            crate::presence::Presence::start(shared, Arc::clone(&fanout), db.clone(), config.presence.clone());
         let storage = Arc::new(ObjectStorage::open_with(
             &config.storage_url,
             &config.storage_options,
@@ -129,6 +134,7 @@ impl App {
             journal,
             trouter: Arc::new(Hub::new()),
             storage,
+            presence,
             fetcher,
             clearing: crate::media::Clearing::default(),
         });
@@ -156,6 +162,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::chatsvc::router())
         .merge(crate::admin::api::router())
         .merge(crate::teams::router(&app.config))
+        .merge(crate::presence::router(&app))
         .merge(crate::registrar::router())
         .merge(crate::trouter::router())
         .merge(crate::calling::router())

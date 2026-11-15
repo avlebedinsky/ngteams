@@ -14,11 +14,11 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use super::{ORIGIN, server, server_with};
 use crate::support::{Backend, CLIENT_ID, PASSWORD, TestServer, backends};
 
-pub(super) const EPID: &str = "00000000-0000-4000-8000-0000000000e1";
-pub(super) const IC3: &str = "https://ic3.teams.office.com";
+pub(crate) const EPID: &str = "00000000-0000-4000-8000-0000000000e1";
+pub(crate) const IC3: &str = "https://ic3.teams.office.com";
 
 /// An access token of `upn` for `resource`, from the password grant.
-pub(super) async fn token(server: &TestServer, upn: &str, resource: &str) -> String {
+pub(crate) async fn token(server: &TestServer, upn: &str, resource: &str) -> String {
     token_with(server, upn, PASSWORD, resource).await
 }
 
@@ -41,15 +41,15 @@ async fn token_with(server: &TestServer, upn: &str, password: &str, resource: &s
     answer["access_token"].as_str().unwrap().to_owned()
 }
 
-pub(super) fn query(epid: &str, client: &str) -> String {
+pub(crate) fn query(epid: &str, client: &str) -> String {
     let tc = format!("%7B%22cv%22:%221%22,%22ua%22:%22{client}%22,%22hr%22:%22%22,%22v%22:%221%22%7D");
     format!("tc={tc}&timeout=40&epid={epid}&cor_id=c&con_num=1_1")
 }
 
-pub(super) struct Raw(WebSocketStream<MaybeTlsStream<TcpStream>>);
+pub(crate) struct Raw(WebSocketStream<MaybeTlsStream<TcpStream>>);
 
 impl Raw {
-    pub(super) async fn open(server: &TestServer, query: &str) -> Self {
+    pub(crate) async fn open(server: &TestServer, query: &str) -> Self {
         Self::try_open(server, query, Some(ORIGIN)).await.unwrap()
     }
 
@@ -67,18 +67,18 @@ impl Raw {
         }
     }
 
-    pub(super) async fn send(&mut self, text: &str) {
+    pub(crate) async fn send(&mut self, text: &str) {
         self.0.send(Message::text(text.to_owned())).await.unwrap();
     }
 
     /// The next text frame; `None` once the socket closed.
-    pub(super) async fn next(&mut self) -> Option<String> {
+    pub(crate) async fn next(&mut self) -> Option<String> {
         self.next_within(Duration::from_secs(10))
             .await
             .expect("no frame in time")
     }
 
-    pub(super) async fn next_within(&mut self, wait: Duration) -> Result<Option<String>, tokio::time::error::Elapsed> {
+    pub(crate) async fn next_within(&mut self, wait: Duration) -> Result<Option<String>, tokio::time::error::Elapsed> {
         tokio::time::timeout(wait, async {
             loop {
                 match self.0.next().await {
@@ -91,7 +91,7 @@ impl Raw {
         .await
     }
 
-    pub(super) async fn authenticate(&mut self, token: &str, params: Option<Value>) {
+    pub(crate) async fn authenticate(&mut self, token: &str, params: Option<Value>) {
         assert_eq!(self.next().await.as_deref(), Some("1::"));
         let mut argument = json!({"headers": {
             "X-Ms-Test-User": "False", "Authorization": format!("Bearer {token}"), "X-MS-Migration": "True",
@@ -107,7 +107,7 @@ impl Raw {
     }
 
     /// Authenticates and reads `trouter.connected`'s argument.
-    pub(super) async fn connect(&mut self, token: &str) -> Value {
+    pub(crate) async fn connect(&mut self, token: &str) -> Value {
         self.authenticate(token, None).await;
         let frame = self.next().await.unwrap();
         let event: Value = serde_json::from_str(frame.strip_prefix("5:1::").unwrap()).unwrap();
@@ -116,12 +116,12 @@ impl Raw {
     }
 
     /// Whether the socket ends with this disconnect.
-    pub(super) async fn ends_with(&mut self, frame: &str) -> bool {
+    pub(crate) async fn ends_with(&mut self, frame: &str) -> bool {
         self.next().await.as_deref() == Some(frame) && self.next().await.is_none()
     }
 }
 
-pub(super) fn registration(app: &str, registration_id: &str, path: &str, ttl: u64) -> Value {
+pub(crate) fn registration(app: &str, registration_id: &str, path: &str, ttl: u64) -> Value {
     json!({
         "clientDescription": {"appId": app, "aesKey": "", "languageId": "en-US", "platform": "chrome",
             "templateKey": format!("{app}_2.6"), "platformUIVersion": "1/1"},
@@ -130,7 +130,7 @@ pub(super) fn registration(app: &str, registration_id: &str, path: &str, ttl: u6
     })
 }
 
-pub(super) async fn register(server: &TestServer, token: Option<&str>, body: &Value) -> u16 {
+pub(crate) async fn register(server: &TestServer, token: Option<&str>, body: &Value) -> u16 {
     let mut request = reqwest::Client::new()
         .post(server.url("/registrar/prod/V2/registrations"))
         .header("X-MS-Migration", "True")
