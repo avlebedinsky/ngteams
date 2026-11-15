@@ -129,8 +129,16 @@ impl Rig {
 
     /// As [`Rig::user`], its client also reaching the team services authz names.
     pub async fn team_user(&self, node: &Node, upn: &str) -> User {
+        self.user_via(node, upn, None, true).await
+    }
+
+    /// As [`Rig::user`] (with `teams`, [`Rig::team_user`]), the client's requests going through `tally` when given.
+    pub async fn user_via(&self, node: &Node, upn: &str, tally: Option<&Tally>, teams: bool) -> User {
         let mut user = User::signed_in(node, &self.origin, upn, options()).await;
-        user.teams = true;
+        user.teams = teams;
+        if let Some(tally) = tally {
+            user.http = format!("http://127.0.0.1:{}", tally.port);
+        }
         user.start();
         user.online(0).await;
         user
@@ -408,6 +416,17 @@ impl User {
         }
     }
 
+    /// Takes the events of the next tenth of a second.
+    pub async fn settle_briefly(&mut self) {
+        let until = tokio::time::Instant::now() + Duration::from_millis(100);
+        loop {
+            let left = until.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() || !self.pump(left).await {
+                return;
+            }
+        }
+    }
+
     pub fn count(&self, mark: usize, pick: impl Fn(&Event) -> bool) -> usize {
         self.log[mark..].iter().filter(|event| pick(event)).count()
     }
@@ -606,6 +625,98 @@ impl Link {
 }
 
 impl Drop for Link {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A loopback relay between clients and a node that writes down each HTTP request's line (`GET /path?query`) as it
+/// passes: what the node was asked, and how often.
+pub struct Tally {
+    pub port: u16,
+    lines: Arc<std::sync::Mutex<Vec<String>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// The request lines at the start of `bytes` and after each line end, as far as `bytes` holds them whole; how much of
+/// `bytes` was read through.
+fn request_lines(bytes: &[u8], found: &mut Vec<String>) -> usize {
+    const METHODS: [&[u8]; 5] = [b"GET /", b"POST /", b"PUT /", b"DELETE /", b"PATCH /"];
+    let mut done = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let line_start = at == 0 || bytes[at - 1] == b'\n';
+        if line_start && METHODS.iter().any(|method| bytes[at..].starts_with(method)) {
+            let Some(end) = bytes[at..].windows(2).position(|pair| pair == b"\r\n") else {
+                return at;
+            };
+            let line = String::from_utf8_lossy(&bytes[at..at + end]);
+            if let Some(line) = line.strip_suffix(" HTTP/1.1") {
+                found.push(line.to_owned());
+            }
+            at += end + 2;
+            done = at;
+        } else {
+            at += 1;
+            if bytes[at - 1] == b'\n' {
+                done = at;
+            }
+        }
+    }
+    done.max(bytes.len().saturating_sub(64))
+}
+
+async fn tally_one(client: TcpStream, target: String, lines: Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let Ok(server) = TcpStream::connect(&target).await else {
+        return;
+    };
+    let (mut from_client, mut to_client) = client.into_split();
+    let (mut from_server, mut to_server) = server.into_split();
+    let up = async move {
+        let mut carry: Vec<u8> = Vec::new();
+        let mut buffer = vec![0_u8; 16 * 1024];
+        while let Ok(read @ 1..) = from_client.read(&mut buffer).await {
+            carry.extend_from_slice(&buffer[..read]);
+            let mut found = Vec::new();
+            let done = request_lines(&carry, &mut found);
+            carry.drain(..done);
+            lines.lock().unwrap().extend(found);
+            if to_server.write_all(&buffer[..read]).await.is_err() {
+                break;
+            }
+        }
+        let _ = to_server.shutdown().await;
+    };
+    let down = async move {
+        let _ = tokio::io::copy(&mut from_server, &mut to_client).await;
+        let _ = to_client.shutdown().await;
+    };
+    tokio::join!(up, down);
+}
+
+impl Tally {
+    pub async fn to(node: &Node) -> Self {
+        let target = node.endpoint.strip_prefix("http://").unwrap().to_owned();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&lines);
+        let task = tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                tokio::spawn(tally_one(client, target.clone(), Arc::clone(&kept)));
+            }
+        });
+        Self { port, lines, task }
+    }
+
+    /// The request lines so far.
+    pub fn lines(&self) -> Vec<String> {
+        self.lines.lock().unwrap().clone()
+    }
+}
+
+impl Drop for Tally {
     fn drop(&mut self) {
         self.task.abort();
     }

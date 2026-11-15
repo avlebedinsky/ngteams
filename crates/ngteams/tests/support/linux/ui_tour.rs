@@ -189,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 305] = [
+const STEPS: [Step; 5 + 305 + 8] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -2275,6 +2275,41 @@ const STEPS: [Step; 5 + 305] = [
         };
         group_controls(shell, (false, true), muted, cx);
     }),
+    // the a–b–c chat's people open while b adds the made-up guest and the guest goes again, each told only by the
+    // chat's update on the push channel: the open flyout follows (QA 267)
+    ("live-people-group", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        shell.update(cx, |shell, cx| {
+            shell.show_chats(window, cx);
+            shell.open_chat(ABC_CHAT.to_owned(), window, cx);
+            if shell.people().is_none() {
+                shell.toggle_people(window, cx);
+            }
+        });
+        show_chats_section(shell, cx);
+    }),
+    ("live-people-added", |_, _, _| live_step(live_add_guest)),
+    ("live-people-added-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    ("live-people-removed-dark", |_, _, _| live_step(live_remove_guest)),
+    ("live-people-removed", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+    }),
+    // the team list while a channel of the made-up team is renamed, told only by the channel's update
+    ("live-channels", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            if shell.people().is_some() {
+                shell.toggle_people(window, cx);
+            }
+        });
+        show_teams_section(shell, cx);
+        live_step(live_show_channel);
+    }),
+    ("live-channel-renamed", |_, _, _| live_step(live_rename_channel)),
+    ("live-channel-renamed-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
 ];
 
 /// The a–b–c chat with the compact card of the last of b's or c's messages drawn with a face open beside that face, as
@@ -3996,12 +4031,170 @@ impl Tokens {
     }
 }
 
+/// The mock, its Trouter and the runtime they serve on, for the steps that change what the mock serves while the app
+/// runs (`live-*`).
+struct Live {
+    mock: Arc<ChatServiceMock>,
+    trouter: Arc<TrouterMock>,
+    runtime: tokio::runtime::Handle,
+}
+
+static LIVE: std::sync::OnceLock<Live> = std::sync::OnceLock::new();
+
+/// The renamed channel's new name in the `live-channel-renamed` step.
+const LIVE_RENAMED: &str = "Launch — renamed live ✨";
+
+/// Runs a `live-*` step's change of the mock, then gives the app's engine time to take it in (the teams' gathering
+/// waits half a second and the tick); a failure is said, and the shot shows what the app did.
+fn live_step(change: fn(&Live) -> SandboxResult) {
+    let outcome = match LIVE.get() {
+        Some(live) => match change(live) {
+            Ok(()) => "done".to_owned(),
+            Err(error) => format!("failed: {error}"),
+        },
+        None => "no mock".to_owned(),
+    };
+    live_note(&format!("live step {outcome}"));
+    thread::sleep(Duration::from_secs(3));
+}
+
+/// Adds `line` to `target/ui-shots/live-steps.log`, which the parent doesn't read: what the `live-*` steps did.
+fn live_note(line: &str) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    // target/<profile>/deps/<test> -> target/ui-shots
+    let Some(target) = exe.ancestors().nth(3) else { return };
+    let dir = target.join("ui-shots");
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("live-steps.log"))
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// A `ThreadUpdate` naming `thread` alone, as Microsoft's carry it.
+fn live_update(live: &Live, thread: &str) {
+    let update =
+        serde_json::json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": {"id": thread}});
+    live.trouter.deliver_chat(LAB_A, &update);
+}
+
+/// b adds the made-up guest to the a–b–c chat on the mock (its members' write, as b's client sends it), and the chat's
+/// update reaches a's push channel.
+fn live_add_guest(live: &Live) -> SandboxResult {
+    let url = format!("{}/api/chatsvc/amer/v1/threads/{ABC_CHAT}/members", live.mock.origin());
+    let body = serde_json::json!({"members": [{"id": OUTSIDER, "role": "User", "shareHistoryTime": 0}]});
+    let token = live.mock.token(LAB_B).ok_or("no token for b")?;
+    let status = live.runtime.block_on(async {
+        reqwest::Client::new()
+            .put(url)
+            .bearer_auth(token)
+            .header("X-MS-Migration", "True")
+            .header("BehaviorOverride", "redirectAs404")
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .map(|answer| answer.status().as_u16())
+    })?;
+    if status != 200 {
+        return Err(format!("the guest's add answered {status}").into());
+    }
+    live_update(live, ABC_CHAT);
+    Ok(())
+}
+
+/// The last request the mock got whose decoded path ends with `end`: its path as sent and its whole URL.
+fn live_request(live: &Live, end: &str) -> SandboxResult<(String, String)> {
+    let requests = live.runtime.block_on(live.mock.received_requests());
+    let decoded = |path: &str| path.replace("%3A", ":").replace("%3a", ":").replace("%40", "@");
+    let request = requests
+        .iter()
+        .rev()
+        .find(|request| request.method.as_str() == "GET" && decoded(request.url.path()).ends_with(end))
+        .ok_or_else(|| format!("the app never read {end}"))?;
+    let mut url = format!("{}{}", live.mock.origin(), request.url.path());
+    if let Some(query) = request.url.query() {
+        url = format!("{url}?{query}");
+    }
+    Ok((request.url.path().to_owned(), url))
+}
+
+/// The JSON the mock answers a's `GET` of `url` with.
+fn live_read(live: &Live, url: &str) -> SandboxResult<serde_json::Value> {
+    let token = live.mock.token(LAB_A).ok_or("no token for a")?;
+    let body = live.runtime.block_on(async {
+        let answer = reqwest::Client::new()
+            .get(url)
+            .bearer_auth(token)
+            .header("X-MS-Migration", "True")
+            .header("BehaviorOverride", "redirectAs404")
+            .send()
+            .await?;
+        answer.bytes().await
+    })?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+/// The guest goes from the a–b–c chat: the chat's next thread read names the three again, at a newer roster (the mock
+/// has no removal of its own), and the chat's update reaches a's push channel.
+fn live_remove_guest(live: &Live) -> SandboxResult {
+    let (path, url) = live_request(live, &format!("/v1/threads/{ABC_CHAT}"))?;
+    let mut thread = live_read(live, &url)?;
+    let members = thread["members"].as_array_mut().ok_or("the thread names no members")?;
+    let before = members.len();
+    members.retain(|member| member["id"] != OUTSIDER);
+    live_note(&format!(
+        "removal: {before} members read, {} answered next at {path}",
+        members.len()
+    ));
+    let roster = thread["rosterVersion"].as_u64().unwrap_or_default();
+    thread["rosterVersion"] = serde_json::json!(roster + 1);
+    live.runtime.block_on(live.mock.answer_next("GET", &path, 200, &thread));
+    live_update(live, ABC_CHAT);
+    Ok(())
+}
+
+/// CSA's next teams read shows the made-up team's other channel in the list (`isFavorite`), named `name` when given,
+/// and the channel's update reaches a's push channel.
+fn live_change_channel(live: &Live, name: Option<&str>) -> SandboxResult {
+    let (path, url) = live_request(live, "/api/v3/teams/users/me")?;
+    let mut teams = live_read(live, &url)?;
+    let channel = teams["teams"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .flat_map(|team| team["channels"].as_array_mut().into_iter().flatten())
+        .find(|channel| channel["id"] == TEAM_CHANNEL)
+        .ok_or("the made-up team has no such channel")?;
+    live_note(&format!("channel was {}", channel["displayName"]));
+    channel["isFavorite"] = serde_json::json!(true);
+    if let Some(name) = name {
+        channel["displayName"] = serde_json::json!(name);
+    }
+    live.runtime.block_on(live.mock.answer_next("GET", &path, 200, &teams));
+    live_update(live, TEAM_CHANNEL);
+    Ok(())
+}
+
+/// The made-up team's other channel shown in the list (the account showed it on another client).
+fn live_show_channel(live: &Live) -> SandboxResult {
+    live_change_channel(live, None)
+}
+
+/// ... and then renamed [`LIVE_RENAMED`].
+fn live_rename_channel(live: &Live) -> SandboxResult {
+    live_change_channel(live, Some(LIVE_RENAMED))
+}
+
 /// The mock and a's engine on it, as `teams_core::account::start` builds one but for the mock origins, a test roster and
 /// a test log; its push channel on the Trouter mock.
 struct MockLab {
     _runtime: tokio::runtime::Runtime,
-    _mock: ChatServiceMock,
-    _trouter: TrouterMock,
+    _mock: Arc<ChatServiceMock>,
+    _trouter: Arc<TrouterMock>,
     dir: tempfile::TempDir,
 }
 
@@ -4067,6 +4260,13 @@ impl MockLab {
             options: EngineOptions::default(),
             known_names: Vec::new(),
         })?;
+        let (mock, trouter) = (Arc::new(mock), Arc::new(trouter));
+        let live = Live {
+            mock: Arc::clone(&mock),
+            trouter: Arc::clone(&trouter),
+            runtime: runtime.handle().clone(),
+        };
+        let _ = LIVE.set(live);
         let lab = Self {
             _runtime: runtime,
             _mock: mock,

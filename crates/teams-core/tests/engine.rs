@@ -4320,3 +4320,194 @@ async fn a_thread_update_of_a_team_or_a_channel_reads_the_teams_again_and_of_a_1
     }
     a.shutdown();
 }
+
+// --- QA: Microsoft's thread updates as they come, in bursts and in shapes that name nothing to read ---
+
+/// A `ThreadUpdate` whose resource is `resource` alone.
+fn thread_update_of(resource: &Value) -> Value {
+    json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": resource})
+}
+
+/// The CSA teams reads the mock got.
+async fn csa_reads(lab: &Lab) -> usize {
+    let requests = lab.mock.received_requests().await;
+    let reads = requests
+        .iter()
+        .filter(|request| request.url.path() == "/api/csa/amer/api/v3/teams/users/me");
+    reads.count()
+}
+
+/// Every thread read the mock got, of any thread.
+async fn any_thread_reads(lab: &Lab) -> usize {
+    let requests = lab.mock.received_requests().await;
+    let reads = requests.iter().filter(|request| {
+        request.method.as_str() == "GET" && decoded(request.url.path()).starts_with("/api/chatsvc/amer/v1/threads/")
+    });
+    reads.count()
+}
+
+/// The chat's `rosterVersion` as the mock's thread read gives it now.
+async fn roster_version_on_the_mock(lab: &Lab, me: &str, chat: &str) -> u64 {
+    let url = format!("{}/api/chatsvc/amer/v1/threads/{chat}", lab.mock.origin());
+    let body = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(lab.mock.token(me).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let thread: Value = serde_json::from_slice(&body).unwrap();
+    thread["rosterVersion"].as_u64().unwrap()
+}
+
+/// A native client on the mock, its reads reaching CSA too, its first teams read done.
+async fn native_with_teams(lab: &Lab) -> Native {
+    let mut a = native(
+        lab,
+        LAB_A,
+        How {
+            csa: true,
+            ..How::default()
+        },
+    );
+    a.ready().await;
+    assert_eq!(a.handle.teams().await.unwrap(), None);
+    a.event(|event| matches!(event, Event::Teams).then_some(())).await;
+    a
+}
+
+#[tokio::test]
+async fn a_burst_of_team_and_channel_updates_carrying_only_their_id_reads_the_teams_once_or_twice() {
+    let lab = Lab::start().await;
+    let mut a = native_with_teams(&lab).await;
+    let before = csa_reads(&lab).await;
+
+    // 30 updates, as Microsoft's carry the thread's id alone, close together: a team's and a channel's threads
+    for n in 0..30 {
+        let thread = if n % 2 == 0 {
+            teams_mock::CHANNEL
+        } else {
+            teams_mock::TEAM_CHANNEL
+        };
+        lab.trouter
+            .deliver_chat(LAB_A, &thread_update_of(&json!({"id": thread})));
+    }
+    after_what_came_before(&lab, &mut a, AB_CHAT).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while csa_reads(&lab).await == before {
+        assert!(tokio::time::Instant::now() < deadline, "the teams weren't read again");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // the gathering's longest wait and then some: nothing more is owed
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let reads = csa_reads(&lab).await - before;
+    assert!(reads <= 2, "{reads} teams reads for 30 updates");
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn updates_of_a_chat_not_stored_of_the_blocked_messages_stream_or_of_no_thread_read_nothing() {
+    let lab = Lab::start().await;
+    let mut a = native_with_teams(&lab).await;
+    let (teams, threads) = (csa_reads(&lab).await, any_thread_reads(&lab).await);
+    let shapes = blocked_shapes();
+    for resource in [
+        // a group chat the account isn't in, as far as its store knows
+        json!({"id": "19:qa-made-up-not-stored@thread.v2"}),
+        json!({"id": "19:qa-made-up-not-stored@thread.v2", "rosterVersion": 9_999_999_999_999_u64}),
+        // the policy-blocked capture's update of the copies' stream, and the stream named alone
+        shapes["stream_thread"].clone(),
+        json!({"id": GENERIC}),
+        // a meeting chat's id the store doesn't hold
+        json!({"id": "19:meeting_qa-made-up@thread.v2"}),
+        // no thread named
+        json!({}),
+        json!({"id": ""}),
+        json!({"id": 42}),
+        json!({"type": "Thread", "members": [{"id": LAB_B}]}),
+    ] {
+        lab.trouter.deliver_chat(LAB_A, &thread_update_of(&resource));
+    }
+    lab.trouter
+        .deliver_chat(LAB_A, &json!({"type": "EventMessage", "resourceType": "ThreadUpdate"}));
+    after_what_came_before(&lab, &mut a, AB_CHAT).await;
+    // longer than the gathering waits
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(csa_reads(&lab).await, teams, "a teams read");
+    assert_eq!(any_thread_reads(&lab).await, threads, "a thread read");
+    assert!(!read_the_stream(&lab).await);
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn repeated_updates_of_one_group_chat_read_its_people_once_per_newer_roster_and_once_each_without_one() {
+    let lab = Lab::start().await;
+    let chat = lab.mock.add_group("Twenty updates", &[LAB_A, LAB_B, LAB_C]).unwrap();
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    let added = a
+        .write(Action::AddMembers {
+            conversation: chat.clone(),
+            members: vec![Mri::new(OUTSIDER)],
+            history: ChatHistory::All,
+        })
+        .await;
+    assert_eq!(added.state, OutboxState::Sent, "{added:?}");
+    let version = roster_version_on_the_mock(&lab, LAB_B, &chat).await;
+
+    // twenty updates carrying the roster's new version: one read, the people right
+    let before = thread_reads_of(&lab, &chat).await;
+    for _ in 0..20 {
+        lab.trouter.deliver_chat(LAB_B, &thread_update(&chat, Some(version)));
+    }
+    after_what_came_before(&lab, &mut b, &chat).await;
+    assert_eq!(thread_reads_of(&lab, &chat).await - before, 1);
+    let mut four = vec![
+        LAB_A.to_owned(),
+        LAB_B.to_owned(),
+        LAB_C.to_owned(),
+        OUTSIDER.to_owned(),
+    ];
+    four.sort();
+    assert_eq!(members_of(&b, &chat).await, four);
+
+    // twenty updates naming the chat alone, as Microsoft's captured one does: a read each, never more
+    let before = thread_reads_of(&lab, &chat).await;
+    for _ in 0..20 {
+        lab.trouter.deliver_chat(LAB_B, &thread_update_of(&json!({"id": chat})));
+    }
+    after_what_came_before(&lab, &mut b, &chat).await;
+    let reads = thread_reads_of(&lab, &chat).await - before;
+    eprintln!("20 updates naming the chat alone: {reads} reads of its people");
+    assert!((1..=20).contains(&reads), "{reads} reads for 20 updates");
+    assert_eq!(members_of(&b, &chat).await, four);
+    a.shutdown();
+    b.shutdown();
+}
+
+#[tokio::test]
+#[ignore = "QA 267 Q1: a meeting chat is never stored as one (sync stores it as `Other`), so its update reads nothing"]
+async fn an_update_of_a_stored_meeting_chat_reads_its_people_and_one_of_a_1_1_chat_does_not() {
+    let lab = Lab::start().await;
+    let meeting = "19:meeting_qa-made-up-0001@thread.v2";
+    assert!(lab.mock.add_meeting_chat(meeting, "Made-up meeting", &[LAB_A, LAB_B]));
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    let before = thread_reads_of(&lab, meeting).await;
+    lab.trouter
+        .deliver_chat(LAB_A, &thread_update_of(&json!({"id": meeting})));
+    after_what_came_before(&lab, &mut a, meeting).await;
+    assert_eq!(thread_reads_of(&lab, meeting).await - before, 1);
+    let one_to_one = thread_reads_of(&lab, AB_CHAT).await;
+    lab.trouter.deliver_chat(
+        LAB_A,
+        &thread_update_of(&json!({"id": AB_CHAT, "rosterVersion": 9_999_999_999_999_u64})),
+    );
+    after_what_came_before(&lab, &mut a, AB_CHAT).await;
+    assert_eq!(thread_reads_of(&lab, AB_CHAT).await, one_to_one);
+    a.shutdown();
+}
