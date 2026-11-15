@@ -66,7 +66,8 @@ impl TurnConfig {
     #[must_use]
     pub fn relay_usable(&self) -> bool {
         let credential = self.secret.as_deref().is_some_and(|secret| !secret.is_empty()) || self.username.is_some();
-        self.urls.iter().all(|url| turn_url(url)) && credential == !self.urls.is_empty()
+        let named = !self.urls.is_empty();
+        self.urls.iter().all(|url| turn_url(url)) && credential == named
     }
 }
 

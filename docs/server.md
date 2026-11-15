@@ -121,7 +121,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `presence.subscription_ttl` | `7200` | seconds a presence subscription holds; the client renews its own every 55 minutes |
 | `presence.max_subscriptions`, `presence.max_endpoints` | `650`, `32` | the people one endpoint may watch; the endpoints one account may report at once |
 | `calling.ring_timeout` | `30` | seconds a call rings before it ends unanswered |
-| `calling.turn.urls` | none | the TURN relay's URLs (`turn:<host>:3478?transport=udp`, `turns:<host>:5349`), handed out with the credentials |
+| `calling.turn.urls` | none | the TURN relay's URLs (`turn:<host>[:<port>][?transport=udp\|tcp]`, `turns:<host>[:<port>]`), handed out with the credentials; set exactly when a credential is |
 | `calling.turn.secret` | none | coturn's `static-auth-secret`: credentials are made from it per account and run out by themselves |
 | `calling.turn.username`, `calling.turn.password` | none | one long-term user of the relay (coturn's `user=`), used when no secret is set |
 | `calling.turn.realm`, `calling.turn.ttl` | `rtcmedia`, `86400` | coturn's `realm`; seconds a credential made from the secret holds |
@@ -646,8 +646,8 @@ The account chooses the address, so the server guards every fetch against reques
 
 The server does a call's signaling and hands out the TURN relay's credentials. A 1:1 call's media goes between the
 two clients through the relay (their ICE is relay-only): the caller's offer travels in the callee's invitation, the
-callee's answer in the caller's acceptance. `ngteams` doesn't take the relay from the server yet
-([the gap](#the-turn-relay-coturn)), so its calls on an own server ring and connect without media. The wire is Teams' (`docs/protocol/calling.md`), every link under
+callee's answer in the caller's acceptance; `ngteams` takes an own-server account's relay from the server
+([below](#the-turn-relay-coturn)). The wire is Teams' (`docs/protocol/calling.md`), every link under
 `<origin>/flightproxy/api/v2/ep/`; requests carry the account's skypetoken.
 
 - **The start** (`POST /flightproxy/api/v2/epconv`) from one account to one other. The answer is the conversation
@@ -700,11 +700,15 @@ id>` and the password the base64 HMAC-SHA1 of the user name under the secret, so
 the server and it runs out after `calling.turn.ttl`. Without a secret, `calling.turn.username` and
 `calling.turn.password` name one long-term user. With neither the answer is `503` and calls have no media.
 
-**Not in the client yet.** `ngteams` reads the credential and not `urls`: every account's relay is still Teams'
-own host, which refuses an own server's credential. So a call between two `ngteams` clients on an own server has
-no audio or video, whatever relay is configured, until the client takes an own-server account's relay from `urls`
-(`docs/backlog/own-server-calls-use-the-servers-relay.md`). The server's tests name their relay to the client
-themselves.
+The server refuses to start when a URL isn't a TURN URL (RFC 7065: `turn:<host>[:<port>][?transport=udp|tcp]`,
+`turns:<host>[:<port>][?transport=tcp]`; ports 3478 and 5349 when none is given) or when URLs and a credential
+aren't set together: either alone leaves every call without media.
+
+`ngteams` takes an own-server account's relay from `urls`, per account: its media allocates on those servers, in
+order, with the credential beside them. It leaves out a URL that isn't a TURN URL or whose host is in a Microsoft
+domain, so an own server's credential never reaches Microsoft; with none left the call fails at its setup and no
+allocation is made. A Microsoft account in the same window keeps Teams' relay host and ignores any `urls`. Clients
+need the relay's hosts and ports reachable themselves: the server isn't on the media path.
 
 A coturn for it:
 

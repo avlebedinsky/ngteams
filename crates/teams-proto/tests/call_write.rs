@@ -1508,6 +1508,37 @@ async fn the_relay_credentials_are_a_read_with_the_ic3_token() {
     assert_eq!(credential.username, "placeholder-user");
     assert_eq!(credential.password.expose(), "placeholder-password");
     assert!(!format!("{credential:?}").contains("placeholder-password"));
+    assert!(relay.urls.is_empty(), "Teams' answer names no relay");
+}
+
+#[test]
+fn an_own_servers_relay_answer_names_its_urls_and_any_other_form_none() {
+    let read = |urls: serde_json::Value| {
+        let answer = json!({
+            "tokens": [{"realm": "\"rtcmedia\"", "username": "placeholder-user", "password": "placeholder-password"}],
+            "expires": 600,
+            "urls": urls,
+        });
+        RelayTokens::read_answer(&serde_json::to_vec(&answer).unwrap())
+            .unwrap()
+            .urls
+    };
+    assert_eq!(
+        read(json!([
+            "turn:turn.own.example.test:3478?transport=udp",
+            "turns:turn.own.example.test:5349"
+        ])),
+        [
+            "turn:turn.own.example.test:3478?transport=udp",
+            "turns:turn.own.example.test:5349"
+        ]
+    );
+    assert_eq!(
+        read(json!(["turn:turn.own.example.test", 7])),
+        ["turn:turn.own.example.test"]
+    );
+    assert!(read(json!("turn:turn.own.example.test")).is_empty());
+    assert!(read(json!(null)).is_empty());
 }
 
 #[test]

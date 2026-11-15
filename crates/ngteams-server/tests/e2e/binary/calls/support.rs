@@ -18,7 +18,6 @@ use teams_core::{
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
 use teams_media::devices::{VideoSink, wav};
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
 use teams_media::stun::{Attribute, Class, IntegrityKey, Message, Method, TRANSPORT_UDP, TransactionId};
 use teams_media::tone::{Tone, level_at};
@@ -177,7 +176,7 @@ impl Rig {
 
     /// A running client of `upn` at `node`, its microphone a tone.
     pub async fn phone(&self, node: &Node, upn: &str, name: &str, tone: Tone) -> Phone {
-        let mut phone = Phone::signed_in(node, &self.origin, (upn, name), (self.relay, tone)).await;
+        let mut phone = Phone::signed_in(node, &self.origin, (upn, name), tone).await;
         phone.start();
         phone.online(0).await;
         phone
@@ -281,7 +280,7 @@ impl Line {
 
 /// One running ngteams client of an account, as the app's account bring-up builds it (`teams_core::account`): its
 /// session, its engine on its store, its messaging and calling push channels, its calls' media on the file devices
-/// (a tone in, a recording out, a pattern for a camera) through the run's relay.
+/// (a tone in, a recording out, a pattern for a camera) through the relay the server names.
 pub struct Phone {
     pub upn: String,
     pub mri: String,
@@ -290,7 +289,6 @@ pub struct Phone {
     pub video: Shown,
     name: String,
     tone: Tone,
-    relay: SocketAddr,
     engine: Option<EngineHandle>,
     session: Arc<Session<MemorySecretStore>>,
     origin: String,
@@ -310,7 +308,7 @@ fn options() -> Options {
 
 impl Phone {
     /// Signed in at `node`, its client not yet started.
-    pub async fn signed_in(node: &Node, origin: &str, (upn, name): (&str, &str), media: (SocketAddr, Tone)) -> Self {
+    pub async fn signed_in(node: &Node, origin: &str, (upn, name): (&str, &str), tone: Tone) -> Self {
         let session = Arc::new(node.sign_in(upn, PASSWORD).await);
         let skype = session.skypetoken().await.unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -321,8 +319,7 @@ impl Phone {
             recording: dir.path().join("heard.wav"),
             video: Shown::default(),
             name: name.into(),
-            tone: media.1,
-            relay: media.0,
+            tone,
             engine: None,
             session,
             origin: origin.into(),
@@ -367,8 +364,8 @@ impl Phone {
                 camera: PatternCamera::default(),
                 pacing: Pacing::RealTime,
             }),
-            // the client doesn't take an own server's relay from it yet (`docs/server.md`): the rig names it
-            relay: Relay::Fixed(vec![RelayServer::udp(self.relay)]),
+            // as a shipped client's: an own-server account's media goes through the relay its server names
+            relay: Relay::Teams,
             session: SessionConfig {
                 processing: ProcessingConfig::OFF,
             },

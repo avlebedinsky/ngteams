@@ -94,7 +94,8 @@ cookie exchanges, telemetry) was needed; it was denied then, and passes under th
 valid 7 days (`expires` in seconds), the realm with its quotes in the string. The client puts it on one ICE server with
 three URLs: `turn:<relay host>:3478?transport=udp`, `turn:<relay host>:443?transport=tcp` and
 `turns:<relay host>:443`. The relay host is `gateway-world.az.relay.teams.cloud.microsoft`. So TURN over TLS on 443 is
-offered as well as plain TCP 443.
+offered as well as plain TCP 443. Teams' answer names no relay; an own server's adds `urls`, its relay's TURN URLs,
+which its accounts allocate on instead ([server.md](../server.md#the-turn-relay-coturn)).
 
 ## The call, step by step
 

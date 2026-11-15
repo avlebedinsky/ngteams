@@ -1,6 +1,8 @@
 //! The TURN relay's credentials (`docs/protocol/calling-echo.md`, "The TURN credentials"): `GET
 //! https://teams.microsoft.com/trap/tokens` ([`RelayTokens`], a read on [`Service::Relay`]) answers one credential for
-//! the `rtcmedia` realm, valid 7 days. The media session's TURN client authenticates to the relay with it.
+//! the `rtcmedia` realm, valid 7 days. The media session's TURN client authenticates to the relay with it. An own
+//! server's answer (`docs/server.md`, "The TURN relay") also names its relay's URLs (`urls`), which Teams' doesn't:
+//! a Teams client knows its relay's host.
 
 use std::fmt;
 use std::time::Duration;
@@ -44,11 +46,13 @@ impl fmt::Debug for RelayCredential {
     }
 }
 
-/// The answer of [`RelayTokens`]: its credentials, and how long they hold.
+/// The answer of [`RelayTokens`]: its credentials, how long they hold, and the relay's URLs when the answer names
+/// them (an own server's `urls`; none in Teams' answer).
 #[derive(Clone, Debug)]
 pub struct RelayAnswer {
     pub credentials: Vec<RelayCredential>,
     pub expires: Duration,
+    pub urls: Vec<String>,
 }
 
 /// Why [`RelayTokens::read_answer`] read nothing.
@@ -61,7 +65,8 @@ pub enum RelayAnswerError {
 }
 
 impl RelayTokens {
-    /// Reads `{"tokens":[{"realm","username","password"}],"expires":<seconds>}`.
+    /// Reads `{"tokens":[{"realm","username","password"}],"expires":<seconds>}`, and an own server's `"urls":
+    /// [<url>, …]` beside them (each string kept; anything else there reads as no URL).
     ///
     /// # Errors
     /// [`RelayAnswerError::Malformed`] for any other answer.
@@ -80,9 +85,15 @@ impl RelayTokens {
             .get("expires")
             .and_then(Value::as_u64)
             .ok_or(RelayAnswerError::Malformed)?;
+        let urls = answer
+            .get("urls")
+            .and_then(Value::as_array)
+            .map(|urls| urls.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default();
         Ok(RelayAnswer {
             credentials,
             expires: Duration::from_secs(expires),
+            urls,
         })
     }
 }

@@ -101,3 +101,134 @@ pub struct RelayConfig {
     pub servers: Vec<RelayServer>,
     pub credentials: Credentials,
 }
+
+/// Why [`RelayServer::parse`] took no server from a URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("not a turn: or turns: URL with a host, an optional port and an optional transport of udp or tcp")]
+pub struct InvalidRelayUrl;
+
+/// The port of a `turn:` URL that names none (RFC 7065).
+pub const TURN_PORT: u16 = 3478;
+/// The port of a `turns:` URL that names none (RFC 7065).
+pub const TURNS_PORT: u16 = 5349;
+
+impl RelayServer {
+    /// The server a TURN URL names (RFC 7065), as an own server hands them out: `turn:<host>[:<port>]
+    /// [?transport=udp|tcp]` (UDP by default) or `turns:<host>[:<port>][?transport=tcp]` (TLS), on the default port
+    /// when it names none. The inverse of [`RelayServer::url`].
+    ///
+    /// # Errors
+    /// [`InvalidRelayUrl`] for any other text.
+    pub fn parse(url: &str) -> Result<Self, InvalidRelayUrl> {
+        let (secure, rest) = match (url.strip_prefix("turns:"), url.strip_prefix("turn:")) {
+            (Some(rest), _) => (true, rest),
+            (None, Some(rest)) => (false, rest),
+            (None, None) => return Err(InvalidRelayUrl),
+        };
+        if rest.starts_with('/') {
+            return Err(InvalidRelayUrl);
+        }
+        // the authority and query read as a hierarchical URL's
+        let parsed = url::Url::parse(&format!("turn://{rest}")).map_err(|_| InvalidRelayUrl)?;
+        let host = match parsed.host() {
+            Some(url::Host::Ipv6(address)) => address.to_string(),
+            Some(url::Host::Ipv4(address)) => address.to_string(),
+            Some(url::Host::Domain(domain)) if !domain.is_empty() => domain.to_owned(),
+            _ => return Err(InvalidRelayUrl),
+        };
+        let bare = parsed.username().is_empty()
+            && parsed.password().is_none()
+            && matches!(parsed.path(), "" | "/")
+            && parsed.fragment().is_none();
+        let pairs: Vec<_> = parsed.query_pairs().collect();
+        let transport = match (pairs.as_slice(), secure) {
+            ([], false) => Transport::Udp,
+            ([], true) => Transport::Tls,
+            ([(key, value)], false) if key == "transport" && value == "udp" => Transport::Udp,
+            ([(key, value)], false) if key == "transport" && value == "tcp" => Transport::Tcp,
+            ([(key, value)], true) if key == "transport" && value == "tcp" => Transport::Tls,
+            _ => return Err(InvalidRelayUrl),
+        };
+        if !bare {
+            return Err(InvalidRelayUrl);
+        }
+        let port = parsed.port().unwrap_or(if secure { TURNS_PORT } else { TURN_PORT });
+        Ok(Self { host, port, transport })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(host: &str, port: u16, transport: Transport) -> RelayServer {
+        RelayServer {
+            host: host.to_owned(),
+            port,
+            transport,
+        }
+    }
+
+    #[test]
+    fn a_turn_url_names_its_server_with_rfc_7065s_defaults() {
+        let parsed = |url: &str| RelayServer::parse(url).unwrap();
+        assert_eq!(
+            parsed("turn:turn.own.example.test:3479?transport=udp"),
+            server("turn.own.example.test", 3479, Transport::Udp)
+        );
+        assert_eq!(
+            parsed("turn:turn.own.example.test?transport=tcp"),
+            server("turn.own.example.test", TURN_PORT, Transport::Tcp)
+        );
+        assert_eq!(
+            parsed("turn:turn.own.example.test"),
+            server("turn.own.example.test", TURN_PORT, Transport::Udp)
+        );
+        assert_eq!(
+            parsed("turns:turn.own.example.test"),
+            server("turn.own.example.test", TURNS_PORT, Transport::Tls)
+        );
+        assert_eq!(
+            parsed("turns:turn.own.example.test:443?transport=tcp"),
+            server("turn.own.example.test", 443, Transport::Tls)
+        );
+        assert_eq!(
+            parsed("turn:127.0.0.1:53478"),
+            server("127.0.0.1", 53_478, Transport::Udp)
+        );
+        assert_eq!(
+            parsed("turn:[2001:db8::7]:3478"),
+            server("2001:db8::7", 3478, Transport::Udp)
+        );
+        for written in [
+            server("turn.own.example.test", 3478, Transport::Udp),
+            server("turn.own.example.test", 443, Transport::Tcp),
+            server("turn.own.example.test", 443, Transport::Tls),
+            server("2001:db8::7", 5349, Transport::Tls),
+        ] {
+            assert_eq!(parsed(&written.url()), written);
+        }
+    }
+
+    #[test]
+    fn anything_else_names_no_server() {
+        for url in [
+            "",
+            "stun:turn.own.example.test",
+            "https://turn.own.example.test",
+            "turn:",
+            "turn:?transport=udp",
+            "turn://turn.own.example.test",
+            "turn: turn.own.example.test",
+            "turn:turn.own.example.test:port",
+            "turn:turn.own.example.test?transport=sctp",
+            "turns:turn.own.example.test?transport=udp",
+            "turn:turn.own.example.test?transport=udp&transport=tcp",
+            "turn:user@turn.own.example.test",
+            "turn:turn.own.example.test/path",
+            "turn:turn.own.example.test#part",
+        ] {
+            assert_eq!(RelayServer::parse(url), Err(InvalidRelayUrl), "{url}");
+        }
+    }
+}

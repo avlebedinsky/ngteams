@@ -37,7 +37,7 @@ use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_media::video::effects::BackgroundChoice;
 use teams_proto::{
-    ChannelParameters, Client, Credentials, HttpTransport, MediaContent, MediaDescription, MediaDescriptions,
+    ChannelParameters, Client, Cloud, Credentials, HttpTransport, MediaContent, MediaDescription, MediaDescriptions,
     RelayTokens,
 };
 
@@ -57,8 +57,11 @@ pub const GROUP_SLOTS: usize = 9;
 /// Where a call's media is relayed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Relay {
-    /// Teams' relay host, as the web client names it: UDP 3478, TCP 443 and TLS 443 ([`teams_relay`]); libwebrtc
-    /// resolves it and allocates over what it reaches.
+    /// The relay of the account's own service, chosen by the cloud of the account's own transport at each call's
+    /// setup. A Microsoft account's is Teams' relay host, as the web client names it: UDP 3478, TCP 443 and TLS 443
+    /// ([`teams_relay`]); libwebrtc resolves it and allocates over what it reaches. An own-server account's is the
+    /// servers its own server's credentials' answer names (`urls`, `docs/server.md`), none on a Microsoft host: the
+    /// own server's credential goes only to its own relay. With none, the call's media isn't set up.
     Teams,
     /// These servers, in order: a test's loopback TURN server. Tests only (`test-support`).
     #[cfg(feature = "test-support")]
@@ -66,14 +69,63 @@ pub enum Relay {
 }
 
 impl Relay {
-    /// The servers libwebrtc allocates on.
-    fn servers(&self) -> Vec<RelayServer> {
+    /// The servers libwebrtc allocates on for an account of `cloud`, whose credentials' answer named `urls`.
+    fn servers(&self, cloud: &Cloud, urls: &[String]) -> Result<Vec<RelayServer>, String> {
         match self {
-            Self::Teams => teams_relay(),
+            Self::Teams if cloud.is_microsoft() => Ok(teams_relay()),
+            Self::Teams => own_relay(urls),
             #[cfg(feature = "test-support")]
-            Self::Fixed(servers) => servers.clone(),
+            Self::Fixed(servers) => Ok(servers.clone()),
         }
     }
+}
+
+/// The domains of Microsoft's services. An own server's relay never names a host in one.
+const MICROSOFT_DOMAINS: [&str; 15] = [
+    "microsoft",
+    "microsoft.com",
+    "microsoftonline.com",
+    "skype.com",
+    "lync.com",
+    "live.com",
+    "office.com",
+    "office.net",
+    "windows.net",
+    "azure.com",
+    "azure.net",
+    "azureedge.net",
+    "cloudapp.net",
+    "trafficmanager.net",
+    "msedge.net",
+];
+
+/// `host` is in one of [`MICROSOFT_DOMAINS`].
+fn microsoft_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    MICROSOFT_DOMAINS
+        .iter()
+        .any(|domain| host == *domain || host.strip_suffix(domain).is_some_and(|sub| sub.ends_with('.')))
+}
+
+/// An own server's relay: the TURN servers its `urls` name, leaving out any that isn't a TURN URL or names a
+/// Microsoft host.
+fn own_relay(urls: &[String]) -> Result<Vec<RelayServer>, String> {
+    let servers: Vec<RelayServer> = urls
+        .iter()
+        .filter_map(|url| RelayServer::parse(url).ok())
+        .filter(|server| !microsoft_host(&server.host))
+        .collect();
+    if servers.len() < urls.len() {
+        log::warn!(
+            "{} of the own server's {} relay URLs left out: not a TURN URL, or a Microsoft host",
+            urls.len() - servers.len(),
+            urls.len()
+        );
+    }
+    if servers.is_empty() {
+        return Err("the own server names no relay its credential may go to".to_owned());
+    }
+    Ok(servers)
 }
 
 /// What a call's media is made of: the devices it opens (the microphone and the speaker, only once the account's
@@ -220,11 +272,14 @@ async fn set_up_with<C: Credentials + 'static>(
         .into_iter()
         .next()
         .ok_or("the relay handed out no credential")?;
-    let credentials = relay::Credentials {
-        username: credential.username,
-        password: credential.password.expose().to_owned(),
+    let relay = RelayConfig {
+        servers: media.relay.servers(client.transport().cloud(), &tokens.urls)?,
+        credentials: relay::Credentials {
+            username: credential.username,
+            password: credential.password.expose().to_owned(),
+        },
     };
-    tokio::task::spawn_blocking(move || set_up(&media, &credentials, offer.as_ref(), video))
+    tokio::task::spawn_blocking(move || set_up(&media, &relay, offer.as_ref(), video))
         .await
         .map_err(|error| format!("the media's setup stopped: {error}"))?
 }
@@ -232,17 +287,13 @@ async fn set_up_with<C: Credentials + 'static>(
 /// The blocking part of [`prepare`].
 fn set_up(
     media: &CallMedia,
-    credentials: &relay::Credentials,
+    relay: &RelayConfig,
     offer: Option<&MediaContent>,
     kind: VideoKind,
 ) -> Result<Prepared, String> {
     let text = |error: &dyn std::fmt::Display| error.to_string();
-    let relay = RelayConfig {
-        servers: media.relay.servers(),
-        credentials: credentials.clone(),
-    };
     // no device opens before the call's start, join or answer was admitted (`open_devices`)
-    let session = MediaSession::start_without_devices(&relay, media.session).map_err(|error| text(&error))?;
+    let session = MediaSession::start_without_devices(relay, media.session).map_err(|error| text(&error))?;
     let mut dialect = NgcSession::new();
     let video = start_video(&session, media.video.as_ref(), kind);
     let group = video && kind == VideoKind::Group;
@@ -1010,6 +1061,55 @@ pub(super) fn slots(live: &LiveMedia) -> Vec<Option<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn urls(urls: &[&str]) -> Vec<String> {
+        urls.iter().map(|url| (*url).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_microsoft_accounts_relay_is_teams_whatever_its_answer_names() {
+        let named = urls(&["turn:turn.own.example.test:3478?transport=udp"]);
+        for named in [Vec::new(), named] {
+            assert_eq!(Relay::Teams.servers(&Cloud::Microsoft, &named), Ok(teams_relay()));
+        }
+    }
+
+    #[test]
+    fn an_own_server_accounts_relay_is_the_one_its_server_names_never_microsofts() {
+        let own = Cloud::own("https://chat.own.example.test").unwrap();
+        let servers = Relay::Teams
+            .servers(
+                &own,
+                &urls(&[
+                    "turn:turn.own.example.test:3478?transport=udp",
+                    "stun:turn.own.example.test",
+                    "turns:gateway-world.az.relay.teams.cloud.microsoft:443",
+                    "turn:relay.Skype.com.",
+                    "turn:a.trafficmanager.net",
+                    "turns:turn.own.example.test",
+                ]),
+            )
+            .unwrap();
+        let urls_of: Vec<String> = servers.iter().map(RelayServer::url).collect();
+        assert_eq!(
+            urls_of,
+            [
+                "turn:turn.own.example.test:3478?transport=udp",
+                "turns:turn.own.example.test:5349?transport=tcp"
+            ]
+        );
+        // a host that only ends like a Microsoft domain is the own server's
+        assert!(Relay::Teams.servers(&own, &urls(&["turn:notmicrosoft.com"])).is_ok());
+        for named in [
+            Vec::new(),
+            urls(&["turn:gateway-world.az.relay.teams.cloud.microsoft"]),
+            urls(&["https://turn.own.example.test"]),
+        ] {
+            assert!(Relay::Teams.servers(&own, &named).is_err(), "{named:?}");
+        }
+        let fixed = Relay::Fixed(vec![RelayServer::udp("127.0.0.1:3478".parse().unwrap())]);
+        assert_eq!(fixed.servers(&own, &[]).unwrap().len(), 1);
+    }
 
     #[test]
     fn media_the_far_end_closed_gets_its_grace_however_long_ago_it_was_applied() {

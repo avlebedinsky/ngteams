@@ -197,8 +197,8 @@ async fn a_call_to_someone_offline_disabled_or_deleted_ends_cleanly() {
         };
         let mut a = rig.phone(&rig.first, "a@own.test", "Ada", A_TONE).await;
         // b and c are signed in, with no client running
-        let mut b = Phone::signed_in(rig.other(), &rig.origin, ("b@own.test", "Bert"), (rig.relay, B_TONE)).await;
-        let c = Phone::signed_in(&rig.first, &rig.origin, ("c@own.test", "Cora"), (rig.relay, B_TONE)).await;
+        let mut b = Phone::signed_in(rig.other(), &rig.origin, ("b@own.test", "Bert"), B_TONE).await;
+        let c = Phone::signed_in(&rig.first, &rig.origin, ("c@own.test", "Cora"), B_TONE).await;
         let chat = a.chat_with(&b.mri).await;
         let gone = a.chat_with(&c.mri).await;
 

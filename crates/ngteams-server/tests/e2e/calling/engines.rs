@@ -1,7 +1,8 @@
 //! The client's engine (`teams-core`) calling through the server, with its calls' media (`teams-media`) on the file
-//! device backend, relayed through the loopback TURN server the server hands out the credentials of: a 1:1 call
-//! connects, a tone and video cross both ways, mute and hold show at the far end, and the chat tells the call. The
-//! same with each client on another node.
+//! device backend, relayed through the loopback TURN server the server names and hands out the credentials of (the
+//! engines are given the relay a shipped client's are, [`Relay::Teams`]: an own-server account's is its server's): a
+//! 1:1 call connects, a tone and video cross both ways, mute and hold show at the far end, and the chat tells the call.
+//! The same with each client on another node.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,7 +16,6 @@ use teams_core::{
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
 use teams_media::devices::{VideoSink, wav};
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
 use teams_media::test_turn::{self, TurnServer};
 use teams_media::tone::{Tone, level_at};
@@ -74,12 +74,13 @@ struct Engine {
 }
 
 impl Engine {
-    /// The account's engine: its sockets on `socket`, its requests through `http`, its media through `relay`.
+    /// The account's engine: its sockets on `socket`, its requests through `http`, its media through the relay its
+    /// server names.
     async fn start(
         account: &Account,
         name: &str,
         (socket, http): (&TestServer, &TestServer),
-        (relay, tone, dir): (std::net::SocketAddr, Tone, &Path),
+        (tone, dir): (Tone, &Path),
     ) -> Self {
         let cloud = Cloud::own(ORIGIN).unwrap();
         let mri = Mri::new(account.mri.clone());
@@ -103,7 +104,7 @@ impl Engine {
                 camera: PatternCamera::default(),
                 pacing: Pacing::RealTime,
             }),
-            relay: Relay::Fixed(vec![RelayServer::udp(relay)]),
+            relay: Relay::Teams,
             session: SessionConfig {
                 processing: ProcessingConfig::OFF,
             },
@@ -269,11 +270,25 @@ async fn wait_until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-/// The TURN relay's credentials the server hands out: the loopback test server's one user.
-fn relayed(config: &mut ngteams_server::config::Config) {
-    config.public_origin = url::Url::parse(ORIGIN).unwrap();
-    config.calling.turn.username = Some(test_turn::USER.to_owned());
-    config.calling.turn.password = Some(test_turn::PASSWORD.to_owned());
+/// The TURN relay the server names, and the credentials it hands out: the loopback test server at `relay` and its one
+/// user.
+fn relayed(relay: std::net::SocketAddr) -> impl FnOnce(&mut ngteams_server::config::Config) {
+    move |config| {
+        config.public_origin = url::Url::parse(ORIGIN).unwrap();
+        config.calling.turn.urls = vec![format!("turn:{relay}?transport=udp")];
+        config.calling.turn.username = Some(test_turn::USER.to_owned());
+        config.calling.turn.password = Some(test_turn::PASSWORD.to_owned());
+    }
+}
+
+/// The loopback relay carried the call: both engines allocated on it and it relayed their media.
+fn carried(turn: &TurnServer) {
+    let allocations = turn.counters.allocations.load(std::sync::atomic::Ordering::Relaxed);
+    let relayed = turn.counters.rtp_relayed.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        allocations >= 2 && relayed > 0,
+        "allocations {allocations}, RTP relayed {relayed}"
+    );
 }
 
 /// Two engines in a call: a's and b's, each with its own id of the call.
@@ -298,12 +313,7 @@ async fn chat_of(a: &Engine, b: &Engine) -> String {
 }
 
 /// a's engine on `node_a` and b's on `node_b`, both accounts new.
-async fn engines(
-    node_a: &TestServer,
-    node_b: &TestServer,
-    relay: std::net::SocketAddr,
-    dir: &Path,
-) -> (Engine, Engine) {
+async fn engines(node_a: &TestServer, node_b: &TestServer, dir: &Path) -> (Engine, Engine) {
     // names of this call's own: with Redis, sign-ins are counted per name across every test running now
     let tag = uuid::Uuid::new_v4().simple().to_string();
     let (a_upn, b_upn) = (format!("a-{tag}@own.test"), format!("b-{tag}@own.test"));
@@ -311,14 +321,14 @@ async fn engines(
     let b_id = node_a.add_user(&b_upn, "Bert").await;
     let a_account = Account::sign_in(node_a, &a_upn, &a_id).await;
     let b_account = Account::sign_in(node_b, &b_upn, &b_id).await;
-    let a = Engine::start(&a_account, "Ada", (node_a, node_a), (relay, A_TONE, dir)).await;
-    let b = Engine::start(&b_account, "Bert", (node_b, node_b), (relay, B_TONE, dir)).await;
+    let a = Engine::start(&a_account, "Ada", (node_a, node_a), (A_TONE, dir)).await;
+    let b = Engine::start(&b_account, "Bert", (node_b, node_b), (B_TONE, dir)).await;
     (a, b)
 }
 
 /// a calls b in their chat and b answers: both are connected and see each other.
-async fn connect(node_a: &TestServer, node_b: &TestServer, relay: std::net::SocketAddr, dir: &Path) -> Talk {
-    let (mut a, mut b) = engines(node_a, node_b, relay, dir).await;
+async fn connect(node_a: &TestServer, node_b: &TestServer, dir: &Path) -> Talk {
+    let (mut a, mut b) = engines(node_a, node_b, dir).await;
     let chat = chat_of(&a, &b).await;
     let call = a.call(CallAction::Call { chat: chat.clone() }).await;
     a.status(call, &CallStatus::Ringing).await;
@@ -402,9 +412,9 @@ async fn chat_tells_the_call(node: &TestServer, reader: &Account, chat: &str) {
 
 /// a calls b in their chat, b answers; a tone and video cross both ways; b's mute and a's hold show at the far end;
 /// a hangs up and the chat tells the call's length. a's client is on `node_a`, b's on `node_b`.
-async fn a_call_with_media(node_a: &TestServer, node_b: &TestServer, relay: std::net::SocketAddr) {
+async fn a_call_with_media(node_a: &TestServer, node_b: &TestServer) {
     let dir = tempfile::tempdir().unwrap();
-    let mut talk = connect(node_a, node_b, relay, dir.path()).await;
+    let mut talk = connect(node_a, node_b, dir.path()).await;
     tokio::time::sleep(TALK).await;
     talk.video_both_ways().await;
     talk.mute_and_hold().await;
@@ -418,8 +428,9 @@ async fn a_call_with_media(node_a: &TestServer, node_b: &TestServer, relay: std:
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_connects_audio_and_video_through_the_servers_signaling() {
     let turn = TurnServer::start().unwrap();
-    let server = TestServer::start_with(crate::support::Backend::Sqlite, relayed).await;
-    a_call_with_media(&server, &server, turn.udp).await;
+    let server = TestServer::start_with(crate::support::Backend::Sqlite, relayed(turn.udp)).await;
+    a_call_with_media(&server, &server).await;
+    carried(&turn);
     assert!(
         ngteams_server::calling::open_calls(&server.app.db)
             .await
@@ -433,21 +444,22 @@ async fn a_call_connects_audio_and_video_through_the_servers_signaling() {
 async fn a_call_connects_audio_and_video_with_each_client_on_another_node() {
     let Some(redis) = redis_url() else { return };
     for backend in backends() {
+        let turn = TurnServer::start().unwrap();
         let url = redis.clone();
         let node_a = TestServer::start_with(backend, |config| {
-            relayed(config);
+            relayed(turn.udp)(config);
             config.redis_url = Some(url);
         })
         .await;
         let (shared, url) = (node_a.app.config.clone(), redis.clone());
         let node_b = TestServer::start_with(backend, |config| {
-            relayed(config);
+            relayed(turn.udp)(config);
             config.database_url = shared.database_url;
             config.redis_url = Some(url);
         })
         .await;
-        let turn = TurnServer::start().unwrap();
-        a_call_with_media(&node_a, &node_b, turn.udp).await;
+        a_call_with_media(&node_a, &node_b).await;
+        carried(&turn);
         node_b.stop().await;
         node_a.stop().await;
     }
@@ -467,8 +479,9 @@ async fn a_call_is_relayed_by_coturn_with_the_credentials_made_from_its_secret()
     let server = TestServer::start_with(crate::support::Backend::Sqlite, |config| {
         config.public_origin = url::Url::parse(ORIGIN).unwrap();
         config.calling.turn.secret = Some(secret);
+        config.calling.turn.urls = vec![format!("turn:{address}?transport=udp")];
     })
     .await;
-    a_call_with_media(&server, &server, address.parse().unwrap()).await;
+    a_call_with_media(&server, &server).await;
     server.stop().await;
 }

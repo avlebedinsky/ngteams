@@ -55,9 +55,10 @@ pub fn call_video(output: Arc<dyn crate::VideoOutput>) -> crate::CallVideo {
     }
 }
 
-/// An account's calling on `devices`: the calls' media on those devices,
-/// relayed through Teams' relay, the microphone processed as a call's is, their video `video` (none without), and the
-/// account describing its client as the web client does ([`web_client_info`], [`CALL_LANGUAGE`]).
+/// An account's calling on `devices`: the calls' media on those devices, relayed through its service's relay
+/// ([`crate::Relay::Teams`]: an own-server account's is the one its server names), the microphone processed as a
+/// call's is, their video `video` (none without), and the account describing its client as the web client does
+/// ([`web_client_info`], [`CALL_LANGUAGE`]).
 #[must_use]
 pub fn account_calls(
     devices: Arc<dyn teams_media::devices::Devices + Send + Sync>,

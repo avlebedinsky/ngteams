@@ -1,7 +1,7 @@
 //! The personal build's calls (`docs/personal-build.md`, "Calls"): the account's engine gets its calling
-//! ([`account_calls`]: the calls' media on the devices the app opened, relayed through Teams'
-//! relay, the microphone processed as a call's is, the account describing its client as the web client does), and the
-//! window shows calls
+//! ([`account_calls`]: the calls' media on the devices the app opened, relayed through the account's service's
+//! relay (Teams' relay host, or the one an own server names), the microphone processed as a call's is, the account
+//! describing its client as the web client does), and the window shows calls
 //! ([`PersonalCalls`]: the ringtone on the same devices, the test call to the echo service, a call's video, the
 //! devices the settings choose among).
 //!
