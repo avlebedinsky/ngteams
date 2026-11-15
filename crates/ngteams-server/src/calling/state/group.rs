@@ -83,9 +83,19 @@ impl Call {
         self.tell_group(origin, &[Seat::CALLER], Some(Seat::CALLER), out);
     }
 
+    /// The leg a ringing party's answer is for: the one it rings on, while no join has reserved its seat over it (the
+    /// join's leg is then the one the party gets).
+    pub(crate) fn answerable(&self, seat: Seat) -> Result<&str, Refusal> {
+        self.ringing(seat)?;
+        match &self.party(seat).leg {
+            Some(leg) if leg.before.is_none() => Ok(&leg.id),
+            _ => Err(Refusal::Gone),
+        }
+    }
+
     /// A ringing party's endpoint answers on its leg `leg` (the answer already with the media node): the party is in
     /// the call, its other endpoints stop ringing, and the roster tells everyone (the party the whole of it). An answer
-    /// for a leg a join reserved the seat over since is refused: the join's leg is the one the party gets.
+    /// for a leg that isn't [`Self::answerable`] any more is refused: a join reserved the seat over it since.
     pub(crate) fn group_accept(
         &mut self,
         seat: Seat,
@@ -94,8 +104,7 @@ impl Call {
         at: At<'_>,
         out: &mut Out,
     ) -> Result<Value, Refusal> {
-        self.ringing(seat)?;
-        if self.party(seat).leg.as_ref().is_none_or(|kept| kept.id != leg) {
+        if self.answerable(seat)? != leg {
             return Err(Refusal::Gone);
         }
         let acceptance = body.get("callAcceptance").ok_or(Refusal::Bad)?;
@@ -1046,6 +1055,27 @@ mod tests {
         .unwrap();
         assert_eq!(call.party(Seat(1)).status, Status::InCall);
         assert_eq!(out.released, ["leg1"]);
+    }
+
+    #[test]
+    fn an_answer_while_a_join_has_the_seat_reserved_is_refused_on_either_leg() {
+        let (mut call, _) = started();
+        let acceptance = json!({"callAcceptance": {}});
+        call.reserve(&party("b"), "leg-b2").unwrap();
+        assert_eq!(call.answerable(Seat(1)), Err(Refusal::Gone));
+        for leg in ["leg1", "leg-b2"] {
+            let mut out = Out::default();
+            let accepted = call.group_accept(
+                Seat(1),
+                (leg, "B"),
+                (Links::new(), &acceptance),
+                at(1_002_000),
+                &mut out,
+            );
+            assert_eq!(accepted, Err(Refusal::Gone), "on {leg}");
+            assert!(out.released.is_empty(), "on {leg}: {:?}", out.released);
+        }
+        assert_eq!(call.party(Seat(1)).status, Status::Ringing);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! A media node for signaling tests: it keeps the rooms and legs signaling asks for and answers fixed SDP that names
 //! the leg, so a test tells whose offer or answer reached whom. A test can make it fail the legs it is asked for, hold
-//! new rooms until several are asked for at once, or hold the next answer or new leg until it lets it go. No media
-//! flows.
+//! new rooms until several are asked for at once, or hold the next answer or new leg (before or once it is made) until
+//! it lets it go. No media flows.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +43,8 @@ pub struct FixedMixer {
     answers: Arc<Mutex<Option<Held>>>,
     /// The next new leg waits here.
     new_legs: Arc<Mutex<Option<Held>>>,
+    /// The next new leg waits here once it is made.
+    made_legs: Arc<Mutex<Option<Held>>>,
 }
 
 /// A request the node holds: told when it is reached, answered once let go.
@@ -138,6 +140,13 @@ impl FixedMixer {
         held
     }
 
+    /// The next leg asked for is made, then its answer or offer waits until let go.
+    pub fn hold_made_leg(&self) -> Held {
+        let held = Held::default();
+        *self.made_legs.lock().unwrap() = Some(held.clone());
+        held
+    }
+
     /// The one leg with the source ids `audio`.
     pub fn leg_of(&self, call: &str, audio: i64) -> Option<String> {
         self.legs(call)
@@ -175,15 +184,19 @@ impl MediaNodes for FixedMixer {
         if self.failing.load(Ordering::SeqCst) {
             return Err(MediaError::Failed("the test fails it".into()));
         }
-        let mut rooms = self.rooms.lock().unwrap();
-        let legs = rooms.rooms.entry(call.to_owned()).or_default();
-        let kept = legs.entry(leg.to_owned()).or_insert(Leg {
-            sources,
-            answered: false,
-            renegotiations: 0,
-        });
+        let renegotiations = {
+            let mut rooms = self.rooms.lock().unwrap();
+            let legs = rooms.rooms.entry(call.to_owned()).or_default();
+            let kept = legs.entry(leg.to_owned()).or_insert(Leg {
+                sources,
+                answered: false,
+                renegotiations: 0,
+            });
+            kept.renegotiations
+        };
+        Held::hold(&self.made_legs).await;
         Ok(match offer {
-            Some(_) => sdp(answer_on(leg, kept.renegotiations)),
+            Some(_) => sdp(answer_on(leg, renegotiations)),
             None => sdp(offer_to(leg)),
         })
     }

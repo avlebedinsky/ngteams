@@ -266,8 +266,7 @@ pub(super) async fn accept(app: &App, caller: &Caller, key: Key<'_>, body: &Valu
     let kept = repo::find(&app.db, key).await?.ok_or(Refusal::Missing)?;
     let call = kept.call;
     let seat = call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
-    call.ringing(seat)?;
-    let leg = &leg_of(&call, seat)?.id;
+    let leg = call.answerable(seat)?;
     nodes(app)?.answer_leg(home_of(&call)?, &call.id, leg, &answer).await?;
     let answered = step(app, key, caller, |call, seat, at, out| {
         call.group_accept(seat, (leg, &endpoint), (links.clone(), body), at, out)

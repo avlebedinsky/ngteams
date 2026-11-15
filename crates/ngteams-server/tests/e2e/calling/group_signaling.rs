@@ -2,7 +2,8 @@
 //! ([`super::mixer::FixedMixer`]): the start in a group chat ringing its other members with the node's offers, the
 //! caller accepted by the node at once, a callee's answer, a decline and a ring nobody answers, leaves and the last
 //! one, a member joining the running call it finds in the chat, a second start refused (also when both come at once),
-//! adds (a callee added back rings anew), a media node that fails a join, an answer a join of the same callee overtook.
+//! adds (a callee added back rings anew), a media node that fails a join, an answer a join of the same callee overtook, and one that comes while such a join
+//! is under way.
 
 use std::time::Duration;
 
@@ -950,6 +951,66 @@ async fn an_answer_a_join_of_the_same_callee_overtook_is_refused_and_the_join_ta
         assert!(
             matches!(ended, End::Failed(_)),
             "the answer was for a leg the join replaced: {ended:?}"
+        );
+        assert_eq!(status, 200, "the join takes him in");
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, std::slice::from_ref(&b)))
+            .await;
+        let legs = group.mixer.legs(&call.id);
+        assert_eq!(legs.len(), 2, "Ada's and the one Bert joined on: {legs:?}");
+        assert!(!legs.contains_key(&rung), "the leg he rang with is gone: {legs:?}");
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_that_comes_while_a_join_of_the_same_callee_is_under_way_is_refused_and_the_join_takes_him_in() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let b = group.b.mri();
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        let call = group.open_call().await;
+        let offer = rings.offer.clone().unwrap().blob;
+        let rung = group
+            .mixer
+            .legs(&call.id)
+            .into_keys()
+            .find(|leg| offer == offer_to(leg));
+        let rung = rung.expect("Bert rings with the node's offer to his leg");
+        // Bert joins from another device and, once the node made the join's leg, answers on the ringing one
+        let made = group.mixer.hold_made_leg();
+        let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
+        let (_, base) = own_callbacks(&group.server, &group.b).await;
+        let join = json!({
+            "callInvitation": {
+                "mediaContent": {"blob": "v=0\r\ns=bert joins\r\n", "contentType": "application/sdp-ngc-1.0"},
+                "links": {"acceptance": format!("{base}acceptance/"), "end": format!("{base}end/")},
+            },
+            "participants": {"from": {"id": b, "displayName": "Bert"}},
+        });
+        let Person { upn, client, .. } = &mut group.b;
+        let joining = raw_as(&group.server, upn, reqwest::Method::POST, &conv, &join);
+        let mixer = &group.mixer;
+        let answered = async {
+            made.reached().await;
+            client.answer(rings.call);
+            let ended = client.ended().await;
+            let legs = mixer.legs(&call.id);
+            made.go();
+            (ended, legs)
+        };
+        let ((status, _), (ended, during)) = tokio::join!(joining, answered);
+        assert!(
+            matches!(ended, End::Failed(_)),
+            "the answer was for the leg the join is replacing: {ended:?}"
+        );
+        assert!(
+            during.values().all(|leg| !leg.answered),
+            "the answer reached no leg: {during:?}"
         );
         assert_eq!(status, 200, "the join takes him in");
         group
