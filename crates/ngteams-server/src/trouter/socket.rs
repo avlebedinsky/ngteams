@@ -747,7 +747,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
 
     /// Delivers again each invitation that is due, as Teams' service does one its endpoint didn't answer.
     async fn redeliver(&mut self) -> Result<(), End> {
-        for published in self.calls.due(Instant::now()) {
+        let due = self.calls.due(Instant::now());
+        if !due.is_empty() {
+            self.account_holds().await?;
+        }
+        for published in due {
             tracing::debug!(call = %published.call, "an unanswered invitation is delivered again");
             self.send_call(&published).await?;
         }
