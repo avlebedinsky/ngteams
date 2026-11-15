@@ -438,7 +438,10 @@ impl LineWrapper {
                     last_candidate_ix = ix;
                     last_candidate_width = width;
                 }
-            } else if c != ' ' && first_non_whitespace_ix.is_some() {
+            } else if c != ' '
+                && first_non_whitespace_ix.is_some()
+                && !Self::is_opening_punctuation(prev_c)
+            {
                 last_candidate_ix = ix;
                 last_candidate_width = width;
             }
@@ -545,10 +548,33 @@ impl LineWrapper {
         matches!(c, '\u{202F}' | '\u{00A0}' | '\u{2011}')
     }
 
-    /// Opening punctuation, after which no line ends (UAX #14 LB14).
+    /// Opening punctuation, after which no line ends (UAX #14 LB14): brackets and opening quotes, the CJK and
+    /// fullwidth ones too. `‘` is left out: it is a word character (`won‘t`), and no candidate follows one anyway.
     #[inline(always)]
     pub(crate) fn is_opening_punctuation(c: char) -> bool {
-        matches!(c, '(' | '[' | '{' | '“' | '«')
+        matches!(
+            c,
+            '(' | '['
+                | '{'
+                | '“'
+                | '«'
+                | '„'
+                | '‚'
+                | '（'
+                | '［'
+                | '｛'
+                | '｟'
+                | '「'
+                | '『'
+                | '【'
+                | '〔'
+                | '〈'
+                | '《'
+                | '〖'
+                | '〘'
+                | '〚'
+                | '｢'
+        )
     }
 
     #[inline(always)]
@@ -1410,6 +1436,28 @@ mod tests {
             truncated.ends_with('\u{2026}'),
             "Truncated text '{}' should end with ellipsis",
             truncated
+        );
+    }
+
+    #[test]
+    fn test_multiline_truncation_keeps_opening_punctuation_to_its_word() {
+        let mut wrapper = build_wrapper();
+
+        // Wrapping ends line 1 before `[[account]]` (no break between the brackets), so line 2,
+        // `[[account]]xx` (124.8px), overflows 120px and takes the ellipsis.
+        let text: &str = "an [[account]]xx";
+        let runs = generate_test_runs(&[text.len()]);
+        let (result, _) = wrapper.truncate_wrapped_line(
+            text.into(),
+            px(120.),
+            2,
+            "\u{2026}",
+            &runs,
+            TruncateFrom::End,
+        );
+        assert!(
+            result.ends_with('\u{2026}'),
+            "'{result}' should be truncated as it wraps"
         );
     }
 

@@ -1,7 +1,9 @@
-No line break right after opening punctuation (UAX #14 LB14): `(`, `[`, `{`, `“` and `«` keep to the word after them,
-as upstream already keeps closing punctuation to the word before it (LB13). Without it a line could end between the two
-brackets of `[[account]]`. Both wrapping paths take it: `LineWrapper::wrap_line` and the shaped line's
-`LineLayout::compute_wrap_boundaries`, which every wrapped text element draws with. An upstream candidate (Zed).
+No line break right after opening punctuation (UAX #14 LB14): brackets and opening quotes, the CJK and fullwidth ones
+too (`(`, `[`, `{`, `“`, `«`, `„`, `「`, `【`, `（` ...), keep to the word after them, as upstream already keeps closing
+punctuation to the word before it (LB13). Without it a line could end between the two brackets of `[[account]]`. Every
+wrapping path takes it: `LineWrapper::wrap_line`, the shaped line's `LineLayout::compute_wrap_boundaries`, which every
+wrapped text element draws with, and `LineWrapper::truncate_wrapped_line`, so a clamped label is cut where it wraps. A
+run of opening brackets longer than the line still breaks inside itself, as before. An upstream candidate (Zed).
 
 --- a/src/text_system/line_layout.rs
 +++ b/src/text_system/line_layout.rs
@@ -35,20 +37,55 @@ brackets of `[[account]]`. Both wrapping paths take it: `LineWrapper::wrap_line`
                                  last_candidate_ix = ix;
                                  last_candidate_width = width;
                              }
-@@ -540,6 +545,12 @@
+@@ -433,7 +438,10 @@
+                     last_candidate_ix = ix;
+                     last_candidate_width = width;
+                 }
+-            } else if c != ' ' && first_non_whitespace_ix.is_some() {
++            } else if c != ' '
++                && first_non_whitespace_ix.is_some()
++                && !Self::is_opening_punctuation(prev_c)
++            {
+                 last_candidate_ix = ix;
+                 last_candidate_width = width;
+             }
+@@ -540,6 +548,35 @@
          matches!(c, '\u{202F}' | '\u{00A0}' | '\u{2011}')
      }
  
-+    /// Opening punctuation, after which no line ends (UAX #14 LB14).
++    /// Opening punctuation, after which no line ends (UAX #14 LB14): brackets and opening quotes, the CJK and
++    /// fullwidth ones too. `‘` is left out: it is a word character (`won‘t`), and no candidate follows one anyway.
 +    #[inline(always)]
 +    pub(crate) fn is_opening_punctuation(c: char) -> bool {
-+        matches!(c, '(' | '[' | '{' | '“' | '«')
++        matches!(
++            c,
++            '(' | '['
++                | '{'
++                | '“'
++                | '«'
++                | '„'
++                | '‚'
++                | '（'
++                | '［'
++                | '｛'
++                | '｟'
++                | '「'
++                | '『'
++                | '【'
++                | '〔'
++                | '〈'
++                | '《'
++                | '〖'
++                | '〘'
++                | '〚'
++                | '｢'
++        )
 +    }
 +
      #[inline(always)]
      fn width_for_char(&mut self, c: char) -> Pixels {
          if (c as u32) < 128 {
-@@ -935,6 +946,18 @@
+@@ -935,6 +972,18 @@
                  .collect::<Vec<_>>(),
              &[Boundary::new(12, 0),], // special chars above take up 3, 2 and 3 bytes, so boundary ends up at 12
          );
@@ -67,3 +104,32 @@ brackets of `[[account]]`. Both wrapping paths take it: `LineWrapper::wrap_line`
      }
  
      #[test]
+@@ -1390,6 +1439,28 @@
+         );
+     }
+ 
++    #[test]
++    fn test_multiline_truncation_keeps_opening_punctuation_to_its_word() {
++        let mut wrapper = build_wrapper();
++
++        // Wrapping ends line 1 before `[[account]]` (no break between the brackets), so line 2,
++        // `[[account]]xx` (124.8px), overflows 120px and takes the ellipsis.
++        let text: &str = "an [[account]]xx";
++        let runs = generate_test_runs(&[text.len()]);
++        let (result, _) = wrapper.truncate_wrapped_line(
++            text.into(),
++            px(120.),
++            2,
++            "\u{2026}",
++            &runs,
++            TruncateFrom::End,
++        );
++        assert!(
++            result.ends_with('\u{2026}'),
++            "'{result}' should be truncated as it wraps"
++        );
++    }
++
+     #[test]
+     fn test_multiline_truncation_no_truncation_needed() {
+         let mut wrapper = build_wrapper();
