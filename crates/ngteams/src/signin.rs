@@ -421,7 +421,7 @@ pub async fn add<S: SecretStore>(
 /// whatever it holds.
 ///
 /// # Errors
-/// What the user is told ([`own_failure`]).
+/// What the user is told ([`form_failure`]).
 pub async fn add_own<S: SecretStore>(
     setup: &Setup,
     upn: &str,
@@ -454,7 +454,7 @@ fn form_failure(setup: &Setup, account: &PersonalAccount, server: &OwnServer, er
     let Some(transport) = transport(error) else {
         return own_failure(setup, account, error);
     };
-    match (untrusted_certificate(transport), &server.ca_file) {
+    match (untrusted_certificate(transport), &account.ca_file) {
         (false, _) => {
             format!("{origin} can't be reached. Check the address and that the server is running, then sign in again.")
         }

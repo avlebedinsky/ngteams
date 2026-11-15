@@ -470,10 +470,10 @@ impl UserDialog {
             return;
         }
         let (upn, display_name, typed) = self.values(cx);
-        let given_to = match &self.user {
-            Some(_) => self.shown_name(),
-            None if display_name.is_empty() => upn.clone(),
-            None => display_name.clone(),
+        let given_to = if self.user.is_some() {
+            self.shown_name()
+        } else {
+            display_name.clone()
         };
         let admin = Arc::clone(&self.admin);
         let id = self.user.as_ref().map(|user| user.id.clone()).unwrap_or_default();

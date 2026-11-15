@@ -29,7 +29,7 @@
 //! mock say where the requests went: the own account's to its server alone, none of its to the mock.
 //!
 //! More scenes, each the app started again in the same sandbox ([`SCENES`]; `NGTEAMS_ACCOUNTS_SCENES` names the ones
-//! to run): the own server's form in Teams Dark, the place chosen with the keyboard alone (Shift+Tab to the choice,
+//! to run; the `qa_` ones need the server binary and are skipped without it): the own server's form in Teams Dark, the place chosen with the keyboard alone (Shift+Tab to the choice,
 //! Right, Enter), and what it says of an empty field; the window without own servers,
 //! which asks for a Microsoft 365 account alone; an own server's account signed out, asked for its password again
 //! and forgotten as `ngteams --forget <server>/<UPN>` forgets it; an own server's account whose server serves no
@@ -185,6 +185,13 @@ fn parent() -> SandboxResult {
         if !only.is_empty() && !only.split(',').any(|wanted| name.contains(wanted.trim())) {
             continue;
         }
+        if name.starts_with(QA_PREFIX) && own_server_binary::binary()?.is_none() {
+            say(&format!(
+                "skipped {name}: needs the ngteams-server binary (cargo build -p ngteams-server, or {})",
+                own_server_binary::BIN_ENV
+            ));
+            continue;
+        }
         match scene(&sandbox) {
             Ok(()) => {
                 passed += 1;
@@ -203,6 +210,9 @@ fn parent() -> SandboxResult {
     }
     Err(format!("{}{}", failed.join("\n"), sandbox.logs()).into())
 }
+
+/// The scenes of [`admin_qa`], which run only on the real server binary.
+const QA_PREFIX: &str = "qa_";
 
 /// One run of the app in the sandbox, by name.
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);

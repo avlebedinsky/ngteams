@@ -198,6 +198,36 @@ fn an_unreachable_server_with_a_ca_file_names_that_file() -> TestResult {
     Ok(())
 }
 
+/// The form's certificate authority field left empty for an entry written by hand with a `ca_file`: the sign-in uses
+/// that file, and the refusal names it.
+#[test]
+fn an_empty_ca_field_names_the_held_entrys_ca_file() -> TestResult {
+    let server = OwnServer::start()?;
+    server.add_user(UPN, NAME)?;
+    let dir = tempfile::tempdir()?;
+    let setup = &setup_in(&dir);
+    let store = MemorySecretStore::new();
+    let other = OwnServer::start()?;
+    let held = PersonalAccount {
+        ca_file: Some(other.ca_file.clone()),
+        ..PersonalAccount::pending_on(UPN, &at(&server, false))?
+    };
+    held.save(&setup.paths)?;
+    let said = block_on(signin::add_own(
+        setup,
+        UPN,
+        &at(&server, false),
+        &Secret::new(PASSWORD),
+        &store,
+    ))
+    .unwrap_err();
+    assert!(
+        said.contains("certificate isn't trusted") && said.contains(&other.ca_file.display().to_string()),
+        "{said}"
+    );
+    Ok(())
+}
+
 /// The sign-in screen holds the entry as it was read when it opened: a `ca_file` the user writes into the entry
 /// meanwhile is used by the next "Sign in", with no restart.
 #[test]

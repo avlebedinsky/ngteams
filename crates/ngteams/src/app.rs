@@ -19,7 +19,8 @@
 //! frequency policy, a password change, a revoked session; or no refresh token stored), its shell shows
 //! [`SIGNED_OUT_HINT`], its engine is shut down (nothing more is sent for it: every request answers that it stopped),
 //! and the sign-in window opens again for it ([`SignInAgain`]). A sign-in that goes through starts the app afresh
-//! (`main`: the process runs itself again), so a new engine starts only once it is signed in again.
+//! (`main`: the process runs itself again), so a new engine starts only once it is signed in again. An account an
+//! administrator turned off (`AADSTS50057`) shows [`TURNED_OFF_HINT`] instead and opens nothing.
 //!
 //! **The control socket** ([`crate::ctl`], [`Launch::ctl`]): served from the launch, once the window opened, until the
 //! quit, which closes it first. A socket another app serves already is said, and the app runs without one.
@@ -850,7 +851,7 @@ pub fn watch_sign_out(
 }
 
 /// [`watch_sign_out`], the window saying `hint` (the read-only mode's [`READ_ONLY_SIGNED_OUT_HINT`], whose `again`
-/// does nothing).
+/// does nothing); for an account an administrator turned off, [`TURNED_OFF_HINT`] in its place.
 pub fn watch_sign_out_saying(
     hint: &'static str,
     mut signed_out: watch::Receiver<Option<SignedOut>>,
