@@ -137,7 +137,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `workflows.max_body_bytes` | `262144` | the largest body a workflow's webhook takes: 256 KB, the limit the client's Overview names |
 | `workflows.rate_per_minute` | `60` | posts one workflow's webhook takes in a minute, across every node (counted in Redis when there is one) |
 | `workflows.runs_kept` | `100` | runs kept per workflow for its run history |
-| `mixer.udp_listen` | `0.0.0.0:3480` | the media node's one UDP socket: every group call's media goes through it |
+| `mixer.udp_listen` | `0.0.0.0:0` | the media node's one UDP socket: every group call's media goes through it. A free port unless set: set a fixed one where a firewall must let the relay's datagrams in |
 | `mixer.public_addrs` | the socket's address, else the host's outward one | the addresses clients' TURN relay reaches that socket at (its host candidates, each on the socket's port) |
 | `mixer.internal_listen`, `mixer.internal_url` | `127.0.0.1:0`, the listener's address | the internal API's listener (signaling → media node), on a private network; the URL the other nodes reach it at |
 | `mixer.node_id` | a new one each start | the node's id in the registry |
@@ -826,7 +826,8 @@ every media node beats in the registry every `mixer.heartbeat` seconds. A call w
 party's `end`, the chat told); a running call is never moved to another node. A party whose leg stays down for
 `mixer.media_timeout`, or doesn't connect within `mixer.connect_timeout` of its answer, is taken out of the call
 (`408` at its `end`, the others get the roster). Every `mixer.reconcile` seconds the node drops a room whose call is
-over or gone. A stopping node takes no new room and serves its rooms for `mixer.drain_timeout` at most.
+over or gone. A stopping `--role media` node takes no new room and serves its rooms for `mixer.drain_timeout` at
+most; a stopping `--role all` node, its API already gone, stops its media node at once.
 
 - **The start**: the caller must be in the chat (`403`), and only the chat's members it names ring, once each; a
   chat that doesn't exist is `404`. The caller is in the call at once: its acceptance, with the node's answer to its

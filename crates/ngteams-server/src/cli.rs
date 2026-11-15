@@ -297,10 +297,15 @@ async fn serve(
         Ok(())
     };
     maintenance.abort();
-    if let Some(media) = media {
-        media
-            .drain(std::time::Duration::from_secs(app.config.mixer.drain_timeout))
-            .await;
+    match media {
+        // a media node alone serves its rooms on while their calls go on elsewhere
+        Some(media) if role == crate::mixer::Role::Media => {
+            media
+                .drain(std::time::Duration::from_secs(app.config.mixer.drain_timeout))
+                .await;
+        }
+        Some(media) => media.stop().await,
+        None => {}
     }
     app.cleared(CLEARING).await;
     served

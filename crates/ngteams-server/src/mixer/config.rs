@@ -14,7 +14,7 @@ pub struct MixerConfig {
     pub internal_listen: SocketAddr,
     /// The internal API's URL as the other nodes reach it; the listener's own address when unset.
     pub internal_url: Option<url::Url>,
-    /// The one UDP socket every call's media goes through.
+    /// The one UDP socket every call's media goes through: a free port unless set (set one for a firewall).
     pub udp_listen: SocketAddr,
     /// The addresses a client's TURN relay reaches the UDP socket at (its host candidates, on the socket's port);
     /// the socket's own address, or else the host's outward one, when unset.
@@ -44,7 +44,7 @@ impl Default for MixerConfig {
             node_id: None,
             internal_listen: SocketAddr::from(([127, 0, 0, 1], 0)),
             internal_url: None,
-            udp_listen: SocketAddr::from(([0, 0, 0, 0], 3480)),
+            udp_listen: SocketAddr::from(([0, 0, 0, 0], 0)),
             public_addrs: Vec::new(),
             ice_lite: true,
             max_rooms: 1000,

@@ -534,3 +534,62 @@ async fn joins_and_leaves_are_told_as_115_and_116() {
         group.server.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_role_serves_and_stops() {
+    for role in ["all", "api", "media"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("server.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "listen = \"127.0.0.1:0\"\ndatabase_url = \"sqlite://{}\"\n[mixer]\nudp_listen = \"127.0.0.1:0\"\n",
+                dir.path().join("db.sqlite").display()
+            ),
+        )
+        .unwrap();
+        let cli = <ngteams_server::cli::Cli as clap::Parser>::parse_from([
+            "ngteams-server",
+            "--config",
+            config.to_str().unwrap(),
+            "serve",
+            "--role",
+            role,
+        ]);
+        ngteams_server::cli::run(cli, &mut "".as_bytes(), &mut Vec::new(), &mut Vec::new(), async {})
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_start_with_no_media_node_to_take_it_fails() {
+    let turn = TurnServer::start().unwrap();
+    let server = TestServer::start_with(Backend::Sqlite, |config| {
+        relayed(turn.udp)(config);
+        on_loopback(config);
+    })
+    .await;
+    // the public API alone, without Redis: no media node to take a new room
+    assert!(ngteams_server::mixer::install(&server.app, None).unwrap());
+    let mixed = Mixed {
+        server,
+        node: None,
+        turn,
+        dir: tempfile::tempdir().unwrap(),
+    };
+    let mut a = mixed.engine("Ada", A_TONE).await;
+    let (b, c) = (mixed.member("Bert").await, mixed.member("Cora").await);
+    let chat = group_chat(&a, &[], &[b, c]).await;
+    let call = a.call(CallAction::Call { chat }).await;
+    let end = a.ended(call).await;
+    eprintln!("the start ended: {end:?}");
+    assert!(
+        ngteams_server::calling::open_calls(&mixed.server.app.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    a.shut_down().await;
+    mixed.stop().await;
+}
