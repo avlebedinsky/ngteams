@@ -1,9 +1,10 @@
 //! Presence, as Teams' unified presence service (UPS) serves it (`docs/protocol/trouter.md`, "Others' presence" and
 //! "Own presence"): an account shows as its live endpoints say, a manual status over them, and offline without one.
 //!
-//! - **State** is on the [`board`]: per account a hash (its manual status, when it was last active, each endpoint
-//!   with the time it lapses), and the sorted set of the accounts with an endpoint, by the next lapse. In Redis every
-//!   node reads and writes it; without Redis it is the node's own.
+//! - **State** is on the [`board`]: per account a hash (when it was last active, each endpoint with the time it
+//!   lapses), and the sorted set of the accounts with an endpoint, by the next lapse. In Redis every node reads and
+//!   writes it; without Redis it is the node's own. The manual status is in the database ([`manual`]), so it outlasts
+//!   a restart of a node or of Redis.
 //! - **An endpoint lapses** when it isn't reported again within `presence.endpoint_ttl`. Each node sweeps the due
 //!   accounts every second; the node that takes an account off the set tells its watchers.
 //! - **Subscriptions**: an endpoint watches people (`presence.max_subscriptions` at most) for
@@ -12,6 +13,7 @@
 //!   (`crate::trouter`). Nothing is kept for replay: the client's subscription after a reconnect gets a snapshot.
 
 mod board;
+mod manual;
 mod routes;
 
 use std::collections::{BTreeMap, HashMap};
@@ -32,8 +34,7 @@ use crate::db::{Db, DbError, with_conn};
 use crate::fanout::Fanout;
 use board::{Board, Memory, Shared, key};
 
-/// How long an account's hash lives after its last write: a manual status nobody reported under for this long is
-/// forgotten.
+/// How long an account's hash lives after its last write: its last activity is forgotten after this long.
 const ACCOUNT_TTL: u64 = 30 * 86_400;
 /// How often a node looks for lapsed endpoints.
 const SWEEP: Duration = Duration::from_secs(1);
@@ -95,12 +96,14 @@ struct State {
 }
 
 impl State {
-    fn read(fields: Vec<(String, String)>) -> Self {
-        let mut state = Self::default();
+    /// The state of the board's `fields` under the `manual` status the database keeps.
+    fn read(fields: Vec<(String, String)>, manual: Option<String>) -> Self {
+        let mut state = Self {
+            manual,
+            ..Self::default()
+        };
         for (field, value) in fields {
-            if field == "manual" {
-                state.manual = Some(value);
-            } else if field == "last" {
+            if field == "last" {
                 state.last_active = value.parse().ok();
             } else if let Some(epid) = field.strip_prefix("ep:")
                 && let Ok(endpoint) = serde_json::from_str(&value)
@@ -303,14 +306,14 @@ impl Presence {
         let now = now_ms();
         let mut items = Vec::with_capacity(asked.len());
         for (mri, sourced) in asked {
-            let Some((oid, out_of_office)) = person(&people, mri) else {
+            let Some((oid, known)) = person(&people, mri) else {
                 items.push(json!({"mri": mri, "status": 40400}));
                 continue;
             };
-            let shown = self.0.state(oid).await?.shown(now);
+            let shown = self.0.state_under(oid, known.manual.clone()).await?.shown(now);
             let mut item = json!({
                 "mri": mri,
-                "presence": shown.presence(oid == viewer, out_of_office),
+                "presence": shown.presence(oid == viewer, known.out_of_office),
                 "etagMatch": false,
                 "etag": etag(now),
                 "status": 20000,
@@ -366,14 +369,10 @@ impl Presence {
     /// Sets the account's manual status, or clears it, and tells its watchers when what it shows changed.
     pub(crate) async fn force(&self, oid: &str, manual: Option<&str>) -> Result<(), PresenceError> {
         let inner = &self.0;
-        let account = key("account", oid);
         let now = now_ms();
         let mut state = inner.state(oid).await?;
         let before = state.shown(now);
-        match manual {
-            Some(manual) => inner.board.hset(&account, "manual", manual, ACCOUNT_TTL).await?,
-            None => inner.board.hdel(&account, &["manual".to_owned()]).await?,
-        }
+        manual::set(&inner.db, oid, manual).await?;
         state.manual = manual.map(str::to_owned);
         inner.told_if_changed(oid, &before, &state.shown(now)).await
     }
@@ -402,7 +401,7 @@ impl Presence {
         let mut taken = Vec::with_capacity(request.add.len());
         let mut snapshot = Vec::new();
         for mri in request.add {
-            let Some((oid, out_of_office)) = person(&people, mri) else {
+            let Some((oid, known)) = person(&people, mri) else {
                 taken.push(Taken::NotFound);
                 continue;
             };
@@ -410,8 +409,8 @@ impl Presence {
                 taken.push(Taken::TooMany);
                 continue;
             }
-            let shown = inner.state(oid).await?.shown(now);
-            snapshot.push(pushed_item(mri, &shown, oid == request.oid, out_of_office, now));
+            let shown = inner.state_under(oid, known.manual.clone()).await?.shown(now);
+            snapshot.push(pushed_item(mri, &shown, oid == request.oid, known.out_of_office, now));
             taken.push(Taken::Subscribed);
         }
         if !snapshot.is_empty() {
@@ -422,10 +421,18 @@ impl Presence {
     }
 }
 
-/// The object id `mri` names and whether that account is out of office, when it is an account that can sign in.
-fn person<'a>(people: &HashMap<String, bool>, mri: &'a str) -> Option<(&'a str, bool)> {
+/// What the directory and the database say of an account that can sign in, beside its presence.
+#[derive(Debug, Default)]
+struct Known {
+    out_of_office: bool,
+    /// Its manual status.
+    manual: Option<String>,
+}
+
+/// The object id `mri` names and what is known of it, when it is an account that can sign in.
+fn person<'a, 'b>(people: &'b HashMap<String, Known>, mri: &'a str) -> Option<(&'a str, &'b Known)> {
     let oid = object_id(mri)?;
-    people.get(oid).map(|out_of_office| (oid, *out_of_office))
+    people.get(oid).map(|known| (oid, known))
 }
 
 /// An item of a presence delivery.
@@ -462,12 +469,19 @@ impl Inner {
         Ok(true)
     }
 
-    async fn state(&self, oid: &str) -> Result<State, BoardError> {
-        Ok(State::read(self.board.hgetall(&key("account", oid)).await?))
+    /// The account's state, with its manual status.
+    async fn state(&self, oid: &str) -> Result<State, PresenceError> {
+        let manual = manual::of(&self.db, &[oid]).await?.remove(oid);
+        Ok(self.state_under(oid, manual).await?)
     }
 
-    /// Of `mris`, the accounts that can sign in, by object id: whether each is out of office.
-    async fn people(&self, mris: &[String]) -> Result<HashMap<String, bool>, DbError> {
+    /// The account's state under the `manual` status read with its other facts.
+    async fn state_under(&self, oid: &str, manual: Option<String>) -> Result<State, BoardError> {
+        Ok(State::read(self.board.hgetall(&key("account", oid)).await?, manual))
+    }
+
+    /// Of `mris`, the accounts that can sign in, by object id: whether each is out of office, and its manual status.
+    async fn people(&self, mris: &[String]) -> Result<HashMap<String, Known>, DbError> {
         let ids: Vec<&str> = mris.iter().filter_map(|mri| object_id(mri)).collect();
         if ids.is_empty() {
             return Ok(HashMap::new());
@@ -480,11 +494,15 @@ impl Inner {
             .load(conn)
             .await?);
         let away = crate::people::out_of_office(db, &found).await?;
+        let mut manual = manual::of(db, &found.iter().map(String::as_str).collect::<Vec<_>>()).await?;
         Ok(found
             .into_iter()
             .map(|id| {
-                let out = away.contains(&id);
-                (id, out)
+                let known = Known {
+                    out_of_office: away.contains(&id),
+                    manual: manual.remove(&id),
+                };
+                (id, known)
             })
             .collect())
     }
@@ -499,7 +517,7 @@ impl Inner {
             .filter_map(|(epid, _)| Some((format!("ep:{epid}"), state.stored.get(epid)?.clone())))
             .collect();
         if self.board.hdel_unchanged(account, &lapsed).await? < lapsed.len() {
-            *state = State::read(self.board.hgetall(account).await?);
+            *state = State::read(self.board.hgetall(account).await?, state.manual.take());
         }
         state.endpoints.retain(|_, endpoint| endpoint.until > now);
         Ok(())
@@ -530,7 +548,11 @@ impl Inner {
         if watchers.is_empty() {
             return Ok(());
         }
-        let out_of_office = self.people(std::slice::from_ref(&mri)).await?.get(oid) == Some(&true);
+        let out_of_office = self
+            .people(std::slice::from_ref(&mri))
+            .await?
+            .get(oid)
+            .is_some_and(|known| known.out_of_office);
         let mut endpoints: BTreeMap<&str, Vec<String>> = BTreeMap::new();
         for watcher in &watchers {
             if let Some((account, endpoint)) = watcher.split_once('|') {
@@ -626,10 +648,11 @@ mod tests {
                 ("last".to_owned(), "7".to_owned()),
                 ("other".to_owned(), "x".to_owned()),
             ];
+            // what the board kept of a manual status before the database held it is no longer read
             fields.extend(manual.map(|manual| ("manual".to_owned(), manual.to_owned())));
             fields
         };
-        let state = State::read(fields(None));
+        let state = State::read(fields(Some("Busy")), None);
         let shown = state.shown(10);
         assert_eq!(
             (shown.availability.as_str(), shown.activity.as_str()),
@@ -638,7 +661,7 @@ mod tests {
         assert_eq!(shown.last_active, Some(7));
         assert_eq!(state.shown(60).availability, "Away");
         assert_eq!(state.shown(100).availability, "Offline");
-        let manual = State::read(fields(Some("DoNotDisturb")));
+        let manual = State::read(fields(None), Some("DoNotDisturb".to_owned()));
         assert_eq!(manual.shown(10).activity, "DoNotDisturb");
         assert_eq!(manual.shown(100).availability, "Offline");
         assert!(shown.same(&state.shown(11)));

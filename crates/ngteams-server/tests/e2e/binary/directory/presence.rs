@@ -198,12 +198,13 @@ async fn presence_comes_back_right_after_each_node_and_redis_restart() {
     reads_as(&c, &a.mri, "Away").await;
     still_pushed(&a, &mut b, ManualAvailability::Busy, &Availability::Busy).await;
 
-    // Redis restarts with nothing kept (a cache without persistence): what the running clients report brings a back
+    // Redis restarts with nothing kept (a cache without persistence): what the running clients report brings a back,
+    // under the status a chose, which the database keeps
     redis_forgets_on_restart(&redis);
     redis.stop().await;
     redis.start().await;
     tokio::time::sleep(Duration::from_secs(3)).await;
-    reads_as(&c, &a.mri, "Available").await;
+    reads_as(&c, &a.mri, "Busy").await;
     let mark = b.mark();
     a.report(OwnStatus::Manual(ManualAvailability::DoNotDisturb)).await;
     eprintln!("after a Redis that kept nothing, b was told {:?}", b.told(mark, &a.mri));

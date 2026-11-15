@@ -32,7 +32,6 @@ pub(super) fn key(kind: &str, id: &str) -> String {
 pub(super) trait Board: Send + Sync + std::fmt::Debug {
     /// Sets `field` of the hash `key`, which then lives `ttl` seconds more.
     async fn hset(&self, key: &str, field: &str, value: &str, ttl: u64) -> Result<(), BoardError>;
-    async fn hdel(&self, key: &str, fields: &[String]) -> Result<(), BoardError>;
     /// Removes each `(field, value)` of the hash `key` whose value is still that one; how many it removed.
     async fn hdel_unchanged(&self, key: &str, fields: &[(String, String)]) -> Result<usize, BoardError>;
     async fn hgetall(&self, key: &str) -> Result<Vec<(String, String)>, BoardError>;
@@ -124,15 +123,6 @@ impl Board for Memory {
             .or_default()
             .insert(field.to_owned(), value.to_owned());
         kept.lives(key, ttl, now_ms());
-        Ok(())
-    }
-
-    async fn hdel(&self, key: &str, fields: &[String]) -> Result<(), BoardError> {
-        let mut kept = self.kept();
-        if let Some(hash) = kept.hashes.get_mut(key) {
-            hash.retain(|field, _| !fields.contains(field));
-            kept.drop_if_empty(key);
-        }
         Ok(())
     }
 
@@ -259,14 +249,6 @@ impl Board for Shared {
         Ok(())
     }
 
-    async fn hdel(&self, key: &str, fields: &[String]) -> Result<(), BoardError> {
-        if fields.is_empty() {
-            return Ok(());
-        }
-        let (mut redis, key) = self.on(key);
-        Ok(redis.hdel(key, fields).await?)
-    }
-
     async fn hdel_unchanged(&self, key: &str, fields: &[(String, String)]) -> Result<usize, BoardError> {
         if fields.is_empty() {
             return Ok(0);
@@ -360,10 +342,15 @@ mod tests {
             let (h, z) = (k("h"), k("z"));
             board.hset(&h, "a", "1", 60).await.unwrap();
             board.hset(&h, "b", "2", 60).await.unwrap();
-            board.hdel(&h, &["a".to_owned()]).await.unwrap();
-            board.hdel(&k("nothing"), &["a".to_owned()]).await.unwrap();
+            board
+                .hdel_unchanged(&h, &[("a".to_owned(), "1".to_owned())])
+                .await
+                .unwrap();
             assert_eq!(board.hgetall(&h).await.unwrap(), [("b".to_owned(), "2".to_owned())]);
-            board.hdel(&h, &["b".to_owned()]).await.unwrap();
+            board
+                .hdel_unchanged(&h, &[("b".to_owned(), "2".to_owned())])
+                .await
+                .unwrap();
             assert!(board.hgetall(&h).await.unwrap().is_empty());
 
             for (member, score) in [("late", 30), ("early", 10), ("mid", 20)] {
@@ -421,7 +408,10 @@ mod tests {
         board.zadd("renewed", "m", 1, Some(60)).await.unwrap();
         board.zadd("renewed", "n", 1, Some(0)).await.unwrap();
         board.hset("kept", "a", "1", 60).await.unwrap();
-        board.hdel("kept", &["a".to_owned()]).await.unwrap();
+        board
+            .hdel_unchanged("kept", &[("a".to_owned(), "1".to_owned())])
+            .await
+            .unwrap();
         let kept = board.kept();
         assert!(kept.hashes.is_empty() && kept.sets.is_empty());
         assert!(kept.lapses.is_empty() && kept.due.is_empty());
