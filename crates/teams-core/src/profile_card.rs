@@ -1,8 +1,8 @@
 //! A person's profile card, read when a view opens one (`docs/protocol/loki.md`), as Teams' card reads it: Loki's
 //! person, schedule, out-of-office, organization and working-with reads ([`teams_proto::loki`]), one UPS presence read
 //! of them ([`PresenceRead`]: availability, when they were last active, out of office) and the middle tier's short
-//! profile ([`ShortProfileLookup`]: job title, office, and their names and addresses when Loki gives none), all at
-//! once. Every one is a read that reaches nobody; nothing is stored.
+//! profile ([`ShortProfileLookup`]: job title, department, office, company, phones, and their names and addresses
+//! when Loki gives none), all at once. Every one is a read that reaches nobody; nothing is stored.
 //!
 //! Loki's configuration is read once per engine, the first time a card is asked for (again after one that failed), and
 //! the regional base it names handed to the reads' transport ([`HttpTransport::set_loki_region`]). Without it every
@@ -88,9 +88,14 @@ pub struct ProfileCard {
     pub user_principal_name: Option<String>,
     /// `Member`, `Guest`, … as the directory gives it.
     pub user_type: Option<String>,
-    /// Their job title and office, as the short profile gives them.
+    /// Their job title, department, office and company, as the short profile gives them.
     pub job_title: Option<String>,
+    pub department: Option<String>,
     pub office: Option<String>,
+    pub company: Option<String>,
+    /// Their mobile and business phone numbers, as the short profile writes them.
+    pub mobile_phone: Option<String>,
+    pub business_phones: Vec<String>,
     /// Their presence (UPS's read).
     pub presence: Option<CardPresence>,
     /// Whether they are out of office: UPS's calendar flag, else `false` when Loki says their automatic replies are
@@ -339,7 +344,11 @@ fn card_of(mri: String, reads: Reads) -> ProfileCard {
             .or_else(|| field(|profile| profile.user_principal_name.as_ref())),
         user_type: person.user_type.or_else(|| field(|profile| profile.user_type.as_ref())),
         job_title: field(|profile| profile.job_title.as_ref()),
+        department: field(|profile| profile.department.as_ref()),
         office: field(|profile| profile.office_location.as_ref()),
+        company: field(|profile| profile.company_name.as_ref()),
+        mobile_phone: field(|profile| profile.mobile_phone.as_ref()),
+        business_phones: field(|profile| profile.business_phone.as_ref()).into_iter().collect(),
         presence,
         out_of_office,
         schedule: reads.schedule,

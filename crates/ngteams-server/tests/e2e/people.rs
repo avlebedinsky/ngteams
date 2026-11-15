@@ -487,6 +487,18 @@ async fn an_engine_names_and_draws_a_colleague_and_reads_their_card() {
                 .await
                 .unwrap();
         }
+        let mut bert_profile = people::repo::person(&office.server.app.db, &office.b)
+            .await
+            .unwrap()
+            .unwrap()
+            .profile;
+        bert_profile.department = Some("Platform".into());
+        bert_profile.company_name = Some("Own Ltd".into());
+        bert_profile.mobile_phone = Some("+1 555 0100".into());
+        bert_profile.business_phone = Some("+1 555 0101".into());
+        people::repo::put_profile(&office.server.app.db, &bert_profile)
+            .await
+            .unwrap();
         let mut ada = Seat::start(&office.server, &office.server, "ada@own.test", &office.a).await;
         let bert = Seat::start(&office.server, &office.server, "bert@own.test", &office.b).await;
         bert.report(OwnStatus::Available).await;
@@ -505,6 +517,10 @@ async fn an_engine_names_and_draws_a_colleague_and_reads_their_card() {
         assert_eq!(card.name.as_deref(), Some("Bert Sample"));
         assert_eq!(card.job_title.as_deref(), Some("Engineer"));
         assert_eq!(card.office.as_deref(), Some("Room 4"));
+        assert_eq!(card.department.as_deref(), Some("Platform"));
+        assert_eq!(card.company.as_deref(), Some("Own Ltd"));
+        assert_eq!(card.mobile_phone.as_deref(), Some("+1 555 0100"));
+        assert_eq!(card.business_phones, ["+1 555 0101"]);
         assert_eq!(card.user_principal_name.as_deref(), Some("bert@own.test"));
         let presence = card.presence.unwrap();
         assert_eq!(presence.availability, Availability::Available);

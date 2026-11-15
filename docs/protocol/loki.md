@@ -86,8 +86,11 @@ schedule. UPS's presence read and pushes carry `lastActiveTime` (RFC 3339 UTC; `
 
 `EngineRequests::profile_card` (`teams-core` `profile_card.rs`) reads, all at once: Loki's person, schedule, out of
 office, organization and working-with; one UPS presence read of the person (`PresenceRead`); and the middle tier's
-short profile (`ShortProfileLookup`), whose `jobTitle` and `officeLocation` are the card's job title and office, and
-whose names and addresses stand in when Loki's person read fails. A section whose read failed is left out; every read
+short profile (`ShortProfileLookup`), whose `jobTitle`, `department`, `officeLocation`, `companyName`, `mobile` and
+`telephoneNumber` are the card's job title, department, office, company, mobile and work phone, and whose names and
+addresses stand in when Loki's person read fails. **Unverified** on Microsoft: no lab account has a department,
+company or phone, so no capture showed those four keys; they are the names the own server serves
+([server.md](../server.md#people)), and a profile without them leaves those rows out. A section whose read failed is left out; every read
 failing is an error. Nothing is stored.
 
 ## What isn't read

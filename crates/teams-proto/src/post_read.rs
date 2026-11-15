@@ -470,7 +470,15 @@ struct RawProfile {
     #[serde(default)]
     job_title: Option<String>,
     #[serde(default)]
+    department: Option<String>,
+    #[serde(default)]
     office_location: Option<String>,
+    #[serde(default)]
+    company_name: Option<String>,
+    #[serde(default)]
+    mobile: Option<String>,
+    #[serde(default)]
+    telephone_number: Option<String>,
 }
 
 fn mri<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Mri, D::Error> {
@@ -492,8 +500,16 @@ pub struct ShortProfile {
     pub user_type: Option<String>,
     /// Their job title (Manage team's Title).
     pub job_title: Option<String>,
+    /// Their department.
+    pub department: Option<String>,
     /// Their office (Manage team's Location).
     pub office_location: Option<String>,
+    /// Their company, `companyName`.
+    pub company_name: Option<String>,
+    /// Their mobile phone number, `mobile`, as the directory writes it.
+    pub mobile_phone: Option<String>,
+    /// Their business phone number, `telephoneNumber`, as the directory writes it.
+    pub business_phone: Option<String>,
 }
 
 impl From<RawProfile> for ShortProfile {
@@ -508,7 +524,11 @@ impl From<RawProfile> for ShortProfile {
             object_id: raw.object_id,
             user_type: raw.user_type,
             job_title: raw.job_title,
+            department: raw.department,
             office_location: raw.office_location,
+            company_name: raw.company_name,
+            mobile_phone: raw.mobile,
+            business_phone: raw.telephone_number,
         }
     }
 }

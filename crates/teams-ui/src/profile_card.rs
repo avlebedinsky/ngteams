@@ -84,6 +84,10 @@ pub const EMAIL: &str = "Email";
 pub const CHAT: &str = "Chat";
 pub const JOB_TITLE: &str = "Job title";
 pub const OFFICE: &str = "Office location";
+pub const WORK_PHONE: &str = "Work phone";
+pub const MOBILE: &str = "Mobile";
+pub const DEPARTMENT: &str = "Department";
+pub const COMPANY: &str = "Company";
 
 /// How long the pointer rests on a face or a name before its card opens, and how long an open card waits for the
 /// pointer to come back to it (or to what it opened from) before it closes.
@@ -135,6 +139,27 @@ pub fn no_org(name: &str) -> String {
 #[must_use]
 pub fn works_with(name: &str) -> String {
     format!("{name} works with")
+}
+
+/// A tile's name under its face (the Organization tab's people they work with): centered, on two lines at most and
+/// cut with an ellipsis, as Teams draws it.
+pub fn tile_name(name: impl IntoElement) -> gpui::Div {
+    // without the ellipsis GPUI puts the rest of a clamped text on its last line, unwrapped and clipped on both sides
+    div()
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_center()
+        .line_clamp(2)
+        .text_ellipsis()
+        .child(name)
+}
+
+/// `tel:` and the number's digits, a leading `+` kept: what the system's phone app dials; `None` without a digit.
+#[must_use]
+pub fn tel_uri(number: &str) -> Option<String> {
+    let plus = number.trim_start().starts_with('+');
+    let digits: String = number.chars().filter(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then(|| format!("tel:{}{digits}", if plus { "+" } else { "" }))
 }
 
 /// "People reporting to {name} ({n})".
@@ -731,6 +756,14 @@ impl ProfileCard {
     /// Their email, opened in the mail app.
     pub fn email(address: &str, cx: &mut gpui::App) {
         cx.open_url(&format!("mailto:{address}"));
+    }
+
+    /// Hands a phone number to the system's phone app (`tel:`), as Teams' card offers it; nothing when it has no
+    /// digit.
+    pub fn phone(number: &str, cx: &mut gpui::App) {
+        if let Some(uri) = tel_uri(number) {
+            cx.open_url(&uri);
+        }
     }
 
     /// Escape: the card closes.

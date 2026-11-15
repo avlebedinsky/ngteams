@@ -15,9 +15,9 @@ use teams_core::CardPerson;
 
 use super::words::{self, Length, Now};
 use super::{
-    CLOSE, CONTACT, CardOf, CardTab, EMAIL, Form, JOB_TITLE, MORE_CONTACT, NOT_LOADED, OFFICE, OUT_OF_OFFICE, PROFILE,
-    ProfileCard, ProfileCardEvent, QUICK_FAILED, QUICK_HINT, QUICK_MAY_HAVE_ARRIVED, QUICK_SENT, QuickNote, REPORTS_TO,
-    SHOW_MORE,
+    CLOSE, COMPANY, CONTACT, CardOf, CardTab, DEPARTMENT, EMAIL, Form, JOB_TITLE, MOBILE, MORE_CONTACT, NOT_LOADED,
+    OFFICE, OUT_OF_OFFICE, PROFILE, ProfileCard, ProfileCardEvent, QUICK_FAILED, QUICK_HINT, QUICK_MAY_HAVE_ARRIVED,
+    QUICK_SENT, QuickNote, REPORTS_TO, SHOW_MORE, WORK_PHONE,
 };
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard;
@@ -604,9 +604,64 @@ impl ProfileCard {
             .into_any_element()
     }
 
-    /// "Contact information": the email and the chat address in two columns; with `all`, every address and the work
-    /// fields known too.
+    /// "Contact information" in two columns, in Teams' order: the email and the chat address, the work phones and the
+    /// mobile, the job title, the department, the office and the company. Without `all` (the Overview), the first
+    /// address only and no department or company.
     fn contact(&self, all: bool, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let mut fields = self.addresses(all, palette, cx);
+        let card = self.card();
+        if let Some(card) = card {
+            fields.extend(phones(card, palette));
+        }
+        let mut plain = |selector: &'static str, glyph: Glyph, label: &'static str, text: Option<&String>| {
+            if let Some(text) = text {
+                let value = div()
+                    .debug_selector(move || selector.to_owned())
+                    .text_sm()
+                    .child(text.clone());
+                fields.push(field(glyph, label, value.into_any_element(), palette));
+            }
+        };
+        plain(
+            "profile-card-job-title",
+            Glyph::BRIEFCASE,
+            JOB_TITLE,
+            card.and_then(|card| card.job_title.as_ref()),
+        );
+        if all {
+            plain(
+                "profile-card-department",
+                Glyph::USERS,
+                DEPARTMENT,
+                card.and_then(|card| card.department.as_ref()),
+            );
+        }
+        plain(
+            "profile-card-office",
+            Glyph::MAP_PIN,
+            OFFICE,
+            card.and_then(|card| card.office.as_ref()),
+        );
+        if all {
+            plain(
+                "profile-card-company",
+                Glyph::BUILDING,
+                COMPANY,
+                card.and_then(|card| card.company.as_ref()),
+            );
+        }
+        div()
+            .debug_selector(|| "profile-card-contact".to_owned())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(CONTACT))
+            .child(div().flex().flex_wrap().gap_y_3().children(fields))
+            .into_any_element()
+    }
+
+    /// The email rows (the first one only, unless `all`) and the chat address.
+    fn addresses(&self, all: bool, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut fields: Vec<AnyElement> = Vec::new();
         let emails = self.emails();
         let shown = if all { emails.len() } else { emails.len().min(1) };
@@ -631,21 +686,7 @@ impl ProfileCard {
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.chat(cx)));
             fields.push(field(Glyph::CHAT, super::CHAT, value.into_any_element(), palette));
         }
-        let plain = |text: &String| div().text_sm().child(text.clone()).into_any_element();
-        if let Some(job) = card.and_then(|card| card.job_title.as_ref()) {
-            fields.push(field(Glyph::BRIEFCASE, JOB_TITLE, plain(job), palette));
-        }
-        if let Some(office) = card.and_then(|card| card.office.as_ref()) {
-            fields.push(field(Glyph::MAP_PIN, OFFICE, plain(office), palette));
-        }
-        div()
-            .debug_selector(|| "profile-card-contact".to_owned())
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(CONTACT))
-            .child(div().flex().flex_wrap().gap_y_3().children(fields))
-            .into_any_element()
+        fields
     }
 
     /// The Organization tab: the managers, the person, their reports (or the note that the directory names none), then
@@ -820,15 +861,7 @@ impl ProfileCard {
             .cursor_pointer()
             .hover(move |tile| tile.bg(rgb(palette.hover)))
             .child(face)
-            .child(
-                div()
-                    .w_full()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_center()
-                    .line_clamp(2)
-                    .child(name),
-            )
+            .child(super::tile_name(name).debug_selector(move || format!("profile-card-person-name-{at}")))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.open_person(of.clone(), window, cx);
             }));
@@ -883,6 +916,30 @@ fn email_row(at: usize, address: String, palette: Palette) -> AnyElement {
     .into_any_element()
 }
 
+/// The work phones, then the mobile: each as the directory writes it, a link that hands the number to the system.
+fn phones(card: &teams_core::ProfileCard, palette: Palette) -> Vec<AnyElement> {
+    let number = |key: String, glyph: Glyph, label: &'static str, text: &String| {
+        let dial = text.clone();
+        let value = link(
+            key,
+            palette,
+            div().text_sm().text_color(rgb(palette.brand)).child(text.clone()),
+        )
+        .on_click(move |_, _, cx| ProfileCard::phone(&dial, cx));
+        field(glyph, label, value.into_any_element(), palette)
+    };
+    let work = card
+        .business_phones
+        .iter()
+        .enumerate()
+        .map(|(at, text)| number(format!("profile-card-work-phone-{at}"), Glyph::PHONE, WORK_PHONE, text));
+    let mobile = card
+        .mobile_phone
+        .iter()
+        .map(|text| number("profile-card-mobile".to_owned(), Glyph::SMARTPHONE, MOBILE, text));
+    work.chain(mobile).collect()
+}
+
 /// A contact field: its icon, its label over its value; half the row.
 fn field(glyph: Glyph, label: &'static str, value: AnyElement, palette: Palette) -> AnyElement {
     div()
@@ -932,7 +989,13 @@ fn divider_label(text: &str, palette: Palette) -> AnyElement {
         .gap_3()
         .text_sm()
         .child(rule())
-        .child(SharedString::from(text.to_owned()))
+        .child(
+            div()
+                .debug_selector(|| "profile-card-works-with-label".to_owned())
+                .min_w_0()
+                .text_center()
+                .child(SharedString::from(text.to_owned())),
+        )
         .child(rule())
         .into_any_element()
 }

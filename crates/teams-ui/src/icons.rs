@@ -140,6 +140,7 @@ impl Glyph {
     pub const ORG_CHART: Self = Self(include_bytes!("../assets/icons/network.svg"));
     /// A job title.
     pub const BRIEFCASE: Self = Self(include_bytes!("../assets/icons/briefcase.svg"));
+    pub const BUILDING: Self = Self(include_bytes!("../assets/icons/building-2.svg"));
     pub const MESSAGE: Self = Self(include_bytes!("../assets/icons/message-square-text.svg"));
     /// Teams' two speech bubbles: a channel post's "Reply in thread".
     pub const THREAD: Self = Self(include_bytes!("../assets/icons/messages-square.svg"));
@@ -171,6 +172,7 @@ impl Glyph {
     /// Teams' New message: a pen over a page.
     pub const NEW_MESSAGE: Self = Self(include_bytes!("../assets/icons/square-pen.svg"));
     pub const PHONE: Self = Self(include_bytes!("../assets/icons/phone.svg"));
+    pub const SMARTPHONE: Self = Self(include_bytes!("../assets/icons/smartphone.svg"));
     pub const PHONE_FORWARDED: Self = Self(include_bytes!("../assets/icons/phone-forwarded.svg"));
     pub const PHONE_OFF: Self = Self(include_bytes!("../assets/icons/phone-off.svg"));
     pub const PHONE_MISSED: Self = Self(include_bytes!("../assets/icons/phone-missed.svg"));

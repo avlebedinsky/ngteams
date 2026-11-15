@@ -929,3 +929,161 @@ fn the_people_flyout_opens_a_card_on_a_face_and_the_chat_on_a_row() {
     assert_eq!(main(&shell, cx), Main::NewChat, "c's row: New message to c");
     assert!(rig.core.actions.lock().unwrap().is_empty());
 }
+
+/// A made-up name too long for any line of the card, one word of it longer than a tile.
+const LONG_NAME: &str = "Maximiliana Theodora Wilhelmina von Hohenzollern-Sigmaringen-Ostrowski-Papadopoulou the Third";
+
+/// Opens `mri`'s full card on `tab` in a window `width` wide.
+fn open_full(rig: &Rig, mri: &str, tab: CardTab, width: f32) -> (Entity<Shell>, &'static mut VisualTestContext) {
+    let (shell, cx) = shell_window(rig);
+    cx.simulate_resize(size(px(width), px(800.0)));
+    draw(cx);
+    let of = CardOf::new(mri, None);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_card(of, (Form::Full, tab), gpui::Bounds::default(), window, cx);
+    });
+    draw(cx);
+    (shell, cx)
+}
+
+fn bounds(cx: &mut VisualTestContext, selector: &str) -> gpui::Bounds<gpui::Pixels> {
+    cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+        .unwrap_or_else(|| panic!("{selector} is drawn"))
+}
+
+fn inside(inner: gpui::Bounds<gpui::Pixels>, outer: gpui::Bounds<gpui::Pixels>) -> bool {
+    inner.left() >= outer.left() && inner.right() <= outer.right()
+}
+
+#[test]
+fn a_long_name_s_lines_stay_inside_the_card_on_the_organization_tab() {
+    for width in [1200.0, 480.0] {
+        let rig = seeded();
+        let mut card = card(LAB_C, LONG_NAME, &[(LAB_B, LONG_NAME), (LAB_A, "Lab Ay")]);
+        card.organization = Some(teams_core::CardOrganization {
+            managers: vec![CardPerson {
+                mri: LAB_B.to_owned(),
+                name: Some(LONG_NAME.to_owned()),
+                email: Some("long@lab.example.test".to_owned()),
+            }],
+            directs: vec![],
+        });
+        rig.core.profile_cards.lock().unwrap().insert(LAB_C.to_owned(), card);
+        rig.core
+            .names
+            .lock()
+            .unwrap()
+            .insert(LAB_B.to_owned(), LONG_NAME.to_owned());
+        let (_shell, cx) = open_full(&rig, LAB_C, CardTab::Organization, width);
+        let card = bounds(cx, "profile-card");
+        for selector in [
+            "profile-card-person-name-0",
+            "profile-card-name",
+            "profile-card-works-with-label",
+            "profile-card-chart-self",
+            "profile-card-manager-0",
+        ] {
+            let line = bounds(cx, selector);
+            assert!(
+                inside(line, card),
+                "{selector} {line:?} runs out of the card {card:?} at {width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_profile_tab_shows_the_phones_department_and_company_in_teams_order() {
+    let rig = seeded();
+    let mut card = card(LAB_C, "Lab Sea", &[]);
+    card.office = Some("Made-up Office 1".to_owned());
+    card.department = Some("Made-up Department".to_owned());
+    card.company = Some("Made-up Company".to_owned());
+    card.mobile_phone = Some("+1 555 0100".to_owned());
+    card.business_phones = vec!["+1 555 0101".to_owned(), "+1 555 0102".to_owned()];
+    rig.core.profile_cards.lock().unwrap().insert(LAB_C.to_owned(), card);
+    let (_shell, cx) = open_full(&rig, LAB_C, CardTab::Profile, 1200.0);
+    let order = [
+        "profile-card-email-0",
+        "profile-card-im",
+        "profile-card-work-phone-0",
+        "profile-card-work-phone-1",
+        "profile-card-mobile",
+        "profile-card-job-title",
+        "profile-card-department",
+        "profile-card-office",
+        "profile-card-company",
+    ];
+    let mut at: Vec<(gpui::Pixels, gpui::Pixels)> = Vec::new();
+    for selector in order {
+        let drawn = bounds(cx, selector);
+        at.push((drawn.top(), drawn.left()));
+    }
+    let mut sorted = at.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(at, sorted, "Teams' order: {order:?}");
+    click(cx, "profile-card-mobile");
+    assert_eq!(cx.opened_url().as_deref(), Some("tel:+15550100"));
+    click(cx, "profile-card-work-phone-1");
+    assert_eq!(cx.opened_url().as_deref(), Some("tel:+15550102"));
+    assert!(rig.core.actions.lock().unwrap().is_empty(), "a phone writes nothing");
+}
+
+#[test]
+fn a_card_without_phones_department_or_company_shows_none_of_their_rows() {
+    let rig = seeded();
+    let (_shell, cx) = open_full(&rig, LAB_C, CardTab::Profile, 1200.0);
+    for selector in [
+        "profile-card-work-phone-0",
+        "profile-card-mobile",
+        "profile-card-department",
+        "profile-card-company",
+        "profile-card-office",
+    ] {
+        assert!(!drawn(cx, selector), "{selector}");
+    }
+    assert!(drawn(cx, "profile-card-job-title"));
+}
+
+/// Draws a tile's name 110 px wide, once: its text's layout is the test's.
+struct TileName {
+    text: Option<gpui::StyledText>,
+}
+
+impl gpui::Render for TileName {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui::div()
+            .w(px(110.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .children(self.text.take().map(teams_ui::profile_card::tile_name))
+    }
+}
+
+#[gpui::test]
+fn a_tile_s_long_name_ends_inside_its_two_lines(cx: &mut TestAppContext) {
+    for name in [
+        LONG_NAME,
+        "Lab Bee",
+        "Maximiliana Hohenzollern-Sigmaringen-Ostrowski-Papadopoulou",
+    ] {
+        let text = gpui::StyledText::new(name);
+        let layout = text.layout().clone();
+        let (_, cx) = cx.add_window_view(|_, _| TileName { text: Some(text) });
+        cx.run_until_parked();
+        let box_ = layout.bounds();
+        let end = layout.position_for_index(layout.len()).unwrap();
+        assert!(
+            end.x - box_.left() <= box_.size.width + px(0.5),
+            "'{name}' ends at {:?}, its box {box_:?}: '{}'",
+            end.x - box_.left(),
+            layout.wrapped_text()
+        );
+        assert!(
+            end.y - box_.top() < layout.line_height() * 2.0,
+            "'{name}' runs past two lines"
+        );
+    }
+}

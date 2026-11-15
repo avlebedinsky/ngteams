@@ -483,6 +483,49 @@ fn an_answer_naming_anyone_not_asked_for_is_dropped_whole() {
 }
 
 #[test]
+fn a_profiles_work_fields_and_phones_are_read_and_a_missing_one_is_none() {
+    let answer = json!({
+        "type": "Microsoft.SkypeSpaces.MiddleTier.Models.IUserIdentity",
+        "value": [
+            {
+                "mri": LAB_A,
+                "jobTitle": "Made-up Tester",
+                "department": "Made-up Department",
+                "officeLocation": "Made-up Office 1",
+                "companyName": "Made-up Company",
+                "mobile": "+1 555 0100",
+                "telephoneNumber": "+1 555 0101",
+            },
+            {"mri": LAB_B},
+        ],
+    });
+
+    let profiles = lookup(&[LAB_A, LAB_B])
+        .read_answer(&serde_json::to_vec(&answer).unwrap())
+        .unwrap();
+
+    let full = &profiles[0];
+    assert_eq!(full.job_title.as_deref(), Some("Made-up Tester"));
+    assert_eq!(full.department.as_deref(), Some("Made-up Department"));
+    assert_eq!(full.office_location.as_deref(), Some("Made-up Office 1"));
+    assert_eq!(full.company_name.as_deref(), Some("Made-up Company"));
+    assert_eq!(full.mobile_phone.as_deref(), Some("+1 555 0100"));
+    assert_eq!(full.business_phone.as_deref(), Some("+1 555 0101"));
+    let bare = &profiles[1];
+    assert_eq!(
+        (
+            &bare.department,
+            &bare.company_name,
+            &bare.mobile_phone,
+            &bare.business_phone
+        ),
+        (&None, &None, &None, &None)
+    );
+    let shown = format!("{profiles:?}");
+    assert!(!shown.contains("555") && !shown.contains("Made-up"), "{shown}");
+}
+
+#[test]
 fn a_profiles_debug_names_only_its_mri() {
     let fixture = fixture();
     let answer = serde_json::to_vec(&fixture["cases"][1]["answer"]).unwrap();

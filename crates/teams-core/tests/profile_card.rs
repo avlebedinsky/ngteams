@@ -147,7 +147,7 @@ async fn serve_presence(server: &MockServer, out_of_office: Value) {
         .await;
 }
 
-/// Serves b's short profile, with a job title and an office.
+/// Serves b's short profile, with a job title, a department, an office, a company and phones.
 async fn serve_short_profile(server: &MockServer) {
     let answer = json!({
         "type": "Microsoft.SkypeSpaces.MiddleTier.Models.IUserIdentity",
@@ -159,7 +159,11 @@ async fn serve_short_profile(server: &MockServer) {
             "userPrincipalName": "lab-b@lab.example.com",
             "userType": "Member",
             "jobTitle": "Made-up Tester",
+            "department": "Made-up Department",
             "officeLocation": "Made-up Office 1",
+            "companyName": "Made-up Company",
+            "mobile": "+1 555 0100",
+            "telephoneNumber": "+1 555 0101",
         }],
     });
     Mock::given(method("POST"))
@@ -193,6 +197,10 @@ async fn a_card_is_made_of_every_read_and_loki_is_configured_once() {
     assert_eq!(card.user_type.as_deref(), Some("Member"));
     assert_eq!(card.job_title.as_deref(), Some("Made-up Tester"));
     assert_eq!(card.office.as_deref(), Some("Made-up Office 1"));
+    assert_eq!(card.department.as_deref(), Some("Made-up Department"));
+    assert_eq!(card.company.as_deref(), Some("Made-up Company"));
+    assert_eq!(card.mobile_phone.as_deref(), Some("+1 555 0100"));
+    assert_eq!(card.business_phones, ["+1 555 0101"]);
     let presence = card.presence.clone().unwrap();
     assert_eq!(presence.availability, Availability::Offline);
     assert_eq!(presence.last_active_ms, Some(2000));
@@ -208,7 +216,10 @@ async fn a_card_is_made_of_every_read_and_loki_is_configured_once() {
     assert_eq!(working[0].name.as_deref(), Some("Lab Account C"));
     assert_eq!(working[0].email.as_deref(), Some("lab-c@lab.example.com"));
     let shown = format!("{card:?}");
-    assert!(!shown.contains("Lab Account") && !shown.contains("lab-a@"), "{shown}");
+    assert!(
+        !shown.contains("Lab Account") && !shown.contains("lab-a@") && !shown.contains("555"),
+        "{shown}"
+    );
     assert!(!format!("{:?}", working[0]).contains("Lab Account"));
 
     // a second card reads no configuration again
