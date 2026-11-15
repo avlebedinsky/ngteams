@@ -169,7 +169,7 @@ async fn short_profiles_name_people_by_mri_and_by_address_with_their_title_and_o
             .await
             .unwrap();
         let storage = office.server.app.storage.as_ref();
-        ngteams_server::admin::delete_by_upn(&office.server.app.db, fanout, storage, "cora@own.test")
+        ngteams_server::admin::delete_by_upn(&office.server.app.db, fanout, Some(storage), "cora@own.test")
             .await
             .unwrap();
         let lookup = ShortProfileLookup::new([Mri::new(mri(&office.b)), Mri::new(mri(&office.c))]).unwrap();
@@ -255,17 +255,41 @@ async fn graph_names_a_user_in_the_forms_the_client_reads_and_serves_their_pictu
         people::remove_picture(db, storage, &office.b).await.unwrap();
         assert_eq!(status_of(ada.read(&picture).await.unwrap_err()), Some(404));
         assert_eq!(storage.get(&kept).await.unwrap(), None);
+        office.server.stop().await;
+    }
+}
 
-        // a deleted account's picture is nobody's: not served, and not kept
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_accounts_picture_is_neither_served_nor_kept() {
+    for backend in backends() {
+        let office = Office::open(backend).await;
+        let ada = office.client("ada@own.test", &office.a).await;
+        let (db, storage) = (&office.server.app.db, office.server.app.storage.as_ref());
         people::set_picture(db, storage, &office.d, png(96, 96)).await.unwrap();
         let kept = people::repo::profile(db, &office.d).await.unwrap().picture_key.unwrap();
         let dans = GraphPicture::of(&mri(&office.d)).unwrap();
         assert!(ada.read(&dans).await.is_ok());
-        ngteams_server::admin::delete_by_upn(db, office.server.app.fanout.as_ref(), storage, "dan@own.test")
+        ngteams_server::admin::delete_by_upn(db, office.server.app.fanout.as_ref(), Some(storage), "dan@own.test")
             .await
             .unwrap();
         assert_eq!(status_of(ada.read(&dans).await.unwrap_err()), Some(404));
         assert_eq!(storage.get(&kept).await.unwrap(), None);
+
+        // nor one whose picture outlived the delete
+        people::set_picture(db, storage, &office.c, png(96, 96)).await.unwrap();
+        let coras = GraphPicture::of(&mri(&office.c)).unwrap();
+        assert!(ada.read(&coras).await.is_ok());
+        ngteams_server::admin::repo::delete(db, ngteams_server::admin::Actor::CLI, &office.c)
+            .await
+            .unwrap();
+        assert!(
+            people::repo::profile(db, &office.c)
+                .await
+                .unwrap()
+                .picture_key
+                .is_some()
+        );
+        assert_eq!(status_of(ada.read(&coras).await.unwrap_err()), Some(404));
         office.server.stop().await;
     }
 }

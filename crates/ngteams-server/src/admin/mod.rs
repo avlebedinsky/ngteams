@@ -223,8 +223,21 @@ pub async fn delete_user(
     actor: Actor<'_>,
     id: &str,
 ) -> Result<(), AdminError> {
+    deleted(db, fanout, Some(storage), actor, id).await
+}
+
+/// [`delete_user`]; without a file store, the picture stays, unserved.
+async fn deleted(
+    db: &Db,
+    fanout: &dyn Fanout,
+    storage: Option<&dyn Storage>,
+    actor: Actor<'_>,
+    id: &str,
+) -> Result<(), AdminError> {
     repo::delete(db, actor, id).await?;
-    if let Err(error) = crate::people::remove_picture(db, storage, id).await {
+    if let Some(storage) = storage
+        && let Err(error) = crate::people::remove_picture(db, storage, id).await
+    {
         tracing::warn!(%error, "a deleted account's picture wasn't removed");
     }
     Ok(crate::trouter::revoke(fanout, id).await?)
@@ -325,10 +338,16 @@ pub async fn reset_password(db: &Db, fanout: &dyn Fanout, upn: &str, password: &
     reset_user_password(db, fanout, Actor::CLI, &id_of(db, upn).await?, password, false).await
 }
 
-/// Deletes the account with this UPN, closing its push sockets (the command line).
+/// Deletes the account with this UPN, closing its push sockets (the command line); its picture too, given the file
+/// store.
 ///
 /// # Errors
 /// As [`delete_user`].
-pub async fn delete_by_upn(db: &Db, fanout: &dyn Fanout, storage: &dyn Storage, upn: &str) -> Result<(), AdminError> {
-    delete_user(db, fanout, storage, Actor::CLI, &id_of(db, upn).await?).await
+pub async fn delete_by_upn(
+    db: &Db,
+    fanout: &dyn Fanout,
+    storage: Option<&dyn Storage>,
+    upn: &str,
+) -> Result<(), AdminError> {
+    deleted(db, fanout, storage, Actor::CLI, &id_of(db, upn).await?).await
 }

@@ -451,7 +451,10 @@ impl Inner {
             now.saturating_add(millis(self.limits.subscription_ttl)),
         );
         self.board.zadd(watching, mri, until, Some(ttl)).await?;
-        self.board.zadd(&key("watchers", mri), me, until, Some(ttl)).await?;
+        let watchers = key("watchers", mri);
+        // its lifetime renews with every watch, so it would otherwise keep the ended ones of a quiet account
+        self.board.zprune(&watchers, now).await?;
+        self.board.zadd(&watchers, me, until, Some(ttl)).await?;
         Ok(true)
     }
 
@@ -664,6 +667,58 @@ mod tests {
         assert_eq!(Taken::TooMany.status(), 40040);
         assert_eq!(object_id("8:orgid:nobody"), None);
         assert_eq!(millis(u64::MAX), i64::MAX);
+    }
+
+    /// A service on the node's own board and an empty database, with no sweep running.
+    async fn inner() -> (Inner, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("server.sqlite").display());
+        let inner = Inner {
+            board: Box::new(Memory::default()),
+            fanout: Arc::new(crate::fanout::Local::new()),
+            db: Db::connect(&url, 1).await.unwrap(),
+            limits: PresenceConfig::default(),
+        };
+        (inner, dir)
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_endpoint_reported_again_after_the_read_is_kept() {
+        let (inner, _dir) = inner().await;
+        let account = key("account", "x");
+        let now = now_ms();
+        let lapsed = (endpoint("Away", "Away", now - 1), endpoint("Busy", "Busy", now - 1));
+        inner.board.hset(&account, "ep:again", &lapsed.0, 60).await.unwrap();
+        inner.board.hset(&account, "ep:gone", &lapsed.1, 60).await.unwrap();
+        let mut state = inner.state("x").await.unwrap();
+        let fresh = endpoint("Available", "Available", now + 60_000);
+        inner.board.hset(&account, "ep:again", &fresh, 60).await.unwrap();
+
+        inner.drop_lapsed(&account, &mut state, now).await.unwrap();
+        assert_eq!(
+            inner.board.hgetall(&account).await.unwrap(),
+            [("ep:again".to_owned(), fresh)]
+        );
+        assert_eq!(state.endpoints.keys().collect::<Vec<_>>(), ["again"]);
+        assert_eq!(state.shown(now).availability, "Available");
+    }
+
+    #[tokio::test]
+    async fn a_renewed_watch_forgets_the_watchers_whose_subscriptions_ended() {
+        let (inner, _dir) = inner().await;
+        let watched = key("watchers", "8:orgid:x");
+        let now = now_ms();
+        inner.board.zadd(&watched, "old|ep", now - 1, Some(60)).await.unwrap();
+        let mut held = 0;
+        let watching = key("watching", "me|ep");
+        assert!(
+            inner
+                .watch(&watching, "me|ep", "8:orgid:x", &mut held, now)
+                .await
+                .unwrap()
+        );
+        assert_eq!(inner.board.zscore(&watched, "old|ep").await.unwrap(), None);
+        assert!(inner.board.zscore(&watched, "me|ep").await.unwrap().is_some());
     }
 
     #[test]

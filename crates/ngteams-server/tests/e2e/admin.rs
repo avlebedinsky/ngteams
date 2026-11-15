@@ -7,28 +7,38 @@ use teams_auth::token::Scope;
 use crate::support::{Backend, PASSWORD, TestServer};
 
 pub async fn cli(server: &TestServer, args: &[&str], input: &str) -> Result<String, ngteams_server::cli::CliError> {
+    Ok(cli_with(server, "", args, input).await?.0)
+}
+
+/// The command line on `server`'s database, with `extra` added to its config; what it writes and what it warns.
+async fn cli_with(
+    server: &TestServer,
+    extra: &str,
+    args: &[&str],
+    input: &str,
+) -> Result<(String, String), ngteams_server::cli::CliError> {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("server.toml");
     std::fs::write(
         &config,
         format!(
-            "database_url = \"{}\"\npublic_origin = \"{}\"\n",
+            "database_url = \"{}\"\npublic_origin = \"{}\"\n{extra}",
             server.app.config.database_url, server.origin
         ),
     )
     .unwrap();
     let mut command = vec!["ngteams-server", "--config", config.to_str().unwrap()];
     command.extend_from_slice(args);
-    let mut output = Vec::new();
+    let (mut output, mut warnings) = (Vec::new(), Vec::new());
     run(
         Cli::parse_from(command),
         &mut input.as_bytes(),
         &mut output,
-        &mut Vec::new(),
+        &mut warnings,
         std::future::pending(),
     )
     .await?;
-    Ok(String::from_utf8(output).unwrap())
+    Ok((String::from_utf8(output).unwrap(), String::from_utf8(warnings).unwrap()))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -87,6 +97,34 @@ async fn accounts_added_and_changed_on_the_command_line_sign_in_as_set() {
             .await
             .0,
         200
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_is_deleted_on_the_command_line_even_when_the_file_store_cant_be_opened() {
+    let server = TestServer::start(Backend::Sqlite).await;
+    server.add_user("ada@own.test", "Ada").await;
+    server.add_user("grace@own.test", "Grace").await;
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("a file");
+    std::fs::write(&blocker, b"").unwrap();
+    let store = format!("storage_url = \"file://{}/blobs\"\n", blocker.display());
+    let (_, warned) = cli_with(&server, &store, &["user", "delete", "grace@own.test"], "")
+        .await
+        .unwrap();
+    assert!(
+        warned.starts_with("warning: grace@own.test IS deleted, but"),
+        "{warned}"
+    );
+    let listed = cli(&server, &["user", "list"], "").await.unwrap();
+    assert!(!listed.contains("grace@own.test"), "{listed}");
+    assert_eq!(
+        server
+            .password_grant("grace@own.test", PASSWORD, &Scope::spaces())
+            .await
+            .0,
+        400
     );
     server.stop().await;
 }

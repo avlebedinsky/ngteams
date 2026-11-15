@@ -439,12 +439,23 @@ async fn user(
         UserCommand::Promote { upn } => Ok(crate::admin::set_admin(&db, &upn, true).await?),
         UserCommand::Demote { upn } => Ok(crate::admin::set_admin(&db, &upn, false).await?),
         UserCommand::Delete { upn } => {
-            let storage = crate::storage::ObjectStorage::open_with(
-                &config.storage_url,
-                &config.storage_options,
-                &config.storage,
-            )?;
-            let ended = crate::admin::delete_by_upn(&db, &nodes, &storage, &upn).await;
+            let storage =
+                crate::storage::ObjectStorage::open_with(&config.storage_url, &config.storage_options, &config.storage);
+            let opened = storage
+                .as_ref()
+                .ok()
+                .map(|storage| storage as &dyn crate::storage::Storage);
+            let ended = crate::admin::delete_by_upn(&db, &nodes, opened, &upn).await;
+            if ended.is_ok()
+                && let Err(error) = &storage
+            {
+                writeln!(
+                    streams.warnings,
+                    "warning: {upn} IS deleted, but its picture wasn't removed: the file store can't be opened \
+                     ({error}). A deleted account's picture is never served."
+                )
+                .map_err(CliError::Output)?;
+            }
             changed(ended, &format!("{upn} IS deleted"), streams.warnings)
         }
         UserCommand::Disable { upn } => {
