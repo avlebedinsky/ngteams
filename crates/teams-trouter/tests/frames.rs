@@ -14,6 +14,8 @@ use url::Url;
 
 const SESSION: &str = include_str!("../../../tests/fixtures/trouter/session.json");
 const DELIVERIES: &str = include_str!("../../../tests/fixtures/trouter/deliveries.json");
+/// The synthetic shapes a message a tenant's policy blocked brings, its stream's `ThreadUpdate` among them.
+const POLICY_BLOCKED: &str = include_str!("../../../tests/fixtures/chatsvc/policy-blocked.json");
 
 const LAB_A: &str = "00000000-0000-4000-8000-00000000000a";
 const LAB_B: &str = "00000000-0000-4000-8000-00000000000b";
@@ -260,9 +262,9 @@ fn the_accounts_own_properties_are_read_only_for_its_mark_all_read_horizon() {
 fn a_thread_update_names_its_thread_and_its_roster_version_and_one_naming_no_thread_is_unknown() {
     let body = |resource: Value| json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": resource});
     let read = |resource: Value| ChatEvent::from_body(&body(resource).to_string());
-    // the shape a policy-blocked message's stream update has (`tests/fixtures/chatsvc/policy-blocked.json`)
+    // the update of the stream a policy-blocked message's copy goes to: no roster version
     assert_eq!(
-        read(json!({"id": "48:generic"})),
+        read(filled(POLICY_BLOCKED)["stream_thread"].clone()),
         ChatEvent::ThreadUpdate {
             thread: "48:generic".to_owned(),
             roster_version: None

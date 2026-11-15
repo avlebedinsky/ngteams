@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, shaped like what a sender's client is delivered when a tenant's policy blocks its 1:1 message with a file of a type the tenant doesn't permit, as a user's own debug log recorded it (structure only, read locally, nothing copied: every id, name, text, link and time here is made up). 'sent' is the message as sent and read back; 'copy' the NewMessage of the service's copy in the account's stream 48:generic (a new clientmessageid, the original HTML and files, threadtype streamofgeneric, no reference to the original); 'stream' the ConversationUpdate of 48:generic before it; 'blocked' the MessageUpdate of the original (empty content, no files, properties.policyViolation naming the copy by genericStreamItemId, edittime equal to its version); 'blocked_atp' the later one adding properties.atp. <guid:a>, <guid:b> are lab accounts' object ids, <region> the chat service's region; tests fill them in. See docs/protocol/chat.md, Messages a policy blocked.",
+  "_synthetic": "Made up, shaped like what a sender's client is delivered when a tenant's policy blocks its 1:1 message with a file of a type the tenant doesn't permit, as a user's own debug log recorded it (structure only, read locally, nothing copied: every id, name, text, link and time here is made up). 'sent' is the message as sent and read back; 'copy' the NewMessage of the service's copy in the account's stream 48:generic (a new clientmessageid, the original HTML and files, threadtype streamofgeneric, no reference to the original); 'stream_thread' the ThreadUpdate of 48:generic that comes first (threadType streamofgeneric, the sender its only member); 'stream' the ConversationUpdate of 48:generic after it; 'blocked' the MessageUpdate of the original (empty content, no files, properties.policyViolation naming the copy by genericStreamItemId, edittime equal to its version); 'blocked_atp' the later one adding properties.atp. <guid:a>, <guid:b> are lab accounts' object ids, <region> the chat service's region; tests fill them in. See docs/protocol/chat.md, Messages a policy blocked.",
   "sent": {
     "id": "1760000100000",
     "clientmessageid": "7100000000000000001",
@@ -44,6 +44,20 @@
     "contenttype": "Text",
     "threadtype": "streamofgeneric",
     "isactive": true
+  },
+  "stream_thread": {
+    "id": "48:generic",
+    "type": "Thread",
+    "version": 1760000100800,
+    "properties": {
+      "originalThreadId": "19:teamsstream_generic_<guid:a>@thread.v2",
+      "threadType": "streamofgeneric"
+    },
+    "members": [
+      {
+        "id": "8:orgid:<guid:a>"
+      }
+    ]
   },
   "stream": {
     "id": "48:generic",

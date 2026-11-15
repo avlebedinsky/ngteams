@@ -286,11 +286,11 @@ channel; the chat service's thread routes answer their own 403 to anyone not in 
 `CannotCreatePrivateChannelDueToUserPolicy`).
 
 These changes are published to the team's or channel's people as a `ThreadUpdate` on `push:<mri>`: a team made,
-edited, archived, restored or deleted (the thread as it last was, with `isDeleted` true), its people and their
-roles, its settings, and a channel made, renamed, archived, restored, deleted, moderated or given other people.
-Someone taken off a team or out of a private channel, or gone from it by themself, is told it too. A running client
-reads its teams again on each such update, so its team and channel lists follow live. A channel's show-by-default,
-the team's picture, codes and tags reach other clients only with their next teams read.
+edited, archived, restored or deleted (the thread as it last was, with `isDeleted` true), its people and their roles,
+its settings, and a channel made, renamed, archived, restored, deleted, moderated or given other people. Someone taken
+off a team or out of a private channel, or gone from it by themself, is told it too. A running client reads its teams
+again once such updates pause ([trouter.md](protocol/trouter.md)), so its team and channel lists follow live. A
+channel's show-by-default, the team's picture, codes and tags reach other clients only with their next teams read.
 
 Limits: 200 standard and 30 private channels a team (`MaxChannelLimitExceeded`,
 `MaxPrivateChannelLimitExceeded`), 200 tags a team, 200 sections an account and 1000 channels a section; a team's
@@ -449,14 +449,15 @@ public origin is refused.
   a stop that Teams leaves the registration through. A registration without a socket gets no delivery.
 - **Deliveries.** A messaging endpoint with a live registration gets the account's `push:<mri>` events as `3:::`
   deliveries at `/trouter/v4/f/<endpoint>/messaging`, each body an `EventMessage` around the fan-out's resource:
-  `NewMessage`, `MessageUpdate`, `ConversationUpdate`, `CustomUserProperties` and `ThreadUpdate` (a new chat, a
-  team's or a channel's change; the client reads it as an unknown kind). A channel's messages come as a chat's do,
-  to the people in the channel's thread: a team's people for a standard channel, its own for a private one, and
-  nobody once they are out of it. A reply's `to` and links name its post's chain (`<channel>;messageid=<post>`); a
-  channel's message names no `threadtype`. `ReadReceipt` stays internal: Teams delivers no peer read receipt. The
-  calling stack's socket gets its endpoint's call deliveries ([Calls](#calls)) and no chat events. The client's
-  answers (`3:::` with a status) are accepted; a calling client's answer to an acceptance carries its later
-  callbacks, which the call controller keeps.
+  `NewMessage`, `MessageUpdate`, `ConversationUpdate`, `CustomUserProperties` and `ThreadUpdate` (a new chat, a chat's
+  people, a team's or a channel's change; the client reads its teams again for a team's or a channel's thread and a
+  stored group chat's people for a chat, [trouter.md](protocol/trouter.md)). A channel's messages come as a chat's do,
+  to the people in the channel's thread: a team's people for a standard channel, its own for a private one, and nobody
+  once they are out of it. A reply's `to` and links name its post's chain (`<channel>;messageid=<post>`); a channel's
+  message names no `threadtype`. `ReadReceipt` stays internal: Teams delivers no peer read receipt. The calling
+  stack's socket gets its endpoint's call deliveries ([Calls](#calls)) and no chat events. The client's answers
+  (`3:::` with a status) are accepted; a calling client's answer to an acceptance carries its later callbacks, which
+  the call controller keeps.
 - **Keep-alives.** `ping` is answered `["pong"]`, any other acknowledged event `[]`. A socket silent for two ping
   intervals and 20 seconds is closed.
 - **Replay.** Every delivered event but typing (and other `Control/…` messages) is also kept in the account's
