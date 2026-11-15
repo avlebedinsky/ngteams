@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ngteams_server::fanout::journal::{CURSORS, EntryId, KEPT_FOR};
+use ngteams_server::fanout::keyspace::Keyspace;
 use ngteams_server::trouter::{Control, Stack, endpoint_id, push_url, tell};
 use serde_json::{Value, json};
 
@@ -66,7 +67,8 @@ async fn a_connected_endpoint_is_told_of_no_loss_after_its_account_was_quiet_for
         };
         let client = redis::Client::open(redis.as_str()).unwrap();
         let mut commands = client.get_multiplexed_async_connection().await.unwrap();
-        let journal = format!("journal:{topic}");
+        // the stream the server keeps the topic in: the deployment's keyspace is its tenant's
+        let journal = Keyspace::new(server.app.issuer.tenant()).key(&format!("journal:{topic}"));
         redis::cmd("XADD")
             .arg(&journal)
             .arg(hour_ago.to_string())
