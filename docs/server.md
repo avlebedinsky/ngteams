@@ -320,7 +320,8 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   saves with it, or `MeetNow`, which has no event). Its join link is
   `<origin>/l/meetup-join/<chat>/0?context={"Tid","Oid"}` and its short link `<origin>/meet/<id>?p=<passcode>`;
   the thread's `properties.meeting` names its organizer, tenant, title and link. An event takes only a meeting its
-  own organizer made and no other event uses; an event changed to a Teams meeting gets one. The people the event
+  own organizer made and no other event uses, checked as the event is written; an event changed to a Teams meeting
+  gets one, and so does a series one of whose occurrences is. The people the event
   invites are put in the chat, those one occurrence of a series invites too; who no longer has an invitation to
   the event or to any occurrence of it is taken out. The chat holds the invitation: a message whose `properties.meeting` names the
   meeting (`ScheduledMeetingCreated`), changed in place when the meeting is, with a cancellation

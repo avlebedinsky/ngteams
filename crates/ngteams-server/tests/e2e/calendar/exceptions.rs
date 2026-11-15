@@ -88,6 +88,46 @@ async fn an_occurrence_moved_asks_its_people_again_and_one_only_renamed_keeps_th
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_occurrence_changed_to_a_teams_meeting_gives_its_series_the_meeting() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+        let mut in_a_room = sync(&bert);
+        in_a_room.online = false;
+        create(&ada, in_a_room).await;
+        let events = week(&ada).await;
+        assert!(events.iter().all(|event| !event.online && event.meeting_chat.is_none()));
+
+        // Wednesday alone, with Cora, saved as a Teams meeting
+        let wednesday = [("Bert", &bert), ("Cora", &cora)];
+        change(&ada, &events[1].id, meeting("Sync", WEDNESDAY, &wednesday)).await;
+        let after = week(&bert).await;
+        assert!(after[1].online && after[1].join_url.is_some());
+        let chat = after[1].meeting_chat.clone().unwrap();
+        assert!(
+            after.iter().all(|event| event.meeting_chat.as_ref() == Some(&chat)),
+            "the meeting is the series'"
+        );
+        for seat in [&ada, &bert, &cora] {
+            let details = seat.engine.meeting(chat.clone()).await.unwrap().unwrap();
+            assert_eq!(details.title.as_deref(), Some("Sync"));
+        }
+
+        // changed again, it keeps that meeting
+        change(&ada, &events[1].id, meeting("Sync, midweek", WEDNESDAY, &wednesday)).await;
+        let again = week(&cora).await;
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].meeting_chat.as_ref(), Some(&chat));
+        for seat in [ada, bert, cora] {
+            seat.stop();
+        }
+        server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn who_loses_the_last_invitation_to_a_series_leaves_its_chat() {
     for backend in backends() {
         let server = server(backend).await;

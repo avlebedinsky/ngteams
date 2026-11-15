@@ -6,6 +6,7 @@ use teams_core::activity::{ActivityKind, MeetingChange};
 use teams_core::engine::Action;
 use teams_proto::ChannelOwnProperty;
 
+use super::events::change;
 use super::meetings::{create, invited};
 use super::{HOUR, MINUTE, MONDAY, Seat, draft, server};
 use crate::chatsvc::activity::{feed, sent};
@@ -68,15 +69,7 @@ async fn a_meetings_invitation_change_and_cancellation_are_kept_in_the_invited_a
         let mut later = planning;
         later.start.ms += HOUR;
         later.end.ms += HOUR;
-        let whole = ada.engine.calendar_event(created.id.clone()).await.unwrap();
-        ada.engine
-            .write_event(EventWrite::Update {
-                id: created.id.clone(),
-                event: whole.raw,
-                draft: later,
-            })
-            .await
-            .unwrap();
+        change(&ada, &created.id, later).await;
         let theirs = feed(&other_device.engine).await;
         assert_eq!(theirs.items.len(), 2, "{theirs:?}");
         assert_eq!(theirs.items[0].kind, ActivityKind::Meeting(MeetingChange::Updated));

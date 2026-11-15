@@ -1,7 +1,7 @@
 use diesel::prelude::*;
 use diesel_async::{AsyncConnection as _, RunQueryDsl};
 
-use super::schema::{calendar_attendees, calendar_events};
+use super::schema::{calendar_attendees, calendar_events, meetings};
 use crate::db::schema::users;
 use crate::db::users::User;
 use crate::db::{Db, DbError, with_conn};
@@ -47,9 +47,25 @@ pub(crate) struct Attendee {
 /// An event with the reader's own invitation, when it has one.
 pub(super) type Seen = (Event, Option<Attendee>);
 
+/// Writes a new event with its invitations. An event that takes a meeting's chat holds the meeting's row from the
+/// check to the write, so of two events that name one meeting the second is refused: [`DbError::Conflict`].
 pub(super) async fn insert(db: &Db, event: &Event, attendees: &[Attendee]) -> Result<(), DbError> {
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
+            if let Some(chat) = &event.meeting_chat {
+                diesel::update(meetings::table.find(chat))
+                    .set(meetings::kind.eq(meetings::kind))
+                    .execute(conn)
+                    .await?;
+                let used: bool = diesel::select(diesel::dsl::exists(
+                    calendar_events::table.filter(calendar_events::meeting_chat.eq(chat)),
+                ))
+                .get_result(conn)
+                .await?;
+                if used {
+                    return Err(DbError::Conflict);
+                }
+            }
             diesel::insert_into(calendar_events::table)
                 .values(event)
                 .execute(conn)
@@ -470,24 +486,34 @@ pub(super) async fn settle_chat(
         .await)
 }
 
-/// Whether an event already takes place in the meeting chat `chat`.
-pub(super) async fn uses_chat(db: &Db, chat: &str) -> Result<bool, DbError> {
-    with_conn!(db, |conn| Ok(diesel::select(diesel::dsl::exists(
-        calendar_events::table.filter(calendar_events::meeting_chat.eq(chat))
-    ))
-    .get_result(conn)
-    .await?))
+/// Everyone the event `id` invites, a series with the occurrences kept under it.
+pub(super) async fn invited(db: &Db, id: &str) -> Result<Vec<String>, DbError> {
+    with_conn!(db, |conn| Ok(invited!(conn, id)))
 }
 
-/// Gives the event (and the occurrences kept under it) its meeting's chat.
-pub(super) async fn set_meeting(db: &Db, id: &str, chat: &str) -> Result<(), DbError> {
-    with_conn!(db, |conn| {
-        diesel::update(calendar_events::table.filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id))))
+/// Gives the event (and the occurrences kept under it) the meeting's chat `chat`, unless it has one by then: its
+/// row is held from the read to the write. The chat it now has.
+pub(super) async fn give_meeting(db: &Db, id: &str, chat: &str) -> Result<String, DbError> {
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            hold!(conn, id);
+            let had: Option<String> = calendar_events::table
+                .find(id)
+                .select(calendar_events::meeting_chat)
+                .first(conn)
+                .await?;
+            if let Some(had) = had {
+                return Ok(had);
+            }
+            diesel::update(
+                calendar_events::table.filter(calendar_events::id.eq(id).or(calendar_events::series_id.eq(id))),
+            )
             .set(calendar_events::meeting_chat.eq(chat))
             .execute(conn)
             .await?;
-    });
-    Ok(())
+            Ok(chat.to_owned())
+        })
+        .await)
 }
 
 /// Remembers the message that told the event (and the occurrences kept under it).
@@ -697,7 +723,7 @@ mod tests {
         };
         assert!(keep_own_row(&db, &other).await.unwrap());
         assert!(event(&db, &other.id, &bert).await.unwrap().unwrap().1.is_some());
-        assert_eq!(invited_under(&db, &series.id).await.unwrap(), [bert]);
+        assert_eq!(super::invited(&db, &series.id).await.unwrap(), [bert]);
     }
 
     /// An attendee read an occurrence of a live series; the organizer cancelled the series; the attendee's answer
@@ -821,8 +847,28 @@ mod tests {
         assert_eq!(start_of("series.20000").await, Some(8000));
     }
 
-    async fn invited_under(db: &Db, id: &str) -> Result<Vec<String>, DbError> {
-        with_conn!(db, |conn| Ok(invited!(conn, id)))
+    /// Of two events that name one meeting's chat, the second isn't kept.
+    #[tokio::test]
+    async fn a_meeting_is_taken_by_one_event_only() {
+        const CHAT: &str = "19:meeting_taken@thread.v2";
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("calendar.sqlite").display());
+        let db = Db::connect(&url, 1).await.unwrap();
+        db.migrate().await.unwrap();
+        let ada = account(&db, "ada@own.test").await;
+        let of = |id: &str, chat: Option<&str>| Event {
+            id: id.into(),
+            meeting_chat: chat.map(str::to_owned),
+            ..series(&ada)
+        };
+        insert(&db, &of("first", Some(CHAT)), &[]).await.unwrap();
+        let second = insert(&db, &of("second", Some(CHAT)), &[]).await;
+        assert!(matches!(second, Err(DbError::Conflict)), "{second:?}");
+        assert!(event(&db, "second", &ada).await.unwrap().is_none());
+        insert(&db, &of("third", None), &[]).await.unwrap();
+        insert(&db, &of("fourth", Some("19:meeting_other@thread.v2")), &[])
+            .await
+            .unwrap();
     }
 
     async fn chat_of(db: &Db, id: &str, creator: &str) -> Result<(), DbError> {
@@ -939,6 +985,6 @@ mod tests {
             .unwrap();
         assert_eq!(gone, only_cora);
         assert!(event(&db, &friday.id, &bert).await.unwrap().is_none());
-        assert_eq!(invited_under(&db, &series.id).await.unwrap(), only_bert);
+        assert_eq!(super::invited(&db, &series.id).await.unwrap(), only_bert);
     }
 }

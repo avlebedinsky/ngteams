@@ -19,6 +19,7 @@ use super::wire::{self, Shown};
 use super::{Answer, Error, Found, Me, Params, body, book, invite, meeting};
 use crate::app::App;
 use crate::chatsvc::service;
+use crate::db::DbError;
 use crate::db::users::{self, User};
 
 /// What a creation or a change asks for, checked.
@@ -50,13 +51,14 @@ pub(super) async fn account(app: &App, id: &str) -> Answer<User> {
     users::by_id(&app.db, id).await?.ok_or(Error::FORBIDDEN)
 }
 
-/// The meeting the form made for the event it now saves: the caller's own, of no event yet.
+/// The meeting the form made for the event it now saves: the caller's own. Whether an event has it already is
+/// checked as the event is written ([`repo::insert`]).
 async fn claimed(app: &App, me: &str, made: &Value) -> Answer<String> {
     let chat = made["groupContext"]["threadId"].as_str().ok_or(Error::BAD_REQUEST)?;
     let own = meeting::of_chat(&app.db, chat)
         .await?
         .is_some_and(|meeting| meeting.organizer_id == me && meeting.kind == "Scheduled");
-    if !own || repo::uses_chat(&app.db, chat).await? {
+    if !own {
         return Err(Error::BAD_REQUEST);
     }
     Ok(chat.to_owned())
@@ -132,7 +134,10 @@ pub(super) async fn create(
         body: Value::Object(asked.draft.body).to_string(),
         version: at,
     };
-    repo::insert(&app.db, &event, &invitations(&event.id, &wanted)).await?;
+    match repo::insert(&app.db, &event, &invitations(&event.id, &wanted)).await {
+        Err(DbError::Conflict) => return Err(Error::BAD_REQUEST),
+        written => written?,
+    }
     tell(&app, &mut event, &organizer, &wanted, &[]).await?;
     activity::tell(&app, &ids(&wanted), Change::Created, &event, &organizer).await?;
     let book = book(&app, &[&event]).await?;
@@ -198,19 +203,47 @@ pub(super) async fn update(
 }
 
 /// One occurrence changed: a new time asks its people again; whoever it adds joins the series' chat, and whoever
-/// it was the last invitation of leaves it; the series' own message stays the series'.
+/// it was the last invitation of leaves it; the series' own message stays the series'. A change to a Teams meeting
+/// gives the series its meeting, since a meeting's chat is the series'.
 async fn one_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -> Answer<()> {
     let wanted = asked.wanted();
-    let (row, moved) = occurrence_changed(app, found, asked.draft).await?;
+    let online = asked.online;
+    let (mut row, moved) = occurrence_changed(app, found, asked.draft).await?;
     let series = row.series_id.clone().unwrap_or_else(|| row.id.clone());
     let gone = repo::sync_attendees(&app.db, &series, &row.id, &wanted, moved).await?;
-    if let Some(chat) = &row.meeting_chat
+    if online && row.meeting_chat.is_none() {
+        row.meeting_chat = series_meeting(app, &series, organizer, &gone).await?;
+    } else if let Some(chat) = &row.meeting_chat
         && repo::settle_chat(&app.db, &series, chat, &ids(&wanted), &gone).await?
     {
         service::announce(app, chat, organizer).await?;
     }
     activity::tell(app, &ids(&wanted), Change::Updated, &row, organizer).await?;
     Ok(())
+}
+
+/// Gives the series `id` a meeting of its own, for a change of one of its occurrences to a Teams meeting: its chat
+/// holds everyone the series and its occurrences invite (and not `gone`), and its message names the series. A
+/// series that has a meeting by then keeps that one. The meeting's chat.
+async fn series_meeting(app: &App, id: &str, organizer: &User, gone: &[String]) -> Answer<Option<String>> {
+    let Some((mut series, _)) = repo::event(&app.db, id, &organizer.id).await? else {
+        return Ok(None);
+    };
+    let fields: Value = serde_json::from_str(&series.body).unwrap_or_default();
+    let made = meeting::make(app, &organizer.id, "Scheduled", fields["subject"].as_str()).await?;
+    let chat = repo::give_meeting(&app.db, id, &made.chat_id).await?;
+    let invited: Vec<(String, bool)> = repo::invited(&app.db, id)
+        .await?
+        .into_iter()
+        .map(|user| (user, false))
+        .collect();
+    if chat == made.chat_id {
+        series.meeting_chat = Some(chat.clone());
+        tell(app, &mut series, organizer, &invited, gone).await?;
+    } else if repo::settle_chat(&app.db, id, &chat, &ids(&invited), gone).await? {
+        service::announce(app, &chat, organizer).await?;
+    }
+    Ok(Some(chat))
 }
 
 /// An event or a whole series changed: its invitations follow, a new time asks everyone again, a change to a
@@ -224,8 +257,7 @@ async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -
     if online && row.meeting_chat.is_none() {
         let fields: Value = serde_json::from_str(&row.body).unwrap_or_default();
         let made = meeting::make(app, &organizer.id, "Scheduled", fields["subject"].as_str()).await?;
-        repo::set_meeting(&app.db, &row.id, &made.chat_id).await?;
-        row.meeting_chat = Some(made.chat_id);
+        row.meeting_chat = Some(repo::give_meeting(&app.db, &row.id, &made.chat_id).await?);
     }
     let before: Vec<String> = before.into_iter().map(|(attendee, _)| attendee.user_id).collect();
     let (kept, new): (Vec<String>, Vec<String>) = ids(&wanted).into_iter().partition(|id| before.contains(id));
