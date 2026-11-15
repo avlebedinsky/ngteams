@@ -56,13 +56,15 @@ use crate::chatsvc::call_events::{self, Part};
 use crate::db::{DbError, users};
 use crate::trouter::Stack;
 use repo::Key;
-use state::{At, Call, Delivery, Kind, Out, Outcome, Refusal, Seat};
+use state::{At, Call, Delivery, Kind, Out, Outcome, Phase, Refusal, Seat};
 use wire::Links;
 
 /// How long an ended call's row is kept, in seconds: a late request of it is answered as gone.
 const KEPT_AFTER_END: i64 = 300;
 /// How often a node looks for calls that are due.
 const SWEEP: Duration = Duration::from_millis(500);
+/// How many sweeps go by between two looks at the group calls' media nodes.
+const SWEEPS_PER_MEDIA_LOOK: u32 = 4;
 /// How many due calls one look takes.
 const SWEEP_BATCH: i64 = 64;
 /// How often a step is tried again when another node moved the call meanwhile.
@@ -344,12 +346,70 @@ async fn step_any<T>(
 pub async fn keep_sweeping(app: Arc<App>) {
     let mut every = tokio::time::interval(SWEEP);
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
+    for round in 0_u32.. {
         every.tick().await;
         if let Err(error) = sweep(&app).await {
             tracing::warn!(%error, "the calls' sweep failed");
         }
+        if round % SWEEPS_PER_MEDIA_LOOK == 0
+            && let Err(error) = sweep_media(&app).await
+        {
+            tracing::warn!(%error, "the group calls' media nodes weren't looked at");
+        }
     }
+}
+
+/// One look at the group calls' media nodes: a call whose node is gone (no heartbeat, or another life) ends for
+/// everyone. A node that can't be judged now is looked at again later.
+///
+/// # Errors
+/// A database failure.
+pub async fn sweep_media(app: &App) -> Result<(), DbError> {
+    let Some(nodes) = app.mixers.get() else {
+        return Ok(());
+    };
+    for kept in repo::open_groups(&app.db).await? {
+        let Some(home) = &kept.call.media else { continue };
+        if !matches!(nodes.alive(home).await, Ok(false)) {
+            continue;
+        }
+        tracing::info!(call = %kept.call.id, node = %home.node, "a group call's media node is gone: the call ends");
+        let ended = step_any(
+            app,
+            Key::Id(&kept.call.id),
+            |call, at, out| Ok(call.media_gone(at, out)),
+        )
+        .await;
+        if let Err(Failure::Database(error)) = ended {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// The media node lost the leg `leg` of the call `call`: its party is taken out of the call (408 at its endpoint),
+/// and the others get the roster.
+pub(crate) async fn leg_lost(app: &App, call: &str, leg: &str) {
+    let taken = step_any(app, Key::Id(call), |call, at, out| {
+        if let Some(seat) = call.seat_of_leg(leg) {
+            call.media_lost(seat, at, out);
+        }
+        Ok(())
+    })
+    .await;
+    match taken {
+        Ok(()) | Err(Failure::Refused(_)) => {}
+        Err(error) => tracing::warn!(?error, "a party whose media was lost wasn't taken out of its call"),
+    }
+}
+
+/// Whether the media node at `home` still has a use for the room of the call `call`: the call runs, in that room.
+///
+/// # Errors
+/// A database failure.
+pub(crate) async fn room_wanted(app: &App, call: &str, home: &MediaHome) -> Result<bool, DbError> {
+    let kept = repo::find(&app.db, Key::Id(call)).await?;
+    Ok(kept.is_some_and(|kept| kept.call.phase != Phase::Ended && kept.call.media.as_ref() == Some(home)))
 }
 
 /// One look at the calls that are due: a ring nobody answered ends, a call without keep-alives is given up, an

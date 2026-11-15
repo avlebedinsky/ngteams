@@ -390,7 +390,7 @@ query, under that origin's `/flightproxy/api/v2/ep/`. Both typed construction an
 on that origin; cloud-aware calendar, thread, invitation and call-post readers reject foreign meeting/controller
 links. Microsoft constructors and readers retain their default URLs and wire shapes.
 
-The own server serves 1:1 calls on these paths and `/trap/tokens`, and a group chat's call (its start, `attach`, `accept`, decline, `leave`, a member's join or roster-only subscription to the conversation, `add`, `renegotiate`) through a media node; with none installed a group start is answered `501` ([server.md](../server.md#calls)). Its
+The own server serves 1:1 calls on these paths and `/trap/tokens`, and a group chat's call (its start, `attach`, `accept`, decline, `leave`, a member's join or roster-only subscription to the conversation, `add`, `renegotiate`) through its own media node (`serve --role all|media`), which mixes the parties' audio (video lines answered rejected); with no media node installed a group start is answered `501`, with none live `503` ([server.md](../server.md#group-calls)). Its
 `/trap/tokens` answer also names its relay (`urls`, `turn:`/`turns:` URLs): an own-server account's media goes
 through those servers (`teams_core::Relay::Teams` reads them, `teams_media::relay::RelayServer::parse`), never
 Teams' relay host.

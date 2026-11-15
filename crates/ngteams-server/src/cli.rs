@@ -34,7 +34,12 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Serves until SIGINT or SIGTERM.
-    Serve,
+    Serve {
+        /// What the node serves: the public API and a media node (`all`), the public API only (`api`), or a media
+        /// node only (`media`).
+        #[arg(long, value_enum, default_value_t = crate::mixer::Role::All, env = "NGTEAMS_SERVER_ROLE")]
+        role: crate::mixer::Role,
+    },
     /// Brings the database schema up to date, then exits.
     Migrate,
     /// Accounts.
@@ -158,6 +163,8 @@ pub enum CliError {
     #[error(transparent)]
     Storage(#[from] crate::storage::StorageError),
     #[error(transparent)]
+    Mixer(#[from] crate::mixer::MixerError),
+    #[error(transparent)]
     Profile(#[from] crate::people::ProfileError),
     #[error(transparent)]
     Picture(#[from] crate::people::PictureError),
@@ -236,7 +243,7 @@ pub async fn run(
 ) -> Result<(), CliError> {
     let config = Config::load(cli.config.as_deref())?;
     match cli.command {
-        Command::Serve => serve(config, shutdown).await,
+        Command::Serve { role } => serve(config, role, shutdown).await,
         Command::Migrate => {
             crate::db::Db::connect(&config.database_url, 1).await?;
             Ok(())
@@ -268,21 +275,53 @@ pub async fn run(
 /// How long a stopping node waits for store clears still running: a store out of reach gives up within it.
 const CLEARING: std::time::Duration = std::time::Duration::from_secs(10);
 
-async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), CliError> {
-    let listener = Listener::bind(config.listen)?;
+async fn serve(
+    config: Config,
+    role: crate::mixer::Role,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), CliError> {
+    let listener = role.serves_api().then(|| Listener::bind(config.listen)).transpose()?;
     let app = App::start(config).await?;
-    let tls = app.config.tls.clone();
-    crate::admin::setup::announce(&app).await;
-    tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
+    let media = if role.serves_media() {
+        Some(crate::mixer::MediaNode::start(&app).await?)
+    } else {
+        None
+    };
+    // a media node takes a lost party out of its call through the same steps, its legs dropped through this
+    crate::mixer::install(&app, media.as_ref())?;
     let maintenance = tokio::spawn(app::maintain(std::sync::Arc::clone(&app)));
-    let sweeper = tokio::spawn(crate::calling::keep_sweeping(std::sync::Arc::clone(&app)));
-    let shutdown = app::closing(std::sync::Arc::clone(&app), shutdown);
-    let served = listener
-        .serve(app::router(std::sync::Arc::clone(&app)), tls, shutdown)
-        .await;
+    let served = match listener {
+        Some(listener) => serve_api(&app, listener, shutdown).await,
+        None => {
+            shutdown.await;
+            Ok(())
+        }
+    };
     maintenance.abort();
-    sweeper.abort();
+    if let Some(media) = media {
+        media
+            .drain(std::time::Duration::from_secs(app.config.mixer.drain_timeout))
+            .await;
+    }
     app.cleared(CLEARING).await;
+    served
+}
+
+/// The public API until `shutdown`.
+async fn serve_api(
+    app: &std::sync::Arc<App>,
+    listener: Listener,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), CliError> {
+    let tls = app.config.tls.clone();
+    crate::admin::setup::announce(app).await;
+    tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
+    let sweeper = tokio::spawn(crate::calling::keep_sweeping(std::sync::Arc::clone(app)));
+    let shutdown = app::closing(std::sync::Arc::clone(app), shutdown);
+    let served = listener
+        .serve(app::router(std::sync::Arc::clone(app)), tls, shutdown)
+        .await;
+    sweeper.abort();
     Ok(served?)
 }
 

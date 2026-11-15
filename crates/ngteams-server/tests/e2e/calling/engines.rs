@@ -30,25 +30,25 @@ use super::client::identity;
 use crate::support::{TestServer, backends, redis_url};
 use crate::trouter::{Account, ORIGIN, options};
 
-const WAIT: Duration = Duration::from_secs(40);
+pub(super) const WAIT: Duration = Duration::from_secs(40);
 /// How long the media runs once connected, before what was heard is judged.
-const TALK: Duration = Duration::from_secs(2);
+pub(super) const TALK: Duration = Duration::from_secs(2);
 /// The far tone is heard at least this loud in a recording.
-const HEARD: f32 = 0.25;
+pub(super) const HEARD: f32 = 0.25;
 /// Frames a side must have decoded of the other's test pattern.
 const FRAMES: u64 = 20;
-const A_TONE: Tone = Tone {
+pub(super) const A_TONE: Tone = Tone {
     hz: 440.0,
     amplitude: 0.5,
 };
-const B_TONE: Tone = Tone {
+pub(super) const B_TONE: Tone = Tone {
     hz: 660.0,
     amplitude: 0.5,
 };
 
 /// What an engine's calls showed: the far end's decoded frames and its own camera's.
 #[derive(Clone, Default)]
-struct Shown {
+pub(super) struct Shown {
     remote: FrameCounter,
     preview: FrameCounter,
 }
@@ -64,11 +64,11 @@ impl VideoOutput for Shown {
 }
 
 /// One account's engine, its calls' media a tone in and a recording out.
-struct Engine {
-    mri: String,
-    account: Account,
-    handle: EngineHandle,
-    recording: PathBuf,
+pub(super) struct Engine {
+    pub(super) mri: String,
+    pub(super) account: Account,
+    pub(super) handle: EngineHandle,
+    pub(super) recording: PathBuf,
     video: Shown,
     _store: tempfile::TempDir,
 }
@@ -76,7 +76,7 @@ struct Engine {
 impl Engine {
     /// The account's engine: its sockets on `socket`, its requests through `http`, its media through the relay its
     /// server names.
-    async fn start(
+    pub(super) async fn start(
         account: &Account,
         name: &str,
         (socket, http): (&TestServer, &TestServer),
@@ -163,7 +163,7 @@ impl Engine {
         }
     }
 
-    async fn next<T>(&mut self, mut pick: impl FnMut(&Event) -> Option<T>) -> T {
+    pub(super) async fn next<T>(&mut self, mut pick: impl FnMut(&Event) -> Option<T>) -> T {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             let event = tokio::time::timeout_at(deadline, self.handle.next_event())
@@ -178,7 +178,7 @@ impl Engine {
 
     /// Asks `action`, again while the call can't take it yet (a renegotiation still settling), as a user's second
     /// press would.
-    async fn call(&self, action: CallAction) -> CallId {
+    pub(super) async fn call(&self, action: CallAction) -> CallId {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             match self.handle.requests().call(action.clone()).await {
@@ -192,7 +192,7 @@ impl Engine {
         }
     }
 
-    async fn status(&mut self, call: CallId, wanted: &CallStatus) {
+    pub(super) async fn status(&mut self, call: CallId, wanted: &CallStatus) {
         self.next(|event| match event {
             Event::Call { call: of, status } if *of == call && status == wanted => Some(()),
             Event::Call {
@@ -204,7 +204,7 @@ impl Engine {
         .await;
     }
 
-    async fn ended(&mut self, call: CallId) -> End {
+    pub(super) async fn ended(&mut self, call: CallId) -> End {
         self.next(|event| match event {
             Event::Call {
                 call: of,
@@ -215,7 +215,7 @@ impl Engine {
         .await
     }
 
-    async fn incoming(&mut self) -> IncomingCall {
+    pub(super) async fn incoming(&mut self) -> IncomingCall {
         self.next(|event| match event {
             Event::IncomingCall(incoming) => Some(incoming.clone()),
             _ => None,
@@ -223,7 +223,7 @@ impl Engine {
         .await
     }
 
-    async fn view(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
+    pub(super) async fn view(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
         self.next(|event| match event {
             Event::CallParticipants { call: of, view } if *of == call && wanted(view) => Some(view.clone()),
             _ => None,
@@ -240,7 +240,7 @@ impl Engine {
         .await
     }
 
-    async fn shut_down(self) {
+    pub(super) async fn shut_down(self) {
         tokio::task::spawn_blocking(move || self.handle.shutdown())
             .await
             .unwrap();
@@ -248,7 +248,7 @@ impl Engine {
 }
 
 /// The level of `tone` in the last `stretch` of the recording at `path`, leaving out its last 200 ms.
-fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
+pub(super) fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
     let samples = wav::read(path).unwrap();
     let at = |span: Duration| usize::try_from(span.as_millis()).unwrap() * 48;
     let end = samples.len().saturating_sub(at(Duration::from_millis(200)));
@@ -262,7 +262,7 @@ fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
     level_at(&samples[start..end], tone.hz)
 }
 
-async fn wait_until(what: &str, done: impl Fn() -> bool) {
+pub(super) async fn wait_until(what: &str, done: impl Fn() -> bool) {
     let deadline = tokio::time::Instant::now() + WAIT;
     while !done() {
         assert!(tokio::time::Instant::now() < deadline, "{what} didn't happen in time");
@@ -272,7 +272,7 @@ async fn wait_until(what: &str, done: impl Fn() -> bool) {
 
 /// The TURN relay the server names, and the credentials it hands out: the loopback test server at `relay` and its one
 /// user.
-fn relayed(relay: std::net::SocketAddr) -> impl FnOnce(&mut ngteams_server::config::Config) {
+pub(super) fn relayed(relay: std::net::SocketAddr) -> impl FnOnce(&mut ngteams_server::config::Config) {
     move |config| {
         config.public_origin = url::Url::parse(ORIGIN).unwrap();
         config.calling.turn.urls = vec![format!("turn:{relay}?transport=udp")];

@@ -38,6 +38,7 @@ jsonwebtoken.workspace = true
 libsqlite3-sys.workspace = true
 mime_guess.workspace = true
 object_store.workspace = true
+opus.workspace = true
 percent-encoding.workspace = true
 redis.workspace = true
 reqwest.workspace = true
@@ -48,6 +49,8 @@ scraper = { workspace = true, features = ["deterministic"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+str0m.workspace = true
+teams-sdp.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite.workspace = true

@@ -2,8 +2,8 @@
 //! answers and drops its legs there. Signaling records only what the node answered, so each operation calls the node
 //! first (a leg's requests repeat safely by its id) and then makes the step that records it.
 //!
-//! Nothing in the server implements it yet: [`Mixers`] stays empty and a group call's start is answered 501 until the
-//! media node serves. The e2e harness installs a node of its own that answers fixed SDP.
+//! The server's own is [`crate::mixer::HttpNodes`], installed when the node serves (`serve --role`); until one is
+//! installed ([`Mixers`]) a group call's start is answered 501.
 
 use std::fmt::Debug;
 use std::sync::{Arc, OnceLock};
@@ -77,6 +77,11 @@ pub trait MediaNodes: Send + Sync + Debug {
 
     /// The call ended.
     async fn delete_room(&self, home: &MediaHome, call: &str) -> Result<(), MediaError>;
+
+    /// Whether the node `home` names still runs in that life: a call whose node is gone ends.
+    async fn alive(&self, _home: &MediaHome) -> Result<bool, MediaError> {
+        Ok(true)
+    }
 }
 
 /// The media nodes this node reaches, once installed (at most once): none, and a group call's start isn't served.

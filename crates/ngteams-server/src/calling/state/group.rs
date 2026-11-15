@@ -170,7 +170,6 @@ impl Call {
     }
 
     /// The media node lost the party's media: it is taken out of the call, as a leave would, and its endpoint is told.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the media node (task 186b) makes this step"))]
     pub(crate) fn media_lost(&mut self, seat: Seat, at: At<'_>, out: &mut Out) {
         if self.phase == Phase::Ended || self.party(seat).status != Status::InCall {
             return;
@@ -179,6 +178,27 @@ impl Call {
         out.call_back(at.origin, self.party(seat).link("end"), end);
         let leave = serde_json::json!({});
         self.group_leave(seat, &leave, at, out);
+    }
+
+    /// The seat whose leg (or a leg it was reserved over) is `leg`.
+    pub(crate) fn seat_of_leg(&self, leg: &str) -> Option<Seat> {
+        self.parties
+            .iter()
+            .position(|party| party.leg.as_ref().is_some_and(|held| held.ids().any(|id| id == leg)))
+            .map(Seat)
+    }
+
+    /// The call's media node is gone: the call ends for everyone in it (503) and every ring ends; its room went with
+    /// the node, so nothing is dropped there. `false` when nothing changed.
+    pub(crate) fn media_gone(&mut self, at: At<'_>, out: &mut Out) -> bool {
+        if self.phase == Phase::Ended || self.kind != Kind::Group {
+            return false;
+        }
+        let end = wire::failure(503, "The call's media node is gone.");
+        self.end_group(at, &end, out);
+        out.released.clear();
+        out.room_over = false;
+        true
     }
 
     /// The party leaves the call: out of the roster, its leg let go.
@@ -841,6 +861,26 @@ mod tests {
         let mut out = Out::default();
         call.media_lost(Seat(2), at(1_011_000), &mut out);
         assert!(out.deliveries.is_empty(), "c isn't in the call");
+    }
+
+    #[test]
+    fn a_gone_media_node_ends_the_call_for_everyone_and_drops_nothing_there() {
+        let (mut call, _) = started();
+        accepted(&mut call, 1, "B", 1_005_000);
+        assert_eq!(call.seat_of_leg("leg1"), Some(Seat(1)));
+        assert_eq!(call.seat_of_leg("nobody's"), None);
+        let mut out = Out::default();
+        assert!(call.media_gone(at(1_020_000), &mut out));
+        assert_eq!(call.phase, Phase::Ended);
+        assert!(out.ended.is_some());
+        assert!(out.released.is_empty() && !out.room_over);
+        let ends: Vec<i64> = out
+            .deliveries
+            .iter()
+            .filter_map(|delivery| delivery.body.pointer("/callEnd/code")?.as_i64())
+            .collect();
+        assert!(ends.contains(&503) && ends.contains(&487), "{ends:?}");
+        assert!(!call.media_gone(at(1_021_000), &mut Out::default()));
     }
 
     #[test]

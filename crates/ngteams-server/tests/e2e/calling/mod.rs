@@ -4,6 +4,7 @@
 
 mod client;
 mod engines;
+mod group_media;
 mod group_signaling;
 mod held_socket;
 mod history;

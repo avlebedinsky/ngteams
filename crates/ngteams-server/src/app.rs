@@ -56,6 +56,8 @@ pub struct App {
     pub mixers: crate::calling::Mixers,
     /// Posts per workflow webhook.
     pub workflow_limit: crate::workflows::Limiter,
+    /// The node's Redis command connection, with Redis.
+    pub redis: Option<crate::fanout::keyspace::Shared>,
 }
 
 /// Why a node can't start.
@@ -132,7 +134,7 @@ impl App {
             crate::trouter::unkept,
         ));
         let presence =
-            crate::presence::Presence::start(shared, Arc::clone(&fanout), db.clone(), config.presence.clone());
+            crate::presence::Presence::start(shared.clone(), Arc::clone(&fanout), db.clone(), config.presence.clone());
         let storage = Arc::new(ObjectStorage::open_with(
             &config.storage_url,
             &config.storage_options,
@@ -155,6 +157,7 @@ impl App {
             clearing: crate::media::Clearing::default(),
             mixers: crate::calling::Mixers::default(),
             workflow_limit,
+            redis: shared,
         });
         Ok(app)
     }

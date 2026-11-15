@@ -42,6 +42,8 @@ pub fn answer() -> MediaContent {
 }
 
 enum Command {
+    /// The offer the client makes from now on, instead of [`offer`].
+    Offer(MediaContent),
     Place(Placement),
     /// Joins the chat's call at the conversation its events named.
     Join(String, CallLink),
@@ -207,6 +209,7 @@ impl Client {
             told,
             held,
             invitations: Arc::clone(&invitations),
+            offer: None,
         };
         let task = tokio::spawn(driver.run(trouter.spawn(), commanded, ready));
         tokio::time::timeout(WAIT, up)
@@ -245,6 +248,11 @@ impl Client {
 
     fn command(&self, command: Command) {
         self.commands.send(command).unwrap();
+    }
+
+    /// Makes `offer` the client's offer from now on (a start's, a join's, a renegotiation's).
+    pub fn offer_with(&self, offer: MediaContent) {
+        self.command(Command::Offer(offer));
     }
 
     /// Calls `callee` (a 1:1 call).
@@ -381,6 +389,7 @@ struct Driver {
     /// How many more responses are held back.
     held: usize,
     invitations: Arc<AtomicUsize>,
+    offer: Option<MediaContent>,
 }
 
 impl Driver {
@@ -432,13 +441,18 @@ impl Driver {
 
     fn act(&mut self, command: Command) {
         let now = Instant::now();
+        let offer = self.offer.clone().unwrap_or_else(offer);
         match command {
-            Command::Place(placement) => self.calls.place(&placement, offer(), now).map(drop),
+            Command::Offer(offer) => {
+                self.offer = Some(offer);
+                Ok(())
+            }
+            Command::Place(placement) => self.calls.place(&placement, offer, now).map(drop),
             Command::Add(call, invitee, chat) => self.calls.add(call, &invitee, &chat),
-            Command::Renegotiate(call) => self.calls.renegotiate(call, &offer()),
+            Command::Renegotiate(call) => self.calls.renegotiate(call, &offer),
             Command::Join(chat, conversation) => {
                 self.calls.posted_running(&chat, conversation);
-                self.calls.join(&chat, offer(), now).map(drop)
+                self.calls.join(&chat, offer, now).map(drop)
             }
             Command::Answer(call) => self.calls.answer(call, answer()),
             Command::Decline(call) => self.calls.decline(call),

@@ -71,6 +71,8 @@ pub struct Config {
     pub presence: PresenceConfig,
     pub media: MediaConfig,
     pub calling: crate::calling::config::CallingConfig,
+    /// The media node of group calls (`serve --role all|media`).
+    pub mixer: crate::mixer::config::MixerConfig,
     /// The meeting rooms the scheduling form's room finder lists (`[[rooms]]`).
     pub rooms: Vec<RoomConfig>,
     pub workflows: crate::workflows::WorkflowsConfig,
@@ -91,6 +93,7 @@ impl std::fmt::Debug for Config {
             .field("storage", &self.storage)
             .field("calling", &self.calling)
             .field("workflows", &self.workflows)
+            .field("mixer", &self.mixer)
             .finish_non_exhaustive()
     }
 }
@@ -305,6 +308,7 @@ impl Default for Config {
             presence: PresenceConfig::default(),
             media: MediaConfig::default(),
             calling: crate::calling::config::CallingConfig::default(),
+            mixer: crate::mixer::config::MixerConfig::default(),
             rooms: Vec::new(),
             workflows: crate::workflows::WorkflowsConfig::default(),
         }
@@ -364,6 +368,11 @@ pub enum ConfigError {
          or tcp), set together with a credential (calling.turn.secret, or calling.turn.username and password)"
     )]
     Relay,
+    #[error(
+        "mixer's limits and times must be above zero, mixer.dead_after above mixer.heartbeat, and \
+         mixer.internal_url an http or https URL"
+    )]
+    Mixer,
 }
 
 impl Config {
@@ -450,6 +459,9 @@ impl Config {
         }
         if !self.calling.turn.relay_usable() {
             return Err(ConfigError::Relay);
+        }
+        if !self.mixer.usable() {
+            return Err(ConfigError::Mixer);
         }
         Ok(())
     }

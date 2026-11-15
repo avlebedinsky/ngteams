@@ -9,7 +9,7 @@ tier's and the provisioning service's team routes), pictures in messages, files 
 calendar and meetings' scheduling (the middle tier's calendar routes), presence, people (short profiles, Graph's users
 and pictures, the person card), account administration (the admin API and the first-admin setup), the registrar and
 the Trouter push socket, and calls (the call controller behind `/flightproxy/api/v2/`: 1:1 calls, a group chat's
-calls' signaling, and the TURN credentials). The registrar, Trouter and the calling surface have no GTM (the client
+calls with their audio through the server's own media node, and the TURN credentials). The registrar, Trouter and the calling surface have no GTM (the client
 finds them on the origin). Other services are added one at a time. Authz names only the services the server serves,
 so the client keeps every other service off.
 
@@ -52,6 +52,12 @@ ngteams-server --config server.toml migrate
 printf '%s\n' "$PASSWORD" | ngteams-server --config server.toml user add ada@example.com --name "Ada Lovelace"
 ngteams-server --config server.toml serve
 ```
+
+`serve --role all|api|media` (or `NGTEAMS_SERVER_ROLE`) says what the node runs: `all` (the default) the public API
+and a media node for group calls in one process, a single node's deployment; `api` the public API only, its group
+calls' media on the media nodes the registry lists (needs Redis, else a group start is `503`); `media` a media node
+only, its internal API and its UDP socket ([Group calls](#group-calls)). A `media` node opens the database and the
+fan-out as any node does.
 
 Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`,
 `profile show|set|picture|remove-picture`, `media list|delete`, `setup-code`, `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
@@ -131,6 +137,15 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `workflows.max_body_bytes` | `262144` | the largest body a workflow's webhook takes: 256 KB, the limit the client's Overview names |
 | `workflows.rate_per_minute` | `60` | posts one workflow's webhook takes in a minute, across every node (counted in Redis when there is one) |
 | `workflows.runs_kept` | `100` | runs kept per workflow for its run history |
+| `mixer.udp_listen` | `0.0.0.0:3480` | the media node's one UDP socket: every group call's media goes through it |
+| `mixer.public_addrs` | the socket's address, else the host's outward one | the addresses clients' TURN relay reaches that socket at (its host candidates, each on the socket's port) |
+| `mixer.internal_listen`, `mixer.internal_url` | `127.0.0.1:0`, the listener's address | the internal API's listener (signaling → media node), on a private network; the URL the other nodes reach it at |
+| `mixer.node_id` | a new one each start | the node's id in the registry |
+| `mixer.ice_lite` | `true` | the node only answers connectivity checks (it has a reachable address) |
+| `mixer.max_rooms`, `mixer.max_legs_per_room` | `1000`, `50` | over them a start, a join or an add is refused (`503`) |
+| `mixer.heartbeat`, `mixer.dead_after` | `5`, `15` | seconds between the node's heartbeats in Redis; seconds without one after which it is dead and its calls end |
+| `mixer.media_timeout`, `mixer.connect_timeout` | `20`, `30` | seconds a party's media may stay down, or take to come up after its answer, before it is taken out of the call |
+| `mixer.reconcile`, `mixer.drain_timeout` | `30`, `300` | seconds between the node's looks at its rooms' calls; seconds a stopping node serves its rooms before it ends them |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
 ## Sign-in and tokens
@@ -774,15 +789,44 @@ callee's answer in the caller's acceptance; `ngteams` takes an own-server accoun
 
 ### Group calls
 
-A start naming a group chat (`groupChat.threadId`) is a group call. Its media goes through a media node, which
-signaling reaches through `calling::MediaNodes`: the node makes a leg per party (with the party's offer it answers;
-without, it offers), takes a callee's answer and a renegotiation, and drops legs and rooms. No node is part of the
-server yet, so **a group start is answered `501`** until one is installed (`App::mixers`); the e2e tests install one
-that answers fixed SDP. Each operation asks the node first (a leg's requests repeat safely by its id) and then makes
-the step that records what the node answered; a join or an add first reserves its seat, so the source ids the node
-gets are the ones the roster names. A reservation whose leg or step fails is undone and its leg dropped: the seat
-gets back the leg its ring was offered on (also when several reservations of it overlap), and a seat made for it
-goes when no seat was made after it; otherwise it stays, without a leg and in no roster, for that account's next try.
+A start naming a group chat (`groupChat.threadId`) is a group call. Its media goes through a **media node**
+(`src/mixer/`): every party's leg goes to the node, which sends each party the mix of everyone else. Signaling
+reaches it through `calling::MediaNodes`: the node makes a leg per party (with the party's offer it answers;
+without, it offers), takes a callee's answer and a renegotiation, and drops legs and rooms. Each operation asks the
+node first (a leg's requests repeat safely by its id) and then makes the step that records what the node answered;
+a join or an add first reserves its seat, so the source ids the node gets are the ones the roster names. A
+reservation whose leg or step fails is undone and its leg dropped: the seat gets back the leg its ring was offered
+on (also when several reservations of it overlap), and a seat made for it goes when no seat was made after it;
+otherwise it stays, without a leg and in no roster, for that account's next try. With no media node to take a new
+room (`--role api` without Redis or a live node, or every node full) the start is answered `503`.
+
+**The media node** is str0m (ICE-lite, DTLS, SRTP and the data channel, on one UDP socket, `mixer.udp_listen`)
+with libopus: each party's audio is decoded into a buffer of its own (played once 60 ms are in, concealed for three
+20 ms ticks when it runs dry, trimmed back past 200 ms), and every 20 ms each party gets the sum of every other
+active party (above −50 dBFS within 200 ms), soft-clipped and encoded (32 kb/s, in-band FEC, DTX). A party is never
+sent its own voice. The control plane on the data channel answers the client's `syn` with `ack` (it sends `dsh`, takes
+nothing, so the client asks for no video source) and tells the dominant speakers (`dsh`, the audio source ids, the
+newest speaker first, at most every 300 ms and to a party once its control plane is up). Video isn't served yet:
+every video line of an offer is answered rejected. The node writes its SDP in Teams' dialect with its host
+candidates (`mixer.public_addrs`); the client is relay-only, so its media reaches the node from the TURN relay's
+address, and **coturn must be allowed to send to the node's address** (a `denied-peer-ip` covering it, or coturn's
+default refusal of loopback peers, leaves group calls without media: add `allowed-peer-ip=<node address>`).
+
+**The internal API** (`mixer.internal_listen`; on a private network, never under the public origin) takes
+`PUT|DELETE /internal/mixer/v1/rooms/<call>/legs/<leg>` (`{"sources", "offer"?}`, answered `{"answer"|"offer",
+"epoch"}`), `POST …/legs/<leg>/answer` (`{"answer"}`), `POST …/legs/<leg>/offer` (`{"offer"}`, answered
+`{"answer"}`), `GET|DELETE …/rooms/<call>`. Each request carries a bearer token the deployment's own keys signed for
+`ngteams-media` (60 s; every node reads the same keys, so there is no secret to configure) and the node life its
+call's row names (`ngteams-media-epoch`); another life's room is `410`. A renegotiation the same as the last is
+answered the same; more than 20 in a minute are `429`.
+
+**Failure**: a call's row names its node (`{node, url, epoch}`), so any signaling node reaches its room; with Redis,
+every media node beats in the registry every `mixer.heartbeat` seconds. A call whose node is gone (no heartbeat for
+`mixer.dead_after`, another life after a restart, or this process's node stopped) ends for everyone (`503` at each
+party's `end`, the chat told); a running call is never moved to another node. A party whose leg stays down for
+`mixer.media_timeout`, or doesn't connect within `mixer.connect_timeout` of its answer, is taken out of the call
+(`408` at its `end`, the others get the roster). Every `mixer.reconcile` seconds the node drops a room whose call is
+over or gone. A stopping node takes no new room and serves its rooms for `mixer.drain_timeout` at most.
 
 - **The start**: the caller must be in the chat (`403`), and only the chat's members it names ring, once each; a
   chat that doesn't exist is `404`. The caller is in the call at once: its acceptance, with the node's answer to its
@@ -815,15 +859,15 @@ goes when no seat was made after it; otherwise it stays, without a leg and in no
   one waits for that answer's acknowledgement (`491` at its `rejection` callback), for 30 s at most, as an
   acknowledgement may be lost and is never sent again. `updateMediaDescriptions` and
   `applyChannelParameters` are taken and change nothing. A group call has no hold (`403`, and no `hold` link).
-- **The roster** lists each party in the call with its main audio and main video (only taken, until the node
-  forwards video) by the source ids signaling gave it (1000, 1010, … per party). Each change goes to every party in
+- **The roster** lists each party in the call with its main audio and main video (only taken: the node doesn't
+  forward video yet) by the source ids signaling gave it (1000, 1010, … per party). Each change goes to every party in
   the call, every ringing party's ring subscription and every follower; a party that comes in gets the whole roster.
   Each calling endpoint of the others also gets `{"evt": 115 | 116, "cp": base64(gzip(JSON))}` when someone comes in
   or leaves; the client reads neither, and the shape is the protocol notes' minimum.
 - **Seats**: a group call's controller links carry the party's seat where a 1:1 call's carry `1`; a link naming
   another party's seat is `404`.
 
-Not served yet: meetings, the test call, group video and sharing (the node takes audio only), transfer, voicemail.
+Not served yet: meetings, the test call, group video and sharing (the node mixes audio only), transfer, voicemail.
 
 ### The call log
 
@@ -1163,6 +1207,11 @@ the 1:1 chat and its history stay its two people's.
   a call whose keep-alives stopped, an ended call's row five minutes later); the version check lets one of them act.
   A group call's row also names its media node's room, so any node reaches it; a step that lets a leg or the room go
   drops it on the node once the step is stored.
+- Media nodes (`serve --role media`, or the media node of `--role all`) carry the group calls' audio; add nodes for
+  more calls. A new room goes to the live node with the fewest legs that isn't stopping: with Redis the registry
+  lists them (`media:nodes`, a sorted set of node ids by their last heartbeat, and `media:node:<id>`, what reaches the
+  node and what it carries, expiring after `mixer.dead_after`); without Redis a node's only media node is its own
+  process's. A call's requests never ask Redis: they go where the call's row says.
 - Migrations take a Postgres advisory lock, so nodes starting together take turns.
 
 ## The client

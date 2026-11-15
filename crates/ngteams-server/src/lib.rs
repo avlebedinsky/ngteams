@@ -31,6 +31,7 @@ pub mod config;
 pub mod db;
 pub mod fanout;
 mod media;
+pub mod mixer;
 pub mod people;
 pub mod presence;
 pub mod registrar;

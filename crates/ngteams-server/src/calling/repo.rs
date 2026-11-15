@@ -168,6 +168,17 @@ pub(super) async fn due(db: &Db, now: i64, limit: i64) -> Result<Vec<(String, bo
     Ok(rows.into_iter().map(|(id, phase)| (id, phase == "ended")).collect())
 }
 
+/// The group calls that aren't over.
+pub(super) async fn open_groups(db: &Db) -> Result<Vec<Kept>, DbError> {
+    let rows: Vec<Row> = with_conn!(db, |conn| calls::table
+        .filter(calls::group_chat.is_not_null())
+        .filter(calls::phase.ne("ended"))
+        .select(Row::as_select())
+        .load(conn)
+        .await?);
+    Ok(rows.into_iter().filter_map(Row::kept).collect())
+}
+
 pub(super) async fn delete(db: &Db, id: &str) -> Result<(), DbError> {
     with_conn!(db, |conn| {
         diesel::delete(calls::table.find(id)).execute(conn).await?;
