@@ -165,9 +165,13 @@ async fn a_disabled_account_or_a_reset_password_signs_the_session_out() {
         ngteams_server::admin::reset_password(&server.app.db, &*server.app.fanout, "bob@own.test", "a new password")
             .await
             .unwrap();
-        for session in [&ada, &bob] {
+        // the account turned off is told so (AADSTS50057, as Entra answers its refresh), the reset one is not
+        for (session, disabled) in [(&ada, true), (&bob, false)] {
             let error = session.access_token(IC3_AUDIENCE).await.unwrap_err();
-            assert!(matches!(error, TokenError::InvalidGrant(_)), "{backend:?}: {error:?}");
+            let TokenError::InvalidGrant(refusal) = &error else {
+                panic!("{backend:?}: {error:?}");
+            };
+            assert_eq!(refusal.codes.contains(&50_057), disabled, "{backend:?}: {refusal:?}");
         }
         let (status, answer) = server.password_grant(UPN, PASSWORD, &Scope::spaces()).await;
         assert_eq!((status, answer["error_codes"][0].as_u64()), (400, Some(50057)));

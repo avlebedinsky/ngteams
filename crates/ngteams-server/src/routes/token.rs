@@ -2,7 +2,8 @@
 //! password grant (an own-server sign-in) and the refresh grant (a token per audience). Answers and errors take
 //! Entra's JSON shapes, so the client's `TokenClient` reads them unchanged: a refused grant is `invalid_grant` with an
 //! `AADSTS` code, a held-off account 429 with `Retry-After`. An account whose password must be changed first gets
-//! `invalid_grant` with `AADSTS50055` and `suberror: user_password_expired` for its right password.
+//! `invalid_grant` with `AADSTS50055` and `suberror: user_password_expired` for its right password. A refresh token of
+//! an account turned off gets `AADSTS50057` (not `70000`), so the client can say why it was signed out.
 //!
 //! Refresh tokens are single use: each grant issues the next one of the sign-in's family. One presented again within
 //! the grace period (a client retrying after a lost answer) still works; later, it revokes the family.
@@ -218,7 +219,17 @@ async fn refresh_grant(app: &App, presented: &str, client_id: &str) -> Result<(U
     let row = refresh::by_hash(&app.db, &digest(presented))
         .await?
         .ok_or_else(Refusal::refresh)?;
-    if row.revoked_at.is_some() || row.client_id != client_id {
+    if row.client_id != client_id {
+        return Err(Refusal::refresh());
+    }
+    // an account turned off is told so, as Entra tells it, though turning it off revoked its tokens too
+    if users::by_id(&app.db, &row.user_id)
+        .await?
+        .is_none_or(|user| user.disabled)
+    {
+        return Err(Refusal::disabled());
+    }
+    if row.revoked_at.is_some() {
         return Err(Refusal::refresh());
     }
     if row.expires_at <= now() {

@@ -133,8 +133,8 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
   `grant_type=refresh_token` for every later token, each with `client_id` and one resource's `scope`
   (`<resource>/.default`, beside `openid profile offline_access`). The token's `aud` is that resource. The answer
   and the errors have Entra's shapes (`invalid_grant` with `AADSTS50126` for a wrong password, `50057` for a
-  disabled account, `70000` for a refresh token that is not valid), so the client's `TokenClient` and `Session` run
-  unchanged with the server as authority.
+  disabled account's password or refresh token, `70000` for a refresh token that is not valid), so the client's
+  `TokenClient` and `Session` run unchanged with the server as authority.
 - Refresh tokens are single use. Each grant returns the next one of the same sign-in. One presented again after
   `tokens.reuse_grace` revokes that whole sign-in.
 - Password attempts are reserved per account before verification (in Redis when configured). Success clears the
