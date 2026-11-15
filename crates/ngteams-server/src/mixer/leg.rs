@@ -161,7 +161,11 @@ impl Leg {
     /// A new leg with `sources`: the answer to `offer` (a caller's or a joiner's), or without one the mixer's offer
     /// (to a callee).
     pub(crate) fn new(making: &Making, sources: Sources, offer: Option<&Sdp>, now: Instant) -> Result<Self, LegError> {
-        let mut rtc = RtcConfig::new().set_ice_lite(making.ice_lite).build(now);
+        // where the mixer offers it checks too: its SDP can't say it is lite (the client reads no `a=ice-lite`), and
+        // two controlled agents never nominate a pair
+        let mut rtc = RtcConfig::new()
+            .set_ice_lite(making.ice_lite && offer.is_some())
+            .build(now);
         for address in &making.candidates {
             let candidate = Candidate::host(*address, "udp").map_err(|error| LegError::Sdp(error.to_string()))?;
             rtc.add_local_candidate(candidate);

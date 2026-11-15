@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_call::{
@@ -59,6 +60,8 @@ enum Command {
 /// One native client of an account.
 pub struct Client {
     pub mri: String,
+    /// Every delivery at the endpoint's root that names an `evt`, as it came (the call machine drops 115 and 116).
+    roots: Arc<Mutex<Vec<Value>>>,
     commands: mpsc::UnboundedSender<Command>,
     events: mpsc::UnboundedReceiver<CallEvent>,
     /// Who else is in the call, as last told (whatever the test waited for then).
@@ -197,6 +200,7 @@ impl Client {
         let (ready, up) = tokio::sync::oneshot::channel();
         let invitations = Arc::new(AtomicUsize::new(0));
         let progress = Gate::default();
+        let roots = Arc::new(Mutex::new(Vec::new()));
         let driver = Driver {
             calls: Calls::for_cloud(identity, cloud),
             sink: Sink {
@@ -210,6 +214,7 @@ impl Client {
             held,
             invitations: Arc::clone(&invitations),
             offer: None,
+            roots: Arc::clone(&roots),
         };
         let task = tokio::spawn(driver.run(trouter.spawn(), commanded, ready));
         tokio::time::timeout(WAIT, up)
@@ -218,6 +223,7 @@ impl Client {
             .expect("the client stopped");
         Self {
             mri: account.mri.clone(),
+            roots,
             commands,
             events,
             participants: Vec::new(),
@@ -248,6 +254,11 @@ impl Client {
 
     fn command(&self, command: Command) {
         self.commands.send(command).unwrap();
+    }
+
+    /// The deliveries at the endpoint's root so far that name an `evt`.
+    pub fn root_deliveries(&self) -> Vec<Value> {
+        self.roots.lock().unwrap().clone()
     }
 
     /// Makes `offer` the client's offer from now on (a start's, a join's, a renegotiation's).
@@ -390,6 +401,7 @@ struct Driver {
     held: usize,
     invitations: Arc<AtomicUsize>,
     offer: Option<MediaContent>,
+    roots: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Driver {
@@ -424,6 +436,11 @@ impl Driver {
                 }
             }
             PushEvent::Call(delivery) => {
+                if let Ok(body) = serde_json::from_slice::<Value>(&delivery.delivery.body)
+                    && body.get("evt").is_some()
+                {
+                    self.roots.lock().unwrap().push(body);
+                }
                 let key = DeliveryKey {
                     connection: delivery.delivery.connection.clone(),
                     id: delivery.delivery.id,

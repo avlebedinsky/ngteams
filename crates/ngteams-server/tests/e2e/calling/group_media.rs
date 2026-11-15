@@ -97,12 +97,13 @@ impl Mixed {
         call.id.clone()
     }
 
-    /// Until the node's room of `call` has `legs` legs, each connected with its control plane up.
+    /// Until the node's room of `call` has `legs` legs connected with their control plane up (a callee that doesn't
+    /// answer has a leg that never connects).
     async fn connected(&self, call: &str, legs: usize) {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             let room = self.node().room(call).await.unwrap_or_default();
-            if room.len() == legs && room.iter().all(|leg| leg.connected && leg.control) {
+            if room.iter().filter(|leg| leg.connected && leg.control).count() == legs {
                 return;
             }
             assert!(
@@ -154,7 +155,7 @@ async fn one_client_hears_its_own_silence_and_gets_the_control_planes_ack() {
         let call = a.call(CallAction::Call { chat }).await;
         a.status(call, &CallStatus::Connected).await;
         let id = mixed.open_call().await;
-        mixed.connected(&id, 3).await;
+        mixed.connected(&id, 1).await;
         tokio::time::sleep(TALK + Duration::from_millis(500)).await;
         a.call(CallAction::HangUp { call }).await;
         a.ended(call).await;
@@ -342,7 +343,7 @@ async fn signaling_and_media_on_different_nodes() {
     let quiet = mixed.member("Cora").await;
     let chat = group_chat(&a, &[&b], &[quiet]).await;
     let calls = connect_all(&chat, &mut [&mut a, &mut b]).await;
-    mixed.connected(&mixed.open_call().await, 3).await;
+    mixed.connected(&mixed.open_call().await, 2).await;
     tokio::time::sleep(2 * TALK).await;
     hang_up_all(&mut [&mut a, &mut b], &calls).await;
     hears(&a, &[B_TONE], A_TONE);
@@ -363,7 +364,7 @@ async fn a_dead_media_node_ends_the_call_for_everyone() {
         let quiet = mixed.member("Cora").await;
         let chat = group_chat(&a, &[&b], &[quiet]).await;
         let calls = connect_all(&chat, &mut [&mut a, &mut b]).await;
-        mixed.connected(&mixed.open_call().await, 3).await;
+        mixed.connected(&mixed.open_call().await, 2).await;
         mixed.node.take().unwrap().stop().await;
         assert!(matches!(a.ended(calls[0]).await, End::Remote(_)));
         assert!(matches!(b.ended(calls[1]).await, End::Remote(_)));
@@ -380,11 +381,11 @@ async fn a_dead_media_node_ends_the_call_for_everyone() {
     }
 }
 
-/// An offer of a client whose media never comes up: str0m's audio and data channel, its one candidate a port nobody
-/// reads.
-fn dead_offer() -> teams_proto::MediaContent {
+/// An offer of a client whose media never comes up: str0m's audio and data channel, its one candidate on `socket`,
+/// which nobody reads.
+fn dead_offer(socket: &std::net::UdpSocket) -> teams_proto::MediaContent {
     let mut rtc = str0m::RtcConfig::new().build(std::time::Instant::now());
-    rtc.add_local_candidate(str0m::Candidate::host(([127, 0, 0, 1], 9).into(), "udp").unwrap());
+    rtc.add_local_candidate(str0m::Candidate::host(socket.local_addr().unwrap(), "udp").unwrap());
     let mut change = rtc.sdp_api();
     change.add_media(
         str0m::media::MediaKind::Audio,
@@ -437,7 +438,8 @@ async fn a_leg_without_media_is_taken_out_of_the_roster() {
         b.decline(rung.call);
         b.ended().await;
         // b joins with an offer whose media never comes up: it is in the roster, then taken out
-        b.offer_with(dead_offer());
+        let unread = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        b.offer_with(dead_offer(&unread));
         b.join(&chat, running_call(&mixed.server, &upn, &id, &chat).await);
         let joiner = b.mri.clone();
         a.view(call, |view| view.participants.iter().any(|party| party.mri == joiner))
@@ -450,5 +452,85 @@ async fn a_leg_without_media_is_taken_out_of_the_roster() {
         a.ended(call).await;
         a.shut_down().await;
         mixed.stop().await;
+    }
+}
+
+/// The participants' ids a 115 or 116 delivery names (its `cp`, gzip'd JSON in base64).
+fn named_in(delivery: &serde_json::Value) -> Vec<String> {
+    use base64::Engine as _;
+    use std::io::Read as _;
+    let packed = base64::engine::general_purpose::STANDARD
+        .decode(delivery["cp"].as_str().unwrap())
+        .unwrap();
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(packed.as_slice())
+        .read_to_string(&mut text)
+        .unwrap();
+    let content: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(content["conversationController"].is_string(), "{content}");
+    content["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|participant| participant["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Until `client` was told `evt` naming exactly `mris` in the call.
+async fn told(client: &super::client::Client, evt: u64, mris: &[&str]) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let seen: Vec<serde_json::Value> = client
+            .root_deliveries()
+            .into_iter()
+            .filter(|delivery| delivery["evt"] == 115 || delivery["evt"] == 116)
+            .collect();
+        if seen.iter().any(|delivery| {
+            let mut named = named_in(delivery);
+            named.sort_unstable();
+            let mut wanted: Vec<String> = mris.iter().map(|&mri| mri.to_owned()).collect();
+            wanted.sort_unstable();
+            delivery["evt"] == evt && named == wanted
+        }) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{}: no {evt} naming {mris:?} in {seen:?}",
+            client.mri
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn joins_and_leaves_are_told_as_115_and_116() {
+    for backend in backends() {
+        let mut group = super::group_signaling::Group::start(backend).await;
+        let (a, b, c) = (
+            group.a.client.mri.clone(),
+            group.b.client.mri.clone(),
+            group.c.client.mri.clone(),
+        );
+        group.a.client.call_group(&group.chat, &[b.clone(), c.clone()]);
+        group.a.client.state(teams_call::CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        group.c.client.incoming().await;
+        group.b.client.answer(rings.call);
+        let joined = group.b.client.state(teams_call::CallState::Connected).await;
+        // the caller in the call and the callee still ringing are told b came in; b isn't told of itself
+        told(&group.a.client, 115, &[&a, &b]).await;
+        told(&group.c.client, 115, &[&a, &b]).await;
+        group.b.client.hang_up(joined);
+        group.b.client.ended().await;
+        told(&group.a.client, 116, &[&a]).await;
+        told(&group.c.client, 116, &[&a]).await;
+        let own = group.b.client.root_deliveries();
+        assert!(
+            own.iter()
+                .all(|delivery| delivery["evt"] != 115 && delivery["evt"] != 116),
+            "{own:?}"
+        );
+        group.server.stop().await;
     }
 }

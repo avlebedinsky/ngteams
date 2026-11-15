@@ -19,7 +19,8 @@ pub struct MixerConfig {
     /// The addresses a client's TURN relay reaches the UDP socket at (its host candidates, on the socket's port);
     /// the socket's own address, or else the host's outward one, when unset.
     pub public_addrs: Vec<IpAddr>,
-    /// ICE-lite: the node only answers connectivity checks (it has a reachable address).
+    /// ICE-lite on the legs whose offer the node answers: there it only answers connectivity checks (it has a
+    /// reachable address). Where the node offers (a callee's leg) it runs full ICE.
     pub ice_lite: bool,
     pub max_rooms: usize,
     pub max_legs_per_room: usize,

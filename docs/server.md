@@ -141,7 +141,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `mixer.public_addrs` | the socket's address, else the host's outward one | the addresses clients' TURN relay reaches that socket at (its host candidates, each on the socket's port) |
 | `mixer.internal_listen`, `mixer.internal_url` | `127.0.0.1:0`, the listener's address | the internal API's listener (signaling → media node), on a private network; the URL the other nodes reach it at |
 | `mixer.node_id` | a new one each start | the node's id in the registry |
-| `mixer.ice_lite` | `true` | the node only answers connectivity checks (it has a reachable address) |
+| `mixer.ice_lite` | `true` | on the legs whose offer the node answers, it only answers connectivity checks (it has a reachable address); where it offers (a callee's leg) it runs full ICE |
 | `mixer.max_rooms`, `mixer.max_legs_per_room` | `1000`, `50` | over them a start, a join or an add is refused (`503`) |
 | `mixer.heartbeat`, `mixer.dead_after` | `5`, `15` | seconds between the node's heartbeats in Redis; seconds without one after which it is dead and its calls end |
 | `mixer.media_timeout`, `mixer.connect_timeout` | `20`, `30` | seconds a party's media may stay down, or take to come up after its answer, before it is taken out of the call |
