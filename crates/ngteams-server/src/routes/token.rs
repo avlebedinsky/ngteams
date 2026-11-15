@@ -174,6 +174,7 @@ pub async fn token(
     // the file service's audience is the server's own origin, as a SharePoint site's is its origin
     let resource = requested(scope, &app.config.audiences)
         .or_else(|| requested(scope, &[app.config.origin()]))
+        .or_else(|| requested(scope, &crate::workflows::audiences(&app.config)))
         .ok_or_else(Refusal::scope)?;
     let (user, refresh) = match field("grant_type") {
         Some("password") => {

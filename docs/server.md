@@ -126,6 +126,10 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `calling.turn.secret` | none | coturn's `static-auth-secret`: credentials are made from it per account and run out by themselves |
 | `calling.turn.username`, `calling.turn.password` | none | one long-term user of the relay (coturn's `user=`), used when no secret is set |
 | `calling.turn.realm`, `calling.turn.ttl` | `rtcmedia`, `86400` | coturn's `realm`; seconds a credential made from the secret holds |
+| `workflows.enabled` | `true` | whether the server serves Workflows ([below](#workflows-with-incoming-webhooks)) and issues tokens for Power Automate's two audiences; the client offers Workflows only then |
+| `workflows.max_body_bytes` | `28672` | the largest body a workflow's webhook takes (Teams takes a message of about 28 KB) |
+| `workflows.rate_per_minute` | `60` | posts one workflow's webhook takes in a minute, across every node (counted in Redis when there is one) |
+| `workflows.runs_kept` | `100` | runs kept per workflow for its run history |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
 ## Sign-in and tokens
@@ -387,6 +391,69 @@ Not served: mail of any kind (invitations, answers and their notes reach nobody 
 kept), the form's delete of an unused online meeting, `masterCategories`, an event by its join link, forwarding,
 reminders, and the options' enforcement in a call (the calls' part).
 
+## Workflows with incoming webhooks
+
+The client's Workflows (`docs/protocol/workflows.md`) talks to Power Automate's Flow API and Power Apps' connection
+routes; for an own-server account their bases are `/workflows/` and `/workflow-connections/` on the origin, with the
+account's tokens for `https://service.flow.microsoft.com/` and `https://service.powerapps.com/`, which the token
+endpoint issues while `workflows.enabled` is on. What is served is what "Send webhook alerts to a channel" and "… to
+a chat" need:
+
+- **The gallery**: the channel dialog's catalog (`galleries/public/teamsworkflowtemplates`, filtered by category as
+  the client asks), the Workflows app's gallery (`galleries/public/templates` with `$filter`, `$search`, `$top`) and
+  a template's read, holding only those two templates under Teams' ids. Every other template needs a Microsoft
+  connector and isn't offered.
+- **The environment** (`environments`): one, `Default-<tenant id>`.
+- **Connections**: the account's Microsoft Teams connection, made when the card editor opens (`PUT
+  …/apis/shared_teams/connections/<name>`) and connected at once, so the client signs nothing in.
+- **Workflows**: create, read, list (the account's own; `flowState=active` for those turned on), rename and edit
+  (`PATCH`), `start`, `stop`, delete; `owners`, `modifyowners`, `owners/<id>`; `triggers`;
+  `triggers/<trigger>/listCallbackUrl` (the webhook link); `runs` and `runs/<run>/actions`. A save is refused (400
+  `WorkflowNotSupported`) unless its definition is a Teams webhook trigger posting to one channel or chat.
+- **The webhook**: `POST <origin>/workflows/automations/direct/workflows/<id>/triggers/manual/paths/invoke?api-version=1&sp=…&sv=1.0&sig=<secret>`,
+  with no token. It answers 202 and posts what it got into the channel or chat as the Workflows bot (`28:358f0194-…`,
+  "Workflows"), through the chat service, so sync and push deliver it as any message.
+
+| Who | May |
+| --- | --- |
+| a workflow's owner (its maker and the co-owners it adds) | read, rename, edit, turn off and on, delete it; read its link, owners, runs; add a co-owner who can see where it posts, take a co-owner off (the maker stays) |
+| the maker of a workflow | save it only to a channel of a team it is on (a private channel's own people only) or a chat it is in, neither archived |
+| anyone with its link | post to it |
+
+Anyone else gets 404 `FlowNotFound`: it learns nothing of the workflow.
+
+**What a webhook takes**: the Teams Workflows payload, `{"type": "message", "attachments": [{"contentType":
+"application/vnd.microsoft.card.adaptive", "content": <card>}]}` (each card becomes one message, at most 10; hero and
+thumbnail cards too), a bare Adaptive Card, or `{"text": "…"}` (a text message). A card must be one the client's
+renderer draws: `type` `AdaptiveCard`, every element and action of a named type, containers nested at most 16 deep.
+
+| Answer | When |
+| --- | --- |
+| 202 | posted, or taken but posted nowhere because none of its owners may post there any more (a failed run, `Forbidden`) |
+| 400 `InvalidRequestContent` | not one of the forms above, or a card the client can't draw (a failed run) |
+| 404 `WorkflowNotFound` | a wrong or missing secret, another trigger, a deleted workflow |
+| 409 `WorkflowTriggerIsNotEnabled` | the workflow is turned off (no run) |
+| 413 | over `workflows.max_body_bytes` |
+| 429 `WorkflowRequestsThrottled` | over `workflows.rate_per_minute`, with `Retry-After` |
+
+The secret is 256 random bits, compared by digest; the webhook's route has its own trace span that names its path
+only, so the secret reaches no log. A workflow's link never changes: to replace it, delete the workflow and save it
+again. Workflows, owners and runs are rows of the database, so any node takes any webhook.
+
+```sh
+curl -sS -X POST "$WEBHOOK_LINK" -H 'Content-Type: application/json' -d '{
+  "type": "message",
+  "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": {
+    "type": "AdaptiveCard", "version": "1.4",
+    "body": [{"type": "TextBlock", "text": "Build 1042 passed", "weight": "bolder"}]
+  }}]
+}'
+```
+
+Not served: any other template or trigger (schedules, Planner, SharePoint, email, AI), a workflow run from a
+message, a run by hand, the input-run runtime (`shared_logicflows`), connector operations and their choices, and
+paging of the lists (a list is whole, without `nextLink`).
+
 ## Prefix table
 
 Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now, and authz
@@ -413,6 +480,8 @@ hands out its GTM where it has one.
 | Search | (the origin) | `/search/` | no |
 | Flight proxy | (the origin) | `/flightproxy/api/v2/` | 1:1 calls |
 | TURN credentials | (the origin) | `/trap/tokens` | yes |
+| Power Automate (Flow API), webhooks | (the client's fixed base) | `/workflows/` | the webhook workflows' subset, while `workflows.enabled` |
+| Power Apps connections | (the client's fixed base) | `/workflow-connections/` | the account's Teams connections, while `workflows.enabled` |
 
 ## Push: the registrar and Trouter
 

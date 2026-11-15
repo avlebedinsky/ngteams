@@ -17,7 +17,8 @@
 //! - [`presence`]: who shows as what (UPS), pushed to the endpoints that watch; [`people`]: the directory's profiles
 //!   and the reads people are named and drawn from;
 //! - `teams`: teams and channels (CSA, the middle tier's and the provisioning service's team routes); a channel
-//!   is a thread of the chat service.
+//!   is a thread of the chat service;
+//! - [`workflows`]: Workflows with incoming webhooks (the Flow API subset the client uses, and the webhooks).
 
 pub mod admin;
 pub mod app;
@@ -40,3 +41,4 @@ pub mod storage;
 mod teams;
 pub mod throttle;
 pub mod trouter;
+pub mod workflows;

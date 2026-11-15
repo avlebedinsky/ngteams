@@ -91,6 +91,47 @@ pub(crate) async fn post_untold(app: &App, post: Post<'_>) -> Result<Option<i64>
     Ok(Some(posted.row.id))
 }
 
+/// A message the server posts as an app (`28:<id>`), which is none of the thread's people; its row names the app's
+/// own account (`users.kind` `app`).
+pub(crate) struct AppPost<'a> {
+    pub thread: &'a str,
+    /// The app's account id.
+    pub app: &'a str,
+    pub name: &'a str,
+    pub kind: &'a str,
+    pub content: &'a str,
+    pub properties: Map<String, Value>,
+}
+
+/// Posts it (a new post of its own in a channel) and tells the thread's people; its id, or `None` when the thread
+/// isn't there.
+pub(crate) async fn post_as_app(app: &App, post: AppPost<'_>) -> Result<Option<i64>, DbError> {
+    let base = wire::base(app);
+    let body = json!({
+        "type": "Message", "conversationid": post.thread,
+        "conversationLink": format!("{base}/v1/users/ME/conversations/{}", post.thread),
+        "from": format!("{base}/v1/users/ME/contacts/28:{}", post.app),
+        "fromDisplayNameInToken": post.name, "imdisplayname": post.name,
+        "messagetype": post.kind, "contenttype": "Text", "content": post.content,
+        "properties": post.properties,
+    });
+    let in_channel = super::channels::place(&app.db, post.thread).await?.is_some();
+    let draft = message_repo::Message {
+        chat_id: post.thread.to_owned(),
+        id: 0,
+        owner_id: post.app.to_owned(),
+        client_id: None,
+        version: 0,
+        body: body.to_string(),
+        root_id: in_channel.then_some(0),
+    };
+    let Some(posted) = message_repo::insert_by(&app.db, &draft, &base, message_repo::Poster::App).await? else {
+        return Ok(None);
+    };
+    events::tell(app, "NewMessage", &posted.row.value()?, &posted.readers, &posted.told).await;
+    Ok(Some(posted.row.id))
+}
+
 async fn keep(app: &App, post: Post<'_>) -> Result<Option<message_repo::Posted>, DbError> {
     let caller = caller(app, post.author);
     let base = wire::base(app);

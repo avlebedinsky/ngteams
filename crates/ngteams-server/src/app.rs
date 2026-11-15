@@ -20,6 +20,10 @@ use crate::fanout::{Fanout, FanoutError, Local, Redis};
 use crate::storage::{ObjectStorage, Storage, StorageError};
 use crate::throttle::Throttle;
 use crate::trouter::Hub;
+use crate::workflows::Limiter;
+
+/// A node's fan-out, journal, sign-in and setup throttles and webhook limiter, in-process or on Redis.
+type Started = (Arc<dyn Fanout>, Arc<dyn Journal>, Throttle, Throttle, Limiter);
 
 /// The largest request body the auth endpoints take.
 const AUTH_BODY_LIMIT: usize = 64 * 1024;
@@ -50,6 +54,8 @@ pub struct App {
     pub(crate) clearing: crate::media::Clearing,
     /// The media nodes a group call's room goes to; none installed, a group call isn't served.
     pub mixers: crate::calling::Mixers,
+    /// Posts per workflow webhook.
+    pub workflow_limit: crate::workflows::Limiter,
 }
 
 /// Why a node can't start.
@@ -92,25 +98,33 @@ impl App {
             max_failures: config.setup.max_attempts,
             window: config.setup.window,
         };
+        let rate = config.workflows.rate_per_minute;
         let mut shared = None;
-        let (fanout, journal, throttle, setup_throttle): (Arc<dyn Fanout>, Arc<dyn Journal>, Throttle, Throttle) =
-            match &config.redis_url {
-                Some(url) => {
-                    let keys = Keyspace::new(config.redis_namespace.as_deref().unwrap_or(&tenant));
-                    let redis = Redis::connect(url, keys).await?;
-                    let throttle = Throttle::redis(config.login.clone(), redis.shared(), "login");
-                    let setup_throttle = Throttle::redis(setup_limits, redis.shared(), "setup");
-                    let journal = RedisJournal::new(redis.shared());
-                    shared = Some(redis.shared());
-                    (Arc::new(redis), Arc::new(journal), throttle, setup_throttle)
-                }
-                None => (
-                    Arc::new(Local::new()),
-                    Arc::new(LocalJournal::new()),
-                    Throttle::local(config.login.clone()),
-                    Throttle::local(setup_limits),
-                ),
-            };
+        let (fanout, journal, throttle, setup_throttle, workflow_limit): Started = match &config.redis_url {
+            Some(url) => {
+                let keys = Keyspace::new(config.redis_namespace.as_deref().unwrap_or(&tenant));
+                let redis = Redis::connect(url, keys).await?;
+                let throttle = Throttle::redis(config.login.clone(), redis.shared(), "login");
+                let setup_throttle = Throttle::redis(setup_limits, redis.shared(), "setup");
+                let journal = RedisJournal::new(redis.shared());
+                let workflow_limit = Limiter::redis(redis.shared(), rate);
+                shared = Some(redis.shared());
+                (
+                    Arc::new(redis),
+                    Arc::new(journal),
+                    throttle,
+                    setup_throttle,
+                    workflow_limit,
+                )
+            }
+            None => (
+                Arc::new(Local::new()),
+                Arc::new(LocalJournal::new()),
+                Throttle::local(config.login.clone()),
+                Throttle::local(setup_limits),
+                Limiter::local(rate),
+            ),
+        };
         let fanout: Arc<dyn Fanout> = Arc::new(Keeping::new(
             fanout,
             Arc::clone(&journal),
@@ -140,6 +154,7 @@ impl App {
             fetcher,
             clearing: crate::media::Clearing::default(),
             mixers: crate::calling::Mixers::default(),
+            workflow_limit,
         });
         Ok(app)
     }
@@ -169,6 +184,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::registrar::router())
         .merge(crate::trouter::router())
         .merge(crate::calling::router())
+        .merge(crate::workflows::router(&app.config))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
@@ -176,6 +192,8 @@ pub fn router(app: Arc<App>) -> Router {
         // after the timeout: a file's upload or download may run longer than other requests
         .merge(crate::media::router(&app))
         .layer(TraceLayer::new_for_http())
+        // after the trace: a webhook's link carries its secret in the query, which that trace would log
+        .merge(crate::workflows::hook::router(&app.config))
         .with_state(app)
 }
 

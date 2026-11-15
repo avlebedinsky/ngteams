@@ -51,21 +51,51 @@ pub(super) struct Posted {
     pub told: Vec<Told>,
 }
 
+/// Whether `$draft`'s owner may post it as `$poster`: a member is in its thread, an app's thread is there.
+macro_rules! may_post {
+    ($conn:expr, $draft:expr, $poster:expr) => {
+        match $poster {
+            Poster::Member => {
+                diesel::select(diesel::dsl::exists(
+                    chat_members::table
+                        .filter(chat_members::chat_id.eq(&$draft.chat_id))
+                        .filter(chat_members::user_id.eq(&$draft.owner_id))
+                        .filter(chat_members::left_at.is_null()),
+                ))
+                .get_result($conn)
+                .await?
+            }
+            Poster::App => {
+                diesel::select(diesel::dsl::exists(chats::table.find(&$draft.chat_id)))
+                    .get_result($conn)
+                    .await?
+            }
+        }
+    };
+}
+
 /// Posts `draft` for its owner, a member of its thread; `base` is the chat service's base, for an item's links.
 pub(super) async fn insert(db: &Db, draft: &Message, base: &str) -> Result<Option<Posted>, DbError> {
+    insert_by(db, draft, base, Poster::Member).await
+}
+
+/// Who a draft's owner is to its thread.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Poster {
+    /// One of its people.
+    Member,
+    /// An app posting into it (the Workflows bot), which is none of its people.
+    App,
+}
+
+/// Posts `draft` for its owner, `poster` to its thread: a member must be in it, an app's thread must be there.
+pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Poster) -> Result<Option<Posted>, DbError> {
     let at = wire::now();
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             let version: i64 = advance!(conn, at);
-            let member: bool = diesel::select(diesel::dsl::exists(
-                chat_members::table
-                    .filter(chat_members::chat_id.eq(&draft.chat_id))
-                    .filter(chat_members::user_id.eq(&draft.owner_id))
-                    .filter(chat_members::left_at.is_null()),
-            ))
-            .get_result(conn)
-            .await?;
-            if !member {
+            let allowed: bool = may_post!(conn, draft, poster);
+            if !allowed {
                 return Ok(None);
             }
             if let Some(id) = &draft.client_id {

@@ -69,6 +69,7 @@ pub struct Config {
     pub calling: crate::calling::config::CallingConfig,
     /// The meeting rooms the scheduling form's room finder lists (`[[rooms]]`).
     pub rooms: Vec<RoomConfig>,
+    pub workflows: crate::workflows::WorkflowsConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -85,6 +86,7 @@ impl std::fmt::Debug for Config {
             .field("media", &self.media)
             .field("storage", &self.storage)
             .field("calling", &self.calling)
+            .field("workflows", &self.workflows)
             .finish_non_exhaustive()
     }
 }
@@ -299,6 +301,7 @@ impl Default for Config {
             media: MediaConfig::default(),
             calling: crate::calling::config::CallingConfig::default(),
             rooms: Vec::new(),
+            workflows: crate::workflows::WorkflowsConfig::default(),
         }
     }
 }
