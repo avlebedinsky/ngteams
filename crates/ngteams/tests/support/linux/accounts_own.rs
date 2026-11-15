@@ -233,7 +233,7 @@ pub fn record_requests(run: &str) -> SandboxResult {
 }
 
 /// The method and URL of every request the app's log holds.
-fn logged_requests() -> Vec<(String, String)> {
+pub fn logged_requests() -> Vec<(String, String)> {
     let Some(log) = teams_log::installed() else {
         return Vec::new();
     };

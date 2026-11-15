@@ -64,6 +64,8 @@ use ngteams::secrets::AppSecrets;
 mod admin;
 #[path = "accounts_admin_qa.rs"]
 mod admin_qa;
+#[path = "accounts_card_qa.rs"]
+mod card_qa;
 #[path = "accounts_own.rs"]
 mod own;
 #[path = "../own_server.rs"]
@@ -218,7 +220,7 @@ const QA_PREFIX: &str = "qa_";
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 28] = [
+const SCENES: [Scene; 32] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -272,6 +274,10 @@ const SCENES: [Scene; 28] = [
     ("qa_page_at_480_dark", |_| admin_qa::page_at(480, true)),
     ("qa_page_at_1280", |_| admin_qa::page_at(1280, false)),
     ("qa_page_at_1280_dark", |_| admin_qa::page_at(1280, true)),
+    ("qa_own_card_at_1280", |_| card_qa::card_at(1280, false)),
+    ("qa_own_card_at_1280_dark", |_| card_qa::card_at(1280, true)),
+    ("qa_own_card_at_480", |_| card_qa::card_at(480, false)),
+    ("qa_own_card_at_480_dark", |_| card_qa::card_at(480, true)),
 ];
 
 /// The child's view trace, line by line as it comes.
@@ -1283,10 +1289,13 @@ struct MockLab {
     /// Where the stores and the app's files are: the parent's directory ([`ROOT_ENV`]), else one of its own.
     root: PathBuf,
     _own_root: Option<tempfile::TempDir>,
+    /// The accounts' clients read Loki (the profile card scenes).
+    loki: bool,
 }
 
 impl MockLab {
-    fn start() -> SandboxResult<Self> {
+    /// The mock, its accounts' clients reading Loki and the mock serving it when `loki` (the profile card scenes).
+    fn start(loki: bool) -> SandboxResult<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1299,12 +1308,16 @@ impl MockLab {
             let dir = tempfile::tempdir()?;
             (dir.path().to_owned(), Some(dir))
         };
+        if loki {
+            card_qa::serve_mock_loki(&mock, &runtime);
+        }
         Ok(Self {
             _runtime: runtime,
             mock: Arc::new(mock),
             trouter,
             root,
             _own_root: own_root,
+            loki,
         })
     }
 
@@ -1340,7 +1353,7 @@ impl MockLab {
         Ok(engine::start(Parts {
             calls: None,
             store: Store::open(store)?,
-            client: Arc::new(Client::new(http()?)),
+            client: Arc::new(Client::new(if self.loki { http()?.with_loki() } else { http()? })),
             outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter)),
             options: EngineOptions::default(),
@@ -1392,6 +1405,11 @@ enum Mode {
     AdminLight,
     /// [`Mode::AdminLight`] with the parent's server's user [`admin_qa::RUNNING`] signed in beside its administrator.
     AdminTwo,
+    /// Own servers on, the parent's server's seeded account signed in beside a and b, its colleagues' chats written
+    /// beforehand, the mock serving Loki (the profile card QA scenes).
+    Card,
+    /// [`Mode::Card`] in Teams Dark.
+    CardDark,
 }
 
 impl Mode {
@@ -1409,6 +1427,8 @@ impl Mode {
             "admin-qa" => Some(Self::AdminQa),
             "admin-light" => Some(Self::AdminLight),
             "admin-two" => Some(Self::AdminTwo),
+            "card" => Some(Self::Card),
+            "card-dark" => Some(Self::CardDark),
             _ => None,
         }
     }
@@ -1422,6 +1442,8 @@ impl Mode {
             Self::AdminQa => "admin-qa",
             Self::AdminLight => "admin-light",
             Self::AdminTwo => "admin-two",
+            Self::Card => "card",
+            Self::CardDark => "card-dark",
             _ => "first",
         }
     }
@@ -1433,7 +1455,12 @@ impl Mode {
 
     /// Teams Dark, whatever the system says.
     fn dark(self) -> bool {
-        matches!(self, Self::Dark | Self::ShownDark | Self::AdminDark)
+        matches!(self, Self::Dark | Self::ShownDark | Self::AdminDark | Self::CardDark)
+    }
+
+    /// The profile card QA scenes.
+    fn card(self) -> bool {
+        matches!(self, Self::Card | Self::CardDark)
     }
 
     fn shown(self) -> bool {
@@ -1456,6 +1483,8 @@ impl Mode {
                 | Self::AdminQa
                 | Self::AdminLight
                 | Self::AdminTwo
+                | Self::Card
+                | Self::CardDark
         )
     }
 }
@@ -1506,7 +1535,7 @@ fn child_window(mode: Mode) -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let fd: RawFd = std::env::var(TRACE_FD_ENV)?.parse()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(fd)?);
-    let lab = MockLab::start()?;
+    let lab = MockLab::start(mode.card())?;
     let a = started(Alias::A, lab.engine(Alias::A, LAB_A, "bot-a@lab.example.test")?)?;
     let b = started(Alias::B, lab.engine(Alias::B, LAB_B, "bot-b@lab.example.test")?)?;
     let mut others = vec![b];
@@ -1563,7 +1592,7 @@ fn child_window(mode: Mode) -> SandboxResult {
         );
         match launched {
             Ok(launched) => {
-                tell_the_parent(mock, watched, origins, cx);
+                tell_the_parent(mock, watched, origins, mode.card().then_some(launched.window), cx);
                 let _ = launched.window.update(cx, |_, window, _| {
                     after_frames(window, READY_FRAMES, |_, _| say("ready"));
                 });
@@ -1594,6 +1623,7 @@ fn own_started(
     match (mode, server) {
         (Mode::Restart, _) => Ok(vec![own::come_back(runner)?]),
         (Mode::AdminDark | Mode::AdminLight, Some(server)) => Ok(vec![admin::signed_in(runner, server)?]),
+        (Mode::Card | Mode::CardDark, Some(server)) => card_qa::started(runner, server),
         (Mode::AdminTwo, Some(server)) => {
             let running =
                 ngteams::accounts::add_own(&runner.setup, admin_qa::RUNNING, server, &Secret::new(own::PASSWORD))?;
@@ -1608,16 +1638,20 @@ fn own_started(
 
 /// What the child does and says for the parent while the app runs: c's post when asked, the window asking for an
 /// account, and with an own server running (`origins`: its origin and the one nothing listens on) the account signed
-/// in and where the requests went.
+/// in and where the requests went; in the profile card scenes (`card`: the window), the card's answers.
 fn tell_the_parent(
     mock: Arc<ChatServiceMock>,
     setup: ngteams::setup::Setup,
     origins: Option<(String, String)>,
+    card: Option<gpui::WindowHandle<teams_ui::window::KitRoot>>,
     cx: &mut App,
 ) {
     post_when_asked(Arc::clone(&mock), cx);
     own::say_prompt(cx);
     if let Some((origin, dead)) = origins {
+        if let Some(window) = card {
+            card_qa::answer(window, Arc::clone(&mock), setup.clone(), origin.clone(), cx);
+        }
         say_when_own_signed_in(setup.clone(), cx);
         own::hand_over_secrets_when_asked(setup.clone(), cx);
         own::say_requests_when_asked(origin, dead, cx);
