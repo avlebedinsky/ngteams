@@ -89,6 +89,7 @@ class Launcher(unittest.TestCase):
         tools.mkdir()
         self.executable(tools / "cargo", CARGO)
         self.env = os.environ.copy()
+        self.env.pop("NGTEAMS_OWN_SERVER", None)
         self.env.update(
             PATH=f"{tools}:{self.env['PATH']}",
             XDG_STATE_HOME=str(self.root / "state"),
@@ -183,6 +184,19 @@ class Launcher(unittest.TestCase):
         self.invoke("b", "--stop")
         self.assertTrue(self.exclusive_available())
         self.assertIn("not running", self.invoke("b", "--status").stdout)
+
+    def test_own_server_switch_reaches_the_app_only_when_the_caller_set_it(self):
+        def app_args(alias):
+            args = json.loads((self.run_dir(alias) / "serve.json").read_text())
+            return [args[index + 1] for index, value in enumerate(args) if value == "--app-arg"]
+        self.started.add("a")
+        self.invoke("a", extra={"NGTEAMS_OWN_SERVER": "1"})
+        args = app_args("a")
+        # among env's assignments, before the program it runs
+        self.assertEqual(args[2:4], ["NGTEAMS_OWN_SERVER=1", str(self.bin / "ngteams")])
+        self.started.add("b")
+        self.invoke("b", extra={"NGTEAMS_OWN_SERVER": ""})
+        self.assertFalse([arg for arg in app_args("b") if arg.startswith("NGTEAMS_OWN_SERVER")])
 
     def test_build_or_startup_failure_releases_alias_and_live_locks(self):
         result = self.invoke("a", check=False, extra={"SYNTHETIC_BUILD_FAIL": "17"})
