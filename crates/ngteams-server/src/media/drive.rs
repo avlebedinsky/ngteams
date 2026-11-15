@@ -41,6 +41,9 @@ const THUMBNAIL_LINK: &str = "urn:ngteams-server:file-thumbnail";
 const INVITE_BODY: usize = 64 * 1024;
 /// The accounts one request shares a file with.
 const MAX_RECIPIENTS: usize = 500;
+/// The most of a refused upload's body that is read before the answer, and how long that may take.
+const REFUSED_BODY: usize = 32 * 1024 * 1024;
+const REFUSED_WAIT: Duration = Duration::from_secs(10);
 /// The names tried for a file whose name the drive already has.
 const RENAMES: u32 = 200;
 
@@ -287,14 +290,14 @@ async fn upload(app: &App, caller: &User, name: &str, headers: &HeaderMap, body:
         .get(CONTENT_LENGTH)
         .and_then(|length| length.to_str().ok()?.parse::<u64>().ok());
     if declared.is_some_and(|length| length > media.max_file_bytes) {
-        return Err(Error::TooLarge);
+        return Err(refused(body, Error::TooLarge).await);
     }
     let left = match media.user_quota_bytes {
         0 => u64::MAX,
         quota => quota.saturating_sub(u64::try_from(repo::used(&app.db, &caller.id).await?).unwrap_or(0)),
     };
     if declared.is_some_and(|length| length > left) {
-        return Err(Error::Quota);
+        return Err(refused(body, Error::Quota).await);
     }
     let id = uuid::Uuid::new_v4().hyphenated().to_string();
     let incoming = body.into_data_stream().map_err(std::io::Error::other).boxed();
@@ -330,6 +333,22 @@ async fn upload(app: &App, caller: &User, name: &str, headers: &HeaderMap, body:
         return Err(error);
     }
     Ok((StatusCode::CREATED, Json(drive_item(app, &item)?)).into_response())
+}
+
+/// `why`, once the body of the upload it refuses is read and dropped, up to [`REFUSED_BODY`] and for at most
+/// [`REFUSED_WAIT`]: a client still sending when its connection closes loses the answer.
+async fn refused(body: Body, why: Error) -> Error {
+    let mut body = body.into_data_stream();
+    let dropped = async {
+        let mut left = REFUSED_BODY;
+        while left > 0
+            && let Some(Ok(bytes)) = body.next().await
+        {
+            left = left.saturating_sub(bytes.len());
+        }
+    };
+    let _ = tokio::time::timeout(REFUSED_WAIT, dropped).await;
+    why
 }
 
 /// A file as SharePoint and Graph describe a `driveItem`.
