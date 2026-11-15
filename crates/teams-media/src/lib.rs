@@ -1,13 +1,14 @@
 //! A call's media, apart from its signaling (`docs/protocol/calling.md`, `docs/protocol/calling-echo.md`).
 //!
-//! libwebrtc carries it ([`rtc`]): ICE through Teams' relay only, DTLS-SRTP, Opus and H.264 (its software
-//! encoder), the jitter buffer, bandwidth estimation, retransmissions and A/V sync. What is ours:
+//! libwebrtc carries it ([`rtc`]): ICE through the account's service's relay only, DTLS-SRTP, Opus and H.264 (its
+//! software encoder), the jitter buffer, bandwidth estimation, retransmissions and A/V sync. What is ours:
 //!
 //! - [`sdp`]: Teams' SDP dialect, `application/sdp-ngc-1.0`, to and from libwebrtc's standard SDP, both ways and on
 //!   both sides of a call: our offer written for the call start and the media controller's or the callee's answer
 //!   read back; the caller's (or the mixer's) offer an invitation carries read in and our answer written for the
 //!   acceptance; a renegotiation offered by either side. A browser's SDP is refused where the dialect is required.
-//! - [`relay`]: where the media is relayed, Teams' relay or a test's TURN server, with the relay's credentials.
+//! - [`relay`]: where the media is relayed, Teams' relay, an own server's TURN servers or a test's, with the relay's
+//!   credentials.
 //! - [`session`]: a call's media on threads of its own: the microphone through the audio processing ([`processing`],
 //!   libwebrtc's own module) to libwebrtc, libwebrtc's audio to the speaker, the camera's frames to libwebrtc and its
 //!   decoded video to the caller's sinks ([`video`]: the camera's bounds and the frames' conversions).

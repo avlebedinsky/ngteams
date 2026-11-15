@@ -202,6 +202,15 @@ fn the_configuration_names_the_calling_keys_it_refuses() {
         |c| c.calling.turn.ttl = 0,
         |c| c.calling.turn.username = Some("relay".into()),
         |c| c.calling.turn.password = Some("synthetic".into()),
+        |c| {
+            c.calling.turn.username = Some(String::new());
+            c.calling.turn.password = Some("synthetic".into());
+        },
+        |c| {
+            c.calling.turn.urls = vec!["turn:turn.own.example.test".to_owned()];
+            c.calling.turn.username = Some("relay".into());
+            c.calling.turn.password = Some(String::new());
+        },
     ] {
         let mut config = Config::default();
         change(&mut config);

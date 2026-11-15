@@ -65,10 +65,14 @@ impl TurnConfig {
     /// for, leaves every call without media.
     #[must_use]
     pub fn relay_usable(&self) -> bool {
-        let credential = self.secret.as_deref().is_some_and(|secret| !secret.is_empty()) || self.username.is_some();
+        let credential = filled(self.secret.as_deref()) || filled(self.username.as_deref());
         let named = !self.urls.is_empty();
         self.urls.iter().all(|url| turn_url(url)) && credential == named
     }
+}
+
+fn filled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
 }
 
 /// `url` is a TURN URL (RFC 7065): `turn:<host>[:<port>][?transport=udp|tcp]` or `turns:<host>[:<port>]
@@ -100,9 +104,15 @@ fn turn_url(url: &str) -> bool {
 }
 
 impl CallingConfig {
-    /// Whether the values can be used: a ring and a credential last some time.
+    /// Whether the values can be used: a ring and a credential last some time, and the long-term user is named with
+    /// its password or not at all (an empty one is refused by every client).
     #[must_use]
     pub fn usable(&self) -> bool {
-        self.ring_timeout > 0 && self.turn.ttl > 0 && self.turn.username.is_some() == self.turn.password.is_some()
+        let user = match (self.turn.username.as_deref(), self.turn.password.as_deref()) {
+            (None, None) => true,
+            (Some(username), Some(password)) => !username.is_empty() && !password.is_empty(),
+            _ => false,
+        };
+        self.ring_timeout > 0 && self.turn.ttl > 0 && user
     }
 }

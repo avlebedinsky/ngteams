@@ -701,13 +701,16 @@ the server and it runs out after `calling.turn.ttl`. Without a secret, `calling.
 `calling.turn.password` name one long-term user. With neither the answer is `503` and calls have no media.
 
 The server refuses to start when a URL isn't a TURN URL (RFC 7065: `turn:<host>[:<port>][?transport=udp|tcp]`,
-`turns:<host>[:<port>][?transport=tcp]`; ports 3478 and 5349 when none is given) or when URLs and a credential
-aren't set together: either alone leaves every call without media.
+`turns:<host>[:<port>][?transport=tcp]`; ports 3478 and 5349 when none is given), when URLs and a credential
+aren't set together (either alone leaves every call without media), or when the long-term user's name or password
+is empty (clients refuse an empty one).
 
 `ngteams` takes an own-server account's relay from `urls`, per account: its media allocates on those servers, in
 order, with the credential beside them. It leaves out a URL that isn't a TURN URL or whose host is in a Microsoft
 domain, so an own server's credential never reaches Microsoft; with none left the call fails at its setup and no
-allocation is made. A Microsoft account in the same window keeps Teams' relay host and ignores any `urls`. Clients
+allocation is made. A named relay's own `300 Try Alternate` is followed, as Teams' relay's is: the relay names
+its alternate, and it already holds the credential. A Microsoft account in the same window keeps Teams' relay host
+and ignores any `urls`. Clients
 need the relay's hosts and ports reachable themselves: the server isn't on the media path.
 
 A coturn for it:

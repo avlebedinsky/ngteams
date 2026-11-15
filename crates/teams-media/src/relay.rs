@@ -1,11 +1,13 @@
 //! Where a call's media is relayed: the TURN servers libwebrtc's ICE agent allocates on, with the credentials the
 //! relay handed out (`RelayTokens`, read by the engine).
 //!
-//! The media goes through Teams' relay only (`docs/protocol/calling-echo.md`, "The relay"): the peer's ICE policy is
-//! relay-only, so libwebrtc gathers relayed candidates alone and no local address goes into an offer. Teams' relay is
-//! named by its host ([`TEAMS_RELAY_HOST`]) in the three URLs the web client gives its own peer: TURN over UDP on
-//! [`TEAMS_RELAY_UDP_PORT`], over TCP on [`TEAMS_RELAY_TCP_PORT`] and over TLS on the same port. libwebrtc resolves
-//! the host, allocates over every URL it can reach, follows a `300 Try Alternate`, and pairs over the best allocation.
+//! The media goes through the relay of the account's own service only: the peer's ICE policy is relay-only, so
+//! libwebrtc gathers relayed candidates alone and no local address goes into an offer. A Microsoft account's relay is
+//! Teams' (`docs/protocol/calling-echo.md`, "The relay"), named by its host ([`TEAMS_RELAY_HOST`]) in the three URLs
+//! the web client gives its own peer: TURN over UDP on [`TEAMS_RELAY_UDP_PORT`], over TCP on
+//! [`TEAMS_RELAY_TCP_PORT`] and over TLS on the same port. An own-server account's is the TURN URLs its server names
+//! ([`RelayServer::parse`], `docs/server.md`); a test's is its own TURN server. libwebrtc resolves the hosts,
+//! allocates over every URL it can reach, follows a `300 Try Alternate`, and pairs over the best allocation.
 
 use std::fmt;
 

@@ -31,8 +31,8 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 # a sound the user imports, MP3 or Ogg, decoded (`sound_file`)
 gstreamer.workspace = true
 gstreamer-app.workspace = true
-# the call's media: the peer connection (ICE through Teams' relay, DTLS-SRTP, Opus and H.264, the jitter buffer,
-# bandwidth estimation, A/V sync), the audio processing module, the data channel
+# the call's media: the peer connection (ICE through the account's service's relay, DTLS-SRTP, Opus and H.264, the
+# jitter buffer, bandwidth estimation, A/V sync), the audio processing module, the data channel
 libwebrtc.workspace = true
 log.workspace = true
 # call captions and device metadata arrive as JSON

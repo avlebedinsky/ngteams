@@ -61,7 +61,9 @@ pub enum Relay {
     /// setup. A Microsoft account's is Teams' relay host, as the web client names it: UDP 3478, TCP 443 and TLS 443
     /// ([`teams_relay`]); libwebrtc resolves it and allocates over what it reaches. An own-server account's is the
     /// servers its own server's credentials' answer names (`urls`, `docs/server.md`), none on a Microsoft host: the
-    /// own server's credential goes only to its own relay. With none, the call's media isn't set up.
+    /// own server's credential goes only to its own relay (and to the alternate that relay names in a `300 Try
+    /// Alternate`, which libwebrtc follows: the relay already holds the credential). With none, the call's media
+    /// isn't set up.
     Teams,
     /// These servers, in order: a test's loopback TURN server. Tests only (`test-support`).
     #[cfg(feature = "test-support")]

@@ -346,7 +346,7 @@ pub enum ConfigError {
     Storage,
     #[error(
         "calling.ring_timeout and calling.turn.ttl must be above zero, and calling.turn.username and \
-         calling.turn.password set together"
+         calling.turn.password set together, neither empty"
     )]
     Calling,
     #[error(
