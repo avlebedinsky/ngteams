@@ -31,7 +31,10 @@ pub(super) async fn edit(
         return Err(Error::Denied);
     }
     sent["from"] = caller.mri().into();
-    let draft = messages::draft(&app, &caller, chat, &sent)?.value()?;
+    let mut draft = messages::draft(&app, &caller, chat, &sent)?;
+    draft.chat_id.clone_from(&found.id);
+    messages::quoted(&app, &caller, &mut draft).await?;
+    let draft = draft.value()?;
     let change = message_repo::Change {
         chat: &found.id,
         id,
@@ -46,7 +49,7 @@ pub(super) async fn edit(
         }
         current["content"] = draft["content"].clone();
         current["messagetype"] = draft["messagetype"].clone();
-        for key in messages::MESSAGE_PROPERTIES {
+        for key in messages::MESSAGE_PROPERTIES.into_iter().chain([messages::VALID_QUOTES]) {
             if let Some(properties) = current["properties"].as_object_mut() {
                 properties.remove(key);
                 if let Some(value) = draft["properties"].get(key) {

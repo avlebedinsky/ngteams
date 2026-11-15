@@ -755,6 +755,25 @@ or an object. Mark-all-read may be reset, as in Teams. Writes retain the account
 `CustomUserProperties` only to that account. An account with no own properties receives the native 404/subcode-1
 shape that the client treats as empty preferences.
 
+## Rich messages
+
+A post or an edit is stored as Teams gives it back (`docs/protocol/chat.md`, "Mentions" and "A message as read"), so
+every reader, the push channel and the sync see the same message (`src/chatsvc/rich.rs`):
+
+- **Mentions.** The compose box's wrapper (`<readonly itemtype="…/Mention">`) is taken off and its span kept; such
+  a message's HTML is then written out again by html5ever, as Teams writes it (`itemscope=""`). HTML without that
+  wrapper, and a `Text` message's content, are kept byte for byte. `properties.mentions` stays a JSON string, each
+  entry's `itemid` a number. A mention of everyone is an entry like any other, its `mri` the chat's id.
+- **Quotes.** `properties.qtdMsgs` (a JSON string as sent) is read back as a list of objects: `messageId` a number,
+  `sender` and `time` as sent, `message`, `sharedRefId` and `replyChainId` null, and `validationResult` `Valid` for
+  a message of the same chat that the writer may read (`Invalid`, the server's own word, for any other: nothing is
+  told about a message elsewhere). `hasValidMsgReferences` is true when every quote is valid. The quote in the HTML is
+  kept as sent; Teams' line feed after it is not added (it changes nothing a reader parses).
+- **Refused** (400): `mentions` or `qtdMsgs` that aren't a list of objects, or a JSON string of one.
+- **Not kept**: `importance`, `subject` and `title` (the native client sends them empty), a forward's
+  `forwardTemplateId` and `originalMessageContext` (the native client doesn't forward), and the push delivery's
+  `mentiontypes` beside the resource (no client reads it). Who a mention reaches is [below](#who-gets-an-item).
+
 ## The account's own streams
 
 `48:notes`, `48:notifications` and `48:mentions` are each kept as a thread only their account is in, under an id no

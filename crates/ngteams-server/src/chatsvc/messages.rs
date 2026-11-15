@@ -7,13 +7,17 @@ use axum::http::{StatusCode, header::LOCATION};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value, json};
 
-use super::{Caller, Error, channels, events, member_of, message_repo, reader_of, reads, repo, streams, wire};
+use super::{Caller, Error, channels, events, member_of, message_repo, reader_of, reads, repo, rich, streams, wire};
 use crate::app::App;
 use crate::db::DbError;
 
 type Params = HashMap<String, String>;
 
+/// The properties a post or an edit sets from what it sent.
 pub(super) const MESSAGE_PROPERTIES: [&str; 6] = ["mentions", "cards", "links", "files", "formatVariant", "qtdMsgs"];
+
+/// What the service adds beside them: whether every quote names a message of the chat ([`quoted`]).
+pub(super) const VALID_QUOTES: &str = "hasValidMsgReferences";
 
 pub(super) async fn post(
     State(app): State<Arc<App>>,
@@ -38,6 +42,7 @@ pub(super) async fn post(
     }
     let mut draft = draft(&app, &caller, chat, &body)?;
     draft.chat_id = found.id;
+    quoted(&app, &caller, &mut draft).await?;
     if let Some(place) = &place {
         if !channels::writable(place) {
             return Err(Error::Denied);
@@ -92,12 +97,19 @@ pub(super) fn draft(app: &App, caller: &Caller, chat: &str, sent: &Value) -> Res
             }
         }
     }
+    if let Some(mentions) = properties.get("mentions") {
+        let mentions = rich::mentions(mentions).map_err(|_| Error::BadRequest)?;
+        properties.insert("mentions".into(), mentions);
+    }
+    if let Some(quotes) = properties.get("qtdMsgs") {
+        rich::quoted_ids(quotes).map_err(|_| Error::BadRequest)?;
+    }
     let mut body = json!({
         "type": "Message", "conversationid": chat,
         "conversationLink": format!("{}/v1/users/ME/conversations/{chat}", wire::base(app)),
         "from": format!("{}/v1/users/ME/contacts/{}", wire::base(app), caller.mri()),
         "fromDisplayNameInToken": caller.name, "imdisplayname": caller.name,
-        "messagetype": kind, "content": content, "properties": properties,
+        "messagetype": kind, "content": if kind == "Text" { content.to_owned() } else { rich::content(content) }, "properties": properties,
     });
     for key in ["contenttype", "clientmessageid", "amsreferences"] {
         if let Some(value) = sent.get(key) {
@@ -123,6 +135,21 @@ pub(super) fn draft(app: &App, caller: &Caller, chat: &str, sent: &Value) -> Res
         body: body.to_string(),
         root_id: None,
     })
+}
+
+/// A draft's quotes (`qtdMsgs`) as read back: each checked against the messages of its chat its writer may read.
+pub(super) async fn quoted(app: &App, caller: &Caller, draft: &mut message_repo::Message) -> Result<(), Error> {
+    let mut body = draft.value()?;
+    let Some(quotes) = body["properties"].get("qtdMsgs").cloned() else {
+        return Ok(());
+    };
+    let ids = rich::quoted_ids(&quotes).map_err(|_| Error::BadRequest)?;
+    let valid = message_repo::readable(&app.db, &draft.chat_id, &caller.id, &ids).await?;
+    let (quotes, all) = rich::quotes(&quotes, &valid).map_err(|_| Error::BadRequest)?;
+    body["properties"]["qtdMsgs"] = quotes;
+    body["properties"][VALID_QUOTES] = all.into();
+    draft.body = body.to_string();
+    Ok(())
 }
 
 pub(super) async fn page(

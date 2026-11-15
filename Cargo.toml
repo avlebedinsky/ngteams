@@ -188,6 +188,8 @@ image-webp = "=0.2.4"
 hmac = "0.13.0"
 # a Retry-After given as an HTTP date
 httpdate = "1.0.3"
+# a JSON object read and written in its keys' order whatever serde_json's features (the own server's mentions)
+indexmap = { version = "2.14.2", features = ["serde"] }
 # the UI sandbox's spawn marks every inherited descriptor but the named ones close-on-exec (`close_range`, which rustix
 # doesn't wrap): the version the workspace already links
 libc = "0.2.191"

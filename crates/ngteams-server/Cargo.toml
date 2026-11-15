@@ -32,6 +32,7 @@ http-range-header.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
+indexmap.workspace = true
 jsonwebtoken.workspace = true
 libsqlite3-sys.workspace = true
 mime_guess.workspace = true
@@ -41,7 +42,8 @@ redis.workspace = true
 reqwest.workspace = true
 rrule.workspace = true
 rustls.workspace = true
-scraper.workspace = true
+# source attribute order when a message is written out again (`chatsvc::rich`)
+scraper = { workspace = true, features = ["deterministic"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

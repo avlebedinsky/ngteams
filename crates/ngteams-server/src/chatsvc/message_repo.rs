@@ -193,6 +193,18 @@ pub(super) async fn page(db: &Db, chat: &str, reader: &str, window: Window) -> R
     })
 }
 
+/// Which of `ids` are messages of `chat` that `reader` may read.
+pub(super) async fn readable(db: &Db, chat: &str, reader: &str, ids: &[i64]) -> Result<Vec<i64>, DbError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_conn!(db, |conn| Ok(within!(chat, reader)
+        .filter(chat_messages::id.eq_any(ids))
+        .select(chat_messages::id)
+        .load(conn)
+        .await?))
+}
+
 pub(super) async fn latest(db: &Db, chat: &str, reader: &str) -> Result<Option<Message>, DbError> {
     with_conn!(db, |conn| Ok(within!(chat, reader)
         .order(chat_messages::id.desc())

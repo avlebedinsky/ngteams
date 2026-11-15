@@ -11,6 +11,7 @@ mod notes;
 mod paging;
 pub(crate) mod properties;
 mod reactions;
+mod rich;
 mod security;
 mod typing;
 
