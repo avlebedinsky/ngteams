@@ -113,7 +113,8 @@ impl CalendarView {
 
     /// The card as Teams' peek: beside the point `at` its event was clicked at (on its right, or its left where the
     /// window has no room), the brand line along its top, the calendar left undimmed; a click beside it closes it and
-    /// still reaches what it lands on, so another event opens its own peek and an event's second click edits it.
+    /// still reaches what it lands on, so another event opens its own peek and an event's second click edits it. The
+    /// wheel beside it scrolls the calendar and closes it, so it never stays beside a slot its event has left.
     fn peek(
         card: gpui::Stateful<gpui::Div>,
         at: gpui::Point<gpui::Pixels>,
@@ -140,6 +141,7 @@ impl CalendarView {
             .left_0()
             .size_full()
             .on_click(cx.listener(|this, _, _, cx| this.close_card(cx)))
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_card(cx)))
             .child(gpui::deferred(placed).with_priority(1))
     }
 

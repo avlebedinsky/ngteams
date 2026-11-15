@@ -122,6 +122,8 @@ impl LineWrapper {
                 };
 
                 width += item_width;
+                // Before a boundary is yielded too: else the next character could break right after this one.
+                prev_c = new_prev_c;
                 if width > wrap_width && ix > last_wrap_ix {
                     let wrap_at_candidate =
                         last_candidate_ix > 0 && width - last_candidate_width <= wrap_width;
@@ -183,8 +185,6 @@ impl LineWrapper {
 
                     return Some(Boundary::new(last_wrap_ix, next_indent));
                 }
-
-                prev_c = new_prev_c;
             }
 
             None
@@ -549,13 +549,14 @@ impl LineWrapper {
     }
 
     /// Opening punctuation, after which no line ends (UAX #14 LB14): brackets and opening quotes, the CJK and
-    /// fullwidth ones too. `‘` is left out: it is a word character (`won‘t`), and no candidate follows one anyway.
+    /// fullwidth ones too. `‘` is one as well (`他说‘你好’`): it also stays a word character, so `won‘t` keeps whole.
     #[inline(always)]
     pub(crate) fn is_opening_punctuation(c: char) -> bool {
         matches!(
             c,
             '(' | '['
                 | '{'
+                | '‘'
                 | '“'
                 | '«'
                 | '„'
@@ -983,6 +984,18 @@ mod tests {
                 )
                 .collect::<Vec<_>>(),
             &[Boundary::new(3, 0), Boundary::new(15, 0)],
+        );
+
+        // A boundary moves past the character it was yielded at: no line holds `[` alone
+        assert_eq!(
+            wrapper
+                .wrap_line(
+                    &[LineFragment::text("abcdefghijk [abcdefghijklmnop]")],
+                    px(120.0),
+                    IndentAdjustment::default()
+                )
+                .collect::<Vec<_>>(),
+            &[Boundary::new(12, 0), Boundary::new(24, 0)],
         );
     }
 

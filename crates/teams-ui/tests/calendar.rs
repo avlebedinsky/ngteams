@@ -1139,6 +1139,38 @@ fn with_a_peek_open_another_event_opens_its_peek_and_a_double_click_edits_the_ac
     });
 }
 
+#[test]
+fn the_wheel_beside_a_peek_scrolls_the_hours_and_closes_it_the_wheel_on_it_keeps_it() {
+    let rig = Rig::start();
+    rig.core.calendar.lock().unwrap().events = vec![event("busy", 14)];
+    let (view, cx, _) = window(&rig);
+    let wheel = |cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>| {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        draw(cx);
+    };
+    click(cx, "calendar-event-busy");
+    let card = cx.debug_bounds("calendar-card").unwrap();
+    wheel(cx, card.center());
+    assert!(
+        cx.update(|_, cx| view.read(cx).card().is_some()),
+        "the wheel on the peek keeps it"
+    );
+    let before = cx.debug_bounds("calendar-event-busy").unwrap().origin.y;
+    let hours = cx.debug_bounds("calendar-hours").unwrap();
+    wheel(cx, gpui::point(hours.origin.x + px(4.0), hours.center().y));
+    assert!(
+        cx.update(|_, cx| view.read(cx).card().is_none()),
+        "the wheel beside the peek closes it"
+    );
+    let after = cx.debug_bounds("calendar-event-busy").unwrap().origin.y;
+    assert!(after < before, "the hours scrolled under it: {before:?} to {after:?}");
+}
+
 /// Split view shows the account's calendar and the person's apart; closing theirs unticks it; adding them again says
 /// so; Remove takes them off the list.
 fn split_close_and_add_again(view: &Entity<CalendarView>, cx: &mut VisualTestContext) {

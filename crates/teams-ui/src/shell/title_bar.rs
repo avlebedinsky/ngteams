@@ -467,8 +467,8 @@ impl Shell {
             .when(open, |avatar| avatar.bg(rgb(palette.on_frame).opacity(0.3)))
             .when(failed, |avatar| avatar.border_1().border_color(rgb(theme::DANGER)))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.toggle_status_menu_at(super::MenuAnchor::TitleBar, cx);
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.status_avatar_clicked(super::MenuAnchor::TitleBar, window, cx);
             }))
             .child(face)
             .children(dot)

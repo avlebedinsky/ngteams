@@ -1,13 +1,14 @@
 //! Text wrapping as GPUI does it with the vendored patch `build/patches/gpui-pre/0002`: no line ends right after
-//! opening punctuation (UAX #14 LB14), as in Teams, in the drawn wrap and in the clamped label's truncation alike.
+//! opening punctuation (UAX #14 LB14), as in Teams, in the drawn wrap, the line wrapper and the clamped label's
+//! truncation alike.
 
 use gpui::{IndentAdjustment, LineFragment, TestAppContext, TruncateFrom, px};
 
-const TEXT: &str = "Add it to an [[account]] entry: 彼は「こんにちは」と言った, 【【注意】】 （ｘ） „Zitat“ and \
-    ((nested (brackets))) as ((((((((((((((((((((((((((((((((((((((((";
+const TEXT: &str = "Add it to an [[account]] entry: 彼は「こんにちは」と言った, 他说‘你好’, 【【注意】】 （ｘ） \
+    „Zitat“ and ((nested (brackets))) as ((((((((((((((((((((((((((((((((((((((((";
 
 fn opening(c: char) -> bool {
-    "([{“«„‚（［｛｟「『【〔〈《〖〘〚｢".contains(c)
+    "([{‘“«„‚（［｛｟「『【〔〈《〖〘〚｢".contains(c)
 }
 
 /// Where each line of `text` ends when drawn `width` wide: shaped, then wrapped, as a text element does.
@@ -56,12 +57,38 @@ fn no_line_ends_on_an_opening_bracket_or_quote_cjk_ones_too(cx: &mut TestAppCont
     );
 }
 
+fn system_font_wrapper(cx: &TestAppContext) -> gpui::LineWrapperHandle {
+    cx.text_system().line_wrapper(gpui::font(".SystemUIFont"), px(14.0))
+}
+
+#[gpui::test]
+fn the_line_wrapper_ends_no_line_on_an_opening_bracket_or_quote(cx: &mut TestAppContext) {
+    let run = TEXT.find(" ((((").unwrap() + 1;
+    let mut wrapper = system_font_wrapper(cx);
+    for width in (60..=720u16).step_by(2) {
+        let breaks = wrapper
+            .wrap_line(
+                &[LineFragment::text(TEXT)],
+                px(f32::from(width)),
+                IndentAdjustment::default(),
+            )
+            .map(|boundary| boundary.ix)
+            .collect::<Vec<_>>();
+        for at in breaks {
+            let ends = TEXT[..at].chars().next_back().unwrap();
+            assert!(
+                !opening(ends) || at > run + 4,
+                "a line ends on {ends:?} at byte {at}, {width} px wide"
+            );
+        }
+    }
+}
+
 #[gpui::test]
 fn a_clamped_label_is_cut_where_its_lines_wrap(cx: &mut TestAppContext) {
     // `line_clamp` with an ellipsis: what the truncation keeps must wrap into the allowed lines, or its last line
     // overflows unmarked
-    let font = gpui::font(".SystemUIFont");
-    let mut wrapper = cx.text_system().line_wrapper(font, px(14.0));
+    let mut wrapper = system_font_wrapper(cx);
     let run = gpui::TextRun {
         len: TEXT.len(),
         font: gpui::font(".SystemUIFont"),

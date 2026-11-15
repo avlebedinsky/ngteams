@@ -79,6 +79,7 @@ use crate::forwarded::Original;
 use crate::global_search::{self, GlobalSearch, GlobalSearchEvent, Mode as SearchMode};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::join_team::{JoinTeam, JoinTeamEvent};
+use crate::keyboard::{self, PopupFocus};
 use crate::manage_team::{ManageTab, ManageTeam, ManageTeamEvent};
 use crate::models::{Account, Models};
 use crate::own_presence::{self, OwnPresence};
@@ -357,6 +358,8 @@ pub struct Shell {
     status_anchor: MenuAnchor,
     /// The avatar it opened from, whose press is its own: a press anywhere else closes the menu.
     status_opener: PopupButton,
+    /// The account menu's keyboard: it takes the focus when it opens and gives it back when it closes.
+    status_focus: PopupFocus,
     /// What the chat's header was last traced showing.
     header_traced: Option<HeaderShown>,
     /// The incoming call's banner and the in-call strip.
@@ -462,6 +465,7 @@ impl Shell {
             status_menu: false,
             status_anchor: MenuAnchor::Rail,
             status_opener: PopupButton::default(),
+            status_focus: PopupFocus::new(cx),
             header_traced: None,
             call_bar,
             call_button_traced: None,
@@ -1604,6 +1608,23 @@ impl Shell {
         let change = if self.status_menu { "opened" } else { "closed" };
         self.trace.record(&TraceLine::new("status-menu", change));
         cx.notify();
+    }
+
+    /// The avatar at `anchor` was clicked: the account menu opens with the keyboard in it, as Teams' menu takes it (so
+    /// Enter no longer reaches a draft), or closes with the keyboard back where it was.
+    pub(crate) fn status_avatar_clicked(&mut self, anchor: MenuAnchor, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_status_menu_at(anchor, cx);
+        if self.status_menu {
+            self.status_focus.opened(window, cx);
+        } else {
+            self.status_focus.closed(window, cx);
+        }
+    }
+
+    /// The account menu closed from inside it (a row picked, Escape, Tab): the keyboard back where it was.
+    fn status_menu_done(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_status_menu(cx);
+        self.status_focus.closed(window, cx);
     }
 
     /// A press outside the account menu (not on the avatar it opened from) closes it, as in Teams.
@@ -3002,9 +3023,9 @@ impl Shell {
                 avatar.bg(rgb(palette.on_frame).opacity(0.3))
             })
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 if this.core.me() == key {
-                    this.toggle_status_menu_at(MenuAnchor::Rail, cx);
+                    this.status_avatar_clicked(MenuAnchor::Rail, window, cx);
                 } else if let Some((accounts, _)) = &this.accounts {
                     accounts.update(cx, |accounts, cx| accounts.switch(&key, cx));
                 }
@@ -3058,13 +3079,18 @@ impl Shell {
                 .pt_1()
                 .border_t_1()
                 .border_color(rgb(palette.border))
-                .child(
+                .child(keyboard::stop(
+                    "status-menu-remove-account",
                     menu_row("status-menu-remove-account", palette)
                         .text_color(rgb(theme::DANGER))
                         .child(Glyph::LOG_OUT.icon().size(px(16.0)))
                         .child("Sign out and remove")
-                        .on_click(cx.listener(|this, _, _, cx| this.ask_remove_account(cx))),
-                )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.status_focus.closed(window, cx);
+                            this.ask_remove_account(cx);
+                        })),
+                    palette,
+                ))
         });
         (header, remove)
     }
@@ -3075,12 +3101,21 @@ impl Shell {
         let chosen = self.settings.read(cx).settings().manual_status_of(self.core.me());
         let entries = ManualStatus::ALL.map(|status| {
             let check = (status == chosen).then(|| Glyph::CHECK.icon().size(px(14.0)).text_color(rgb(palette.brand)));
-            menu_row(format!("status-menu-{}", status.key()), palette)
+            let key = format!("status-menu-{}", status.key());
+            let row = menu_row(key.clone(), palette)
                 .when(status == chosen, |row| row.font_weight(gpui::FontWeight::SEMIBOLD))
                 .child(settings_view::status_mark(status, palette))
                 .child(div().flex_1().child(status.label()))
                 .children(check)
-                .on_click(cx.listener(move |this, _, _, cx| this.choose_status(status, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.choose_status(status, cx);
+                    this.status_focus.closed(window, cx);
+                }));
+            keyboard::stop(SharedString::from(key), row, palette)
+        });
+        let weak = cx.entity().downgrade();
+        let keys = keyboard::menu_keys(self.status_focus.root().clone(), move |window, cx| {
+            let _ = weak.update(cx, |this, cx| this.status_menu_done(window, cx));
         });
         let reported = self.own_reporting(cx).map(|reporting| {
             div()
@@ -3127,6 +3162,8 @@ impl Shell {
             .rounded_lg()
             .shadow_lg()
             .occlude()
+            .track_focus(self.status_focus.root())
+            .on_key_down(keys)
             .on_mouse_down_out(
                 self.status_opener
                     .outside(cx.listener(|this, _, _, cx| this.close_status_menu(cx))),

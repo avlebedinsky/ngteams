@@ -860,3 +860,71 @@ fn a_press_outside_the_account_menu_closes_it_and_its_avatar_still_toggles_it() 
         "the avatar's and the outside press's closing are traced"
     );
 }
+
+#[test]
+fn the_account_menu_takes_the_keyboard_and_gives_it_back() {
+    let d = TwoAccounts::start();
+    let window = d.open();
+    let shell = d.rig.cx.update(|cx| {
+        window::content(window, cx)
+            .unwrap()
+            .read(cx)
+            .shell_in(cx)
+            .unwrap()
+            .clone()
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), &d.rig.cx);
+    cx.run_until_parked();
+    let open = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| shell.read(cx).status_menu_open());
+    let focused = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.focused(cx));
+    let at = cx
+        .debug_bounds("title-account")
+        .or_else(|| cx.debug_bounds("rail-status"))
+        .expect("an avatar opens the account menu")
+        .center();
+    // the keyboard is in the search box, which takes Enter as a draft would
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.focus_search(teams_ui::global_search::Mode::Search, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let typing = focused(&mut cx);
+    // the press on the avatar puts the keyboard on the shell (its root is focusable), the click opens the menu
+    cx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    let before = focused(&mut cx);
+    assert!(before.is_some());
+    cx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(open(&mut cx));
+    assert_ne!(
+        focused(&mut cx),
+        typing,
+        "the open menu, not the search box, has the keyboard"
+    );
+    assert_ne!(focused(&mut cx), before, "the open menu has the keyboard");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!open(&mut cx), "Escape closes it");
+    assert_eq!(focused(&mut cx), before, "the keyboard is back where it was");
+    // Down reaches its first status, Enter picks it, and the keyboard goes back
+    cx.simulate_click(at, gpui::Modifiers::none());
+    cx.run_until_parked();
+    for key in ["down", "enter"] {
+        // down and up, as a person presses it: a focused row is clicked on the key's release
+        let keystroke = gpui::Keystroke::parse(key).unwrap();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    }
+    assert!(!open(&mut cx), "a picked status closes it");
+    assert_eq!(d.traced("status-menu", "chosen").len(), 1, "Enter picked a status");
+    assert_eq!(focused(&mut cx), before, "the keyboard is back after a pick");
+}
