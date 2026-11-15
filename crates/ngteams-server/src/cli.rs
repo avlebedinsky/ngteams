@@ -40,6 +40,9 @@ pub enum Command {
     /// Accounts.
     #[command(subcommand)]
     User(UserCommand),
+    /// What the directory knows of accounts: the person card's fields and the picture.
+    #[command(subcommand)]
+    Profile(ProfileCommand),
     /// What accounts keep in the store.
     #[command(subcommand)]
     Media(MediaCommand),
@@ -79,6 +82,48 @@ pub enum UserCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ProfileCommand {
+    /// Prints an account's profile, a field on each line.
+    Show { upn: String },
+    /// Sets profile fields; an empty value clears one, a field not named stays.
+    Set {
+        upn: String,
+        #[command(flatten)]
+        fields: ProfileFields,
+    },
+    /// Sets the account's picture from a PNG, JPEG, GIF or WebP file of at most 4 MiB.
+    Picture { upn: String, file: PathBuf },
+    /// Takes the account's picture away.
+    RemovePicture { upn: String },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ProfileFields {
+    #[arg(long)]
+    given_name: Option<String>,
+    #[arg(long)]
+    surname: Option<String>,
+    #[arg(long)]
+    job_title: Option<String>,
+    #[arg(long)]
+    department: Option<String>,
+    #[arg(long)]
+    office: Option<String>,
+    #[arg(long)]
+    company: Option<String>,
+    #[arg(long)]
+    mobile_phone: Option<String>,
+    #[arg(long)]
+    business_phone: Option<String>,
+    /// The UPN of the account this one reports to.
+    #[arg(long)]
+    manager: Option<String>,
+    /// Whether the account's automatic replies are on.
+    #[arg(long)]
+    out_of_office: Option<bool>,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum MediaCommand {
     /// Lists an account's files and pictures: kind, id, bytes, when it was stored, name.
     List { upn: String },
@@ -112,6 +157,12 @@ pub enum CliError {
     Serve(#[from] crate::serve::ServeError),
     #[error(transparent)]
     Storage(#[from] crate::storage::StorageError),
+    #[error(transparent)]
+    Profile(#[from] crate::people::ProfileError),
+    #[error(transparent)]
+    Picture(#[from] crate::people::PictureError),
+    #[error("can't read the picture's file: {0}")]
+    File(#[source] std::io::Error),
     #[error("the account keeps nothing with the id {0}")]
     NotStored(String),
     #[error("can't start the runtime: {0}")]
@@ -191,6 +242,7 @@ pub async fn run(
             Ok(())
         }
         Command::User(command) => user(config, command, input, &mut Streams { output, warnings }).await,
+        Command::Profile(command) => profile(&config, command, output).await,
         Command::Media(command) => media(&config, command, output).await,
         Command::SetupCode => {
             let db = crate::db::Db::connect(&config.database_url, 1).await?;
@@ -232,6 +284,80 @@ async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'stat
     sweeper.abort();
     app.cleared(CLEARING).await;
     Ok(served?)
+}
+
+/// The profile commands, on the database and, for a picture, the file store.
+async fn profile(config: &Config, command: ProfileCommand, output: &mut dyn Write) -> Result<(), CliError> {
+    use crate::people;
+    let db = crate::db::Db::connect(&config.database_url, 1).await?;
+    let storage = || crate::storage::ObjectStorage::open_with(&config.storage_url, &config.storage_options, &config.storage);
+    match command {
+        ProfileCommand::Show { upn } => show_profile(&db, &upn, output).await,
+        ProfileCommand::Set { upn, fields } => {
+            let changes = people::ProfileChanges {
+                given_name: fields.given_name,
+                surname: fields.surname,
+                job_title: fields.job_title,
+                department: fields.department,
+                office_location: fields.office,
+                company_name: fields.company,
+                mobile_phone: fields.mobile_phone,
+                business_phone: fields.business_phone,
+                manager: fields.manager,
+                out_of_office: fields.out_of_office,
+            };
+            let user = people::account(&db, &upn).await?;
+            people::update_profile(&db, &user.upn, &changes).await?;
+            writeln!(output, "updated {}", user.upn).map_err(CliError::Output)
+        }
+        ProfileCommand::Picture { upn, file } => {
+            let user = people::account(&db, &upn).await?;
+            let source = tokio::fs::read(&file).await.map_err(CliError::File)?;
+            let size = source.len();
+            people::set_picture(&db, &storage()?, &user.id, source.into()).await?;
+            writeln!(output, "picture set for {} ({size} bytes read)", user.upn).map_err(CliError::Output)
+        }
+        ProfileCommand::RemovePicture { upn } => {
+            let user = people::account(&db, &upn).await?;
+            let removed = people::remove_picture(&db, &storage()?, &user.id).await?;
+            let said = if removed {
+                format!("picture removed for {}", user.upn)
+            } else {
+                format!("{} has no picture", user.upn)
+            };
+            writeln!(output, "{said}").map_err(CliError::Output)
+        }
+    }
+}
+
+/// An account's profile, a field and its value (tab-separated) on each line.
+async fn show_profile(db: &crate::db::Db, upn: &str, output: &mut dyn Write) -> Result<(), CliError> {
+    let user = crate::people::account(db, upn).await?;
+    let profile = crate::people::repo::profile(db, &user.id).await?;
+    let manager = match &profile.manager_id {
+        Some(id) => crate::db::users::by_id(db, id).await?.map(|manager| manager.upn),
+        None => None,
+    };
+    let yes_no = |yes: bool| Some(if yes { "yes" } else { "no" }.to_owned());
+    let lines = [
+        ("upn", Some(user.upn)),
+        ("name", Some(user.display_name)),
+        ("given name", profile.given_name),
+        ("surname", profile.surname),
+        ("job title", profile.job_title),
+        ("department", profile.department),
+        ("office", profile.office_location),
+        ("company", profile.company_name),
+        ("mobile phone", profile.mobile_phone),
+        ("business phone", profile.business_phone),
+        ("manager", manager),
+        ("out of office", yes_no(profile.out_of_office)),
+        ("picture", yes_no(profile.picture_key.is_some())),
+    ];
+    for (name, value) in lines {
+        writeln!(output, "{name}\t{}", value.unwrap_or_default()).map_err(CliError::Output)?;
+    }
+    Ok(())
 }
 
 /// Each thing the account keeps on a line (`file` or `picture`, id, bytes, when it was stored, name,

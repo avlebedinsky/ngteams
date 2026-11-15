@@ -2,6 +2,7 @@
 //! draws people from: the middle tier's short profiles, Graph's users and pictures (`crate::routes::graph`) and
 //! Loki's person card.
 
+mod edit;
 mod loki;
 mod picture;
 pub mod repo;
@@ -17,6 +18,7 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 
+pub use edit::{ProfileChanges, ProfileError, account, update_profile};
 pub use picture::{PictureError, remove_picture, set_picture};
 pub(crate) use picture::picture;
 pub use repo::{Person, Profile, out_of_office};

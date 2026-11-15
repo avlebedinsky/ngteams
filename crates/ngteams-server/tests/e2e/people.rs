@@ -418,3 +418,112 @@ async fn an_engine_names_and_draws_a_colleague_and_reads_their_card() {
         office.server.stop().await;
     }
 }
+
+/// The admin command line on `server`'s database and file store.
+async fn cli(server: &TestServer, args: &[&str]) -> Result<String, ngteams_server::cli::CliError> {
+    use clap::Parser as _;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("server.toml");
+    let written = format!(
+        "database_url = \"{}\"\npublic_origin = \"{}\"\nstorage_url = \"{}\"\n",
+        server.app.config.database_url, server.origin, server.app.config.storage_url
+    );
+    std::fs::write(&config, written).unwrap();
+    let mut command = vec!["ngteams-server", "--config", config.to_str().unwrap()];
+    command.extend_from_slice(args);
+    let mut output = Vec::new();
+    let cli = ngteams_server::cli::Cli::try_parse_from(command).expect("the command line isn't one the server takes");
+    ngteams_server::cli::run(cli, &mut "".as_bytes(), &mut output, &mut Vec::new(), std::future::pending()).await?;
+    Ok(String::from_utf8(output).unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operator_sets_a_profile_and_a_picture_on_the_command_line_and_clients_read_them() {
+    let blobs = tempfile::tempdir().unwrap();
+    let store = format!("file://{}", blobs.path().display());
+    let server = server_with(Backend::Sqlite, |config| config.storage_url = store).await;
+    let a = server.add_user("ada@own.test", "Ada Lovelace").await;
+    let b = server.add_user("bert@own.test", "Bert Sample").await;
+    let c = server.add_user("cora@own.test", "Cora Chief").await;
+    let set = [
+        "profile", "set", "Bert@own.test", "--given-name", "Bert", "--surname", " Sample ", "--job-title", "Engineer",
+        "--department", "Research", "--office", "Room 4", "--company", "Own", "--mobile-phone", "+1 555 0100",
+        "--business-phone", "+1 555 0101", "--manager", "cora@own.test", "--out-of-office", "true",
+    ];
+    assert_eq!(cli(&server, &set).await.unwrap(), "updated bert@own.test\n");
+    let file = blobs.path().join("bert.png");
+    std::fs::write(&file, png(300, 200)).unwrap();
+    let pictured = cli(&server, &["profile", "picture", "bert@own.test", file.to_str().unwrap()])
+        .await
+        .unwrap();
+    assert!(pictured.starts_with("picture set for bert@own.test ("), "{pictured}");
+    let shown = cli(&server, &["profile", "show", "bert@own.test"]).await.unwrap();
+    for line in [
+        "name\tBert Sample\n", "given name\tBert\n", "surname\tSample\n", "job title\tEngineer\n",
+        "department\tResearch\n", "office\tRoom 4\n", "company\tOwn\n", "mobile phone\t+1 555 0100\n",
+        "business phone\t+1 555 0101\n", "manager\tcora@own.test\n", "out of office\tyes\n", "picture\tyes\n",
+    ] {
+        assert!(shown.contains(line), "{line:?} isn't in {shown:?}");
+    }
+
+    // what the operator set is what a client reads
+    let session = Arc::new(server.session("ada@own.test").await);
+    let ada = Client::new(transport(&session, &server, &a).await.with_loki());
+    ada.transport().set_loki_region(&format!("{ORIGIN}/loki/")).unwrap();
+    let bert = Mri::new(mri(&b));
+    let lookup = ShortProfileLookup::new([bert.clone()]).unwrap();
+    let answer = ada.post_read(lookup.clone()).await.unwrap();
+    let profile = lookup.read_answer(answer.body()).unwrap().remove(0);
+    assert_eq!(profile.job_title.as_deref(), Some("Engineer"));
+    assert_eq!(profile.surname.as_deref(), Some("Sample"));
+    let picture = GraphPicture::of(bert.as_str()).unwrap();
+    assert!(picture.read_answer(&ada.read(&picture).await.unwrap()).is_ok());
+    let answer = ada.read(&LokiOrganization::of(bert.as_str()).unwrap()).await.unwrap();
+    assert_eq!(LokiOrganization::read_answer(answer.body()).unwrap().managers[0].object_id, c);
+    let presence = teams_proto::PresenceRead::new([bert.clone()]).unwrap();
+    let answer = ada.post_read(presence.clone()).await.unwrap();
+    assert_eq!(presence.read_answer(answer.body()).unwrap()[0].out_of_office, Some(true));
+
+    // an empty value clears a field, and the others stay
+    let cleared = ["profile", "set", "bert@own.test", "--job-title", "", "--manager", "", "--out-of-office", "false"];
+    cli(&server, &cleared).await.unwrap();
+    let kept = people::repo::profile(&server.app.db, &b).await.unwrap();
+    assert_eq!((kept.job_title, kept.manager_id, kept.out_of_office), (None, None, false));
+    assert_eq!(kept.office_location.as_deref(), Some("Room 4"));
+    assert!(kept.picture_key.is_some());
+    let shown = cli(&server, &["profile", "show", "bert@own.test"]).await.unwrap();
+    assert!(shown.contains("job title\t\n") && shown.contains("out of office\tno\n"), "{shown}");
+
+    // nobody reports to themselves, directly or around
+    cli(&server, &["profile", "set", "bert@own.test", "--manager", "cora@own.test"]).await.unwrap();
+    for refused in [
+        vec!["profile", "set", "cora@own.test", "--manager", "bert@own.test"],
+        vec!["profile", "set", "cora@own.test", "--manager", "cora@own.test"],
+        vec!["profile", "set", "cora@own.test", "--manager", "nobody@own.test"],
+        vec!["profile", "set", "nobody@own.test", "--job-title", "Ghost"],
+        vec!["profile", "set", "cora@own.test", "--job-title", "a\u{7}b"],
+        vec!["profile", "show", "nobody@own.test"],
+        vec!["profile", "picture", "nobody@own.test", file.to_str().unwrap()],
+        vec!["profile", "picture", "cora@own.test", "/no/such/file.png"],
+        vec!["profile", "picture", "cora@own.test", blobs.path().join("../server.toml").to_str().unwrap()],
+        vec!["profile", "remove-picture", "nobody@own.test"],
+    ] {
+        assert!(cli(&server, &refused).await.is_err(), "{refused:?}");
+    }
+    let long = "x".repeat(257);
+    assert!(cli(&server, &["profile", "set", "cora@own.test", "--office", &long]).await.is_err());
+    let text = blobs.path().join("notes.txt");
+    std::fs::write(&text, "not a picture").unwrap();
+    assert!(cli(&server, &["profile", "picture", "cora@own.test", text.to_str().unwrap()]).await.is_err());
+
+    assert_eq!(
+        cli(&server, &["profile", "remove-picture", "bert@own.test"]).await.unwrap(),
+        "picture removed for bert@own.test\n"
+    );
+    assert_eq!(
+        cli(&server, &["profile", "remove-picture", "bert@own.test"]).await.unwrap(),
+        "bert@own.test has no picture\n"
+    );
+    assert_eq!(status_of(ada.read(&picture).await.unwrap_err()), Some(404));
+    server.stop().await;
+}
