@@ -554,3 +554,66 @@ async fn a_webhook_workflow_runs_only_from_its_link_and_names_only_its_own_runs(
         server.stop().await;
     }
 }
+
+/// Bert, a co-owner, edits the workflow in place after Ada, its maker, left the chat. A move goes only where each
+/// enabled owner sees: Ada holds it back until she is disabled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owner_edits_in_place_after_the_maker_left_and_moves_where_each_enabled_owner_sees() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+        // three, so that Ada can leave it
+        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
+        let environment = environment(&ada).await;
+        let chat = group_chat(&ada, &[&bert, &cora], "Project room").await;
+        let id = save(&ada, &environment, &Target::Chat(&chat)).await["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let bert_owner = Principal {
+            id: bert.id.clone(),
+            name: "Bert".into(),
+            email: None,
+        };
+        let add = WorkflowRequest::AddOwner {
+            environment: environment.clone(),
+            flow: id.clone(),
+            owner: bert_owner,
+        };
+        ask(&ada, add).await.unwrap();
+        let leave = crate::chatsvc::members::RemoveMember {
+            chat: chat.clone(),
+            member: ada.mri.clone(),
+        };
+        assert_eq!(ada.client.write(leave).await.unwrap().status(), 200);
+        ada.stop();
+
+        let chat_template = template(&bert, CHAT_TEMPLATE).await;
+        let connection = teams_connection(&bert, &environment).await;
+        let edit = |target: &Target<'_>| WorkflowRequest::Update {
+            environment: environment.clone(),
+            flow: id.clone(),
+            properties: save_body(&chat_template, target, &connection),
+            expected_modified: None,
+        };
+        // the same chat, as each save of the card editor sends it: only the editor must see it
+        ask(&bert, edit(&Target::Chat(&chat))).await.unwrap();
+        // a move: Ada, still an owner, is not in Bert's chat with Cora
+        let other = group_chat(&bert, &[&cora], "Bert and Cora").await;
+        assert_eq!(
+            ask(&bert, edit(&Target::Chat(&other))).await,
+            Err(WorkflowFailure::Forbidden)
+        );
+        // a disabled owner does not hold a move back
+        ngteams_server::admin::set_disabled(&server.app.db, &*server.app.fanout, "ada@own.test", true)
+            .await
+            .unwrap();
+        ask(&bert, edit(&Target::Chat(&other))).await.unwrap();
+        let read = ask(&bert, flow_request(&environment, &id)).await.unwrap();
+        assert!(read["properties"]["definition"].to_string().contains(&other));
+        bert.stop();
+        cora.stop();
+        server.stop().await;
+    }
+}

@@ -156,13 +156,23 @@ async fn change(
     let owners = repo::owners(&app.db, &flow.id).await?;
     if changes.contains_key("definition") {
         let target = target(&changes)?;
-        // each owner reads where it posts, as `modify_owners` asks of a new one
-        for owner in &owners {
-            if !sees(&app, owner, &target).await? {
+        if target.thread() == flow.target_thread {
+            // the same place: the editor still reads it
+            if !sees(&app, &caller.id, &target).await? {
                 return Err(Error::FORBIDDEN);
             }
+        } else {
+            // a move: each enabled owner reads the new place, as `modify_owners` asks of a new one
+            for owner in &owners {
+                let enabled = users::by_id(&app.db, owner)
+                    .await?
+                    .is_some_and(|user| !user.disabled && user.deleted_at.is_none());
+                if enabled && !sees(&app, owner, &target).await? {
+                    return Err(Error::FORBIDDEN);
+                }
+            }
+            flow.target_thread = target.thread().to_owned();
         }
-        flow.target_thread = target.thread().to_owned();
     }
     connections_are(&app, &owners, &changes).await?;
     kept_now.extend(kept(changes));
@@ -530,7 +540,7 @@ fn flow_id(environment: &str, flow: &str) -> String {
 fn resource(flow: &repo::Workflow, caller: &Caller<Flow>) -> Value {
     let environment = caller.environment();
     let mut properties = stored(flow);
-    let definition = stored_definition(flow);
+    let definition = properties.get("definition").cloned().unwrap_or_default();
     let triggers: Vec<Value> = definition
         .get("triggers")
         .and_then(Value::as_object)

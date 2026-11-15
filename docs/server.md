@@ -416,7 +416,7 @@ a chat" need:
 
 | Who | May |
 | --- | --- |
-| a workflow's owner (its maker and the co-owners it adds) | read, rename, edit, turn off and on, delete it; read its link, owners, runs; add a co-owner who can see where it posts, take a co-owner off (the maker stays); move it only to a channel or chat that each owner can see |
+| a workflow's owner (its maker and the co-owners it adds) | read, rename, edit, turn off and on, delete it; read its link, owners, runs; add a co-owner who can see where it posts, take a co-owner off (the maker stays); edit it in place while it can see where it posts, move it only to a channel or chat that each enabled owner can see |
 | the maker of a workflow | save it only to a channel of a team it is on (a private channel's own people only) or a chat it is in, neither archived |
 | anyone with its link | post to it |
 
