@@ -9,7 +9,7 @@ use crate::chatsvc::activity::{FEED, mentioning};
 use crate::chatsvc::members::RemoveMember;
 use crate::support::backends;
 
-fn in_chat(event: &Event, chat: &str) -> bool {
+pub(super) fn in_chat(event: &Event, chat: &str) -> bool {
     matches!(event, Event::Message { conversation, .. } if conversation == chat)
 }
 
@@ -23,7 +23,7 @@ async fn roster_event(user: &mut User, chat: &str, kind: &str) {
 }
 
 /// Waits until the client knows the chat's people: its own writes to the roster need them.
-async fn knows_people(user: &mut User, chat: &str, people: usize) {
+pub(super) async fn knows_people(user: &mut User, chat: &str, people: usize) {
     for _ in 0..30 {
         if user.engine().members(chat).await.unwrap().len() == people {
             return;

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_core::account::{CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM, USER_PROFILE_GTM};
+use teams_core::activity::ActivityFeed;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, MessageChange, Parts, Source};
 use teams_core::{Outbox, Transient};
 use teams_proto::chat::MessageText;
@@ -121,6 +122,18 @@ impl Rig {
             node.stop().await;
         }
         self.first.stop().await;
+    }
+
+    /// Stops every node, then starts each again: what they serve from here on is what the database kept.
+    pub async fn restart(&mut self) {
+        if let Some(node) = &mut self.second {
+            node.stop().await;
+        }
+        self.first.stop().await;
+        self.first.start().await;
+        if let Some(node) = &mut self.second {
+            node.start().await;
+        }
     }
 }
 
@@ -275,6 +288,39 @@ impl User {
     pub fn close(&mut self) {
         if let Some(engine) = self.engine.take() {
             engine.shutdown();
+        }
+    }
+
+    /// Quits the client and starts it again on its store, as a quit and a start of ngteams: connected, registered
+    /// and caught up.
+    pub async fn restart(&mut self) {
+        self.close();
+        let mark = self.mark();
+        self.start();
+        self.online(mark).await;
+        self.caught_up(mark).await;
+    }
+
+    /// Waits for the end of a catch-up the client itself started since `mark`.
+    pub async fn caught_up(&mut self, mark: usize) {
+        self.since(mark, "catch-up", |event| matches!(event, Event::CaughtUp { .. }))
+            .await;
+    }
+
+    /// The client's activity feed once `pick` takes it; nothing asks the service for it here.
+    pub async fn feed(&mut self, what: &str, pick: impl Fn(&ActivityFeed) -> bool) -> ActivityFeed {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let feed = self.engine().activity().await.unwrap();
+            if pick(&feed) {
+                return feed;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}: the feed never showed {what}: {feed:#?}",
+                self.upn
+            );
+            self.pump(Duration::from_millis(100)).await;
         }
     }
 

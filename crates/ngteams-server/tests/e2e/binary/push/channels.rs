@@ -13,7 +13,7 @@ use crate::support::backends;
 use crate::teams::new_channel;
 
 /// A team of `owner`'s with `people` as its members; its thread and group.
-async fn team(owner: &User, people: &[&User]) -> (String, String) {
+pub(super) async fn team(owner: &User, people: &[&User]) -> (String, String) {
     let create = TeamWrite::Create(NewTeam {
         name: "Rocket".into(),
         description: "Rocket's people".into(),
@@ -34,7 +34,13 @@ async fn team(owner: &User, people: &[&User]) -> (String, String) {
 }
 
 /// A channel of the team; its thread and, for a private one, its group.
-async fn channel(owner: &User, team: &str, group: &str, name: &str, kind: NewChannelKind) -> (String, Option<String>) {
+pub(super) async fn channel(
+    owner: &User,
+    team: &str,
+    group: &str,
+    name: &str,
+    kind: NewChannelKind,
+) -> (String, Option<String>) {
     let draft = teams_core::ChannelDraft {
         channel: new_channel(team, group, name, kind),
         show_by_default: false,
