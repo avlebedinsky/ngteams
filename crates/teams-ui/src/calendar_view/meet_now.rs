@@ -245,6 +245,7 @@ impl CalendarView {
         Some(
             div()
                 .id("calendar-meet-now-backdrop")
+                .occlude()
                 .absolute()
                 .top_0()
                 .left_0()

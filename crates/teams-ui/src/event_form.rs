@@ -2047,6 +2047,7 @@ impl EventForm {
         Some(
             div()
                 .id("event-confirm-backdrop")
+                .occlude()
                 .absolute()
                 .top_0()
                 .left_0()

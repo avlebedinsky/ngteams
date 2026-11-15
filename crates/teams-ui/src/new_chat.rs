@@ -1020,6 +1020,7 @@ impl NewChat {
                 .id("new-chat-suggestions")
                 .debug_selector(|| "new-chat-suggestions".to_owned())
                 .absolute()
+                .occlude()
                 .top(px(top))
                 .left(px(52.0))
                 .right(px(72.0))

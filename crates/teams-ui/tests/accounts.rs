@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use common::{FakeCore, FakeEvents, LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, VisualTestContext, WindowHandle};
 use notices::{Asked, FakeServer, chat, message};
+use teams_auth::admin::{AdminUser, UserChanges, UserPage};
+use teams_auth::secrets::Secret;
 use teams_core::{CallId, CallStatus, End, Event, IncomingCall, MessageChange, Source};
 use teams_proto::Mri;
 use teams_store::{Applied, ConversationKind, Member};
@@ -31,6 +33,7 @@ use teams_ui::settings::Settings;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Main;
 use teams_ui::tray::COUNT_DELAY;
+use teams_ui::user_admin::{AdminProblem, NewAccount, UserAdmin};
 use teams_ui::window::{self, KitRoot};
 use teams_ui::{Bridge, Core, Models, ViewTrace};
 use tokio::sync::mpsc;
@@ -718,4 +721,96 @@ fn an_own_servers_account_names_its_server_on_its_rail_tile_and_account_menu() {
     toggle_menu();
     cx.run_until_parked();
     assert!(cx.debug_bounds("status-menu-account-server").is_some());
+}
+
+/// An own server's account list of two made-up users, read-only.
+struct TwoUsers;
+
+impl UserAdmin for TwoUsers {
+    fn list(&self, _: &str, _: Option<&str>) -> Result<UserPage, AdminProblem> {
+        let user = |n: u8, upn: &str, name: &str| AdminUser {
+            id: format!("00000000-0000-4000-8000-0000000000b{n}"),
+            upn: upn.to_owned(),
+            display_name: name.to_owned(),
+            enabled: true,
+            admin: false,
+            must_change_password: false,
+        };
+        Ok(UserPage {
+            users: vec![
+                user(1, "dana@example.test", "Dana Doe"),
+                user(2, "evan@example.test", "Evan Roe"),
+            ],
+            next: None,
+        })
+    }
+
+    fn add(&self, _: &NewAccount) -> Result<AdminUser, AdminProblem> {
+        Err(AdminProblem::NotAdmin)
+    }
+
+    fn change(&self, _: &str, _: &UserChanges) -> Result<AdminUser, AdminProblem> {
+        Err(AdminProblem::NotAdmin)
+    }
+
+    fn delete(&self, _: &str) -> Result<(), AdminProblem> {
+        Err(AdminProblem::NotAdmin)
+    }
+
+    fn reset_password(&self, _: &str, _: &Secret, _: bool) -> Result<(), AdminProblem> {
+        Err(AdminProblem::NotAdmin)
+    }
+}
+
+#[test]
+fn an_account_menu_item_over_a_user_row_takes_the_click_alone() {
+    let d = TwoAccounts::start();
+    let window = d.open();
+    d.rig.cx.update(|cx| {
+        let accounts = d.desktop.read(cx).accounts().clone();
+        accounts.update(cx, |accounts, cx| {
+            accounts.set_admin(LAB_A, Some(Arc::new(TwoUsers)), cx);
+        });
+    });
+    let shell = d.rig.cx.update(|cx| {
+        window::content(window, cx)
+            .unwrap()
+            .read(cx)
+            .shell_in(cx)
+            .unwrap()
+            .clone()
+    });
+    d.rig.cx.update(|cx| shell.update(cx, teams_ui::Shell::show_settings));
+    d.rig.cx.run_until_parked();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), &d.rig.cx);
+    cx.run_until_parked();
+    let page = cx.debug_bounds("settings-page-users").expect("Manage users is offered");
+    cx.simulate_click(page.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    d.rig
+        .cx
+        .update(|cx| shell.update(cx, teams_ui::Shell::toggle_status_menu));
+    cx.run_until_parked();
+
+    let rows = ["user-row-dana@example.test", "user-row-evan@example.test"]
+        .map(|row| cx.debug_bounds(row).expect("the users are listed"));
+    let over_a_row = [
+        "status-menu-available",
+        "status-menu-busy",
+        "status-menu-do-not-disturb",
+        "status-menu-away",
+    ]
+    .into_iter()
+    .filter_map(|item| cx.debug_bounds(item))
+    .map(|item| item.center())
+    .find(|point| rows.iter().any(|row| row.contains(point)))
+    .expect("a menu item lies over a user row");
+    cx.simulate_click(over_a_row, gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(d.traced("status-menu", "chosen").len(), 1, "the menu took the click");
+    assert!(
+        d.traced("user-admin", "dialog").is_empty(),
+        "the row under the menu got the click too"
+    );
 }

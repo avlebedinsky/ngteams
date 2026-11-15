@@ -3099,6 +3099,7 @@ impl Shell {
             .border_color(rgb(palette.border))
             .rounded_lg()
             .shadow_lg()
+            .occlude()
             .children(header)
             .children(entries)
             .children(reported)
@@ -3403,6 +3404,7 @@ impl Render for Shell {
                 .flex()
                 .items_center()
                 .justify_center()
+                .occlude()
                 .bg(gpui::rgba(0x0000_0080))
                 .child(self.first_run.clone())
         });

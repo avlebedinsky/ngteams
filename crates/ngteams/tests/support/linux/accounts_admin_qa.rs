@@ -12,7 +12,8 @@
 //!   Escape and one confirmed, the list loading and failing while the server is stopped, and Try again.
 //! - [`roles_while_running`]: a user promoted and demoted while the app runs (what the page shows now and after the
 //!   app starts again), and a user who can't sign in any more while their client runs.
-//! - [`page_at`]: the page and its dialogs at 480 px and 1280 px, in Teams Light and Dark, keyboard only.
+//! - [`page_at`]: the page and its dialogs at 480 px and 1280 px, in Teams Light and Dark, keyboard only; at 1280 px
+//!   the account menu over the list, whose item over a user's row takes the click alone.
 
 use std::fs;
 use std::path::PathBuf;
@@ -1157,7 +1158,38 @@ pub fn page_at(width: u32, dark: bool) -> SandboxResult {
     input.key(keys::ENTER)?;
     listed(&mut trace, &running, &server, &[DANA])?;
     shot(&sandbox, &format!("ngteams-qa-after-dialog{suffix}.png"))?;
+    if width >= 1280 {
+        menu_over_the_list(&sandbox, &mut input, &mut trace, &suffix)?;
+    }
     quit_and_finish(&sandbox, &mut trace, running)
+}
+
+/// The title bar's account picture at 1280 px, and a point of the account menu's "Do not disturb" over the list's first
+/// row.
+const AVATAR_AT: (u32, u32) = (1254, 23);
+const ITEM_OVER_ROW_AT: (u32, u32) = (1100, 236);
+
+/// The account menu opened over the list: its item over a user's row takes the click alone, no user's dialog opens.
+fn menu_over_the_list(
+    sandbox: &Sandbox,
+    input: &mut VirtualInput,
+    trace: &mut TraceReader,
+    suffix: &str,
+) -> SandboxResult {
+    let menu = |change: &'static str| {
+        move |line: &serde_json::Value| line["view"] == "status-menu" && line["change"] == change
+    };
+    input.click(AVATAR_AT.0, AVATAR_AT.1, keys::BTN_LEFT)?;
+    trace.next_where("the account menu opened", menu("opened"))?;
+    input.move_to(ITEM_OVER_ROW_AT.0, ITEM_OVER_ROW_AT.1)?;
+    shot(sandbox, &format!("ngteams-qa-menu-over-rows{suffix}.png"))?;
+    input.click(ITEM_OVER_ROW_AT.0, ITEM_OVER_ROW_AT.1, keys::BTN_LEFT)?;
+    trace.next_where("the menu's item over the row chosen", menu("chosen"))?;
+    trace.none_within(Duration::from_secs(2), "a user's dialog under the menu", |line| {
+        line["view"] == "user-admin" && line["change"] == "dialog"
+    })?;
+    input.move_to(640, 400)?;
+    shot(sandbox, &format!("ngteams-qa-menu-item-chosen{suffix}.png"))
 }
 
 /// The long name typed as over the 61 users of `manage_users_seeded`, over 3: the time to be refused is the dialog's

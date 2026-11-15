@@ -218,7 +218,7 @@ const QA_PREFIX: &str = "qa_";
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 25] = [
+const SCENES: [Scene; 26] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -264,6 +264,7 @@ const SCENES: [Scene; 25] = [
     ("qa_roles_while_running", admin_qa::roles_while_running),
     ("qa_page_at_480", |_| admin_qa::page_at(480, false)),
     ("qa_page_at_480_dark", |_| admin_qa::page_at(480, true)),
+    ("qa_page_at_1280", |_| admin_qa::page_at(1280, false)),
     ("qa_page_at_1280_dark", |_| admin_qa::page_at(1280, true)),
 ];
 
@@ -294,6 +295,25 @@ impl TraceReader {
             return Ok(());
         }
         self.next_where(what, found)
+    }
+
+    /// Fails if a line `found` takes, named `what` in the error, comes within `within`.
+    fn none_within(
+        &mut self,
+        within: Duration,
+        what: &str,
+        found: impl Fn(&serde_json::Value) -> bool,
+    ) -> SandboxResult {
+        let until = std::time::Instant::now() + within;
+        while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+            let Ok(line) = self.lines.recv_timeout(left) else {
+                break;
+            };
+            let hit = found(&line);
+            self.seen.push(line);
+            ensure(!hit, || format!("trace line {what}; seen {:?}", self.seen))?;
+        }
+        Ok(())
     }
 
     /// Waits for a line `found` takes among those not seen yet.

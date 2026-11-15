@@ -546,6 +546,7 @@ impl CalendarView {
         Some(
             div()
                 .id("calendar-add-backdrop")
+                .occlude()
                 .absolute()
                 .top_0()
                 .left_0()
@@ -658,6 +659,7 @@ impl CalendarView {
             div()
                 .debug_selector(|| "calendar-add-found".to_owned())
                 .absolute()
+                .occlude()
                 .top(px(40.0))
                 .left_0()
                 .w(px(360.0))

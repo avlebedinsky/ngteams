@@ -563,6 +563,7 @@ impl EventForm {
         Some(
             div()
                 .id("event-custom-backdrop")
+                .occlude()
                 .absolute()
                 .top_0()
                 .left_0()

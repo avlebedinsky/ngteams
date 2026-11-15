@@ -97,6 +97,7 @@ impl CalendarView {
         Some(
             div()
                 .id("calendar-card-backdrop")
+                .occlude()
                 .absolute()
                 .top_0()
                 .left_0()
@@ -133,6 +134,7 @@ impl CalendarView {
             .child(card);
         div()
             .id("calendar-card-backdrop")
+            .occlude()
             .absolute()
             .top_0()
             .left_0()

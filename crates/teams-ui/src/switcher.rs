@@ -568,6 +568,7 @@ impl Render for Switcher {
             .border_1()
             .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
+            .occlude()
             .child(command)
     }
 }
