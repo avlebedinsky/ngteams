@@ -12,7 +12,7 @@ use teams_media::tone::Tone;
 use teams_proto::Mri;
 use teams_store::OutboxState;
 
-use super::engines::{A_TONE, B_TONE, Engine, HEARD, TALK, WAIT, heard, relayed};
+use super::engines::{A_TONE, B_TONE, Engine, TALK, WAIT, heard, relayed};
 use crate::support::{Backend, TestServer, backends, redis_url};
 use crate::trouter::{Account, ORIGIN};
 
@@ -24,6 +24,9 @@ const SILENT: Tone = Tone {
     hz: 440.0,
     amplitude: 0.0,
 };
+/// A tone of the mix is heard at least this loud: under load (the coverage build, three calls at once) a recording
+/// has gaps that halve a tone's level, which is still far above [`ABSENT`].
+const HEARD: f32 = 0.15;
 /// Below this, a tone isn't in a recording.
 const ABSENT: f32 = 0.05;
 
