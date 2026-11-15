@@ -3,6 +3,7 @@
 
 mod access;
 mod files;
+mod freeing;
 mod limits;
 mod pictures;
 mod previews;

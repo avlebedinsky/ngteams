@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::extract::{Path, Query, State, rejection::JsonRejection};
@@ -70,6 +70,14 @@ pub(super) async fn edit(
     Ok(StatusCode::OK)
 }
 
+/// Notes the media objects of the pictures `body` shows (`amsreferences`), before its delete takes them out.
+fn keep(shown: &Mutex<Vec<String>>, body: &Value) {
+    let named = body["amsreferences"].as_array().into_iter().flatten();
+    if let Ok(mut shown) = shown.lock() {
+        *shown = named.filter_map(Value::as_str).map(str::to_owned).collect();
+    }
+}
+
 pub(super) fn message_id(path: &Params) -> Result<i64, Error> {
     path.get("message")
         .and_then(|id| id.parse().ok())
@@ -103,6 +111,7 @@ pub(super) async fn delete(
     let chat = reads::target(&path)?;
     let (found, _) = member_of(&app, &caller, chat).await?;
     let id = message_id(&path)?;
+    let shown = Mutex::new(Vec::new());
     let change = message_repo::Change {
         chat: &found.id,
         id,
@@ -112,6 +121,7 @@ pub(super) async fn delete(
         base: &wire::base(&app),
     };
     let result = message_repo::update(&app.db, change, |body, at| {
+        keep(&shown, body);
         body["content"] = "".into();
         body["properties"] = json!({"deletetime": at});
         if let Some(client) = body.get("clientmessageid").cloned() {
@@ -125,6 +135,7 @@ pub(super) async fn delete(
     })
     .await?;
     let changed = updated(result)?;
+    crate::media::release(&app, &caller.id, &shown.into_inner().unwrap_or_default()).await;
     events::tell(
         &app,
         "MessageUpdate",

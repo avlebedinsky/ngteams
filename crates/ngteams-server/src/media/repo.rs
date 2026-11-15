@@ -2,6 +2,7 @@ use diesel::prelude::*;
 use diesel_async::{AsyncConnection as _, RunQueryDsl};
 
 use super::schema::{drive_grants, drive_items, media_object_readers, media_objects, media_usage};
+use crate::chatsvc::schema::chat_messages;
 use crate::db::{Db, DbError, conflict, with_conn};
 
 /// Adds `$bytes` to what `$user` has stored when the sum stays within `$quota` (0: no limit; taking bytes away
@@ -131,6 +132,61 @@ pub(super) async fn fill_object(
         .await)
 }
 
+/// Removes `owner`'s object and takes its bytes off the owner's count: the version it read from (`None` inside:
+/// it was never filled), or `None` when the owner has no such object. The row is held as a fill holds it, so the
+/// size taken off is the one counted.
+pub(super) async fn remove_object(db: &Db, owner: &str, id: &str) -> Result<Option<Option<String>>, DbError> {
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let own = media_objects::table
+                .filter(media_objects::id.eq(id))
+                .filter(media_objects::owner_id.eq(owner));
+            if diesel::update(own)
+                .set(media_objects::size.eq(media_objects::size))
+                .execute(conn)
+                .await?
+                == 0
+            {
+                return Ok(None);
+            }
+            let (blob, size): (Option<String>, i64) = media_objects::table
+                .find(id)
+                .select((media_objects::blob, media_objects::size))
+                .first(conn)
+                .await?;
+            diesel::delete(media_object_readers::table.filter(media_object_readers::object_id.eq(id)))
+                .execute(conn)
+                .await?;
+            diesel::delete(media_objects::table.find(id)).execute(conn).await?;
+            let freed = -size;
+            let _ = charge!(conn, owner, freed, 0);
+            Ok(Some(blob))
+        })
+        .await)
+}
+
+/// Whether a message of a chat the object was made for still names it.
+pub(super) async fn shown(db: &Db, id: &str) -> Result<bool, DbError> {
+    let chats = object_chats(db, id).await?;
+    let named = format!("%{id}%");
+    with_conn!(db, |conn| Ok(diesel::select(diesel::dsl::exists(
+        chat_messages::table
+            .filter(chat_messages::chat_id.eq_any(&chats))
+            .filter(chat_messages::body.like(&named))
+    ))
+    .get_result(conn)
+    .await?))
+}
+
+pub(super) async fn objects(db: &Db, owner: &str) -> Result<Vec<Object>, DbError> {
+    with_conn!(db, |conn| Ok(media_objects::table
+        .filter(media_objects::owner_id.eq(owner))
+        .order((media_objects::created_at.asc(), media_objects::id.asc()))
+        .select(Object::as_select())
+        .load(conn)
+        .await?))
+}
+
 /// The bytes `user` has stored.
 pub(super) async fn used(db: &Db, user: &str) -> Result<i64, DbError> {
     with_conn!(db, |conn| Ok(media_usage::table
@@ -165,6 +221,39 @@ pub(super) async fn add_item(db: &Db, item: &Item, quota: i64) -> Result<Option<
             Ok(Some(()))
         })
         .await)
+}
+
+/// Removes `owner`'s file with its grants and takes its bytes off the owner's count; whether it was there. Of two
+/// removals at once, one finds it.
+pub(super) async fn remove_item(db: &Db, owner: &str, id: &str) -> Result<bool, DbError> {
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            let own = drive_items::table
+                .filter(drive_items::id.eq(id))
+                .filter(drive_items::owner_id.eq(owner));
+            let Some(size) = own.select(drive_items::size).first::<i64>(conn).await.optional()? else {
+                return Ok(false);
+            };
+            diesel::delete(drive_grants::table.filter(drive_grants::item_id.eq(id)))
+                .execute(conn)
+                .await?;
+            if diesel::delete(own).execute(conn).await? == 0 {
+                return Ok(false);
+            }
+            let freed = -size;
+            let _ = charge!(conn, owner, freed, 0);
+            Ok(true)
+        })
+        .await)
+}
+
+pub(super) async fn items(db: &Db, owner: &str) -> Result<Vec<Item>, DbError> {
+    with_conn!(db, |conn| Ok(drive_items::table
+        .filter(drive_items::owner_id.eq(owner))
+        .order((drive_items::created_at.asc(), drive_items::name.asc()))
+        .select(Item::as_select())
+        .load(conn)
+        .await?))
 }
 
 pub(super) async fn item(db: &Db, id: &str) -> Result<Option<Item>, DbError> {

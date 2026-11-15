@@ -36,8 +36,8 @@ pub(super) fn router(app: &App) -> Router<Arc<App>> {
     Router::new()
         .route("/ams/v1/objects", post(create))
         .route("/ams/v1/objects/", post(create))
-        .route("/ams/v1/objects/{object}", get(read))
-        .route("/ams/v1/objects/{object}/", get(read))
+        .route("/ams/v1/objects/{object}", get(read).delete(delete))
+        .route("/ams/v1/objects/{object}/", get(read).delete(delete))
         .route("/ams/v1/objects/{object}/views/{view}", get(view))
         .layer(DefaultBodyLimit::max(CREATE_BODY))
         .merge(
@@ -118,10 +118,8 @@ async fn store(
     storage.put(&key(&object.id, &blob), bytes).await?;
     let filled = repo::fill_object(db, object, &blob, content_type, size, quota).await;
     let (unread, outcome) = settled(db, object, blob, filled).await;
-    if let Some(unread) = unread
-        && let Err(error) = storage.delete(&key(&object.id, &unread)).await
-    {
-        tracing::warn!(%error, "a picture's unread bytes weren't cleared");
+    if let Some(unread) = unread {
+        super::clear(storage, &key(&object.id, &unread)).await;
     }
     outcome
 }
@@ -144,6 +142,42 @@ async fn settled(
             Err(_) => (None, Err(error.into())),
         },
     }
+}
+
+async fn delete(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>) -> Result<StatusCode, Error> {
+    let caller = account(&app, &headers, IC3).await?;
+    let object = repo::object(&app.db, &id).await?.ok_or(Error::Missing)?;
+    if object.owner_id != caller.id {
+        return Err(Error::Forbidden);
+    }
+    if remove(&app.db, app.storage.as_ref(), &caller.id, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(Error::Missing)
+    }
+}
+
+/// Removes `owner`'s picture, gives its bytes back to the owner's count and clears them from the store; whether
+/// it was there. The row goes first: a fill that stored bytes meanwhile finds no object and clears its own.
+pub(super) async fn remove(db: &Db, storage: &dyn Storage, owner: &str, id: &str) -> Result<bool, DbError> {
+    let Some(blob) = repo::remove_object(db, owner, id).await? else {
+        return Ok(false);
+    };
+    if let Some(blob) = blob {
+        super::clear(storage, &key(id, &blob)).await;
+    }
+    Ok(true)
+}
+
+/// Removes `owner`'s picture when no message of the chats it was made for names it any more.
+pub(super) async fn release(db: &Db, storage: &dyn Storage, owner: &str, id: &str) -> Result<(), DbError> {
+    let theirs = repo::object(db, id)
+        .await?
+        .is_some_and(|object| object.owner_id == owner);
+    if theirs && !repo::shown(db, id).await? {
+        remove(db, storage, owner, id).await?;
+    }
+    Ok(())
 }
 
 /// The media type of a picture's bytes, by their signature: the formats the client shows.

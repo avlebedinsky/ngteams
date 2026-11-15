@@ -1,4 +1,4 @@
-//! The command line: `serve`, `migrate`, the account commands, `setup-code` and `keys rotate`. Every command reads
+//! The command line: `serve`, `migrate`, the account commands, `media`, `setup-code` and `keys rotate`. Every command reads
 //! the same configuration as the server (`--config`, then `NGTEAMS_SERVER_*`).
 
 use std::io::{IsTerminal as _, Write};
@@ -39,6 +39,9 @@ pub enum Command {
     /// Accounts.
     #[command(subcommand)]
     User(UserCommand),
+    /// What accounts keep in the store.
+    #[command(subcommand)]
+    Media(MediaCommand),
     /// Token signing keys.
     #[command(subcommand)]
     Keys(KeysCommand),
@@ -75,6 +78,18 @@ pub enum UserCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum MediaCommand {
+    /// Lists an account's files and pictures: kind, id, bytes, when it was stored, name.
+    List { upn: String },
+    /// Deletes files or pictures of an account, by id: their bytes leave the store and the account's quota.
+    Delete {
+        upn: String,
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum KeysCommand {
     /// Creates a new key; running nodes switch at their next hourly check (or unknown-key reload).
     Rotate,
@@ -94,6 +109,10 @@ pub enum CliError {
     Db(#[from] crate::db::DbError),
     #[error(transparent)]
     Serve(#[from] crate::serve::ServeError),
+    #[error(transparent)]
+    Storage(#[from] crate::storage::StorageError),
+    #[error("the account keeps nothing with the id {0}")]
+    NotStored(String),
     #[error("can't start the runtime: {0}")]
     Runtime(#[source] std::io::Error),
     #[error("can't read the password from standard input: {0}")]
@@ -171,6 +190,7 @@ pub async fn run(
             Ok(())
         }
         Command::User(command) => user(config, command, input, &mut Streams { output, warnings }).await,
+        Command::Media(command) => media(&config, command, output).await,
         Command::SetupCode => {
             let db = crate::db::Db::connect(&config.database_url, 1).await?;
             let code = crate::admin::setup::issue(&db).await?;
@@ -203,6 +223,49 @@ async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'stat
     let served = listener.serve(app::router(app), tls, shutdown).await;
     maintenance.abort();
     Ok(served?)
+}
+
+/// Each thing the account keeps on a line (`file` or `picture`, id, bytes, when it was stored, name,
+/// tab-separated), or the deletes one by one: the first id the account doesn't keep ends them.
+async fn media(config: &Config, command: MediaCommand, output: &mut dyn Write) -> Result<(), CliError> {
+    let db = crate::db::Db::connect(&config.database_url, 1).await?;
+    let owner = async |upn: &str| {
+        let found = crate::db::users::by_upn(&db, upn).await?;
+        found.ok_or(CliError::Admin(AdminError::NoSuchUser))
+    };
+    match command {
+        MediaCommand::List { upn } => {
+            for kept in crate::media::stored(&db, &owner(&upn).await?.id).await? {
+                let at = chrono::DateTime::from_timestamp(kept.created_at, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH);
+                writeln!(
+                    output,
+                    "{}\t{}\t{}\t{}\t{}",
+                    kept.kind,
+                    kept.id,
+                    kept.size,
+                    at.format("%Y-%m-%dT%H:%M:%SZ"),
+                    kept.name
+                )
+                .map_err(CliError::Output)?;
+            }
+            Ok(())
+        }
+        MediaCommand::Delete { upn, ids } => {
+            let owner = owner(&upn).await?.id;
+            let storage = crate::storage::ObjectStorage::open_with(
+                &config.storage_url,
+                &config.storage_options,
+                &config.storage,
+            )?;
+            for id in ids {
+                if !crate::media::remove_stored(&db, &storage, &owner, &id).await? {
+                    return Err(CliError::NotStored(id));
+                }
+                writeln!(output, "deleted {id}").map_err(CliError::Output)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Where a command writes.

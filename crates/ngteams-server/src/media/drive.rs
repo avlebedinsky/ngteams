@@ -173,20 +173,10 @@ async fn api(
         return Err(Error::Forbidden);
     }
     let folder = format!("drive/root:/{FOLDER}");
-    let owner_only = || Json(json!({"value": [grant(&caller.id, "owner")]})).into_response();
-    if method == Method::GET {
-        if rest == "drive" {
-            return Ok(Json(drive(&app, &caller)).into_response());
-        }
-        if rest == "drive/root/permissions" || rest == format!("{folder}:/permissions") {
-            return Ok(owner_only());
-        }
-        if rest == folder {
-            if !repo::has_items(&app.db, &caller.id).await? {
-                return Err(Error::Missing);
-            }
-            return Ok(Json(json!({"id": "chatfiles", "name": FOLDER, "folder": {}})).into_response());
-        }
+    if method == Method::GET
+        && let Some(answer) = drive_read(&app, &caller, &rest, &folder).await?
+    {
+        return Ok(answer);
     }
     if method == Method::PUT
         && let Some(name) = rest
@@ -220,8 +210,65 @@ async fn api(
             }
             Ok(StatusCode::NO_CONTENT.into_response())
         }
+        ("DELETE", ["drive", "items", item]) => {
+            if remove(&app.db, app.storage.as_ref(), &caller.id, &item_guid(item)).await? {
+                Ok(StatusCode::NO_CONTENT.into_response())
+            } else {
+                Err(Error::Missing)
+            }
+        }
         _ => Err(Error::Missing),
     }
+}
+
+/// The drive, its chat-files folder with its files, and their grants, as their owner reads them; `None` for
+/// another path.
+async fn drive_read(app: &App, caller: &User, rest: &str, folder: &str) -> Result<Option<Response>, Error> {
+    let answer = if rest == "drive" {
+        drive(app, caller)
+    } else if rest == "drive/root/permissions" || rest == format!("{folder}:/permissions") {
+        json!({"value": [grant(&caller.id, "owner")]})
+    } else if rest == folder {
+        if !repo::has_items(&app.db, &caller.id).await? {
+            return Err(Error::Missing);
+        }
+        json!({"id": "chatfiles", "name": FOLDER, "folder": {}})
+    } else if rest == format!("{folder}:/children") {
+        let items = repo::items(&app.db, &caller.id).await?;
+        let value = items
+            .iter()
+            .map(|item| drive_item(app, item))
+            .collect::<Result<Vec<Value>, Error>>()?;
+        json!({"value": value})
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(Json(answer).into_response()))
+}
+
+/// The file's id from either name [`drive_item`] gives it: its drive item id (`01` and the id's digits) or the id.
+fn item_guid(id: &str) -> String {
+    id.strip_prefix("01")
+        .filter(|digits| digits.len() == 32)
+        .and_then(|digits| uuid::Uuid::try_parse(digits).ok())
+        .map_or_else(|| id.to_owned(), |id| id.hyphenated().to_string())
+}
+
+/// Removes `owner`'s file, ends its shares, gives its bytes back to the owner's count and clears them and its
+/// thumbnails from the store; whether it was there.
+pub(super) async fn remove(
+    db: &crate::db::Db,
+    storage: &dyn crate::storage::Storage,
+    owner: &str,
+    id: &str,
+) -> Result<bool, DbError> {
+    if !repo::remove_item(db, owner, id).await? {
+        return Ok(false);
+    }
+    for key in std::iter::once(key(id)).chain(thumbs::keys(id)) {
+        super::clear(storage, &key).await;
+    }
+    Ok(true)
 }
 
 async fn owned(app: &App, caller: &User, item: &str) -> Result<repo::Item, Error> {

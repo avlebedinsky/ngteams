@@ -128,7 +128,8 @@ impl IntoResponse for Error {
             Self::Quota => (
                 StatusCode::INSUFFICIENT_STORAGE,
                 "quotaLimitReached",
-                "The account's storage is full.",
+                "The account's storage is full. Delete files or pictures it sent: a file stays in its sender's drive \
+                 after its message is deleted. The server's administrator can delete them too.",
             ),
             Self::Upstream => (StatusCode::BAD_GATEWAY, "badGateway", "The link's site didn't answer."),
             Self::Busy => {
@@ -169,6 +170,65 @@ async fn account(app: &App, headers: &HeaderMap, audience: &str) -> Result<User,
     } else {
         Err(Error::Unauthorized)
     }
+}
+
+/// Removes bytes nothing reads any more. A store that fails leaves them: the log names their key.
+async fn clear(storage: &dyn crate::storage::Storage, key: &str) {
+    if let Err(error) = storage.delete(key).await {
+        tracing::warn!(%error, key, "stored bytes nothing reads weren't cleared");
+    }
+}
+
+/// The pictures one message's delete frees at most.
+const RELEASED: usize = 64;
+
+/// Frees those of `objects` that are `owner`'s pictures and that no message names any more, after a message that
+/// named them was deleted. The delete stands when this fails: the owner, or the operator, can still delete the
+/// object.
+pub(crate) async fn release(app: &App, owner: &str, objects: &[String]) {
+    for id in objects.iter().take(RELEASED) {
+        if let Err(error) = ams::release(&app.db, app.storage.as_ref(), owner, id).await {
+            tracing::warn!(%error, "a picture no message shows wasn't freed");
+        }
+    }
+}
+
+/// One thing an account keeps in the store, for the operator's commands.
+pub(crate) struct Stored {
+    pub kind: &'static str,
+    pub id: String,
+    pub name: String,
+    pub size: i64,
+    pub created_at: i64,
+}
+
+/// What `owner` keeps in the store: its files, then its pictures, oldest first.
+pub(crate) async fn stored(db: &crate::db::Db, owner: &str) -> Result<Vec<Stored>, DbError> {
+    let files = repo::items(db, owner).await?.into_iter().map(|item| Stored {
+        kind: "file",
+        id: item.id,
+        name: item.name,
+        size: item.size,
+        created_at: item.created_at,
+    });
+    let pictures = repo::objects(db, owner).await?.into_iter().map(|object| Stored {
+        kind: "picture",
+        id: object.id,
+        name: object.filename,
+        size: object.size,
+        created_at: object.created_at,
+    });
+    Ok(files.chain(pictures).collect())
+}
+
+/// Removes the file or the picture `id` of `owner` with its bytes; whether the owner had it.
+pub(crate) async fn remove_stored(
+    db: &crate::db::Db,
+    storage: &dyn crate::storage::Storage,
+    owner: &str,
+    id: &str,
+) -> Result<bool, DbError> {
+    Ok(drive::remove(db, storage, owner, id).await? || ams::remove(db, storage, owner, id).await?)
 }
 
 fn quota(app: &App) -> i64 {

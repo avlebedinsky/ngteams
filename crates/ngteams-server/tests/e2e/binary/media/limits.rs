@@ -5,11 +5,14 @@ use teams_core::engine::Action;
 use teams_proto::{CreatePicture, PastedFormat, PastedPicture, UploadPicture};
 
 use super::super::push::support::User;
+use reqwest::Method;
+
 use super::support::{
-    MIB, Stage, abandon_upload, card, noise, paste, send_file, streamed_upload, token, try_upload, upload_path,
+    IC3, MIB, Stage, abandon_upload, card, drive, get, item, noise, paste, raw, send_file, streamed_upload, token,
+    try_upload, upload_path,
 };
 use crate::media::png;
-use crate::support::{Backend, backends};
+use crate::support::backends;
 
 fn picture(bytes: Vec<u8>) -> PastedPicture {
     PastedPicture {
@@ -110,32 +113,81 @@ async fn an_account_at_its_quota_is_refused_the_next_upload_and_the_others_keep_
     }
 }
 
-/// Q1 of QA round 1 for task 182: nothing an account does gives its stored bytes back.
-#[ignore = "an account has no way to free its quota: no route deletes a file or a picture"]
+/// The two kinds of an account's stored keys: its pictures and its files.
+async fn kept(stage: &Stage) -> (usize, usize) {
+    let keys = stage.blobs.keys().await;
+    let of = |kind: &str| keys.iter().filter(|key| key.starts_with(kind)).count();
+    (of("ams/"), of("drive/"))
+}
+
+/// A picture's bytes come back to its owner's quota when the last message that shows it is deleted, or its object
+/// is; a file stays in its owner's drive when its message is deleted, as in Teams, and comes back when the owner
+/// deletes it there. What comes back has left the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_account_at_its_quota_uploads_again_after_it_deleted_what_it_sent() {
     let small = png(8, 8);
     let config = format!("[media]\nuser_quota_bytes = {}\n", small.len() + 3000);
-    let stage = Stage::start(Backend::Sqlite, &config).await;
-    let (a, mut b, c, chat) = stage.people().await;
-    let (_, pasted) = paste(&a, &stage.cloud, &chat, &small, (8, 8)).await;
-    let sent = send_file(&a, &stage.cloud, &chat, "full.bin", &[7; 3000]).await;
-    card(&mut b, &stage.cloud, &chat, &sent).await;
-    let said = refused(&a, "one-more.bin", b"x").await;
-    assert!(said.contains("507"), "{said}");
+    for backend in backends() {
+        let stage = Stage::start(backend, &config).await;
+        let (a, mut b, c, chat) = stage.people().await;
+        let node = &stage.rig.first;
+        let (_, pasted) = paste(&a, &stage.cloud, &chat, &small, (8, 8)).await;
+        let sent = send_file(&a, &stage.cloud, &chat, "full.bin", &[7; 3000]).await;
+        let share = card(&mut b, &stage.cloud, &chat, &sent).await.share_url.unwrap();
+        let (file, link) = item(stage.rig.other(), &b, &stage, &share).await.unwrap();
+        let said = refused(&a, "one-more.bin", b"x").await;
+        assert!(said.contains("507"), "{said}");
 
-    for message_id in [pasted, sent] {
-        a.write(Action::Delete {
-            conversation: chat.clone(),
-            message_id,
-        })
-        .await;
+        for message_id in [pasted, sent] {
+            a.write(Action::Delete {
+                conversation: chat.clone(),
+                message_id,
+            })
+            .await;
+        }
+        assert_eq!(kept(&stage).await, (0, 1), "the picture stayed, or the file went");
+        let (src, _) = paste(&a, &stage.cloud, &chat, &small, (8, 8)).await;
+        let said = refused(&a, "after.bin", &[7; 3000]).await;
+        assert!(said.contains("507"), "{said}");
+
+        let object = src.split_once("/ams/v1/objects/").unwrap().1;
+        let object = format!("/ams/v1/objects/{}", object.split('/').next().unwrap());
+        let (ic3, theirs) = (token(&a, IC3).await, token(&b, IC3).await);
+        let delete = async |path: &str, token: &str| raw(node, Method::DELETE, path, Some(token), &[], None).await.0;
+        assert_eq!(delete(&object, &theirs).await, 403);
+        assert_eq!(get(node, &format!("{object}/views/imgo"), Some(&theirs)).await, 200);
+        assert_eq!(delete(&object, &ic3).await, 204);
+        assert_eq!(delete(&object, &ic3).await, 404);
+        assert_eq!(get(node, &format!("{object}/views/imgo"), Some(&ic3)).await, 404);
+        assert_eq!(kept(&stage).await, (0, 1));
+
+        let (own, outsider) = (token(&a, &stage.rig.origin).await, token(&c, &stage.rig.origin).await);
+        let path = format!("{}/drive/items/{file}", drive(&a));
+        assert_eq!(delete(&path, &outsider).await, 403);
+        assert_eq!(
+            delete(&format!("{}/drive/items/{file}", drive(&c)), &outsider).await,
+            404
+        );
+        assert_eq!(get(stage.rig.other(), &link, None).await, 200);
+        assert!(b.engine().file_thumbnail(share.clone()).await.unwrap().is_none());
+        assert_eq!(stage.blobs.keys().await.len(), 2, "no note of the file's thumbnails");
+        assert_eq!(delete(&path, &own).await, 204);
+        assert_eq!(delete(&path, &own).await, 404);
+        assert_eq!(
+            get(stage.rig.other(), &link, None).await,
+            404,
+            "the link outlived the file"
+        );
+        assert_eq!(stage.blobs.keys().await, Vec::<String>::new());
+
+        let whole = vec![7; 3000 + small.len()];
+        assert_eq!(
+            try_upload(&a, "after.bin", &whole).await.unwrap().size(),
+            whole.len() as u64
+        );
+        let said = refused(&a, "one-more.bin", b"x").await;
+        assert!(said.contains("507"), "{said}");
+        drop((a, b, c));
+        stage.stop().await;
     }
-    let again = try_upload(&a, "after.bin", &[7; 3000]).await;
-    assert!(
-        again.is_ok(),
-        "still over the quota after deleting both messages: {again:?}"
-    );
-    drop((a, b, c));
-    stage.stop().await;
 }

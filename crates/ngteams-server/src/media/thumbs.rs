@@ -51,6 +51,12 @@ fn picture_key(item: &str, size: &str) -> String {
     format!("drive-thumbnails/{item}/{size}.jpg")
 }
 
+/// Every key a file's thumbnails may be kept under.
+pub(super) fn keys(item: &str) -> impl Iterator<Item = String> {
+    let pictures: Vec<String> = SIZES.iter().map(|(size, _)| picture_key(item, size)).collect();
+    std::iter::once(note_key(item)).chain(pictures)
+}
+
 /// The thumbnails of `item`, made now when nobody asked before.
 pub(super) async fn of(app: &App, item: &repo::Item) -> Result<Made, Error> {
     if let Some(note) = app.storage.get(&note_key(&item.id)).await? {

@@ -48,13 +48,18 @@ printf '%s\n' "$PASSWORD" | ngteams-server --config server.toml user add ada@exa
 ngteams-server --config server.toml serve
 ```
 
-Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`, `setup-code`,
-`keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
+Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`,
+`media list|delete`, `setup-code`, `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
 deleting an account, or resetting its password, revokes its refresh tokens and closes its push sockets at once: a
 disabled or deleted account is refused everywhere from then on, and after a new password the sessions end when
 their access tokens run out (one hour by default). `user add --admin` and `user promote` make an admin; `user list`
 ends each line with `admin` or `user`. The command line keeps the same guards as the admin API (the last enabled
 admin stays) and its actions are audited as `cli`.
+
+`media list <upn>` prints what an account keeps in the store, a line each: `file` or `picture`, id, bytes, when
+it was stored, name (tab-separated). `media delete <upn> <id>…` deletes them by id: the bytes leave the store and
+the account's quota, a file's shares and links end, and a message that showed a deleted picture shows none. It is
+the operator's way to free an account that is at its quota ([Freeing storage](#freeing-storage)).
 
 With `redis_url` set, `user disable`, `user delete` and `user reset-password` make the change in the database first
 and then tell the account's open push sockets through Redis. When Redis is down the change stays: the command prints
@@ -432,6 +437,7 @@ Requests carry the chat service's token (`https://ic3.teams.office.com`).
 | `PUT /ams/v1/objects/<id>/content/imgpsh` | stores the picture's bytes. Only the object's maker; only PNG, JPEG, GIF or WebP, by their signature | 201; 403; 413 over `media.max_picture_bytes`; 415; 507 over the quota |
 | `GET /ams/v1/objects/<id>/views/<view>` | the picture (`imgo`, `imgpsh_fullsize`, `imgpsh_fullsize_anim`: all the bytes as sent) | 200; 403; 404 while the object is empty |
 | `GET /ams/v1/objects/<id>` | the object's description, in Teams' eight keys | 200; 403 |
+| `DELETE /ams/v1/objects/<id>` | deletes the picture: its bytes leave the store and its maker's quota. Only the object's maker. Not seen in a capture of Teams: the route is this server's own | 204; 403; 404 |
 
 An object is read by its maker and by whoever is a member of one of its chats when the read arrives: someone who
 left the chat no longer reads it. `forward` (sharing an object with another chat) and other object types are not
@@ -457,6 +463,10 @@ The client sends a file the way it sends one to OneDrive, and the server keeps o
    - `GET sites/root/items/<item>/driveItem/permissions`: who the file is shared with: the owner
      (`roles: ["owner"]`) and each other account (`["write"]`).
    - `DELETE sites/root/items/<item>/driveItem/permissions/<account id>`: ends one account's access.
+   - `GET drive/root:/Microsoft Teams Chat Files:/children`: the drive's files (`value`: the items).
+   - `DELETE drive/items/<item>` (the item's `id` or its `sharepointIds.listItemUniqueId`): deletes the file, as
+     Graph and SharePoint delete a drive item. 204; 404 for a file the drive doesn't have. Its bytes and
+     thumbnails leave the store and the owner's quota, and its shares and links end.
 3. A reader reaches the file through Graph, by the sharing link the message carries (the file's `webUrl`):
    `GET /graph/v1.0/shares/u!<link, base64url>/driveItem` (the item with `@microsoft.graph.downloadUrl`) and
    `…/driveItem/thumbnails` (Graph's `small`, `medium` and `large`, 96, 176 and 800 pixels). 403 for an account
@@ -485,6 +495,23 @@ Sharing needs two people reads the people service will own: `POST <middle tier>/
 (MRIs to names and addresses) and `GET /graph/v1.0/users/<id>`. Both are served in the smallest form file sharing
 needs. Authz hands out `middleTier` and `amsV2`, so a client signed in through authz pastes pictures and sends
 files.
+
+### Freeing storage
+
+An account at `media.user_quota_bytes` gets 507 for each new picture or file until some of what it stored is
+deleted:
+
+- **A picture** is deleted with the last message that shows it: when its sender deletes a message, each picture
+  of the sender's that the message showed (`amsreferences`), and that no other message in its chats still names,
+  is deleted. `DELETE /ams/v1/objects/<id>` deletes one whatever shows it. A picture taken out of a message by
+  an edit, or pasted and never sent, stays until its object is deleted.
+- **A file** stays in its sender's drive when its message is deleted, as a file stays in the sender's OneDrive in
+  Teams. Its owner deletes it with `DELETE drive/items/<item>`. ngteams has no command for that yet, so on a
+  server of ngteams clients the operator frees files with `ngteams-server media list|delete`.
+
+Each delete takes the bytes off the account's count in the transaction that removes the row, so uploads and
+deletes at once leave the count right, on several nodes too. The bytes are cleared from the store after that; if
+the store fails then, the node logs their key and the bytes stay in the bucket, read by nothing.
 
 ### Link previews (`/ams/urlp/v1/url/`)
 
