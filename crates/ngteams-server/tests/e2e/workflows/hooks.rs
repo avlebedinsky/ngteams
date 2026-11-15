@@ -250,7 +250,9 @@ async fn refusals(rig: &Rig) {
         runs(&rig.ada, &rig.environment, &rig.channel_id).await[0],
         ("Failed".to_owned(), Some("InvalidRequestContent".to_owned()))
     );
-    assert_eq!(rig.post(link, &card_payload(&"x".repeat(40 * 1024))).await, 413);
+    // the Overview says "The max payload is 256 KB"
+    assert_eq!(rig.post(link, &card_payload(&"x".repeat(200 * 1024))).await, 202);
+    assert_eq!(rig.post(link, &card_payload(&"x".repeat(300 * 1024))).await, 413);
     bad_links(rig).await;
 }
 

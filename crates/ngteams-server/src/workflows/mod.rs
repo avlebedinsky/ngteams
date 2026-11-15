@@ -54,7 +54,7 @@ pub struct WorkflowsConfig {
     /// Whether the Flow and Power Apps routes are served and their tokens issued: the client offers Workflows
     /// for an account only then.
     pub enabled: bool,
-    /// The largest body a webhook takes, in bytes (Teams takes a message of about 28 KB).
+    /// The largest body a webhook takes, in bytes: 256 KB, the limit the client's Overview names.
     pub max_body_bytes: usize,
     /// Posts a workflow's webhook takes in a minute: across every node when the server has Redis, else per node.
     pub rate_per_minute: u32,
@@ -66,7 +66,7 @@ impl Default for WorkflowsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_body_bytes: 28 * 1024,
+            max_body_bytes: 256 * 1024,
             rate_per_minute: 60,
             runs_kept: 100,
         }

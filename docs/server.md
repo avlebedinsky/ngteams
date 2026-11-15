@@ -128,7 +128,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `calling.turn.username`, `calling.turn.password` | none | one long-term user of the relay (coturn's `user=`), used when no secret is set |
 | `calling.turn.realm`, `calling.turn.ttl` | `rtcmedia`, `86400` | coturn's `realm`; seconds a credential made from the secret holds |
 | `workflows.enabled` | `true` | whether the server serves Workflows ([below](#workflows-with-incoming-webhooks)) and issues tokens for Power Automate's two audiences; the client offers Workflows only then |
-| `workflows.max_body_bytes` | `28672` | the largest body a workflow's webhook takes (Teams takes a message of about 28 KB) |
+| `workflows.max_body_bytes` | `262144` | the largest body a workflow's webhook takes: 256 KB, the limit the client's Overview names |
 | `workflows.rate_per_minute` | `60` | posts one workflow's webhook takes in a minute, across every node (counted in Redis when there is one) |
 | `workflows.runs_kept` | `100` | runs kept per workflow for its run history |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |

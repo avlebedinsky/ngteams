@@ -596,7 +596,8 @@ async fn refusals(rig: &Rig, scene: &mut Scene) {
     }
     assert_eq!(rig.post(&link, &eleven).await, 400);
     assert_eq!(rig.post_at(&rig.first, &link, b"QA-not-json {").await.0, 400);
-    let big = payload("adaptive", &format!("QA-big {}", "x".repeat(40 * 1024)));
+    // the Overview says "The max payload is 256 KB"
+    let big = payload("adaptive", &format!("QA-big {}", "x".repeat(300 * 1024)));
     assert_eq!(rig.post(&link, &big).await, 413);
     bad_links(rig, scene).await;
 }
