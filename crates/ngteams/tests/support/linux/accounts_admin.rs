@@ -64,7 +64,7 @@ const GIVEN: &str = "temporary horse 1";
 const CHOSEN: &str = "chosen battery 2";
 
 /// Waits for the trace's next `user-admin` line of `change` and `kind`.
-fn admin_line(trace: &mut TraceReader, running: &Running, change: &str, kind: &str) -> SandboxResult {
+pub(super) fn admin_line(trace: &mut TraceReader, running: &Running, change: &str, kind: &str) -> SandboxResult {
     trace
         .next_where(&format!("user-admin {change} {kind}"), |line| {
             line["view"] == "user-admin" && line["change"] == change && line["kinds"] == serde_json::json!([kind])
@@ -79,7 +79,7 @@ fn admin_line(trace: &mut TraceReader, running: &Running, change: &str, kind: &s
 }
 
 /// Waits for the page to list exactly the accounts `upns` (the trace names them by id).
-fn listed(trace: &mut TraceReader, running: &Running, server: &own::Own, upns: &[&str]) -> SandboxResult {
+pub(super) fn listed(trace: &mut TraceReader, running: &Running, server: &own::Own, upns: &[&str]) -> SandboxResult {
     let users = server.users()?;
     let mut wanted: Vec<String> = users
         .iter()
@@ -109,7 +109,7 @@ fn listed(trace: &mut TraceReader, running: &Running, server: &own::Own, upns: &
 }
 
 /// The server's account `upn`: `(enabled, admin)`.
-fn server_user(server: &own::Own, upn: &str) -> SandboxResult<Option<(bool, bool)>> {
+pub(super) fn server_user(server: &own::Own, upn: &str) -> SandboxResult<Option<(bool, bool)>> {
     Ok(server
         .users()?
         .into_iter()
@@ -117,7 +117,7 @@ fn server_user(server: &own::Own, upn: &str) -> SandboxResult<Option<(bool, bool
         .map(|(_, _, enabled, admin)| (enabled, admin)))
 }
 
-fn tabs(input: &mut VirtualInput, count: usize) -> SandboxResult {
+pub(super) fn tabs(input: &mut VirtualInput, count: usize) -> SandboxResult {
     for _ in 0..count {
         input.key(keys::TAB)?;
     }
@@ -195,7 +195,7 @@ fn first_admin_created(
 }
 
 /// Opens Manage users of the account `account` (as `ngteamsctl` addresses it) and waits for its list.
-fn manage_users_opened(
+pub(super) fn manage_users_opened(
     sandbox: &Sandbox,
     trace: &mut TraceReader,
     running: &Running,
@@ -219,7 +219,7 @@ fn manage_users_opened(
 
 /// From the page's search field: types `query`, waits for the list, and opens its first row's dialog (Tab past
 /// "Add user" to the list, Enter).
-fn first_found_opened(
+pub(super) fn first_found_opened(
     input: &mut VirtualInput,
     trace: &mut TraceReader,
     running: &Running,
@@ -234,7 +234,7 @@ fn first_found_opened(
 
 /// The search field emptied of `typed` characters (the keyboard is on it after a dialog closes): the page lists
 /// `all` again.
-fn search_cleared(
+pub(super) fn search_cleared(
     input: &mut VirtualInput,
     trace: &mut TraceReader,
     running: &Running,
@@ -457,7 +457,7 @@ fn a_user_must_change_the_password(
 }
 
 /// Whether `ngteamsctl` opens Manage users for the account `account`.
-fn offers_manage_users(sandbox: &Sandbox, account: &str) -> bool {
+pub(super) fn offers_manage_users(sandbox: &Sandbox, account: &str) -> bool {
     ctl(sandbox, &["--account", account, "open", "settings", "users"]).is_ok()
 }
 
@@ -591,7 +591,7 @@ pub fn manage_users_in_dark(sandbox: &Sandbox) -> SandboxResult {
 // --- the window asking for an account alone, at its own width ---
 
 /// A sandbox as wide as the window asking for an account; `None` without the sandbox's tools.
-fn narrow() -> SandboxResult<Option<Sandbox>> {
+pub(super) fn narrow() -> SandboxResult<Option<Sandbox>> {
     let options = SandboxOptions {
         width: 480,
         height: 800,

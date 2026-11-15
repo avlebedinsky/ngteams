@@ -62,6 +62,8 @@ use ngteams::app::{self, Launch};
 use ngteams::secrets::AppSecrets;
 #[path = "accounts_admin.rs"]
 mod admin;
+#[path = "accounts_admin_qa.rs"]
+mod admin_qa;
 #[path = "accounts_own.rs"]
 mod own;
 #[path = "../own_server.rs"]
@@ -206,7 +208,7 @@ fn parent() -> SandboxResult {
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 19] = [
+const SCENES: [Scene; 25] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -247,6 +249,12 @@ const SCENES: [Scene; 19] = [
     ("admin_password_change_at_480_dark", |_| {
         admin::password_change_at_480(true)
     }),
+    ("qa_admin_first_run_on_the_binary", admin_qa::first_run_on_the_binary),
+    ("qa_manage_users_seeded", admin_qa::manage_users_seeded),
+    ("qa_roles_while_running", admin_qa::roles_while_running),
+    ("qa_page_at_480", |_| admin_qa::page_at(480, false)),
+    ("qa_page_at_480_dark", |_| admin_qa::page_at(480, true)),
+    ("qa_page_at_1280_dark", |_| admin_qa::page_at(1280, true)),
 ];
 
 /// The child's view trace, line by line as it comes.
@@ -1321,6 +1329,12 @@ enum Mode {
     Admin,
     /// Teams Dark, the parent's own server's administrator signed in and shown beside a and b.
     AdminDark,
+    /// [`Mode::Admin`] with a request log of its own (the QA scenes).
+    AdminQa,
+    /// [`Mode::AdminDark`] in Teams Light.
+    AdminLight,
+    /// [`Mode::AdminLight`] with the parent's server's user [`admin_qa::RUNNING`] signed in beside its administrator.
+    AdminTwo,
 }
 
 impl Mode {
@@ -1335,6 +1349,9 @@ impl Mode {
             "restart" => Some(Self::Restart),
             "admin" => Some(Self::Admin),
             "admin-dark" => Some(Self::AdminDark),
+            "admin-qa" => Some(Self::AdminQa),
+            "admin-light" => Some(Self::AdminLight),
+            "admin-two" => Some(Self::AdminTwo),
             _ => None,
         }
     }
@@ -1345,6 +1362,9 @@ impl Mode {
             Self::Restart => "restart",
             Self::Admin => "admin",
             Self::AdminDark => "admin-dark",
+            Self::AdminQa => "admin-qa",
+            Self::AdminLight => "admin-light",
+            Self::AdminTwo => "admin-two",
             _ => "first",
         }
     }
@@ -1370,7 +1390,16 @@ impl Mode {
 
     /// The parent's own server is the one the window's account is on.
     fn on_own_server(self) -> bool {
-        matches!(self, Self::Window | Self::Restart | Self::Admin | Self::AdminDark)
+        matches!(
+            self,
+            Self::Window
+                | Self::Restart
+                | Self::Admin
+                | Self::AdminDark
+                | Self::AdminQa
+                | Self::AdminLight
+                | Self::AdminTwo
+        )
     }
 }
 
@@ -1497,17 +1526,26 @@ fn child_window(mode: Mode) -> SandboxResult {
     Ok(())
 }
 
-/// The own server's account a mode starts with: the first run's come back ([`Mode::Restart`]), or the server's
-/// administrator signed in beforehand ([`Mode::AdminDark`]).
+/// The own server's accounts a mode starts with: the first run's come back ([`Mode::Restart`]), or the server's
+/// administrator signed in beforehand ([`Mode::AdminDark`], [`Mode::AdminLight`]; [`Mode::AdminTwo`] with its user
+/// beside it).
 fn own_started(
     mode: Mode,
     runner: &ngteams::accounts::Runner,
     server: Option<&ngteams::accounts_file::OwnServer>,
-) -> SandboxResult<Option<Started>> {
+) -> SandboxResult<Vec<Started>> {
     match (mode, server) {
-        (Mode::Restart, _) => Ok(Some(own::come_back(runner)?)),
-        (Mode::AdminDark, Some(server)) => Ok(Some(admin::signed_in(runner, server)?)),
-        _ => Ok(None),
+        (Mode::Restart, _) => Ok(vec![own::come_back(runner)?]),
+        (Mode::AdminDark | Mode::AdminLight, Some(server)) => Ok(vec![admin::signed_in(runner, server)?]),
+        (Mode::AdminTwo, Some(server)) => {
+            let running =
+                ngteams::accounts::add_own(&runner.setup, admin_qa::RUNNING, server, &Secret::new(own::PASSWORD))?;
+            Ok(vec![
+                admin::signed_in(runner, server)?,
+                runner.start(&running).map_err(String::from)?,
+            ])
+        }
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -1526,7 +1564,8 @@ fn tell_the_parent(
         say_when_own_signed_in(setup.clone(), cx);
         own::hand_over_secrets_when_asked(setup.clone(), cx);
         own::say_requests_when_asked(origin, dead, cx);
-        say_mock_requests_when_asked(mock, setup, cx);
+        say_mock_requests_when_asked(Arc::clone(&mock), setup.clone(), cx);
+        admin_qa::say_mock_needles_when_asked(mock, setup, cx);
     }
 }
 
@@ -1557,7 +1596,9 @@ fn runner_of(
     for account in held.iter().filter(|account| account.server.is_none()) {
         account.save(&setup.paths)?;
     }
-    if let Some(server) = server.filter(|_| matches!(mode, Mode::Window | Mode::AdminDark)) {
+    if let Some(server) =
+        server.filter(|_| matches!(mode, Mode::Window | Mode::AdminDark | Mode::AdminLight | Mode::AdminTwo))
+    {
         setup.ask_for_on(OWN_UPN, server)?;
     }
     if !mode.own_servers() {

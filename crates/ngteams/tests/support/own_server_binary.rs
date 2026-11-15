@@ -163,7 +163,7 @@ impl BinaryServer {
     }
 
     /// Runs the server's command line with `args` (and `input` on standard input); what it printed.
-    fn run(&self, args: &[&str], input: Option<&str>) -> TestResult<String> {
+    pub fn run(&self, args: &[&str], input: Option<&str>) -> TestResult<String> {
         let mut running = Command::new(&self.binary)
             .arg("--config")
             .arg(&self.config)
@@ -182,6 +182,11 @@ impl BinaryServer {
             return Err(format!("{args:?}: {}", String::from_utf8_lossy(&output.stderr)).into());
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// The `serve` process's id.
+    pub fn pid(&self) -> u32 {
+        self.serving.id()
     }
 
     /// What `serve` wrote to standard error so far.

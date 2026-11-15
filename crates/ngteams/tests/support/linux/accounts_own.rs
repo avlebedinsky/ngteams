@@ -118,6 +118,30 @@ impl Own {
         }
     }
 
+    /// What the binary's `serve` logged so far; `None` for the server in this process.
+    pub fn log(&self) -> Option<String> {
+        match self {
+            Self::Binary(server) => Some(server.log()),
+            Self::InProcess(_) => None,
+        }
+    }
+
+    /// The binary's command line with `args` (and `input` on standard input): what it printed.
+    pub fn cli(&self, args: &[&str], input: Option<&str>) -> SandboxResult<String> {
+        match self {
+            Self::Binary(server) => server.run(args, input),
+            Self::InProcess(_) => Err("the server in this process has no command line".into()),
+        }
+    }
+
+    /// The binary's `serve` process; `None` for the server in this process.
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Binary(server) => Some(server.pid()),
+            Self::InProcess(_) => None,
+        }
+    }
+
     /// The account's entry as a user of a self-signed deployment writes it: its server and its `ca_file`.
     pub fn entry(&self) -> SandboxResult<accounts_file::OwnServer> {
         Ok(accounts_file::OwnServer::parse(
