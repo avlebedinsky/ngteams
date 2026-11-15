@@ -34,6 +34,7 @@ group chat's people (below). Rich quote normalization is still being added.
 | Files | object_store: any S3-compatible service, a local directory, or memory |
 | Pictures, thumbnails | image (PNG, JPEG, GIF, WebP), decoded within size and memory limits |
 | Link previews | reqwest behind an address guard, scraper for the page's metadata |
+| Rich messages | scraper (html5ever, attributes in source order) writes a mention's message out again; indexmap keeps a mention entry's keys in order |
 | Download ranges, media types | http-range-header, mime_guess |
 | Configuration, CLI | figment (TOML plus environment), clap |
 | Logs | tracing, tracing-subscriber |
