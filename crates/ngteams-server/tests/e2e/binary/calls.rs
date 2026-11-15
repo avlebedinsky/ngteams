@@ -4,8 +4,12 @@
 //! without `NGTS_TEST_COTURN` and `NGTS_TEST_COTURN_SECRET` (`docs/server.md`).
 
 mod access;
+mod accounts;
+mod coturn_log;
 mod flows;
 mod nodes;
+mod own_relay;
+mod qa_net;
 mod relay;
 mod support;
 

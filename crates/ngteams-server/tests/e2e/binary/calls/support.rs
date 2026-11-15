@@ -97,6 +97,24 @@ impl Rig {
             eprintln!("skipped: {COTURN} and {COTURN_SECRET} name no coturn");
             return None;
         };
+        let table =
+            (turn == Turn::Coturn).then(|| format!("secret = {secret:?}\nurls = [\"turn:{relay}?transport=udp\"]\n"));
+        Self::start_with(backend, flow, ring_timeout, relay, table.as_deref()).await
+    }
+
+    /// As [`Self::start`], the nodes' `[calling.turn]` being `turn` as written (none: no table), the run's relay the
+    /// coturn at `relay`.
+    pub async fn start_with(
+        backend: Backend,
+        flow: &str,
+        ring_timeout: u64,
+        relay: SocketAddr,
+        turn: Option<&str>,
+    ) -> Option<Self> {
+        let Some((_, secret)) = coturn() else {
+            eprintln!("skipped: {COTURN} and {COTURN_SECRET} name no coturn");
+            return None;
+        };
         eprintln!("real-binary calls, {flow}: {backend:?}");
         let redis = (backend == Backend::Postgres).then(redis_url).flatten();
         assert!(
@@ -106,11 +124,8 @@ impl Rig {
         let mut deployment = Deployment::new(backend, false, redis).await;
         deployment.origin = deployment.origin.replacen("http:", "https:", 1);
         let mut config = format!("[calling]\nring_timeout = {ring_timeout}\n");
-        if turn == Turn::Coturn {
-            let _ = write!(
-                config,
-                "[calling.turn]\nsecret = {secret:?}\nurls = [\"turn:{relay}?transport=udp\"]\n"
-            );
+        if let Some(turn) = turn {
+            let _ = write!(config, "[calling.turn]\n{turn}");
         }
         let first = deployment.node("a");
         append(&first.config, &config);
@@ -336,6 +351,12 @@ impl Phone {
     /// The account's skypetoken, for a request no client sends.
     pub async fn skypetoken(&self) -> String {
         self.session.skypetoken().await.unwrap().token.expose().to_owned()
+    }
+
+    /// The account's `ic3` token, for a check of where it went.
+    pub async fn ic3(&self) -> String {
+        let token = teams_trouter::TrouterCredentials::ic3(&*self.session).await.unwrap();
+        token.token.expose().to_owned()
     }
 
     fn transport(&self, tracker: &Arc<Tracker>) -> Transport {

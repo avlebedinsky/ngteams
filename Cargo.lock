@@ -7794,6 +7794,7 @@ dependencies = [
  "teams-call",
  "teams-core",
  "teams-media",
+ "teams-mock",
  "teams-proto",
  "teams-store",
  "teams-trouter",
