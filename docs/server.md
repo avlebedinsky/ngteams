@@ -513,7 +513,8 @@ deleted:
 
 Each delete takes the bytes off the account's count in the transaction that removes the row, so uploads and
 deletes at once leave the count right, on several nodes too. The bytes are cleared from the store after that; if
-the store fails then, the node logs their key and the bytes stay in the bucket, read by nothing.
+the store fails then, the node logs their key and the bytes stay in the bucket, read by nothing. A node that
+stops waits up to 10 seconds for the clears still running, and logs the keys it leaves.
 
 ### Link previews (`/ams/urlp/v1/url/`)
 

@@ -45,6 +45,7 @@ pub struct App {
     pub storage: Arc<dyn Storage>,
     /// What reads pages and pictures for link previews.
     pub(crate) fetcher: crate::media::Fetcher,
+    pub(crate) clearing: crate::media::Clearing,
 }
 
 /// Why a node can't start.
@@ -127,7 +128,14 @@ impl App {
             trouter: Arc::new(Hub::new()),
             storage,
             fetcher,
+            clearing: crate::media::Clearing::default(),
         }))
+    }
+
+    /// Waits, at most `limit`, for the store clears a message delete left running after its answer, as a node does
+    /// before it stops. The keys still not cleared then: the log names each, since no row does any more.
+    pub async fn cleared(&self, limit: Duration) -> Vec<String> {
+        self.clearing.done(limit).await
     }
 }
 

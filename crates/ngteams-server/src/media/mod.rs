@@ -17,7 +17,9 @@ mod schema;
 mod thumbs;
 mod urlp;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub(crate) use fetch::Fetcher;
 
@@ -36,8 +38,8 @@ use crate::storage::StorageError;
 /// The largest body of a read by POST.
 const SMALL_BODY: usize = 64 * 1024;
 /// How long a read may take, and how long a file's or a picture's bytes may take to arrive or to start leaving.
-const SHORT: std::time::Duration = std::time::Duration::from_secs(30);
-const LONG: std::time::Duration = std::time::Duration::from_secs(600);
+const SHORT: Duration = Duration::from_secs(30);
+const LONG: Duration = Duration::from_secs(600);
 
 /// The chat service's audience, which AMS takes too.
 const IC3: &str = <crate::auth::extract::Ic3 as crate::auth::extract::Audience>::AUDIENCE;
@@ -185,7 +187,8 @@ const RELEASED: usize = 64;
 /// Frees those of `objects` that are `owner`'s pictures and that no message names any more, after a message that
 /// named them was deleted. The delete stands when this fails: the owner, or the operator, can still delete the
 /// object. Their bytes come off the owner's count here and leave the store in a task of its own, so a store out
-/// of reach neither holds the delete's answer back nor loses the clearing to the request's deadline.
+/// of reach neither holds the delete's answer back nor loses the clearing to the request's deadline. A node that
+/// stops waits for that task ([`Clearing`]).
 pub(crate) async fn release(app: &Arc<App>, owner: &str, objects: &[String]) {
     let mut unread = Vec::new();
     for id in objects.iter().take(RELEASED) {
@@ -197,12 +200,42 @@ pub(crate) async fn release(app: &Arc<App>, owner: &str, objects: &[String]) {
     if unread.is_empty() {
         return;
     }
+    app.clearing.0.send_modify(|keys| keys.extend(unread.iter().cloned()));
     let app = Arc::clone(app);
     tokio::spawn(async move {
         for key in unread {
             clear(app.storage.as_ref(), &key).await;
+            app.clearing.0.send_modify(|keys| {
+                keys.remove(&key);
+            });
         }
     });
+}
+
+/// The store keys [`release`] still clears. Nothing else names them once their rows are gone, so a node that stops
+/// waits for them ([`Self::done`]).
+#[derive(Debug, Default)]
+pub(crate) struct Clearing(tokio::sync::watch::Sender<BTreeSet<String>>);
+
+impl Clearing {
+    /// Waits until no key is left, at most `limit`; the keys left then, each named in the log.
+    pub(crate) async fn done(&self, limit: Duration) -> Vec<String> {
+        let mut keys = self.0.subscribe();
+        if tokio::time::timeout(limit, keys.wait_for(BTreeSet::is_empty))
+            .await
+            .is_ok()
+        {
+            return Vec::new();
+        }
+        let left: Vec<String> = self.0.borrow().iter().cloned().collect();
+        for key in &left {
+            tracing::warn!(
+                key,
+                "stored bytes nothing reads weren't cleared before the node stopped"
+            );
+        }
+        left
+    }
 }
 
 /// One thing an account keeps in the store, for the operator's commands.

@@ -62,6 +62,18 @@ pub(super) async fn of(app: &App, item: &repo::Item) -> Result<Made, Error> {
     if let Some(note) = app.storage.get(&note_key(&item.id)).await? {
         return Ok(serde_json::from_slice(&note).unwrap_or_default());
     }
+    let made = make(app, item).await;
+    // a delete meanwhile cleared keys that weren't there yet, whether every write went through or not
+    if repo::item(&app.db, &item.id).await?.is_none() {
+        for key in keys(&item.id) {
+            super::clear(app.storage.as_ref(), &key).await;
+        }
+        return Err(Error::Missing);
+    }
+    made
+}
+
+async fn make(app: &App, item: &repo::Item) -> Result<Made, Error> {
     let mut made = Made::default();
     if item.size <= MAX_SOURCE
         && let Some(source) = app.storage.get(&drive::key(&item.id)).await?
@@ -74,13 +86,6 @@ pub(super) async fn of(app: &App, item: &repo::Item) -> Result<Made, Error> {
     }
     let note = serde_json::to_vec(&made).unwrap_or_default();
     app.storage.put(&note_key(&item.id), note.into()).await?;
-    // a delete meanwhile cleared keys that weren't there yet
-    if repo::item(&app.db, &item.id).await?.is_none() {
-        for key in keys(&item.id) {
-            super::clear(app.storage.as_ref(), &key).await;
-        }
-        return Err(Error::Missing);
-    }
     Ok(made)
 }
 

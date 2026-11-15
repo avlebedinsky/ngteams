@@ -141,6 +141,108 @@ async fn a_message_delete_does_not_wait_for_a_store_that_hangs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stopping_node_waits_for_a_deleted_pictures_bytes_and_names_those_it_leaves() {
+    let (trio, store) = Trio::start_held(Backend::Sqlite, |_| {}, |call| call.starts_with("delete ams/")).await;
+    let picture = PastedPicture {
+        format: PastedFormat::Png,
+        bytes: png(8, 8),
+    };
+    let object = trio.a.upload_picture(trio.chat.clone(), picture).await.unwrap();
+    let message = show(&trio, &object).await;
+    delete_message(&trio, message).await;
+    tokio::time::timeout(WAIT, store.waited_on())
+        .await
+        .expect("nothing cleared the store");
+
+    let left = trio.server.app.cleared(Duration::from_millis(100)).await;
+    assert_eq!(left, store.keys(), "the bytes a stopped node leaves aren't named");
+    assert_eq!(left.len(), 1);
+
+    let opening = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.open();
+    };
+    let (left, ()) = tokio::join!(trio.server.app.cleared(WAIT), opening);
+    assert_eq!(left, Vec::<String>::new());
+    assert_eq!(
+        store.keys(),
+        Vec::<String>::new(),
+        "the node didn't wait for the clearing"
+    );
+    trio.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_delete_frees_its_picture_while_the_fan_out_hangs() {
+    let (trio, fanout) = Trio::start_stuck(Backend::Sqlite).await;
+    let picture = PastedPicture {
+        format: PastedFormat::Png,
+        bytes: png(8, 8),
+    };
+    let object = trio.a.upload_picture(trio.chat.clone(), picture).await.unwrap();
+    let message = show(&trio, &object).await;
+    let ic3 = token(&trio.server, "a@own.test", IC3).await;
+    let view = format!("/ams/v1/objects/{object}/views/imgo");
+
+    fanout.stick(true);
+    let freed = async {
+        while raw(&trio.server, Method::GET, &view, Some(&ic3), &[], None).await.0 != 404 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let deleting = async {
+        let freed = tokio::time::timeout(Duration::from_secs(3), freed).await;
+        fanout.stick(false);
+        freed
+    };
+    let (freed, ()) = tokio::join!(deleting, delete_message(&trio, message));
+    freed.expect("the picture waited for the fan-out");
+    trio.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_deleted_while_its_thumbnails_fail_to_be_made_leaves_none() {
+    let (trio, store) = Trio::start_held(
+        Backend::Sqlite,
+        |_| {},
+        |call| call.starts_with("put drive-thumbnails/") && call.ends_with("/small.jpg"),
+    )
+    .await;
+    let own = token(&trio.server, "a@own.test", ORIGIN).await;
+    let share = super::files::send_file(&trio, "photo.png", &png(40, 30)).await;
+    let file = only_file(&trio, &own).await;
+
+    let deleting = async {
+        store.waited_on().await;
+        let status = delete(&trio, &own, &file).await;
+        store.fail(|call| call.ends_with("/medium.jpg"));
+        store.open();
+        status
+    };
+    let both = async { tokio::join!(trio.b.file_thumbnail(share), deleting) };
+    let (thumbnail, status) = tokio::time::timeout(WAIT, both).await.unwrap();
+    assert_eq!(status, 204);
+    assert!(
+        !matches!(thumbnail, Ok(Some(_))),
+        "a deleted file's thumbnail was served"
+    );
+    assert_eq!(store.keys(), Vec::<String>::new());
+    trio.stop().await;
+}
+
+/// The path of the one file in a's chat files.
+async fn only_file(trio: &Trio, own: &str) -> String {
+    let listed = format!("{}/drive/root:/Microsoft%20Teams%20Chat%20Files:/children", drive(trio));
+    let (_, _, body) = raw(&trio.server, Method::GET, &listed, Some(own), &[], None).await;
+    let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    format!(
+        "{}/drive/items/{}",
+        drive(trio),
+        listed["value"][0]["id"].as_str().unwrap()
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_file_deleted_while_its_thumbnails_are_made_leaves_none() {
     let (trio, store) = Trio::start_held(
         Backend::Sqlite,
@@ -150,17 +252,7 @@ async fn a_file_deleted_while_its_thumbnails_are_made_leaves_none() {
     .await;
     let own = token(&trio.server, "a@own.test", ORIGIN).await;
     let share = super::files::send_file(&trio, "photo.png", &png(40, 30)).await;
-    let listed = format!(
-        "{}/drive/root:/Microsoft%20Teams%20Chat%20Files:/children",
-        drive(&trio)
-    );
-    let (_, _, body) = raw(&trio.server, Method::GET, &listed, Some(&own), &[], None).await;
-    let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let file = format!(
-        "{}/drive/items/{}",
-        drive(&trio),
-        listed["value"][0]["id"].as_str().unwrap()
-    );
+    let file = only_file(&trio, &own).await;
 
     let deleting = async {
         store.waited_on().await;

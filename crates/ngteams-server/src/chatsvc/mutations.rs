@@ -135,14 +135,9 @@ pub(super) async fn delete(
     })
     .await?;
     let changed = updated(result)?;
-    events::tell(
-        &app,
-        "MessageUpdate",
-        &changed.row.value()?,
-        &changed.readers,
-        &changed.told,
-    )
-    .await;
+    let resource = changed.row.value();
+    // before the event: a fan-out that hangs past the request's deadline would leave the pictures charged
     crate::media::release(&app, &caller.id, &shown.into_inner().unwrap_or_default()).await;
+    events::tell(&app, "MessageUpdate", &resource?, &changed.readers, &changed.told).await;
     Ok(Json(Value::Null))
 }

@@ -212,6 +212,9 @@ pub async fn run(
     }
 }
 
+/// How long a stopping node waits for store clears still running: a store out of reach gives up within it.
+const CLEARING: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), CliError> {
     let listener = Listener::bind(config.listen)?;
     let app = App::start(config).await?;
@@ -220,8 +223,11 @@ async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'stat
     tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
     let maintenance = tokio::spawn(app::maintain(std::sync::Arc::clone(&app)));
     let shutdown = app::closing(std::sync::Arc::clone(&app), shutdown);
-    let served = listener.serve(app::router(app), tls, shutdown).await;
+    let served = listener
+        .serve(app::router(std::sync::Arc::clone(&app)), tls, shutdown)
+        .await;
     maintenance.abort();
+    app.cleared(CLEARING).await;
     Ok(served?)
 }
 
