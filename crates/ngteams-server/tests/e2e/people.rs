@@ -653,3 +653,61 @@ async fn an_empty_value_clears_a_profile_field_and_a_change_that_makes_no_sense_
     }
     desk.server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_that_cant_be_read_answers_unavailable_and_a_token_from_before_a_reset_opens_nothing() {
+    use diesel_async::SimpleAsyncConnection as _;
+    let office = Office::open(Backend::Sqlite).await;
+    let graph = office.token("ada@own.test", GRAPH_AUDIENCE).await;
+    let loki = office.token("ada@own.test", LOKI_AUDIENCE).await;
+    let middle_tier = office.token("ada@own.test", MIDDLE_TIER_AUDIENCE).await;
+    let presence = office.token("ada@own.test", teams_proto::PRESENCE_AUDIENCE).await;
+    let persona = format!("aadObjectId={}", office.b);
+    let short_profiles = office.server.url("/api/mt/part/own-01/beta/users/fetchShortProfile");
+    let post = |url: String, token: &str, body: Value| {
+        let request = reqwest::Client::new().post(url).bearer_auth(token).json(&body);
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    let asked = json!([{"mri": mri(&office.b)}]);
+    let read = office.server.url("/ups/own/v1/presence/getpresence/");
+
+    let db = &office.server.app.db;
+    let dropped: Result<(), ngteams_server::db::DbError> = async {
+        ngteams_server::with_conn!(db, |conn| conn.batch_execute("DROP TABLE user_profiles").await?);
+        Ok(())
+    }
+    .await;
+    dropped.unwrap();
+    for path in [
+        format!("/graph/v1.0/users/{}", office.b),
+        format!("/graph/v1.0/users/{}/photos/96x96/$value", office.b),
+        "/graph/v1.0/me".to_owned(),
+    ] {
+        assert_eq!(office.get(&graph, &path).await.0, 503, "{path}");
+    }
+    for read in [
+        "v2/person",
+        "v1/organization",
+        "v1/workingwith",
+        "v1/schedule",
+        "v1/oofstatus",
+    ] {
+        let path = format!("/loki/api/{read}?{persona}");
+        assert_eq!(office.get(&loki, &path).await.0, 503, "{path}");
+    }
+    assert_eq!(
+        post(short_profiles.clone(), &middle_tier, json!([mri(&office.b)])).await,
+        503
+    );
+    assert_eq!(post(read.clone(), &presence, asked.clone()).await, 503);
+
+    // a token issued under the password before a reset is no credential any more
+    let fanout = office.server.app.fanout.as_ref();
+    ngteams_server::admin::reset_password(db, fanout, "ada@own.test", "another password")
+        .await
+        .unwrap();
+    assert_eq!(office.get(&graph, "/graph/v1.0/me").await.0, 401);
+    assert_eq!(post(read, &presence, asked).await, 401);
+    assert_eq!(post(short_profiles, &middle_tier, json!([])).await, 401);
+    office.server.stop().await;
+}

@@ -6,11 +6,11 @@ origin. The client sends a request to it only for an account signed in to that s
 
 What it serves today: sign-in (the token endpoint), authz, the chat service, teams and channels (CSA, the middle
 tier's and the provisioning service's team routes), pictures in messages, files sent in chats, link previews, the
-calendar and meetings' scheduling (the middle tier's calendar routes), account administration (the admin API and the
-first-admin setup), the registrar and the Trouter push socket, and 1:1 calls (the call controller behind
-`/flightproxy/api/v2/` and the TURN credentials). The registrar, Trouter and the calling surface have no GTM (the
-client finds them on the origin). Other services are added one at a time. Authz names only the services the server
-serves, so the client keeps every other service off.
+calendar and meetings' scheduling (the middle tier's calendar routes), presence, people (short profiles, Graph's users
+and pictures, the person card), account administration (the admin API and the first-admin setup), the registrar and
+the Trouter push socket, and 1:1 calls (the call controller behind `/flightproxy/api/v2/` and the TURN credentials).
+The registrar, Trouter and the calling surface have no GTM (the client finds them on the origin). Other services are
+added one at a time. Authz names only the services the server serves, so the client keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
 reactions, transient typing, account preferences and message pages (newest, backward, incremental and around a
@@ -53,7 +53,7 @@ ngteams-server --config server.toml serve
 ```
 
 Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`,
-`media list|delete`, `setup-code`, `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
+`profile show|set|picture|remove-picture`, `media list|delete`, `setup-code`, `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
 deleting an account, or resetting its password, revokes its refresh tokens and closes its push sockets at once: a
 disabled or deleted account is refused everywhere from then on, and after a new password the sessions end when
 their access tokens run out (one hour by default). `user add --admin` and `user promote` make an admin; `user list`
@@ -116,6 +116,9 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `setup.require_code` | `true` | whether creating the first admin takes the setup code; turn it off only for an install nobody else reaches before its admin exists |
 | `setup.max_attempts`, `setup.window` | `5`, `300` | first-admin setup attempts a client address may make in the window (seconds) |
 | `trouter.auth_timeout` | `10` | seconds a push socket has to authenticate after it opened |
+| `presence.endpoint_ttl` | `320` | seconds an account's endpoint shows as it was last reported; the client reports again every two minutes |
+| `presence.subscription_ttl` | `7200` | seconds a presence subscription holds; the client renews its own every 55 minutes |
+| `presence.max_subscriptions`, `presence.max_endpoints` | `650`, `32` | the people one endpoint may watch; the endpoints one account may report at once |
 | `calling.ring_timeout` | `30` | seconds a call rings before it ends unanswered |
 | `calling.turn.urls` | none | the TURN relay's URLs (`turn:<host>:3478?transport=udp`, `turns:<host>:5349`), handed out with the credentials |
 | `calling.turn.secret` | none | coturn's `static-auth-secret`: credentials are made from it per account and run out by themselves |
@@ -390,17 +393,17 @@ hands out its GTM where it has one.
 | Admin API, first-admin setup | (the origin) | `/api/admin/v1/` | yes |
 | The account's own endpoints | (the origin) | `/api/account/v1/` | yes |
 | Chat service | `chatServiceAfd` | `/api/chatsvc/<region>/` | yes |
-| Middle tier | `middleTier` | `/api/mt/part/<partition>/` (the partition as `<letters>-<digits>`: `own-01`) | the team and calendar routes |
+| Middle tier | `middleTier` | `/api/mt/part/<partition>/` (the partition as `<letters>-<digits>`: `own-01`) | the team and calendar routes, `users/fetchShortProfile` |
 | Chat service aggregator | `chatSvcAggAfd` | `/api/csa/<region>/` | yes |
 | Provisioning | `teamsAndChannelsProvisioningService` | `/fabric/<region>/templates/api/` (the client takes a region of letters only) | yes |
-| Presence | `presenceUPS` | `/ups/<geo>/` | no |
+| Presence | `presenceUPS` | `/ups/<geo>/` (the region's lowercase letters) | yes |
 | Registrar | (the origin) | `/registrar/prod/V2/` | yes |
 | Trouter | (the origin) | `wss://<origin>/trouter/v4/c` | yes |
 | AMS and link previews | `amsV2` | `/ams/` | yes |
-| Graph | (the origin) | `/graph/v1.0/` | `me`, `me/drive`, `users/<id>`, a shared file's item and thumbnails |
+| Graph | (the origin) | `/graph/v1.0/` | `me`, `me/drive`, `users/<id>`, `users/<id>/photos/96x96/$value`, a shared file's item and thumbnails |
 | User profiles | `userProfileService` | `/api/userprofilesvc/<region>/` | a team's people search |
 | Files | (the origin) | `/sp/` | yes |
-| Loki | (the origin) | `/loki/` | no |
+| Loki | (the origin) | `/loki/` | yes |
 | Search | (the origin) | `/search/` | no |
 | Flight proxy | (the origin) | `/flightproxy/api/v2/` | 1:1 calls |
 | TURN credentials | (the origin) | `/trap/tokens` | yes |
@@ -524,7 +527,8 @@ slow client doesn't count against it; raise it only when the link between the se
 limits the whole of each request, a download too: none is set by default. These keys are for S3 stores only.
 
 Keys in the bucket: `ams/<object>/<version>` (pictures: each upload of an object's bytes gets a key of its own, and
-the database names the one the object reads from), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails).
+the database names the one the object reads from), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails),
+`profile-pictures/<account>/<upload>` (an account's picture).
 
 ## Pictures, files and link previews
 
@@ -592,10 +596,9 @@ and kept in the store. Other files have none (`value: []`), and the client draws
 
 The file's `webUrl` itself answers nothing: there is no web page to open a file in.
 
-Sharing needs two people reads the people service will own: `POST <middle tier>/beta/users/fetchShortProfile`
-(MRIs to names and addresses) and `GET /graph/v1.0/users/<id>`. Both are served in the smallest form file sharing
-needs. Authz hands out `middleTier` and `amsV2`, so a client signed in through authz pastes pictures and sends
-files.
+Sharing needs two people reads: `POST <middle tier>/beta/users/fetchShortProfile` (MRIs to names and addresses)
+and `GET /graph/v1.0/users/<id>` ([People](#people)). Authz hands out `middleTier` and `amsV2`, so a client signed
+in through authz pastes pictures and sends files.
 
 ### Freeing storage
 
@@ -719,6 +722,91 @@ denied-peer-ip=192.168.0.0-192.168.255.255
 
 Clients relay everything, so the relay needs its UDP range (`min-port`, `max-port`) open and enough bandwidth for
 every call's media twice. Several coturn instances with one secret serve any number of nodes.
+
+## Presence
+
+The wire is UPS's (`docs/protocol/trouter.md`, "Others' presence" and "Own presence"), under `/ups/<geo>/v1/`, with
+the token of `https://presence.teams.microsoft.com/`. Every request is from an account that can sign in, with a
+token from after its last password reset.
+
+| Request | Does | Answers |
+|---|---|---|
+| `POST presence/getpresence/` | reads the presence of a list of `{"mri"}` (1 to 650) | 200, one item per MRI in order: `mri`, `presence` (`sourceNetwork` `Self` or `SameEnterprise`, `calendarData.isOutOfOffice`, `capabilities`, `availability`, `activity`, `lastActiveTime`, `deviceType` while an endpoint is live), `etagMatch`, `etag`, `status` `20000`, and `source` when asked with it. An MRI that is no account that can sign in gets `status` `40400` and no `presence` |
+| `PUT me/endpoints/` | reports the account's endpoint (`x-ms-endpoint-id`, the body's `id`) with its `availability` and `activity` | 201; 400 for another form; 429 past `presence.max_endpoints` |
+| `PUT me/forceavailability/` | sets the manual status (`Available`, `Busy`, `DoNotDisturb`, `Away`, `BeRightBack`, `Offline`); with no body, clears it | 200 |
+| `POST pubsub/subscriptions/<epid>` | changes whom the caller's messaging endpoint watches: `subscriptionsToAdd`, `subscriptionsToRemove`, and with `shouldPurgePreviousSubscriptions` everything it watched before is dropped first | 200 `{"addStatuses", "removeStatuses"}`, an item per MRI: `20200` taken, `40020` no such account, `40040` past `presence.max_subscriptions`. 400 without `x-ms-correlation-id` or `x-ms-client-version` ("Missing mandatory header"), or when `trouterUri` isn't the caller's own endpoint's push URL followed by `unifiedPresenceService` |
+
+- **What an account shows.** Without a live endpoint: `Offline`, whatever its manual status. With one: its manual
+  status when it has one, else the busiest of its live endpoints (`DoNotDisturb`, `Busy`, `BusyIdle`, `Available`,
+  `AvailableIdle`, `BeRightBack`, `Away`), with that endpoint's activity. `lastActiveTime` is the time of the
+  account's last endpoint report (`0001-01-01T00:00:00Z` before the first). `isOutOfOffice` is the directory's
+  ([People](#people)).
+- **An endpoint lapses** `presence.endpoint_ttl` after its last report: the client sends none when it quits, so
+  an account shows offline up to that long after its last client stopped. Each node looks for lapsed endpoints
+  every second. A manual status stays until it is cleared, and is forgotten 30 days after the account's last
+  report or status change.
+- **Deliveries.** A subscription holds for `presence.subscription_ttl`. Right after it, the endpoint gets a
+  snapshot of the people it newly watches (`"isSnapshot": true`); then each change of what one of them shows, as a
+  `3:::` delivery at `/trouter/v4/f/<endpoint>/unifiedPresenceService` with UPS's body
+  (`{"presence": [{"mri", "etag", "source", "presence"}]}`). A report that changes nothing a watcher sees is not
+  delivered. Presence deliveries go only to the sockets open now and are not kept for replay: the client subscribes
+  again after each connect and gets a snapshot. A change of `isOutOfOffice` alone is not pushed; the next read or
+  change carries it.
+- **State.** Everything is in Redis when `redis_url` is set, else in the node. The keys are
+  `ngts:presence:account:<account>` (a hash: the manual status, the last activity, each endpoint with its lapse
+  time), `ngts:presence:due:accounts` (a sorted set: the accounts with an endpoint, by their next lapse),
+  `ngts:presence:watchers:<mri>` and `ngts:presence:watching:<account>|<endpoint>` (sorted sets by the
+  subscription's end). A change is published on the watcher's `push:<mri>` as
+  `{"resourceType": "Presence", "endpoints": […], "resource": <the delivery's body>}`.
+
+## People
+
+The directory holds, beside each account's name and address, an optional profile (`user_profiles`): given name,
+surname, job title, department, office, company, two phone numbers, the account it reports to, whether its
+automatic replies are on, and its picture. The operator sets them:
+
+```sh
+ngteams-server --config server.toml profile set bert@example.com --job-title Engineer --office "Room 4" \
+    --manager cora@example.com --out-of-office true
+ngteams-server --config server.toml profile picture bert@example.com bert.png
+ngteams-server --config server.toml profile show bert@example.com
+```
+
+`profile set` takes `--given-name`, `--surname`, `--job-title`, `--department`, `--office`, `--company`,
+`--mobile-phone`, `--business-phone`, `--manager <upn>` and `--out-of-office true|false`. An empty value clears a
+field; a field not named stays. A value has at most 256 characters. An account can't report to itself, directly or
+through the accounts that report to it. `profile picture` takes a PNG, JPEG, GIF or WebP file of at most 4 MiB,
+cuts its middle square and keeps it as a 96 by 96 JPEG in the file store, in place of the one before;
+`profile remove-picture` takes it away. A picture doesn't count toward the account's storage quota: the operator
+sets it, and it is a few kilobytes.
+
+The reads, each for any account that can sign in:
+
+- **Short profiles**: `POST <middle tier>/beta/users/fetchShortProfile` with a list of MRIs (at most 500), or with
+  `?isMailAddress=true` a list of addresses. `{"type", "value": [profile]}`, a profile per account found: `mri`,
+  `objectId`, `displayName`, `email`, `userPrincipalName`, `userType`, `accountEnabled`, and `givenName`,
+  `surname`, `jobTitle`, `department`, `officeLocation`, `companyName`, `mobile`, `telephoneNumber` where the
+  directory has them. A disabled account still answers, so what it wrote keeps its author's name; a deleted one
+  doesn't.
+- **Graph**: `GET /graph/v1.0/me` and `GET /graph/v1.0/users/<id>` answer the user's record (`id`, `displayName`,
+  `userPrincipalName`, `mail`, `businessPhones`, `givenName`, `surname`, `jobTitle`, `mobilePhone`,
+  `officeLocation`, `preferredLanguage`), or with `$select` only the properties it names. An account that was
+  deleted answers 404 `Request_ResourceNotFound`. `GET /graph/v1.0/users/<id>/photos/96x96/$value` answers the
+  picture (`image/jpeg`), or 404 `ImageNotFound` for an account without one and for any other size.
+- **The person card** (Loki, under `/loki/`, with the token of `https://loki.delve.office.com` and an
+  `X-ClientType` header, else 400 `ClientTypeMissing`; `docs/protocol/loki.md`). The persona is `aadObjectId`
+  (and the same account in `teamsMri` when that is sent); one that can't sign in answers 404.
+  - `api/v1/livepersonacard/configuration`: `LokiUrl` is `<origin>/loki/`.
+  - `api/v2/person`: names, the address as mail and IM address, the UPN, `userType` `Member`.
+  - `api/v1/organization`: `managers` (the reporting line upward, nearest first, at most 8) and `directs`.
+  - `api/v1/workingwith` (`limit`, 12 by default, at most 50): the other people of the threads **the reader and
+    the person are both in now**, those in the most of them first. So a card never tells a reader of a chat the
+    reader isn't in.
+  - `api/v1/schedule`: no calendar is behind it yet, so the status is `Unknown` (`Oof` while automatic replies are
+    on) and no working hours are named.
+  - `api/v1/oofstatus`: `outOfOfficeState` `Disabled`, or `AlwaysEnabled` while automatic replies are on.
+
+The team pickers' people searches are in [Teams and channels](#teams-and-channels).
 
 ## Chat events
 
@@ -876,6 +964,9 @@ the 1:1 chat and its history stay its two people's.
   a registration taken, a socket's claim to its endpoint, an event the journal didn't keep, a disconnect) topics. A
   kept event is appended to the account's journal before it is published, so the node that is woken reads it there,
   in order; a socket that lagged or reconnected reads from its endpoint's cursor. Registrations are rows, so any node takes one and any node reads it.
+- Presence lives in Redis: any node takes an endpoint's report or a subscription, any node answers a read, and
+  the node that sweeps a lapsed endpoint (the one that takes the account off the due set) tells its watchers. A
+  change reaches a watcher's socket on any node through the watcher's `push:<mri>`.
 - Pictures and files live in the shared store and their rows in the database, so one node takes an upload and
   another serves it. A download link one node signed opens on every node. Each account's stored bytes are counted
   in one row updated in a single statement, so two nodes can't both pass the quota.

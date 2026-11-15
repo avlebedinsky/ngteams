@@ -225,3 +225,16 @@ async fn out_of_office(
         "outOfOfficeState": state, "externalAudience": "Unknown", "emailAddress": person.user.upn,
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_answers_with_its_status() {
+        let status = |refusal: Refusal| refusal.into_response().status();
+        assert_eq!(status(Refusal::ClientTypeMissing), StatusCode::BAD_REQUEST);
+        assert_eq!(status(Refusal::PersonNotFound), StatusCode::NOT_FOUND);
+        assert_eq!(status(DbError::Conflict.into()), StatusCode::SERVICE_UNAVAILABLE);
+    }
+}

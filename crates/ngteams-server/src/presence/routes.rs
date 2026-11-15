@@ -251,3 +251,24 @@ async fn subscribe(
         "removeStatuses": statuses(&request.subscriptions_to_remove, |_| 20200),
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::presence::BoardError;
+
+    #[test]
+    fn a_refusal_answers_with_its_status() {
+        let redis = redis::RedisError::from((redis::ErrorKind::Io, "down"));
+        let board = PresenceError::Board(BoardError::from(redis));
+        assert!(board.to_string().contains("down"));
+        let status = |refusal: Refusal| refusal.into_response().status();
+        assert_eq!(status(board.into()), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            status(PresenceError::TooManyEndpoints.into()),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(status(bad("no")), StatusCode::BAD_REQUEST);
+        assert!(is_word("InACall") && !is_word("") && !is_word("a b") && !is_word(&"x".repeat(65)));
+    }
+}
