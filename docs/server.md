@@ -285,12 +285,13 @@ channel; the chat service's thread routes answer their own 403 to anyone not in 
 (`ChannelNameAlreadyExist`, `OperationNotAllowedOnArchivedTeam`, `NoPermissionToCreateChannel`,
 `CannotCreatePrivateChannelDueToUserPolicy`).
 
-These changes are published to the team's or channel's people as a `ThreadUpdate` on `push:<mri>`: a team made,
-edited, archived, restored or deleted (the thread as it last was, with `isDeleted` true), its people and their roles,
-its settings, and a channel made, renamed, archived, restored, deleted, moderated or given other people. Someone taken
-off a team or out of a private channel, or gone from it by themself, is told it too. A running client reads its teams
-again once such updates pause ([trouter.md](protocol/trouter.md)), so its team and channel lists follow live. A
-channel's show-by-default, the team's picture, codes and tags reach other clients only with their next teams read.
+These changes are published to the team's or channel's people as a `ThreadUpdate` on `push:<mri>`: a team made, edited,
+archived, restored or deleted (the thread as it last was, with `isDeleted` true), its people and their roles, its
+settings, and a channel made, renamed, archived, restored, deleted, moderated or given other people. Someone taken off a
+team or out of a private channel, or gone from it by themself, is told it too, by an update that names no member
+(`members` empty). A running client reads its teams again once such updates pause ([trouter.md](protocol/trouter.md)),
+so its team and channel lists follow live. A channel's show-by-default, the team's picture, codes and tags reach other
+clients only with their next teams read.
 
 Limits: 200 standard and 30 private channels a team (`MaxChannelLimitExceeded`,
 `MaxPrivateChannelLimitExceeded`), 200 tags a team, 200 sections an account and 1000 channels a section; a team's

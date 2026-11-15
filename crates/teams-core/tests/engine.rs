@@ -3519,7 +3519,7 @@ fn deliver_copy(lab: &Lab, shapes: &Value) {
     stream["properties"]["consumptionHorizonBookmark"] = json!("synthetic-bookmark");
     lab.trouter.deliver_chat(
         LAB_A,
-        &json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": {"id": stream["id"]}}),
+        &json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": shapes["stream_thread"]}),
     );
     lab.trouter.deliver_chat(
         LAB_A,

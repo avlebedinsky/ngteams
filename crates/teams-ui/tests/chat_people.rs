@@ -673,3 +673,44 @@ fn an_open_group_chat_s_people_follow_a_change_of_its_people_live() {
     let asked = rig.core.presence_asked.lock().unwrap().clone();
     assert_eq!(asked.iter().filter(|asked| *asked == LAB_D).count(), 1, "{asked:?}");
 }
+
+/// While an open flyout reads its people again, it keeps the people it showed and Add lit for those picked.
+#[test]
+fn a_read_again_keeps_the_people_shown_and_add_lit_until_it_ends() {
+    let rig = seeded();
+    rig.core
+        .names
+        .lock()
+        .unwrap()
+        .insert(LAB_D.to_owned(), "Dee Synthetic".to_owned());
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, TALK);
+    click(cx, "chat-header-people");
+    let view = people(&shell, cx);
+    click(cx, "chat-people-add");
+    take(cx, "Dee");
+    assert_eq!(picked(&view, cx), [LAB_D]);
+    let lit = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).can_confirm(cx));
+    assert!(lit(cx));
+
+    // c gone, and b's answer held: the read again doesn't end yet
+    let people: Vec<Member> = [LAB_A, LAB_B].iter().map(|mri| Member::new(mri, None)).collect();
+    rig.core.members.lock().unwrap().insert(TALK.to_owned(), people);
+    rig.core.hold_people.lock().unwrap().insert(LAB_B.to_owned());
+    rig.send(teams_core::Event::ConversationChanged {
+        conversation: TALK.to_owned(),
+    });
+    draw(cx);
+    let held: Vec<_> = rig.core.held.lock().unwrap().drain(..).collect();
+    assert!(!held.is_empty(), "the read again waits for b");
+    assert_eq!(shown_people(&view, cx), [LAB_B, LAB_C], "the people shown stay");
+    assert!(lit(cx), "Add stays lit");
+
+    rig.core.hold_people.lock().unwrap().clear();
+    for (answer, person) in held {
+        answer.send(Ok(person));
+    }
+    draw(cx);
+    assert_eq!(shown_people(&view, cx), [LAB_B]);
+    assert!(lit(cx));
+}
