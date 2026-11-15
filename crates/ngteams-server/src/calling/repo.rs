@@ -3,8 +3,9 @@
 
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
+use serde_json::{Value, json};
 
-use super::state::Call;
+use super::state::{Call, Seat};
 use crate::db::{Db, DbError, with_conn};
 
 diesel::table! {
@@ -45,7 +46,7 @@ impl Row {
         Self {
             id: call.id.clone(),
             conversation: call.conversation.clone(),
-            caller_id: call.caller.id.clone(),
+            caller_id: call.party(Seat::CALLER).id.clone(),
             phase: call.phase.name().to_owned(),
             version,
             due_at: call.due_at,
@@ -55,11 +56,31 @@ impl Row {
     }
 
     fn kept(self) -> Option<Kept> {
-        let call = serde_json::from_str(&self.state).ok()?;
+        let mut state: Value = serde_json::from_str(&self.state).ok()?;
+        upgrade(&mut state);
         Some(Kept {
-            call,
+            call: serde_json::from_value(state).ok()?,
             version: self.version,
         })
+    }
+}
+
+/// A call as the first controller stored it, in today's shape: its `caller` and `callee` the parties, its seats
+/// named `"caller"` and `"callee"`.
+fn upgrade(state: &mut Value) {
+    let Some(fields) = state.as_object_mut() else { return };
+    if let (Some(caller), Some(callee)) = (fields.remove("caller"), fields.remove("callee")) {
+        fields.insert("parties".into(), json!([caller, callee]));
+    }
+    let seat = |seat: &mut Value| match seat.as_str() {
+        Some("caller") => *seat = json!(0),
+        Some("callee") => *seat = json!(1),
+        _ => {}
+    };
+    for pointer in ["/negotiation/by", "/answered/by", "/held_by"] {
+        if let Some(named) = state.pointer_mut(pointer) {
+            seat(named);
+        }
     }
 }
 
@@ -169,4 +190,43 @@ pub async fn open_calls(db: &Db) -> Result<Vec<OpenCall>, DbError> {
             phase: row.phase,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_the_first_controller_stored_reads_with_its_parties_and_seats() {
+        let party = |id: &str| {
+            json!({"id": id, "name": id, "participant": {}, "endpoints": [], "active": null, "muted": false,
+                "state_sequence": 0, "joined": null})
+        };
+        let stored = json!({
+            "id": "call", "conversation": "conv", "phase": "connected", "caller": party("a"), "callee": party("b"),
+            "offer": {}, "started_at": 1, "connected_at": 2, "ended_at": null, "due_at": 3, "roster_sequence": 0,
+            "negotiation": {"by": "callee", "number": 1, "at": 4}, "negotiations": 1,
+            "answered": {"by": "caller", "number": 1}, "held_by": "caller", "chat": null,
+        });
+        let row = Row {
+            id: "call".into(),
+            conversation: "conv".into(),
+            caller_id: "a".into(),
+            phase: "connected".into(),
+            version: 7,
+            due_at: 3,
+            created_at: 0,
+            state: stored.to_string(),
+        };
+        let kept = row.kept().unwrap();
+        assert_eq!(kept.version, 7);
+        let call = kept.call;
+        assert_eq!(call.seat_of("b"), Some(Seat::CALLEE));
+        assert_eq!(call.negotiation.map(|waiting| waiting.by), Some(Seat::CALLEE));
+        assert_eq!(call.answered.map(|answered| answered.by), Some(Seat::CALLER));
+        assert_eq!(call.held_by, Some(Seat::CALLER));
+        let mut nothing = json!("not a call");
+        upgrade(&mut nothing);
+        assert_eq!(nothing, json!("not a call"));
+    }
 }

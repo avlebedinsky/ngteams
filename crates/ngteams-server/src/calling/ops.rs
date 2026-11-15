@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 
 use super::repo::{self, Key};
-use super::state::{Call, Party, Phase, Refusal, Side};
+use super::state::{Call, Party, Phase, Refusal, Seat};
 use super::wire::{self, CONTROLLER_HOST, CONVERSATION_HOST};
 use super::{Caller, Failure, call_events, calling_endpoints, needed_links, now_ms, own_links, step};
 use crate::app::App;
@@ -44,11 +44,11 @@ fn status(status: StatusCode) -> Response {
     status.into_response()
 }
 
-/// The call `key` names and `caller`'s side of it; someone who is no party of it finds none.
-async fn party_of(app: &App, key: Key<'_>, caller: &Caller) -> Result<(Call, Side), Failure> {
+/// The call `key` names and `caller`'s seat of it; someone who is no party of it finds none.
+async fn party_of(app: &App, key: Key<'_>, caller: &Caller) -> Result<(Call, Seat), Failure> {
     let kept = repo::find(&app.db, key).await?.ok_or(Refusal::Missing)?;
-    let side = kept.call.side_of(&caller.id).ok_or(Refusal::Missing)?;
-    Ok((kept.call, side))
+    let seat = kept.call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
+    Ok((kept.call, seat))
 }
 
 /// What a start names: the caller as it names itself, and its one callee.
@@ -143,8 +143,7 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
         id: uuid::Uuid::new_v4().to_string(),
         conversation: uuid::Uuid::new_v4().simple().to_string(),
         phase: Phase::Ringing,
-        caller: from,
-        callee: party(&invited.id, &invited.display_name, asked.to),
+        parties: vec![from, party(&invited.id, &invited.display_name, asked.to)],
         offer: asked.offer.clone(),
         started_at: now,
         connected_at: None,
@@ -206,8 +205,8 @@ pub(super) async fn subscribe(
         return Err(Refusal::Forbidden.into());
     }
     if let Some((endpoint, links)) = own_links(&app, &caller, &body).await? {
-        step(&app, key, &caller, |call, side, _, _| {
-            call.more_links(side, &endpoint, links.clone());
+        step(&app, key, &caller, |call, seat, _, _| {
+            call.more_links(seat, &endpoint, links.clone());
             Ok(())
         })
         .await?;
@@ -226,8 +225,8 @@ pub(super) async fn end_for_all(
     hosted(&path, CONVERSATION_HOST)?;
     let body = json(&body)?;
     let key = Key::Conversation(param(&path, "conversation"));
-    step(&app, key, &caller, |call, side, at, out| {
-        call.leave(side, &body, at, out);
+    step(&app, key, &caller, |call, seat, at, out| {
+        call.leave(seat, &body, at, out);
         Ok(())
     })
     .await?;
@@ -249,22 +248,22 @@ pub(super) async fn conversation(
     let body = json(&body)?;
     match param(&path, "op") {
         "leave" => {
-            step(&app, key, &caller, |call, side, at, out| {
-                call.leave(side, &body, at, out);
+            step(&app, key, &caller, |call, seat, at, out| {
+                call.leave(seat, &body, at, out);
                 Ok(())
             })
             .await?;
         }
         "updateEndpointState" => {
-            step(&app, key, &caller, |call, side, at, out| {
-                call.endpoint_state(side, &body, at, out)
+            step(&app, key, &caller, |call, seat, at, out| {
+                call.endpoint_state(seat, &body, at, out)
             })
             .await?;
         }
         "notificationLinks" => {
             if let Some((endpoint, links)) = own_links(&app, &caller, &body).await? {
-                step(&app, key, &caller, |call, side, _, _| {
-                    call.more_links(side, &endpoint, links.clone());
+                step(&app, key, &caller, |call, seat, _, _| {
+                    call.more_links(seat, &endpoint, links.clone());
                     Ok(())
                 })
                 .await?;
@@ -287,7 +286,7 @@ pub(super) async fn keep_alive(
         return Err(Refusal::Missing.into());
     }
     let key = Key::Id(param(&path, "call"));
-    step(&app, key, &caller, |call, side, at, _| call.keep_alive(side, at)).await?;
+    step(&app, key, &caller, |call, seat, at, _| call.keep_alive(seat, at)).await?;
     Ok(status(StatusCode::ACCEPTED))
 }
 
@@ -300,10 +299,10 @@ pub(super) async fn controller(
 ) -> Result<Response, Failure> {
     hosted(&path, CONTROLLER_HOST)?;
     let key = Key::Id(param(&path, "call"));
-    let (_, side) = party_of(&app, key, &caller).await?;
+    let (_, seat) = party_of(&app, key, &caller).await?;
     let kind = param(&path, "kind");
     // the ringing leg is the callee's alone, whatever the request carries
-    if matches!(kind, "forked" | "incoming") && side != Side::Callee {
+    if matches!(kind, "forked" | "incoming") && seat != Seat::CALLEE {
         return Err(Refusal::Forbidden.into());
     }
     let body = json(&body)?;
@@ -355,15 +354,15 @@ impl Leg<'_> {
     }
 
     /// An operation that changes nothing a party is told: checked against the call, answered 200.
-    async fn simple(&self, check: impl Fn(&Call, Side) -> Result<(), Refusal>) -> Result<Response, Failure> {
-        step(self.app, self.key, self.caller, |call, side, _, _| check(call, side)).await?;
+    async fn simple(&self, check: impl Fn(&Call, Seat) -> Result<(), Refusal>) -> Result<Response, Failure> {
+        step(self.app, self.key, self.caller, |call, seat, _, _| check(call, seat)).await?;
         Ok(status(StatusCode::OK))
     }
 
     async fn attach(&self) -> Result<Response, Failure> {
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
-        let answer = step(self.app, self.key, self.caller, |call, side, at, _| {
-            call.attach(side, &endpoint, links.clone(), at)
+        let answer = step(self.app, self.key, self.caller, |call, seat, at, _| {
+            call.attach(seat, &endpoint, links.clone(), at)
         })
         .await?;
         Ok(Json(answer).into_response())
@@ -371,16 +370,16 @@ impl Leg<'_> {
 
     async fn accept(&self) -> Result<Response, Failure> {
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
-        let answer = step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.accept(side, &endpoint, (links.clone(), self.body), at, out)
+        let answer = step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.accept(seat, &endpoint, (links.clone(), self.body), at, out)
         })
         .await?;
         Ok(Json(answer).into_response())
     }
 
     async fn reject(&self) -> Result<Response, Failure> {
-        step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.reject(side, self.body, at, out)
+        step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.reject(seat, self.body, at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))
@@ -388,8 +387,8 @@ impl Leg<'_> {
 
     async fn renegotiate(&self) -> Result<Response, Failure> {
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
-        step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.renegotiate(side, &endpoint, (links.clone(), self.body), at, out)
+        step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.renegotiate(seat, &endpoint, (links.clone(), self.body), at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))
@@ -398,8 +397,8 @@ impl Leg<'_> {
     async fn answer(&self) -> Result<Response, Failure> {
         let number = self.negotiation()?;
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
-        step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.answer(side, number, (&endpoint, links.clone(), self.body), at, out)
+        step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.answer(seat, number, (&endpoint, links.clone(), self.body), at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))
@@ -407,8 +406,8 @@ impl Leg<'_> {
 
     async fn turn_away(&self) -> Result<Response, Failure> {
         let number = self.negotiation()?;
-        step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.turn_away(side, number, self.body, at, out)
+        step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.turn_away(seat, number, self.body, at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))
@@ -416,8 +415,8 @@ impl Leg<'_> {
 
     async fn acknowledge_answer(&self) -> Result<Response, Failure> {
         let number = self.negotiation()?;
-        step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.acknowledge_answer(side, number, at, out)
+        step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.acknowledge_answer(seat, number, at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))
@@ -427,8 +426,8 @@ impl Leg<'_> {
     /// would have handed them out.
     async fn acknowledge_acceptance(&self) -> Result<Response, Failure> {
         if let Some((endpoint, links)) = own_links(self.app, self.caller, self.body).await? {
-            step(self.app, self.key, self.caller, |call, side, _, _| {
-                call.more_links(side, &endpoint, links.clone());
+            step(self.app, self.key, self.caller, |call, seat, _, _| {
+                call.more_links(seat, &endpoint, links.clone());
                 Ok(())
             })
             .await?;
@@ -438,8 +437,8 @@ impl Leg<'_> {
 
     async fn hold(&self) -> Result<Response, Failure> {
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
-        let answer = step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.hold(side, &endpoint, links.clone(), at, out)
+        let answer = step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.hold(seat, &endpoint, links.clone(), at, out)
         })
         .await?;
         Ok((StatusCode::ACCEPTED, Json(answer)).into_response())
@@ -447,8 +446,8 @@ impl Leg<'_> {
 
     async fn resume(&self) -> Result<Response, Failure> {
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
-        step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.resume(side, &endpoint, links.clone(), at, out)
+        step(self.app, self.key, self.caller, |call, seat, at, out| {
+            call.resume(seat, &endpoint, links.clone(), at, out)
         })
         .await?;
         Ok(status(StatusCode::ACCEPTED))

@@ -47,7 +47,7 @@ use crate::chatsvc::call_events::{self, Part};
 use crate::db::{DbError, users};
 use crate::trouter::Stack;
 use repo::Key;
-use state::{At, Call, Delivery, Out, Outcome, Refusal, Side};
+use state::{At, Call, Delivery, Out, Outcome, Refusal, Seat};
 use wire::Links;
 
 /// How long an ended call's row is kept, in seconds: a late request of it is answered as gone.
@@ -232,8 +232,8 @@ async fn publish(app: &App, call: &str, delivery: &Delivery) {
 
 async fn tell_chat_ended(app: &App, call: &Call, outcome: Outcome) {
     let Some(chat) = &call.chat else { return };
-    let part = |side: Side, seconds: i64| {
-        let party = call.party(side);
+    let part = |seat: Seat, seconds: i64| {
+        let party = call.party(seat);
         Part {
             id: &party.id,
             name: &party.name,
@@ -241,33 +241,34 @@ async fn tell_chat_ended(app: &App, call: &Call, outcome: Outcome) {
         }
     };
     let parts = match outcome {
-        Outcome::Talked(seconds) => vec![part(Side::Caller, seconds), part(Side::Callee, seconds)],
-        Outcome::Missed => vec![part(Side::Caller, 0)],
+        Outcome::Talked(seconds) => vec![part(Seat::CALLER, seconds), part(Seat::CALLEE, seconds)],
+        Outcome::Missed => vec![part(Seat::CALLER, 0)],
     };
-    let caller = (call.caller.id.as_str(), call.caller.name.as_str());
+    let caller = call.party(Seat::CALLER);
+    let caller = (caller.id.as_str(), caller.name.as_str());
     if let Err(error) = call_events::ended(app, chat, caller, &call.id, &parts).await {
         tracing::warn!(%error, "a call's end wasn't written to its chat");
     }
 }
 
-/// Makes `step` on the call `key` names, as `caller`'s side of it: read, stepped and stored unless another node moved
+/// Makes `step` on the call `key` names, as `caller`'s seat of it: read, stepped and stored unless another node moved
 /// the row meanwhile, then read again. Someone who is no party of the call finds none.
 async fn step<T>(
     app: &App,
     key: Key<'_>,
     caller: &Caller,
-    step: impl Fn(&mut Call, Side, At<'_>, &mut Out) -> Result<T, Refusal>,
+    step: impl Fn(&mut Call, Seat, At<'_>, &mut Out) -> Result<T, Refusal>,
 ) -> Result<T, Failure> {
     let origin = app.config.origin();
     for _ in 0..ATTEMPTS {
         let kept = repo::find(&app.db, key).await?.ok_or(Refusal::Missing)?;
-        let side = kept.call.side_of(&caller.id).ok_or(Refusal::Missing)?;
+        let seat = kept.call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
         let (mut call, mut out) = (kept.call.clone(), Out::default());
         let at = At {
             origin: &origin,
             now: now_ms(),
         };
-        let answer = step(&mut call, side, at, &mut out)?;
+        let answer = step(&mut call, seat, at, &mut out)?;
         if call == kept.call || repo::store(&app.db, &call, kept.version).await? {
             carry_out(app, &call, out).await;
             return Ok(answer);
@@ -335,8 +336,8 @@ pub(crate) async fn answered(app: &App, call: &str, account: &str, endpoint: &st
         id: account.to_owned(),
         name: String::new(),
     };
-    let kept = step(app, Key::Id(call), &caller, |call, side, _, _| {
-        call.more_links(side, endpoint, links.clone());
+    let kept = step(app, Key::Id(call), &caller, |call, seat, _, _| {
+        call.more_links(seat, endpoint, links.clone());
         Ok(())
     })
     .await;

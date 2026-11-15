@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
 
-use super::state::{Call, KEEP_ALIVE, Party, Side};
+use super::state::{Call, KEEP_ALIVE, Party, Seat};
 
 /// A party's callbacks, by the name its request gave each.
 pub(crate) type Links = BTreeMap<String, String>;
@@ -136,9 +136,9 @@ pub(crate) fn invitation(origin: &str, call: &Call, tenant: &str, region: &str) 
         named["propertyBag"] = Value::Null;
         named
     };
-    let mut from = party(&call.caller);
+    let mut from = party(call.party(Seat::CALLER));
     from["region"] = json!(region);
-    let mut to = party(&call.callee);
+    let mut to = party(call.party(Seat::CALLEE));
     to["endpointId"] = json!("00000000-0000-0000-0000-000000000000");
     let gp = json!({
         "callNotification": {
@@ -162,7 +162,7 @@ pub(crate) fn invitation(origin: &str, call: &Call, tenant: &str, region: &str) 
         "debugContent": {
             "callId": call.id,
             "callStartTime": iso(call.started_at),
-            "participantId": call.callee.participant["participantId"],
+            "participantId": call.party(Seat::CALLEE).participant["participantId"],
         },
         "groupContext": null,
     });
@@ -174,7 +174,7 @@ pub(crate) fn attach_answer(origin: &str, call: &Call) -> Value {
     let incoming = |op: &str| controller_url(origin, &call.id, ("incoming", "t", 1), Some(op));
     let controller = conversation_url(origin, &call.conversation, None);
     json!({
-        "participants": {"from": call.caller.participant, "to": call.callee.participant},
+        "participants": {"from": call.party(Seat::CALLER).participant, "to": call.party(Seat::CALLEE).participant},
         "callInvitation": {
             "callModalities": ["audio"],
             "links": {
@@ -248,7 +248,7 @@ pub(crate) fn acceptance(origin: &str, call: &Call, media: &Value) -> Value {
     );
     json!({
         "callAcceptance": {
-            "acceptedBy": call.callee.participant,
+            "acceptedBy": call.party(Seat::CALLEE).participant,
             "acceptedCallModalities": ["Audio"],
             "links": links,
             "mediaContent": media,
@@ -376,11 +376,11 @@ fn roster_entry(party: &Party, version: u64) -> Value {
     })
 }
 
-/// The roster update of `sides`' entries, at the call's current sequence.
-pub(crate) fn roster(call: &Call, sides: &[Side]) -> Value {
-    let participants: Map<String, Value> = sides
+/// The roster update of `seats`' entries, at the call's current sequence.
+pub(crate) fn roster(call: &Call, seats: &[Seat]) -> Value {
+    let participants: Map<String, Value> = seats
         .iter()
-        .map(|side| call.party(*side))
+        .map(|seat| call.party(*seat))
         .map(|party| (party.mri(), roster_entry(party, call.roster_sequence)))
         .collect();
     json!({"participants": participants, "type": "Delta", "sequenceNumber": call.roster_sequence})
