@@ -19,8 +19,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 
 pub use edit::{ProfileChanges, ProfileError, account, update_profile};
-pub use picture::{PictureError, remove_picture, set_picture};
 pub(crate) use picture::picture;
+pub use picture::{PictureError, remove_picture, set_picture};
 pub use repo::{Person, Profile, out_of_office};
 
 use crate::app::App;

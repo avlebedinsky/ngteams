@@ -209,6 +209,15 @@ mod tests {
         assert_eq!(kind(&typing), Kind::Transient);
         assert_eq!(kind(&receipt), Kind::Internal);
         assert_eq!(kind(&json!({})), Kind::Internal);
+        assert!(keep("push:8:orgid:a", message.to_string().as_bytes()));
+        assert!(!keep("push:8:orgid:a", typing.to_string().as_bytes()));
+        assert!(!keep("push:8:orgid:a", receipt.to_string().as_bytes()));
+        assert!(!keep("push:8:orgid:a", b"not json"));
+        assert!(!keep("trouter:8:orgid:a", message.to_string().as_bytes()));
+    }
+
+    #[test]
+    fn a_presence_envelope_is_delivered_once_to_the_endpoints_it_names() {
         let presence = json!({"resourceType": "Presence", "endpoints": ["Endpoint"], "resource": {"presence": []}});
         assert_eq!(kind(&presence), Kind::Presence);
         assert!(!keep("push:8:orgid:a", presence.to_string().as_bytes()));
@@ -219,14 +228,10 @@ mod tests {
         };
         let delivery = super::presence(&target("Endpoint"), &presence).unwrap();
         assert_eq!(delivery["url"], "/trouter/v4/f/Endpoint/unifiedPresenceService");
-        assert_eq!(delivery["body"], r#"{"presence":[]}"#);
+        let body: Value = serde_json::from_str(delivery["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body, json!({"presence": []}));
         assert!(super::presence(&target("Other"), &presence).is_none());
         assert!(super::presence(&target("Endpoint"), &json!({"resourceType": "Presence"})).is_none());
-        assert!(keep("push:8:orgid:a", message.to_string().as_bytes()));
-        assert!(!keep("push:8:orgid:a", typing.to_string().as_bytes()));
-        assert!(!keep("push:8:orgid:a", receipt.to_string().as_bytes()));
-        assert!(!keep("push:8:orgid:a", b"not json"));
-        assert!(!keep("trouter:8:orgid:a", message.to_string().as_bytes()));
     }
 
     #[test]

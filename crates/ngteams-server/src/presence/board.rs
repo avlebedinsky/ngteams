@@ -85,7 +85,11 @@ impl Board for Memory {
         let hashes = self.hashes();
         Ok(hashes
             .get(key)
-            .map(|hash| hash.iter().map(|(field, value)| (field.clone(), value.clone())).collect())
+            .map(|hash| {
+                hash.iter()
+                    .map(|(field, value)| (field.clone(), value.clone()))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 

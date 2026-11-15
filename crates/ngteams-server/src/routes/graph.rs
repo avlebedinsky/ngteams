@@ -58,7 +58,10 @@ fn record(origin: &str, person: &Person, select: Option<&str>) -> Value {
         ("displayName", json!(user.display_name)),
         ("userPrincipalName", json!(user.upn)),
         ("mail", json!(user.upn)),
-        ("businessPhones", json!(profile.business_phone.iter().collect::<Vec<_>>())),
+        (
+            "businessPhones",
+            json!(profile.business_phone.iter().collect::<Vec<_>>()),
+        ),
         ("givenName", json!(profile.given_name)),
         ("surname", json!(profile.surname)),
         ("jobTitle", json!(profile.job_title)),
@@ -135,11 +138,7 @@ async fn photo(
             bytes,
         )
             .into_response(),
-        Ok(None) => refusal(
-            StatusCode::NOT_FOUND,
-            "ImageNotFound",
-            "The photo wasn't found.",
-        ),
+        Ok(None) => refusal(StatusCode::NOT_FOUND, "ImageNotFound", "The photo wasn't found."),
         Err(error) => unavailable(&error).into_response(),
     }
 }

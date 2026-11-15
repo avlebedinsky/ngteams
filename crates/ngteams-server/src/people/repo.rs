@@ -1,7 +1,7 @@
 //! The directory beside the accounts: one optional row of profile fields per account, and the reads the person card
 //! is made of.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -206,54 +206,57 @@ pub async fn directs(db: &Db, manager: &str, limit: i64) -> Result<Vec<User>, Db
         .await?))
 }
 
-/// The people in the threads both `viewer` and `person` are in now, those in the most of them first, at most
-/// `limit`: whom `viewer` already sees `person` work with.
-///
-/// # Errors
-/// A database failure.
-pub async fn works_with(db: &Db, viewer: &str, person: &str, limit: usize) -> Result<Vec<User>, DbError> {
-    let viewers: Vec<String> = with_conn!(db, |conn| chat_members::table
-        .filter(chat_members::user_id.eq(viewer))
+/// The threads `user` is in now.
+async fn seats(db: &Db, user: &str) -> Result<Vec<String>, DbError> {
+    with_conn!(db, |conn| Ok(chat_members::table
+        .filter(chat_members::user_id.eq(user))
         .filter(chat_members::left_at.is_null())
         .select(chat_members::chat_id)
         .load(conn)
-        .await?);
-    let both: Vec<String> = with_conn!(db, |conn| chat_members::table
-        .filter(chat_members::user_id.eq(person))
-        .filter(chat_members::left_at.is_null())
-        .filter(chat_members::chat_id.eq_any(&viewers))
-        .select(chat_members::chat_id)
-        .load(conn)
-        .await?);
-    let others: Vec<String> = with_conn!(db, |conn| chat_members::table
+        .await?))
+}
+
+/// The people beside `viewer` and `person` in the threads both are in now, once for each such thread.
+async fn beside(db: &Db, viewer: &str, person: &str) -> Result<Vec<String>, DbError> {
+    let viewers = seats(db, viewer).await?;
+    let both: Vec<String> = seats(db, person)
+        .await?
+        .into_iter()
+        .filter(|thread| viewers.contains(thread))
+        .collect();
+    with_conn!(db, |conn| Ok(chat_members::table
         .filter(chat_members::chat_id.eq_any(&both))
         .filter(chat_members::left_at.is_null())
         .filter(chat_members::user_id.ne(viewer))
         .filter(chat_members::user_id.ne(person))
         .select(chat_members::user_id)
         .load(conn)
-        .await?);
-    let mut shared: Vec<(String, usize)> = Vec::new();
-    for other in others {
-        match shared.iter_mut().find(|(id, _)| *id == other) {
-            Some((_, count)) => *count += 1,
-            None => shared.push((other, 1)),
-        }
+        .await?))
+}
+
+/// The people in the threads both `viewer` and `person` are in now, those in the most of them first, at most
+/// `limit`: whom `viewer` already sees `person` work with.
+///
+/// # Errors
+/// A database failure.
+pub async fn works_with(db: &Db, viewer: &str, person: &str, limit: usize) -> Result<Vec<User>, DbError> {
+    let mut shared: HashMap<String, usize> = HashMap::new();
+    for other in beside(db, viewer, person).await? {
+        *shared.entry(other).or_default() += 1;
     }
     if shared.is_empty() {
         return Ok(Vec::new());
     }
-    let ids: Vec<&str> = shared.iter().map(|(id, _)| id.as_str()).collect();
+    let ids: Vec<&str> = shared.keys().map(String::as_str).collect();
     let mut found: Vec<User> = with_conn!(db, |conn| users::table
         .filter(users::id.eq_any(&ids))
         .filter(users::disabled.eq(false))
         .select(User::as_select())
         .load(conn)
         .await?);
-    let count = |user: &User| shared.iter().find(|(id, _)| *id == user.id).map_or(0, |(_, count)| *count);
     found.sort_by(|a, b| {
-        count(b)
-            .cmp(&count(a))
+        shared[&b.id]
+            .cmp(&shared[&a.id])
             .then_with(|| a.display_name.cmp(&b.display_name))
             .then_with(|| a.id.cmp(&b.id))
     });

@@ -261,12 +261,7 @@ impl Presence {
     /// The service on Redis (`Some`: the state every node shares) or on the node's own state, sweeping lapsed
     /// endpoints until it is dropped.
     #[must_use]
-    pub fn start(
-        redis: Option<ConnectionManager>,
-        fanout: Arc<dyn Fanout>,
-        db: Db,
-        limits: PresenceConfig,
-    ) -> Self {
+    pub fn start(redis: Option<ConnectionManager>, fanout: Arc<dyn Fanout>, db: Db, limits: PresenceConfig) -> Self {
         let board: Box<dyn Board> = match redis {
             Some(redis) => Box::new(Shared(redis)),
             None => Box::new(Memory::default()),
@@ -384,10 +379,7 @@ impl Presence {
         let watching = key("watching", &me);
         let now = now_ms();
         if request.purge {
-            for mri in inner.board.zrange(&watching, i64::MIN, i64::MAX, usize::MAX).await? {
-                inner.board.zrem(&key("watchers", &mri), &me).await?;
-            }
-            inner.board.del(&watching).await?;
+            inner.unwatch_all(&watching, &me).await?;
         }
         for mri in request.remove {
             inner.board.zrem(&key("watchers", mri), &me).await?;
@@ -395,8 +387,11 @@ impl Presence {
         }
         inner.board.zprune(&watching, now).await?;
         let people = inner.people(request.add).await?;
-        let until = now.saturating_add(millis(inner.limits.subscription_ttl));
-        let mut held = inner.board.zrange(&watching, now + 1, i64::MAX, usize::MAX).await?.len();
+        let mut held = inner
+            .board
+            .zrange(&watching, now + 1, i64::MAX, usize::MAX)
+            .await?
+            .len();
         let mut taken = Vec::with_capacity(request.add.len());
         let mut snapshot = Vec::new();
         for mri in request.add {
@@ -404,14 +399,10 @@ impl Presence {
                 taken.push(Taken::NotFound);
                 continue;
             };
-            let known = inner.board.zscore(&watching, mri).await?.is_some();
-            if !known && held >= inner.limits.max_subscriptions {
+            if !inner.watch(&watching, &me, mri, &mut held, now).await? {
                 taken.push(Taken::TooMany);
                 continue;
             }
-            held += usize::from(!known);
-            inner.board.zadd(&watching, mri, until).await?;
-            inner.board.zadd(&key("watchers", mri), &me, until).await?;
             let shown = inner.state(oid).await?.shown(now);
             snapshot.push(pushed_item(mri, &shown, oid == request.oid, out_of_office, now));
             taken.push(Taken::Subscribed);
@@ -436,6 +427,28 @@ fn pushed_item(mri: &str, shown: &Shown, own: bool, out_of_office: bool, now: i6
 }
 
 impl Inner {
+    /// Ends everything the watcher `me` watches.
+    async fn unwatch_all(&self, watching: &str, me: &str) -> Result<(), BoardError> {
+        for mri in self.board.zrange(watching, i64::MIN, i64::MAX, usize::MAX).await? {
+            self.board.zrem(&key("watchers", &mri), me).await?;
+        }
+        self.board.del(watching).await
+    }
+
+    /// Makes the watcher `me` watch `mri` for the subscription lifetime; `false`, and nothing kept, when it watches
+    /// as many as it may (`held`) and `mri` isn't among them.
+    async fn watch(&self, watching: &str, me: &str, mri: &str, held: &mut usize, now: i64) -> Result<bool, BoardError> {
+        let known = self.board.zscore(watching, mri).await?.is_some();
+        if !known && *held >= self.limits.max_subscriptions {
+            return Ok(false);
+        }
+        *held += usize::from(!known);
+        let until = now.saturating_add(millis(self.limits.subscription_ttl));
+        self.board.zadd(watching, mri, until).await?;
+        self.board.zadd(&key("watchers", mri), me, until).await?;
+        Ok(true)
+    }
+
     async fn state(&self, oid: &str) -> Result<State, BoardError> {
         Ok(State::read(self.board.hgetall(&key("account", oid)).await?))
     }
@@ -580,7 +593,10 @@ mod tests {
         };
         let state = State::read(fields(None));
         let shown = state.shown(10);
-        assert_eq!((shown.availability.as_str(), shown.activity.as_str()), ("Busy", "InACall"));
+        assert_eq!(
+            (shown.availability.as_str(), shown.activity.as_str()),
+            ("Busy", "InACall")
+        );
         assert_eq!(shown.last_active, Some(7));
         assert_eq!(state.shown(60).availability, "Away");
         assert_eq!(state.shown(100).availability, "Offline");

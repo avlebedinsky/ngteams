@@ -86,11 +86,7 @@ async fn trio(configure: impl FnOnce(&mut ngteams_server::config::Config)) -> Tr
 #[tokio::test(flavor = "multi_thread")]
 async fn a_presence_read_answers_each_account_asked_in_teams_shape() {
     let Trio {
-        server,
-        a,
-        b,
-        a_token,
-        ..
+        server, a, b, a_token, ..
     } = trio(|_| {}).await;
     let stranger = format!("8:orgid:{}", uuid::Uuid::new_v4());
     let asked = json!([{"mri": a, "source": "ups"}, {"mri": b}, {"mri": stranger}, {"mri": "28:bot"}]);
@@ -144,14 +140,24 @@ async fn an_account_shows_as_its_endpoints_and_its_manual_status_say() {
     } = trio(|_| {}).await;
     // a manual status alone shows nothing
     assert_eq!(
-        put(&server, &b_token, "me/forceavailability/", EPID, Some(json!({"availability": "Busy"}))).await,
+        put(
+            &server,
+            &b_token,
+            "me/forceavailability/",
+            EPID,
+            Some(json!({"availability": "Busy"}))
+        )
+        .await,
         200
     );
     assert_eq!(shown(&server, &a_token, &b).await["availability"], "Offline");
     assert_eq!(put(&server, &b_token, "me/forceavailability/", EPID, None).await, 200);
 
     let available = endpoint(EPID, "Available", "Available");
-    assert_eq!(put(&server, &b_token, "me/endpoints/", EPID, Some(available)).await, 201);
+    assert_eq!(
+        put(&server, &b_token, "me/endpoints/", EPID, Some(available)).await,
+        201
+    );
     let seen = shown(&server, &a_token, &b).await;
     assert_eq!(seen["availability"], "Available");
     assert_eq!(seen["activity"], "Available");
@@ -164,13 +170,26 @@ async fn an_account_shows_as_its_endpoints_and_its_manual_status_say() {
 
     // of two endpoints the busier one shows, with its activity
     let in_a_call = endpoint(OTHER_EPID, "Busy", "InACall");
-    assert_eq!(put(&server, &b_token, "me/endpoints/", OTHER_EPID, Some(in_a_call)).await, 201);
+    assert_eq!(
+        put(&server, &b_token, "me/endpoints/", OTHER_EPID, Some(in_a_call)).await,
+        201
+    );
     let seen = shown(&server, &a_token, &b).await;
-    assert_eq!((&seen["availability"], &seen["activity"]), (&json!("Busy"), &json!("InACall")));
+    assert_eq!(
+        (&seen["availability"], &seen["activity"]),
+        (&json!("Busy"), &json!("InACall"))
+    );
     // a manual status is over them all, until it is reset
     for word in ["DoNotDisturb", "Away", "BeRightBack", "Available", "Offline"] {
         assert_eq!(
-            put(&server, &b_token, "me/forceavailability/", EPID, Some(json!({"availability": word}))).await,
+            put(
+                &server,
+                &b_token,
+                "me/forceavailability/",
+                EPID,
+                Some(json!({"availability": word}))
+            )
+            .await,
             200
         );
         let seen = shown(&server, &a_token, &b).await;
@@ -179,16 +198,42 @@ async fn an_account_shows_as_its_endpoints_and_its_manual_status_say() {
     assert_eq!(put(&server, &b_token, "me/forceavailability/", EPID, None).await, 200);
     assert_eq!(shown(&server, &a_token, &b).await["availability"], "Busy");
 
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_or_a_status_in_another_form_is_refused() {
+    let Trio { server, b_token, .. } = trio(|_| {}).await;
     for (path, epid, body) in [
-        ("me/endpoints/", EPID, json!({"id": EPID, "availability": "Dancing", "activity": "Available"})),
-        ("me/endpoints/", EPID, json!({"id": EPID, "availability": "Available", "activity": "a b"})),
-        ("me/endpoints/", EPID, json!({"id": OTHER_EPID, "availability": "Available", "activity": "Available"})),
-        ("me/endpoints/", "not-a-guid", json!({"id": "not-a-guid", "availability": "Available", "activity": "x"})),
+        (
+            "me/endpoints/",
+            EPID,
+            json!({"id": EPID, "availability": "Dancing", "activity": "Available"}),
+        ),
+        (
+            "me/endpoints/",
+            EPID,
+            json!({"id": EPID, "availability": "Available", "activity": "a b"}),
+        ),
+        (
+            "me/endpoints/",
+            EPID,
+            json!({"id": OTHER_EPID, "availability": "Available", "activity": "Available"}),
+        ),
+        (
+            "me/endpoints/",
+            "not-a-guid",
+            json!({"id": "not-a-guid", "availability": "Available", "activity": "x"}),
+        ),
         ("me/endpoints/", EPID, json!([])),
         ("me/forceavailability/", EPID, json!({"availability": "Dancing"})),
         ("me/forceavailability/", EPID, json!({"status": "Busy"})),
     ] {
-        assert_eq!(put(&server, &b_token, path, epid, Some(body.clone())).await, 400, "{path} {body}");
+        assert_eq!(
+            put(&server, &b_token, path, epid, Some(body.clone())).await,
+            400,
+            "{path} {body}"
+        );
     }
     let ic3 = token(&server, "wb@own.test", IC3).await;
     assert_eq!(put(&server, &ic3, "me/forceavailability/", EPID, None).await, 401);
@@ -204,10 +249,16 @@ async fn an_account_holds_only_so_many_endpoints() {
         assert_eq!(put(&server, &b_token, "me/endpoints/", &epid(n), Some(body)).await, 201);
     }
     let third = endpoint(&epid(2), "Available", "Available");
-    assert_eq!(put(&server, &b_token, "me/endpoints/", &epid(2), Some(third)).await, 429);
+    assert_eq!(
+        put(&server, &b_token, "me/endpoints/", &epid(2), Some(third)).await,
+        429
+    );
     // one it holds already is reported again
     let again = endpoint(&epid(1), "Away", "Away");
-    assert_eq!(put(&server, &b_token, "me/endpoints/", &epid(1), Some(again)).await, 201);
+    assert_eq!(
+        put(&server, &b_token, "me/endpoints/", &epid(1), Some(again)).await,
+        201
+    );
     server.stop().await;
 }
 
@@ -232,9 +283,8 @@ struct Subscribe<'a> {
 
 impl Subscribe<'_> {
     fn body(&self) -> Value {
-        let sourced = |names: &[&str]| -> Vec<Value> {
-            names.iter().map(|mri| json!({"mri": mri, "source": "ups"})).collect()
-        };
+        let sourced =
+            |names: &[&str]| -> Vec<Value> { names.iter().map(|mri| json!({"mri": mri, "source": "ups"})).collect() };
         json!({"trouterUri": self.uri, "shouldPurgePreviousSubscriptions": self.purge,
             "subscriptionsToAdd": sourced(&self.add), "subscriptionsToRemove": sourced(&self.remove)})
     }
@@ -258,7 +308,9 @@ impl Subscribe<'_> {
 async fn pushed(socket: &mut Raw) -> Value {
     loop {
         let frame = socket.next().await.expect("the socket closed");
-        let Some(delivery) = frame.strip_prefix("3:::") else { continue };
+        let Some(delivery) = frame.strip_prefix("3:::") else {
+            continue;
+        };
         let delivery: Value = serde_json::from_str(delivery).unwrap();
         if delivery["url"].as_str().unwrap().ends_with("/unifiedPresenceService") {
             assert_eq!(delivery["method"], "POST");
@@ -313,14 +365,20 @@ async fn a_subscribed_endpoint_gets_a_snapshot_and_then_each_change_until_it_uns
     assert_eq!(snapshot["presence"][0]["presence"]["sourceNetwork"], "SameEnterprise");
 
     let available = endpoint(OTHER_EPID, "Available", "Available");
-    assert_eq!(put(&server, &b_token, "me/endpoints/", OTHER_EPID, Some(available.clone())).await, 201);
+    assert_eq!(
+        put(&server, &b_token, "me/endpoints/", OTHER_EPID, Some(available.clone())).await,
+        201
+    );
     let change = pushed(&mut ada).await;
     assert_eq!(change.get("isSnapshot"), None);
     assert_eq!(change["presence"][0]["mri"], b_mri);
     assert_eq!(change["presence"][0]["presence"]["availability"], "Available");
     assert!(change["presence"][0]["etag"].is_string());
     // the same report again changes nothing, so nothing is pushed
-    assert_eq!(put(&server, &b_token, "me/endpoints/", OTHER_EPID, Some(available)).await, 201);
+    assert_eq!(
+        put(&server, &b_token, "me/endpoints/", OTHER_EPID, Some(available)).await,
+        201
+    );
     assert!(quiet(&mut ada).await);
 
     // more people are added without the purge; the snapshot names only them
@@ -330,8 +388,47 @@ async fn a_subscribed_endpoint_gets_a_snapshot_and_then_each_change_until_it_uns
     assert_eq!(snapshot["presence"].as_array().unwrap().len(), 1);
     assert_eq!(snapshot["presence"][0]["presence"]["sourceNetwork"], "Self");
     let busy = Some(json!({"availability": "Busy"}));
-    assert_eq!(put(&server, &b_token, "me/forceavailability/", OTHER_EPID, busy).await, 200);
-    assert_eq!(pushed(&mut ada).await["presence"][0]["presence"]["availability"], "Busy");
+    assert_eq!(
+        put(&server, &b_token, "me/forceavailability/", OTHER_EPID, busy).await,
+        200
+    );
+    assert_eq!(
+        pushed(&mut ada).await["presence"][0]["presence"]["availability"],
+        "Busy"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_and_the_purge_end_what_an_endpoint_watches() {
+    let Trio {
+        server,
+        a,
+        b,
+        a_token,
+        b_token,
+    } = trio(|_| {}).await;
+    let (mut ada, surl) = socket(&server, "wa@own.test", EPID).await;
+    let subscribe = |purge: bool, add: Vec<&'static str>, remove: Vec<&'static str>| Subscribe {
+        epid: EPID,
+        uri: format!("{surl}unifiedPresenceService"),
+        purge,
+        add,
+        remove,
+    };
+    let (a_mri, b_mri): (&'static str, &'static str) = (a.leak(), b.leak());
+    let available = endpoint(OTHER_EPID, "Available", "Available");
+    assert_eq!(
+        put(&server, &b_token, "me/endpoints/", OTHER_EPID, Some(available)).await,
+        201
+    );
+    let (status, _) = subscribe(true, vec![b_mri], vec![]).send(&server, &a_token).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        pushed(&mut ada).await["presence"][0]["presence"]["availability"],
+        "Available"
+    );
 
     // a removal ends one person's changes
     let (status, taken) = subscribe(false, vec![], vec![b_mri]).send(&server, &a_token).await;
@@ -340,19 +437,31 @@ async fn a_subscribed_endpoint_gets_a_snapshot_and_then_each_change_until_it_uns
         taken,
         json!({"addStatuses": [], "removeStatuses": [{"mri": b_mri, "source": "ups", "status": 20200}]})
     );
-    assert_eq!(put(&server, &b_token, "me/forceavailability/", OTHER_EPID, None).await, 200);
+    let busy = Some(json!({"availability": "Busy"}));
+    assert_eq!(
+        put(&server, &b_token, "me/forceavailability/", OTHER_EPID, busy).await,
+        200
+    );
     assert!(quiet(&mut ada).await);
     assert_eq!(server.app.presence.watchers(b_mri).await.unwrap(), 0);
 
     // the purge drops what the endpoint watched before
     let (status, _) = subscribe(false, vec![b_mri], vec![]).send(&server, &a_token).await;
     assert_eq!(status, 200);
-    pushed(&mut ada).await;
+    assert_eq!(
+        pushed(&mut ada).await["presence"][0]["presence"]["availability"],
+        "Busy"
+    );
     let (status, _) = subscribe(true, vec![a_mri], vec![]).send(&server, &a_token).await;
     assert_eq!(status, 200);
     pushed(&mut ada).await;
     assert_eq!(server.app.presence.watchers(b_mri).await.unwrap(), 0);
     assert_eq!(server.app.presence.watchers(a_mri).await.unwrap(), 1);
+    assert_eq!(
+        put(&server, &b_token, "me/forceavailability/", OTHER_EPID, None).await,
+        200
+    );
+    assert!(quiet(&mut ada).await);
     server.stop().await;
 }
 
@@ -384,13 +493,19 @@ async fn a_subscription_is_taken_only_in_teams_form_for_the_accounts_own_endpoin
         let response = reqwest::Client::new().execute(request).await.unwrap();
         assert_eq!(response.status(), 400);
         let text = response.text().await.unwrap();
-        assert!(text.contains(&format!("Missing mandatory header '{missing}'")), "{text}");
+        assert!(
+            text.contains(&format!("Missing mandatory header '{missing}'")),
+            "{text}"
+        );
     }
     let mut other_header = good(vec![b_mri]).request(&server, &a_token).build().unwrap();
     other_header
         .headers_mut()
         .insert("x-ms-endpoint-id", OTHER_EPID.parse().unwrap());
-    assert_eq!(reqwest::Client::new().execute(other_header).await.unwrap().status(), 400);
+    assert_eq!(
+        reqwest::Client::new().execute(other_header).await.unwrap().status(),
+        400
+    );
     // another account's endpoint, another path, another host
     let foreign = |uri: &str| Subscribe {
         epid: EPID,
@@ -400,7 +515,10 @@ async fn a_subscription_is_taken_only_in_teams_form_for_the_accounts_own_endpoin
         remove: vec![],
     };
     assert_eq!(foreign(&uri).send(&server, &b_token).await.0, 400);
-    assert_eq!(foreign(&format!("{surl}messaging")).send(&server, &a_token).await.0, 400);
+    assert_eq!(
+        foreign(&format!("{surl}messaging")).send(&server, &a_token).await.0,
+        400
+    );
     let elsewhere = uri.replace("own.example.test", "elsewhere.example.test");
     assert_eq!(foreign(&elsewhere).send(&server, &a_token).await.0, 400);
     let malformed = reqwest::Client::new()

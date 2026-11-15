@@ -290,7 +290,8 @@ async fn serve(config: Config, shutdown: impl Future<Output = ()> + Send + 'stat
 async fn profile(config: &Config, command: ProfileCommand, output: &mut dyn Write) -> Result<(), CliError> {
     use crate::people;
     let db = crate::db::Db::connect(&config.database_url, 1).await?;
-    let storage = || crate::storage::ObjectStorage::open_with(&config.storage_url, &config.storage_options, &config.storage);
+    let storage =
+        || crate::storage::ObjectStorage::open_with(&config.storage_url, &config.storage_options, &config.storage);
     match command {
         ProfileCommand::Show { upn } => show_profile(&db, &upn, output).await,
         ProfileCommand::Set { upn, fields } => {

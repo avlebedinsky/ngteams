@@ -48,44 +48,59 @@ pub(super) fn router() -> Router<Arc<App>> {
 }
 
 /// A refusal, in Loki's error shape.
-fn refusal(status: StatusCode, code: &str) -> Response {
-    (status, Json(json!({"error": {"code": code}}))).into_response()
+#[derive(Debug)]
+enum Refusal {
+    /// Loki answers no request that doesn't name its client.
+    ClientTypeMissing,
+    PersonNotFound,
+    Unavailable,
 }
 
-/// Loki answers no request that doesn't name its client.
-fn client_named(headers: &HeaderMap) -> Result<(), Response> {
-    if headers.contains_key("x-clienttype") {
-        Ok(())
-    } else {
-        Err(refusal(StatusCode::BAD_REQUEST, "ClientTypeMissing"))
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        let (status, code) = match self {
+            Self::ClientTypeMissing => (StatusCode::BAD_REQUEST, "ClientTypeMissing"),
+            Self::PersonNotFound => (StatusCode::NOT_FOUND, "PersonNotFound"),
+            Self::Unavailable => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        (status, Json(json!({"error": {"code": code}}))).into_response()
     }
 }
 
-fn failed(error: &DbError) -> Response {
-    unavailable(error).into_response()
+impl From<DbError> for Refusal {
+    fn from(error: DbError) -> Self {
+        unavailable(&error);
+        Self::Unavailable
+    }
+}
+
+fn client_named(headers: &HeaderMap) -> Result<(), Refusal> {
+    if headers.contains_key("x-clienttype") {
+        Ok(())
+    } else {
+        Err(Refusal::ClientTypeMissing)
+    }
 }
 
 /// The person a read's query names (`aadObjectId`, and the same account in `teamsMri` when that is there), when
 /// they can sign in.
-async fn persona(app: &App, headers: &HeaderMap, query: &HashMap<String, String>) -> Result<Person, Response> {
+async fn persona(app: &App, headers: &HeaderMap, query: &HashMap<String, String>) -> Result<Person, Refusal> {
     client_named(headers)?;
-    let missing = || refusal(StatusCode::NOT_FOUND, "PersonNotFound");
-    let id = query.get("aadObjectId").ok_or_else(missing)?;
+    let id = query.get("aadObjectId").ok_or(Refusal::PersonNotFound)?;
     if query.get("teamsMri").is_some_and(|mri| *mri != format!("8:orgid:{id}")) {
-        return Err(missing());
+        return Err(Refusal::PersonNotFound);
     }
     repo::person(&app.db, id)
-        .await
-        .map_err(|error| failed(&error))?
+        .await?
         .filter(|person| !person.user.disabled)
-        .ok_or_else(missing)
+        .ok_or(Refusal::PersonNotFound)
 }
 
 async fn configuration(
     State(app): State<Arc<App>>,
     caller: Caller<Loki>,
     headers: HeaderMap,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<Value>, Refusal> {
     client_named(&headers)?;
     Ok(Json(json!({
         "LokiUrl": format!("{}/loki/", app.config.origin()),
@@ -101,7 +116,7 @@ async fn person(
     _caller: Caller<Loki>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<Value>, Refusal> {
     let Person { user, profile } = persona(&app, &headers, &query).await?;
     let source = "Organisation";
     Ok(Json(json!({"person": {
@@ -153,14 +168,10 @@ async fn organization(
     _caller: Caller<Loki>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<Value>, Refusal> {
     let Person { user, profile } = persona(&app, &headers, &query).await?;
-    let managers = managers(&app, &user.id, profile.manager_id)
-        .await
-        .map_err(|error| failed(&error))?;
-    let directs = repo::directs(&app.db, &user.id, MAX_DIRECTS)
-        .await
-        .map_err(|error| failed(&error))?;
+    let managers = managers(&app, &user.id, profile.manager_id).await?;
+    let directs = repo::directs(&app.db, &user.id, MAX_DIRECTS).await?;
     Ok(Json(json!({
         "managers": managers,
         "directs": directs.iter().map(entry).collect::<Vec<_>>(),
@@ -173,15 +184,13 @@ async fn working_with(
     caller: Caller<Loki>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<Value>, Refusal> {
     let person = persona(&app, &headers, &query).await?;
     let limit = query
         .get("limit")
         .and_then(|limit| limit.parse::<usize>().ok())
         .map_or(WORKING_WITH, |limit| limit.clamp(1, MAX_WORKING_WITH));
-    let with = repo::works_with(&app.db, &caller.id, &person.user.id, limit)
-        .await
-        .map_err(|error| failed(&error))?;
+    let with = repo::works_with(&app.db, &caller.id, &person.user.id, limit).await?;
     Ok(Json(json!({"value": with.iter().map(entry).collect::<Vec<_>>()})))
 }
 
@@ -192,7 +201,7 @@ async fn schedule(
     _caller: Caller<Loki>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<Value>, Refusal> {
     let person = persona(&app, &headers, &query).await?;
     let status = if person.profile.out_of_office { "Oof" } else { "Unknown" };
     Ok(Json(json!({
@@ -205,9 +214,13 @@ async fn out_of_office(
     _caller: Caller<Loki>,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, Response> {
+) -> Result<Json<Value>, Refusal> {
     let person = persona(&app, &headers, &query).await?;
-    let state = if person.profile.out_of_office { "AlwaysEnabled" } else { "Disabled" };
+    let state = if person.profile.out_of_office {
+        "AlwaysEnabled"
+    } else {
+        "Disabled"
+    };
     Ok(Json(json!({
         "outOfOfficeState": state, "externalAudience": "Unknown", "emailAddress": person.user.upn,
     })))
