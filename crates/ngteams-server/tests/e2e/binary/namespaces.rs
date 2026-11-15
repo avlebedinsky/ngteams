@@ -224,6 +224,21 @@ async fn hold_off(site: &Site, upn: &str) -> Instant {
     started
 }
 
+/// `y`'s account `upn` signs in at both `y`'s nodes while `x`'s account of that name, held off since `started`,
+/// stays held.
+async fn held_on_x_only(x: &Site, y: &Site, upn: &str, started: Instant) {
+    for node in [0, 1] {
+        assert_eq!(y.password(node, upn, PASSWORD).await, 200, "y: {upn} at node {node}");
+    }
+    let status = x.password(0, upn, PASSWORD).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(x.window),
+        "the checks took {elapsed:?}, past the window; the host is too slow for this check"
+    );
+    assert_eq!(status, 429, "x: {upn}, {elapsed:?} after its first wrong password");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wrong_passwords_on_one_deployment_hold_off_the_account_on_both_its_nodes_and_never_on_another() {
     let Some(redis) = shared_redis("namespaces: sign-in holds") else {
@@ -255,27 +270,26 @@ async fn wrong_passwords_on_one_deployment_hold_off_the_account_on_both_its_node
             assert_eq!(x.password(node, upn, PASSWORD).await, 200, "x: {upn} at node {node}");
         }
     }
-    // Y's accounts of the same names, at both its nodes, sign in, the client's way too
-    for upn in held.iter().chain(&["Mixed.Case@own.test"]) {
-        for node in [0, 1] {
-            assert_eq!(y.password(node, upn, PASSWORD).await, 200, "y: {upn} at node {node}");
-        }
+    // Y's accounts of the same names sign in at both Y's nodes, and that clears nothing of X's holds (each
+    // account's checks run beside the others', so they end within its window on a loaded host)
+    join_all(
+        held.iter()
+            .zip(&started)
+            .map(|(upn, started)| held_on_x_only(&x, &y, upn, *started)),
+    )
+    .await;
+    for node in [0, 1] {
+        assert_eq!(
+            y.password(node, "Mixed.Case@own.test", PASSWORD).await,
+            200,
+            "y at node {node}"
+        );
     }
     let session = y.nodes[1].sign_in("a@own.test", PASSWORD).await;
     session.skypetoken().await.unwrap();
     // and Y's own storm holds off Y's b and not X's b
     hold_off(&y, "b@own.test").await;
     assert_eq!(x.password(1, "b@own.test", PASSWORD).await, 200);
-    // X's holds still stand: no sign-in on Y cleared them
-    for (upn, started) in held.iter().zip(&started) {
-        let status = x.password(0, upn, PASSWORD).await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_secs(x.window),
-            "the checks took {elapsed:?}, past the window; the host is too slow for this check"
-        );
-        assert_eq!(status, 429, "x: {upn}, {elapsed:?} after its first wrong password");
-    }
 
     // the hold ends with the window
     let last = *started.iter().max().unwrap();
