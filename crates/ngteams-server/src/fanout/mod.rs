@@ -6,11 +6,13 @@
 //! every subscription of the node ([`Missed::Closed`]): a subscriber subscribes again and reads what it missed.
 //! In Redis a topic is a channel of the deployment's [`keyspace`], so deployments on one Redis hear only their own.
 
+pub mod commands;
 pub mod journal;
 pub mod keyspace;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -19,6 +21,7 @@ use redis::{AsyncCommands as _, PushInfo, PushKind, Value};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc;
 
+use self::commands::Commands;
 use self::keyspace::{Keyspace, Shared};
 
 /// Payloads a subscriber may fall behind by before it misses some.
@@ -189,8 +192,10 @@ impl Drop for Release {
 
 #[derive(Debug)]
 struct RedisInner {
-    commands: ConnectionManager,
+    commands: Commands,
     subscriber: ConnectionManager,
+    /// The longest a subscription change waits on Redis.
+    timeout: Duration,
     keys: Keyspace,
     /// The node's subscribers by Redis channel.
     topics: Topics,
@@ -203,7 +208,7 @@ impl RedisInner {
         let _change = self.changes.lock().await;
         if self.topics.release(channel) {
             let mut subscriber = self.subscriber.clone();
-            if let Err(error) = subscriber.unsubscribe(channel).await {
+            if let Err(error) = commands::within(self.timeout, subscriber.unsubscribe(channel)).await {
                 tracing::warn!(%error, "can't drop a Redis subscription");
             }
         }
@@ -219,19 +224,25 @@ pub struct Redis {
 
 impl Redis {
     /// Connects to `url` (its RESP3 form is used for the subscriber) and starts delivering the topics of `keys`.
+    /// A command, a connection attempt or a subscription change waits at most `timeout` for Redis.
     ///
     /// # Errors
     /// Redis can't be reached.
-    pub async fn connect(url: &str, keys: Keyspace) -> Result<Self, FanoutError> {
+    pub async fn connect(url: &str, keys: Keyspace, timeout: Duration) -> Result<Self, FanoutError> {
         let client = redis::Client::open(resp3(url))?;
-        let commands = ConnectionManager::new(client.clone()).await?;
+        let bounded = || {
+            redis::aio::ConnectionManagerConfig::new()
+                .set_connection_timeout(Some(timeout))
+                .set_response_timeout(Some(timeout))
+        };
+        let commands = ConnectionManager::new_with_config(client.clone(), bounded()).await?;
         let (pushes, mut received) = mpsc::unbounded_channel::<PushInfo>();
         // no automatic resubscription: a break closes the subscriptions, and their topics are asked for anew
-        let config = redis::aio::ConnectionManagerConfig::new().set_push_sender(pushes);
-        let subscriber = ConnectionManager::new_with_config(client, config).await?;
+        let subscriber = ConnectionManager::new_with_config(client, bounded().set_push_sender(pushes)).await?;
         let inner = Arc::new(RedisInner {
-            commands,
+            commands: Commands::new(commands, timeout),
             subscriber,
+            timeout,
             keys,
             topics: Topics::default(),
             changes: tokio::sync::Mutex::new(()),
@@ -268,7 +279,7 @@ impl Fanout for Redis {
         let (receiver, first) = self.inner.topics.receiver(&channel);
         if first {
             let mut subscriber = self.inner.subscriber.clone();
-            if let Err(error) = subscriber.subscribe(&channel).await {
+            if let Err(error) = commands::within(self.inner.timeout, subscriber.subscribe(&channel)).await {
                 self.inner.topics.release(&channel);
                 return Err(error.into());
             }
@@ -373,7 +384,7 @@ mod tests {
             return;
         };
         let keys = Keyspace::new(&uuid::Uuid::new_v4().to_string());
-        let node = Redis::connect(&url, keys).await.unwrap();
+        let node = Redis::connect(&url, keys, Duration::from_secs(1)).await.unwrap();
         let topic = format!("push:{}", uuid::Uuid::new_v4());
         let channel = node.inner.keys.key(&topic);
         let subscription = node.subscribe(&topic).await.unwrap();

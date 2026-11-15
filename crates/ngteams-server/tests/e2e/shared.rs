@@ -16,6 +16,8 @@ use ngteams_server::storage::{ObjectStorage, Storage, StorageError};
 use crate::support::{Backend, TestServer, redis_url};
 
 const WAIT: Duration = Duration::from_secs(5);
+/// How long a node waits on Redis.
+const TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn next(subscription: &mut ngteams_server::fanout::Subscription) -> Bytes {
     tokio::time::timeout(WAIT, subscription.recv()).await.unwrap().unwrap()
@@ -66,8 +68,8 @@ async fn a_subscriber_that_falls_behind_learns_how_much_it_missed() {
 async fn redis_carries_a_topic_between_two_nodes() {
     let Some(url) = redis_url() else { return };
     let keys = Keyspace::new(&uuid::Uuid::new_v4().to_string());
-    let node_a = Redis::connect(&url, keys.clone()).await.unwrap();
-    let node_b = Redis::connect(&url, keys).await.unwrap();
+    let node_a = Redis::connect(&url, keys.clone(), TIMEOUT).await.unwrap();
+    let node_b = Redis::connect(&url, keys, TIMEOUT).await.unwrap();
     node_a.ready().await.unwrap();
     let topic = format!("push:{}", uuid::Uuid::new_v4());
     let mut on_b = node_b.subscribe(&topic).await.unwrap();
@@ -154,8 +156,12 @@ async fn a_success_clears_the_failures_counted_in_redis() {
 #[tokio::test]
 async fn an_unreachable_redis_stops_the_node_from_starting() {
     let keys = Keyspace::new("down");
-    assert!(Redis::connect("redis://127.0.0.1:1", keys.clone()).await.is_err());
-    assert!(Redis::connect("not a url", keys).await.is_err());
+    assert!(
+        Redis::connect("redis://127.0.0.1:1", keys.clone(), TIMEOUT)
+            .await
+            .is_err()
+    );
+    assert!(Redis::connect("not a url", keys, TIMEOUT).await.is_err());
 }
 
 #[tokio::test]

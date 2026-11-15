@@ -48,6 +48,10 @@ pub struct Config {
     /// it, the tenant id in the database, which the nodes of one deployment share and no other deployment has. Set
     /// it where two deployments on one Redis have the same tenant id (a database restored from another's).
     pub redis_namespace: Option<String>,
+    /// The longest a Redis command or connection attempt may take, in milliseconds. Every use of Redis goes on
+    /// without it, so a request waits about this long for a Redis that is down or doesn't answer, then the commands
+    /// right after fail at once for as long.
+    pub redis_timeout_ms: u64,
     /// Where files go: `file:///<dir>`, `memory:///` or `s3://<bucket>`, with `storage_options` (S3's region,
     /// endpoint, keys) as `object_store` names them.
     pub storage_url: String,
@@ -286,6 +290,7 @@ impl Default for Config {
             database_pool: 16,
             redis_url: None,
             redis_namespace: None,
+            redis_timeout_ms: 1000,
             storage_url: "memory:///".to_owned(),
             storage_options: BTreeMap::new(),
             storage: StorageConfig::default(),
@@ -339,6 +344,8 @@ pub enum ConfigError {
     Database,
     #[error("redis_namespace must be 1 to 64 letters, digits, '.', '_' or '-'")]
     Namespace,
+    #[error("redis_timeout_ms must be above zero")]
+    RedisTimeout,
     #[error(
         "tokens' lifetimes, the login and setup windows and the push socket's authentication time must be above zero"
     )]
@@ -411,6 +418,9 @@ impl Config {
         if namespace.is_some_and(|namespace| !crate::fanout::keyspace::Keyspace::is_namespace(namespace)) {
             return Err(ConfigError::Namespace);
         }
+        if self.redis_timeout_ms == 0 {
+            return Err(ConfigError::RedisTimeout);
+        }
         if self.tokens.access_lifetime == 0
             || self.tokens.refresh_lifetime == 0
             || self.tokens.key_rotation == 0
@@ -442,6 +452,12 @@ impl Config {
             return Err(ConfigError::Relay);
         }
         Ok(())
+    }
+
+    /// [`Self::redis_timeout_ms`].
+    #[must_use]
+    pub fn redis_timeout(&self) -> Duration {
+        Duration::from_millis(self.redis_timeout_ms)
     }
 
     /// The public origin without its trailing slash, the form bases are built on.

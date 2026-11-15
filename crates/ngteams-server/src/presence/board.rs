@@ -228,7 +228,7 @@ pub(super) struct Shared(pub keyspace::Shared);
 
 impl Shared {
     /// The connection and the Redis key of the name `key`.
-    fn on(&self, key: &str) -> (redis::aio::ConnectionManager, String) {
+    fn on(&self, key: &str) -> (crate::fanout::commands::Commands, String) {
         (self.0.commands(), self.0.key(key))
     }
 }
@@ -323,7 +323,11 @@ mod tests {
         if let Ok(url) = std::env::var("NGTEAMS_SERVER_REDIS_URL") {
             let redis = redis::Client::open(url).unwrap();
             let keys = keyspace::Keyspace::new(&uuid::Uuid::new_v4().simple().to_string());
-            let shared = keyspace::Shared::new(redis.get_connection_manager().await.unwrap(), keys);
+            let commands = crate::fanout::commands::Commands::new(
+                redis.get_connection_manager().await.unwrap(),
+                std::time::Duration::from_secs(1),
+            );
+            let shared = keyspace::Shared::new(commands, keys);
             boards.push(Box::new(Shared(shared)));
         }
         boards

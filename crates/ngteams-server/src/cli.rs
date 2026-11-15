@@ -418,6 +418,7 @@ async fn user(
 ) -> Result<(), CliError> {
     let db = crate::db::Db::connect(&config.database_url, 1).await?;
     let nodes = Nodes {
+        timeout: config.redis_timeout(),
         redis: config.redis_url,
         namespace: config.redis_namespace,
         db: db.clone(),
@@ -491,6 +492,7 @@ fn changed(ended: Result<(), AdminError>, done: &str, warnings: &mut dyn Write) 
 struct Nodes {
     redis: Option<String>,
     namespace: Option<String>,
+    timeout: std::time::Duration,
     db: crate::db::Db,
 }
 
@@ -505,7 +507,9 @@ impl Nodes {
                 .await
                 .map_err(|error| FanoutError::Unavailable(error.to_string()))?,
         };
-        Ok(Box::new(Redis::connect(url, Keyspace::new(&namespace)).await?))
+        Ok(Box::new(
+            Redis::connect(url, Keyspace::new(&namespace), self.timeout).await?,
+        ))
     }
 }
 
@@ -582,6 +586,7 @@ mod tests {
         let mut down = Nodes {
             redis: Some(format!("redis://127.0.0.1:{closed}")),
             namespace: None,
+            timeout: std::time::Duration::from_secs(1),
             db: crate::db::Db::connect(&database, 1).await.unwrap(),
         };
         let untold = down.publish("topic", Bytes::new()).await.unwrap_err();
@@ -615,6 +620,7 @@ mod tests {
         let alone = Nodes {
             redis: None,
             namespace: None,
+            timeout: std::time::Duration::from_secs(1),
             db: crate::db::Db::connect(&database, 1).await.unwrap(),
         };
         alone.ready().await.unwrap();

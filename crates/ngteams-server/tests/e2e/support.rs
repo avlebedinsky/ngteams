@@ -223,3 +223,71 @@ impl Drop for TestServer {
         }
     }
 }
+
+/// What a [`RedisGate`] does with the connections to Redis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Carries them.
+    Open,
+    /// Holds them open and unanswered, as a Redis whose host stops answering.
+    Hung,
+    /// Closes each, as a stopped Redis.
+    Down,
+}
+
+/// A loopback relay in front of the run's Redis that can hang or go down.
+pub struct RedisGate {
+    pub url: String,
+    state: tokio::sync::watch::Sender<Gate>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RedisGate {
+    pub async fn before(redis: &str) -> Self {
+        let upstream = url::Url::parse(redis).unwrap();
+        let target = format!("{}:{}", upstream.host_str().unwrap(), upstream.port().unwrap_or(6379));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("redis://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let state = tokio::sync::watch::Sender::new(Gate::Open);
+        let watching = state.subscribe();
+        let task = tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                tokio::spawn(carry(client, target.clone(), watching.clone()));
+            }
+        });
+        Self { url, state, task }
+    }
+
+    /// Carries, holds or closes the connections from now on: the ones held or carried so far end on any change.
+    pub fn set(&self, gate: Gate) {
+        self.state.send_replace(gate);
+    }
+}
+
+/// Carries one connection to Redis while the gate is open, holds it unanswered while it is hung, closes it while it
+/// is down; until either side ends it or the gate changes.
+async fn carry(mut client: tokio::net::TcpStream, target: String, mut state: tokio::sync::watch::Receiver<Gate>) {
+    let now = *state.borrow_and_update();
+    match now {
+        Gate::Down => {}
+        Gate::Hung => {
+            let _ = state.changed().await;
+        }
+        Gate::Open => {
+            let Ok(mut upstream) = tokio::net::TcpStream::connect(&target).await else {
+                return;
+            };
+            tokio::select! {
+                _ = tokio::io::copy_bidirectional(&mut client, &mut upstream) => {}
+                _ = state.changed() => {}
+            }
+        }
+    }
+}
+
+impl Drop for RedisGate {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.state.send_replace(Gate::Down);
+    }
+}

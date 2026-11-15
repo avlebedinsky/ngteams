@@ -2,7 +2,7 @@
 //! reads or subscribes to is named through [`Keyspace::key`], under the deployment's namespace: nothing else builds a
 //! Redis name. A node's command connection is handed out only together with its keyspace ([`Shared`]).
 
-use redis::aio::ConnectionManager;
+use super::commands::Commands;
 
 /// What every name of the server starts with in a Redis.
 const PREFIX: &str = "ngts";
@@ -44,7 +44,7 @@ impl Keyspace {
 /// A node's Redis command connection with the keyspace its commands name their keys in.
 #[derive(Clone)]
 pub struct Shared {
-    commands: ConnectionManager,
+    commands: Commands,
     keys: Keyspace,
 }
 
@@ -58,7 +58,7 @@ impl std::fmt::Debug for Shared {
 
 impl Shared {
     #[must_use]
-    pub fn new(commands: ConnectionManager, keys: Keyspace) -> Self {
+    pub fn new(commands: Commands, keys: Keyspace) -> Self {
         Self { commands, keys }
     }
 
@@ -70,7 +70,7 @@ impl Shared {
 
     /// The connection, for commands on keys [`Self::key`] named.
     #[must_use]
-    pub fn commands(&self) -> ConnectionManager {
+    pub fn commands(&self) -> Commands {
         self.commands.clone()
     }
 }

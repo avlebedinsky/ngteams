@@ -466,3 +466,63 @@ async fn with_workflows_off_a_node_issues_no_flow_token_and_serves_no_webhook() 
         on.stop().await;
     }
 }
+
+/// Redis stops, or stops answering, while the webhook takes a post: the rate limit and the chat service's fan-out go
+/// on without it (fail open), so the post is answered 202 at once, well inside the webhook's 30 s, posted once and
+/// kept in the run history; a member's own send in the chat isn't held either.
+#[tokio::test(flavor = "multi_thread")]
+async fn with_redis_down_or_hung_a_post_is_answered_at_once_posted_once_and_kept() {
+    use crate::support::{Gate, RedisGate};
+    let Some(redis) = crate::support::redis_url() else {
+        return;
+    };
+    for backend in backends() {
+        for gone in [Gate::Down, Gate::Hung] {
+            let gate = RedisGate::before(&redis).await;
+            let server = TestServer::start_with(backend, |config| {
+                config.public_origin = url::Url::parse(ORIGIN).unwrap();
+                config.redis_url = Some(gate.url.clone());
+            })
+            .await;
+            let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+            let bert = Seat::new(&server, "bert@own.test", "Bert").await;
+            let environment = environment(&ada).await;
+            let chat = group_chat(&ada, &[&bert], "Project room").await;
+            let flow = save(&ada, &environment, &Target::Chat(&chat)).await;
+            let id = flow["name"].as_str().unwrap().to_owned();
+            let link = webhook_link(&ada, &environment, &id).await;
+
+            gate.set(gone);
+            let started = std::time::Instant::now();
+            let status = post(&server, &link, card_payload("Gone").to_string().as_bytes()).await;
+            let took = started.elapsed();
+            assert_eq!(status, 202, "{gone:?}");
+            assert!(took < Duration::from_secs(5), "{gone:?}: the post took {took:?}");
+            let started = std::time::Instant::now();
+            let sent = ada
+                .engine
+                .write(teams_core::engine::Action::Send {
+                    conversation: chat.clone(),
+                    text: teams_proto::chat::MessageText::plain("Still here").unwrap(),
+                })
+                .await
+                .unwrap();
+            let took = started.elapsed();
+            assert_eq!(sent.state, teams_store::OutboxState::Sent, "{sent:?}");
+            assert!(took < Duration::from_secs(5), "{gone:?}: the send took {took:?}");
+
+            gate.set(Gate::Open);
+            assert_eq!(runs(&ada, &environment, &id).await, [("Succeeded".to_owned(), None)]);
+            bert.engine.sync().await.unwrap();
+            let messages = bert.engine.messages(&chat, None, 50).await.unwrap().messages;
+            let posted = messages
+                .iter()
+                .filter(|message| message.sender.as_deref() == Some(BOT))
+                .count();
+            assert_eq!(posted, 1, "{gone:?}");
+            ada.stop();
+            bert.stop();
+            server.stop().await;
+        }
+    }
+}

@@ -918,8 +918,8 @@ async fn with_redis_down_a_post_is_let_through_and_the_warning_names_no_secret()
     let flow = flows.save(&Target::Chat(&chat)).await;
     let link = flows.link(&flow).await;
     redis.stop().await;
-    // the rate limit can't count: the post is let through rather than lost. Its answer is printed only: the chat
-    // service's fan-out waits on Redis, so it may come after the webhook's 30 s limit (QA 213 Q1)
+    // the rate limit can't count and the chat service can't fan out: the post is let through rather than lost, and
+    // answered at once, so a sender that retries a slow answer doesn't post it twice
     let local = link.replacen(&rig.origin, &rig.first.endpoint, 1);
     let started = std::time::Instant::now();
     let answer = reqwest::Client::builder()
@@ -933,7 +933,10 @@ async fn with_redis_down_a_post_is_let_through_and_the_warning_names_no_secret()
         .send()
         .await
         .map(|response| response.status().as_u16());
-    eprintln!("webhook with Redis down: {answer:?} after {:?}", started.elapsed());
+    let took = started.elapsed();
+    assert_eq!(answer.ok(), Some(202), "after {took:?}");
+    assert!(took < Duration::from_secs(5), "the post took {took:?}");
+    assert_eq!(flows.runs(&flow).await, [("Succeeded".to_owned(), None)]);
     redis.start().await;
     bert.engine().sync().await.unwrap();
     let page = bert.engine().messages(&chat, None, 50).await.unwrap();
