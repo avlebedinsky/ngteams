@@ -711,7 +711,8 @@ goes when no seat was made after it; otherwise it stays, without a leg and in no
   callback with `409` / `5704`, naming the running call (one call per chat is a unique index, so two starts can't
   both win).
 - **Each party alone**: a callee's `accept` gives its answer to its leg and takes it into the call (its other
-  endpoints stop ringing, `487`); a decline or a ring that runs out (`calling.ring_timeout`, per callee) ends only
+  endpoints stop ringing, `487`), unless a join of the same callee reserved its seat over that leg meanwhile: then
+  the answer is `410` and the join takes it in; a decline or a ring that runs out (`calling.ring_timeout`, per callee) ends only
   that party's ring and drops its leg; a `leave` takes one party out (its roster entry `inactive`) and drops its
   leg, and the last one out ends the call: the rings still going end, the room is dropped, and the chat gets
   `callEnded` listing everyone who was in it. A leave from an endpoint whose answer lost changes nothing.

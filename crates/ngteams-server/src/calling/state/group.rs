@@ -83,17 +83,21 @@ impl Call {
         self.tell_group(origin, &[Seat::CALLER], Some(Seat::CALLER), out);
     }
 
-    /// A ringing party's endpoint answers (its answer already with the media node): the party is in the call, its
-    /// other endpoints stop ringing, and the roster tells everyone (the party the whole of it).
+    /// A ringing party's endpoint answers on its leg `leg` (the answer already with the media node): the party is in
+    /// the call, its other endpoints stop ringing, and the roster tells everyone (the party the whole of it). An answer
+    /// for a leg a join reserved the seat over since is refused: the join's leg is the one the party gets.
     pub(crate) fn group_accept(
         &mut self,
         seat: Seat,
-        endpoint: &str,
+        (leg, endpoint): (&str, &str),
         (links, body): (Links, &Value),
         at: At<'_>,
         out: &mut Out,
     ) -> Result<Value, Refusal> {
         self.ringing(seat)?;
+        if self.party(seat).leg.as_ref().is_none_or(|kept| kept.id != leg) {
+            return Err(Refusal::Gone);
+        }
         let acceptance = body.get("callAcceptance").ok_or(Refusal::Bad)?;
         let party = self.party_mut(seat);
         party.keep(endpoint, links);
@@ -610,7 +614,8 @@ mod tests {
         let mut out = Out::default();
         let body = json!({"callAcceptance": {"acceptedBy": {"endpointId": format!("ep-{endpoint}")}}});
         let links = links(endpoint, &["mediaAnswer", "rejection"]);
-        call.group_accept(Seat(seat), endpoint, (links, &body), at(now), &mut out)
+        let leg = call.party(Seat(seat)).leg.clone().unwrap().id;
+        call.group_accept(Seat(seat), (&leg, endpoint), (links, &body), at(now), &mut out)
             .unwrap();
         out
     }
@@ -707,13 +712,19 @@ mod tests {
         // answered: it rings no more; a second answer is too late
         let body = json!({"callAcceptance": {}});
         assert_eq!(
-            call.group_accept(Seat(1), "B2", (Links::new(), &body), at(1_006_000), &mut Out::default()),
+            call.group_accept(
+                Seat(1),
+                ("leg1", "B2"),
+                (Links::new(), &body),
+                at(1_006_000),
+                &mut Out::default()
+            ),
             Err(Refusal::Gone)
         );
         assert_eq!(
             call.group_accept(
                 Seat(2),
-                "C",
+                ("leg2", "C"),
                 (Links::new(), &json!({})),
                 at(1_006_000),
                 &mut Out::default()
@@ -1009,6 +1020,35 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_for_a_leg_a_join_reserved_the_seat_over_is_refused_and_the_join_takes_the_seat() {
+        let (mut call, _) = started();
+        let acceptance = json!({"callAcceptance": {}});
+        let reserved = call.reserve(&party("b"), "leg-b2").unwrap();
+        assert_eq!(
+            call.group_accept(
+                Seat(1),
+                ("leg1", "B"),
+                (Links::new(), &acceptance),
+                at(1_002_000),
+                &mut Out::default()
+            ),
+            Err(Refusal::Gone)
+        );
+        assert_eq!(call.party(Seat(1)).status, Status::Ringing);
+        let mut out = Out::default();
+        call.join(
+            reserved.seat,
+            ("leg-b2", "B2", Links::new()),
+            &answer(),
+            at(1_003_000),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(call.party(Seat(1)).status, Status::InCall);
+        assert_eq!(out.released, ["leg1"]);
+    }
+
+    #[test]
     fn the_caller_who_left_rings_again_when_added_back() {
         let (mut call, _) = started();
         accepted(&mut call, 1, "B", 1_002_000);
@@ -1024,7 +1064,7 @@ mod tests {
         let acceptance = json!({"callAcceptance": {}});
         call.group_accept(
             Seat::CALLER,
-            "A2",
+            ("leg-a2", "A2"),
             (links("A2", &["rosterUpdate"]), &acceptance),
             at(1_005_000),
             &mut out,

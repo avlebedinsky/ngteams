@@ -2,7 +2,7 @@
 //! ([`super::mixer::FixedMixer`]): the start in a group chat ringing its other members with the node's offers, the
 //! caller accepted by the node at once, a callee's answer, a decline and a ring nobody answers, leaves and the last
 //! one, a member joining the running call it finds in the chat, a second start refused (also when both come at once),
-//! adds (a callee added back rings anew), a media node that fails a join.
+//! adds (a callee added back rings anew), a media node that fails a join, an answer a join of the same callee overtook.
 
 use std::time::Duration;
 
@@ -458,7 +458,12 @@ async fn a_second_start_in_a_chat_with_a_running_call_is_refused_naming_it() {
 
 /// A raw calling request with `person`'s skypetoken.
 async fn raw(server: &TestServer, person: &Person, method: reqwest::Method, path: &str, body: &Value) -> (u16, Value) {
-    let session = server.session(&person.upn).await;
+    raw_as(server, &person.upn, method, path, body).await
+}
+
+/// A raw calling request with the skypetoken of the account `upn`.
+async fn raw_as(server: &TestServer, upn: &str, method: reqwest::Method, path: &str, body: &Value) -> (u16, Value) {
+    let session = server.session(upn).await;
     let token = session.skypetoken().await.unwrap();
     let response = reqwest::Client::new()
         .request(method, server.url(path))
@@ -897,6 +902,64 @@ async fn a_join_the_media_node_fails_keeps_the_ring_and_a_later_join_takes_the_s
             .await;
         let legs = group.mixer.legs(&call.id);
         assert_eq!(legs.len(), 3, "Ada's, Bert's and Cora's: {legs:?}");
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_a_join_of_the_same_callee_overtook_is_refused_and_the_join_takes_him_in() {
+    for backend in backends() {
+        let mut group = Group::start(backend).await;
+        let b = group.b.mri();
+        group.a.client.call_group(&group.chat, std::slice::from_ref(&b));
+        group.a.client.state(CallState::Connected).await;
+        let rings = group.b.client.incoming().await;
+        let call = group.open_call().await;
+        let offer = rings.offer.clone().unwrap().blob;
+        let rung = group
+            .mixer
+            .legs(&call.id)
+            .into_keys()
+            .find(|leg| offer == offer_to(leg));
+        let rung = rung.expect("Bert rings with the node's offer to his leg");
+        // Bert answers on one device and, while the node takes that answer, joins from another
+        let answer = group.mixer.hold_answer();
+        group.b.client.answer(rings.call);
+        answer.reached().await;
+        let new_leg = group.mixer.hold_new_leg();
+        let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
+        let (_, base) = own_callbacks(&group.server, &group.b).await;
+        let join = json!({
+            "callInvitation": {
+                "mediaContent": {"blob": "v=0\r\ns=bert joins\r\n", "contentType": "application/sdp-ngc-1.0"},
+                "links": {"acceptance": format!("{base}acceptance/"), "end": format!("{base}end/")},
+            },
+            "participants": {"from": {"id": b, "displayName": "Bert"}},
+        });
+        let Person { upn, client, .. } = &mut group.b;
+        let joining = raw_as(&group.server, upn, reqwest::Method::POST, &conv, &join);
+        let answered = async {
+            new_leg.reached().await;
+            // the answer comes back once the join reserved his seat over the leg the answer was for
+            answer.go();
+            let ended = client.ended().await;
+            new_leg.go();
+            ended
+        };
+        let ((status, _), ended) = tokio::join!(joining, answered);
+        assert!(
+            matches!(ended, End::Failed(_)),
+            "the answer was for a leg the join replaced: {ended:?}"
+        );
+        assert_eq!(status, 200, "the join takes him in");
+        group
+            .a
+            .client
+            .participants_until(|now| are(now, std::slice::from_ref(&b)))
+            .await;
+        let legs = group.mixer.legs(&call.id);
+        assert_eq!(legs.len(), 2, "Ada's and the one Bert joined on: {legs:?}");
+        assert!(!legs.contains_key(&rung), "the leg he rang with is gone: {legs:?}");
         group.server.stop().await;
     }
 }

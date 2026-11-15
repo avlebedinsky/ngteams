@@ -1,12 +1,13 @@
 //! A media node for signaling tests: it keeps the rooms and legs signaling asks for and answers fixed SDP that names
-//! the leg, so a test tells whose offer or answer reached whom. A test can make it fail the legs it is asked for, or
-//! hold new rooms until several are asked for at once. No media flows.
+//! the leg, so a test tells whose offer or answer reached whom. A test can make it fail the legs it is asked for, hold
+//! new rooms until several are asked for at once, or hold the next answer or new leg until it lets it go. No media
+//! flows.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Barrier;
+use tokio::sync::{Barrier, Notify};
 
 use async_trait::async_trait;
 use ngteams_server::calling::{MediaError, MediaHome, MediaNodes, Sdp, Sources};
@@ -38,6 +39,37 @@ pub struct FixedMixer {
     failing: Arc<AtomicBool>,
     /// New rooms wait here for each other.
     gate: Arc<Mutex<Option<Arc<Barrier>>>>,
+    /// The next answer waits here.
+    answers: Arc<Mutex<Option<Held>>>,
+    /// The next new leg waits here.
+    new_legs: Arc<Mutex<Option<Held>>>,
+}
+
+/// A request the node holds: told when it is reached, answered once let go.
+#[derive(Clone, Debug, Default)]
+pub struct Held {
+    reached: Arc<Notify>,
+    go: Arc<Notify>,
+}
+
+impl Held {
+    /// Until the held request reaches the node.
+    pub async fn reached(&self) {
+        self.reached.notified().await;
+    }
+
+    /// The held request is answered.
+    pub fn go(&self) {
+        self.go.notify_one();
+    }
+
+    async fn hold(slot: &Mutex<Option<Self>>) {
+        let held = slot.lock().unwrap().take();
+        if let Some(held) = held {
+            held.reached.notify_one();
+            held.go.notified().await;
+        }
+    }
 }
 
 /// The node's offer to the leg `leg`.
@@ -92,6 +124,20 @@ impl FixedMixer {
         *self.gate.lock().unwrap() = Some(Arc::new(Barrier::new(rooms)));
     }
 
+    /// The next answer to an offer of the node's waits until let go.
+    pub fn hold_answer(&self) -> Held {
+        let held = Held::default();
+        *self.answers.lock().unwrap() = Some(held.clone());
+        held
+    }
+
+    /// The next leg asked for waits until let go.
+    pub fn hold_new_leg(&self) -> Held {
+        let held = Held::default();
+        *self.new_legs.lock().unwrap() = Some(held.clone());
+        held
+    }
+
     /// The one leg with the source ids `audio`.
     pub fn leg_of(&self, call: &str, audio: i64) -> Option<String> {
         self.legs(call)
@@ -125,6 +171,7 @@ impl MediaNodes for FixedMixer {
         sources: Sources,
         offer: Option<&Sdp>,
     ) -> Result<Sdp, MediaError> {
+        Held::hold(&self.new_legs).await;
         if self.failing.load(Ordering::SeqCst) {
             return Err(MediaError::Failed("the test fails it".into()));
         }
@@ -142,6 +189,7 @@ impl MediaNodes for FixedMixer {
     }
 
     async fn answer_leg(&self, _home: &MediaHome, call: &str, leg: &str, _answer: &Sdp) -> Result<(), MediaError> {
+        Held::hold(&self.answers).await;
         let mut rooms = self.rooms.lock().unwrap();
         let kept = rooms
             .rooms

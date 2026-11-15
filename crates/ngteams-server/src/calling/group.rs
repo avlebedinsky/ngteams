@@ -259,7 +259,7 @@ async fn refuse(app: &App, running: &Call, conversation_end: Option<&str>) -> Re
     Json(wire::unrun_conversation(&origin, &app.config.region, &never)).into_response()
 }
 
-/// A ringing party's `accept`: its answer to the node's offer goes to its leg, then it is in the call.
+/// A ringing party's `accept`: its answer to the node's offer goes to its leg, then it is in the call on that leg.
 pub(super) async fn accept(app: &App, caller: &Caller, key: Key<'_>, body: &Value) -> Result<Response, Failure> {
     let (endpoint, links) = needed_links(app, caller, body).await?;
     let answer = sdp(body.pointer("/callAcceptance/mediaContent"))?;
@@ -267,11 +267,10 @@ pub(super) async fn accept(app: &App, caller: &Caller, key: Key<'_>, body: &Valu
     let call = kept.call;
     let seat = call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
     call.ringing(seat)?;
-    nodes(app)?
-        .answer_leg(home_of(&call)?, &call.id, &leg_of(&call, seat)?.id, &answer)
-        .await?;
+    let leg = &leg_of(&call, seat)?.id;
+    nodes(app)?.answer_leg(home_of(&call)?, &call.id, leg, &answer).await?;
     let answered = step(app, key, caller, |call, seat, at, out| {
-        call.group_accept(seat, &endpoint, (links.clone(), body), at, out)
+        call.group_accept(seat, (leg, &endpoint), (links.clone(), body), at, out)
     })
     .await?;
     Ok(Json(answered).into_response())
