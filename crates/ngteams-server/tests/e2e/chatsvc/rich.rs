@@ -22,7 +22,7 @@ const REPLY: &str = include_str!("../../../../../tests/fixtures/chatsvc/reply.js
 const BASE: &str = "https://own.example.test/api/chatsvc/own";
 
 /// A fixture with its placeholders filled in: the lab's names and ids as the test's, Microsoft's bases as the server's.
-fn fixture(source: &str, swaps: &[(&str, &str)]) -> Value {
+pub(super) fn fixture(source: &str, swaps: &[(&str, &str)]) -> Value {
     let mut source = source
         .replace("https://teams.microsoft.com/api/chatsvc/<region>", BASE)
         .replace("https://notifications.skype.net", BASE);
@@ -73,7 +73,7 @@ impl Request for Post {
 }
 
 /// Message `id` of `chat` as account `upn` reads it, raw.
-async fn read_back(server: &TestServer, upn: &str, user: &str, chat: &str, id: &str) -> Value {
+pub(super) async fn read_back(server: &TestServer, upn: &str, user: &str, chat: &str, id: &str) -> Value {
     let reader = client(server, upn, user).await;
     let response = reader.read(&Page { chat: chat.into() }).await.unwrap();
     assert_eq!(response.status(), 200);
@@ -98,7 +98,7 @@ fn parsed(mut message: Value) -> Value {
 
 /// `golden` with what the server chooses itself (ids, times, its order number) taken from `actual`, and what it
 /// doesn't make (Microsoft's language detection) left out.
-fn served(mut golden: Value, actual: &Value) -> Value {
+pub(super) fn served(mut golden: Value, actual: &Value) -> Value {
     for key in [
         "id",
         "version",

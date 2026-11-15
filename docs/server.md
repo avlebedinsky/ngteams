@@ -769,6 +769,8 @@ every reader, the push channel and the sync see the same message (`src/chatsvc/r
   a message of the same chat that the writer may read (`Invalid`, the server's own word, for any other: nothing is
   told about a message elsewhere). `hasValidMsgReferences` is true when every quote is valid. The quote in the HTML is
   kept as sent; Teams' line feed after it is not added (it changes nothing a reader parses).
+- **Edits** keep the message's id, client message id and arrival; `properties.edittime` is the edit's time and
+  `properties.composetime` the compose time the editing client sends, as Teams keeps it (`edit.json`).
 - **Refused** (400): `mentions` or `qtdMsgs` that aren't a list of objects, or a JSON string of one.
 - **Not kept**: `importance`, `subject` and `title` (the native client sends them empty), a forward's
   `forwardTemplateId` and `originalMessageContext` (the native client doesn't forward), and the push delivery's

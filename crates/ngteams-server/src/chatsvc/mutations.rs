@@ -35,6 +35,7 @@ pub(super) async fn edit(
     draft.chat_id.clone_from(&found.id);
     messages::quoted(&app, &caller, &mut draft).await?;
     let draft = draft.value()?;
+    let composed = sent.get("composetime").filter(|time| time.is_string()).cloned();
     let change = message_repo::Change {
         chat: &found.id,
         id,
@@ -58,6 +59,10 @@ pub(super) async fn edit(
             }
         }
         current["properties"]["edittime"] = json!(at);
+        // Teams keeps the time the message was composed at, as the editing client wrote it
+        if let Some(composed) = composed.as_ref() {
+            current["properties"]["composetime"] = composed.clone();
+        }
         Ok(true)
     })
     .await?;
