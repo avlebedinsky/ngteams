@@ -8,7 +8,7 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
-use teams_core::account::{CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM, USER_PROFILE_GTM};
+use teams_core::account::{AMS_GTM, CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM, USER_PROFILE_GTM};
 use teams_core::activity::ActivityFeed;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, MessageChange, Parts, Source};
 use teams_core::{Outbox, Transient};
@@ -74,7 +74,12 @@ impl Rig {
         eprintln!("real-binary push: {backend:?}");
         let mut deployment = Deployment::new(backend, false, redis).await;
         deployment.origin = deployment.origin.replacen("http:", "https:", 1);
+        let storage = format!(
+            "storage_url = \"file://{}\"\n",
+            deployment.dir.path().join("blobs").display()
+        );
         let mut first = deployment.node("a");
+        prepend(&first.config, &storage);
         append(&first.config, config);
         first.cli(&["migrate"], "");
         for upn in ["a@own.test", "b@own.test", "c@own.test", "d@own.test"] {
@@ -83,6 +88,7 @@ impl Rig {
         first.start().await;
         let mut second = (backend == Backend::Postgres).then(|| deployment.node("b"));
         if let Some(node) = &mut second {
+            prepend(&node.config, &storage);
             append(&node.config, config);
             node.start().await;
         }
@@ -135,6 +141,12 @@ impl Rig {
             node.start().await;
         }
     }
+}
+
+/// Root keys can't follow the configuration's tables, so they go before them.
+fn prepend(config: &Path, keys: &str) {
+    let rest = std::fs::read_to_string(config).unwrap();
+    std::fs::write(config, format!("{keys}{rest}")).unwrap();
 }
 
 fn append(config: &Path, tables: &str) {
@@ -236,14 +248,18 @@ impl User {
         )
         .unwrap()
         .for_account(self.mri.clone());
-        if !self.teams {
-            return chats;
-        }
         let base = |gtm: &str| {
             self.session
                 .service_base(gtm)
                 .unwrap_or_else(|| panic!("authz names no {gtm}"))
         };
+        let chats = match self.session.service_base(AMS_GTM) {
+            Some(ams) => chats.with_ams(&ams).unwrap(),
+            None => chats,
+        };
+        if !self.teams {
+            return chats;
+        }
         chats
             .with_middle_tier(&base(MIDDLE_TIER_GTM))
             .unwrap()
