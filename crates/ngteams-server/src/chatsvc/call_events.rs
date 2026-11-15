@@ -30,10 +30,29 @@ fn escaped(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// The call `call` began, placed by `caller` (its id and name).
-pub(crate) async fn started(app: &App, chat: &str, (id, name): (&str, &str), call: &str) -> Result<(), DbError> {
-    let content =
-        format!("<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType><callId>{call}</callId>");
+/// The ids of the people in the chat `chat` now; `None` when there is no such chat.
+pub(crate) async fn members(app: &App, chat: &str) -> Result<Option<Vec<String>>, DbError> {
+    if repo::chat(&app.db, chat).await?.is_none() {
+        return Ok(None);
+    }
+    let members = repo::members(&app.db, chat).await?;
+    Ok(Some(members.into_iter().map(|member| member.user_id).collect()))
+}
+
+/// The call `call` began, placed by `caller` (its id and name); a group call's start names its conversation, where
+/// a member who wasn't rung joins it.
+pub(crate) async fn started(
+    app: &App,
+    chat: &str,
+    (id, name): (&str, &str),
+    (call, conversation): (&str, Option<&str>),
+) -> Result<(), DbError> {
+    let url = conversation
+        .map(|url| format!("<conversationUrl>{}</conversationUrl>", escaped(url)))
+        .unwrap_or_default();
+    let content = format!(
+        "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType>{url}<callId>{call}</callId>"
+    );
     post(app, chat, (id, name), &content).await
 }
 

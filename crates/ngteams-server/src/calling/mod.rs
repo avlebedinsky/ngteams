@@ -16,11 +16,15 @@
 //! - **A call's events in its chat** (`Event/Call`: started, ended with its length, missed) are written through the
 //!   chat service ([`crate::chatsvc::call_events`]), when the two parties have their chat.
 //!
-//! A group call needs the call's mixer; its start is answered 501 until the media node serves it ([`ops::start`]
-//! is where it plugs in: the call's kind is told apart there, and a mixer's offer would take the place of the
-//! caller's in [`wire::invitation`]).
+//! - **A group call** ([`group`]) is a group chat's: every member it names rings with the call's media node's offer,
+//!   the caller is in it at once with the node's answer, and each party answers, declines, joins and leaves alone;
+//!   the call ends when nobody is in it. Its media goes through the node ([`media::MediaNodes`]), which the
+//!   operation asks first and the step then records. Until a node is installed ([`Mixers`]) a group call's start is
+//!   answered 501; a meeting and the test call are never served.
 
 pub mod config;
+mod group;
+mod media;
 mod ops;
 mod repo;
 mod state;
@@ -38,6 +42,7 @@ use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
+pub use media::{MediaError, MediaHome, MediaNodes, Mixers, Sdp, Sources};
 pub use repo::{OpenCall, open_calls};
 pub use turn::rest_credential;
 
@@ -47,7 +52,7 @@ use crate::chatsvc::call_events::{self, Part};
 use crate::db::{DbError, users};
 use crate::trouter::Stack;
 use repo::Key;
-use state::{At, Call, Delivery, Out, Outcome, Refusal, Seat};
+use state::{At, Call, Delivery, Kind, Out, Outcome, Refusal, Seat};
 use wire::Links;
 
 /// How long an ended call's row is kept, in seconds: a late request of it is answered as gone.
@@ -126,12 +131,20 @@ pub(crate) enum Failure {
     NotServed,
     /// Other nodes kept moving the call.
     Busy,
+    /// The call's media node didn't do its part.
+    Media(MediaError),
     Database(DbError),
 }
 
 impl From<Refusal> for Failure {
     fn from(refusal: Refusal) -> Self {
         Self::Refused(refusal)
+    }
+}
+
+impl From<MediaError> for Failure {
+    fn from(error: MediaError) -> Self {
+        Self::Media(error)
     }
 }
 
@@ -150,6 +163,7 @@ impl IntoResponse for Failure {
             Self::Refused(Refusal::Gone) => (StatusCode::GONE, "CallEnded"),
             Self::NotServed => (StatusCode::NOT_IMPLEMENTED, "NotServed"),
             Self::Busy => (StatusCode::SERVICE_UNAVAILABLE, "Busy"),
+            Self::Media(error) => media_failure(&error),
             Self::Database(error) => {
                 tracing::error!(%error, "calling database failure");
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -157,6 +171,16 @@ impl IntoResponse for Failure {
         };
         (status, Json(json!({"code": code}))).into_response()
     }
+}
+
+/// How a media node's failure is answered: a room that is gone as the call being gone, anything else as the service
+/// being unavailable.
+fn media_failure(error: &MediaError) -> (StatusCode, &'static str) {
+    if matches!(error, MediaError::Gone) {
+        return (StatusCode::GONE, "MediaGone");
+    }
+    tracing::warn!(%error, "a call's media node failed");
+    (StatusCode::SERVICE_UNAVAILABLE, "MediaUnavailable")
 }
 
 /// Unix milliseconds.
@@ -209,13 +233,29 @@ async fn needed_links(app: &App, caller: &Caller, body: &Value) -> Result<(Strin
         .ok_or(Failure::Refused(Refusal::Bad))
 }
 
-/// Publishes what a step tells the parties, and writes the call's end to its chat.
+/// Drops the media legs and the room a step let go of, publishes what it tells the parties, and writes the call's end
+/// to its chat.
 async fn carry_out(app: &App, call: &Call, out: Out) {
+    release(app, call, &out).await;
     for delivery in &out.deliveries {
         publish(app, &call.id, delivery).await;
     }
     if let Some(outcome) = out.ended {
         tell_chat_ended(app, call, outcome).await;
+    }
+}
+
+/// Drops the legs and the room `out` let go of on the call's media node. One not dropped is logged: the media node
+/// drops a room whose call is over by itself.
+async fn release(app: &App, call: &Call, out: &Out) {
+    let (Some(home), Some(nodes)) = (&call.media, app.mixers.get()) else {
+        return;
+    };
+    for leg in &out.released {
+        media::drop_leg(nodes.as_ref(), home, &call.id, leg).await;
+    }
+    if out.room_over {
+        media::drop_room(nodes.as_ref(), home, &call.id).await;
     }
 }
 
@@ -240,9 +280,12 @@ async fn tell_chat_ended(app: &App, call: &Call, outcome: Outcome) {
             seconds,
         }
     };
-    let parts = match outcome {
-        Outcome::Talked(seconds) => vec![part(Seat::CALLER, seconds), part(Seat::CALLEE, seconds)],
-        Outcome::Missed => vec![part(Seat::CALLER, 0)],
+    let parts = match (call.kind, outcome) {
+        (Kind::Group, Outcome::Talked(seconds)) => {
+            call.rostered().into_iter().map(|seat| part(seat, seconds)).collect()
+        }
+        (_, Outcome::Talked(seconds)) => vec![part(Seat::CALLER, seconds), part(Seat::CALLEE, seconds)],
+        (_, Outcome::Missed) => vec![part(Seat::CALLER, 0)],
     };
     let caller = call.party(Seat::CALLER);
     let caller = (caller.id.as_str(), caller.name.as_str());
@@ -259,16 +302,29 @@ async fn step<T>(
     caller: &Caller,
     step: impl Fn(&mut Call, Seat, At<'_>, &mut Out) -> Result<T, Refusal>,
 ) -> Result<T, Failure> {
+    step_any(app, key, |call, at, out| {
+        let seat = call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
+        step(call, seat, at, out)
+    })
+    .await
+}
+
+/// Makes `step` on the call `key` names, whoever asks: read, stepped and stored unless another node moved the row
+/// meanwhile, then read again.
+async fn step_any<T>(
+    app: &App,
+    key: Key<'_>,
+    step: impl Fn(&mut Call, At<'_>, &mut Out) -> Result<T, Refusal>,
+) -> Result<T, Failure> {
     let origin = app.config.origin();
     for _ in 0..ATTEMPTS {
         let kept = repo::find(&app.db, key).await?.ok_or(Refusal::Missing)?;
-        let seat = kept.call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
         let (mut call, mut out) = (kept.call.clone(), Out::default());
         let at = At {
             origin: &origin,
             now: now_ms(),
         };
-        let answer = step(&mut call, seat, at, &mut out)?;
+        let answer = step(&mut call, at, &mut out)?;
         if call == kept.call || repo::store(&app.db, &call, kept.version).await? {
             carry_out(app, &call, out).await;
             return Ok(answer);

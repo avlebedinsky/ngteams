@@ -48,6 +48,8 @@ pub struct App {
     /// What reads pages and pictures for link previews.
     pub(crate) fetcher: crate::media::Fetcher,
     pub(crate) clearing: crate::media::Clearing,
+    /// The media nodes a group call's room goes to; none installed, a group call isn't served.
+    pub mixers: crate::calling::Mixers,
 }
 
 /// Why a node can't start.
@@ -137,6 +139,7 @@ impl App {
             presence,
             fetcher,
             clearing: crate::media::Clearing::default(),
+            mixers: crate::calling::Mixers::default(),
         });
         Ok(app)
     }

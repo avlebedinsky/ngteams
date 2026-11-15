@@ -12,9 +12,9 @@ use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_call::{
     CallEvent, CallId, CallState, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity, Incoming, Outcome,
-    Placement, RemoteEnd, Tracker, WriteId, WriteSink,
+    Participant, Placement, RemoteEnd, Tracker, WriteId, WriteSink,
 };
-use teams_proto::{ClientInfo, Cloud, HttpTransport, MediaContent, Mri, Transport as _};
+use teams_proto::{CallLink, ClientInfo, Cloud, HttpTransport, MediaContent, Mri, Transport as _};
 use teams_trouter::{CallResponder, CallResponse, CallStack, Options, PushEvent, RegistrationReport, Trouter};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -42,6 +42,8 @@ pub fn answer() -> MediaContent {
 
 enum Command {
     Place(Placement),
+    /// Joins the chat's call at the conversation its events named.
+    Join(String, CallLink),
     Answer(CallId),
     Decline(CallId),
     HangUp(CallId),
@@ -52,6 +54,8 @@ pub struct Client {
     pub mri: String,
     commands: mpsc::UnboundedSender<Command>,
     events: mpsc::UnboundedReceiver<CallEvent>,
+    /// Who else is in the call, as last told (whatever the test waited for then).
+    participants: Vec<Participant>,
     task: JoinHandle<()>,
 }
 
@@ -156,6 +160,7 @@ impl Client {
             mri: account.mri.clone(),
             commands,
             events,
+            participants: Vec::new(),
             task,
         }
     }
@@ -170,6 +175,19 @@ impl Client {
             callees: vec![Mri::new(callee)],
             group_chat: None,
         }));
+    }
+
+    /// Calls `callees` in the group chat `chat`.
+    pub fn call_group(&self, chat: &str, callees: &[String]) {
+        self.command(Command::Place(Placement::Chat {
+            callees: callees.iter().map(Mri::new).collect(),
+            group_chat: Some(chat.to_owned()),
+        }));
+    }
+
+    /// Joins the running call of the group chat `chat`, at `conversation`.
+    pub fn join(&self, chat: &str, conversation: CallLink) {
+        self.command(Command::Join(chat.to_owned(), conversation));
     }
 
     pub fn answer(&self, call: CallId) {
@@ -192,6 +210,9 @@ impl Client {
                 .await
                 .unwrap_or_else(|_| panic!("{}: the event didn't come in time", self.mri))
                 .expect("the client stopped");
+            if let CallEvent::Participants { participants, .. } = &event {
+                self.participants.clone_from(participants);
+            }
             if let Some(picked) = pick(event) {
                 return picked;
             }
@@ -237,6 +258,18 @@ impl Client {
         self.next(|event| match event {
             CallEvent::RingEnded { end, .. } => Some(end),
             CallEvent::Ended { end, .. } => panic!("the call ended ({end:?}) instead of its ring"),
+            _ => None,
+        })
+        .await
+    }
+
+    /// Who else is in the call, as told until `wanted` takes it.
+    pub async fn participants_until(&mut self, wanted: impl Fn(&[Participant]) -> bool) -> Vec<Participant> {
+        if wanted(&self.participants) {
+            return self.participants.clone();
+        }
+        self.next(|event| match event {
+            CallEvent::Participants { participants, .. } if wanted(&participants) => Some(participants),
             _ => None,
         })
         .await
@@ -307,6 +340,10 @@ impl Driver {
         let now = Instant::now();
         match command {
             Command::Place(placement) => self.calls.place(&placement, offer(), now).map(drop),
+            Command::Join(chat, conversation) => {
+                self.calls.posted_running(&chat, conversation);
+                self.calls.join(&chat, offer(), now).map(drop)
+            }
             Command::Answer(call) => self.calls.answer(call, answer()),
             Command::Decline(call) => self.calls.decline(call),
             Command::HangUp(call) => self.calls.hang_up(call, now),

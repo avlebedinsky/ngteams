@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 
 use super::repo::{self, Key};
-use super::state::{Call, Party, Phase, Refusal, Seat};
+use super::state::{Call, Kind, Party, Phase, Refusal, Seat};
 use super::wire::{self, CONTROLLER_HOST, CONVERSATION_HOST};
 use super::{Caller, Failure, call_events, calling_endpoints, needed_links, now_ms, own_links, step};
 use crate::app::App;
@@ -51,15 +51,21 @@ async fn party_of(app: &App, key: Key<'_>, caller: &Caller) -> Result<(Call, Sea
     Ok((kept.call, seat))
 }
 
-/// What a start names: the caller as it names itself, and its one callee.
-struct Asked<'a> {
+/// What a start names: a 1:1 call, or a group chat's call.
+enum Asked<'a> {
+    OneToOne(OneToOne<'a>),
+    Group(super::group::Start<'a>),
+}
+
+/// What a 1:1 call's start names: the caller as it names itself, and its one callee.
+struct OneToOne<'a> {
     from: &'a Value,
     to: &'a Value,
     callee: &'a str,
     offer: &'a Value,
 }
 
-/// Reads a start; a group call's, a meeting's and the test call's aren't served.
+/// Reads a start; a meeting's and the test call's aren't served.
 fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
     let from = body.pointer("/participants/from").ok_or(Refusal::Bad)?;
     let callees = body
@@ -70,20 +76,28 @@ fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
         return Err(Refusal::Forbidden.into());
     }
     let set = |pointer: &str| body.pointer(pointer).is_some_and(|value| !value.is_null());
-    let other_kind = [
-        "/groupChat",
-        "/meetingInfo",
-        "/meetingData",
-        "/conversationRequest/scenario",
-    ]
-    .into_iter()
-    .any(set);
-    let [to] = callees.as_slice() else {
-        return Err(Failure::NotServed);
-    };
+    let other_kind = ["/meetingInfo", "/meetingData", "/conversationRequest/scenario"]
+        .into_iter()
+        .any(set);
     if other_kind {
         return Err(Failure::NotServed);
     }
+    if set("/groupChat") {
+        let chat = body
+            .pointer("/groupChat/threadId")
+            .and_then(Value::as_str)
+            .ok_or(Refusal::Bad)?;
+        let offer = body.pointer("/callInvitation/mediaContent").ok_or(Refusal::Bad)?;
+        return Ok(Asked::Group(super::group::Start {
+            from,
+            chat,
+            to: callees,
+            offer,
+        }));
+    }
+    let [to] = callees.as_slice() else {
+        return Err(Failure::NotServed);
+    };
     let invited = to
         .get("id")
         .and_then(Value::as_str)
@@ -96,33 +110,32 @@ fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
     if invited == caller.id {
         return Err(Refusal::Bad.into());
     }
-    Ok(Asked {
+    Ok(Asked::OneToOne(OneToOne {
         from,
         to,
         callee: invited,
         offer,
-    })
+    }))
 }
 
-fn party(id: &str, name: &str, named: &Value) -> Party {
+pub(super) fn party(id: &str, name: &str, named: &Value) -> Party {
     let mut party = Party {
         id: id.to_owned(),
         name: name.to_owned(),
-        participant: Value::Null,
-        endpoints: Vec::new(),
-        active: None,
-        muted: false,
-        state_sequence: 0,
-        joined: None,
+        ..Party::default()
     };
     party.participant = wire::named_by(named, &party);
     party
 }
 
-/// `POST epconv`: a 1:1 call's start. The conversation is answered and the callee's calling endpoints ring.
+/// `POST epconv`: a call's start. A 1:1 call's conversation is answered and the callee's calling endpoints ring; a
+/// group call's is [`super::group::start`].
 pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Bytes) -> Result<Response, Failure> {
     let body = json(&body)?;
-    let asked = asked(&caller, &body)?;
+    let asked = match asked(&caller, &body)? {
+        Asked::Group(start) => return super::group::start(&app, &caller, start, &body).await,
+        Asked::OneToOne(asked) => asked,
+    };
     let invited = users::by_id(&app.db, asked.callee)
         .await?
         .filter(|user| !user.disabled)
@@ -156,6 +169,11 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
         held_by: None,
         chat,
         accepted_as: None,
+        kind: Kind::OneToOne,
+        media: None,
+        next_source: 0,
+        watchers: Vec::new(),
+        alive_due: 0,
     };
     repo::insert(&app.db, &call).await?;
     // before anyone can end the call: the chat orders its events by when they were written
@@ -168,7 +186,7 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
 /// Writes the call's start to the chat of its two parties, when they have one.
 async fn tell_chat_started(app: &App, caller: &Caller, call: &Call) {
     let Some(chat) = &call.chat else { return };
-    let told = call_events::started(app, chat, (&caller.id, &caller.name), &call.id).await;
+    let told = call_events::started(app, chat, (&caller.id, &caller.name), (&call.id, None)).await;
     if let Err(error) = told {
         tracing::warn!(%error, "a call's start wasn't written to its chat");
     }
@@ -187,7 +205,8 @@ async fn ring(app: &App, call: &Call, tenant: &str, endpoints: Vec<String>) {
     }
 }
 
-/// `POST conv/<id>`: a party's subscription to its call's conversation. A 1:1 call takes no one else in.
+/// `POST conv/<id>`: a party's subscription to its call's conversation. A 1:1 call takes no one else in; a group
+/// call's is [`super::group::subscribe`].
 pub(super) async fn subscribe(
     State(app): State<Arc<App>>,
     caller: Caller,
@@ -197,6 +216,10 @@ pub(super) async fn subscribe(
     hosted(&path, CONVERSATION_HOST)?;
     let key = Key::Conversation(param(&path, "conversation"));
     let body = json(&body)?;
+    let kept = repo::find(&app.db, key).await?.ok_or(Refusal::Missing)?;
+    if kept.call.kind == Kind::Group {
+        return super::group::subscribe(&app, &caller, key, &kept.call, &body).await;
+    }
     let (call, _) = party_of(&app, key, &caller).await?;
     if body
         .get("callInvitation")
@@ -269,6 +292,7 @@ pub(super) async fn conversation(
                 .await?;
             }
         }
+        "add" => return super::group::add(&app, &caller, key, &body).await,
         "updateEndpointMetadata" | "updateParticipantProperties" => {}
         _ => return Err(Refusal::Missing.into()),
     }
@@ -286,8 +310,19 @@ pub(super) async fn keep_alive(
         return Err(Refusal::Missing.into());
     }
     let key = Key::Id(param(&path, "call"));
+    let (call, seat) = party_of(&app, key, &caller).await?;
+    own_leg(&call, seat, &path)?;
     step(&app, key, &caller, |call, seat, at, _| call.keep_alive(seat, at)).await?;
     Ok(status(StatusCode::ACCEPTED))
+}
+
+/// A group call's controller links name the party's own seat; one naming another's is none of the account's.
+fn own_leg(call: &Call, seat: Seat, path: &Params) -> Result<(), Failure> {
+    if param(path, "leg") == super::wire::leg_of(call, seat).to_string() {
+        Ok(())
+    } else {
+        Err(Refusal::Missing.into())
+    }
 }
 
 /// An operation on a call controller's link.
@@ -299,16 +334,18 @@ pub(super) async fn controller(
 ) -> Result<Response, Failure> {
     hosted(&path, CONTROLLER_HOST)?;
     let key = Key::Id(param(&path, "call"));
-    let (_, seat) = party_of(&app, key, &caller).await?;
+    let (call, seat) = party_of(&app, key, &caller).await?;
+    own_leg(&call, seat, &path)?;
     let kind = param(&path, "kind");
-    // the ringing leg is the callee's alone, whatever the request carries
-    if matches!(kind, "forked" | "incoming") && seat != Seat::CALLEE {
+    // the ringing leg is a callee's alone, whatever the request carries
+    if matches!(kind, "forked" | "incoming") && seat == Seat::CALLER {
         return Err(Refusal::Forbidden.into());
     }
     let body = json(&body)?;
     let asked = Leg {
         app: &app,
         caller: &caller,
+        group: call.kind == Kind::Group,
         key,
         number: param(&path, "number"),
         body: &body,
@@ -320,6 +357,8 @@ pub(super) async fn controller(
 struct Leg<'a> {
     app: &'a App,
     caller: &'a Caller,
+    /// The call is a group call's.
+    group: bool,
     key: Key<'a>,
     /// The link's number: a negotiation's own, for its answer, rejection and acknowledgement.
     number: &'a str,
@@ -369,6 +408,9 @@ impl Leg<'_> {
     }
 
     async fn accept(&self) -> Result<Response, Failure> {
+        if self.group {
+            return super::group::accept(self.app, self.caller, self.key, self.body).await;
+        }
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
         let answer = step(self.app, self.key, self.caller, |call, seat, at, out| {
             call.accept(seat, &endpoint, (links.clone(), self.body), at, out)
@@ -386,6 +428,9 @@ impl Leg<'_> {
     }
 
     async fn renegotiate(&self) -> Result<Response, Failure> {
+        if self.group {
+            return super::group::renegotiate(self.app, self.caller, self.key, self.body).await;
+        }
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
         step(self.app, self.key, self.caller, |call, seat, at, out| {
             call.renegotiate(seat, &endpoint, (links.clone(), self.body), at, out)

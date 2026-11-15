@@ -4,6 +4,8 @@
 
 mod client;
 mod engines;
+mod group_signaling;
+mod mixer;
 mod relay;
 mod signaling;
 

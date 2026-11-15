@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::media::{MediaHome, Sources};
 use super::wire::{self, Links};
+
+mod group;
 
 /// The call's keep-alive interval, in seconds, as Teams hands it out.
 pub(crate) const KEEP_ALIVE: i64 = 2700;
@@ -47,6 +50,43 @@ impl Seat {
     pub(crate) const CALLEE: Self = Self(1);
 }
 
+/// Whether a call is between two people, or a group chat's call through a media node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Kind {
+    #[default]
+    OneToOne,
+    Group,
+}
+
+/// Where a group call's party is. A 1:1 call's parties keep the default: whether they are in the call is whether
+/// they have an endpoint in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Status {
+    #[default]
+    Ringing,
+    InCall,
+    Declined,
+    Missed,
+    Left,
+}
+
+/// A group call party's leg on the call's media node: its id there and the sources it sends as.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Leg {
+    pub id: String,
+    pub sources: Sources,
+}
+
+/// A chat member who follows a group call's roster without being in it: its endpoint and callbacks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Watcher {
+    pub id: String,
+    pub endpoint: String,
+    pub links: Links,
+}
+
 /// One of a party's endpoints: its Trouter endpoint and the callbacks it handed out, by name.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Endpoint {
@@ -54,7 +94,7 @@ pub(crate) struct Endpoint {
     pub links: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Party {
     /// The account's object id.
     pub id: String,
@@ -70,6 +110,16 @@ pub(crate) struct Party {
     pub state_sequence: u64,
     /// When it came into the call (RFC 3339).
     pub joined: Option<String>,
+    #[serde(default)]
+    pub status: Status,
+    /// When a group call's ring of it ends (Unix seconds), while it rings.
+    #[serde(default)]
+    pub ring_due: Option<i64>,
+    #[serde(default)]
+    pub leg: Option<Leg>,
+    /// The number of a group call party's renegotiation whose answer waits for its acknowledgement.
+    #[serde(default)]
+    pub answered: Option<u64>,
 }
 
 impl Party {
@@ -146,6 +196,19 @@ pub(crate) struct Call {
     /// call, as its own requests name it.
     #[serde(default)]
     pub accepted_as: Option<String>,
+    #[serde(default)]
+    pub kind: Kind,
+    /// A group call's room on its media node.
+    #[serde(default)]
+    pub media: Option<MediaHome>,
+    /// The first source id the next party of a group call gets.
+    #[serde(default)]
+    pub next_source: u32,
+    #[serde(default)]
+    pub watchers: Vec<Watcher>,
+    /// When a group call is given up without a keep-alive (Unix seconds).
+    #[serde(default)]
+    pub alive_due: i64,
 }
 
 /// A delivery to one calling endpoint: `body` at `path` under its push URL (empty: its root).
@@ -170,6 +233,10 @@ pub(crate) enum Outcome {
 pub(crate) struct Out {
     pub deliveries: Vec<Delivery>,
     pub ended: Option<Outcome>,
+    /// The media legs the step let go of (a group call's party left, declined or wasn't reached).
+    pub released: Vec<String>,
+    /// The step ended a group call: its room goes.
+    pub room_over: bool,
 }
 
 impl Out {
@@ -207,7 +274,7 @@ pub(crate) struct At<'a> {
 }
 
 impl At<'_> {
-    fn seconds(&self) -> i64 {
+    pub(crate) fn seconds(&self) -> i64 {
         self.now / 1000
     }
 }
@@ -236,15 +303,28 @@ impl Call {
     }
 
     /// The party's seat when it is in the call that is up.
-    fn in_call(&self, seat: Seat) -> Result<(), Refusal> {
+    pub(crate) fn in_call(&self, seat: Seat) -> Result<(), Refusal> {
+        let party = self.party(seat);
+        let present = match self.kind {
+            Kind::OneToOne => party.active.is_some(),
+            Kind::Group => party.status == Status::InCall,
+        };
         match self.phase {
-            Phase::Connected if self.party(seat).active.is_some() => Ok(()),
+            Phase::Connected if present => Ok(()),
             Phase::Ended => Err(Refusal::Gone),
             _ => Err(Refusal::Forbidden),
         }
     }
 
-    fn ringing(&self, seat: Seat) -> Result<(), Refusal> {
+    pub(crate) fn ringing(&self, seat: Seat) -> Result<(), Refusal> {
+        if self.kind == Kind::Group {
+            return match (self.phase, self.party(seat).status) {
+                (Phase::Ended, _) => Err(Refusal::Gone),
+                (_, Status::Ringing) if seat != Seat::CALLER => Ok(()),
+                _ if seat == Seat::CALLER => Err(Refusal::Forbidden),
+                _ => Err(Refusal::Gone),
+            };
+        }
         match (self.phase, seat) {
             (Phase::Ringing, Seat::CALLEE) => Ok(()),
             (Phase::Ringing, Seat::CALLER) => Err(Refusal::Forbidden),
@@ -258,8 +338,8 @@ impl Call {
         if !links.contains_key("end") {
             return Err(Refusal::Bad);
         }
-        self.party_mut(Seat::CALLEE).keep(endpoint, links);
-        Ok(wire::attach_answer(at.origin, self))
+        self.party_mut(seat).keep(endpoint, links);
+        Ok(wire::attach_answer(at.origin, self, seat))
     }
 
     /// A party in the call describes its media lines again or seeds its channel: nothing the far end is told.
@@ -313,11 +393,14 @@ impl Call {
         let told = wire::acceptance(at.origin, self, media.ok_or(Refusal::Bad)?);
         out.call_back(at.origin, self.party(Seat::CALLER).link("acceptance"), told);
         self.tell_roster(at.origin, &[Seat::CALLER, Seat::CALLEE], out);
-        Ok(wire::accept_answer(at.origin, self))
+        Ok(wire::accept_answer(at.origin, self, seat))
     }
 
     /// The callee declines: every endpoint of its that rang stops, and the caller's call ends as declined.
     pub(crate) fn reject(&mut self, seat: Seat, body: &Value, at: At<'_>, out: &mut Out) -> Result<(), Refusal> {
+        if self.kind == Kind::Group {
+            return self.group_reject(seat, body, at, out);
+        }
         self.ringing(seat)?;
         let code = body.pointer("/callEnd/code").and_then(Value::as_i64).unwrap_or(603);
         let callee = Some(&self.party(Seat::CALLEE).participant);
@@ -335,6 +418,10 @@ impl Call {
     /// it is up, a leave of the callee's that names another endpoint than the one that answered changes nothing: it
     /// comes from an endpoint whose answer lost to the other's.
     pub(crate) fn leave(&mut self, seat: Seat, body: &Value, at: At<'_>, out: &mut Out) {
+        if self.kind == Kind::Group {
+            self.group_leave(seat, body, at, out);
+            return;
+        }
         if self.phase == Phase::Connected && seat == Seat::CALLEE && self.lost_fork(body) {
             return;
         }
@@ -369,6 +456,9 @@ impl Call {
     pub(crate) fn lapse(&mut self, at: At<'_>, out: &mut Out) -> bool {
         if self.due_at > at.seconds() {
             return false;
+        }
+        if self.kind == Kind::Group {
+            return self.group_lapse(at, out);
         }
         match self.phase {
             Phase::Ended => false,
@@ -408,7 +498,12 @@ impl Call {
     /// The call's keep-alive from a party in it.
     pub(crate) fn keep_alive(&mut self, seat: Seat, at: At<'_>) -> Result<(), Refusal> {
         self.in_call(seat)?;
-        self.due_at = at.seconds() + KEEP_ALIVE + KEEP_ALIVE_SLACK;
+        if self.kind == Kind::Group {
+            self.alive_due = at.seconds() + KEEP_ALIVE + KEEP_ALIVE_SLACK;
+            self.reschedule();
+        } else {
+            self.due_at = at.seconds() + KEEP_ALIVE + KEEP_ALIVE_SLACK;
+        }
         Ok(())
     }
 
@@ -459,6 +554,9 @@ impl Call {
         out: &mut Out,
     ) -> Result<(), Refusal> {
         self.in_call(seat)?;
+        if self.kind == Kind::Group {
+            return Err(Refusal::Forbidden);
+        }
         let offered = body.get("mediaNegotiation").ok_or(Refusal::Bad)?;
         let media = offered
             .get("mediaContent")
@@ -559,6 +657,10 @@ impl Call {
         out: &mut Out,
     ) -> Result<(), Refusal> {
         self.in_call(seat)?;
+        if self.kind == Kind::Group {
+            self.party_mut(seat).answered.take_if(|answered| *answered == number);
+            return Ok(());
+        }
         let answered = self
             .answered
             .take_if(|answered| answered.by != seat && answered.number == number);
@@ -580,7 +682,7 @@ impl Call {
         out: &mut Out,
     ) -> Result<Value, Refusal> {
         self.in_call(seat)?;
-        if self.held_by.is_some_and(|holder| holder != seat) {
+        if self.kind == Kind::Group || self.held_by.is_some_and(|holder| holder != seat) {
             return Err(Refusal::Forbidden);
         }
         self.party_mut(seat).keep(endpoint, links);
@@ -606,6 +708,9 @@ impl Call {
         out: &mut Out,
     ) -> Result<(), Refusal> {
         self.in_call(seat)?;
+        if self.kind == Kind::Group {
+            return Err(Refusal::Forbidden);
+        }
         if self.held_by != Some(seat) {
             return Err(Refusal::Gone);
         }
@@ -631,6 +736,10 @@ impl Call {
 
     /// Tells both parties the roster's entries of `seats`.
     fn tell_roster(&mut self, origin: &str, seats: &[Seat], out: &mut Out) {
+        if self.kind == Kind::Group {
+            self.tell_group(origin, seats, None, out);
+            return;
+        }
         self.roster_sequence += 1;
         let update = wire::roster(self, seats);
         self.send_roster(origin, &update, out);
@@ -668,11 +777,7 @@ mod tests {
             name: name.to_owned(),
             participant: json!({"id": format!("8:orgid:{id}"), "displayName": name, "endpointId": format!("ep-{id}"),
                 "participantId": format!("p-{id}")}),
-            endpoints: Vec::new(),
-            active: None,
-            muted: false,
-            state_sequence: 0,
-            joined: None,
+            ..Party::default()
         }
     }
 
@@ -705,6 +810,11 @@ mod tests {
             held_by: None,
             chat: None,
             accepted_as: None,
+            kind: Kind::OneToOne,
+            media: None,
+            next_source: 0,
+            watchers: Vec::new(),
+            alive_due: 0,
         }
     }
 

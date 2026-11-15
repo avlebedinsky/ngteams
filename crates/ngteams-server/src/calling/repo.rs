@@ -5,7 +5,7 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use serde_json::{Value, json};
 
-use super::state::{Call, Seat};
+use super::state::{Call, Kind, Seat};
 use crate::db::{Db, DbError, with_conn};
 
 diesel::table! {
@@ -18,6 +18,7 @@ diesel::table! {
         due_at -> BigInt,
         created_at -> BigInt,
         state -> Text,
+        group_chat -> Nullable<Text>,
     }
 }
 
@@ -32,6 +33,8 @@ struct Row {
     due_at: i64,
     created_at: i64,
     state: String,
+    /// A group call's chat: at most one call that isn't over in each.
+    group_chat: Option<String>,
 }
 
 /// A call and the version its row was read at.
@@ -52,6 +55,7 @@ impl Row {
             due_at: call.due_at,
             created_at: call.started_at / 1000,
             state: serde_json::to_string(call).unwrap_or_default(),
+            group_chat: call.chat.clone().filter(|_| call.kind == Kind::Group),
         }
     }
 
@@ -118,6 +122,18 @@ pub(super) async fn find(db: &Db, key: Key<'_>) -> Result<Option<Kept>, DbError>
             .await
             .optional()?,
     });
+    Ok(row.and_then(Row::kept))
+}
+
+/// The group chat `chat`'s call that isn't over, if it has one.
+pub(super) async fn running_in(db: &Db, chat: &str) -> Result<Option<Kept>, DbError> {
+    let row: Option<Row> = with_conn!(db, |conn| calls::table
+        .filter(calls::group_chat.eq(chat))
+        .filter(calls::phase.ne("ended"))
+        .select(Row::as_select())
+        .first(conn)
+        .await
+        .optional()?);
     Ok(row.and_then(Row::kept))
 }
 
@@ -217,6 +233,7 @@ mod tests {
             due_at: 3,
             created_at: 0,
             state: stored.to_string(),
+            group_chat: None,
         };
         let kept = row.kept().unwrap();
         assert_eq!(kept.version, 7);
