@@ -9,7 +9,7 @@ mod media;
 mod namespaces;
 mod push;
 mod setup;
-mod support;
+pub(crate) mod support;
 mod teams;
 
 use std::time::Duration;

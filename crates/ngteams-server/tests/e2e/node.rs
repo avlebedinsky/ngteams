@@ -312,11 +312,9 @@ async fn a_node_whose_database_is_gone_is_not_ready() {
 #[test]
 fn the_binary_migrates_and_serves_until_terminated() {
     let dir = tempfile::tempdir().unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    // Locked until the child is gone: `serve` binds it only after `migrate`, while other tests run.
+    let taken = crate::binary::support::Port::take();
+    let port = taken.number;
     let config = dir.path().join("server.toml");
     std::fs::write(
         &config,
@@ -354,6 +352,7 @@ fn the_binary_migrates_and_serves_until_terminated() {
         .unwrap();
     assert!(terminated.success());
     assert!(serving.wait().unwrap().success());
+    drop(taken);
 }
 
 fn binary_is_live(port: u16) -> bool {
