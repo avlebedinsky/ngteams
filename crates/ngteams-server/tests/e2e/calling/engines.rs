@@ -66,6 +66,7 @@ impl VideoOutput for Shown {
 /// One account's engine, its calls' media a tone in and a recording out.
 struct Engine {
     mri: String,
+    account: Account,
     handle: EngineHandle,
     recording: PathBuf,
     video: Shown,
@@ -132,6 +133,10 @@ impl Engine {
         .unwrap();
         let mut engine = Self {
             mri: account.mri.clone(),
+            account: Account {
+                mri: account.mri.clone(),
+                session: Arc::clone(&account.session),
+            },
             handle,
             recording,
             video,
@@ -299,10 +304,13 @@ async fn engines(
     relay: std::net::SocketAddr,
     dir: &Path,
 ) -> (Engine, Engine) {
-    let a_id = node_a.add_user("a@own.test", "Ada").await;
-    let b_id = node_a.add_user("b@own.test", "Bert").await;
-    let a_account = Account::sign_in(node_a, "a@own.test", &a_id).await;
-    let b_account = Account::sign_in(node_b, "b@own.test", &b_id).await;
+    // names of this call's own: with Redis, sign-ins are counted per name across every test running now
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let (a_upn, b_upn) = (format!("a-{tag}@own.test"), format!("b-{tag}@own.test"));
+    let a_id = node_a.add_user(&a_upn, "Ada").await;
+    let b_id = node_a.add_user(&b_upn, "Bert").await;
+    let a_account = Account::sign_in(node_a, &a_upn, &a_id).await;
+    let b_account = Account::sign_in(node_b, &b_upn, &b_id).await;
     let a = Engine::start(&a_account, "Ada", (node_a, node_a), (relay, A_TONE, dir)).await;
     let b = Engine::start(&b_account, "Bert", (node_b, node_b), (relay, B_TONE, dir)).await;
     (a, b)
@@ -375,13 +383,8 @@ impl Talk {
 }
 
 /// The chat tells the call: its start, and its end with both in it.
-async fn chat_tells_the_call(node: &TestServer, chat: &str) {
-    let b_id = ngteams_server::db::users::by_upn(&node.app.db, "b@own.test")
-        .await
-        .unwrap()
-        .unwrap()
-        .id;
-    let reader = Account::sign_in(node, "b@own.test", &b_id).await.client(node);
+async fn chat_tells_the_call(node: &TestServer, reader: &Account, chat: &str) {
+    let reader = reader.client(node);
     let page = ChatReads::new(&reader).messages(chat, 10).await.unwrap();
     let events: Vec<&str> = page
         .messages
@@ -407,7 +410,7 @@ async fn a_call_with_media(node_a: &TestServer, node_b: &TestServer, relay: std:
     talk.mute_and_hold().await;
     tokio::time::sleep(TALK).await;
     talk.hang_up().await;
-    chat_tells_the_call(node_b, &talk.chat).await;
+    chat_tells_the_call(node_b, &talk.b.account, &talk.chat).await;
     talk.a.shut_down().await;
     talk.b.shut_down().await;
 }

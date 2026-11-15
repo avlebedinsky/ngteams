@@ -362,11 +362,14 @@ async fn a_call_is_signaled_between_clients_on_two_nodes() {
             config.calling.ring_timeout = 3;
         })
         .await;
-        let a_id = node_a.add_user("a@own.test", "Ada").await;
-        let b_id = node_a.add_user("b@own.test", "Bert").await;
+        // names of this test's own: with Redis, sign-ins are counted per name across every test running now
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let (a_upn, b_upn) = (format!("a-{tag}@own.test"), format!("b-{tag}@own.test"));
+        let a_id = node_a.add_user(&a_upn, "Ada").await;
+        let b_id = node_a.add_user(&b_upn, "Bert").await;
         // each client's socket is on one node and its requests go through the other
-        let mut a = super::client(&node_a, &node_b, "a@own.test", &a_id, "Ada").await;
-        let mut b = super::client(&node_b, &node_a, "b@own.test", &b_id, "Bert").await;
+        let mut a = super::client(&node_a, &node_b, &a_upn, &a_id, "Ada").await;
+        let mut b = super::client(&node_b, &node_a, &b_upn, &b_id, "Bert").await;
         a.call(&mri(&b_id));
         a.state(CallState::Ringing).await;
         let rings = b.incoming().await;
