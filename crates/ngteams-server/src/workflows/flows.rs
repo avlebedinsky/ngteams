@@ -234,7 +234,7 @@ async fn owners(
     Ok(Json(json!({"value": value})))
 }
 
-/// `POST …/modifyowners`: `put` makes each principal an owner, `delete` takes each off.
+/// `POST …/modifyowners`: `put` makes each principal an owner (Remove has its own route).
 async fn modify_owners(
     State(app): State<Arc<App>>,
     caller: Caller<Flow>,
@@ -243,25 +243,20 @@ async fn modify_owners(
 ) -> Answer<StatusCode> {
     let flow = owned(&app, &caller, &environment, &flow).await?;
     let body = super::body(body)?;
-    let principals = |key: &str| -> Answer<Vec<String>> {
-        match body.get(key) {
-            None | Some(Value::Null) => Ok(Vec::new()),
-            Some(Value::Array(entries)) => entries
-                .iter()
-                .map(|entry| {
-                    entry
-                        .pointer("/properties/principal/id")
-                        .or_else(|| entry.get("name"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .ok_or(Error::BAD_REQUEST)
-                })
-                .collect(),
-            Some(_) => Err(Error::BAD_REQUEST),
-        }
-    };
-    let added = principals("put")?;
-    let taken = principals("delete")?;
+    let added = body
+        .get("put")
+        .and_then(Value::as_array)
+        .ok_or(Error::BAD_REQUEST)?
+        .iter()
+        .map(|entry| {
+            entry
+                .pointer("/properties/principal/id")
+                .or_else(|| entry.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or(Error::BAD_REQUEST)
+        })
+        .collect::<Answer<Vec<String>>>()?;
     let target = target(&stored(&flow))?;
     for owner in &added {
         let person = users::by_id(&app.db, owner).await?;
@@ -276,9 +271,6 @@ async fn modify_owners(
     for owner in &added {
         repo::add_owner(&app.db, &flow.id, owner).await?;
     }
-    for owner in &taken {
-        take_owner(&app, &flow, owner).await?;
-    }
     Ok(StatusCode::OK)
 }
 
@@ -289,17 +281,12 @@ async fn remove_owner(
     Path((environment, flow, owner)): Path<(String, String, String)>,
 ) -> Answer<StatusCode> {
     let flow = owned(&app, &caller, &environment, &flow).await?;
-    take_owner(&app, &flow, &owner).await?;
-    Ok(StatusCode::OK)
-}
-
-/// Takes a co-owner off; the creator stays.
-async fn take_owner(app: &App, flow: &repo::Workflow, owner: &str) -> Answer<()> {
+    // the maker stays
     if owner == flow.creator_id {
         return Err(Error::Code(StatusCode::BAD_REQUEST, "CannotRemoveCreator"));
     }
-    if repo::remove_owner(&app.db, &flow.id, owner).await? {
-        Ok(())
+    if repo::remove_owner(&app.db, &flow.id, &owner).await? {
+        Ok(StatusCode::OK)
     } else {
         Err(Error::NOT_FOUND)
     }

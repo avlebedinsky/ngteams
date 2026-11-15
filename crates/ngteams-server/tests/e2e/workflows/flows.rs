@@ -486,3 +486,51 @@ async fn the_overview_renames_turns_off_and_on_shares_and_deletes_a_workflow() {
         server.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_webhook_workflow_runs_only_from_its_link_and_names_only_its_own_runs() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let environment = environment(&ada).await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        let channel = Target::Channel {
+            group: &group,
+            channel: &team,
+        };
+        let flow = save(&ada, &environment, &channel).await;
+        let id = flow["name"].as_str().unwrap().to_owned();
+        let run = ask(
+            &ada,
+            WorkflowRequest::Run {
+                environment: environment.clone(),
+                flow: id.clone(),
+                trigger: "manual".into(),
+            },
+        )
+        .await;
+        assert_eq!(run, Err(WorkflowFailure::Service(400)));
+        let details = ask(
+            &ada,
+            WorkflowRequest::RunActions {
+                environment: environment.clone(),
+                flow: id.clone(),
+                run: "no-such-run".into(),
+            },
+        )
+        .await;
+        assert_eq!(details, Err(WorkflowFailure::NotFound));
+        let badly_named = ask(
+            &ada,
+            WorkflowRequest::CreateConnection {
+                environment: environment.clone(),
+                connector: "shared_teams".into(),
+                connection: "not a name!".into(),
+            },
+        )
+        .await;
+        assert_eq!(badly_named, Err(WorkflowFailure::Service(400)));
+        ada.stop();
+        server.stop().await;
+    }
+}
