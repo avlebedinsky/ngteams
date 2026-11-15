@@ -40,7 +40,7 @@ const SHORT: std::time::Duration = std::time::Duration::from_secs(30);
 const LONG: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// The chat service's audience, which AMS takes too.
-const IC3: &str = <crate::chatsvc::Ic3 as crate::auth::extract::Audience>::AUDIENCE;
+const IC3: &str = <crate::auth::extract::Ic3 as crate::auth::extract::Audience>::AUDIENCE;
 
 pub(crate) fn router(app: &App) -> Router<Arc<App>> {
     let small = Router::new()
@@ -151,7 +151,8 @@ fn unavailable(error: &dyn std::fmt::Display) -> Response {
     StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
 
-/// The enabled account whose access token for `audience` the request carries.
+/// The enabled account whose access token for `audience` the request carries. A token from before the account's
+/// last password reset is refused as an invalid one, as the push socket refuses it.
 async fn account(app: &App, headers: &HeaderMap, audience: &str) -> Result<User, Error> {
     let token = crate::auth::extract::bearer(headers).ok_or(Error::Unauthorized)?;
     let claims = app
@@ -159,10 +160,15 @@ async fn account(app: &App, headers: &HeaderMap, audience: &str) -> Result<User,
         .verify_access(token, audience)
         .await
         .map_err(|_| Error::Unauthorized)?;
-    users::by_id(&app.db, &claims.oid)
+    let user = users::by_id(&app.db, &claims.oid)
         .await?
         .filter(|user| !user.disabled)
-        .ok_or(Error::Forbidden)
+        .ok_or(Error::Forbidden)?;
+    if user.password_version == claims.pwd_ver {
+        Ok(user)
+    } else {
+        Err(Error::Unauthorized)
+    }
 }
 
 fn quota(app: &App) -> i64 {

@@ -122,13 +122,14 @@ fn the_configuration_refuses_an_origin_clients_would_not_take() {
     }
 }
 
+fn refused(change: fn(&mut Config)) -> ConfigError {
+    let mut config = Config::default();
+    change(&mut config);
+    config.check().unwrap_err()
+}
+
 #[test]
 fn the_configuration_refuses_bad_names_databases_and_lifetimes() {
-    let refused = |change: fn(&mut Config)| {
-        let mut config = Config::default();
-        change(&mut config);
-        config.check().unwrap_err()
-    };
     assert!(matches!(
         refused(|c| c.region = "Bad Region".into()),
         ConfigError::Region
@@ -144,6 +145,10 @@ fn the_configuration_refuses_bad_names_databases_and_lifetimes() {
     ));
     assert!(matches!(refused(|c| c.login.window = 0), ConfigError::Lifetime));
     assert!(matches!(refused(|c| c.trouter.auth_timeout = 0), ConfigError::Lifetime));
+}
+
+#[test]
+fn the_configuration_refuses_media_sizes_and_times_of_zero_but_takes_no_quota() {
     for change in [
         (|c| c.media.max_picture_bytes = 0) as fn(&mut Config),
         |c| c.media.max_file_bytes = 0,

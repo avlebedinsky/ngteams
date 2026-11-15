@@ -319,8 +319,8 @@ public origin is refused.
   from the database once it listens, before each delivery and, on a node without Redis (which the command can't
   reach), every second, also while a replay to a slow reader is under way; it ends when the account is gone,
   disabled or has another password than its token was issued under. An access token names its account's password
-  version (`pwd_ver`, a count of the resets), so a token from before a reset opens no socket either, though it is
-  good elsewhere until it runs out. So nothing posted after the command returned is pushed to the account. The
+  version (`pwd_ver`, a count of the resets), so a token from before a reset opens no socket and no picture, file
+  or preview route either, though it is good elsewhere until it runs out. So nothing posted after the command returned is pushed to the account. The
   client then asks for a new token, which it doesn't get, and is signed out.
 - **Endpoint.** `trouter.connected` names the endpoint, its push URL (`<origin>/trouter/v4/f/<endpoint>/`), the
   `reconnectUrl` on the same origin and `connectparams` valid for seven days. The endpoint id is derived from the
@@ -455,7 +455,9 @@ The client sends a file the way it sends one to OneDrive, and the server keeps o
 
 Download and thumbnail links are `<origin>/sp/download/<item>?tempauth=…` and
 `<origin>/sp/thumbnail/<item>/<size>?tempauth=…`. The `tempauth` is a JWT the server signs for that one item and
-purpose, valid for `media.link_lifetime` seconds. Any node checks it with the shared keys. The link takes no
+purpose, valid for `media.link_lifetime` seconds. Any node checks it with the shared keys. It names the account
+it was handed to and that account's password version, and each use reads the account: a link of an account that
+is disabled, deleted or has had its password reset since answers 401. The link takes no
 token of the account, and the server streams the bytes from the store, so the store's credentials and the
 account's tokens never meet. S3's own presigned URLs aren't handed out: the client takes a file link only on the
 server's origin and follows no redirect.

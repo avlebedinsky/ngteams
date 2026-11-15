@@ -105,6 +105,17 @@ struct LinkClaims {
     iss: String,
     exp: i64,
     sub: String,
+    oid: String,
+    pwd_ver: i64,
+}
+
+/// What a verified link credential names ([`Issuer::verify_link`]).
+#[derive(Debug)]
+pub struct Link {
+    pub subject: String,
+    /// The account the link was handed to, and its password version then.
+    pub oid: String,
+    pub pwd_ver: i64,
 }
 
 /// A requested resource, as a token request's `scope` names it.
@@ -277,28 +288,36 @@ impl Issuer {
     }
 
     /// A short-lived credential for one stored thing (`subject`), carried in a link's query: `audience` says what
-    /// the link is for. Signed like every token, so any node checks a link another node handed out.
+    /// the link is for, and it names the account it is handed to (`holder`) with its password version, as an
+    /// access token does. Signed like every token, so any node checks a link another node handed out.
     ///
     /// # Errors
     /// No signing key, or signing fails.
-    pub fn link(&self, audience: &str, subject: &str, lifetime: Duration) -> Result<String, KeyError> {
+    pub fn link(&self, audience: &str, subject: &str, holder: &User, lifetime: Duration) -> Result<String, KeyError> {
         self.keys.sign(&LinkClaims {
             aud: audience.to_owned(),
             iss: self.iss.clone(),
             exp: now() + crate::db::seconds(lifetime),
             sub: subject.to_owned(),
+            oid: holder.id.clone(),
+            pwd_ver: holder.password_version,
         })
     }
 
-    /// The subject of a link credential for `audience`.
+    /// What a link credential for `audience` names. Whether its holder still is the account it was is the
+    /// caller's check.
     ///
     /// # Errors
     /// [`Invalid`]: not ours, for something else, or expired.
-    pub async fn verify_link(&self, token: &str, audience: &str) -> Result<String, Invalid> {
+    pub async fn verify_link(&self, token: &str, audience: &str) -> Result<Link, Invalid> {
         let mut validation = self.validation(audience);
         validation.leeway = 0;
         let claims: LinkClaims = self.keys.verify(token, &validation).await?;
-        Ok(claims.sub)
+        Ok(Link {
+            subject: claims.sub,
+            oid: claims.oid,
+            pwd_ver: claims.pwd_ver,
+        })
     }
 
     fn validation(&self, audience: &str) -> Validation {

@@ -222,6 +222,59 @@ async fn a_download_link_ends_with_its_lifetime_and_the_engine_asks_for_another(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_disabled_account_and_a_token_from_before_a_password_reset_open_no_media_route_and_no_link() {
+    let trio = Trio::start(Backend::Sqlite).await;
+    let server = &trio.server;
+    let (app, [_, b, _]) = (&server.app, &trio.ids);
+    let share = send_file(&trio, "report.txt", b"0123456789").await;
+    let (id, readers) = item(server, "b@own.test", &share).await;
+    let (_, senders) = item(server, "a@own.test", &share).await;
+    let thumbnail = format!("/sp/thumbnail/{id}/large?tempauth=");
+    let routes = [
+        (
+            "/graph/v1.0/me/drive".to_owned(),
+            token(server, "b@own.test", GRAPH).await,
+        ),
+        (
+            format!("{}/_api/v2.0/drive", site(b)),
+            token(server, "b@own.test", ORIGIN).await,
+        ),
+        (
+            "/ams/v1/objects/0-none-d1-00000000000000000000000000000000".to_owned(),
+            token(server, "b@own.test", IC3).await,
+        ),
+    ];
+    let get = |path: String, token: Option<String>| async move {
+        raw(server, Method::GET, &path, token.as_deref(), &[], None).await.0
+    };
+    let answers = || async {
+        let mut answers = vec![get(readers.clone(), None).await, get(senders.clone(), None).await];
+        for (path, token) in &routes {
+            answers.push(get(path.clone(), Some(token.clone())).await);
+        }
+        answers
+    };
+    assert_eq!(answers().await, [200, 200, 200, 200, 404]);
+
+    ngteams_server::admin::reset_password(&app.db, &*app.fanout, "b@own.test", "another horse battery")
+        .await
+        .unwrap();
+    assert_eq!(answers().await, [401, 200, 401, 401, 401]);
+    let credential = readers.split_once("tempauth=").unwrap().1;
+    assert_ne!(get(format!("{thumbnail}{credential}"), None).await, 200);
+
+    ngteams_server::admin::set_disabled(&app.db, &*app.fanout, "a@own.test", true)
+        .await
+        .unwrap();
+    assert_eq!(get(senders.clone(), None).await, 401);
+    ngteams_server::admin::set_disabled(&app.db, &*app.fanout, "a@own.test", false)
+        .await
+        .unwrap();
+    assert_eq!(get(senders, None).await, 200);
+    trio.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn two_nodes_share_files_pictures_and_link_credentials() {
     for backend in backends() {
         let (first, blobs) = super::server(backend, |_| {}).await;

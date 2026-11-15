@@ -250,6 +250,7 @@ pub(super) mod testing {
             is_admin: false,
             must_change_password: false,
             deleted_at: None,
+            password_version: 0,
         }
     }
 

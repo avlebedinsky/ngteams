@@ -105,8 +105,8 @@ pub(super) async fn shared(app: &App, link: &str) -> Result<repo::Item, Error> {
     repo::item_named(&app.db, &owner, name).await?.ok_or(Error::Missing)
 }
 
-pub(super) fn download_link(app: &App, item: &repo::Item) -> Result<String, Error> {
-    let credential = app.issuer.link(CONTENT_LINK, &item.id, lifetime(app))?;
+pub(super) fn download_link(app: &App, holder: &User, item: &repo::Item) -> Result<String, Error> {
+    let credential = app.issuer.link(CONTENT_LINK, &item.id, holder, lifetime(app))?;
     Ok(format!(
         "{}/sp/download/{}?tempauth={credential}",
         app.config.origin(),
@@ -114,8 +114,8 @@ pub(super) fn download_link(app: &App, item: &repo::Item) -> Result<String, Erro
     ))
 }
 
-pub(super) fn thumbnail_link(app: &App, item: &repo::Item, size: &str) -> Result<String, Error> {
-    let credential = app.issuer.link(THUMBNAIL_LINK, &item.id, lifetime(app))?;
+pub(super) fn thumbnail_link(app: &App, holder: &User, item: &repo::Item, size: &str) -> Result<String, Error> {
+    let credential = app.issuer.link(THUMBNAIL_LINK, &item.id, holder, lifetime(app))?;
     Ok(format!(
         "{}/sp/thumbnail/{}/{size}?tempauth={credential}",
         app.config.origin(),
@@ -337,17 +337,21 @@ async fn invite(app: &App, caller: &User, item: &repo::Item, body: &[u8]) -> Res
     Ok(Json(json!({"value": value})).into_response())
 }
 
-/// The item a link's `tempauth` is the credential for.
+/// The item a link's `tempauth` is the credential for, while the account it was handed to is the one it was.
 async fn linked(app: &App, audience: &str, id: &str, query: &HashMap<String, String>) -> Result<repo::Item, Error> {
     let credential = query.get("tempauth").ok_or(Error::Unauthorized)?;
-    let subject = app
+    let link = app
         .issuer
         .verify_link(credential, audience)
         .await
         .map_err(|_| Error::Unauthorized)?;
-    if subject != id {
+    if link.subject != id {
         return Err(Error::Unauthorized);
     }
+    users::by_id(&app.db, &link.oid)
+        .await?
+        .filter(|holder| !holder.disabled && holder.password_version == link.pwd_ver)
+        .ok_or(Error::Unauthorized)?;
     repo::item(&app.db, id).await?.ok_or(Error::Missing)
 }
 

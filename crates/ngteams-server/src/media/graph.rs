@@ -60,7 +60,7 @@ async fn item(
     let caller = caller(&app, &headers).await?;
     let item = shared(&app, &caller, &share).await?;
     let mut answer = drive::drive_item(&app, &item)?;
-    answer["@microsoft.graph.downloadUrl"] = drive::download_link(&app, &item)?.into();
+    answer["@microsoft.graph.downloadUrl"] = drive::download_link(&app, &caller, &item)?.into();
     Ok(Json(answer))
 }
 
@@ -77,7 +77,8 @@ async fn thumbnails(
     }
     let mut set = json!({"id": "0"});
     for (size, (width, height)) in &made.sizes {
-        set[size] = json!({"url": drive::thumbnail_link(&app, &item, size)?, "width": width, "height": height});
+        set[size] =
+            json!({"url": drive::thumbnail_link(&app, &caller, &item, size)?, "width": width, "height": height});
     }
     Ok(Json(json!({"value": [set]})))
 }
