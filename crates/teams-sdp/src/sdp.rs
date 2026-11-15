@@ -548,6 +548,44 @@ enum Taken {
     GroupSharing,
 }
 
+/// The stream ids a mixer names its lines by (`a=x-source-streamid`): a participant's audio, main video, sharing and
+/// data streams, as the call's roster names them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamIds {
+    pub audio: u32,
+    pub video: u32,
+    pub sharing: u32,
+    pub data: u32,
+}
+
+impl StreamIds {
+    /// The id of the line labelled `label`, if it is one a mixer names.
+    fn of(self, label: &str) -> Option<u32> {
+        match label {
+            "main-audio" => Some(self.audio),
+            "main-video" => Some(self.video),
+            SHARING_LABEL => Some(self.sharing),
+            "data" => Some(self.data),
+            _ => None,
+        }
+    }
+}
+
+/// What only a mixer's session writes ([`NgcSession::mixer`]).
+#[derive(Clone, Copy, Debug)]
+struct MixerSide {
+    /// The data line's stream, drawn once: an answer that names another each time is a changed answer.
+    data_ssrc: u32,
+    ids: Option<StreamIds>,
+}
+
+/// How a session writes: the client's side or a mixer's.
+#[derive(Clone, Copy)]
+struct Writing {
+    role: Role,
+    mixer: Option<MixerSide>,
+}
+
 /// One call's media session as Teams' dialect sees it: the pairs of libwebrtc's and Teams' mids for every m-line and
 /// each line's label, kept for the call's life so that a renegotiation, offered by either side, names the same
 /// lines. On the caller's side our offer numbers the lines; on the callee's side the offer it reads does.
@@ -570,6 +608,8 @@ pub struct NgcSession {
     our_sharing: Option<String>,
     /// A group call's sharing line, by Teams mid: the mixer's (taken as offered) or our group offer's.
     group_sharing: Option<String>,
+    /// A mixer's session: see [`NgcSession::mixer`].
+    mixer: Option<MixerSide>,
 }
 
 /// Which half of an exchange an SDP is.
@@ -584,6 +624,27 @@ impl NgcSession {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A mixer's session (a server's, not the client's): candidates of any type are written as they are (a mixer
+    /// has a reachable address of its own), the data line names one stream for the session's life, and each line names
+    /// the stream id [`NgcSession::set_stream_ids`] gave its kind.
+    #[must_use]
+    pub fn mixer() -> Self {
+        Self {
+            mixer: Some(MixerSide {
+                data_ssrc: fresh_ssrc(),
+                ids: None,
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// The stream ids a mixer's session names its lines by, from its next write on; a client's session names none.
+    pub fn set_stream_ids(&mut self, ids: StreamIds) {
+        if let Some(mixer) = &mut self.mixer {
+            mixer.ids = Some(ids);
+        }
     }
 
     /// Sets which of the video lines offered to us the call takes from the next offer read on
@@ -880,7 +941,7 @@ impl NgcSession {
             names.push(name);
         }
         let parsed = self.directed(parsed, &names, Role::Offer);
-        write(&parsed, &names, Role::Offer)
+        write(&parsed, &names, self.writing(Role::Offer))
     }
 
     /// Forgets the lines an earlier offer of ours added that `parsed` (our new offer) no longer has: that offer was
@@ -1000,7 +1061,14 @@ impl NgcSession {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let parsed = self.directed(parsed, &names, Role::Answer);
-        write(&parsed, &names, Role::Answer)
+        write(&parsed, &names, self.writing(Role::Answer))
+    }
+
+    fn writing(&self, role: Role) -> Writing {
+        Writing {
+            role,
+            mixer: self.mixer,
+        }
     }
 
     /// `parsed` (ours) with each video line going as Teams is to hear it: in an offer, a 1:1 call's main line
@@ -1109,12 +1177,12 @@ fn only_theirs(section: &mut Section) {
 // ---- standard → Teams' dialect ----
 
 /// Writes `parsed` (libwebrtc's) in Teams' dialect, each section named by its entry of `names`.
-fn write(parsed: &Parsed, names: &[Line], role: Role) -> Result<NgcSdp, SdpError> {
+fn write(parsed: &Parsed, names: &[Line], writing: Writing) -> Result<NgcSdp, SdpError> {
     let mut foundations = Vec::new();
     let candidates = parsed
         .media
         .iter()
-        .map(|section| relayed_candidates(section, &mut foundations))
+        .map(|section| relayed_candidates(section, &mut foundations, writing.mixer.is_some()))
         .collect::<Result<Vec<_>, _>>()?;
     // a bundled line carries no candidate of its own: it goes where the first one does, as the web client writes it
     let bundle_default = candidates
@@ -1141,7 +1209,7 @@ fn write(parsed: &Parsed, names: &[Line], role: Role) -> Result<NgcSdp, SdpError
                 candidates: ours.lines,
                 at,
             };
-            write_section(section, name, role, written, &mut out)?;
+            write_section(section, name, writing, written, &mut out)?;
         }
     }
     let mut text = out.join("\r\n");
@@ -1196,8 +1264,8 @@ struct Relayed {
 }
 
 /// Our relayed candidates of a section, rewritten as Teams' candidates (numbered foundations, no related address,
-/// no extension), with the address and port of the first, if it has any.
-fn relayed_candidates(section: &Section, foundations: &mut Vec<String>) -> Result<Relayed, SdpError> {
+/// no extension), with the address and port of the first, if it has any; a mixer's (`any`) of every type, as they are.
+fn relayed_candidates(section: &Section, foundations: &mut Vec<String>, any: bool) -> Result<Relayed, SdpError> {
     let mut written = Vec::new();
     let mut default = None;
     for candidate in section.values("candidate") {
@@ -1216,7 +1284,7 @@ fn relayed_candidates(section: &Section, foundations: &mut Vec<String>) -> Resul
         else {
             return Err(SdpError::Unwritable("a candidate that doesn't read"));
         };
-        if kind != "relay" {
+        if kind != "relay" && !any {
             return Err(SdpError::LocalCandidate(kind.to_owned()));
         }
         if component != "1" {
@@ -1230,9 +1298,11 @@ fn relayed_candidates(section: &Section, foundations: &mut Vec<String>) -> Resul
             .position(|known| known == foundation)
             .unwrap_or_default()
             + 1;
-        written.push(format!(
-            "a=candidate:{number} 1 {transport} {priority} {address} {port} typ relay raddr 0.0.0.0 rport 0"
-        ));
+        written.push(if kind == "relay" {
+            format!("a=candidate:{number} 1 {transport} {priority} {address} {port} typ relay raddr 0.0.0.0 rport 0")
+        } else {
+            format!("a=candidate:{number} 1 {transport} {priority} {address} {port} typ {kind}")
+        });
         default.get_or_insert((address.to_owned(), port.to_owned()));
     }
     Ok(Relayed {
@@ -1244,7 +1314,7 @@ fn relayed_candidates(section: &Section, foundations: &mut Vec<String>) -> Resul
 fn write_section(
     section: &Section,
     name: &Line,
-    role: Role,
+    writing: Writing,
     written: Written,
     out: &mut Vec<String>,
 ) -> Result<(), SdpError> {
@@ -1260,9 +1330,9 @@ fn write_section(
     out.push(format!("m={} {port} RTP/SAVP {formats}", section.kind.ngc()));
     out.push(format!("c=IN {family} {address}"));
     if section.kind == Kind::Data {
-        write_data_payload(out)?;
+        write_data_payload(out, writing.mixer.map(|mixer| mixer.data_ssrc))?;
     } else {
-        write_rtp_payload(section, &port, role, out);
+        write_rtp_payload(section, &port, writing.role, out);
     }
     write_transport(section, name, candidates, out);
     if section.kind == Kind::Data {
@@ -1291,6 +1361,9 @@ fn write_section(
         out.push("a=rtcp-rsize".to_owned());
     }
     out.push(format!("a=label:{}", name.label));
+    if let Some(id) = writing.mixer.and_then(|mixer| mixer.ids?.of(&name.label)) {
+        out.push(format!("a=x-source-streamid:{id}"));
+    }
     if section.kind == Kind::Data {
         out.push(format!(
             "a=sctp-port:{}",
@@ -1394,11 +1467,16 @@ fn names_a_line(value: &str) -> bool {
         .is_some_and(|uri| LINE_NAMING_EXTENSIONS.contains(&uri))
 }
 
-/// The payload lines of a data section, as the web client writes them (an SSRC of its own, drawn at random).
-fn write_data_payload(out: &mut Vec<String>) -> Result<(), SdpError> {
-    let mut bytes = [0; 4];
-    getrandom::fill(&mut bytes).map_err(|error| SdpError::Random(error.to_string()))?;
-    let ssrc = (u32::from_be_bytes(bytes) & 0x7fff_ffff).max(1);
+/// The payload lines of a data section, as the web client writes them: an SSRC of its own, drawn at random unless
+/// the session has one (`kept`, a mixer's).
+fn write_data_payload(out: &mut Vec<String>, kept: Option<u32>) -> Result<(), SdpError> {
+    let ssrc = if let Some(ssrc) = kept {
+        ssrc
+    } else {
+        let mut bytes = [0; 4];
+        getrandom::fill(&mut bytes).map_err(|error| SdpError::Random(error.to_string()))?;
+        (u32::from_be_bytes(bytes) & 0x7fff_ffff).max(1)
+    };
     out.extend([
         "a=x-data-protocol:sctp".to_owned(),
         format!("a=x-ssrc-range:{ssrc}-{ssrc}"),
