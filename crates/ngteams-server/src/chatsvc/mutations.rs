@@ -135,7 +135,6 @@ pub(super) async fn delete(
     })
     .await?;
     let changed = updated(result)?;
-    crate::media::release(&app, &caller.id, &shown.into_inner().unwrap_or_default()).await;
     events::tell(
         &app,
         "MessageUpdate",
@@ -144,5 +143,6 @@ pub(super) async fn delete(
         &changed.told,
     )
     .await;
+    crate::media::release(&app, &caller.id, &shown.into_inner().unwrap_or_default()).await;
     Ok(Json(Value::Null))
 }

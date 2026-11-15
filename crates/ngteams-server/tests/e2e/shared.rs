@@ -8,6 +8,7 @@ use axum::routing::get;
 use bytes::Bytes;
 use ngteams_server::app::App;
 use ngteams_server::auth::extract::Skype;
+use ngteams_server::config::StorageConfig;
 use ngteams_server::fanout::{Fanout, Local, Missed, Redis};
 use ngteams_server::storage::{ObjectStorage, Storage, StorageError};
 
@@ -159,7 +160,8 @@ async fn the_file_store_keeps_replaces_and_removes_by_key() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("file://{}", dir.path().join("objects").display());
     for url in [url.as_str(), "memory:///"] {
-        let storage = ObjectStorage::open(url, &std::collections::BTreeMap::new()).unwrap();
+        let storage =
+            ObjectStorage::open_with(url, &std::collections::BTreeMap::new(), &StorageConfig::default()).unwrap();
         assert_eq!(storage.get("pictures/a.png").await.unwrap(), None);
         storage.put("pictures/a.png", Bytes::from_static(b"one")).await.unwrap();
         storage.put("pictures/a.png", Bytes::from_static(b"two")).await.unwrap();
@@ -175,11 +177,19 @@ async fn the_file_store_keeps_replaces_and_removes_by_key() {
         }
     }
     assert!(matches!(
-        ObjectStorage::open("nonsense", &std::collections::BTreeMap::new()),
+        ObjectStorage::open_with(
+            "nonsense",
+            &std::collections::BTreeMap::new(),
+            &StorageConfig::default()
+        ),
         Err(StorageError::Url(_))
     ));
     assert!(matches!(
-        ObjectStorage::open("gopher://x/y", &std::collections::BTreeMap::new()),
+        ObjectStorage::open_with(
+            "gopher://x/y",
+            &std::collections::BTreeMap::new(),
+            &StorageConfig::default()
+        ),
         Err(StorageError::Url(_))
     ));
 }

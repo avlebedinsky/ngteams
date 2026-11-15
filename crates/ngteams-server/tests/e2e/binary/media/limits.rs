@@ -145,6 +145,13 @@ async fn an_account_at_its_quota_uploads_again_after_it_deleted_what_it_sent() {
             })
             .await;
         }
+        // the picture's bytes leave the store after the delete's answer
+        for _ in 0..500 {
+            if kept(&stage).await == (0, 1) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         assert_eq!(kept(&stage).await, (0, 1), "the picture stayed, or the file went");
         let (src, _) = paste(&a, &stage.cloud, &chat, &small, (8, 8)).await;
         let said = refused(&a, "after.bin", &[7; 3000]).await;

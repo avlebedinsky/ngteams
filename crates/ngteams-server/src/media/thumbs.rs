@@ -74,6 +74,13 @@ pub(super) async fn of(app: &App, item: &repo::Item) -> Result<Made, Error> {
     }
     let note = serde_json::to_vec(&made).unwrap_or_default();
     app.storage.put(&note_key(&item.id), note.into()).await?;
+    // a delete meanwhile cleared keys that weren't there yet
+    if repo::item(&app.db, &item.id).await?.is_none() {
+        for key in keys(&item.id) {
+            super::clear(app.storage.as_ref(), &key).await;
+        }
+        return Err(Error::Missing);
+    }
     Ok(made)
 }
 

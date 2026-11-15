@@ -90,7 +90,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `database_pool` | `16` | Postgres connections per node (SQLite: one) |
 | `redis_url` | none | `redis://…` or `rediss://…`; without it, fan-out and login counters stay in the node |
 | `storage_url`, `storage_options` | `memory:///`, none | where pictures and files live: `s3://<bucket>[/<prefix>]` on any S3-compatible service, or `file:///<dir>` on one node ([Storage](#storage)). `memory:///` forgets everything at exit |
-| `storage.connect_timeout`, `storage.request_timeout` | `3`, `30` | seconds a node waits for a connection to an S3 store, and for one request to it ([Storage](#storage)) |
+| `storage.connect_timeout`, `storage.request_timeout` | `3`, `30` | seconds a node waits for a connection to an S3 store, and for its answer or for a download that stands still ([Storage](#storage)) |
 | `storage.max_retries`, `storage.retry_timeout` | `3`, `8` | how often a request the store didn't answer is sent again, and the seconds after its first attempt past which it isn't |
 | `media.max_picture_bytes` | `25165824` | the largest picture pasted into a message (24 MiB, the most the client reads back) |
 | `media.max_file_bytes` | `262144000` | the largest file sent in a chat (250 MiB, the client's own limit) |
@@ -417,10 +417,12 @@ aborted one stays.
 
 A store out of reach answers the client 503 within seconds: a node waits `storage.connect_timeout` for a
 connection and sends a request again at most `storage.max_retries` times, none later than `storage.retry_timeout`
-after the first attempt. `storage.request_timeout` is for one request: one picture, or one 5 MiB part of a file.
-A file of any size goes in parts, so a slow client doesn't count against it; raise it only when the link between
-the server and its store is slow. `timeout` and `connect_timeout` in `storage_options` take the place of the two
-timeouts. These keys are for S3 stores only.
+after the first attempt. `storage.request_timeout` is the wait for the store's answer to one request (one picture,
+or one 5 MiB part of a file, sent whole first) and the longest a download may then stand still, the store sending
+nothing or the client taking nothing. A file of any size is sent in parts and a download has no total time, so a
+slow client doesn't count against it; raise it only when the link between the server and its store is slow.
+`read_timeout` and `connect_timeout` in `storage_options` take the place of the two timeouts, and `timeout` there
+limits the whole of each request, a download too: none is set by default. These keys are for S3 stores only.
 
 Keys in the bucket: `ams/<object>/<version>` (pictures: each upload of an object's bytes gets a key of its own, and
 the database names the one the object reads from), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails).
@@ -465,8 +467,8 @@ The client sends a file the way it sends one to OneDrive, and the server keeps o
    - `DELETE sites/root/items/<item>/driveItem/permissions/<account id>`: ends one account's access.
    - `GET drive/root:/Microsoft Teams Chat Files:/children`: the drive's files (`value`: the items).
    - `DELETE drive/items/<item>` (the item's `id` or its `sharepointIds.listItemUniqueId`): deletes the file, as
-     Graph and SharePoint delete a drive item. 204; 404 for a file the drive doesn't have. Its bytes and
-     thumbnails leave the store and the owner's quota, and its shares and links end.
+     Graph and SharePoint delete a drive item. 204; 403 on another account's drive; 404 for a file the drive
+     doesn't have. Its bytes and thumbnails leave the store and the owner's quota, and its shares and links end.
 3. A reader reaches the file through Graph, by the sharing link the message carries (the file's `webUrl`):
    `GET /graph/v1.0/shares/u!<link, base64url>/driveItem` (the item with `@microsoft.graph.downloadUrl`) and
    `…/driveItem/thumbnails` (Graph's `small`, `medium` and `large`, 96, 176 and 800 pixels). 403 for an account

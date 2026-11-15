@@ -9,10 +9,13 @@ mod pictures;
 mod previews;
 mod storage;
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ngteams_server::config::Config;
+use ngteams_server::storage::{Blob, Incoming, Storage, StorageError};
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_core::Outbox;
@@ -60,17 +63,106 @@ pub async fn configure_storage(config: &mut Config, dir: &std::path::Path) {
 }
 
 pub async fn server(backend: Backend, configure: impl FnOnce(&mut Config)) -> (TestServer, TempDir) {
+    server_storing(backend, configure, |storage| storage).await
+}
+
+async fn server_storing(
+    backend: Backend,
+    configure: impl FnOnce(&mut Config),
+    store: impl FnOnce(Arc<dyn Storage>) -> Arc<dyn Storage>,
+) -> (TestServer, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut storage = Config::default();
     configure_storage(&mut storage, dir.path()).await;
-    let server = TestServer::start_with(backend, |config| {
+    let configure = |config: &mut Config| {
         config.public_origin = url::Url::parse(ORIGIN).unwrap();
         config.storage_url = storage.storage_url;
         config.storage_options = storage.storage_options;
         configure(config);
-    })
-    .await;
+    };
+    let server = TestServer::start_storing(backend, configure, store).await;
     (server, dir)
+}
+
+/// The server's store with some of its calls held back, and the keys it holds: `held` picks the calls, named
+/// `put <key>` and `delete <key>`, that wait for [`Self::open`].
+#[derive(Debug)]
+pub struct Held {
+    inner: Arc<dyn Storage>,
+    waits: fn(&str) -> bool,
+    gate: tokio::sync::Semaphore,
+    waiting: AtomicUsize,
+    keys: Mutex<BTreeSet<String>>,
+}
+
+impl Held {
+    pub fn new(inner: Arc<dyn Storage>, held: fn(&str) -> bool) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            waits: held,
+            gate: tokio::sync::Semaphore::new(0),
+            waiting: AtomicUsize::new(0),
+            keys: Mutex::new(BTreeSet::new()),
+        })
+    }
+
+    /// Lets every held call go on, now and later.
+    pub fn open(&self) {
+        self.gate.close();
+    }
+
+    pub fn keys(&self) -> Vec<String> {
+        self.keys.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Waits until a call is held.
+    pub async fn waited_on(&self) {
+        while self.waiting.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn pass(&self, call: &str, key: &str) {
+        if (self.waits)(&format!("{call} {key}")) {
+            self.waiting.fetch_add(1, Ordering::SeqCst);
+            let _ = self.gate.acquire().await;
+        }
+    }
+
+    fn keep(&self, key: &str) {
+        self.keys.lock().unwrap().insert(key.to_owned());
+    }
+}
+
+#[async_trait::async_trait]
+impl Storage for Held {
+    async fn put(&self, key: &str, bytes: bytes::Bytes) -> Result<(), StorageError> {
+        self.pass("put", key).await;
+        self.inner.put(key, bytes).await?;
+        self.keep(key);
+        Ok(())
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, StorageError> {
+        self.inner.get(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.pass("delete", key).await;
+        self.inner.delete(key).await?;
+        self.keys.lock().unwrap().remove(key);
+        Ok(())
+    }
+
+    async fn put_stream(&self, key: &str, body: Incoming, limit: u64) -> Result<u64, StorageError> {
+        let size = self.inner.put_stream(key, body, limit).await?;
+        self.keep(key);
+        Ok(size)
+    }
+
+    async fn open(&self, key: &str, range: Option<std::ops::Range<u64>>) -> Result<Option<Blob>, StorageError> {
+        self.inner.open(key, range).await
+    }
 }
 
 /// The transport as the account bring-up builds it: every base from authz's GTMs.
@@ -134,7 +226,31 @@ impl Trio {
     }
 
     pub async fn start_with(backend: Backend, configure: impl FnOnce(&mut Config)) -> Self {
-        let (server, blobs) = server(backend, configure).await;
+        Self::start_storing(backend, configure, |storage| storage).await
+    }
+
+    /// The trio on a store whose `held` calls wait ([`Held`]), and that store.
+    pub async fn start_held(
+        backend: Backend,
+        configure: impl FnOnce(&mut Config),
+        held: fn(&str) -> bool,
+    ) -> (Self, Arc<Held>) {
+        let mut store = None;
+        let trio = Self::start_storing(backend, configure, |inner| {
+            let held = Held::new(inner, held);
+            store = Some(Arc::clone(&held));
+            held
+        })
+        .await;
+        (trio, store.unwrap())
+    }
+
+    async fn start_storing(
+        backend: Backend,
+        configure: impl FnOnce(&mut Config),
+        store: impl FnOnce(Arc<dyn Storage>) -> Arc<dyn Storage>,
+    ) -> Self {
+        let (server, blobs) = server_storing(backend, configure, store).await;
         let ids = [
             server.add_user("a@own.test", "Ada").await,
             server.add_user("b@own.test", "Bert").await,

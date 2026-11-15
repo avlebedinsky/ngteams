@@ -123,15 +123,16 @@ pub struct SetupConfig {
     pub window: u64,
 }
 
-/// How long a node waits for an S3 store (`storage_url`) before it answers 503, in seconds. `timeout` and
+/// How long a node waits for an S3 store (`storage_url`) before it answers 503, in seconds. `read_timeout` and
 /// `connect_timeout` in `storage_options` take the place of the two timeouts here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StorageConfig {
     /// The longest wait for a connection to the store.
     pub connect_timeout: u64,
-    /// The longest one request to the store may take: one picture, or one part (5 MiB) of a file, whatever the
-    /// file's size. Raise it when the link between the server and its store is slow.
+    /// The longest the store may take to answer one request (one picture, or one 5 MiB part of a file, sent
+    /// whole first), and the longest a download may then stand still. A download's whole time has no limit: it
+    /// goes at its reader's pace. Raise it when the link between the server and its store is slow.
     pub request_timeout: u64,
     /// How often a request the store didn't answer, or answered with a server error, is sent again.
     pub max_retries: usize,

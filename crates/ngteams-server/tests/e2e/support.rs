@@ -7,6 +7,7 @@ use ngteams_server::admin::{self, Actor, NewAccount};
 use ngteams_server::app::{self, App};
 use ngteams_server::config::Config;
 use ngteams_server::serve::Listener;
+use ngteams_server::storage::Storage;
 use serde_json::Value;
 use teams_auth::authz::{AuthzClient, Region};
 use teams_auth::refresh::refresh_token_key;
@@ -75,6 +76,15 @@ impl TestServer {
     }
 
     pub async fn start_with(backend: Backend, configure: impl FnOnce(&mut Config)) -> Self {
+        Self::start_storing(backend, configure, |storage| storage).await
+    }
+
+    /// As [`Self::start_with`], keeping its blobs in what `store` makes of the configured store.
+    pub async fn start_storing(
+        backend: Backend,
+        configure: impl FnOnce(&mut Config),
+        store: impl FnOnce(Arc<dyn Storage>) -> Arc<dyn Storage>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let listener = Listener::bind(([127, 0, 0, 1], 0).into()).unwrap();
         let address = listener.local_addr().unwrap();
@@ -86,7 +96,9 @@ impl TestServer {
             ..Config::default()
         };
         configure(&mut config);
-        let app = App::start(config).await.unwrap();
+        let mut app = App::start(config).await.unwrap();
+        let started = Arc::get_mut(&mut app).unwrap();
+        started.storage = store(Arc::clone(&started.storage));
         let router = app::router(Arc::clone(&app));
         let (shutdown, stop) = oneshot::channel::<()>();
         let closing = app::closing(Arc::clone(&app), async move {

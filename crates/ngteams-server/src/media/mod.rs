@@ -184,13 +184,25 @@ const RELEASED: usize = 64;
 
 /// Frees those of `objects` that are `owner`'s pictures and that no message names any more, after a message that
 /// named them was deleted. The delete stands when this fails: the owner, or the operator, can still delete the
-/// object.
-pub(crate) async fn release(app: &App, owner: &str, objects: &[String]) {
+/// object. Their bytes come off the owner's count here and leave the store in a task of its own, so a store out
+/// of reach neither holds the delete's answer back nor loses the clearing to the request's deadline.
+pub(crate) async fn release(app: &Arc<App>, owner: &str, objects: &[String]) {
+    let mut unread = Vec::new();
     for id in objects.iter().take(RELEASED) {
-        if let Err(error) = ams::release(&app.db, app.storage.as_ref(), owner, id).await {
-            tracing::warn!(%error, "a picture no message shows wasn't freed");
+        match ams::release(&app.db, owner, id).await {
+            Ok(key) => unread.extend(key),
+            Err(error) => tracing::warn!(%error, "a picture no message shows wasn't freed"),
         }
     }
+    if unread.is_empty() {
+        return;
+    }
+    let app = Arc::clone(app);
+    tokio::spawn(async move {
+        for key in unread {
+            clear(app.storage.as_ref(), &key).await;
+        }
+    });
 }
 
 /// One thing an account keeps in the store, for the operator's commands.

@@ -3,6 +3,7 @@
 //! uploads and deletes run at once.
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use clap::Parser as _;
 use ngteams_server::cli::{Cli, CliError, run};
@@ -14,6 +15,8 @@ use teams_store::OutboxState;
 
 use super::{IC3, ORIGIN, Trio, cloud, png, raw, token};
 use crate::support::{Backend, TestServer, backends};
+
+const WAIT: Duration = Duration::from_secs(10);
 
 /// a sends a message that shows the picture `object`; the message.
 async fn show(trio: &Trio, object: &str) -> String {
@@ -90,6 +93,89 @@ async fn a_picture_two_messages_show_stays_until_the_last_of_them_is_deleted() {
     assert_eq!(read().await, 404);
     // the object the refused paste made holds nothing; the freed bytes fit a new picture
     trio.a.upload_picture(trio.chat.clone(), picture()).await.unwrap();
+    trio.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_delete_does_not_wait_for_a_store_that_hangs() {
+    let small = png(8, 8);
+    let quota = small.len() as u64;
+    let (trio, store) = Trio::start_held(
+        Backend::Sqlite,
+        |config| config.media.user_quota_bytes = quota,
+        |call| call.starts_with("delete ams/"),
+    )
+    .await;
+    let picture = || PastedPicture {
+        format: PastedFormat::Png,
+        bytes: small.clone(),
+    };
+    let object = trio.a.upload_picture(trio.chat.clone(), picture()).await.unwrap();
+    let message = show(&trio, &object).await;
+
+    tokio::time::timeout(WAIT, delete_message(&trio, message))
+        .await
+        .expect("the delete waited for the store");
+    let ic3 = token(&trio.server, "a@own.test", IC3).await;
+    let view = format!("/ams/v1/objects/{object}/views/imgo");
+    assert_eq!(
+        raw(&trio.server, Method::GET, &view, Some(&ic3), &[], None).await.0,
+        404
+    );
+    tokio::time::timeout(WAIT, store.waited_on())
+        .await
+        .expect("nothing cleared the store");
+    assert_eq!(store.keys().len(), 1);
+    trio.a.upload_picture(trio.chat.clone(), picture()).await.unwrap();
+
+    store.open();
+    let cleared = async {
+        while store.keys().len() > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(WAIT, cleared)
+        .await
+        .expect("the picture's bytes stayed");
+    trio.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_deleted_while_its_thumbnails_are_made_leaves_none() {
+    let (trio, store) = Trio::start_held(
+        Backend::Sqlite,
+        |_| {},
+        |call| call.starts_with("put drive-thumbnails/") && call.ends_with("/made.json"),
+    )
+    .await;
+    let own = token(&trio.server, "a@own.test", ORIGIN).await;
+    let share = super::files::send_file(&trio, "photo.png", &png(40, 30)).await;
+    let listed = format!(
+        "{}/drive/root:/Microsoft%20Teams%20Chat%20Files:/children",
+        drive(&trio)
+    );
+    let (_, _, body) = raw(&trio.server, Method::GET, &listed, Some(&own), &[], None).await;
+    let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let file = format!(
+        "{}/drive/items/{}",
+        drive(&trio),
+        listed["value"][0]["id"].as_str().unwrap()
+    );
+
+    let deleting = async {
+        store.waited_on().await;
+        let status = delete(&trio, &own, &file).await;
+        store.open();
+        status
+    };
+    let both = async { tokio::join!(trio.b.file_thumbnail(share), deleting) };
+    let (thumbnail, status) = tokio::time::timeout(WAIT, both).await.unwrap();
+    assert_eq!(status, 204);
+    assert!(
+        !matches!(thumbnail, Ok(Some(_))),
+        "a deleted file's thumbnail was served"
+    );
+    assert_eq!(store.keys(), Vec::<String>::new());
     trio.stop().await;
 }
 
@@ -237,6 +323,16 @@ async fn the_operator_lists_and_deletes_what_an_account_keeps() {
         let other = cli(&trio.server, &["media", "delete", "b@own.test", photo]).await;
         assert!(matches!(other, Err(CliError::NotStored(_))), "{other:?}");
         assert_eq!(put(&trio, &own, "one-more.bin", 1).await.0, 507);
+
+        let unknown = cli(&trio.server, &["media", "delete", "a@own.test", "no-such-id", photo]).await;
+        assert!(
+            matches!(&unknown, Err(CliError::NotStored(id)) if id == "no-such-id"),
+            "{unknown:?}"
+        );
+        assert_eq!(
+            cli(&trio.server, &["media", "list", "a@own.test"]).await.unwrap(),
+            listed
+        );
 
         let deleted = cli(&trio.server, &["media", "delete", "a@own.test", photo, &object, &file]).await;
         assert_eq!(deleted.unwrap().lines().count(), 3);

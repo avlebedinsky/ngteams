@@ -12,8 +12,8 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::path::Path;
 use object_store::{
-    ClientConfigKey, GetOptions, GetRange, ObjectStore, ObjectStoreExt as _, ObjectStoreScheme, PutPayload,
-    RetryConfig, WriteMultipart,
+    ClientConfigKey, ClientOptions, GetOptions, GetRange, ObjectStore, ObjectStoreExt as _, ObjectStoreScheme,
+    PutPayload, RetryConfig, WriteMultipart,
 };
 use url::Url;
 
@@ -83,17 +83,6 @@ pub struct ObjectStorage {
 }
 
 impl ObjectStorage {
-    /// [`Self::open_with`] the default waits.
-    ///
-    /// # Errors
-    /// As [`Self::open_with`].
-    pub fn open<'a>(
-        url: &str,
-        options: impl IntoIterator<Item = (&'a String, &'a String)>,
-    ) -> Result<Self, StorageError> {
-        Self::open_with(url, options, &StorageConfig::default())
-    }
-
     /// The store `url` names, with `options` (S3's region, endpoint and keys, as `object_store` names them) and,
     /// for S3, the waits and retries of `client`: a store out of reach is given up on in seconds, where
     /// `object_store`'s own ten retries take much longer. A `file://` directory is made when missing.
@@ -136,14 +125,17 @@ impl ObjectStorage {
 }
 
 /// The S3 store at `url` as `object_store` builds it from `options`, with `client`'s waits unless an option sets
-/// its own, and `client`'s retries.
+/// its own, and `client`'s retries. No request has a total time: a download goes at its reader's pace, so only
+/// the time it stands still is bounded.
 fn s3(url: &Url, options: impl Iterator<Item = (String, String)>, client: &StorageConfig) -> AmazonS3Builder {
     let waits = [
         (ClientConfigKey::ConnectTimeout, client.connect_timeout),
-        (ClientConfigKey::Timeout, client.request_timeout),
+        (ClientConfigKey::ReadTimeout, client.request_timeout),
     ];
     let builder = waits.into_iter().fold(
-        AmazonS3Builder::new().with_url(url.as_str()),
+        AmazonS3Builder::new()
+            .with_url(url.as_str())
+            .with_client_options(ClientOptions::new().with_timeout_disabled()),
         |builder, (key, seconds)| builder.with_config(AmazonS3ConfigKey::Client(key), format!("{seconds}s")),
     );
     options
@@ -239,7 +231,6 @@ mod tests {
             ("aws_access_key_id", "none".to_owned()),
             ("aws_secret_access_key", "none".to_owned()),
             ("aws_allow_http", "true".to_owned()),
-            ("timeout", "45s".to_owned()),
             ("not an option", "left out".to_owned()),
         ]
         .into_iter()
@@ -257,11 +248,65 @@ mod tests {
         let built = s3(&url, options(9).into_iter(), &client);
         let wait = |key| built.get_config_value(&AmazonS3ConfigKey::Client(key));
         assert_eq!(wait(ClientConfigKey::ConnectTimeout).as_deref(), Some("2s"));
-        assert_eq!(wait(ClientConfigKey::Timeout).as_deref(), Some("45s"));
+        assert_eq!(wait(ClientConfigKey::ReadTimeout).as_deref(), Some("30s"));
+        assert_eq!(wait(ClientConfigKey::Timeout), None);
+        let own = [("read_timeout", "45s"), ("timeout", "600s")].map(|(key, value)| (key.to_owned(), value.to_owned()));
+        let built = s3(&url, options(9).into_iter().chain(own), &client);
+        let wait = |key| built.get_config_value(&AmazonS3ConfigKey::Client(key));
+        assert_eq!(wait(ClientConfigKey::ReadTimeout).as_deref(), Some("45s"));
+        assert_eq!(wait(ClientConfigKey::Timeout).as_deref(), Some("600s"));
         assert!(matches!(
             ObjectStorage::open_with("s3://", &BTreeMap::new(), &client),
             Err(StorageError::Url(_))
         ));
+    }
+
+    /// Answers the request `peer` sends with `size` zero bytes.
+    fn answer(mut peer: std::net::TcpStream, size: usize) {
+        use std::io::{Read as _, Write as _};
+        let (mut asked, mut byte) = (Vec::new(), [0]);
+        while !asked.ends_with(b"\r\n\r\n") && peer.read(&mut byte).unwrap_or(0) == 1 {
+            asked.push(byte[0]);
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {size}\r\netag: \"one\"\r\n\
+             last-modified: Thu, 01 Jan 2026 00:00:00 GMT\r\n\r\n"
+        );
+        let _ = peer.write_all(head.as_bytes());
+        let _ = peer.write_all(&vec![0; size]);
+    }
+
+    /// An S3 endpoint that answers every request with `size` zero bytes; its port.
+    fn serving(size: usize) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for peer in listener.incoming().flatten() {
+                std::thread::spawn(move || answer(peer, size));
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_download_read_for_longer_than_the_request_timeout_arrives_whole() {
+        const SIZE: usize = 32 << 20;
+        let client = StorageConfig {
+            request_timeout: 1,
+            retry_timeout: 1,
+            ..StorageConfig::default()
+        };
+        let store = ObjectStorage::open_with("s3://bucket/prefix", &options(serving(SIZE)), &client).unwrap();
+        let mut blob = store.open("a/b", None).await.unwrap().unwrap();
+        let (mut read, mut pauses) = (0, 0);
+        while let Some(bytes) = blob.bytes.next().await {
+            read += bytes.unwrap().len();
+            if pauses < 8 {
+                pauses += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+        assert_eq!(read, SIZE);
     }
 
     #[tokio::test]
@@ -269,7 +314,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let store = ObjectStorage::open("s3://bucket/prefix", &options(port)).unwrap();
+        let store = ObjectStorage::open_with("s3://bucket/prefix", &options(port), &StorageConfig::default()).unwrap();
         let asked = Instant::now();
         let stored = store.put("a/b", Bytes::from_static(b"bytes")).await;
         assert!(matches!(stored, Err(StorageError::Store(_))), "{stored:?}");

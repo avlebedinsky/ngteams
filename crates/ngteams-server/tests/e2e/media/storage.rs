@@ -42,7 +42,7 @@ mod tests {
         let mut config = Config::default();
         super::super::configure_storage(&mut config, dir.path()).await;
         (
-            ObjectStorage::open(&config.storage_url, &config.storage_options).unwrap(),
+            ObjectStorage::open_with(&config.storage_url, &config.storage_options, &config.storage).unwrap(),
             dir,
         )
     }

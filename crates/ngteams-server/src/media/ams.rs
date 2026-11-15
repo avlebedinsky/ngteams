@@ -169,15 +169,18 @@ pub(super) async fn remove(db: &Db, storage: &dyn Storage, owner: &str, id: &str
     Ok(true)
 }
 
-/// Removes `owner`'s picture when no message of the chats it was made for names it any more.
-pub(super) async fn release(db: &Db, storage: &dyn Storage, owner: &str, id: &str) -> Result<(), DbError> {
+/// Removes `owner`'s picture when no message of the chats it was made for names it any more: the key of its
+/// bytes, for the caller to clear. A message posted between the check and the removal isn't seen and shows the
+/// picture missing; the client makes a new object for each picture it sends, so only a hand-made repost meets it.
+pub(super) async fn release(db: &Db, owner: &str, id: &str) -> Result<Option<String>, DbError> {
     let theirs = repo::object(db, id)
         .await?
         .is_some_and(|object| object.owner_id == owner);
-    if theirs && !repo::shown(db, id).await? {
-        remove(db, storage, owner, id).await?;
+    if !theirs || repo::shown(db, id).await? {
+        return Ok(None);
     }
-    Ok(())
+    let blob = repo::remove_object(db, owner, id).await?.flatten();
+    Ok(blob.map(|blob| key(id, &blob)))
 }
 
 /// The media type of a picture's bytes, by their signature: the formats the client shows.
