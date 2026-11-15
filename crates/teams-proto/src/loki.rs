@@ -3,8 +3,8 @@
 //! [`LOKI_AUDIENCE`] and the headers the service wants of a Teams client (the transport adds them).
 //!
 //! - [`LokiConfiguration`], on the fixed global base ([`Service::LokiGlobal`]), names the account's regional base
-//!   (`LokiUrl`, `https://<region>.loki.delve.office.com/`), which the transport takes once at run time
-//!   (`HttpTransport::set_loki_region`). The global host refuses every other path.
+//!   (`LokiUrl`, `https://<region>.loki.delve.office.com/`, or `/loki/` on an own server's origin), which the transport
+//!   takes once at run time (`HttpTransport::set_loki_region`). The global host refuses every other path.
 //! - On the regional base ([`Service::Loki`]), with the query
 //!   `teamsMri=8:orgid:<oid>&aadObjectId=<oid>&personaType=User`: a person's names and addresses ([`LokiPerson`]), their organization ([`LokiOrganization`]), who they work with
 //!   ([`LokiWorkingWith`]), their schedule ([`LokiSchedule`]) and whether their automatic replies are on
@@ -78,13 +78,20 @@ pub(crate) fn parse_regional_base(base: &str) -> Option<Url> {
 pub struct LokiConfiguration;
 
 impl LokiConfiguration {
-    /// The regional base the answer names (`LokiUrl`), when it is one the transport takes
+    /// The regional base the answer names (`LokiUrl`), when it is one a Microsoft-cloud transport takes
     /// (`https://<region>.loki.delve.office.com/`); `None` for any other answer.
     #[must_use]
     pub fn read_answer(body: &[u8]) -> Option<String> {
+        Self::read_answer_in(&crate::Cloud::Microsoft, body)
+    }
+
+    /// The regional base the answer names (`LokiUrl`), when it is one the account's cloud takes
+    /// (`HttpTransport::set_loki_region`): on an own server, `/loki/` on its origin.
+    #[must_use]
+    pub fn read_answer_in(cloud: &crate::Cloud, body: &[u8]) -> Option<String> {
         let answer: Value = serde_json::from_slice(body).ok()?;
         let base = answer.get("LokiUrl")?.as_str()?;
-        parse_regional_base(base).map(|_| base.to_owned())
+        crate::http::loki_base(cloud, base).map(|_| base.to_owned())
     }
 }
 
@@ -564,6 +571,37 @@ mod tests {
         assert_eq!(minutes(serde_json::json!(48)), None);
         assert_eq!(minutes(serde_json::json!("3")), None);
         assert_eq!(offset_minutes(None), None);
+    }
+
+    #[test]
+    fn an_own_servers_configuration_names_loki_on_its_own_origin_only() {
+        let own = crate::Cloud::own("https://chat.example:8443").unwrap();
+        let answer = |base: &str| serde_json::to_vec(&serde_json::json!({ "LokiUrl": base })).unwrap();
+        let read = |cloud: &crate::Cloud, base: &str| LokiConfiguration::read_answer_in(cloud, &answer(base));
+        let own_base = "https://chat.example:8443/loki/";
+        assert_eq!(read(&own, own_base).as_deref(), Some(own_base));
+        assert_eq!(
+            read(&own, "https://chat.example:8443/loki").as_deref(),
+            Some("https://chat.example:8443/loki")
+        );
+        for refused in [
+            "https://nam.loki.delve.office.com/",
+            "https://chat.example/loki/",
+            "https://other.example:8443/loki/",
+            "http://chat.example:8443/loki/",
+            "https://chat.example:8443/",
+            "https://chat.example:8443/loki/x",
+            "https://chat.example:8443/loki/?a=b",
+        ] {
+            assert_eq!(read(&own, refused), None, "{refused}");
+        }
+        // a Microsoft account reads only Microsoft's regional hosts, as before
+        let microsoft = crate::Cloud::Microsoft;
+        assert_eq!(read(&microsoft, own_base), None);
+        let region = "https://nam.loki.delve.office.com/";
+        assert_eq!(read(&microsoft, region).as_deref(), Some(region));
+        assert_eq!(LokiConfiguration::read_answer(&answer(region)).as_deref(), Some(region));
+        assert_eq!(LokiConfiguration::read_answer(&answer(own_base)), None);
     }
 
     #[test]

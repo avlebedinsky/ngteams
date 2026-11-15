@@ -9,6 +9,7 @@ use bytes::Bytes;
 use ngteams_server::people::{self, Profile};
 use serde_json::{Value, json};
 use teams_core::Availability;
+use teams_core::CardPerson;
 use teams_core::engine::{Action, Event, OwnStatus};
 use teams_proto::{
     Client, GRAPH_AUDIENCE, GraphPicture, GraphUser, LOKI_AUDIENCE, LokiConfiguration, LokiOrganization,
@@ -473,9 +474,23 @@ async fn profile_told(seat: &mut Seat, mri: &str) {
 async fn an_engine_names_and_draws_a_colleague_and_reads_their_card() {
     for backend in backends() {
         let office = Office::open(backend).await;
+        // a longer line for the card: Bert → Cora → Eve, and Finn reports to Bert
+        let eve = office.server.add_user("eve@own.test", "Eve Director").await;
+        let finn = office.server.add_user("finn@own.test", "Finn Junior").await;
+        for (id, manager) in [(&office.c, &eve), (&finn, &office.b)] {
+            let profile = Profile {
+                user_id: id.clone(),
+                manager_id: Some(manager.clone()),
+                ..Profile::default()
+            };
+            people::repo::put_profile(&office.server.app.db, &profile)
+                .await
+                .unwrap();
+        }
         let mut ada = Seat::start(&office.server, &office.server, "ada@own.test", &office.a).await;
         let bert = Seat::start(&office.server, &office.server, "bert@own.test", &office.b).await;
         bert.report(OwnStatus::Available).await;
+        group(&ada, [&office.b, &office.d], "Launch").await;
 
         // the name and the picture come from the server's Graph
         let asked = ada.engine.person(bert.mri.clone()).await.unwrap();
@@ -494,6 +509,36 @@ async fn an_engine_names_and_draws_a_colleague_and_reads_their_card() {
         let presence = card.presence.unwrap();
         assert_eq!(presence.availability, Availability::Available);
         assert_eq!(card.out_of_office, Some(false));
+
+        // Loki's sections, on the regional base the server's configuration names
+        let named = |people: &[CardPerson]| {
+            people
+                .iter()
+                .map(|person| (person.mri.clone(), person.name.clone(), person.email.clone()))
+                .collect::<Vec<_>>()
+        };
+        let card_person =
+            |id: &String, name: &str, email: &str| (mri(id), Some(name.to_owned()), Some(email.to_owned()));
+        let organization = card.organization.expect("the card has no organization");
+        assert_eq!(
+            named(&organization.managers),
+            [
+                card_person(&office.c, "Cora Chief", "cora@own.test"),
+                card_person(&eve, "Eve Director", "eve@own.test"),
+            ]
+        );
+        assert_eq!(
+            named(&organization.directs),
+            [card_person(&finn, "Finn Junior", "finn@own.test")]
+        );
+        let working_with = card.working_with.expect("the card has no working-with");
+        assert_eq!(
+            named(&working_with),
+            [card_person(&office.d, "Dan Fourth", "dan@own.test")]
+        );
+        assert_eq!(card.given_name.as_deref(), Some("Bert"));
+        assert_eq!(card.emails, ["bert@own.test"]);
+        assert!(card.schedule.is_some(), "the card has no schedule");
         ada.engine.shutdown();
         bert.engine.shutdown();
         office.server.stop().await;

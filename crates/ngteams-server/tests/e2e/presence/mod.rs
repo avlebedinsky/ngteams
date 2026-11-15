@@ -60,7 +60,8 @@ impl Seat {
     /// `upn`'s client, its requests through `http` and its push socket on `socket`.
     pub(crate) async fn start(http: &TestServer, socket: &TestServer, upn: &str, id: &str) -> Self {
         let session = Arc::new(http.session(upn).await);
-        let client = Arc::new(Client::new(transport(&session, http, id).await));
+        // the reads carry Loki, as the app's account does
+        let client = Arc::new(Client::new(transport(&session, http, id).await.with_loki()));
         let writes = Arc::new(transport(&session, http, id).await);
         let trouter = Trouter::with_mock_origin(
             Arc::clone(&writes),

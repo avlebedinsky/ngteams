@@ -690,7 +690,7 @@ impl<C: Credentials> HttpTransport<C> {
     }
 
     /// Sets the account's Loki regional base, as its configuration's `LokiUrl` names it
-    /// ([`crate::LokiConfiguration::read_answer`]): `https://<one label>.loki.delve.office.com/` exactly (the label
+    /// ([`crate::LokiConfiguration::read_answer_in`]): `https://<one label>.loki.delve.office.com/` exactly (the label
     /// lowercase letters, digits and inner `-`; the trailing slash optional), no port, user info, path, query or
     /// fragment. For an own-server cloud, the base is `/loki/` on the account's HTTPS origin, including its TLS port.
     /// Taken once: setting the same base again is `Ok`, another one is refused and the first kept.
@@ -700,14 +700,7 @@ impl<C: Credentials> HttpTransport<C> {
     /// Loki.
     pub fn set_loki_region(&self, base: &str) -> Result<(), BuildError> {
         let slot = self.loki.as_ref().ok_or(BuildError::LokiBase)?;
-        let url = cloud_base(
-            &self.cloud,
-            base,
-            parse_regional_base,
-            "/loki",
-            "https://region.loki.delve.office.com",
-        )
-        .ok_or(BuildError::LokiBase)?;
+        let url = loki_base(&self.cloud, base).ok_or(BuildError::LokiBase)?;
         let set = slot.get_or_init(|| url.clone());
         if *set == url { Ok(()) } else { Err(BuildError::LokiBase) }
     }
@@ -1953,6 +1946,18 @@ fn cloud_base(
     let projected = cloud.project(&url, prefix, microsoft)?;
     parse(projected.as_str())?;
     Some(url)
+}
+
+/// The Loki regional base `base` names in `cloud`: `https://<region>.loki.delve.office.com/` for Microsoft, `/loki/` on
+/// the account's origin for an own server.
+pub(crate) fn loki_base(cloud: &Cloud, base: &str) -> Option<Url> {
+    cloud_base(
+        cloud,
+        base,
+        parse_regional_base,
+        "/loki",
+        "https://region.loki.delve.office.com",
+    )
 }
 
 /// The AMS base, if `base` is one [`HttpTransport::with_ams`] accepts.

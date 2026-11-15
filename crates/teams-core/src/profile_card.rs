@@ -235,7 +235,7 @@ async fn configure<C: Credentials>(client: &Client<HttpTransport<C>>, configured
             let answer = client.read(&LokiConfiguration).await.map_err(|error| {
                 log::info!("Loki's configuration couldn't be read: {error}");
             })?;
-            let base = LokiConfiguration::read_answer(answer.body()).ok_or_else(|| {
+            let base = LokiConfiguration::read_answer_in(transport.cloud(), answer.body()).ok_or_else(|| {
                 log::info!("Loki's configuration names no regional base the transport takes");
             })?;
             transport.set_loki_region(&base).map_err(|error| {
