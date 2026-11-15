@@ -8,9 +8,10 @@ What it serves today: sign-in (the token endpoint), authz, the chat service, tea
 tier's and the provisioning service's team routes), pictures in messages, files sent in chats, link previews, the
 calendar and meetings' scheduling (the middle tier's calendar routes), presence, people (short profiles, Graph's users
 and pictures, the person card), account administration (the admin API and the first-admin setup), the registrar and
-the Trouter push socket, and 1:1 calls (the call controller behind `/flightproxy/api/v2/` and the TURN credentials).
-The registrar, Trouter and the calling surface have no GTM (the client finds them on the origin). Other services are
-added one at a time. Authz names only the services the server serves, so the client keeps every other service off.
+the Trouter push socket, and calls (the call controller behind `/flightproxy/api/v2/`: 1:1 calls, a group chat's
+calls' signaling, and the TURN credentials). The registrar, Trouter and the calling surface have no GTM (the client
+finds them on the origin). Other services are added one at a time. Authz names only the services the server serves,
+so the client keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
 reactions, transient typing, account preferences and message pages (newest, backward, incremental and around a
@@ -654,8 +655,8 @@ callee's answer in the caller's acceptance; `ngteams` takes an own-server accoun
   with its links (`leave`, `updateEndpointState`, `updateEndpointMetadata`, `updateParticipantProperties`,
   `notificationLinks`). The callee's registered calling endpoints (the `SkypeSpaces` stack's Trouter sockets, on
   any node) get the invitation at their root: `{"evt": 107, "gp": <base64 JSON>}` with the caller, the leg's
-  `attach`, `progress` and `reject` links and the caller's offer. A group call's, a meeting's and the test call's
-  start is answered `501`: they need the call's mixer.
+  `attach`, `progress` and `reject` links and the caller's offer. A group chat's call is [below](#group-calls); a
+  meeting's and the test call's start is answered `501`.
 - **While it rings**: `attach` (answered with the leg's `progress`, `acceptance` and `callLeg` links and the
   conversation's), `progress`, `accept` (answered with the call leg's links and the keep-alive interval), `reject`.
   An answer delivers the acceptance, with the callee's answer, at the caller's `acceptance` callback; the callee's
@@ -688,8 +689,50 @@ callee's answer in the caller's acceptance; `ngteams` takes an own-server accoun
   its start, and its end listing who was in it and for how long. An end with the caller alone is a missed call
   (unanswered, declined or cancelled).
 
-Not served yet: group calls and meetings, the test call, transfer, voicemail, adding someone to a call, the call
-log stream (`48:calllogs`) and a missed call's activity item.
+### Group calls
+
+A start naming a group chat (`groupChat.threadId`) is a group call. Its media goes through a media node, which
+signaling reaches through `calling::MediaNodes`: the node makes a leg per party (with the party's offer it answers;
+without, it offers), takes a callee's answer and a renegotiation, and drops legs and rooms. No node is part of the
+server yet, so **a group start is answered `501`** until one is installed (`App::mixers`); the e2e tests install one
+that answers fixed SDP. Each operation asks the node first (a leg's requests repeat safely by its id) and then makes
+the step that records what the node answered; a join or an add first reserves its seat, so the source ids the node
+gets are the ones the roster names.
+
+- **The start**: the caller must be in the chat (`403`), and only the chat's members it names ring, once each; a
+  chat that doesn't exist is `404`. The caller is in the call at once: its acceptance, with the node's answer to its
+  offer, comes at its `acceptance` callback, and its first roster at its `rosterUpdate`. Each callee's calling
+  endpoints get `{"evt": 109, "gp": …}` with the node's offer to its own leg (`fromMixer`, `mediaLegId`,
+  `conversationType: "groupCall"`, the chat in `groupChat`, `isMultiParty`). The chat gets `callStarted` naming the
+  call's conversation (`<conversationUrl>`), which is how a member who wasn't rung finds it. A start in a chat whose
+  call still runs is answered with a conversation that never runs and ended at once at its `conversationEnd`
+  callback with `409` / `5704`, naming the running call (one call per chat is a unique index, so two starts can't
+  both win).
+- **Each party alone**: a callee's `accept` gives its answer to its leg and takes it into the call (its other
+  endpoints stop ringing, `487`); a decline or a ring that runs out (`calling.ring_timeout`, per callee) ends only
+  that party's ring and drops its leg; a `leave` takes one party out (its roster entry `inactive`) and drops its
+  leg, and the last one out ends the call: the rings still going end, the room is dropped, and the chat gets
+  `callEnded` listing everyone who was in it. A leave from an endpoint whose answer lost changes nothing.
+- **Joining and following**: a chat member's `POST conv/<id>` with a `callInvitation` and its offer joins the
+  call: its acceptance, with the node's answer, comes at its own `acceptance` callback. Without one, a member follows
+  the roster (the whole roster now, its changes after); a party hands out more callbacks. Anyone not in the chat
+  gets `404`.
+- **Add** (`conv/<id>/add`, the conversation's `addParticipantAndModality` link): a party in the call rings a member
+  of the chat with the node's offer to a new leg; someone with no calling endpoint isn't brought in, and the adder
+  is told at its `addParticipantFailure` callback (`580` / `5205`); someone not in the chat is `403`.
+- **Renegotiation** goes to the node, and its answer back to the party alone, at its `mediaAnswer` callback; the next
+  one waits for that answer's acknowledgement (`491` at its `rejection` callback). `updateMediaDescriptions` and
+  `applyChannelParameters` are taken and change nothing. A group call has no hold (`403`, and no `hold` link).
+- **The roster** lists each party in the call with its main audio and main video (only taken, until the node
+  forwards video) by the source ids signaling gave it (1000, 1010, … per party). Each change goes to every party in
+  the call, every ringing party's ring subscription and every follower; a party that comes in gets the whole roster.
+  Each calling endpoint of the others also gets `{"evt": 115 | 116, "cp": base64(gzip(JSON))}` when someone comes in
+  or leaves; the client reads neither, and the shape is the protocol notes' minimum.
+- **Seats**: a group call's controller links carry the party's seat where a 1:1 call's carry `1`; a link naming
+  another party's seat is `404`.
+
+Not served yet: meetings, the test call, group video and sharing (the node takes audio only), transfer, voicemail,
+the call log stream (`48:calllogs`) and a missed call's activity item.
 
 ### The TURN relay (coturn)
 
@@ -1001,6 +1044,8 @@ the 1:1 chat and its history stay its two people's.
   otherwise it reads again. What the step tells a party is published on `call:<endpoint>`, and the node that holds
   that calling endpoint's socket delivers it. Every node looks twice a second for calls that are due (a ring's end,
   a call whose keep-alives stopped, an ended call's row five minutes later); the version check lets one of them act.
+  A group call's row also names its media node's room, so any node reaches it; a step that lets a leg or the room go
+  drops it on the node once the step is stored.
 - Migrations take a Postgres advisory lock, so nodes starting together take turns.
 
 ## The client
