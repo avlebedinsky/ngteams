@@ -244,7 +244,7 @@ pub(super) fn occurrence_id(series: &str, start: i64) -> String {
 
 /// The answer's envelope around its events.
 pub(super) fn events(events: Vec<Value>) -> Value {
-    json!({"type": EVENT_TYPE, "value": events})
+    json!({"type": EVENT_TYPE, "value": Value::Array(events)})
 }
 
 /// A time as the service writes an event's: UTC, seven fraction digits.

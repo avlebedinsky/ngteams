@@ -315,6 +315,13 @@ and a team's tags. Not served: the `updates` read, CSA's posts reads, pins and t
 | `GET` | `beta/contactsv3/` `?pageSize`, `beta/teams/suggested`, `beta/atpsafelinks/getpolicy/`, `beta/tenant/privacyProfile`, `beta/users/<id>/tenant/<guid>/user/<guid>` | contacts, suggested teams, the safe-links policy, the tenant's privacy profile, a cross-tenant user | not used | this file | seen, not reviewed |
 | `GET` | `beta/channels/<channel>/tabs`, `beta/chats/<chat>/apps/chatentitlements` (under `api/mt/…` and `api/apps/…`) | a channel's tabs and a chat's apps | Middle-tier typed read (`TeamApps`, `AppDefinitions`) where implemented; no app-service transport | this file | seen, not reviewed (`ab-chat`) |
 
+Own server ([server.md](../server.md#the-calendar-and-meetings)): serves the calendar rows of this table: the
+calendar view, an event's creation, read, change, cancellation, answer and delete, a series by its occurrences,
+the online meeting's creation and Meet now, the time zone's name, both Scheduler reads, a channel's meeting on its
+team's calendar (create, read, change, cancel), the meeting options' read and save, and the room finder's reads
+(the rooms of its configuration). It serves no `masterCategories` and no online meeting's delete. An attendee is
+an account of the server; it sends no mail.
+
 ## Registrar (`https://<teams origin>/registrar/prod/V2/`)
 
 | Method | Path | What it does | Native | Notes · task | Evidence |

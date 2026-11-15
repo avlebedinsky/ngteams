@@ -1,5 +1,7 @@
 use teams_core::EventWrite;
-use teams_proto::{EventKind, EventResponse, EventTime, Recurrence, RecurrencePattern, ShowAs, Weekday, ZonedTime};
+use teams_proto::{
+    CalendarEvent, EventKind, EventResponse, EventTime, Recurrence, RecurrencePattern, ShowAs, Weekday, ZonedTime,
+};
 
 use super::{DAY, HOUR, MINUTE, MONDAY, Seat, draft, server, week};
 use crate::support::backends;
@@ -143,119 +145,124 @@ pub(crate) fn weekly(days: &[Weekday], last_day_ms: Option<i64>) -> Recurrence {
     }
 }
 
+const STANDUP: i64 = MONDAY + 10 * HOUR;
+
+fn standup() -> teams_proto::EventDraft {
+    let mut standup = draft("Standup", STANDUP, 15);
+    standup.recurrence = Some(weekly(&[Weekday::Monday, Weekday::Wednesday], Some(MONDAY + 16 * DAY)));
+    standup
+}
+
+async fn change(seat: &Seat, id: &str, draft: teams_proto::EventDraft) {
+    let whole = seat.engine.calendar_event(id.to_owned()).await.unwrap();
+    seat.engine
+        .write_event(EventWrite::Update {
+            id: id.to_owned(),
+            event: whole.raw,
+            draft,
+        })
+        .await
+        .unwrap();
+}
+
+/// The series' week as its occurrences, each read whole as the calendar lists it.
+async fn occurrences_of(ada: &Seat, master: &CalendarEvent) -> Vec<CalendarEvent> {
+    let events = week(ada).await;
+    assert_eq!(events.len(), 2, "{events:?}");
+    for (event, day) in events.iter().zip([0, 2]) {
+        assert_eq!(event.kind, EventKind::Occurrence);
+        assert_eq!(event.series_master_id.as_deref(), Some(master.id.as_str()));
+        assert_eq!(event.start, EventTime::Instant(STANDUP + day * DAY));
+        assert_eq!(event.subject, "Standup");
+    }
+    assert_ne!(events[0].id, events[1].id);
+    read_whole(ada, master, &events).await;
+    events
+}
+
+async fn read_whole(ada: &Seat, master: &CalendarEvent, events: &[CalendarEvent]) {
+    // it ends on its last day: three weeks of two
+    let all = ada.engine.calendar(MONDAY - 7 * DAY, MONDAY + 35 * DAY).await.unwrap();
+    assert_eq!(all.len(), 6, "{all:?}");
+    let whole = ada.engine.calendar_event(master.id.clone()).await.unwrap();
+    assert_eq!(whole.event.kind, EventKind::RecurringMaster);
+    assert_eq!(whole.recurrence, standup().recurrence);
+    let wednesday = ada.engine.calendar_event(events[1].id.clone()).await.unwrap();
+    assert_eq!(wednesday.event, events[1]);
+}
+
+/// One occurrence moved and renamed is an exception of its series, under the same id; the series renamed leaves
+/// it what it was given; one deleted leaves the others.
+async fn one_at_a_time(ada: &Seat, master: &CalendarEvent, events: &[CalendarEvent]) {
+    let late = draft("Standup, late", STANDUP + 2 * DAY + HOUR, 15);
+    change(ada, &events[1].id, late).await;
+    let after = week(ada).await;
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert_eq!(after[0], events[0]);
+    assert_eq!(after[1].id, events[1].id);
+    assert_eq!(after[1].kind, EventKind::Exception);
+    assert_eq!(after[1].subject, "Standup, late");
+    assert_eq!(after[1].start, EventTime::Instant(STANDUP + 2 * DAY + HOUR));
+    assert_eq!(after[1].series_master_id.as_deref(), Some(master.id.as_str()));
+
+    renamed_and_one_deleted(ada, master, events).await;
+}
+
+async fn renamed_and_one_deleted(ada: &Seat, master: &CalendarEvent, events: &[CalendarEvent]) {
+    let mut renamed = standup();
+    renamed.subject = "Daily".into();
+    change(ada, &master.id, renamed).await;
+    let after = week(ada).await;
+    let subjects: Vec<&str> = after.iter().map(|event| event.subject.as_str()).collect();
+    assert_eq!(subjects, ["Daily", "Standup, late"]);
+
+    ada.engine
+        .write_event(EventWrite::Delete {
+            id: after[0].id.clone(),
+        })
+        .await
+        .unwrap();
+    let after = week(ada).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].subject, "Standup, late");
+    assert!(ada.engine.calendar_event(events[0].id.clone()).await.is_err());
+    // the id of a day the series has no occurrence on names nothing
+    let tuesday = format!("{}.{}", master.id, STANDUP + DAY);
+    assert!(ada.engine.calendar_event(tuesday).await.is_err());
+}
+
+/// The series moved to Tuesdays, never ending: its occurrences are new ones, what the old ones were given is gone.
+async fn reshaped(ada: &Seat, master: &CalendarEvent) {
+    let mut tuesdays = standup();
+    tuesdays.start.ms += DAY;
+    tuesdays.end.ms += DAY;
+    tuesdays.recurrence = Some(weekly(&[Weekday::Tuesday], None));
+    change(ada, &master.id, tuesdays).await;
+    let after = ada.engine.calendar(MONDAY, MONDAY + 14 * DAY).await.unwrap();
+    let starts: Vec<EventTime> = after.iter().map(|event| event.start).collect();
+    assert_eq!(
+        starts,
+        [EventTime::Instant(STANDUP + DAY), EventTime::Instant(STANDUP + 8 * DAY)]
+    );
+    let later = ada
+        .engine
+        .calendar(MONDAY + 700 * DAY, MONDAY + 707 * DAY)
+        .await
+        .unwrap();
+    assert_eq!(later.len(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_series_is_read_by_its_occurrences_and_changed_whole_or_one_at_a_time() {
     for backend in backends() {
         let server = server(backend).await;
         let ada = Seat::new(&server, "ada@own.test", "Ada").await;
-        let start = MONDAY + 10 * HOUR;
-        let days = [Weekday::Monday, Weekday::Wednesday];
-        let mut standup = draft("Standup", start, 15);
-        standup.recurrence = Some(weekly(&days, Some(MONDAY + 16 * DAY)));
-        let master = ada
-            .engine
-            .write_event(EventWrite::Create(standup.clone()))
-            .await
-            .unwrap()
-            .created
-            .unwrap();
+        let written = ada.engine.write_event(EventWrite::Create(standup())).await.unwrap();
+        let master = written.created.unwrap();
         assert_eq!(master.kind, EventKind::RecurringMaster);
-
-        let events = week(&ada).await;
-        assert_eq!(events.len(), 2, "{events:?}");
-        for (event, day) in events.iter().zip([0, 2]) {
-            assert_eq!(event.kind, EventKind::Occurrence);
-            assert_eq!(event.series_master_id.as_deref(), Some(master.id.as_str()));
-            assert_eq!(event.start, EventTime::Instant(start + day * DAY));
-            assert_eq!(event.subject, "Standup");
-        }
-        assert_ne!(events[0].id, events[1].id);
-        // it ends on its last day: three weeks of two
-        let all = ada.engine.calendar(MONDAY - 7 * DAY, MONDAY + 35 * DAY).await.unwrap();
-        assert_eq!(all.len(), 6, "{all:?}");
-
-        let whole = ada.engine.calendar_event(master.id.clone()).await.unwrap();
-        assert_eq!(whole.event.kind, EventKind::RecurringMaster);
-        assert_eq!(whole.recurrence, standup.recurrence);
-        let wednesday = ada.engine.calendar_event(events[1].id.clone()).await.unwrap();
-        assert_eq!(wednesday.event, events[1]);
-
-        // one occurrence moved and renamed is an exception of its series, under the same id
-        let late = draft("Standup, late", start + 2 * DAY + HOUR, 15);
-        ada.engine
-            .write_event(EventWrite::Update {
-                id: events[1].id.clone(),
-                event: wednesday.raw.clone(),
-                draft: late,
-            })
-            .await
-            .unwrap();
-        let after = week(&ada).await;
-        assert_eq!(after.len(), 2, "{after:?}");
-        assert_eq!(after[0], events[0]);
-        assert_eq!(after[1].id, events[1].id);
-        assert_eq!(after[1].kind, EventKind::Exception);
-        assert_eq!(after[1].subject, "Standup, late");
-        assert_eq!(after[1].start, EventTime::Instant(start + 2 * DAY + HOUR));
-        assert_eq!(after[1].series_master_id.as_deref(), Some(master.id.as_str()));
-
-        // the whole series renamed: its exception keeps what it was given
-        let mut renamed = standup.clone();
-        renamed.subject = "Daily".into();
-        ada.engine
-            .write_event(EventWrite::Update {
-                id: master.id.clone(),
-                event: whole.raw.clone(),
-                draft: renamed.clone(),
-            })
-            .await
-            .unwrap();
-        let after = week(&ada).await;
-        let subjects: Vec<&str> = after.iter().map(|event| event.subject.as_str()).collect();
-        assert_eq!(subjects, ["Daily", "Standup, late"]);
-
-        // one occurrence deleted leaves the others; the id of a day the series has none on names nothing
-        ada.engine
-            .write_event(EventWrite::Delete {
-                id: after[0].id.clone(),
-            })
-            .await
-            .unwrap();
-        let after = week(&ada).await;
-        assert_eq!(after.len(), 1, "{after:?}");
-        assert_eq!(after[0].subject, "Standup, late");
-        assert!(ada.engine.calendar_event(events[0].id.clone()).await.is_err());
-        let tuesday = format!("{}.{}", master.id, start + DAY);
-        assert!(ada.engine.calendar_event(tuesday).await.is_err());
-
-        // the series moved to Tuesdays only: its occurrences are new ones, the old exceptions gone
-        let mut tuesdays = renamed;
-        tuesdays.start.ms += DAY;
-        tuesdays.end.ms += DAY;
-        tuesdays.recurrence = Some(weekly(&[Weekday::Tuesday], None));
-        let whole = ada.engine.calendar_event(master.id.clone()).await.unwrap();
-        ada.engine
-            .write_event(EventWrite::Update {
-                id: master.id.clone(),
-                event: whole.raw,
-                draft: tuesdays,
-            })
-            .await
-            .unwrap();
-        let after = ada.engine.calendar(MONDAY, MONDAY + 14 * DAY).await.unwrap();
-        let starts: Vec<EventTime> = after.iter().map(|event| event.start).collect();
-        assert_eq!(
-            starts,
-            [EventTime::Instant(start + DAY), EventTime::Instant(start + 8 * DAY)]
-        );
-        // it never ends now
-        let later = ada
-            .engine
-            .calendar(MONDAY + 700 * DAY, MONDAY + 707 * DAY)
-            .await
-            .unwrap();
-        assert_eq!(later.len(), 1);
-
+        let events = occurrences_of(&ada, &master).await;
+        one_at_a_time(&ada, &master, &events).await;
+        reshaped(&ada, &master).await;
         ada.engine
             .write_event(EventWrite::Delete { id: master.id.clone() })
             .await

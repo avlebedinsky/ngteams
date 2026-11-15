@@ -190,44 +190,55 @@ pub(super) async fn update(
     }
     let asked = Asked::read(&app, &me.id, &sent, &query, !one).await?;
     let organizer = account(&app, &me.id).await?;
+    if one {
+        one_changed(&app, &found, asked, &organizer).await?;
+    } else {
+        all_changed(&app, &found, asked, &organizer).await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One occurrence changed: whoever it adds joins the series' chat; the series' own message stays the series'.
+async fn one_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -> Answer<()> {
+    let wanted = asked.wanted();
+    let row = occurrence_changed(app, found, asked.draft).await?;
+    repo::sync_attendees(&app.db, std::slice::from_ref(&row.id), &wanted, false).await?;
+    if let Some(chat) = &row.meeting_chat
+        && service::set_members(&app.db, chat, &ids(&wanted), &[]).await?
+    {
+        service::announce(app, chat, organizer).await?;
+    }
+    activity::tell(app, &ids(&wanted), Change::Updated, &row, organizer).await;
+    Ok(())
+}
+
+/// An event or a whole series changed: its invitations follow, a new time asks everyone again, a change to a
+/// Teams meeting makes its meeting, and everyone it invited, invites or no longer invites is told.
+async fn all_changed(app: &App, found: &Found, asked: Asked, organizer: &User) -> Answer<()> {
     let wanted = asked.wanted();
     let online = asked.online;
-    let (mut row, reshaped) = if one {
-        (occurrence_changed(&app, &found, asked.draft).await?, false)
-    } else {
-        whole_changed(&app, &found, asked.draft).await?
-    };
-    let moved = (found.event.start_ms, found.event.end_ms) != (row.start_ms, row.end_ms) && found.occurrence.is_none();
+    let (mut row, reshaped) = whole_changed(app, found, asked.draft).await?;
+    let moved = (found.event.start_ms, found.event.end_ms) != (row.start_ms, row.end_ms);
     let before = repo::attendees(&app.db, &row.id).await?;
     let mut rows = vec![row.id.clone()];
     if found.event.recurring && !reshaped {
         rows.extend(repo::own_row_ids(&app.db, &row.id).await?);
     }
     repo::sync_attendees(&app.db, &rows, &wanted, moved).await?;
-    if one {
-        // one occurrence: whoever it adds joins the series' chat; the series' own message stays the series'
-        if let Some(chat) = &row.meeting_chat
-            && service::set_members(&app.db, chat, &ids(&wanted), &[]).await?
-        {
-            service::announce(&app, chat, &organizer).await?;
-        }
-        activity::tell(&app, &ids(&wanted), Change::Updated, &row, &organizer).await;
-        return Ok(StatusCode::NO_CONTENT);
-    }
     if online && row.meeting_chat.is_none() {
         let fields: Value = serde_json::from_str(&row.body).unwrap_or_default();
-        let made = meeting::make(&app, &me.id, "Scheduled", fields["subject"].as_str()).await?;
+        let made = meeting::make(app, &organizer.id, "Scheduled", fields["subject"].as_str()).await?;
         repo::set_meeting(&app.db, &row.id, &made.chat_id).await?;
         row.meeting_chat = Some(made.chat_id);
     }
     let before: Vec<String> = before.into_iter().map(|(attendee, _)| attendee.user_id).collect();
     let (kept, new): (Vec<String>, Vec<String>) = ids(&wanted).into_iter().partition(|id| before.contains(id));
     let gone: Vec<String> = before.into_iter().filter(|id| !kept.contains(id)).collect();
-    tell(&app, &mut row, &organizer, &wanted, &gone).await?;
-    activity::tell(&app, &kept, Change::Updated, &row, &organizer).await;
-    activity::tell(&app, &new, Change::Created, &row, &organizer).await;
-    activity::tell(&app, &gone, Change::Canceled, &row, &organizer).await;
-    Ok(StatusCode::NO_CONTENT)
+    tell(app, &mut row, organizer, &wanted, &gone).await?;
+    activity::tell(app, &kept, Change::Updated, &row, organizer).await;
+    activity::tell(app, &new, Change::Created, &row, organizer).await;
+    activity::tell(app, &gone, Change::Canceled, &row, organizer).await;
+    Ok(())
 }
 
 /// One occurrence given fields of its own: kept as a row under its series.

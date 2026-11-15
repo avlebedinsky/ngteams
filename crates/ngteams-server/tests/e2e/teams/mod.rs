@@ -4,7 +4,7 @@
 mod activity;
 mod channels;
 mod create;
-mod golden;
+pub(crate) mod golden;
 mod join;
 mod manage;
 mod nodes;

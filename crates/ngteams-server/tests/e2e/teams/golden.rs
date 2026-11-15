@@ -24,7 +24,7 @@ fn kind(value: &Value) -> &'static str {
 }
 
 /// `ours` has every key of `golden` but `except`, of the same type (a fixture's `null` says nothing of the type).
-fn same_shape(ours: &Value, golden: &Value, except: &[&str], at: &str) {
+pub(crate) fn same_shape(ours: &Value, golden: &Value, except: &[&str], at: &str) {
     for (key, value) in golden.as_object().unwrap() {
         if except.contains(&key.as_str()) {
             continue;

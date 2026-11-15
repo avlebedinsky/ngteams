@@ -62,13 +62,19 @@ async fn channel_of(app: &App, me: &Me, team: &Team, sent: &Value) -> Answer<Cha
     Ok(channel)
 }
 
-/// The team's meeting `uid`, while it isn't cancelled.
-async fn meeting_of(app: &App, team: &Team, uid: &str) -> Answer<Event> {
+/// The team's meeting `uid`, while it isn't cancelled, for someone in its channel: a private channel's meeting is
+/// its people's alone.
+async fn meeting_of(app: &App, me: &Me, team: &Team, uid: &str) -> Answer<Event> {
     let found = repo::event(&app.db, uid, "").await?;
-    found
+    let event = found
         .map(|(event, _)| event)
         .filter(|event| event.team_id.as_deref() == Some(team.id.as_str()) && !event.cancelled)
-        .ok_or(Error::NOT_FOUND)
+        .ok_or(Error::NOT_FOUND)?;
+    let channel = event.channel_id.clone().unwrap_or_default();
+    if teams::joined(&app.db, &me.id, &[channel]).await?.is_empty() {
+        return Err(Error::NOT_FOUND);
+    }
+    Ok(event)
 }
 
 /// Whom the meeting has on their own calendars: who scheduled it, whom it names, and with `inviteAllMembers`
@@ -175,7 +181,7 @@ pub(super) async fn read(
     Path((group, uid)): Path<(String, String)>,
 ) -> Answer<Json<Value>> {
     let team = team_of(&app, &me, &group).await?;
-    let event = meeting_of(&app, &team, &uid).await?;
+    let event = meeting_of(&app, &me, &team, &uid).await?;
     let book = book(&app, &[&event]).await?;
     let attendees = repo::attendees(&app.db, &event.id).await?;
     let shown = Shown {
@@ -193,7 +199,7 @@ pub(super) async fn read(
 /// `fetchEventContract` names by its kind and start.
 async fn own(app: &App, me: &Me, group: &str, uid: &str, contract: &Value) -> Answer<(Team, Found)> {
     let team = team_of(app, me, group).await?;
-    let event = meeting_of(app, &team, uid).await?;
+    let event = meeting_of(app, me, &team, uid).await?;
     if event.owner_id != me.id {
         return Err(Error::FORBIDDEN);
     }

@@ -139,14 +139,14 @@ pub(super) async fn save(
         return Err(Error::BAD_REQUEST);
     }
     let chat = &target.2;
-    let mut set = kept(&app.db, chat).await?;
+    let mut values = kept(&app.db, chat).await?;
     for ((name, _, _), value) in &changes {
-        set.insert((*name).to_owned(), json!(value));
+        values.insert((*name).to_owned(), json!(value));
     }
-    keep(&app.db, chat, &Value::Object(set.clone()).to_string()).await?;
+    keep(&app.db, chat, &Value::Object(values.clone()).to_string()).await?;
     let options: Vec<Value> = changes
         .iter()
-        .map(|((name, kind, values), _)| entry(name, kind, values, &set))
+        .map(|((name, kind, allowed), _)| entry(name, kind, allowed, &values))
         .collect();
     Ok(Json(json!({"options": options})))
 }

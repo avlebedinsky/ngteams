@@ -5,11 +5,12 @@ wire the client already speaks to Microsoft (the shapes in `docs/protocol/`), wi
 origin. The client sends a request to it only for an account signed in to that server.
 
 What it serves today: sign-in (the token endpoint), authz, the chat service, teams and channels (CSA, the middle
-tier's and the provisioning service's team routes), pictures in messages, files sent in chats, link previews, account
-administration (the admin API and the first-admin setup), the registrar and the Trouter push socket, and 1:1 calls
-(the call controller behind `/flightproxy/api/v2/` and the TURN credentials). The registrar, Trouter and the
-calling surface have no GTM (the client finds them on the origin). Other services are added one at a time. Authz
-names only the services the server serves, so the client keeps every other service off.
+tier's and the provisioning service's team routes), pictures in messages, files sent in chats, link previews, the
+calendar and meetings' scheduling (the middle tier's calendar routes), account administration (the admin API and the
+first-admin setup), the registrar and the Trouter push socket, and 1:1 calls (the call controller behind
+`/flightproxy/api/v2/` and the TURN credentials). The registrar, Trouter and the calling surface have no GTM (the
+client finds them on the origin). Other services are added one at a time. Authz names only the services the server
+serves, so the client keeps every other service off.
 
 The chat service serves chat creation, conversation sync, thread/member reads, message posting, edits, soft deletion,
 reactions, transient typing, account preferences and message pages (newest, backward, incremental and around a
@@ -117,6 +118,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `calling.turn.secret` | none | coturn's `static-auth-secret`: credentials are made from it per account and run out by themselves |
 | `calling.turn.username`, `calling.turn.password` | none | one long-term user of the relay (coturn's `user=`), used when no secret is set |
 | `calling.turn.realm`, `calling.turn.ttl` | `rtcmedia`, `86400` | coturn's `realm`; seconds a credential made from the secret holds |
+| `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
 ## Sign-in and tokens
 
@@ -287,6 +289,78 @@ Not served yet: a channel's email address, team apps and templates, the default 
 enforced on posts (the settings are kept and read back), and system
 messages (`ThreadActivity/…`) for a team's changes.
 
+## The calendar and meetings
+
+The client's calendar, scheduling form and channel meetings find their routes on the middle tier, with the
+account's token for `https://api.spaces.skype.com`; the shapes are those of `docs/protocol/calendar.md` and of
+"A channel's meeting" in `calling.md`. Scheduling is served here; a meeting's call and media are not.
+
+- **Events**: `GET v2.0/me/calendars/default/calendarView` (a window of at most 100 days; the client asks for 62
+  at most), `POST v2.0/me/calendars/default/events`, and `GET`, `PUT`, `DELETE v2.0/me/calendars/events/<id>` with
+  `…/cancel` and `…/respond`. Times are kept as instants and answered in UTC; an event keeps the zone it names
+  (`eventTimeZone`, by the middle tier's names: `TurkeySt`) and `beta/me/calendarEvents/timeZoneSettingsWithOffset`
+  names an IANA zone that way. What is kept of a sent event is a fixed list of the form's own fields; who
+  organizes it, who answered what and the meeting's links are the server's.
+- **A series** (`eventRecurrencePattern`, `eventRecurrenceRange`) is one row, read as its occurrences: the rule
+  runs on the clock of the series' own zone (the `rrule` crate), so an occurrence keeps its time of day across a
+  daylight-time change. An occurrence's id is the series' id, a dot and the occurrence's own start. One occurrence
+  changed, answered, cancelled or taken off a calendar is kept as a row of its own under the series; a change of the
+  series' rule or times forgets those rows.
+- **Whom an event invites** are accounts of this server, named by MRI or by address (the sign-in name); another
+  address is refused (400 `UnknownAttendee`), since the server sends no mail. Each of them has the event on its
+  own calendar with its own answer (`respond`), reads whom it invites, and may take it off (`DELETE`). The
+  organizer's change reaches everyone it now invites (a new time asks each of them again; who is taken off no
+  longer has it), and its cancellation leaves the event cancelled (`isCancelled`, `Canceled: …`) on their
+  calendars until they take it off. An event nobody else has is deleted outright.
+- **A Teams meeting** is a chat-service thread, `19:meeting_<id>@thread.v2`, made by
+  `POST beta/me/calendarEvents/privateMeeting/schedulingService/create` (`Scheduled` for the event the form then
+  saves with it, or `MeetNow`, which has no event). Its join link is
+  `<origin>/l/meetup-join/<chat>/0?context={"Tid","Oid"}` and its short link `<origin>/meet/<id>?p=<passcode>`;
+  the thread's `properties.meeting` names its organizer, tenant, title and link. An event takes only a meeting its
+  own organizer made and no other event uses; an event changed to a Teams meeting gets one. The people the event
+  invites are put in the chat, and the chat holds the invitation: a message whose `properties.meeting` names the
+  meeting (`ScheduledMeetingCreated`), changed in place when the meeting is, with a cancellation
+  (`ScheduledMeetingCancelled`) after it.
+- **A channel's meeting**: `POST v2.0/groups/smtp:<team mailbox>/calendars/default/events`, and for its `iCalUID`
+  `GET …/calendars/events/iCalUId/<uid>`, `PUT …/calendars/events/<uid>` and `…/<uid>/cancel`. The team's mailbox
+  is `<group id>@<the origin's host>`. The meeting is posted to its channel (its link names the channel and that
+  post), its change edits the post in place and its cancellation replies under it. Who scheduled it has an
+  accepted copy on its own calendar, as has anyone it names and, with `inviteAllMembers`, everyone in the channel.
+- **The Scheduler**: `PUT v2.0/me/calendars/schedules` (each person's busy times; what an event is about only
+  for the caller's own) and `findMeetingTimes` (the half hours, 08:00 to 18:00 counted from the midnight the
+  read starts at, at which everyone asked about is free).
+- **Meeting options**: `GET` and `POST beta/meetings/v1/options/<tenant>/<organizer>/<chat>/0/0`, kept per chat
+  (a meeting's, or a group chat's for its calls): `AutoAdmittedUsers`, `PresenterOption`, `AllowMeetingChat`,
+  `AttendeeRestrictions`.
+- **Rooms**: `GET v2.0/places/roomLists`, `places/rooms` and `places/<list address>/roomList/rooms` list the
+  `[[rooms]]` of the configuration. A room is a place, not an account: an event that names one invites nobody by
+  it.
+
+Who may do what, checked against the database on every request:
+
+| Who | May |
+|---|---|
+| an event's organizer | read, change, cancel and delete it |
+| an account it invites | read it with whom it invites, answer it, take it off its own calendar |
+| who scheduled a channel's meeting | change and cancel it on the team's calendar |
+| anyone on the team | read a channel's meeting from the team's calendar; schedule one in a channel they are in, while neither the team nor the channel is archived |
+| the people in a meeting's or a group chat | read its meeting options; the organizer the path names saves them (a meeting's own organizer) |
+| anyone signed in | make an event or a meeting of its own; ask for any account's busy times; list the rooms |
+
+Anyone else gets 404 `NotFound` for an event, a meeting or a team's calendar: it learns nothing of it. An invited
+account that tries to change or cancel gets 403 `Forbidden`.
+
+What reaches the invited accounts beside their calendars, on `push:<mri>`: the meeting chat's `ThreadUpdate` and
+the invitation, change and cancellation as that chat's (or the channel's) messages, and for each a `NewMessage` of
+the account's `48:notifications` stream: an activity item (`msGraph`, `privateMeetingCreated`,
+`privateMeetingUpdated`, `privateMeetingCanceled`, or `channelMeeting…`) naming who did it, the meeting's time and
+the event it opens.
+
+Not served: mail of any kind (invitations, answers and their notes reach nobody by mail; an answer's note is not
+kept), the form's delete of an unused online meeting, `masterCategories`, an event by its join link, forwarding,
+reminders, and the options' enforcement in a call (the calls' part). The activity items are told live and
+replayed to a reconnecting socket; they are not kept in the feed.
+
 ## Prefix table
 
 Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now, and authz
@@ -299,7 +373,7 @@ hands out its GTM where it has one.
 | Admin API, first-admin setup | (the origin) | `/api/admin/v1/` | yes |
 | The account's own endpoints | (the origin) | `/api/account/v1/` | yes |
 | Chat service | `chatServiceAfd` | `/api/chatsvc/<region>/` | yes |
-| Middle tier | `middleTier` | `/api/mt/part/<partition>/` (the partition as `<letters>-<digits>`: `own-01`) | the team routes |
+| Middle tier | `middleTier` | `/api/mt/part/<partition>/` (the partition as `<letters>-<digits>`: `own-01`) | the team and calendar routes |
 | Chat service aggregator | `chatSvcAggAfd` | `/api/csa/<region>/` | yes |
 | Provisioning | `teamsAndChannelsProvisioningService` | `/fabric/<region>/templates/api/` (the client takes a region of letters only) | yes |
 | Presence | `presenceUPS` | `/ups/<geo>/` | no |

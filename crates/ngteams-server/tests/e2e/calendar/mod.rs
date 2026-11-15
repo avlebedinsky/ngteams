@@ -2,10 +2,13 @@
 
 mod channels;
 pub(crate) mod events;
+mod golden;
 pub(crate) mod meetings;
+mod nodes;
 mod options;
 mod push;
 mod scheduler;
+mod security;
 
 use teams_proto::{CalendarEvent, EventDraft, EventShowAs, EventTime, Organizer, ZonedTime};
 

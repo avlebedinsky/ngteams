@@ -92,42 +92,83 @@ async fn chat_items(seat: &Seat, chat: &str) -> Vec<(String, bool, String)> {
     items
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_teams_meeting_reaches_whom_it_invites_with_its_chat_its_link_and_their_answers() {
-    for backend in backends() {
-        let server = server(backend).await;
-        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
-        let bert = Seat::new(&server, "bert@own.test", "Bert").await;
-        let cora = Seat::new(&server, "cora@own.test", "Cora").await;
-        let dan = Seat::new(&server, "dan@own.test", "Dan").await;
-        let tenant = ngteams_server::db::meta::tenant(&server.app.db).await.unwrap();
-        let start = MONDAY + 14 * HOUR;
-        let mut planning = draft("Planning", start, 30);
-        planning.online = true;
-        planning.attendees = vec![
+/// Ada's meeting with Bert and (optional) Cora; Dan is not invited.
+struct Planning {
+    ada: Seat,
+    bert: Seat,
+    cora: Seat,
+    dan: Seat,
+    draft: teams_proto::EventDraft,
+    created: CalendarEvent,
+    chat: String,
+    link: String,
+}
+
+const PLANNING: i64 = MONDAY + 14 * HOUR;
+
+impl Planning {
+    async fn made(server: &crate::support::TestServer) -> Self {
+        let ada = Seat::new(server, "ada@own.test", "Ada").await;
+        let bert = Seat::new(server, "bert@own.test", "Bert").await;
+        let cora = Seat::new(server, "cora@own.test", "Cora").await;
+        let dan = Seat::new(server, "dan@own.test", "Dan").await;
+        let mut draft = draft("Planning", PLANNING, 30);
+        draft.online = true;
+        draft.attendees = vec![
             invited("Bert@own.test", "Bert", Some(&bert.mri), true),
             invited("cora@own.test", "Cora", None, false),
         ];
-        let created = create(&ada, planning.clone()).await;
+        let created = create(&ada, draft.clone()).await;
+        Self {
+            chat: created.meeting_chat.clone().unwrap(),
+            link: created.join_url.clone().unwrap(),
+            ada,
+            bert,
+            cora,
+            dan,
+            draft,
+            created,
+        }
+    }
+
+    /// The meeting names its chat, its link, its organizer and tenant, and its short link's id.
+    async fn names_its_meeting(&self, tenant: &str) {
+        let created = &self.created;
         assert!(created.online && created.is_organizer);
-        let link = created.join_url.clone().unwrap();
-        assert!(
-            link.starts_with(&format!("{ORIGIN}/l/meetup-join/19%3Ameeting_")),
-            "{link}"
-        );
-        let chat = created.meeting_chat.clone().unwrap();
-        assert!(teams_proto::is_meeting_chat_id(&chat), "{chat}");
+        let prefix = format!("{ORIGIN}/l/meetup-join/19%3Ameeting_");
+        assert!(self.link.starts_with(&prefix), "{}", self.link);
+        assert!(teams_proto::is_meeting_chat_id(&self.chat), "{}", self.chat);
         let meeting = created.meeting.clone().unwrap();
         assert_eq!(
             (meeting.organizer_id.as_str(), meeting.tenant_id.as_str()),
-            (ada.id.as_str(), tenant.as_str())
+            (self.ada.id.as_str(), tenant)
         );
         let code = created.meeting_code.clone().unwrap();
         assert!(code.id.len() >= 9 && !code.passcode.is_empty(), "{code:?}");
         assert_eq!(created.location.as_deref(), Some("Microsoft Teams Meeting"));
+        self.chat_names_it(&meeting).await;
+    }
 
-        // its organizer reads whom it invites; each of them has it, not answered yet
-        let whole = ada.engine.calendar_event(created.id.clone()).await.unwrap();
+    async fn chat_names_it(&self, meeting: &teams_proto::MeetingInfo) {
+        // the meeting's chat names the meeting to the people in it, and holds the invitation
+        for seat in [&self.ada, &self.bert, &self.cora] {
+            let details = seat.engine.meeting(self.chat.clone()).await.unwrap().unwrap();
+            assert_eq!(&details.meeting, meeting);
+            assert_eq!(details.title.as_deref(), Some("Planning"));
+            assert_eq!(details.join_url.as_deref(), Some(self.link.as_str()));
+        }
+        assert!(self.dan.engine.meeting(self.chat.clone()).await.is_err());
+        let listed = ChatReads::new(&*self.bert.client).conversations().await.unwrap();
+        assert!(listed.conversations.iter().any(|entry| entry.id == self.chat));
+        assert_eq!(
+            chat_items(&self.bert, &self.chat).await,
+            [("Planning".to_owned(), false, "Scheduled a meeting".to_owned())]
+        );
+    }
+
+    /// Its organizer reads whom it invites; each of them has it, not answered yet; nobody else has it.
+    async fn is_on_its_peoples_calendars(&self) {
+        let whole = self.ada.engine.calendar_event(self.created.id.clone()).await.unwrap();
         let none = Some(EventResponse::NoResponse);
         assert_eq!(
             roster(&whole),
@@ -139,56 +180,50 @@ async fn a_teams_meeting_reaches_whom_it_invites_with_its_chat_its_link_and_thei
                     false
                 ),
                 ("Bert".into(), "bert@own.test".into(), none.clone(), false),
-                ("Cora".into(), "cora@own.test".into(), none.clone(), true),
+                ("Cora".into(), "cora@own.test".into(), none, true),
             ]
         );
         assert_eq!(whole.optional, ["cora@own.test"]);
-        for seat in [&bert, &cora] {
+        self.invited_have_it().await;
+    }
+
+    async fn invited_have_it(&self) {
+        for seat in [&self.bert, &self.cora] {
             let events = week(seat).await;
             assert_eq!(events.len(), 1, "{events:?}");
             let event = &events[0];
-            assert_eq!(event.id, created.id);
+            assert_eq!(event.id, self.created.id);
             assert!(!event.is_organizer && event.online);
             assert_eq!(event.response, EventResponse::NotResponded);
             assert_eq!(event.show_as, ShowAs::Tentative);
             assert_eq!(event.organizer_name.as_deref(), Some("Ada"));
-            assert_eq!(event.join_url.as_deref(), Some(link.as_str()));
-            assert_eq!(event.meeting_chat.as_deref(), Some(chat.as_str()));
+            assert_eq!(event.join_url.as_deref(), Some(self.link.as_str()));
+            assert_eq!(event.meeting_chat.as_deref(), Some(self.chat.as_str()));
         }
-        assert_eq!(
-            roster(&bert.engine.calendar_event(created.id.clone()).await.unwrap()).len(),
-            3
-        );
-        assert!(week(&dan).await.is_empty());
-        assert!(dan.engine.calendar_event(created.id.clone()).await.is_err());
+        self.nobody_else_has_it().await;
+    }
 
-        // the meeting's chat names the meeting to the people in it, and holds the invitation
-        for seat in [&ada, &bert, &cora] {
-            let details = seat.engine.meeting(chat.clone()).await.unwrap().unwrap();
-            assert_eq!(details.meeting, meeting);
-            assert_eq!(details.title.as_deref(), Some("Planning"));
-            assert_eq!(details.join_url.as_deref(), Some(link.as_str()));
-        }
-        assert!(dan.engine.meeting(chat.clone()).await.is_err());
-        let listed = ChatReads::new(&*bert.client).conversations().await.unwrap();
-        assert!(listed.conversations.iter().any(|entry| entry.id == chat));
-        assert_eq!(
-            chat_items(&bert, &chat).await,
-            [("Planning".to_owned(), false, "Scheduled a meeting".to_owned())]
-        );
+    async fn nobody_else_has_it(&self) {
+        let theirs = self.bert.engine.calendar_event(self.created.id.clone()).await.unwrap();
+        assert_eq!(roster(&theirs).len(), 3);
+        assert!(week(&self.dan).await.is_empty());
+        assert!(self.dan.engine.calendar_event(self.created.id.clone()).await.is_err());
+    }
 
-        // answers: each account's own, read back by its organizer
-        respond(&bert, &created.id, RsvpAnswer::Accept).await.unwrap();
-        respond(&cora, &created.id, RsvpAnswer::Decline).await.unwrap();
-        refused(respond(&dan, &created.id, RsvpAnswer::Accept).await, "404");
-        refused(respond(&ada, &created.id, RsvpAnswer::Accept).await, "403");
-        let events = week(&bert).await;
+    /// Answers: each account's own, read back by the organizer.
+    async fn is_answered(&self) {
+        let id = &self.created.id;
+        respond(&self.bert, id, RsvpAnswer::Accept).await.unwrap();
+        respond(&self.cora, id, RsvpAnswer::Decline).await.unwrap();
+        refused(respond(&self.dan, id, RsvpAnswer::Accept).await, "404");
+        refused(respond(&self.ada, id, RsvpAnswer::Accept).await, "403");
+        let events = week(&self.bert).await;
         assert_eq!(
             (&events[0].response, &events[0].show_as),
             (&EventResponse::Accepted, &ShowAs::Busy)
         );
-        assert_eq!(week(&cora).await[0].response, EventResponse::Declined);
-        let whole = ada.engine.calendar_event(created.id.clone()).await.unwrap();
+        assert_eq!(week(&self.cora).await[0].response, EventResponse::Declined);
+        let whole = self.ada.engine.calendar_event(id.clone()).await.unwrap();
         let answers: Vec<Option<EventResponse>> = roster(&whole).into_iter().map(|row| row.2).collect();
         assert_eq!(
             answers,
@@ -198,70 +233,166 @@ async fn a_teams_meeting_reaches_whom_it_invites_with_its_chat_its_link_and_thei
                 Some(EventResponse::Declined)
             ]
         );
+    }
 
-        // only its organizer changes or cancels it
-        let mut later = planning.clone();
+    /// Only its organizer changes it; the change reaches the people it now invites: a new time asks for a new
+    /// answer, who was taken off no longer has it, who was added has it and is in its chat.
+    async fn is_changed(&self) {
+        let id = &self.created.id;
+        let mut later = self.draft.clone();
         later.subject = "Planning, later".into();
         later.start.ms += HOUR;
         later.end.ms += HOUR;
         later.attendees = vec![
-            invited("bert@own.test", "Bert", Some(&bert.mri), true),
-            invited("dan@own.test", "Dan", Some(&dan.mri), true),
+            invited("bert@own.test", "Bert", Some(&self.bert.mri), true),
+            invited("dan@own.test", "Dan", Some(&self.dan.mri), true),
         ];
         let change = |raw: &FullEvent| EventWrite::Update {
-            id: created.id.clone(),
+            id: id.clone(),
             event: raw.raw.clone(),
             draft: later.clone(),
         };
-        let own = bert.engine.calendar_event(created.id.clone()).await.unwrap();
-        refused(bert.engine.write_event(change(&own)).await.map(|_| ()), "403");
-        refused(cancel(&bert, &created, "No").await, "403");
-        ada.engine.write_event(change(&whole)).await.unwrap();
+        let theirs = self.bert.engine.calendar_event(id.clone()).await.unwrap();
+        refused(self.bert.engine.write_event(change(&theirs)).await.map(|_| ()), "403");
+        refused(cancel(&self.bert, &self.created, "No").await, "403");
+        let whole = self.ada.engine.calendar_event(id.clone()).await.unwrap();
+        self.ada.engine.write_event(change(&whole)).await.unwrap();
 
-        // the change reaches them: a new time asks for a new answer, who was taken off no longer has it
-        let events = week(&bert).await;
+        self.change_reached_them().await;
+    }
+
+    async fn change_reached_them(&self) {
+        let events = week(&self.bert).await;
         assert_eq!(events[0].subject, "Planning, later");
-        assert_eq!(events[0].start, EventTime::Instant(start + HOUR));
+        assert_eq!(events[0].start, EventTime::Instant(PLANNING + HOUR));
         assert_eq!(events[0].response, EventResponse::NotResponded);
-        assert!(week(&cora).await.is_empty());
-        assert_eq!(week(&dan).await.len(), 1);
-        assert_eq!(week(&ada).await[0].join_url.as_deref(), Some(link.as_str()));
-        let details = dan.engine.meeting(chat.clone()).await.unwrap().unwrap();
+        assert!(week(&self.cora).await.is_empty());
+        assert_eq!(week(&self.dan).await.len(), 1);
+        assert_eq!(week(&self.ada).await[0].join_url.as_deref(), Some(self.link.as_str()));
+        self.chat_follows_the_change().await;
+    }
+
+    async fn chat_follows_the_change(&self) {
+        let details = self.dan.engine.meeting(self.chat.clone()).await.unwrap().unwrap();
         assert_eq!(details.title.as_deref(), Some("Planning, later"));
-        assert!(cora.engine.meeting(chat.clone()).await.is_err());
+        assert!(self.cora.engine.meeting(self.chat.clone()).await.is_err());
         assert_eq!(
-            chat_items(&dan, &chat).await,
+            chat_items(&self.dan, &self.chat).await,
             [("Planning, later".to_owned(), false, "Scheduled a meeting".to_owned())]
         );
+    }
 
-        // cancelled: gone for its organizer, cancelled for the others until they take it off
-        let current = week(&ada).await.remove(0);
-        cancel(&ada, &current, "Postponed").await.unwrap();
-        assert!(week(&ada).await.is_empty());
-        let events = week(&bert).await;
+    /// Cancelled: gone for its organizer, cancelled for the others until they take it off.
+    async fn is_cancelled(&self) {
+        let id = &self.created.id;
+        let current = week(&self.ada).await.remove(0);
+        cancel(&self.ada, &current, "Postponed").await.unwrap();
+        assert!(week(&self.ada).await.is_empty());
+        let events = week(&self.bert).await;
         assert!(events[0].cancelled);
         assert_eq!(events[0].subject, "Canceled: Planning, later");
-        refused(respond(&bert, &created.id, RsvpAnswer::Accept).await, "400");
-        let items = chat_items(&bert, &chat).await;
-        assert_eq!(items.len(), 2, "{items:?}");
-        assert_eq!(
-            items[1],
-            (
-                "Planning, later".to_owned(),
-                true,
-                "The meeting \"Planning, later\" is cancelled: Postponed".to_owned()
-            )
-        );
-        delete(&bert, &created.id).await.unwrap();
-        assert!(week(&bert).await.is_empty());
-        refused(delete(&bert, &created.id).await, "404");
-        assert_eq!(week(&dan).await.len(), 1);
+        refused(respond(&self.bert, id, RsvpAnswer::Accept).await, "400");
+        self.cancellation_reached_them().await;
+    }
 
-        for seat in [ada, bert, cora, dan] {
+    async fn cancellation_reached_them(&self) {
+        let id = &self.created.id;
+        let items = chat_items(&self.bert, &self.chat).await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        let text = "The meeting \"Planning, later\" is cancelled: Postponed";
+        assert_eq!(items[1], ("Planning, later".to_owned(), true, text.to_owned()));
+        delete(&self.bert, id).await.unwrap();
+        assert!(week(&self.bert).await.is_empty());
+        refused(delete(&self.bert, id).await, "404");
+        assert_eq!(week(&self.dan).await.len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_teams_meeting_reaches_whom_it_invites_with_its_chat_its_link_and_their_answers() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let tenant = ngteams_server::db::meta::tenant(&server.app.db).await.unwrap();
+        let planning = Planning::made(&server).await;
+        planning.names_its_meeting(&tenant).await;
+        planning.is_on_its_peoples_calendars().await;
+        planning.is_answered().await;
+        planning.is_changed().await;
+        planning.is_cancelled().await;
+        for seat in [planning.ada, planning.bert, planning.cora, planning.dan] {
             seat.stop();
         }
         server.stop().await;
     }
+}
+
+fn answers(events: &[CalendarEvent]) -> Vec<EventResponse> {
+    events.iter().map(|event| event.response.clone()).collect()
+}
+
+/// One occurrence answered is still an occurrence; the series answered is every occurrence answered.
+async fn answered_one_then_all(ada: &Seat, bert: &Seat, master: &CalendarEvent, events: &[CalendarEvent]) {
+    let (wednesday, friday) = (&events[1], &events[2]);
+    respond(bert, &wednesday.id, RsvpAnswer::Accept).await.unwrap();
+    let after = week(bert).await;
+    assert_eq!(
+        answers(&after),
+        [
+            EventResponse::NotResponded,
+            EventResponse::Accepted,
+            EventResponse::NotResponded
+        ]
+    );
+    assert_eq!(after[1].kind, EventKind::Occurrence);
+    assert_eq!(after[1].id, wednesday.id);
+    let whole = ada.engine.calendar_event(wednesday.id.clone()).await.unwrap();
+    assert_eq!(roster(&whole)[1].2, Some(EventResponse::Accepted));
+    let whole = ada.engine.calendar_event(friday.id.clone()).await.unwrap();
+    assert_eq!(roster(&whole)[1].2, Some(EventResponse::NoResponse));
+    respond(bert, &master.id, RsvpAnswer::Tentative).await.unwrap();
+    assert_eq!(answers(&week(bert).await), vec![EventResponse::Tentative; 3]);
+    let next = bert.engine.calendar(MONDAY + 7 * DAY, MONDAY + 14 * DAY).await.unwrap();
+    assert_eq!(answers(&next), vec![EventResponse::Tentative; 3]);
+}
+
+/// One occurrence cancelled: its organizer no longer has it, the invited account has it cancelled until it takes
+/// it off; taken off one calendar, an occurrence stays on the other's. Then the whole series.
+async fn cancelled_one_then_all(ada: &Seat, bert: &Seat, master: &CalendarEvent, events: &[CalendarEvent]) {
+    let (monday, wednesday, friday) = (&events[0], &events[1], &events[2]);
+    cancel(ada, monday, "Holiday").await.unwrap();
+    let own = week(ada).await;
+    assert_eq!(own.len(), 2, "{own:?}");
+    let after = week(bert).await;
+    assert_eq!(after.len(), 3);
+    assert!(after[0].cancelled && !after[1].cancelled);
+    assert_eq!(after[0].subject, "Canceled: Sync");
+    delete(bert, &after[0].id).await.unwrap();
+    delete(bert, &friday.id).await.unwrap();
+    one_left(ada, bert, wednesday).await;
+    all_cancelled(ada, bert, master).await;
+}
+
+async fn one_left(ada: &Seat, bert: &Seat, wednesday: &CalendarEvent) {
+    let after = week(bert).await;
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].id, wednesday.id);
+    assert_eq!(week(ada).await.len(), 2);
+}
+
+async fn all_cancelled(ada: &Seat, bert: &Seat, master: &CalendarEvent) {
+    cancel(ada, master, "Done").await.unwrap();
+    assert!(ada.engine.calendar(MONDAY, MONDAY + 28 * DAY).await.unwrap().is_empty());
+    let after = bert.engine.calendar(MONDAY, MONDAY + 14 * DAY).await.unwrap();
+    assert_eq!(after.len(), 4, "{after:?}");
+    assert!(after.iter().all(|event| event.cancelled));
+    delete(bert, &master.id).await.unwrap();
+    assert!(
+        bert.engine
+            .calendar(MONDAY, MONDAY + 28 * DAY)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -270,15 +401,13 @@ async fn a_series_of_meetings_is_answered_and_cancelled_whole_or_one_at_a_time()
         let server = server(backend).await;
         let ada = Seat::new(&server, "ada@own.test", "Ada").await;
         let bert = Seat::new(&server, "bert@own.test", "Bert").await;
-        let start = MONDAY + 10 * HOUR;
-        let mut sync = draft("Sync", start, 30);
+        let mut sync = draft("Sync", MONDAY + 10 * HOUR, 30);
         sync.online = true;
         sync.attendees = vec![invited("bert@own.test", "Bert", Some(&bert.mri), true)];
         sync.recurrence = Some(weekly(&[Weekday::Monday, Weekday::Wednesday, Weekday::Friday], None));
         let master = create(&ada, sync).await;
         assert_eq!(master.kind, EventKind::RecurringMaster);
         let chat = master.meeting_chat.clone().unwrap();
-
         let events = week(&bert).await;
         assert_eq!(events.len(), 3, "{events:?}");
         for event in &events {
@@ -289,63 +418,8 @@ async fn a_series_of_meetings_is_answered_and_cancelled_whole_or_one_at_a_time()
                 "one chat for the series"
             );
         }
-        let (monday, wednesday, friday) = (&events[0], &events[1], &events[2]);
-
-        // one occurrence answered is still an occurrence; the series answered is every occurrence answered
-        respond(&bert, &wednesday.id, RsvpAnswer::Accept).await.unwrap();
-        let answers = |events: &[CalendarEvent]| -> Vec<EventResponse> {
-            events.iter().map(|event| event.response.clone()).collect()
-        };
-        let after = week(&bert).await;
-        assert_eq!(
-            answers(&after),
-            [
-                EventResponse::NotResponded,
-                EventResponse::Accepted,
-                EventResponse::NotResponded
-            ]
-        );
-        assert_eq!(after[1].kind, EventKind::Occurrence);
-        assert_eq!(after[1].id, wednesday.id);
-        let whole = ada.engine.calendar_event(wednesday.id.clone()).await.unwrap();
-        assert_eq!(roster(&whole)[1].2, Some(EventResponse::Accepted));
-        let whole = ada.engine.calendar_event(friday.id.clone()).await.unwrap();
-        assert_eq!(roster(&whole)[1].2, Some(EventResponse::NoResponse));
-        respond(&bert, &master.id, RsvpAnswer::Tentative).await.unwrap();
-        assert_eq!(answers(&week(&bert).await), vec![EventResponse::Tentative; 3]);
-        let next = bert.engine.calendar(MONDAY + 7 * DAY, MONDAY + 14 * DAY).await.unwrap();
-        assert_eq!(answers(&next), vec![EventResponse::Tentative; 3]);
-
-        // one occurrence cancelled: its organizer no longer has it, the invited account has it cancelled
-        cancel(&ada, monday, "Holiday").await.unwrap();
-        let own = week(&ada).await;
-        assert_eq!(own.len(), 2, "{own:?}");
-        let after = week(&bert).await;
-        assert_eq!(after.len(), 3);
-        assert!(after[0].cancelled && !after[1].cancelled);
-        assert_eq!(after[0].subject, "Canceled: Sync");
-        // taken off one calendar, an occurrence stays on the other's
-        delete(&bert, &after[0].id).await.unwrap();
-        delete(&bert, &friday.id).await.unwrap();
-        let after = week(&bert).await;
-        assert_eq!(after.len(), 1, "{after:?}");
-        assert_eq!(after[0].id, wednesday.id);
-        assert_eq!(week(&ada).await.len(), 2);
-
-        // the series cancelled
-        cancel(&ada, &master, "Done").await.unwrap();
-        assert!(ada.engine.calendar(MONDAY, MONDAY + 28 * DAY).await.unwrap().is_empty());
-        let after = bert.engine.calendar(MONDAY, MONDAY + 14 * DAY).await.unwrap();
-        assert_eq!(after.len(), 4, "{after:?}");
-        assert!(after.iter().all(|event| event.cancelled));
-        delete(&bert, &master.id).await.unwrap();
-        assert!(
-            bert.engine
-                .calendar(MONDAY, MONDAY + 28 * DAY)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        answered_one_then_all(&ada, &bert, &master, &events).await;
+        cancelled_one_then_all(&ada, &bert, &master, &events).await;
         let items = chat_items(&bert, &chat).await;
         let texts: Vec<&str> = items.iter().map(|item| item.2.as_str()).collect();
         assert_eq!(

@@ -22,11 +22,13 @@ pub(super) struct Series {
 /// The series an event's fields describe, starting at `start_ms`: `Ok(None)` for an event that doesn't repeat.
 ///
 /// # Errors
-/// The pattern or the range isn't one the form writes.
+/// The pattern or the range isn't one the form writes, or one comes without the other.
 pub(super) fn series(body: &Map<String, Value>, start_ms: i64, end_ms: i64, zone: Zone) -> Result<Option<Series>, ()> {
-    let (pattern, range) = match (body.get("eventRecurrencePattern"), body.get("eventRecurrenceRange")) {
-        (None | Some(Value::Null), _) | (_, None | Some(Value::Null)) => return Ok(None),
+    let given = |key: &str| body.get(key).filter(|value| !value.is_null());
+    let (pattern, range) = match (given("eventRecurrencePattern"), given("eventRecurrenceRange")) {
+        (None, None) => return Ok(None),
         (Some(pattern), Some(range)) => (pattern, range),
+        _ => return Err(()),
     };
     let first_day = day(range.get("startDate")).ok_or(())?;
     let last_day = match range.get("endDate") {
@@ -345,8 +347,12 @@ mod tests {
         let read = |body: Value| series(body.as_object().unwrap(), 0, MINUTE, zone).map(|series| series.is_some());
         assert_eq!(read(json!({})), Ok(false));
         assert_eq!(
-            read(json!({"eventRecurrencePattern": null, "eventRecurrenceRange": {}})),
+            read(json!({"eventRecurrencePattern": null, "eventRecurrenceRange": null})),
             Ok(false)
+        );
+        assert_eq!(
+            read(json!({"eventRecurrenceRange": {"startDate": "2027-01-04"}})),
+            Err(())
         );
         let range = json!({"startDate": "2027-01-04"});
         for pattern in [

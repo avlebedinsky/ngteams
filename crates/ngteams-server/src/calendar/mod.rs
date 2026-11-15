@@ -258,14 +258,13 @@ struct Found {
 impl Found {
     /// The event `id` when it is on `user`'s calendar; anyone else learns only that it isn't there.
     async fn of(db: &Db, user: &str, id: &str) -> Answer<Self> {
-        let (seen, occurrence) = match repo::event(db, id, user).await? {
-            Some(seen) => (seen, None),
-            None => {
-                let (series, start) = id.rsplit_once('.').ok_or(Error::NOT_FOUND)?;
-                let start: i64 = start.parse().map_err(|_| Error::NOT_FOUND)?;
-                let seen = repo::event(db, series, user).await?.ok_or(Error::NOT_FOUND)?;
-                (seen, Some(start))
-            }
+        let (seen, occurrence) = if let Some(seen) = repo::event(db, id, user).await? {
+            (seen, None)
+        } else {
+            let (series, start) = id.rsplit_once('.').ok_or(Error::NOT_FOUND)?;
+            let start: i64 = start.parse().map_err(|_| Error::NOT_FOUND)?;
+            let seen = repo::event(db, series, user).await?.ok_or(Error::NOT_FOUND)?;
+            (seen, Some(start))
         };
         let (event, mine) = seen;
         if !on_calendar(&(event.clone(), mine.clone()), user) {

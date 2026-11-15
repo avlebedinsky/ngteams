@@ -13,12 +13,18 @@ const MT: &str = "/api/mt/part/own-01/beta";
 const PROV: &str = "/fabric/own/templates/api";
 const CHAT: &str = "/api/chatsvc/own/v1";
 
-async fn token(server: &TestServer, upn: &str, audience: &str) -> String {
+pub(crate) async fn token(server: &TestServer, upn: &str, audience: &str) -> String {
     let session = server.session(upn).await;
     session.access_token(audience).await.unwrap().token.expose().to_owned()
 }
 
-async fn call(server: &TestServer, token: &str, method: Method, path: &str, body: Option<Value>) -> (u16, Value) {
+pub(crate) async fn call(
+    server: &TestServer,
+    token: &str,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
     let mut request = reqwest::Client::new().request(method, server.url(path));
     if !token.is_empty() {
         request = request.bearer_auth(token);
