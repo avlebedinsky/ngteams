@@ -10,7 +10,7 @@ use teams_auth::admin::{
 };
 use teams_auth::cloud::Cloud;
 use teams_auth::secrets::Secret;
-use wiremock::matchers::{body_json, header, method, path, query_param, query_param_is_missing};
+use wiremock::matchers::{any, body_json, header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TOKEN: &str = "made-up-access-token";
@@ -303,6 +303,56 @@ async fn a_list_in_another_form_is_refused() -> TestResult {
     assert!(matches!(
         client.users(&Secret::new(TOKEN), "", None, 50).await,
         Err(AdminError::UnexpectedResponse { status: 200 })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_success_that_names_no_account_is_refused() -> TestResult {
+    let (server, client) = server().await?;
+    // A success whose body is neither an account (no `upn`, no flags) nor a list: each call that reads one takes it
+    // as an unexpected answer with the status it got.
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": ID, "ok": true})))
+        .mount(&server)
+        .await;
+    let (token, password) = (Secret::new(TOKEN), Secret::new("a made-up password"));
+    let unexpected = |result: Result<AdminUser, AdminError>| -> bool {
+        matches!(result, Err(AdminError::UnexpectedResponse { status: 201 }))
+    };
+    assert!(unexpected(
+        client
+            .create_first_admin(FirstAdmin {
+                code: None,
+                upn: "dana@example.test",
+                display_name: "Dana Doe",
+                password: &password,
+            })
+            .await
+    ));
+    assert!(unexpected(client.me(&token).await));
+    assert!(unexpected(
+        client
+            .create_user(
+                &token,
+                NewUser {
+                    upn: "dana@example.test",
+                    display_name: "Dana Doe",
+                    password: &password,
+                    admin: false,
+                    must_change_password: true,
+                },
+            )
+            .await
+    ));
+    let rename = UserChanges {
+        display_name: Some("Dana D.".to_owned()),
+        ..UserChanges::default()
+    };
+    assert!(unexpected(client.update_user(&token, ID, &rename).await));
+    assert!(matches!(
+        client.users(&token, "", None, 50).await,
+        Err(AdminError::UnexpectedResponse { status: 201 })
     ));
     Ok(())
 }
