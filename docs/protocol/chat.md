@@ -1167,3 +1167,33 @@ The native client: [`teams_core::activity`](../../crates/teams-core/src/activity
   v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread` with `{"isread": "true"}`, retried
   nine times while denied. A carve-out under the lab rule (the account's own feed): it passes.
 - `GET v1/users/ME/properties` answers 404, and so does `v1/users/ME/conversations/48:calllogs` for the lab accounts.
+
+## The call log
+
+Read from a lab account's synced store of 2026-11-16 (84 call entries from the lab's call runs, besides recording
+and transcript records); no value is copied here. `48:calllogs` (`threadType` `streamofcalllogs`) holds one `Text`
+message per call the account was in or rang for. Its sender is the call's caller (its `from`), its content reads
+"Call Logs for Call <call id>", its arrival is the call's end (within a few seconds), and its `properties` are
+`call-log` (the call, a JSON object as text) and `s2spartnername` `concore_gvc`. The call:
+
+- `callId`, `startTime`, `connectTime` (null for a call the account never took), `endTime` (ISO times, 7 digits).
+- `callDirection` `outgoing` (the account placed it) or `incoming`; `callType` `twoParty` or `multiParty`;
+  `callState` `accepted`, `declined` (only incoming ones seen) or `missed` (the caller's unanswered calls too: no
+  outgoing entry was `declined`, though the lab's runs had declines); `sessionType` `default`.
+- `originator` (the caller's MRI) and `originatorParticipant`, `target` and `targetParticipant` (the callee in a 1:1
+  call, the account in most group entries, null in some): each participant `{id, type, displayName, tenantId,
+  alternateId, applicationType}`, `type` `default` (a voicemail's `voicemail`), only the originator's
+  `displayName` set.
+- `participants` (MRIs) and `participantList` (participants) for a group call, null for a 1:1 call; `threadId` and
+  `messageId` (the group chat and, it seems, its call event) on some group entries.
+- `userParticipantId` (a GUID of the entry's own), `sharedCorrelationId` (a GUID, not the call id),
+  `forwardingInfo` (`{forwardingType: "unanswered", forwardingDestinationType: "voicemail", acceptedBy}` when the
+  call went to voicemail), `transferInfo` (a park or a transfer), `callAttributes` (null in all).
+
+A missed call's item in the activity feed (the same store): `activityType` `call`, `activitySubtype` `missedCall`,
+the caller as `sourceUserId` and `sourceUserImDisplayName`, `sourceThreadId` empty, `sourceMessageId` `1`, an empty
+`messagePreview` with `messagePreviewTemplateOption` `previewUnavailable`, and an `activityContext` with
+`callModalities` (`Audio`), the Calls clump (`ClumpId` `nr:system:clump:Calls`, `ClumpType` and `ClumpTitle`
+`Calls`), `partnerAppId`, `activityVersion` and `activityProcessingLatency`; empty content, `isread` false, the
+`skypespaces` partner. The native client reads it as "Missed call from <caller>" (`teams_core::activity`) and reads
+nothing of the call log's entries yet.

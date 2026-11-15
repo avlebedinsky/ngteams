@@ -9,6 +9,7 @@ use super::state::{Call, Kind, Party, Seat, Status};
 use super::wire::iso;
 use crate::app::App;
 use crate::chatsvc::service::{self, Activity};
+use crate::db::DbError;
 
 /// How the call went for one party, as its call log tells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,24 +105,31 @@ fn missed(call: &Call, to: &str, at: i64) -> Value {
 /// Writes what the ended call `call` leaves each party: its call log entry, and a missed call's activity item for
 /// each callee who never took it. One not written is logged: the call itself is over either way.
 pub(super) async fn tell(app: &App, call: &Call) {
-    let tenant = match crate::db::meta::tenant(&app.db).await {
-        Ok(tenant) => tenant,
-        Err(error) => {
-            tracing::warn!(%error, "a call's log wasn't written");
-            return;
+    let logged = log(app, call).await;
+    let missed = tell_missed(app, call).await;
+    for (what, written) in [("the call log", logged), ("a missed call's activity", missed)] {
+        if let Err(error) = written {
+            tracing::warn!(%error, what, "a call's end wasn't written to its parties' streams");
         }
-    };
+    }
+}
+
+/// Each party's call log entry.
+async fn log(app: &App, call: &Call) -> Result<(), DbError> {
+    let tenant = crate::db::meta::tenant(&app.db).await?;
     let caller = call.party(Seat::CALLER).mri();
     let people: Vec<String> = call.parties.iter().map(|party| party.id.clone()).collect();
-    let log = |to: &str, at: i64| {
+    let content = format!("Call Logs for Call {}", call.id);
+    let entry = |to: &str, at: i64| {
         let seat = call.seat_of(to).unwrap_or(Seat::CALLER);
         let properties = json!({"call-log": entry(call, seat, &tenant).to_string(), "s2spartnername": "concore_gvc"});
-        let content = format!("Call Logs for Call {}", call.id);
-        service::stream_message(app, service::CALL_LOG, (at, &caller), &content, properties)
+        service::stream_message(app, service::CALL_LOG, (at, &caller), &content, &properties)
     };
-    if let Err(error) = service::tell_call_log(app, &people, &log).await {
-        tracing::warn!(%error, "a call's log wasn't written");
-    }
+    service::tell_call_log(app, &people, &entry).await
+}
+
+/// A missed call's activity item for each callee who never took the call.
+async fn tell_missed(app: &App, call: &Call) -> Result<(), DbError> {
     let missed_by: Vec<String> = call
         .parties
         .iter()
@@ -130,11 +138,12 @@ pub(super) async fn tell(app: &App, call: &Call) {
         .map(|party| party.id.clone())
         .collect();
     if missed_by.is_empty() {
-        return;
+        return Ok(());
     }
+    let caller = call.party(Seat::CALLER).mri();
     let item = |to: &str, at: i64| {
         let properties = json!({"activity": missed(call, to, at), "isread": false, "messageUpdatePolicyValue": 1});
-        service::stream_message(app, service::FEED, (at, &caller), "", properties)
+        service::stream_message(app, service::FEED, (at, &caller), "", &properties)
     };
     let told = Activity {
         people: &missed_by,
@@ -142,9 +151,7 @@ pub(super) async fn tell(app: &App, call: &Call) {
         personal: true,
         item: &item,
     };
-    if let Err(error) = service::tell_activity(app, told).await {
-        tracing::warn!(%error, "a missed call's activity wasn't written");
-    }
+    service::tell_activity(app, told).await
 }
 
 #[cfg(test)]

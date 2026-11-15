@@ -243,7 +243,7 @@ pub(crate) fn stream_message(
     stream: &str,
     (at, from): (i64, &str),
     content: &str,
-    properties: Value,
+    properties: &Value,
 ) -> Value {
     let base = wire::base(app);
     let time = wire::iso(at);

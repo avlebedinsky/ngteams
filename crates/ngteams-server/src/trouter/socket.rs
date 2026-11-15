@@ -216,6 +216,14 @@ async fn ticked(interval: Option<&mut Interval>) {
     }
 }
 
+/// Waits until `at`, or for ever when there is nothing to wait for.
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The next payload of a subscription a socket may not have.
 async fn next_of(subscription: Option<&mut Subscription>) -> Result<Bytes, Missed> {
     match subscription {
@@ -378,6 +386,8 @@ enum Step {
     Event(Result<Bytes, Missed>),
     Control(Result<Bytes, Missed>),
     Account,
+    /// An invitation the endpoint didn't answer is due again.
+    Redeliver,
     End(End),
 }
 
@@ -517,6 +527,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             // an open socket is never authenticated again: the client comes back with a new token
             () = &mut waits.expired => Step::End(End::Tell(Some(UNAUTHORIZED))),
             () = ticked(waits.account.as_mut()) => Step::Account,
+            () = until(self.calls.next_due()) => Step::Redeliver,
             () = &mut waits.idle => Step::End(End::Gone),
             _ = closing.changed() => Step::End(End::Tell(None)),
         }
@@ -541,6 +552,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             }
             Step::Event(Err(Missed::Closed)) | Step::Control(Err(Missed::Closed)) => Err(End::Tell(None)),
             Step::Account => self.account_holds().await,
+            Step::Redeliver => self.redeliver().await,
             Step::End(end) => Err(end),
         }
     }
@@ -722,9 +734,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             return Ok(());
         };
         self.account_holds().await?;
+        self.send_call(&published).await
+    }
+
+    /// Writes a call delivery under a number of its own.
+    async fn send_call(&mut self, published: &calls::Published) -> Result<(), End> {
         let id = self.calls.number(&published.call);
-        let delivery = calls::delivery(&self.host, &self.claim.endpoint, id, &published);
+        let delivery = calls::delivery(&self.host, &self.claim.endpoint, id, published);
+        self.calls.sent(id, published, Instant::now());
         self.link.send(frames::delivery(&delivery)).await
+    }
+
+    /// Delivers again each invitation that is due, as Teams' service does one its endpoint didn't answer.
+    async fn redeliver(&mut self) -> Result<(), End> {
+        for published in self.calls.due(Instant::now()) {
+            tracing::debug!(call = %published.call, "an unanswered invitation is delivered again");
+            self.send_call(&published).await?;
+        }
+        Ok(())
     }
 
     async fn on_control(&mut self, payload: &[u8]) -> Result<(), End> {
@@ -763,6 +790,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Session<'_, S> {
             }
             FromClient::Response { id, status, body } => {
                 tracing::debug!(id, status, "a delivery was answered");
+                self.calls.answered(id);
                 if let (Some(call), Some(body)) = (self.calls.call_of(id).map(str::to_owned), body) {
                     let (account, endpoint) = (&self.account.oid, &self.claim.endpoint);
                     crate::calling::answered(self.app, &call, account, endpoint, &body).await;

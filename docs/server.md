@@ -734,8 +734,10 @@ callee's answer in the caller's acceptance; `ngteams` takes an own-server accoun
   with its links (`leave`, `updateEndpointState`, `updateEndpointMetadata`, `updateParticipantProperties`,
   `notificationLinks`). The callee's registered calling endpoints (the `SkypeSpaces` stack's Trouter sockets, on
   any node) get the invitation at their root: `{"evt": 107, "gp": <base64 JSON>}` with the caller, the leg's
-  `attach`, `progress` and `reject` links and the caller's offer. A group chat's call is [below](#group-calls); a
-  meeting's and the test call's start is answered `501`.
+  `attach`, `progress` and `reject` links and the caller's offer. An invitation an endpoint doesn't answer (its
+  socket sends no response to the delivery) is delivered again, three times 2 s apart, as Teams' service does, by
+  the node that holds that socket; any response stops it, and the client takes a redelivery as the invitation it
+  has. A group chat's call is [below](#group-calls); a meeting's and the test call's start is answered `501`.
 - **While it rings**: `attach` (answered with the leg's `progress`, `acceptance` and `callLeg` links and the
   conversation's), `progress`, `accept` (answered with the call leg's links and the keep-alive interval), `reject`.
   An answer delivers the acceptance, with the callee's answer, at the caller's `acceptance` callback; the callee's
@@ -819,8 +821,28 @@ goes when no seat was made after it; otherwise it stays, without a leg and in no
 - **Seats**: a group call's controller links carry the party's seat where a 1:1 call's carry `1`; a link naming
   another party's seat is `404`.
 
-Not served yet: meetings, the test call, group video and sharing (the node takes audio only), transfer, voicemail,
-the call log stream (`48:calllogs`) and a missed call's activity item.
+Not served yet: meetings, the test call, group video and sharing (the node takes audio only), transfer, voicemail.
+
+### The call log
+
+When a 1:1 or group call ends, each of its parties gets an entry in its own call log (`48:calllogs`, one of [the
+account's own streams](#the-accounts-own-streams)), and each callee who never took it gets a missed call in its
+activity feed. No capture shows the service writing either; both take the shapes a lab account's synced streams
+hold (`docs/protocol/chat.md`, "The call log"), and the client's catch-up and push store them as any stream's.
+
+- **An entry** is a `Text` message from the caller, "Call Logs for Call <call id>", whose `properties.call-log`
+  (JSON as text) tells the call: its id and times (`connectTime` when the party came into it, else null), the
+  party's `callDirection` (`outgoing` for the caller, `incoming` for everyone else, a joiner too), `callType`
+  (`twoParty`, `multiParty`) and `callState`: `accepted` when the party came into the call, `declined` when it
+  declined (and didn't come in later), else `missed`. The caller of a call nobody took has it as `missed`, as
+  Teams' logs show it. The caller is the `originator`; a 1:1 call names the callee as `target`, a group call every
+  party it rang in `participants` and its chat in `threadId`. `sharedCorrelationId` is the call's conversation and
+  `userParticipantId` the party's own participant id; forwarding, transfer and attributes are null.
+- **A missed call** (`activityType` `call`, `activitySubtype` `missedCall`, the caller as its source) goes to each
+  party but the caller whose entry is `missed`: a cancelled ring, one that ran out, a group call that ended while it
+  rang, someone with no calling endpoint. A decline is none. The client reads it as "Missed call from <caller>".
+- Both are written after the call's end is delivered, one transaction per stream, and told on each account's push
+  channel, so its clients on any node have them at once; a client that didn't list the stream yet catches it up.
 
 ### The TURN relay (coturn)
 
@@ -1014,14 +1036,16 @@ every reader, the push channel and the sync see the same message (`src/chatsvc/r
 
 ## The account's own streams
 
-`48:notes`, `48:notifications` and `48:mentions` are each kept as a thread only their account is in, under an id no
-request can name. A request's `48:…` id always resolves to the caller's own stream, so the membership check that
+`48:notes`, `48:notifications`, `48:mentions` and `48:calllogs` are each kept as a thread only their account is in,
+under an id no request can name. A request's `48:…` id always resolves to the caller's own stream, so the membership check that
 guards every chat also keeps one account's stream from another. A stream is no thread: its thread and member reads
 answer 404, as does any other `48:` id (`48:generic`: 400).
 
 - **Notes** (`48:notes`): `POST …/48:notes/messages` writes a note, and its edit, delete and message pages work as
   a chat's. They answer 404 until the first note is written, and are in no conversation list, as with Teams. A
   note is pushed to the account's own endpoints.
+- **The call log** (`48:calllogs`) is written by the server only, one entry per call ([above](#the-call-log));
+  it is listed once it holds one, and takes its account's `consumptionhorizon` (also before that).
 - **The activity feed** (`48:notifications`) and **the mentions stream** (`48:mentions`) are written by the server
   only (a post there is refused, 403). They are in the conversation list once they hold an item, with their
   `consumptionhorizon` and `consumptionHorizonBookmark`. The account marks an item read or unread (`PUT

@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 use teams_call::CallState;
 use teams_core::Outbox;
-use teams_core::activity::{ActivityFeed, ActivityKind};
+use teams_core::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_proto::{Author, Client, Mri};
 use teams_store::{Message, Store};
@@ -155,7 +155,7 @@ fn missed_from(feed: &ActivityFeed) -> Vec<String> {
     feed.items
         .iter()
         .filter(|item| item.kind == ActivityKind::MissedCall)
-        .map(|item| item.title())
+        .map(ActivityItem::title)
         .collect()
 }
 
