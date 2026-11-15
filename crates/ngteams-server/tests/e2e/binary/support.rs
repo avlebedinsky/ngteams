@@ -23,28 +23,31 @@ pub struct Deployment {
     pub origin: String,
     pub tls: bool,
     pub redis: Option<String>,
+    _port: Port,
 }
 
 impl Deployment {
     pub async fn new(backend: Backend, tls: bool, redis: Option<String>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let database = database_url(backend, &dir).await;
-        let origin = format!("{}://127.0.0.1:{}", if tls { "https" } else { "http" }, free_port());
+        let port = Port::take();
+        let origin = format!("{}://127.0.0.1:{}", if tls { "https" } else { "http" }, port.number);
         Self {
             dir,
             database,
             origin,
             tls,
             redis,
+            _port: port,
         }
     }
 
     pub fn node(&self, name: &str) -> Node {
-        let port = if name == "a" {
-            url::Url::parse(&self.origin).unwrap().port().unwrap()
-        } else {
-            free_port()
-        };
+        let own = (name != "a").then(Port::take);
+        let port = own.as_ref().map_or_else(
+            || url::Url::parse(&self.origin).unwrap().port().unwrap(),
+            |port| port.number,
+        );
         let endpoint = format!("{}://127.0.0.1:{port}", if self.tls { "https" } else { "http" });
         let config = self.dir.path().join(format!("{name}.toml"));
         let mut text = format!(
@@ -71,6 +74,7 @@ impl Deployment {
             endpoint,
             process: None,
             http: http_client(),
+            _port: own,
         }
     }
 }
@@ -80,6 +84,7 @@ pub struct Node {
     pub endpoint: String,
     process: Option<Child>,
     pub http: reqwest::Client,
+    _port: Option<Port>,
 }
 
 impl Node {
@@ -160,6 +165,12 @@ impl Node {
                 "binary exited before ready"
             );
             if self.status("/health/ready").await == Some(204) {
+                // a node that couldn't take its port exits; the answer was then another's
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(
+                    self.process.as_mut().unwrap().try_wait().unwrap().is_none(),
+                    "binary exited once ready"
+                );
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -261,12 +272,33 @@ pub fn http_client() -> reqwest::Client {
         .unwrap()
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A loopback port only its holder uses, from when it is picked until its node is gone: a node binds it long after
+/// (the command line's migration and accounts come first), and a port the system hands out could meanwhile go to
+/// another test's node or to an outgoing connection. So the ports are below the system's range for those, and each
+/// is locked by a file among every test process of the machine.
+pub struct Port {
+    pub number: u16,
+    _lock: std::fs::File,
+}
+
+impl Port {
+    const RANGE: std::ops::Range<u16> = 20_000..32_000;
+
+    pub fn take() -> Self {
+        let locks = std::env::temp_dir().join("ngteams-server-e2e-ports");
+        std::fs::create_dir_all(&locks).unwrap();
+        let span = u128::from(Self::RANGE.end - Self::RANGE.start);
+        let start = u16::try_from(uuid::Uuid::new_v4().as_u128() % span).unwrap();
+        (0..Self::RANGE.end - Self::RANGE.start)
+            .map(|step| Self::RANGE.start + (start + step) % (Self::RANGE.end - Self::RANGE.start))
+            .find_map(|number| {
+                let lock = std::fs::File::create(locks.join(number.to_string())).ok()?;
+                lock.try_lock().ok()?;
+                std::net::TcpListener::bind(("127.0.0.1", number)).ok()?;
+                Some(Self { number, _lock: lock })
+            })
+            .expect("a free loopback port")
+    }
 }
 
 // Re-exec isolates the TLS trust environment from parallel tests and the user's trust store.

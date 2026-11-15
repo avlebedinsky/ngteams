@@ -4,8 +4,10 @@
 //! a subscriber that falls behind learns how much it missed ([`Missed`]), and replays from the topic's [`journal`].
 //! What is published while a node's Redis subscription is down reaches none of its subscribers, so a break closes
 //! every subscription of the node ([`Missed::Closed`]): a subscriber subscribes again and reads what it missed.
+//! In Redis a topic is a channel of the deployment's [`keyspace`], so deployments on one Redis hear only their own.
 
 pub mod journal;
+pub mod keyspace;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,6 +18,8 @@ use redis::aio::ConnectionManager;
 use redis::{AsyncCommands as _, PushInfo, PushKind, Value};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::mpsc;
+
+use self::keyspace::{Keyspace, Shared};
 
 /// Payloads a subscriber may fall behind by before it misses some.
 pub const BACKLOG: usize = 256;
@@ -170,15 +174,15 @@ impl Fanout for Local {
 /// Drops a node's Redis subscription to a topic once its last local subscriber is gone.
 struct Release {
     inner: Arc<RedisInner>,
-    topic: String,
+    channel: String,
 }
 
 impl Drop for Release {
     fn drop(&mut self) {
         let inner = Arc::clone(&self.inner);
-        let topic = std::mem::take(&mut self.topic);
+        let channel = std::mem::take(&mut self.channel);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move { inner.release(&topic).await });
+            runtime.spawn(async move { inner.release(&channel).await });
         }
     }
 }
@@ -187,17 +191,19 @@ impl Drop for Release {
 struct RedisInner {
     commands: ConnectionManager,
     subscriber: ConnectionManager,
+    keys: Keyspace,
+    /// The node's subscribers by Redis channel.
     topics: Topics,
     /// Held while a topic is subscribed or released, so a release can't undo a subscription made meanwhile.
     changes: tokio::sync::Mutex<()>,
 }
 
 impl RedisInner {
-    async fn release(&self, topic: &str) {
+    async fn release(&self, channel: &str) {
         let _change = self.changes.lock().await;
-        if self.topics.release(topic) {
+        if self.topics.release(channel) {
             let mut subscriber = self.subscriber.clone();
-            if let Err(error) = subscriber.unsubscribe(topic).await {
+            if let Err(error) = subscriber.unsubscribe(channel).await {
                 tracing::warn!(%error, "can't drop a Redis subscription");
             }
         }
@@ -212,11 +218,11 @@ pub struct Redis {
 }
 
 impl Redis {
-    /// Connects to `url` (its RESP3 form is used for the subscriber) and starts delivering.
+    /// Connects to `url` (its RESP3 form is used for the subscriber) and starts delivering the topics of `keys`.
     ///
     /// # Errors
     /// Redis can't be reached.
-    pub async fn connect(url: &str) -> Result<Self, FanoutError> {
+    pub async fn connect(url: &str, keys: Keyspace) -> Result<Self, FanoutError> {
         let client = redis::Client::open(resp3(url))?;
         let commands = ConnectionManager::new(client.clone()).await?;
         let (pushes, mut received) = mpsc::unbounded_channel::<PushInfo>();
@@ -226,6 +232,7 @@ impl Redis {
         let inner = Arc::new(RedisInner {
             commands,
             subscriber,
+            keys,
             topics: Topics::default(),
             changes: tokio::sync::Mutex::new(()),
         });
@@ -239,10 +246,10 @@ impl Redis {
         Ok(Self { inner })
     }
 
-    /// Its command connection, for other shared state (login counters).
+    /// Its command connection with the deployment's keyspace, for other shared state (login counters, the journal).
     #[must_use]
-    pub fn connection(&self) -> ConnectionManager {
-        self.inner.commands.clone()
+    pub fn shared(&self) -> Shared {
+        Shared::new(self.inner.commands.clone(), self.inner.keys.clone())
     }
 }
 
@@ -250,17 +257,19 @@ impl Redis {
 impl Fanout for Redis {
     async fn publish(&self, topic: &str, payload: Bytes) -> Result<(), FanoutError> {
         let mut commands = self.inner.commands.clone();
-        commands.publish::<_, _, ()>(topic, payload.as_ref()).await?;
+        let channel = self.inner.keys.key(topic);
+        commands.publish::<_, _, ()>(channel, payload.as_ref()).await?;
         Ok(())
     }
 
     async fn subscribe(&self, topic: &str) -> Result<Subscription, FanoutError> {
         let _change = self.inner.changes.lock().await;
-        let (receiver, first) = self.inner.topics.receiver(topic);
+        let channel = self.inner.keys.key(topic);
+        let (receiver, first) = self.inner.topics.receiver(&channel);
         if first {
             let mut subscriber = self.inner.subscriber.clone();
-            if let Err(error) = subscriber.subscribe(topic).await {
-                self.inner.topics.release(topic);
+            if let Err(error) = subscriber.subscribe(&channel).await {
+                self.inner.topics.release(&channel);
                 return Err(error.into());
             }
         }
@@ -268,7 +277,7 @@ impl Fanout for Redis {
             receiver,
             _release: Some(Release {
                 inner: Arc::clone(&self.inner),
-                topic: topic.to_owned(),
+                channel,
             }),
         })
     }
@@ -363,22 +372,24 @@ mod tests {
         let Ok(url) = std::env::var("NGTEAMS_SERVER_REDIS_URL") else {
             return;
         };
-        let node = Redis::connect(&url).await.unwrap();
+        let keys = Keyspace::new(&uuid::Uuid::new_v4().to_string());
+        let node = Redis::connect(&url, keys).await.unwrap();
         let topic = format!("push:{}", uuid::Uuid::new_v4());
+        let channel = node.inner.keys.key(&topic);
         let subscription = node.subscribe(&topic).await.unwrap();
         let change = node.inner.changes.lock().await;
         drop(subscription);
-        node.inner.topics.deliver(&topic, Bytes::from_static(b"late"));
+        node.inner.topics.deliver(&channel, Bytes::from_static(b"late"));
         drop(change);
-        let released = tokio::time::timeout(std::time::Duration::from_secs(5), wait_for_release(&node, &topic)).await;
+        let released = tokio::time::timeout(std::time::Duration::from_secs(5), wait_for_release(&node, &channel)).await;
         assert!(released.is_ok());
     }
-    async fn wait_for_release(node: &Redis, topic: &str) {
-        let mut commands = node.connection();
+    async fn wait_for_release(node: &Redis, channel: &str) {
+        let mut commands = node.shared().commands();
         loop {
             let counts: Vec<(String, u64)> = redis::cmd("PUBSUB")
                 .arg("NUMSUB")
-                .arg(topic)
+                .arg(channel)
                 .query_async(&mut commands)
                 .await
                 .unwrap();

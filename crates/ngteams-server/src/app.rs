@@ -15,6 +15,7 @@ use crate::auth::tokens::Issuer;
 use crate::config::{Config, LoginConfig};
 use crate::db::{Db, DbError};
 use crate::fanout::journal::{Journal, Keeping, LocalJournal, RedisJournal};
+use crate::fanout::keyspace::Keyspace;
 use crate::fanout::{Fanout, FanoutError, Local, Redis};
 use crate::storage::{ObjectStorage, Storage, StorageError};
 use crate::throttle::Throttle;
@@ -91,10 +92,11 @@ impl App {
         let (fanout, journal, throttle, setup_throttle): (Arc<dyn Fanout>, Arc<dyn Journal>, Throttle, Throttle) =
             match &config.redis_url {
                 Some(url) => {
-                    let redis = Redis::connect(url).await?;
-                    let throttle = Throttle::redis(config.login.clone(), redis.connection());
-                    let setup_throttle = Throttle::redis(setup_limits, redis.connection());
-                    let journal = RedisJournal::new(redis.connection());
+                    let keys = Keyspace::new(config.redis_namespace.as_deref().unwrap_or(&tenant));
+                    let redis = Redis::connect(url, keys).await?;
+                    let throttle = Throttle::redis(config.login.clone(), redis.shared(), "login");
+                    let setup_throttle = Throttle::redis(setup_limits, redis.shared(), "setup");
+                    let journal = RedisJournal::new(redis.shared());
                     (Arc::new(redis), Arc::new(journal), throttle, setup_throttle)
                 }
                 None => (

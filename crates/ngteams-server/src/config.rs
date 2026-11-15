@@ -44,6 +44,10 @@ pub struct Config {
     pub database_pool: u32,
     /// `redis://…` or `rediss://…`: fan-out and login counters shared between nodes. Without it, both are in-process.
     pub redis_url: Option<String>,
+    /// The deployment's part of that Redis (`crate::fanout::keyspace`): every key and channel is under it. Without
+    /// it, the tenant id in the database, which the nodes of one deployment share and no other deployment has. Set
+    /// it where two deployments on one Redis have the same tenant id (a database restored from another's).
+    pub redis_namespace: Option<String>,
     /// Where files go: `file:///<dir>`, `memory:///` or `s3://<bucket>`, with `storage_options` (S3's region,
     /// endpoint, keys) as `object_store` names them.
     pub storage_url: String,
@@ -252,6 +256,7 @@ impl Default for Config {
             database_url: "sqlite://ngteams-server.sqlite".to_owned(),
             database_pool: 16,
             redis_url: None,
+            redis_namespace: None,
             storage_url: "memory:///".to_owned(),
             storage_options: BTreeMap::new(),
             storage: StorageConfig::default(),
@@ -301,6 +306,8 @@ pub enum ConfigError {
     Region,
     #[error("database_url must start with postgres:// or sqlite://")]
     Database,
+    #[error("redis_namespace must be 1 to 64 letters, digits, '.', '_' or '-'")]
+    Namespace,
     #[error(
         "tokens' lifetimes, the login and setup windows and the push socket's authentication time must be above zero"
     )]
@@ -334,8 +341,8 @@ impl Config {
         Ok(config)
     }
 
-    /// Refuses an origin a client wouldn't accept, a region that can't stand in a path, an unknown database and a
-    /// zero lifetime.
+    /// Refuses an origin a client wouldn't accept, a region that can't stand in a path, an unknown database, a Redis
+    /// namespace that isn't a plain name and a zero lifetime.
     ///
     /// # Errors
     /// The first value that is wrong.
@@ -363,6 +370,10 @@ impl Config {
             && !self.database_url.starts_with("sqlite://")
         {
             return Err(ConfigError::Database);
+        }
+        let namespace = self.redis_namespace.as_deref();
+        if namespace.is_some_and(|namespace| !crate::fanout::keyspace::Keyspace::is_namespace(namespace)) {
+            return Err(ConfigError::Namespace);
         }
         if self.tokens.access_lifetime == 0
             || self.tokens.refresh_lifetime == 0

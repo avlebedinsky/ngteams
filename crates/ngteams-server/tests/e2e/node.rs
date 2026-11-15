@@ -129,6 +129,21 @@ fn refused(change: fn(&mut Config)) -> ConfigError {
 }
 
 #[test]
+fn a_redis_namespace_is_a_short_plain_name() {
+    let named = |namespace: &str| Config {
+        redis_namespace: Some(namespace.to_owned()),
+        ..Config::default()
+    };
+    for namespace in ["", "two words", "a:b", "{a}"] {
+        assert!(
+            matches!(named(namespace).check(), Err(ConfigError::Namespace)),
+            "{namespace}"
+        );
+    }
+    named("eu-1.staging_2").check().unwrap();
+}
+
+#[test]
 fn the_configuration_refuses_bad_names_databases_and_lifetimes() {
     assert!(matches!(
         refused(|c| c.region = "Bad Region".into()),

@@ -9,6 +9,7 @@ use bytes::Bytes;
 use ngteams_server::app::App;
 use ngteams_server::auth::extract::Skype;
 use ngteams_server::config::StorageConfig;
+use ngteams_server::fanout::keyspace::Keyspace;
 use ngteams_server::fanout::{Fanout, Local, Missed, Redis};
 use ngteams_server::storage::{ObjectStorage, Storage, StorageError};
 
@@ -64,8 +65,9 @@ async fn a_subscriber_that_falls_behind_learns_how_much_it_missed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_carries_a_topic_between_two_nodes() {
     let Some(url) = redis_url() else { return };
-    let node_a = Redis::connect(&url).await.unwrap();
-    let node_b = Redis::connect(&url).await.unwrap();
+    let keys = Keyspace::new(&uuid::Uuid::new_v4().to_string());
+    let node_a = Redis::connect(&url, keys.clone()).await.unwrap();
+    let node_b = Redis::connect(&url, keys).await.unwrap();
     node_a.ready().await.unwrap();
     let topic = format!("push:{}", uuid::Uuid::new_v4());
     let mut on_b = node_b.subscribe(&topic).await.unwrap();
@@ -151,8 +153,9 @@ async fn a_success_clears_the_failures_counted_in_redis() {
 
 #[tokio::test]
 async fn an_unreachable_redis_stops_the_node_from_starting() {
-    assert!(Redis::connect("redis://127.0.0.1:1").await.is_err());
-    assert!(Redis::connect("not a url").await.is_err());
+    let keys = Keyspace::new("down");
+    assert!(Redis::connect("redis://127.0.0.1:1", keys.clone()).await.is_err());
+    assert!(Redis::connect("not a url", keys).await.is_err());
 }
 
 #[tokio::test]

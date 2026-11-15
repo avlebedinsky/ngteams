@@ -91,6 +91,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `database_url` | `sqlite://ngteams-server.sqlite` | `postgres://…` or `sqlite://<path>` |
 | `database_pool` | `16` | Postgres connections per node (SQLite: one) |
 | `redis_url` | none | `redis://…` or `rediss://…`; without it, fan-out and login counters stay in the node |
+| `redis_namespace` | the tenant id in the database | the deployment's part of that Redis: every key and channel is `ngts:<namespace>:…`. 1 to 64 letters, digits, `.`, `_` or `-`. Set it only where two deployments on one Redis hold the same tenant id (a database restored from another's); every node of a deployment takes the same value |
 | `storage_url`, `storage_options` | `memory:///`, none | where pictures and files live: `s3://<bucket>[/<prefix>]` on any S3-compatible service, or `file:///<dir>` on one node ([Storage](#storage)). `memory:///` forgets everything at exit |
 | `storage.connect_timeout`, `storage.request_timeout` | `3`, `30` | seconds a node waits for a connection to an S3 store, and for its answer or for a download that stands still ([Storage](#storage)) |
 | `storage.max_retries`, `storage.retry_timeout` | `3`, `8` | how often a request the store didn't answer is sent again, and the seconds after its first attempt past which it isn't |
@@ -449,7 +450,8 @@ public origin is refused.
 - **Keep-alives.** `ping` is answered `["pong"]`, any other acknowledged event `[]`. A socket silent for two ping
   intervals and 20 seconds is closed.
 - **Replay.** Every delivered event but typing (and other `Control/…` messages) is also kept in the account's
-  journal for 15 minutes, at most 512 entries: a Redis Stream `journal:push:<mri>`, or memory on a single node. Each
+  journal for 15 minutes, at most 512 entries: a Redis Stream `journal:push:<mri>` (in the deployment's
+  [keyspace](#scaling)), or memory on a single node. Each
   registered endpoint keeps a cursor, the last entry written to its socket, for 24 hours: a field of the account's
   hash `cursors:push:<mri>`, which holds the 64 cursors that moved last. A socket delivers from its endpoint's
   cursor, so after a reconnect, on any node, the endpoint gets what it missed as stored deliveries (`"mstore":true`,
@@ -838,6 +840,14 @@ the 1:1 chat and its history stay its two people's.
   from it. Without Redis the same `Fanout` trait is one process's broadcast.
 - Delivery through the fan-out is at most once. A subscriber that falls behind learns how many payloads it missed.
   When a node's Redis subscription breaks, its subscriptions end: a subscriber subscribes again.
+- Several deployments may share one Redis. Every Redis key and channel of a deployment is under its namespace,
+  `ngts:<namespace>:<name>`: the sign-in and setup counters (`login:<hash>`, `setup:<hash>`), the fan-out's topics
+  (`push:<mri>`, `trouter:<mri>`) and the journal (`journal:<topic>`, `cursors:<topic>`). The namespace is
+  `redis_namespace`, or else the tenant id the nodes read from the database: the nodes of one deployment agree with
+  no configuration, and another deployment's sign-in holds, pushes and replays never meet them. The command line's
+  account commands reach the nodes in the same namespace. The names are built in one place,
+  `fanout::keyspace` (`Keyspace::key`, and `Shared`, the only way to a node's Redis connection): new code that keeps
+  anything in Redis names it there, never with a bare key.
 - A Trouter socket lives on one node. Its node subscribes to the account's `push:<mri>` and `trouter:<mri>` (control:
   a registration taken, a socket's claim to its endpoint, an event the journal didn't keep, a disconnect) topics. A
   kept event is appended to the account's journal before it is published, so the node that is woken reads it there,
@@ -876,7 +886,8 @@ through its loopback TURN server) against an in-process server on loopback, on S
 (a Postgres the tests may create databases on) the Postgres cases run too, and with `NGTEAMS_SERVER_REDIS_URL` the
 Redis cases. The picture and file tests keep their blobs in the S3 store `NGTEAMS_SERVER_S3_URL` names
 (`http://<access key>:<secret>@<host>:<port>/<bucket>`; they make the bucket), else in a temporary directory. CI's
-Coverage job sets all three from its service containers (RustFS for S3). Locally:
+Coverage job sets all three from its service containers (RustFS for S3). Each test's deployment has a database and a
+Redis namespace of its own, so the tests run in parallel on one Postgres and one Redis. Locally:
 
 ```sh
 podman run -d --rm --name ngts-pg -e POSTGRES_PASSWORD=ngts -p 55432:5432 docker.io/library/postgres:17

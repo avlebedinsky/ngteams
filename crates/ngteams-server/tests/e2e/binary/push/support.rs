@@ -439,6 +439,20 @@ impl User {
         .unwrap()
     }
 
+    /// Waits until the account's store holds its own chat message `id`, which its push brings: only then can it edit
+    /// the message, react to it or delete it.
+    pub async fn holds(&self, chat: &str, id: &str) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while self.engine().message(chat, id).await.unwrap().is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}: its own message {id} never reached the store",
+                self.upn
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     pub async fn create(&self, others: &[&Self], topic: Option<&str>) -> String {
         self.write(Action::CreateChat {
             others: others.iter().map(|user| user.mri.clone()).collect(),

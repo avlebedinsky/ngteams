@@ -13,6 +13,7 @@ use tracing_subscriber::prelude::*;
 use crate::admin::{Actor, AdminError, NewAccount};
 use crate::app::{self, App};
 use crate::config::Config;
+use crate::fanout::keyspace::Keyspace;
 use crate::fanout::{Fanout, FanoutError, Local, Redis, Subscription};
 use crate::serve::Listener;
 
@@ -289,7 +290,11 @@ async fn user(
     streams: &mut Streams<'_>,
 ) -> Result<(), CliError> {
     let db = crate::db::Db::connect(&config.database_url, 1).await?;
-    let nodes = Nodes(config.redis_url);
+    let nodes = Nodes {
+        redis: config.redis_url,
+        namespace: config.redis_namespace,
+        db: db.clone(),
+    };
     match command {
         UserCommand::Add { upn, name, admin } => {
             let password = password(input)?;
@@ -338,16 +343,26 @@ fn changed(ended: Result<(), AdminError>, done: &str, warnings: &mut dyn Write) 
 
 /// The fan-out the running nodes listen on, connected to only when it is used: a command makes its database change
 /// first, and keeps it when Redis is down. Without Redis there is none to reach from here: the one node reads the
-/// change from the database.
+/// change from the database. The nodes listen in the deployment's keyspace, which is the tenant's unless configured.
 #[derive(Debug)]
-struct Nodes(Option<String>);
+struct Nodes {
+    redis: Option<String>,
+    namespace: Option<String>,
+    db: crate::db::Db,
+}
 
 impl Nodes {
     async fn reach(&self) -> Result<Box<dyn Fanout>, FanoutError> {
-        Ok(match &self.0 {
-            Some(url) => Box::new(Redis::connect(url).await?),
-            None => Box::new(Local::new()),
-        })
+        let Some(url) = &self.redis else {
+            return Ok(Box::new(Local::new()));
+        };
+        let namespace = match &self.namespace {
+            Some(namespace) => namespace.clone(),
+            None => crate::db::meta::tenant(&self.db)
+                .await
+                .map_err(|error| FanoutError::Unavailable(error.to_string()))?,
+        };
+        Ok(Box::new(Redis::connect(url, Keyspace::new(&namespace)).await?))
     }
 }
 
@@ -419,8 +434,16 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let down = Nodes(Some(format!("redis://127.0.0.1:{closed}")));
+        let dir = tempfile::tempdir().unwrap();
+        let database = format!("sqlite://{}", dir.path().join("server.sqlite").display());
+        let mut down = Nodes {
+            redis: Some(format!("redis://127.0.0.1:{closed}")),
+            namespace: None,
+            db: crate::db::Db::connect(&database, 1).await.unwrap(),
+        };
         let untold = down.publish("topic", Bytes::new()).await.unwrap_err();
+        down.namespace = Some("staging".to_owned());
+        assert!(down.ready().await.is_err());
 
         let mut warnings = Vec::new();
         changed(
@@ -444,7 +467,13 @@ mod tests {
 
     #[tokio::test]
     async fn without_redis_there_is_nobody_to_tell() {
-        let alone = Nodes(None);
+        let dir = tempfile::tempdir().unwrap();
+        let database = format!("sqlite://{}", dir.path().join("server.sqlite").display());
+        let alone = Nodes {
+            redis: None,
+            namespace: None,
+            db: crate::db::Db::connect(&database, 1).await.unwrap(),
+        };
         alone.ready().await.unwrap();
         alone.subscribe("topic").await.unwrap();
         alone.publish("topic", Bytes::new()).await.unwrap();

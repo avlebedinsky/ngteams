@@ -12,6 +12,7 @@ mod binary;
 mod calendar;
 mod calling;
 mod chatsvc;
+mod deployments;
 mod media;
 mod migrations;
 mod node;

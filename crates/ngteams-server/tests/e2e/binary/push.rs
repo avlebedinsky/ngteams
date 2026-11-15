@@ -77,6 +77,7 @@ async fn a_post_its_edit_reaction_delete_typing_and_a_read_reach_the_other_clien
             user.shows(&chat, &id, "hello, live").await;
         }
 
+        a.holds(&chat, &id).await;
         a.write(edit(&chat, &id, "edited, live")).await;
         for user in [&mut a2, &mut b] {
             user.pushed(0, &chat, &id, MessageChange::Edit).await;

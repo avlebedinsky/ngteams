@@ -1,6 +1,6 @@
 //! Password attempts per account: after `max_failures` within the window, the account's password sign-ins are
-//! held off until the window ends. Counted in Redis when the server has one (every node sees the same count), else in
-//! the node.
+//! held off until the window ends. Counted in Redis when the server has one (every node of the deployment sees the
+//! same count, in the deployment's keyspace), else in the node.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use redis::AsyncCommands as _;
-use redis::aio::ConnectionManager;
 use sha2::{Digest as _, Sha256};
 
 use crate::config::LoginConfig;
+use crate::fanout::keyspace::Shared;
 
 /// The attempts counted: per account, the count and when its window started.
 type Windows = HashMap<String, (u32, Instant)>;
@@ -25,7 +25,9 @@ pub enum Throttle {
     },
     Redis {
         limits: LoginConfig,
-        redis: ConnectionManager,
+        redis: Shared,
+        /// What is counted (`login`, `setup`): the counts of one kind don't meet another's.
+        kind: &'static str,
     },
 }
 
@@ -48,8 +50,8 @@ impl Throttle {
     }
 
     #[must_use]
-    pub fn redis(limits: LoginConfig, redis: ConnectionManager) -> Self {
-        Self::Redis { limits, redis }
+    pub fn redis(limits: LoginConfig, redis: Shared, kind: &'static str) -> Self {
+        Self::Redis { limits, redis, kind }
     }
 
     /// Reserves one password attempt before verification. Returns the remaining hold when the limit is exceeded.
@@ -65,9 +67,9 @@ impl Throttle {
                 *count = count.saturating_add(1);
                 held.then(|| window.saturating_sub(started.elapsed()))
             }
-            Self::Redis { limits, redis } => {
-                let mut redis = redis.clone();
-                let key = key(account);
+            Self::Redis { limits, redis, kind } => {
+                let key = key(redis, kind, account);
+                let mut redis = redis.commands();
                 let result: redis::RedisResult<(u64, i64)> = redis::pipe()
                     .atomic()
                     .cmd("SET")
@@ -99,9 +101,9 @@ impl Throttle {
             Self::Local { windows, .. } => {
                 windows.lock().unwrap_or_else(PoisonError::into_inner).remove(account);
             }
-            Self::Redis { redis, .. } => {
-                let mut redis = redis.clone();
-                if let Err(error) = redis.del::<_, ()>(key(account)).await {
+            Self::Redis { redis, kind, .. } => {
+                let key = key(redis, kind, account);
+                if let Err(error) = redis.commands().del::<_, ()>(key).await {
                     tracing::warn!(%error, "can't clear the login failures");
                 }
             }
@@ -110,9 +112,7 @@ impl Throttle {
 }
 
 /// The Redis key of an account's count: its UPN hashed, so Redis holds no account names.
-fn key(account: &str) -> String {
-    format!(
-        "ngts:login:{}",
-        URL_SAFE_NO_PAD.encode(Sha256::digest(account.as_bytes()))
-    )
+fn key(redis: &Shared, kind: &str, account: &str) -> String {
+    let account = URL_SAFE_NO_PAD.encode(Sha256::digest(account.as_bytes()));
+    redis.key(&format!("{kind}:{account}"))
 }

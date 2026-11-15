@@ -4,7 +4,8 @@
 //!
 //! [`LocalJournal`] is one process's (a single node, SQLite); [`RedisJournal`] keeps each topic in a Redis Stream
 //! (`journal:<topic>`, capped with `MAXLEN`, expiring [`KEPT_FOR`] after its last entry) and a topic's cursors in a
-//! hash (`cursors:<topic>`), at most [`CURSORS`] of them, so neither grows with the readers that come and go.
+//! hash (`cursors:<topic>`), at most [`CURSORS`] of them, so neither grows with the readers that come and go. Both
+//! names are in the deployment's keyspace.
 //! [`Keeping`] is the fan-out with a journal behind it: it keeps what its rule picks, then publishes, and says so on
 //! the fan-out when it couldn't keep one.
 
@@ -12,11 +13,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::keyspace::Shared;
+use super::{Fanout, FanoutError, Subscription};
 use async_trait::async_trait;
 use bytes::Bytes;
-use redis::aio::ConnectionManager;
-
-use super::{Fanout, FanoutError, Subscription};
 
 /// How long an entry is kept after it was appended (Teams' deliveries live 15 minutes, `ttl=900`).
 pub const KEPT_FOR: Duration = Duration::from_mins(15);
@@ -273,33 +273,27 @@ impl Journal for LocalJournal {
 }
 
 /// The journal in Redis Streams, shared by every node.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RedisJournal {
-    commands: ConnectionManager,
-}
-
-impl std::fmt::Debug for RedisJournal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RedisJournal").finish_non_exhaustive()
-    }
+    redis: Shared,
 }
 
 /// A stream's entries as `XRANGE` answers them: the id, then the fields and values.
 type Range = Vec<(String, Vec<(String, Vec<u8>)>)>;
 
 impl RedisJournal {
-    /// A journal over a node's command connection ([`super::Redis::connection`]).
+    /// A journal over a node's command connection ([`super::Redis::shared`]).
     #[must_use]
-    pub fn new(commands: ConnectionManager) -> Self {
-        Self { commands }
+    pub fn new(redis: Shared) -> Self {
+        Self { redis }
     }
 
-    fn key(topic: &str) -> String {
-        format!("journal:{topic}")
+    fn key(&self, topic: &str) -> String {
+        self.redis.key(&format!("journal:{topic}"))
     }
 
-    fn cursors_key(topic: &str) -> String {
-        format!("cursors:{topic}")
+    fn cursors_key(&self, topic: &str) -> String {
+        self.redis.key(&format!("cursors:{topic}"))
     }
 }
 
@@ -356,8 +350,8 @@ fn redis_ms((seconds, micros): (u64, u64)) -> u64 {
 #[async_trait]
 impl Journal for RedisJournal {
     async fn append(&self, topic: &str, payload: Bytes) -> Result<EntryId, FanoutError> {
-        let key = Self::key(topic);
-        let mut commands = self.commands.clone();
+        let key = self.key(topic);
+        let mut commands = self.redis.commands();
         let (id,): (String,) = redis::pipe()
             .cmd("XADD")
             .arg(&key)
@@ -376,8 +370,8 @@ impl Journal for RedisJournal {
     }
 
     async fn after(&self, topic: &str, cursor: EntryId) -> Result<Kept, FanoutError> {
-        let key = Self::key(topic);
-        let mut commands = self.commands.clone();
+        let key = self.key(topic);
+        let mut commands = self.redis.commands();
         let (now, len, first, later): ((u64, u64), usize, Range, Range) = redis::pipe()
             .cmd("TIME")
             .cmd("XLEN")
@@ -410,11 +404,11 @@ impl Journal for RedisJournal {
     }
 
     async fn tail(&self, topic: &str) -> Result<EntryId, FanoutError> {
-        let mut commands = self.commands.clone();
+        let mut commands = self.redis.commands();
         let (now, newest): ((u64, u64), Range) = redis::pipe()
             .cmd("TIME")
             .cmd("XREVRANGE")
-            .arg(Self::key(topic))
+            .arg(self.key(topic))
             .arg("+")
             .arg("-")
             .arg("COUNT")
@@ -426,11 +420,11 @@ impl Journal for RedisJournal {
     }
 
     async fn cursor(&self, topic: &str, reader: &str) -> Result<Option<EntryId>, FanoutError> {
-        let mut commands = self.commands.clone();
+        let mut commands = self.redis.commands();
         let (now, kept): ((u64, u64), Option<String>) = redis::pipe()
             .cmd("TIME")
             .cmd("HGET")
-            .arg(Self::cursors_key(topic))
+            .arg(self.cursors_key(topic))
             .arg(reader)
             .query_async(&mut commands)
             .await?;
@@ -438,11 +432,11 @@ impl Journal for RedisJournal {
     }
 
     async fn set_cursor(&self, topic: &str, reader: &str, cursor: EntryId) -> Result<(), FanoutError> {
-        let mut commands = self.commands.clone();
+        let mut commands = self.redis.commands();
         redis::cmd("EVAL")
             .arg(SET_CURSOR)
             .arg(1)
-            .arg(Self::cursors_key(topic))
+            .arg(self.cursors_key(topic))
             .arg(reader)
             .arg(cursor.to_string())
             .arg(CURSORS)
