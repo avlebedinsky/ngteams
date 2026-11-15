@@ -184,6 +184,11 @@ async fn call_nobody_takes(a: &mut Phone, chat: &str) -> Result<End, String> {
     Ok(a.ended(from, call).await)
 }
 
+/// The server refused the call's start: the client ends it at its start, or doesn't place it.
+fn refused(end: &Result<End, String>) -> bool {
+    matches!(end, Ok(End::Failed("start")) | Err(_))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_to_someone_offline_disabled_or_deleted_ends_cleanly() {
     for backend in backends() {
@@ -213,11 +218,11 @@ async fn a_call_to_someone_offline_disabled_or_deleted_ends_cleanly() {
         rig.first.cli(&["user", "disable", "b@own.test"], "");
         let end = call_nobody_takes(&mut a, &chat).await;
         eprintln!("a call to a disabled account: {end:?}");
-        assert!(!matches!(end, Ok(End::HungUp | End::Declined)), "{end:?}");
+        assert!(refused(&end), "the server refuses it, it doesn't ring out: {end:?}");
         rig.first.cli(&["user", "delete", "c@own.test"], "");
         let end = call_nobody_takes(&mut a, &gone).await;
         eprintln!("a call to a deleted account: {end:?}");
-        assert!(!matches!(end, Ok(End::HungUp | End::Declined)), "{end:?}");
+        assert!(refused(&end), "the server refuses it, it doesn't ring out: {end:?}");
         rig.no_open_calls().await;
 
         // enabled again and signed in again, b takes a's next call

@@ -189,6 +189,17 @@ impl Rig {
         ngteams_server::calling::open_calls(&db).await.unwrap()
     }
 
+    /// A calling endpoint `phone`'s client registered, as its callbacks name it, read from the server's database.
+    pub async fn calling_endpoint(&self, phone: &Phone) -> String {
+        let db = ngteams_server::db::Db::connect(&self.database, 1).await.unwrap();
+        let stack = ngteams_server::trouter::Stack::Calling;
+        let registered = ngteams_server::registrar::registered(&db, phone.oid(), stack.app_id())
+            .await
+            .unwrap();
+        let epid = registered.first().expect("a registered calling endpoint");
+        ngteams_server::trouter::endpoint_id(phone.oid(), epid, stack)
+    }
+
     /// Waits until the server holds no call that isn't over.
     pub async fn no_open_calls(&self) {
         let deadline = tokio::time::Instant::now() + WAIT;

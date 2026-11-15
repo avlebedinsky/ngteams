@@ -204,15 +204,15 @@ async fn a_start_needs_the_callers_own_identity_callbacks_and_a_real_callee() {
     )
     .await;
     assert_eq!(status, 403, "a callback on another endpoint");
-    // someone else as the caller, a callee that doesn't exist, itself, a body that is no start
-    let (status, _) = raw(
-        server,
-        "c@own.test",
-        post.clone(),
-        epconv,
-        &start_body(&a, &b, elsewhere),
-    )
-    .await;
+    // someone else as the caller (b's callbacks on b's own endpoint, so only the name refuses it), a callee that
+    // doesn't exist, itself, a body that is no start
+    let stack = ngteams_server::trouter::Stack::Calling;
+    let registered = ngteams_server::registrar::registered(&server.app.db, &pair.b_id, stack.app_id())
+        .await
+        .unwrap();
+    let b_endpoint = ngteams_server::trouter::endpoint_id(&pair.b_id, &registered[0], stack);
+    let b_own = format!("{}/trouter/v4/f/{b_endpoint}/callAgent/x/", crate::trouter::ORIGIN);
+    let (status, _) = raw(server, "b@own.test", post.clone(), epconv, &start_body(&a, &c, &b_own)).await;
     assert_eq!(status, 403, "another account as the caller");
     let nobody = "8:orgid:00000000-0000-4000-8000-00000000dead";
     let (status, _) = raw(

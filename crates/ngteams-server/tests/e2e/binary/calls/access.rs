@@ -86,23 +86,19 @@ async fn outsider_requests(rig: &Rig, c: &Phone, a_mri: &str, b_mri: &str) {
         panic!("one call: {calls:?}");
     };
     let token = c.skypetoken().await;
+    let c_endpoint = rig.calling_endpoint(c).await;
     for node in [&rig.first, rig.other()] {
         for (method, path) in requests_of(&call.conversation, &call.id) {
             let (status, body) = raw(node, &token, method.clone(), &path, &json!({})).await;
             assert_eq!(status, 404, "{method} {path}: an outsider learns nothing of the call");
             assert!(!body.to_string().contains(&call.id), "{method} {path}: {body}");
         }
-        // c can't start a call in a's name, nor one whose deliveries go to someone else's socket
+        // c can't start a call in a's name (its callbacks on c's own endpoint, so only the name refuses it), nor
+        // one whose deliveries go to someone else's socket
+        let own = format!("{}/trouter/v4/f/{c_endpoint}/callAgent/x/", rig.origin);
         let elsewhere = format!("{}/trouter/v4/f/SomeoneElsesEndpoint00/callAgent/x/", rig.origin);
         let epconv = format!("{PROXY}/epconv");
-        let (status, _) = raw(
-            node,
-            &token,
-            Method::POST,
-            &epconv,
-            &start_body(a_mri, b_mri, &elsewhere),
-        )
-        .await;
+        let (status, _) = raw(node, &token, Method::POST, &epconv, &start_body(a_mri, b_mri, &own)).await;
         assert_eq!(status, 403, "a start in another account's name");
         let (status, _) = raw(
             node,
