@@ -150,13 +150,14 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
         roster_sequence: 0,
         negotiation: None,
         negotiations: 0,
-        answered_by: None,
+        answered: None,
         held_by: None,
         chat,
     };
     repo::insert(&app.db, &call).await?;
-    ring(&app, &call).await?;
+    // before anyone can end the call: the chat orders its events by when they were written
     tell_chat_started(&app, &caller, &call).await;
+    ring(&app, &call).await?;
     let origin = app.config.origin();
     Ok(Json(wire::conversation(&origin, &app.config.region, &call)).into_response())
 }
@@ -308,6 +309,7 @@ pub(super) async fn controller(
         app: &app,
         caller: &caller,
         key,
+        number: param(&path, "number"),
         body: &body,
     };
     asked.run(kind, param(&path, "op")).await
@@ -318,6 +320,8 @@ struct Leg<'a> {
     app: &'a App,
     caller: &'a Caller,
     key: Key<'a>,
+    /// The link's number: a negotiation's own, for its answer, rejection and acknowledgement.
+    number: &'a str,
     body: &'a Value,
 }
 
@@ -341,6 +345,11 @@ impl Leg<'_> {
             }
             _ => Err(Refusal::Missing.into()),
         }
+    }
+
+    /// The negotiation the link is of.
+    fn negotiation(&self) -> Result<u64, Failure> {
+        self.number.parse().map_err(|_| Refusal::Missing.into())
     }
 
     /// An operation that changes nothing a party is told: checked against the call, answered 200.
@@ -385,25 +394,28 @@ impl Leg<'_> {
     }
 
     async fn answer(&self) -> Result<Response, Failure> {
+        let number = self.negotiation()?;
         let (endpoint, links) = needed_links(self.app, self.caller, self.body).await?;
         step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.answer(side, &endpoint, (links.clone(), self.body), at, out)
+            call.answer(side, number, (&endpoint, links.clone(), self.body), at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))
     }
 
     async fn turn_away(&self) -> Result<Response, Failure> {
+        let number = self.negotiation()?;
         step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.turn_away(side, self.body, at, out)
+            call.turn_away(side, number, self.body, at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))
     }
 
     async fn acknowledge_answer(&self) -> Result<Response, Failure> {
+        let number = self.negotiation()?;
         step(self.app, self.key, self.caller, |call, side, at, out| {
-            call.acknowledge_answer(side, at, out)
+            call.acknowledge_answer(side, number, at, out)
         })
         .await?;
         Ok(status(StatusCode::OK))

@@ -12,7 +12,7 @@
 //!   the server deliver to someone else's socket.
 //! - **Who may do what** is the token's account against the call's two parties; anyone else gets 404.
 //! - **The sweeper** ([`sweep`]) ends a ring nobody answered and a call whose keep-alives stopped, on whichever
-//!   node looks first, and drops the rows of calls that are over.
+//!   serving node looks first, and drops the rows of calls that are over.
 //! - **A call's events in its chat** (`Event/Call`: started, ended with its length, missed) are written through the
 //!   chat service ([`crate::chatsvc::call_events`]), when the two parties have their chat.
 //!
@@ -27,7 +27,7 @@ mod state;
 mod turn;
 mod wire;
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::FromRequestParts;
@@ -276,20 +276,17 @@ async fn step<T>(
     Err(Failure::Busy)
 }
 
-/// Starts the node's sweeper; it stops when the node's state is dropped.
-pub(crate) fn spawn_sweeper(app: &Arc<App>) {
-    let app = Arc::downgrade(app);
-    tokio::spawn(async move {
-        let mut every = tokio::time::interval(SWEEP);
-        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            every.tick().await;
-            let Some(app) = Weak::upgrade(&app) else { return };
-            if let Err(error) = sweep(&app).await {
-                tracing::warn!(%error, "the calls' sweep failed");
-            }
+/// A serving node's sweeper, until the task is dropped. Only a node that serves runs it: what a sweep tells the
+/// parties reaches them through the node's fan-out, which a one-shot command's process ends with.
+pub async fn keep_sweeping(app: Arc<App>) {
+    let mut every = tokio::time::interval(SWEEP);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        every.tick().await;
+        if let Err(error) = sweep(&app).await {
+            tracing::warn!(%error, "the calls' sweep failed");
         }
-    });
+    }
 }
 
 /// One look at the calls that are due: a ring nobody answered ends, a call without keep-alives is given up, an

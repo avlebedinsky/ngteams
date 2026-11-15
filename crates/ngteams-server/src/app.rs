@@ -130,7 +130,6 @@ impl App {
             fetcher,
             clearing: crate::media::Clearing::default(),
         });
-        crate::calling::spawn_sweeper(&app);
         Ok(app)
     }
 

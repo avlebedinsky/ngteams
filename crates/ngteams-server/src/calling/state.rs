@@ -118,6 +118,13 @@ pub(crate) struct Negotiation {
     pub at: i64,
 }
 
+/// A renegotiation's answer, forwarded to the party that offered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Answered {
+    pub by: Side,
+    pub number: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Call {
     pub id: String,
@@ -136,8 +143,8 @@ pub(crate) struct Call {
     pub roster_sequence: u64,
     pub negotiation: Option<Negotiation>,
     pub negotiations: u64,
-    /// Whose answer to a renegotiation waits to be acknowledged.
-    pub answered_by: Option<Side>,
+    /// The answered renegotiation whose answer waits to be acknowledged.
+    pub answered: Option<Answered>,
     pub held_by: Option<Side>,
     /// The chat the call's start was written to.
     pub chat: Option<String>,
@@ -405,6 +412,9 @@ impl Call {
         let muted = state.pointer("/state/isMuted").and_then(Value::as_bool);
         let sequence = state.get("endpointStateSequenceNumber").and_then(Value::as_u64);
         let party = self.party_mut(side);
+        if sequence.is_some_and(|sequence| sequence < party.state_sequence) {
+            return Ok(());
+        }
         let changed = muted.is_some_and(|muted| muted != party.muted);
         party.muted = muted.unwrap_or(party.muted);
         party.state_sequence = sequence.unwrap_or(party.state_sequence + 1);
@@ -470,13 +480,13 @@ impl Call {
         Ok(())
     }
 
-    /// The far end answers a renegotiation: its answer goes to the party that offered, with where it is
-    /// acknowledged.
+    /// The far end answers the renegotiation `number`: its answer goes to the party that offered, with where it is
+    /// acknowledged. An answer to an earlier negotiation than the one that waits has nothing to answer.
     pub(crate) fn answer(
         &mut self,
         side: Side,
-        endpoint: &str,
-        (links, body): (Links, &Value),
+        number: u64,
+        (endpoint, links, body): (&str, Links, &Value),
         at: At<'_>,
         out: &mut Out,
     ) -> Result<(), Refusal> {
@@ -488,21 +498,29 @@ impl Call {
             .ok_or(Refusal::Bad)?;
         let offered = self
             .negotiation
-            .take_if(|waiting| waiting.by != side)
+            .take_if(|waiting| waiting.by != side && waiting.number == number)
             .ok_or(Refusal::Gone)?;
         self.party_mut(side).keep(endpoint, links);
-        self.answered_by = Some(side);
+        self.answered = Some(Answered { by: side, number });
         let told = wire::media_answer(at.origin, self, &self.party(side).mri(), answer, media);
         out.call_back(at.origin, self.party(offered.by).link("mediaAnswer"), told);
         Ok(())
     }
 
-    /// The far end turns a renegotiation away: the party that offered is told at its `rejection` callback.
-    pub(crate) fn turn_away(&mut self, side: Side, body: &Value, at: At<'_>, out: &mut Out) -> Result<(), Refusal> {
+    /// The far end turns the renegotiation `number` away: the party that offered is told at its `rejection`
+    /// callback.
+    pub(crate) fn turn_away(
+        &mut self,
+        side: Side,
+        number: u64,
+        body: &Value,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
         self.in_call(side)?;
         let offered = self
             .negotiation
-            .take_if(|waiting| waiting.by != side)
+            .take_if(|waiting| waiting.by != side && waiting.number == number)
             .ok_or(Refusal::Gone)?;
         let failure = if body.is_object() {
             body.clone()
@@ -513,11 +531,21 @@ impl Call {
         Ok(())
     }
 
-    /// The party that offered acknowledges the answer: the answerer hears it at its own callback.
-    pub(crate) fn acknowledge_answer(&mut self, side: Side, at: At<'_>, out: &mut Out) -> Result<(), Refusal> {
+    /// The party that offered acknowledges the answer to its renegotiation `number`: the answerer hears it at its
+    /// own callback.
+    pub(crate) fn acknowledge_answer(
+        &mut self,
+        side: Side,
+        number: u64,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
         self.in_call(side)?;
-        if let Some(answerer) = self.answered_by.take_if(|answerer| *answerer != side) {
-            let link = self.party(answerer).link("mediaAcknowledgement");
+        let answered = self
+            .answered
+            .take_if(|answered| answered.by != side && answered.number == number);
+        if let Some(answered) = answered {
+            let link = self.party(answered.by).link("mediaAcknowledgement");
             out.call_back(at.origin, link, wire::media_acknowledgement());
         }
         Ok(())
@@ -656,7 +684,7 @@ mod tests {
             roster_sequence: 0,
             negotiation: None,
             negotiations: 0,
-            answered_by: None,
+            answered: None,
             held_by: None,
             chat: None,
         }
@@ -903,6 +931,11 @@ mod tests {
         call.endpoint_state(Side::Caller, &muted, at(1_021_000), &mut out)
             .unwrap();
         assert!(out.deliveries.is_empty());
+        // an older state that comes after a newer one changes nothing
+        let late = json!({"endpointState": {"state": {"isMuted": false}, "endpointStateSequenceNumber": 3}});
+        call.endpoint_state(Side::Caller, &late, at(1_021_500), &mut out)
+            .unwrap();
+        assert!(call.caller.muted && call.caller.state_sequence == 4 && out.deliveries.is_empty());
         call.leave(Side::Caller, &json!({}), at(1_022_000), &mut out);
         // one that was on its way when the call ended is taken and tells nobody
         let mut out = Out::default();
@@ -980,14 +1013,20 @@ mod tests {
         let answer = json!({"mediaAnswer": {"mediaContent": {"blob": "answer 2", "contentType": "x"}}});
         let mut out = Out::default();
         assert_eq!(
-            call.answer(Side::Caller, "A", (Links::new(), &answer), at(1_022_000), &mut out),
+            call.answer(Side::Caller, 1, ("A", Links::new(), &answer), at(1_022_000), &mut out),
             Err(Refusal::Gone)
         );
         assert_eq!(
-            call.answer(Side::Callee, "B", (Links::new(), &json!({})), at(1_022_000), &mut out),
+            call.answer(
+                Side::Callee,
+                1,
+                ("B", Links::new(), &json!({})),
+                at(1_022_000),
+                &mut out
+            ),
             Err(Refusal::Bad)
         );
-        call.answer(Side::Callee, "B", (Links::new(), &answer), at(1_022_000), &mut out)
+        call.answer(Side::Callee, 1, ("B", Links::new(), &answer), at(1_022_000), &mut out)
             .unwrap();
         assert_eq!(paths(&out), [("A", "mediaAnswer")]);
         assert_eq!(out.deliveries[0].body["mediaAnswer"]["sender"]["id"], "8:orgid:b");
@@ -999,13 +1038,19 @@ mod tests {
         );
         // the answerer's own acknowledgement tells nobody; the offerer's tells the answerer
         let mut out = Out::default();
-        call.acknowledge_answer(Side::Callee, at(1_023_000), &mut out).unwrap();
+        call.acknowledge_answer(Side::Callee, 1, at(1_023_000), &mut out)
+            .unwrap();
         assert!(out.deliveries.is_empty());
-        call.acknowledge_answer(Side::Caller, at(1_023_000), &mut out).unwrap();
+        // nor does the offerer's of another negotiation
+        call.acknowledge_answer(Side::Caller, 2, at(1_023_000), &mut out)
+            .unwrap();
+        assert!(out.deliveries.is_empty());
+        call.acknowledge_answer(Side::Caller, 1, at(1_023_000), &mut out)
+            .unwrap();
         assert_eq!(paths(&out), [("B", "mediaAcknowledgement")]);
         // settled: an answer now has nothing to answer
         assert_eq!(
-            call.answer(Side::Callee, "B", (Links::new(), &answer), at(1_024_000), &mut out),
+            call.answer(Side::Callee, 1, ("B", Links::new(), &answer), at(1_024_000), &mut out),
             Err(Refusal::Gone)
         );
     }
@@ -1027,11 +1072,11 @@ mod tests {
         call.renegotiate(Side::Caller, "A", (from_a.clone(), &offer()), at(1_021_000), &mut out)
             .unwrap();
         assert_eq!(
-            call.turn_away(Side::Caller, &Value::Null, at(1_022_000), &mut out),
+            call.turn_away(Side::Caller, 1, &Value::Null, at(1_022_000), &mut out),
             Err(Refusal::Gone)
         );
         let mut out = Out::default();
-        call.turn_away(Side::Callee, &Value::Null, at(1_022_000), &mut out)
+        call.turn_away(Side::Callee, 1, &Value::Null, at(1_022_000), &mut out)
             .unwrap();
         assert_eq!(paths(&out), [("A", "rejection")]);
         assert_eq!(out.deliveries[0].body["mediaNegotiationFailure"]["code"], 488);
@@ -1042,9 +1087,20 @@ mod tests {
         call.renegotiate(Side::Caller, "A", (from_a, &offer()), at(1_061_000), &mut out)
             .unwrap();
         assert_eq!(paths(&out), [("B", "mediaRenegotiation")]);
-        let own = json!({"mediaNegotiationFailure": {"code": 488}});
+        // what comes late for the one that gave way answers nothing of the one that waits now
+        let answer = json!({"mediaAnswer": {"mediaContent": {"blob": "late", "contentType": "x"}}});
         let mut out = Out::default();
-        call.turn_away(Side::Callee, &own, at(1_062_000), &mut out).unwrap();
+        assert_eq!(
+            call.answer(Side::Callee, 2, ("B", Links::new(), &answer), at(1_062_000), &mut out),
+            Err(Refusal::Gone)
+        );
+        assert_eq!(
+            call.turn_away(Side::Callee, 2, &Value::Null, at(1_062_000), &mut out),
+            Err(Refusal::Gone)
+        );
+        assert!(out.deliveries.is_empty() && call.negotiation.as_ref().is_some_and(|waiting| waiting.number == 3));
+        let own = json!({"mediaNegotiationFailure": {"code": 488}});
+        call.turn_away(Side::Callee, 3, &own, at(1_062_000), &mut out).unwrap();
         assert_eq!(out.deliveries[0].body, own);
         assert_eq!(ringing().described(Side::Caller), Err(Refusal::Forbidden));
         assert_eq!(call.described(Side::Caller), Ok(()));

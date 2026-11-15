@@ -180,6 +180,22 @@ fn the_configuration_refuses_a_store_wait_of_zero_but_takes_no_retries() {
     single.check().unwrap();
 }
 
+#[test]
+fn the_configuration_names_the_calling_keys_it_refuses() {
+    for change in [
+        (|c| c.calling.ring_timeout = 0) as fn(&mut Config),
+        |c| c.calling.turn.ttl = 0,
+        |c| c.calling.turn.username = Some("relay".into()),
+        |c| c.calling.turn.password = Some("synthetic".into()),
+    ] {
+        let mut config = Config::default();
+        change(&mut config);
+        let error = config.check().unwrap_err();
+        assert!(matches!(error, ConfigError::Calling), "{error}");
+        assert!(error.to_string().contains("calling.turn.username"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn housekeeping_rotates_a_due_key_and_the_earlier_tokens_still_verify() {
     let server = TestServer::start_with(crate::support::Backend::Sqlite, |config| config.tokens.key_rotation = 1).await;

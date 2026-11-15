@@ -355,8 +355,9 @@ public origin is refused.
   to the people in the channel's thread: a team's people for a standard channel, its own for a private one, and
   nobody once they are out of it. A reply's `to` and links name its post's chain (`<channel>;messageid=<post>`); a
   channel's message names no `threadtype`. `ReadReceipt` stays internal: Teams delivers no peer read receipt. The
-  calling stack's socket gets no chat events. The client's answers (`3:::` with a status) are accepted and not
-  needed.
+  calling stack's socket gets its endpoint's call deliveries ([Calls](#calls)) and no chat events. The client's
+  answers (`3:::` with a status) are accepted; a calling client's answer to an acceptance carries its later
+  callbacks, which the call controller keeps.
 - **Keep-alives.** `ping` is answered `["pong"]`, any other acknowledged event `[]`. A socket silent for two ping
   intervals and 20 seconds is closed.
 - **Replay.** Every delivered event but typing (and other `Control/…` messages) is also kept in the account's
@@ -548,7 +549,8 @@ The account chooses the address, so the server guards every fetch against reques
 
 The server does a call's signaling and hands out the TURN relay's credentials. A 1:1 call's media goes between the
 two clients through the relay (their ICE is relay-only): the caller's offer travels in the callee's invitation, the
-callee's answer in the caller's acceptance. The wire is Teams' (`docs/protocol/calling.md`), every link under
+callee's answer in the caller's acceptance. `ngteams` doesn't take the relay from the server yet
+([the gap](#the-turn-relay-coturn)), so its calls on an own server ring and connect without media. The wire is Teams' (`docs/protocol/calling.md`), every link under
 `<origin>/flightproxy/api/v2/ep/`; requests carry the account's skypetoken.
 
 - **The start** (`POST /flightproxy/api/v2/epconv`) from one account to one other. The answer is the conversation
@@ -569,7 +571,8 @@ callee's answer in the caller's acceptance. The wire is Teams' (`docs/protocol/c
   delivered at the far end's `mediaRenegotiation` callback with where its answer (`negotiations/…/answer`) or its
   rejection goes, the answer delivered back with where it is acknowledged (`mediaAnswers/…/acknowledge`), and the
   acknowledgement told to the answerer; a renegotiation while another waits for its answer is turned away with
-  `491` at its `rejection` callback. `updateMediaDescriptions` and `applyChannelParameters` are taken and change
+  `491` at its `rejection` callback, and one unanswered for 30 seconds gives way to the next: what then comes for
+  it at its own links is answered `410`. `updateMediaDescriptions` and `applyChannelParameters` are taken and change
   nothing. The caller's `mediaRenegotiation` callback is read from its answer to the acceptance's delivery (its
   `callAcceptanceAcknowledgement`), as Teams' call controller reads it.
 - **Hold and resume**: `hold` is answered `202` with the `resume` link; both rosters gain Teams' music-on-hold
@@ -599,6 +602,12 @@ log stream (`48:calllogs`) and a missed call's activity item.
 id>` and the password the base64 HMAC-SHA1 of the user name under the secret, so coturn checks it without asking
 the server and it runs out after `calling.turn.ttl`. Without a secret, `calling.turn.username` and
 `calling.turn.password` name one long-term user. With neither the answer is `503` and calls have no media.
+
+**Not in the client yet.** `ngteams` reads the credential and not `urls`: every account's relay is still Teams'
+own host, which refuses an own server's credential. So a call between two `ngteams` clients on an own server has
+no audio or video, whatever relay is configured, until the client takes an own-server account's relay from `urls`
+(`docs/backlog/own-server-calls-use-the-servers-relay.md`). The server's tests name their relay to the client
+themselves.
 
 A coturn for it:
 

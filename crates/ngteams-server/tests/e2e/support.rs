@@ -66,6 +66,7 @@ pub struct TestServer {
     pub app: Arc<App>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+    sweeper: tokio::task::JoinHandle<()>,
     _dir: TempDir,
 }
 
@@ -105,11 +106,13 @@ impl TestServer {
         let task = tokio::spawn(async move {
             listener.serve(router, None, closing).await.unwrap();
         });
+        let sweeper = tokio::spawn(ngteams_server::calling::keep_sweeping(Arc::clone(&app)));
         Self {
             origin,
             app,
             shutdown: Some(shutdown),
             task: Some(task),
+            sweeper,
             _dir: dir,
         }
     }
@@ -196,6 +199,7 @@ impl TestServer {
 
 impl Drop for TestServer {
     fn drop(&mut self) {
+        self.sweeper.abort();
         if let Some(task) = self.task.take() {
             task.abort();
         }

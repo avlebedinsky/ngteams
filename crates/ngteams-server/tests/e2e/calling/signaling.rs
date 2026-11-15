@@ -81,13 +81,29 @@ async fn the_callers_cancel_ends_the_ring() {
     let mut pair = Pair::start(crate::support::Backend::Sqlite).await;
     pair.a.call(&mri(&pair.b_id));
     let call = pair.a.state(CallState::Ringing).await;
-    let rings = pair.b.incoming().await;
+    pair.b.incoming().await;
+    let calls = ngteams_server::calling::open_calls(&pair.server.app.db).await.unwrap();
+    let [rang] = calls.as_slice() else {
+        panic!("one call: {calls:?}");
+    };
     pair.a.hang_up(call);
     assert_eq!(pair.a.ended().await, End::HungUp);
     let end = pair.b.ring_ended().await;
     assert_eq!(end.code, Some(487), "{end:?}");
     // the ring is over: its answer comes too late
-    let _ = rings;
+    let stack = ngteams_server::trouter::Stack::Calling;
+    let registered = ngteams_server::registrar::registered(&pair.server.app.db, &pair.b_id, stack.app_id())
+        .await
+        .unwrap();
+    let endpoint = ngteams_server::trouter::endpoint_id(&pair.b_id, &registered[0], stack);
+    let link = |name: &str| format!("{}/trouter/v4/f/{endpoint}/callAgent/x/{name}/", crate::trouter::ORIGIN);
+    let acceptance = json!({"callAcceptance": {
+        "links": {"mediaRenegotiation": link("mediaRenegotiation")},
+        "mediaContent": {"blob": "v=0\r\n", "contentType": "application/sdp-ngc-1.0"},
+    }});
+    let accept = format!("/flightproxy/api/v2/ep/cc.own/cc/v1/incoming/{}/1/t/1/accept", rang.id);
+    let (status, _) = raw(&pair.server, "b@own.test", reqwest::Method::POST, &accept, &acceptance).await;
+    assert_eq!(status, 410, "an answer to a cancelled ring");
     pair.server.stop().await;
 }
 
@@ -242,7 +258,7 @@ async fn only_a_calls_own_parties_operate_on_it() {
     pair.server.add_user("c@own.test", "Cora").await;
     pair.a.call(&mri(&pair.b_id));
     pair.a.state(CallState::Ringing).await;
-    pair.b.incoming().await;
+    let rings = pair.b.incoming().await;
     let calls = ngteams_server::calling::open_calls(&pair.server.app.db).await.unwrap();
     let [call] = calls.as_slice() else {
         panic!("one call: {calls:?}");
@@ -287,6 +303,8 @@ async fn only_a_calls_own_parties_operate_on_it() {
     // the call is untouched: it still rings and is answered
     let quiet = pair.b.events_within(Duration::from_millis(300)).await;
     assert!(quiet.is_empty(), "{quiet:#?}");
+    pair.b.answer(rings.call);
+    pair.a.state(CallState::Connected).await;
     pair.server.stop().await;
 }
 

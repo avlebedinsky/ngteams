@@ -287,6 +287,11 @@ pub enum ConfigError {
     Media,
     #[error("the store's connect and request timeouts must be above zero")]
     Storage,
+    #[error(
+        "calling.ring_timeout and calling.turn.ttl must be above zero, and calling.turn.username and \
+         calling.turn.password set together"
+    )]
+    Calling,
 }
 
 impl Config {
@@ -343,7 +348,6 @@ impl Config {
             || self.login.window == 0
             || self.setup.window == 0
             || self.trouter.auth_timeout == 0
-            || !self.calling.usable()
         {
             return Err(ConfigError::Lifetime);
         }
@@ -359,6 +363,9 @@ impl Config {
         }
         if self.storage.connect_timeout == 0 || self.storage.request_timeout == 0 {
             return Err(ConfigError::Storage);
+        }
+        if !self.calling.usable() {
+            return Err(ConfigError::Calling);
         }
         Ok(())
     }
