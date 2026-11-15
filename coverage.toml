@@ -45,7 +45,7 @@ sha256 = "2144e0b826f79b642f344fefb7881c65489ee1a7b9633fdfb4293d1bb7b35eae"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams-server/src/lib.rs"]
-sha256 = "b41571cdc0baac476128fb86486ce2dd5c0dcdeb547f427785d09bb98f02fb09"
+sha256 = "417bf80b56e05b87bf90e365ef496db0dfec07d73b6dca4bf6bdbf0e5be42b20"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams-server/src/auth/mod.rs"]
