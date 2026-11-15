@@ -16,7 +16,7 @@
 //!   channel made, renamed or deleted, [`Teams::note_activity`]), so a new channel shows too; and a team's or
 //!   channel's `ThreadUpdate` (a team or channel made, renamed or removed, people added or gone, the account among
 //!   them, [`Teams::note_pushed`]), read from the tick once such changes pause, so a burst of them reads the teams a
-//!   few times rather than once each.
+//!   few times rather than once each; that read, when it fails, is owed again once the failed read's wait is over.
 //! - **And the favourites (chats and channels)**: the same answer's `Favorites` folder (the chats and channels Teams
 //!   lists under "Favorites" above its chats, in the user's order), stored with the teams when it could be read
 //!   ([`TeamsRead::favorites`]; a read that couldn't keeps the stored ones), a change told as
@@ -84,10 +84,10 @@ const CREATED_KEPT: Duration = Duration::from_mins(10);
 
 /// Team and channel changes pushed one after another (`ThreadUpdate`) are gathered into one read of the teams: it
 /// starts from the tick once none came for this long, ...
-pub(crate) const PUSHED_QUIET: Duration = Duration::from_millis(500);
+const PUSHED_QUIET: Duration = Duration::from_millis(500);
 /// ... or this long after the first of them, however many follow, so a burst (an owner making many channels) reads
 /// the teams a few times, not once per change.
-pub(crate) const PUSHED_AT_MOST: Duration = Duration::from_secs(5);
+const PUSHED_AT_MOST: Duration = Duration::from_secs(5);
 
 /// The background read of the teams.
 pub(crate) struct Teams<C> {
@@ -108,6 +108,9 @@ pub(crate) struct Teams<C> {
     asked: HashSet<String>,
     /// The first and the last team or channel change pushed since the last read they started ([`Self::note_pushed`]).
     pushed: Option<(Instant, Instant)>,
+    /// The read pushed changes are owed has started (or follows the running one) and no read stored the teams since: a
+    /// failed one is owed again after its wait.
+    pushed_read: bool,
 }
 
 impl<C: Credentials + 'static> Teams<C> {
@@ -127,6 +130,7 @@ impl<C: Credentials + 'static> Teams<C> {
             known: None,
             asked: HashSet::new(),
             pushed: None,
+            pushed_read: false,
         }
     }
 
@@ -141,14 +145,18 @@ impl<C: Credentials + 'static> Teams<C> {
     }
 
     /// From the tick: the read the pushed changes are owed starts at `now` when none came for [`PUSHED_QUIET`], or
-    /// [`PUSHED_AT_MOST`] after the first of them.
+    /// [`PUSHED_AT_MOST`] after the first of them, and not while a failed read's wait runs.
     pub(crate) fn read_pushed_if_due(&mut self, now: Instant) {
         let Some((first, last)) = self.pushed else {
             return;
         };
+        if self.retry_at.is_some_and(|at| now < at) {
+            return;
+        }
         if now.saturating_duration_since(last) >= PUSHED_QUIET || now.saturating_duration_since(first) >= PUSHED_AT_MOST
         {
             self.pushed = None;
+            self.pushed_read = true;
             log::info!("a team's or channel's change was pushed: reading the teams again");
             self.read_now();
         }
@@ -288,11 +296,17 @@ impl<C: Credentials + 'static> Teams<C> {
                 };
                 if std::mem::take(&mut self.read_again) {
                     self.read_now();
+                } else {
+                    self.pushed_read = false;
                 }
                 Ok(Ok(teams != Applied::Ignored || favorites != Applied::Ignored))
             }
             Err(error) => {
-                self.retry_at = Some(Instant::now() + self.retry);
+                let now = Instant::now();
+                self.retry_at = Some(now + self.retry);
+                if std::mem::take(&mut self.pushed_read) {
+                    self.note_pushed(now);
+                }
                 Ok(Err(error))
             }
         }
@@ -613,5 +627,37 @@ mod tests {
         }
         teams.read_pushed_if_due(now);
         assert!(teams.busy(), "the first is old enough");
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_pushed_changes_were_owed_is_owed_again_once_its_wait_is_over() {
+        use super::PUSHED_QUIET;
+        let dir = tempfile::tempdir().expect("a directory");
+        let mut store = teams_store::Store::open(&dir.path().join("teams.sqlite")).expect("a store");
+        let mut teams = teams_without_csa();
+        let start = tokio::time::Instant::now();
+        teams.note_pushed(start);
+        teams.read_pushed_if_due(start + PUSHED_QUIET);
+        let read = teams.next().await.expect("the owed read ran");
+        assert!(matches!(teams.store(&mut store, read), Ok(Err(_))), "no CSA base");
+
+        let failed = tokio::time::Instant::now();
+        teams.read_pushed_if_due(failed + PUSHED_QUIET);
+        assert!(!teams.busy(), "the failed read's wait runs");
+        teams.read_pushed_if_due(failed + std::time::Duration::from_secs(61));
+        assert!(teams.busy(), "the wait is over: the read is owed again");
+        let _ = teams.next().await.expect("it ran");
+        let stored = super::TeamsRead {
+            teams: Vec::new(),
+            favorites: None,
+        };
+        assert!(teams.store(&mut store, Ok(stored)).expect("stored").is_ok());
+
+        // once a read stored the teams, one that fails leaves nothing owed
+        teams.note_activity();
+        let read = teams.next().await.expect("it ran");
+        assert!(matches!(teams.store(&mut store, read), Ok(Err(_))));
+        teams.read_pushed_if_due(tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert!(!teams.busy(), "nothing was pushed");
     }
 }
