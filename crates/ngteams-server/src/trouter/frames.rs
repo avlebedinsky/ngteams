@@ -129,9 +129,14 @@ mod tests {
     fn service_packets_are_written_as_the_client_reads_them() {
         assert_eq!(disconnect(None), "0::");
         assert_eq!(disconnect(Some("unauthorized")), r#"0:::{"reason":"unauthorized"}"#);
+        // The client reads the object by key, and the order of the keys follows the build's `serde_json` features.
+        let event = event_out(2, "trouter.message_loss", &json!({"droppedIndicators": []}));
+        let data = event
+            .strip_prefix("5:2::")
+            .and_then(|data| serde_json::from_str::<Value>(data).ok());
         assert_eq!(
-            event_out(2, "trouter.message_loss", &json!({"droppedIndicators": []})),
-            r#"5:2::{"args":[{"droppedIndicators":[]}],"name":"trouter.message_loss"}"#
+            data,
+            Some(json!({"name": "trouter.message_loss", "args": [{"droppedIndicators": []}]}))
         );
         assert_eq!(ack(4, &json!(["pong"])), r#"6:::4+["pong"]"#);
         assert_eq!(delivery(&json!({"id": 1})), r#"3:::{"id":1}"#);

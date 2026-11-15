@@ -9,3 +9,4 @@ captures/
 .agents/skills/sound-pack/
 .claude/skills/sound-pack
 /.ci-cache/
+__pycache__/
