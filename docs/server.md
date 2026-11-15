@@ -756,7 +756,8 @@ token from after its last password reset.
   `ngts:presence:account:<account>` (a hash: the manual status, the last activity, each endpoint with its lapse
   time), `ngts:presence:due:accounts` (a sorted set: the accounts with an endpoint, by their next lapse),
   `ngts:presence:watchers:<mri>` and `ngts:presence:watching:<account>|<endpoint>` (sorted sets by the
-  subscription's end). A change is published on the watcher's `push:<mri>` as
+  subscription's end, each forgotten whole when its last subscription ends). The node's own state forgets its keys
+  as Redis does. A change is published on the watcher's `push:<mri>` as
   `{"resourceType": "Presence", "endpoints": […], "resource": <the delivery's body>}`.
 
 ## People
@@ -792,7 +793,8 @@ The reads, each for any account that can sign in:
   `userPrincipalName`, `mail`, `businessPhones`, `givenName`, `surname`, `jobTitle`, `mobilePhone`,
   `officeLocation`, `preferredLanguage`), or with `$select` only the properties it names. An account that was
   deleted answers 404 `Request_ResourceNotFound`. `GET /graph/v1.0/users/<id>/photos/96x96/$value` answers the
-  picture (`image/jpeg`), or 404 `ImageNotFound` for an account without one and for any other size.
+  picture (`image/jpeg`), or 404 `ImageNotFound` for an account without one, a deleted one and any other size.
+  Deleting an account takes its picture out of the file store.
 - **The person card** (Loki, under `/loki/`, with the token of `https://loki.delve.office.com` and an
   `X-ClientType` header, else 400 `ClientTypeMissing`; `docs/protocol/loki.md`). The persona is `aadObjectId`
   (and the same account in `teamsMri` when that is sent); one that can't sign in answers 404.

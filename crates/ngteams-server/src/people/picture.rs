@@ -101,8 +101,12 @@ pub async fn remove_picture(db: &Db, storage: &dyn Storage, id: &str) -> Result<
     Ok(true)
 }
 
-/// The picture of the account `id`, when it has one.
+/// The picture of the account `id`, when it has one and wasn't deleted.
 pub(crate) async fn picture(db: &Db, storage: &dyn Storage, id: &str) -> Result<Option<Bytes>, PictureError> {
+    let account = users::by_id(db, id).await?;
+    if account.is_none_or(|user| user.deleted_at.is_some()) {
+        return Ok(None);
+    }
     match repo::profile(db, id).await?.picture_key {
         Some(key) => Ok(storage.get(&key).await?),
         None => Ok(None),

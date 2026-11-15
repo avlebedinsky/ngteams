@@ -439,7 +439,12 @@ async fn user(
         UserCommand::Promote { upn } => Ok(crate::admin::set_admin(&db, &upn, true).await?),
         UserCommand::Demote { upn } => Ok(crate::admin::set_admin(&db, &upn, false).await?),
         UserCommand::Delete { upn } => {
-            let ended = crate::admin::delete_by_upn(&db, &nodes, &upn).await;
+            let storage = crate::storage::ObjectStorage::open_with(
+                &config.storage_url,
+                &config.storage_options,
+                &config.storage,
+            )?;
+            let ended = crate::admin::delete_by_upn(&db, &nodes, &storage, &upn).await;
             changed(ended, &format!("{upn} IS deleted"), streams.warnings)
         }
         UserCommand::Disable { upn } => {

@@ -411,7 +411,7 @@ async fn remove(
     Admin(admin): Admin,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    made(super::delete_user(&app.db, &*app.fanout, Actor::account(&admin), &id).await)?;
+    made(super::delete_user(&app.db, &*app.fanout, app.storage.as_ref(), Actor::account(&admin), &id).await)?;
     Ok(done())
 }
 

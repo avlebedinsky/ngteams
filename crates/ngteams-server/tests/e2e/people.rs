@@ -168,7 +168,8 @@ async fn short_profiles_name_people_by_mri_and_by_address_with_their_title_and_o
         ngteams_server::admin::set_disabled(&office.server.app.db, fanout, "bert@own.test", true)
             .await
             .unwrap();
-        ngteams_server::admin::delete_by_upn(&office.server.app.db, fanout, "cora@own.test")
+        let storage = office.server.app.storage.as_ref();
+        ngteams_server::admin::delete_by_upn(&office.server.app.db, fanout, storage, "cora@own.test")
             .await
             .unwrap();
         let lookup = ShortProfileLookup::new([Mri::new(mri(&office.b)), Mri::new(mri(&office.c))]).unwrap();
@@ -249,10 +250,22 @@ async fn graph_names_a_user_in_the_forms_the_client_reads_and_serves_their_pictu
         }
 
         // a picture taken away is gone, from the store too
-        people::remove_picture(&office.server.app.db, office.server.app.storage.as_ref(), &office.b)
+        let (db, storage) = (&office.server.app.db, office.server.app.storage.as_ref());
+        let kept = people::repo::profile(db, &office.b).await.unwrap().picture_key.unwrap();
+        people::remove_picture(db, storage, &office.b).await.unwrap();
+        assert_eq!(status_of(ada.read(&picture).await.unwrap_err()), Some(404));
+        assert_eq!(storage.get(&kept).await.unwrap(), None);
+
+        // a deleted account's picture is nobody's: not served, and not kept
+        people::set_picture(db, storage, &office.d, png(96, 96)).await.unwrap();
+        let kept = people::repo::profile(db, &office.d).await.unwrap().picture_key.unwrap();
+        let dans = GraphPicture::of(&mri(&office.d)).unwrap();
+        assert!(ada.read(&dans).await.is_ok());
+        ngteams_server::admin::delete_by_upn(db, office.server.app.fanout.as_ref(), storage, "dan@own.test")
             .await
             .unwrap();
-        assert_eq!(status_of(ada.read(&picture).await.unwrap_err()), Some(404));
+        assert_eq!(status_of(ada.read(&dans).await.unwrap_err()), Some(404));
+        assert_eq!(storage.get(&kept).await.unwrap(), None);
         office.server.stop().await;
     }
 }
@@ -267,19 +280,17 @@ async fn a_picture_is_kept_only_when_it_is_one_and_replaces_the_one_before() {
     assert!(first.picture_size > 0);
     assert_eq!(first.job_title.as_deref(), Some("Engineer"));
 
-    for refused in [
-        Bytes::from_static(b"not a picture"),
-        Bytes::from(vec![0_u8; 5 * 1024 * 1024]),
-    ] {
-        let error = people::set_picture(db, storage, &office.b, refused).await.unwrap_err();
-        assert!(
-            matches!(
-                error,
-                people::PictureError::NotAPicture | people::PictureError::TooLarge
-            ),
-            "{error}"
-        );
-    }
+    let error = people::set_picture(db, storage, &office.b, Bytes::from_static(b"not a picture"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, people::PictureError::NotAPicture), "{error}");
+    // a real picture, only too large
+    let mut oversize = png(10, 10).to_vec();
+    oversize.resize(people::MAX_SOURCE + 1, 0);
+    let error = people::set_picture(db, storage, &office.b, oversize.into())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, people::PictureError::TooLarge), "{error}");
     let nobody = people::set_picture(db, storage, "nobody", png(10, 10))
         .await
         .unwrap_err();

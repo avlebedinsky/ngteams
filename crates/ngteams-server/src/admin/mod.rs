@@ -17,6 +17,7 @@ use crate::auth::password::{self, PasswordError};
 use crate::db::users::{self, User};
 use crate::db::{Db, DbError};
 use crate::fanout::{Fanout, FanoutError};
+use crate::storage::Storage;
 
 /// The longest display name, in characters.
 pub const MAX_NAME: usize = 256;
@@ -211,12 +212,21 @@ async fn updated(db: &Db, actor: Actor<'_>, id: &str, changes: Changes) -> Resul
     repo::update(db, actor, id, &changes).await
 }
 
-/// Deletes an account ([`repo::delete`]), closing its push sockets.
+/// Deletes an account ([`repo::delete`]) and its picture, closing its push sockets.
 ///
 /// # Errors
 /// No such account, [`AdminError::LastAdmin`], a database failure, or a fan-out that couldn't tell the sockets.
-pub async fn delete_user(db: &Db, fanout: &dyn Fanout, actor: Actor<'_>, id: &str) -> Result<(), AdminError> {
+pub async fn delete_user(
+    db: &Db,
+    fanout: &dyn Fanout,
+    storage: &dyn Storage,
+    actor: Actor<'_>,
+    id: &str,
+) -> Result<(), AdminError> {
     repo::delete(db, actor, id).await?;
+    if let Err(error) = crate::people::remove_picture(db, storage, id).await {
+        tracing::warn!(%error, "a deleted account's picture wasn't removed");
+    }
     Ok(crate::trouter::revoke(fanout, id).await?)
 }
 
@@ -319,6 +329,6 @@ pub async fn reset_password(db: &Db, fanout: &dyn Fanout, upn: &str, password: &
 ///
 /// # Errors
 /// As [`delete_user`].
-pub async fn delete_by_upn(db: &Db, fanout: &dyn Fanout, upn: &str) -> Result<(), AdminError> {
-    delete_user(db, fanout, Actor::CLI, &id_of(db, upn).await?).await
+pub async fn delete_by_upn(db: &Db, fanout: &dyn Fanout, storage: &dyn Storage, upn: &str) -> Result<(), AdminError> {
+    delete_user(db, fanout, storage, Actor::CLI, &id_of(db, upn).await?).await
 }

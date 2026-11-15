@@ -143,8 +143,8 @@ fn entry(user: &User) -> Value {
     })
 }
 
-/// The managers above `profile`'s account, nearest first: each one that can sign in, until the chain ends, loops
-/// or is [`MAX_MANAGERS`] long.
+/// The managers above the account `id`, nearest first from `manager`, until the chain ends, loops, reaches one who
+/// can't sign in, or is [`MAX_MANAGERS`] long.
 async fn managers(app: &App, id: &str, manager: Option<String>) -> Result<Vec<Value>, DbError> {
     let mut seen = vec![id.to_owned()];
     let mut above = Vec::new();

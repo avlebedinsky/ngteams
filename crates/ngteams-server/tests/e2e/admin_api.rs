@@ -457,7 +457,7 @@ async fn two_admins_removing_each_other_at_once_leave_one() {
             let eve = server.add_user(&upn, "Eve").await;
             set_admin(db, &upn, true).await.unwrap();
             let (first, second) = tokio::join!(
-                delete_user(db, fanout, Actor::CLI, &eve),
+                delete_user(db, fanout, server.app.storage.as_ref(), Actor::CLI, &eve),
                 update_user(db, fanout, Actor::CLI, &root, demote()),
             );
             assert!(

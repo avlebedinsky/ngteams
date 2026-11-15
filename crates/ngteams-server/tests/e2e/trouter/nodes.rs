@@ -127,7 +127,7 @@ async fn deleting_an_account_on_one_node_ends_its_sockets_on_the_other_at_once()
         let mut socket = Raw::open(&node_b, &query(EPID, "TeamsCDL")).await;
         socket.connect(&ic3).await;
         let app = &pair.server.app;
-        ngteams_server::admin::delete_by_upn(&app.db, &*app.fanout, "b@own.test")
+        ngteams_server::admin::delete_by_upn(&app.db, &*app.fanout, app.storage.as_ref(), "b@own.test")
             .await
             .unwrap();
         let frame = socket.next_within(std::time::Duration::from_secs(4)).await;
