@@ -1339,6 +1339,16 @@ impl Mode {
         }
     }
 
+    /// The name of the mode's own request log: another scene's requests went to another server.
+    fn request_log(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Admin => "admin",
+            Self::AdminDark => "admin-dark",
+            _ => "first",
+        }
+    }
+
     /// Own servers on (`NGTEAMS_OWN_SERVER=1`, as the setup takes it).
     fn own_servers(self) -> bool {
         self != Self::Off
@@ -1423,7 +1433,7 @@ fn child_window(mode: Mode) -> SandboxResult {
         fs::write(lab.root.join("ui").join("a.toml"), own::DARK_SETTINGS)?;
     }
     let server = if mode.on_own_server() {
-        own::record_requests(if mode == Mode::Restart { "restart" } else { "first" })?;
+        own::record_requests(mode.request_log())?;
         Some(ngteams::accounts_file::OwnServer::parse(
             &std::env::var(OWN_ORIGIN_ENV)?,
             &std::env::var(OWN_CA_ENV)?,
