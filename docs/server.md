@@ -85,6 +85,8 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `database_pool` | `16` | Postgres connections per node (SQLite: one) |
 | `redis_url` | none | `redis://…` or `rediss://…`; without it, fan-out and login counters stay in the node |
 | `storage_url`, `storage_options` | `memory:///`, none | where pictures and files live: `s3://<bucket>[/<prefix>]` on any S3-compatible service, or `file:///<dir>` on one node ([Storage](#storage)). `memory:///` forgets everything at exit |
+| `storage.connect_timeout`, `storage.request_timeout` | `3`, `30` | seconds a node waits for a connection to an S3 store, and for one request to it ([Storage](#storage)) |
+| `storage.max_retries`, `storage.retry_timeout` | `3`, `8` | how often a request the store didn't answer is sent again, and the seconds after its first attempt past which it isn't |
 | `media.max_picture_bytes` | `25165824` | the largest picture pasted into a message (24 MiB, the most the client reads back) |
 | `media.max_file_bytes` | `262144000` | the largest file sent in a chat (250 MiB, the client's own limit) |
 | `media.user_quota_bytes` | `5368709120` | what one account may store, pictures and files together (5 GiB); `0` is no limit |
@@ -407,6 +409,13 @@ The option names are `object_store`'s. In the environment they are `NGTEAMS_SERV
 and so on. Without keys, `object_store` takes the instance's or the container's role credentials. The bucket must
 exist. Uploads go as multipart uploads, so the store's rule for unfinished multipart uploads decides how long an
 aborted one stays.
+
+A store out of reach answers the client 503 within seconds: a node waits `storage.connect_timeout` for a
+connection and sends a request again at most `storage.max_retries` times, none later than `storage.retry_timeout`
+after the first attempt. `storage.request_timeout` is for one request: one picture, or one 5 MiB part of a file.
+A file of any size goes in parts, so a slow client doesn't count against it; raise it only when the link between
+the server and its store is slow. `timeout` and `connect_timeout` in `storage_options` take the place of the two
+timeouts. These keys are for S3 stores only.
 
 Keys in the bucket: `ams/<object>/<version>` (pictures: each upload of an object's bytes gets a key of its own, and
 the database names the one the object reads from), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails).

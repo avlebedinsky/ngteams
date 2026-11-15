@@ -48,6 +48,7 @@ pub struct Config {
     /// endpoint, keys) as `object_store` names them.
     pub storage_url: String,
     pub storage_options: BTreeMap<String, String>,
+    pub storage: StorageConfig,
     /// TLS on the listener; without it the server speaks plain HTTP for a reverse proxy in front.
     pub tls: Option<TlsConfig>,
     /// The region and partition the client's bases and tokens name.
@@ -73,6 +74,7 @@ impl std::fmt::Debug for Config {
             .field("setup", &self.setup)
             .field("trouter", &self.trouter)
             .field("media", &self.media)
+            .field("storage", &self.storage)
             .finish_non_exhaustive()
     }
 }
@@ -119,6 +121,33 @@ pub struct SetupConfig {
     /// Setup attempts a client address may make in `window` seconds.
     pub max_attempts: u32,
     pub window: u64,
+}
+
+/// How long a node waits for an S3 store (`storage_url`) before it answers 503, in seconds. `timeout` and
+/// `connect_timeout` in `storage_options` take the place of the two timeouts here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct StorageConfig {
+    /// The longest wait for a connection to the store.
+    pub connect_timeout: u64,
+    /// The longest one request to the store may take: one picture, or one part (5 MiB) of a file, whatever the
+    /// file's size. Raise it when the link between the server and its store is slow.
+    pub request_timeout: u64,
+    /// How often a request the store didn't answer, or answered with a server error, is sent again.
+    pub max_retries: usize,
+    /// No request is sent again later than this after its first attempt.
+    pub retry_timeout: u64,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: 3,
+            request_timeout: 30,
+            max_retries: 3,
+            retry_timeout: 8,
+        }
+    }
 }
 
 /// Pictures, files and link previews (`crate::media`). Sizes are in bytes.
@@ -201,6 +230,7 @@ impl Default for Config {
             redis_url: None,
             storage_url: "memory:///".to_owned(),
             storage_options: BTreeMap::new(),
+            storage: StorageConfig::default(),
             tls: None,
             region: "own".to_owned(),
             partition: "own01".to_owned(),
@@ -251,6 +281,8 @@ pub enum ConfigError {
     Lifetime,
     #[error("media sizes, the link lifetime and the preview timeout must be above zero")]
     Media,
+    #[error("the store's connect and request timeouts must be above zero")]
+    Storage,
 }
 
 impl Config {
@@ -319,6 +351,9 @@ impl Config {
             || media.preview_max_picture_bytes == 0
         {
             return Err(ConfigError::Media);
+        }
+        if self.storage.connect_timeout == 0 || self.storage.request_timeout == 0 {
+            return Err(ConfigError::Storage);
         }
         Ok(())
     }

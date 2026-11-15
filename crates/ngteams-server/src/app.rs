@@ -109,7 +109,11 @@ impl App {
             crate::trouter::keep,
             crate::trouter::unkept,
         ));
-        let storage = Arc::new(ObjectStorage::open(&config.storage_url, &config.storage_options)?);
+        let storage = Arc::new(ObjectStorage::open_with(
+            &config.storage_url,
+            &config.storage_options,
+            &config.storage,
+        )?);
         let fetcher =
             crate::media::Fetcher::new(&config.media).map_err(|error| StartError::Previews(error.to_string()))?;
         Ok(Arc::new(Self {

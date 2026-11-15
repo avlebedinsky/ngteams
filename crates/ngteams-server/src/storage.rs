@@ -9,9 +9,15 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
+use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::path::Path;
-use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt as _, PutPayload, WriteMultipart};
+use object_store::{
+    ClientConfigKey, GetOptions, GetRange, ObjectStore, ObjectStoreExt as _, ObjectStoreScheme, PutPayload,
+    RetryConfig, WriteMultipart,
+};
 use url::Url;
+
+use crate::config::StorageConfig;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -77,14 +83,27 @@ pub struct ObjectStorage {
 }
 
 impl ObjectStorage {
-    /// The store `url` names, with `options` (S3's region, endpoint and keys, as `object_store` names them). A
-    /// `file://` directory is made when missing.
+    /// [`Self::open_with`] the default waits.
     ///
     /// # Errors
-    /// [`StorageError::Url`] for a URL `object_store` doesn't take.
+    /// As [`Self::open_with`].
     pub fn open<'a>(
         url: &str,
         options: impl IntoIterator<Item = (&'a String, &'a String)>,
+    ) -> Result<Self, StorageError> {
+        Self::open_with(url, options, &StorageConfig::default())
+    }
+
+    /// The store `url` names, with `options` (S3's region, endpoint and keys, as `object_store` names them) and,
+    /// for S3, the waits and retries of `client`: a store out of reach is given up on in seconds, where
+    /// `object_store`'s own ten retries take much longer. A `file://` directory is made when missing.
+    ///
+    /// # Errors
+    /// [`StorageError::Url`] for a URL `object_store` doesn't take.
+    pub fn open_with<'a>(
+        url: &str,
+        options: impl IntoIterator<Item = (&'a String, &'a String)>,
+        client: &StorageConfig,
     ) -> Result<Self, StorageError> {
         let parsed = Url::parse(url).map_err(|_| StorageError::Url(url.to_owned()))?;
         if parsed.scheme() == "file" {
@@ -92,8 +111,15 @@ impl ObjectStorage {
             std::fs::create_dir_all(&dir).map_err(|error| StorageError::Url(error.to_string()))?;
         }
         let options = options.into_iter().map(|(key, value)| (key.clone(), value.clone()));
-        let (store, prefix) =
-            object_store::parse_url_opts(&parsed, options).map_err(|error| StorageError::Url(error.to_string()))?;
+        let refused = |error: object_store::Error| StorageError::Url(error.to_string());
+        if let Ok((ObjectStoreScheme::AmazonS3, prefix)) = ObjectStoreScheme::parse(&parsed) {
+            let store = s3(&parsed, options, client).build().map_err(refused)?;
+            return Ok(Self {
+                store: Arc::new(store),
+                prefix: Path::parse(prefix).map_err(|_| StorageError::Url(url.to_owned()))?,
+            });
+        }
+        let (store, prefix) = object_store::parse_url_opts(&parsed, options).map_err(refused)?;
         Ok(Self {
             store: Arc::from(store),
             prefix,
@@ -107,6 +133,31 @@ impl ObjectStorage {
         }
         Ok(self.prefix.parts().chain(key.parts()).collect())
     }
+}
+
+/// The S3 store at `url` as `object_store` builds it from `options`, with `client`'s waits unless an option sets
+/// its own, and `client`'s retries.
+fn s3(url: &Url, options: impl Iterator<Item = (String, String)>, client: &StorageConfig) -> AmazonS3Builder {
+    let waits = [
+        (ClientConfigKey::ConnectTimeout, client.connect_timeout),
+        (ClientConfigKey::Timeout, client.request_timeout),
+    ];
+    let builder = waits.into_iter().fold(
+        AmazonS3Builder::new().with_url(url.as_str()),
+        |builder, (key, seconds)| builder.with_config(AmazonS3ConfigKey::Client(key), format!("{seconds}s")),
+    );
+    options
+        .fold(builder, |builder, (key, value)| {
+            match key.to_ascii_lowercase().parse::<AmazonS3ConfigKey>() {
+                Ok(key) => builder.with_config(key, value),
+                Err(_) => builder,
+            }
+        })
+        .with_retry(RetryConfig {
+            max_retries: client.max_retries,
+            retry_timeout: std::time::Duration::from_secs(client.retry_timeout),
+            ..RetryConfig::default()
+        })
 }
 
 #[async_trait]
@@ -171,5 +222,59 @@ impl Storage for ObjectStorage {
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn options(port: u16) -> BTreeMap<String, String> {
+        [
+            ("aws_endpoint", format!("http://127.0.0.1:{port}")),
+            ("aws_region", "us-east-1".to_owned()),
+            ("aws_access_key_id", "none".to_owned()),
+            ("aws_secret_access_key", "none".to_owned()),
+            ("aws_allow_http", "true".to_owned()),
+            ("timeout", "45s".to_owned()),
+            ("not an option", "left out".to_owned()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect()
+    }
+
+    #[test]
+    fn an_s3_store_takes_the_configured_waits_unless_an_option_sets_its_own() {
+        let client = StorageConfig {
+            connect_timeout: 2,
+            ..StorageConfig::default()
+        };
+        let url = Url::parse("s3://bucket/prefix").unwrap();
+        let built = s3(&url, options(9).into_iter(), &client);
+        let wait = |key| built.get_config_value(&AmazonS3ConfigKey::Client(key));
+        assert_eq!(wait(ClientConfigKey::ConnectTimeout).as_deref(), Some("2s"));
+        assert_eq!(wait(ClientConfigKey::Timeout).as_deref(), Some("45s"));
+        assert!(matches!(
+            ObjectStorage::open_with("s3://", &BTreeMap::new(), &client),
+            Err(StorageError::Url(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_s3_store_out_of_reach_is_given_up_on_within_the_configured_retries() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let store = ObjectStorage::open("s3://bucket/prefix", &options(port)).unwrap();
+        let asked = Instant::now();
+        let stored = store.put("a/b", Bytes::from_static(b"bytes")).await;
+        assert!(matches!(stored, Err(StorageError::Store(_))), "{stored:?}");
+        let opened = store.put_stream("a/c", futures_util::stream::empty().boxed(), 10).await;
+        assert!(matches!(opened, Err(StorageError::Store(_))), "{opened:?}");
+        assert!(asked.elapsed() < Duration::from_secs(4), "{:?}", asked.elapsed());
     }
 }

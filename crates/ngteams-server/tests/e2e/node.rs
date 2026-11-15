@@ -164,6 +164,22 @@ fn the_configuration_refuses_media_sizes_and_times_of_zero_but_takes_no_quota() 
     unlimited.check().unwrap();
 }
 
+#[test]
+fn the_configuration_refuses_a_store_wait_of_zero_but_takes_no_retries() {
+    assert!(matches!(
+        refused(|c| c.storage.connect_timeout = 0),
+        ConfigError::Storage
+    ));
+    assert!(matches!(
+        refused(|c| c.storage.request_timeout = 0),
+        ConfigError::Storage
+    ));
+    let mut single = Config::default();
+    single.storage.max_retries = 0;
+    single.storage.retry_timeout = 0;
+    single.check().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn housekeeping_rotates_a_due_key_and_the_earlier_tokens_still_verify() {
     let server = TestServer::start_with(crate::support::Backend::Sqlite, |config| config.tokens.key_rotation = 1).await;
