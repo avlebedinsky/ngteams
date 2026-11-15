@@ -132,7 +132,8 @@ impl CoturnLog {
             .unwrap_or(0)
     }
 
-    /// Every user coturn processed a request of.
+    /// Every user coturn processed a request of: the running test's own (the rigs take turns while the log is named,
+    /// `support::take_turn`).
     pub fn users(&self) -> Vec<String> {
         let mut users: Vec<String> = self.entries().iter().map(|entry| entry.user().to_owned()).collect();
         users.sort();

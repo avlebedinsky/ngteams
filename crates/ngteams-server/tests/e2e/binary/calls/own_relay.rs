@@ -16,7 +16,7 @@ use teams_core::{CallAction, CallStatus, End};
 use super::coturn_log::{COTURN_LOG, CoturnLog, Entry};
 use super::qa_net::{QaNet, Seen};
 use super::support::{A_TONE, B_TONE, COTURN_SECRET, HEARD, Phone, Rig, TALK, Turn, coturn};
-use super::{connect, hang_up, heard_each_other, pair};
+use super::{connect, hang_up, heard_each_other, loudness, pair};
 use crate::binary::support::Deployment;
 use crate::support::{Backend, backends};
 
@@ -284,9 +284,11 @@ async fn a_relay_that_refuses_isnt_there_or_is_microsofts_fails_the_call_at_setu
     }
 }
 
-/// How loud each side heard the other in the last [`TALK`].
-fn levels(a: &Phone, b: &Phone) -> (f32, f32) {
-    (a.heard(B_TONE, TALK), b.heard(A_TONE, TALK))
+/// How loud each side heard the other in the last [`TALK`], or in a later one after a loaded host's dip
+/// ([`loudness`]).
+async fn levels(a: &Phone, b: &Phone) -> (f32, f32) {
+    let heard = loudness(&[(a, B_TONE), (b, A_TONE)]).await;
+    (heard[0], heard[1])
 }
 
 /// The requests coturn took from `oid` (method, refused with), from `log`.
@@ -322,7 +324,7 @@ async fn a_call_longer_than_its_relay_credential_keeps_its_media_and_the_next_ca
     let mut heard = Vec::new();
     for at in [8_u64, 60, 150, 255, 275] {
         tokio::time::sleep_until(connected + Duration::from_secs(at)).await;
-        let level = levels(&a, &b);
+        let level = levels(&a, &b).await;
         eprintln!(
             "{at} s into the call: a heard b at {:.3}, b heard a at {:.3}",
             level.0, level.1

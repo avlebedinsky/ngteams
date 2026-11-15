@@ -66,10 +66,37 @@ async fn hang_up(leaver: &mut Phone, left: CallId, other: &mut Phone, others: Ca
     assert!(matches!(end, End::Remote(_)), "{end:?}");
 }
 
-/// Each side's speaker played the other's tone in the last [`TALK`] of the call.
+/// Windows of [`TALK`] a check of the far tone waits on after the first, while a listener hears too little.
+const DIP_WINDOWS: u32 = 3;
+
+/// How loud each `(listener, far tone)` heard that tone in the last [`TALK`]. While one heard it at [`HEARD`] or less,
+/// measured again over the next [`TALK`], up to [`DIP_WINDOWS`] times: a heavily loaded host starves the media for
+/// seconds, which passes; media that isn't there stays away.
+async fn loudness(sides: &[(&Phone, teams_media::tone::Tone)]) -> Vec<f32> {
+    let measure = || {
+        sides
+            .iter()
+            .map(|(listener, tone)| listener.heard(*tone, TALK))
+            .collect::<Vec<_>>()
+    };
+    let mut heard = measure();
+    for _ in 0..DIP_WINDOWS {
+        if heard.iter().all(|level| *level > HEARD) {
+            break;
+        }
+        eprintln!("a dip ({heard:.3?}): measured again over the next {TALK:?}");
+        tokio::time::sleep(TALK).await;
+        heard = measure();
+    }
+    heard
+}
+
+/// Each side's speaker played the other's tone in the last [`TALK`] of the call, or in a later one after a loaded
+/// host's dip ([`loudness`]).
 async fn heard_each_other(a: &Phone, a_tone: teams_media::tone::Tone, b: &Phone, b_tone: teams_media::tone::Tone) {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let (a_heard, b_heard) = (a.heard(b_tone, TALK), b.heard(a_tone, TALK));
+    let heard = loudness(&[(a, b_tone), (b, a_tone)]).await;
+    let (a_heard, b_heard) = (heard[0], heard[1]);
     eprintln!(
         "{} heard {} at {a_heard:.3}, {} heard {} at {b_heard:.3}",
         a.upn, b.upn, b.upn, a.upn

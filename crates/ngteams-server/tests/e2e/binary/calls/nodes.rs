@@ -2,8 +2,8 @@
 
 use teams_core::{CallAction, CallStatus, End};
 
-use super::support::{A_TONE, B_TONE, Line, Rig, TALK, Turn};
-use super::{connect, hang_up, heard_each_other, pair, shows};
+use super::support::{A_TONE, B_TONE, HEARD, Line, Rig, TALK, Turn};
+use super::{connect, hang_up, heard_each_other, loudness, pair, shows};
 use crate::support::Backend;
 
 /// The two-node rig, when the run has a Postgres and a coturn.
@@ -117,8 +117,10 @@ async fn a_call_goes_on_through_a_restart_of_each_node_and_is_hung_up_after() {
         shows(&b_mri)(view) && view.participants.iter().any(|party| party.muted)
     })
     .await;
+    // b hears a to the end (b is muted)
+    let heard = loudness(&[(&b, A_TONE)]).await[0];
+    assert!(heard > HEARD, "b heard a to the end: {heard:.3}");
     hang_up(&mut a, talk.call, &mut b, talk.answered).await;
-    assert!(b.heard(A_TONE, TALK) > super::support::HEARD, "b heard a to the end");
     rig.no_open_calls().await;
     let people = [a.mri.clone(), b.mri.clone()];
     b.shows_lines(

@@ -2,7 +2,8 @@
 //! names they asked DNS for, and the UDP that went straight between two clients instead of through a relay. The QA
 //! network (`qa/289` round 1, `pod-net.sh`) is a namespace with loopback only, a dummy default route, nftables sets
 //! `inet qa` `outside4`/`outside6`/`direct` that record (and drop) each such attempt, and a DNS listener that logs
-//! every name asked (`NGTS_QA_NET_DNS_LOG`) and answers none.
+//! every name asked (`NGTS_QA_NET_DNS_LOG`) and answers none. Its records are the whole network's: a test reads them
+//! within its rig's life, while no other rig runs (`support::take_turn`).
 
 use std::collections::BTreeMap;
 use std::net::UdpSocket;
