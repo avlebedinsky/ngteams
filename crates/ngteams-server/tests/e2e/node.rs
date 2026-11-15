@@ -211,6 +211,53 @@ fn the_configuration_names_the_calling_keys_it_refuses() {
     }
 }
 
+#[test]
+fn the_configuration_takes_a_relays_urls_in_the_turn_form_only_beside_its_credential() {
+    let relay = |urls: &[&str], secret: Option<&str>| {
+        let mut config = Config::default();
+        config.calling.turn.urls = urls.iter().map(|url| (*url).to_owned()).collect();
+        config.calling.turn.secret = secret.map(str::to_owned);
+        config.check()
+    };
+    let secret = Some("shared with coturn");
+    for urls in [
+        &["stun:turn.own.example.test:3478"][..],
+        &["https://turn.own.example.test"],
+        &["turn:"],
+        &["turn:?transport=udp"],
+        &["turns:turn.own.example.test:5349", "turn: turn.own.example.test"],
+        &["turn:turn.own.example.test:3478?transport=sctp"],
+        &["turn:turn.own.example.test:port"],
+    ] {
+        let error = relay(urls, secret).unwrap_err();
+        assert!(matches!(error, ConfigError::Relay), "{urls:?}: {error}");
+        assert!(error.to_string().contains("calling.turn.urls"), "{error}");
+    }
+    // a credential without a relay to use it at, and a relay with no credential for it
+    assert!(matches!(relay(&[], secret), Err(ConfigError::Relay)));
+    assert!(matches!(
+        relay(&["turn:turn.own.example.test:3478?transport=udp"], None),
+        Err(ConfigError::Relay)
+    ));
+    relay(
+        &[
+            "turn:turn.own.example.test:3478?transport=udp",
+            "turn:turn.own.example.test:3478?transport=tcp",
+            "turns:turn.own.example.test:5349",
+            "turn:[2001:db8::7]",
+            "turn:192.0.2.7:3478",
+        ],
+        secret,
+    )
+    .unwrap();
+    let mut user = Config::default();
+    user.calling.turn.urls = vec!["turn:turn.own.example.test".to_owned()];
+    user.calling.turn.username = Some("relay".into());
+    user.calling.turn.password = Some("synthetic".into());
+    user.check().unwrap();
+    Config::default().check().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn housekeeping_rotates_a_due_key_and_the_earlier_tokens_still_verify() {
     let server = TestServer::start_with(crate::support::Backend::Sqlite, |config| config.tokens.key_rotation = 1).await;

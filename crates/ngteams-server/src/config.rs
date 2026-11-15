@@ -349,6 +349,11 @@ pub enum ConfigError {
          calling.turn.password set together"
     )]
     Calling,
+    #[error(
+        "calling.turn.urls must be turn: or turns: URLs with a host (an optional port, an optional transport of udp \
+         or tcp), set together with a credential (calling.turn.secret, or calling.turn.username and password)"
+    )]
+    Relay,
 }
 
 impl Config {
@@ -429,6 +434,9 @@ impl Config {
         }
         if !self.calling.usable() {
             return Err(ConfigError::Calling);
+        }
+        if !self.calling.turn.relay_usable() {
+            return Err(ConfigError::Relay);
         }
         Ok(())
     }

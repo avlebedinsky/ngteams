@@ -49,6 +49,7 @@ async fn a_relay_with_one_user_hands_that_user_out_and_one_not_configured_nothin
     let server = server_with(Backend::Sqlite, |config| {
         config.calling.turn.username = Some("relay-user".to_owned());
         config.calling.turn.password = Some("relay-password".to_owned());
+        config.calling.turn.urls = vec!["turn:turn.own.example.test".to_owned()];
     })
     .await;
     let id = server.add_user("a@own.test", "Ada").await;

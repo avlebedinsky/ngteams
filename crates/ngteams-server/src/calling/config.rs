@@ -59,6 +59,45 @@ impl Default for CallingConfig {
     }
 }
 
+impl TurnConfig {
+    /// Whether the relay's URLs are ones a client takes (each a `turn:` or `turns:` URL with a host), and
+    /// set exactly when a credential is: a credential with no relay to use it at, or a relay nobody gets a credential
+    /// for, leaves every call without media.
+    #[must_use]
+    pub fn relay_usable(&self) -> bool {
+        let credential = self.secret.as_deref().is_some_and(|secret| !secret.is_empty()) || self.username.is_some();
+        self.urls.iter().all(|url| turn_url(url)) && credential == !self.urls.is_empty()
+    }
+}
+
+/// `url` is a TURN URL (RFC 7065): `turn:<host>[:<port>][?transport=udp|tcp]` or `turns:<host>[:<port>]
+/// [?transport=tcp]`, its authority read by the `url` crate.
+fn turn_url(url: &str) -> bool {
+    let (secure, rest) = match (url.strip_prefix("turns:"), url.strip_prefix("turn:")) {
+        (Some(rest), _) => (true, rest),
+        (None, Some(rest)) => (false, rest),
+        (None, None) => return false,
+    };
+    if rest.starts_with('/') {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(&format!("turn://{rest}")) else {
+        return false;
+    };
+    let bare = parsed.host_str().is_some_and(|host| !host.is_empty())
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && matches!(parsed.path(), "" | "/")
+        && parsed.fragment().is_none();
+    let transports: Vec<_> = parsed.query_pairs().collect();
+    let transport = match transports.as_slice() {
+        [] => true,
+        [(key, value)] => key == "transport" && (value == "tcp" || (value == "udp" && !secure)),
+        _ => false,
+    };
+    bare && transport
+}
+
 impl CallingConfig {
     /// Whether the values can be used: a ring and a credential last some time.
     #[must_use]
