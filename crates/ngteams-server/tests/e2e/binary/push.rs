@@ -4,6 +4,7 @@
 
 mod channels;
 mod feed;
+mod lists;
 mod notes;
 mod people;
 mod pictures;

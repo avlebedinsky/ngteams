@@ -1,6 +1,6 @@
 //! A group chat's people as users of three ngteams clients meet them: someone added reads what the adder chose,
-//! someone removed or gone keeps the old history and gets and writes nothing more, everyone sees the roster and its
-//! lines, and a post racing a removal never reaches the one removed.
+//! someone removed or gone keeps the old history and gets and writes nothing more, everyone's running client shows
+//! the roster live and its lines, and a post racing a removal never reaches the one removed.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -78,8 +78,8 @@ async fn with_two_messages(a: &mut User, b: &mut User, d: &User, topic: &str) ->
     (chat, old)
 }
 
-/// a adds c to `chat` with `history`: everyone's client hears the line and reads the four people from the server;
-/// the adder's and the added one's clients show them at once.
+/// a adds c to `chat` with `history`: everyone's client hears the line, reads the four people from the server and
+/// shows them at once, the clients of the two who only look on too.
 async fn adds_cora(people: [&mut User; 4], chat: &str, history: ChatHistory) {
     let [a, b, c, d] = people;
     a.write(Action::AddMembers {
@@ -95,7 +95,7 @@ async fn adds_cora(people: [&mut User; 4], chat: &str, history: ChatHistory) {
         let people = roster(user, chat).await;
         assert!(people.len() == 4 && people.contains(&added), "{}: {people:?}", user.upn);
     }
-    for user in [a, c] {
+    for user in [a, b, c, d] {
         shows_cora(user, chat, &added).await;
     }
 }
@@ -160,8 +160,8 @@ async fn someone_added_reads_what_the_adder_chose_and_everyone_sees_the_roster_a
         assert_eq!(page.len(), 2, "the line that added c and what came after: {page:?}");
         assert_eq!((page[0].0.as_str(), page[1].1.as_str()), (welcomes[0].as_str(), ADDED));
 
-        // the same after c's client and the servers restarted, and on a new device of c; a client that was running
-        // when c came shows the four people once it caught up
+        // the same after c's client and the servers restarted, and on a new device of c; the clients of those who
+        // only looked on still show the four people after their restart
         c.restart().await;
         reads_what_the_choice_allows(&c, &bare, &full).await;
         for user in [&mut b, &mut d] {
@@ -278,8 +278,10 @@ async fn removes_bert_and_goes_on(a: &mut User, b: &mut User, c: &mut User, chat
     for user in [&mut *a, &mut *b, &mut *c] {
         line(user, 0, chat, REMOVED).await;
     }
-    for user in [&*a, &*c] {
+    for user in [&mut *a, &mut *c] {
         assert_eq!(roster(user, chat).await.len(), 2, "{}", user.upn);
+        // the remover's and the bystander's running clients show the two left, live
+        knows_people(user, chat, 2).await;
     }
     b.settle().await;
     let on_b = b.mark();
@@ -341,6 +343,7 @@ async fn someone_removed_keeps_the_old_history_and_gets_and_writes_nothing_more_
         assert_eq!(remove(&c, &chat, &c).await, 200);
         line(&mut a, on_a, &chat, REMOVED).await;
         assert_eq!(roster(&a, &chat).await, [a.mri.as_str()]);
+        knows_people(&mut a, &chat, 1).await;
         assert_eq!(lines(&a, &chat, REMOVED).await, 2);
         c.settle().await;
         let on_c = c.mark();
