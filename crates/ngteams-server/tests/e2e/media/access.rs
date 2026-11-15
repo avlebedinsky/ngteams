@@ -33,7 +33,7 @@ async fn a_drive_and_an_object_answer_only_their_owner_and_the_people_shared_wit
     let trio = Trio::start(Backend::Sqlite).await;
     let server = &trio.server;
     let [a, b, _] = &trio.ids;
-    let share = send_file(&trio, "report.txt", b"0123456789").await;
+    let share = send_file(&trio, "report.png", &png(1200, 600)).await;
     let (id, _) = item(server, "b@own.test", &share).await;
     let drive = format!("{}/_api/v2.0/drive", site(a));
     let own = token(server, "a@own.test", ORIGIN).await;
@@ -80,11 +80,21 @@ async fn a_drive_and_an_object_answer_only_their_owner_and_the_people_shared_wit
     let outsider = trio.outsider().await;
     let read = FileDownload::of_in(&cloud(), &share).unwrap();
     assert!(outsider.read(&read).await.is_ok());
+    let (_, handed) = item(server, "c@own.test", &share).await;
+    let thumbnails = format!("/graph/v1.0/shares/{}/driveItem/thumbnails", read.share());
+    let graph = token(server, "c@own.test", GRAPH).await;
+    let (_, _, sizes) = raw(server, Method::GET, &thumbnails, Some(&graph), &[], None).await;
+    let sizes: Value = serde_json::from_slice(&sizes).unwrap();
+    let picture = sizes["value"][0]["large"]["url"].as_str().unwrap();
+    let picture = picture.strip_prefix(ORIGIN).unwrap().to_owned();
+    let open = |link: String| async move { raw(server, Method::GET, &link, None, &[], None).await.0 };
+    assert_eq!((open(handed.clone()).await, open(picture.clone()).await), (200, 200));
 
     let revoke = format!("{permissions}/{}", trio.ids[2]);
     assert_eq!(raw(server, Method::DELETE, &revoke, Some(&own), &[], None).await.0, 204);
     assert_eq!(raw(server, Method::DELETE, &revoke, Some(&own), &[], None).await.0, 404);
     assert_eq!(status(&outsider.read(&read).await.unwrap_err()), Some(403));
+    assert_eq!((open(handed).await, open(picture).await), (403, 403));
     let owner = format!("{permissions}/{a}");
     assert_eq!(raw(server, Method::DELETE, &owner, Some(&own), &[], None).await.0, 404);
 
@@ -96,7 +106,7 @@ async fn a_drive_and_an_object_answer_only_their_owner_and_the_people_shared_wit
             expected
         );
     }
-    let elsewhere = FileDownload::of_in(&cloud(), &share.replace("report.txt", "other.txt")).unwrap();
+    let elsewhere = FileDownload::of_in(&cloud(), &share.replace("report.png", "other.png")).unwrap();
     let path = format!("/graph/v1.0/shares/{}/driveItem", elsewhere.share());
     assert_eq!(raw(server, Method::GET, &path, Some(&graph), &[], None).await.0, 404);
 

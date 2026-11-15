@@ -5,7 +5,8 @@
 //! signed links below.
 //!
 //! `/sp/download/<item>` and `/sp/thumbnail/<item>/<size>` take no token of an account: the link's `tempauth` is the
-//! credential ([`crate::auth::tokens::Issuer::link`]), for that one item, for `media.link_lifetime` seconds.
+//! credential ([`crate::auth::tokens::Issuer::link`]), for that one item, for `media.link_lifetime` seconds, and only
+//! while the file stays shared with the account the link was handed to.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -337,7 +338,8 @@ async fn invite(app: &App, caller: &User, item: &repo::Item, body: &[u8]) -> Res
     Ok(Json(json!({"value": value})).into_response())
 }
 
-/// The item a link's `tempauth` is the credential for, while the account it was handed to is the one it was.
+/// The item a link's `tempauth` is the credential for, while the account it was handed to is the one it was and the
+/// file is still shared with it.
 async fn linked(app: &App, audience: &str, id: &str, query: &HashMap<String, String>) -> Result<repo::Item, Error> {
     let credential = query.get("tempauth").ok_or(Error::Unauthorized)?;
     let link = app
@@ -352,7 +354,11 @@ async fn linked(app: &App, audience: &str, id: &str, query: &HashMap<String, Str
         .await?
         .filter(|holder| !holder.disabled && holder.password_version == link.pwd_ver)
         .ok_or(Error::Unauthorized)?;
-    repo::item(&app.db, id).await?.ok_or(Error::Missing)
+    let item = repo::item(&app.db, id).await?.ok_or(Error::Missing)?;
+    if !repo::grants(&app.db, &item.id).await?.contains(&link.oid) {
+        return Err(Error::Forbidden);
+    }
+    Ok(item)
 }
 
 async fn download(

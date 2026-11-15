@@ -457,7 +457,8 @@ Download and thumbnail links are `<origin>/sp/download/<item>?tempauth=…` and
 `<origin>/sp/thumbnail/<item>/<size>?tempauth=…`. The `tempauth` is a JWT the server signs for that one item and
 purpose, valid for `media.link_lifetime` seconds. Any node checks it with the shared keys. It names the account
 it was handed to and that account's password version, and each use reads the account: a link of an account that
-is disabled, deleted or has had its password reset since answers 401. The link takes no
+is disabled, deleted or has had its password reset since answers 401, and a link to a file no longer shared with
+that account answers 403. The link takes no
 token of the account, and the server streams the bytes from the store, so the store's credentials and the
 account's tokens never meet. S3's own presigned URLs aren't handed out: the client takes a file link only on the
 server's origin and follows no redirect.
