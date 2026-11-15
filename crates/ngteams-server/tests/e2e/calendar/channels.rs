@@ -48,7 +48,7 @@ pub(crate) async fn schedule(
     seat.engine.write_event(write).await.unwrap().created.unwrap()
 }
 
-fn refused(answer: Result<teams_core::EventWritten, EngineError>, status: &str) {
+pub(crate) fn refused(answer: Result<teams_core::EventWritten, EngineError>, status: &str) {
     let error = answer.unwrap_err().to_string();
     assert!(error.contains(status), "{error}");
 }

@@ -203,15 +203,35 @@ async fn own(app: &App, me: &Me, group: &str, uid: &str, contract: &Value) -> An
         .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
         .map(|time| time.timestamp_millis())
         .ok_or(Error::BAD_REQUEST)?;
-    // an `Exception` is only a saved row: none that starts there is none at all, not the series' own at that time
+    // an `Exception` is only a saved row: none that starts there is none at all, not the series' own at that time;
+    // two that start there are not told apart by what the contract carries
     let id = if contract["eventType"].as_str() == Some("Exception") {
-        let moved = repo::changed_row_at(&app.db, &event.id, start).await?;
-        moved.ok_or(Error::NOT_FOUND)?
+        let mut moved = repo::changed_rows_at(&app.db, &event.id, start).await?;
+        match moved.len() {
+            0 => return Err(Error::NOT_FOUND),
+            1 => moved.remove(0),
+            _ => return Err(Error::CONFLICT),
+        }
     } else {
         wire::occurrence_id(&event.id, start)
     };
     let found = Found::of(&app.db, &me.id, &id).await?;
     Ok((team, found))
+}
+
+/// One occurrence of a channel's series changed, with its invitations. It isn't given the start that another
+/// changed, live occurrence of its series has: a moved occurrence is named by its start alone, so two of a series
+/// can't have the same.
+async fn one_changed(app: &App, found: &Found, draft: Draft, wanted: &[(String, bool)]) -> Answer<Event> {
+    let here = found.own_row();
+    let series = here.series_id.clone().unwrap_or_else(|| here.id.clone());
+    let there = repo::changed_rows_at(&app.db, &series, draft.start_ms).await?;
+    if there.iter().any(|id| *id != here.id) {
+        return Err(Error::CONFLICT);
+    }
+    let (row, moved) = write::occurrence_changed(app, found, draft).await?;
+    repo::sync_attendees(&app.db, &series, &row.id, wanted, moved).await?;
+    Ok(row)
 }
 
 /// `PUT v2.0/groups/smtp:<mailbox>/calendars/events/<uid>` with `{"updatedCalendarEvent", "fetchEventContract"}`:
@@ -242,10 +262,7 @@ pub(super) async fn update(
     let wanted = wanted(&app, &me.id, &sent, &channel, &mailbox(&app, &team)).await?;
     let mut rows = Vec::new();
     let row = if one {
-        let (row, moved) = write::occurrence_changed(&app, &found, draft).await?;
-        let series = row.series_id.clone().unwrap_or_else(|| row.id.clone());
-        repo::sync_attendees(&app.db, &series, &row.id, &wanted, moved).await?;
-        row
+        one_changed(&app, &found, draft, &wanted).await?
     } else {
         let changed = write::whole_changed(&app, &found, draft, &wanted).await?;
         if found.event.recurring && !changed.reshaped {

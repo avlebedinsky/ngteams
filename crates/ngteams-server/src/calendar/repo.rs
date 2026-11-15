@@ -390,9 +390,9 @@ pub(super) async fn own_row_ids(db: &Db, series: &str) -> Result<Vec<String>, Db
         .await?))
 }
 
-/// The occurrence of `series` its organizer gave a time of its own that now starts at `start_ms`: not a cancelled
-/// one, whose time another may since have taken.
-pub(super) async fn changed_row_at(db: &Db, series: &str, start_ms: i64) -> Result<Option<String>, DbError> {
+/// The occurrences of `series` its organizer gave a time of their own that now start at `start_ms`, two at most:
+/// not a cancelled one, whose time another may since have taken.
+pub(super) async fn changed_rows_at(db: &Db, series: &str, start_ms: i64) -> Result<Vec<String>, DbError> {
     with_conn!(db, |conn| Ok(calendar_events::table
         .filter(calendar_events::series_id.eq(series))
         .filter(calendar_events::changed.eq(true))
@@ -400,9 +400,9 @@ pub(super) async fn changed_row_at(db: &Db, series: &str, start_ms: i64) -> Resu
         .filter(calendar_events::start_ms.eq(start_ms))
         .order(calendar_events::id.asc())
         .select(calendar_events::id)
-        .first(conn)
-        .await
-        .optional()?))
+        .limit(2)
+        .load(conn)
+        .await?))
 }
 
 /// Makes a meeting's chat follow the invitations of its event `id` (a series with the occurrences kept under it)
@@ -630,8 +630,8 @@ mod tests {
             "the series' invitations came with the row"
         );
         assert_eq!(
-            changed_row_at(&db, &series.id, 8500).await.unwrap(),
-            None,
+            changed_rows_at(&db, &series.id, 8500).await.unwrap(),
+            [""; 0],
             "cancelled, it isn't the one that starts there"
         );
 
@@ -646,10 +646,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!event(&db, &seen.id, &bert).await.unwrap().unwrap().0.cancelled);
-        assert_eq!(
-            changed_row_at(&db, &series.id, 8500).await.unwrap().as_deref(),
-            Some("series.8000")
-        );
+        assert_eq!(changed_rows_at(&db, &series.id, 8500).await.unwrap(), ["series.8000"]);
         // and a row kept for an occurrence that has none is made
         let other = Event {
             id: "series.20000".into(),

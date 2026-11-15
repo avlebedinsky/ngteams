@@ -4,11 +4,14 @@
 use teams_core::EventWrite;
 use teams_proto::{EventDraft, EventKind, EventResponse, EventTime, RsvpAnswer, ScheduledMeeting, Weekday};
 
-use super::channels::{place, schedule};
+use super::channels::{place, refused, schedule};
 use super::events::{change, weekly};
 use super::meetings::{answers, create, invited, respond};
 use super::{DAY, HOUR, MONDAY, Seat, draft, server, week};
 use crate::support::backends;
+
+/// What the engine answers a calendar write.
+type Written = Result<teams_core::EventWritten, teams_core::EngineError>;
 
 const SYNC: i64 = MONDAY + 10 * HOUR;
 const WEDNESDAY: i64 = SYNC + 2 * DAY;
@@ -143,13 +146,18 @@ async fn who_loses_the_last_invitation_to_a_series_leaves_its_chat() {
 /// The change of one occurrence of a channel's series, as its details send it: the occurrence as its scheduler's
 /// calendar reads it, the form's fields over it.
 async fn change_in_channel(ada: &Seat, id: &str, draft: EventDraft, channel: teams_proto::MeetingChannel) {
+    changed_in_channel(ada, id, draft, channel).await.unwrap();
+}
+
+/// What the server answered that change.
+async fn changed_in_channel(ada: &Seat, id: &str, draft: EventDraft, channel: teams_proto::MeetingChannel) -> Written {
     let whole = ada.engine.calendar_event(id.to_owned()).await.unwrap();
     let write = EventWrite::UpdateInChannel {
         event: whole.raw,
         draft,
         channel,
     };
-    ada.engine.write_event(write).await.unwrap();
+    ada.engine.write_event(write).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -201,15 +209,15 @@ async fn a_channels_moved_occurrence_asks_again_and_is_found_by_the_start_it_now
 
 /// The cancellation of one occurrence of a channel's series, named as the scheduler's calendar now reads it.
 async fn cancel_in_channel(ada: &Seat, moved: &teams_proto::CalendarEvent, channel: teams_proto::MeetingChannel) {
-    assert!(cancelled_in_channel(ada, moved, channel).await);
+    cancelled_in_channel(ada, moved, channel).await.unwrap();
 }
 
-/// Whether the server took that cancellation.
+/// What the server answered that cancellation.
 async fn cancelled_in_channel(
     ada: &Seat,
     moved: &teams_proto::CalendarEvent,
     channel: teams_proto::MeetingChannel,
-) -> bool {
+) -> Written {
     let (meeting, post) = ScheduledMeeting::of_event(moved).unwrap();
     let cancel = EventWrite::CancelInChannel {
         meeting: Box::new(meeting),
@@ -217,7 +225,45 @@ async fn cancelled_in_channel(
         post,
         message: None,
     };
-    ada.engine.write_event(cancel).await.is_ok()
+    ada.engine.write_event(cancel).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_channels_occurrence_isnt_moved_to_where_another_moved_one_of_its_series_starts() {
+    for backend in backends() {
+        let server = server(backend).await;
+        let ada = Seat::new(&server, "ada@own.test", "Ada").await;
+        let (team, group) = ada.make_team("Rocket", false).await;
+        let mut all_hands = draft("All hands", SYNC, 30);
+        all_hands.recurrence = Some(weekly(&[Weekday::Monday, Weekday::Wednesday, Weekday::Friday], None));
+        schedule(&ada, all_hands, place(&team, &group), true).await;
+        let events = week(&ada).await;
+        let (wednesday, friday) = (events[1].id.clone(), events[2].id.clone());
+        let thursday = SYNC + 3 * DAY + HOUR;
+        let there = draft("All hands, moved", thursday, 30);
+        change_in_channel(&ada, &wednesday, there.clone(), place(&team, &group)).await;
+
+        // Friday's can't take that start too: a change there would name either of the two
+        let late = draft("All hands, late", thursday, 30);
+        refused(
+            changed_in_channel(&ada, &friday, late, place(&team, &group)).await,
+            "409",
+        );
+        let starts = |events: &[teams_proto::CalendarEvent]| -> Vec<EventTime> {
+            events.iter().map(|event| event.start).collect()
+        };
+        let times = [SYNC, thursday, SYNC + 4 * DAY].map(EventTime::Instant);
+        assert_eq!(starts(&week(&ada).await), times);
+
+        // the one that is there is changed again where it is
+        change_in_channel(&ada, &wednesday, there, place(&team, &group)).await;
+        let after = week(&ada).await;
+        assert_eq!(starts(&after), times);
+        assert_eq!(after[1].subject, "All hands, moved");
+        assert_eq!(after[2].subject, "All hands");
+        ada.stop();
+        server.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -242,7 +288,7 @@ async fn a_channels_cancelled_exception_named_again_doesnt_reach_the_occurrence_
         assert_eq!(week(&ada).await.len(), 2);
 
         // the same cancellation sent again finds nothing: Friday's own occurrence stays
-        assert!(!cancelled_in_channel(&ada, there, place(&team, &group)).await);
+        refused(cancelled_in_channel(&ada, there, place(&team, &group)).await, "404");
         assert_eq!(week(&ada).await.len(), 2);
         let live = week(&bert).await.into_iter().filter(|event| !event.cancelled);
         assert_eq!(live.count(), 2);
