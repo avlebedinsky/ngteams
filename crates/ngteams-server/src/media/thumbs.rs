@@ -25,7 +25,7 @@ static DECODERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// Runs `work` over `source` off the async threads, when a decoder is free in turn. The decode holds its turn
 /// until it ends: a request that goes away leaves it running.
-pub(super) async fn decoding<T: Send + 'static>(
+pub(crate) async fn decoding<T: Send + 'static>(
     source: Bytes,
     work: impl FnOnce(&[u8]) -> Option<T> + Send + 'static,
 ) -> Option<T> {
@@ -102,7 +102,7 @@ pub(super) async fn picture(app: &App, item: &repo::Item, size: &str) -> Result<
 }
 
 /// `source` as a picture, within the decoder's limits; `None` when it isn't one.
-pub(super) fn decode(source: &[u8]) -> Option<DynamicImage> {
+pub(crate) fn decode(source: &[u8]) -> Option<DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(source)).with_guessed_format().ok()?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_SIDE);

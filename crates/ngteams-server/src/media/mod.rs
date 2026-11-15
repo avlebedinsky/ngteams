@@ -11,7 +11,6 @@ mod ams;
 mod drive;
 mod fetch;
 mod graph;
-mod people;
 mod repo;
 mod schema;
 mod thumbs;
@@ -22,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) use fetch::Fetcher;
+pub(crate) use thumbs::{decode, decoding};
 
 use axum::http::header::WWW_AUTHENTICATE;
 use axum::http::{HeaderMap, StatusCode};
@@ -47,13 +47,6 @@ const IC3: &str = <crate::auth::extract::Ic3 as crate::auth::extract::Audience>:
 pub(crate) fn router(app: &App) -> Router<Arc<App>> {
     let small = Router::new()
         .merge(graph::router())
-        .route(
-            &format!(
-                "{}/beta/users/fetchShortProfile",
-                crate::services::middle_tier_prefix(&app.config)
-            ),
-            axum::routing::post(people::short_profiles),
-        )
         .layer(axum::extract::DefaultBodyLimit::max(SMALL_BODY))
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

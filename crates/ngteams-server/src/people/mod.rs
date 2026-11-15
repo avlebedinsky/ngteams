@@ -2,16 +2,23 @@
 //! draws people from: the middle tier's short profiles, Graph's users and pictures (`crate::routes::graph`) and
 //! Loki's person card.
 
+mod loki;
+mod picture;
 pub mod repo;
+mod short;
 
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use axum::extract::FromRequestParts;
+use axum::Router;
+use axum::extract::{DefaultBodyLimit, FromRequestParts};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 
+pub use picture::{PictureError, remove_picture, set_picture};
+pub(crate) use picture::picture;
 pub use repo::{Person, Profile, out_of_office};
 
 use crate::app::App;
@@ -22,6 +29,8 @@ use crate::db::users::{self, User};
 /// password reset.
 pub(crate) struct Caller<A> {
     pub id: String,
+    /// The server's tenant, as the token names it.
+    pub tenant: String,
     pub user: User,
     audience: PhantomData<A>,
 }
@@ -46,8 +55,31 @@ impl<A: Audience> FromRequestParts<Arc<App>> for Caller<A> {
         }
         Ok(Self {
             id: bearer.claims.oid,
+            tenant: bearer.claims.tid,
             user,
             audience: PhantomData,
         })
     }
+}
+
+/// The largest body of a read by POST.
+const BODY_LIMIT: usize = 64 * 1024;
+
+/// The people reads: the middle tier's short profiles, Graph's users and pictures, Loki's person card.
+pub(crate) fn router(app: &App) -> Router<Arc<App>> {
+    let short_profiles = format!(
+        "{}/beta/users/fetchShortProfile",
+        crate::services::middle_tier_prefix(&app.config)
+    );
+    Router::new()
+        .route(&short_profiles, post(short::short_profiles))
+        .merge(crate::routes::graph::router())
+        .merge(loki::router())
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
+}
+
+/// The 503 a request gets when the database or the file store doesn't answer.
+pub(crate) fn unavailable(error: &dyn std::fmt::Display) -> StatusCode {
+    tracing::error!(%error, "people request failed");
+    StatusCode::SERVICE_UNAVAILABLE
 }
