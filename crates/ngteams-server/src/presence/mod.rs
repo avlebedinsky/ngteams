@@ -91,6 +91,8 @@ struct State {
     manual: Option<String>,
     last_active: Option<i64>,
     endpoints: BTreeMap<String, Endpoint>,
+    /// Each endpoint's value as it was read.
+    stored: BTreeMap<String, String>,
 }
 
 impl State {
@@ -105,6 +107,7 @@ impl State {
                 && let Ok(endpoint) = serde_json::from_str(&value)
             {
                 state.endpoints.insert(epid.to_owned(), endpoint);
+                state.stored.insert(epid.to_owned(), value);
             }
         }
         state
@@ -443,9 +446,12 @@ impl Inner {
             return Ok(false);
         }
         *held += usize::from(!known);
-        let until = now.saturating_add(millis(self.limits.subscription_ttl));
-        self.board.zadd(watching, mri, until).await?;
-        self.board.zadd(&key("watchers", mri), me, until).await?;
+        let (ttl, until) = (
+            self.limits.subscription_ttl,
+            now.saturating_add(millis(self.limits.subscription_ttl)),
+        );
+        self.board.zadd(watching, mri, until, Some(ttl)).await?;
+        self.board.zadd(&key("watchers", mri), me, until, Some(ttl)).await?;
         Ok(true)
     }
 
@@ -476,22 +482,26 @@ impl Inner {
             .collect())
     }
 
-    /// Forgets the endpoints of `state` that lapsed by `now`.
+    /// Forgets the endpoints of `state` that lapsed by `now`. One reported again since `state` was read is kept, and
+    /// `state` is read again to show it.
     async fn drop_lapsed(&self, account: &str, state: &mut State, now: i64) -> Result<(), BoardError> {
-        let lapsed: Vec<String> = state
+        let lapsed: Vec<(String, String)> = state
             .endpoints
             .iter()
             .filter(|(_, endpoint)| endpoint.until <= now)
-            .map(|(epid, _)| format!("ep:{epid}"))
+            .filter_map(|(epid, _)| Some((format!("ep:{epid}"), state.stored.get(epid)?.clone())))
             .collect();
+        if self.board.hdel_unchanged(account, &lapsed).await? < lapsed.len() {
+            *state = State::read(self.board.hgetall(account).await?);
+        }
         state.endpoints.retain(|_, endpoint| endpoint.until > now);
-        self.board.hdel(account, &lapsed).await
+        Ok(())
     }
 
     /// Puts the account on the set of those with an endpoint, at its next lapse.
     async fn schedule(&self, oid: &str, state: &State) -> Result<(), BoardError> {
         match state.endpoints.values().map(|endpoint| endpoint.until).min() {
-            Some(next) => self.board.zadd(&key("due", "accounts"), oid, next).await,
+            Some(next) => self.board.zadd(&key("due", "accounts"), oid, next, None).await,
             None => Ok(()),
         }
     }

@@ -552,3 +552,53 @@ async fn a_subscription_is_taken_only_in_teams_form_for_the_accounts_own_endpoin
     assert_eq!(taken["addStatuses"][0]["status"], 20200);
     server.stop().await;
 }
+
+/// The seconds each Redis key matching `pattern` still lives (`-1`: for good).
+async fn lifetimes(redis: &mut redis::aio::MultiplexedConnection, pattern: &str) -> Vec<i64> {
+    let keys: Vec<String> = redis::cmd("KEYS").arg(pattern).query_async(redis).await.unwrap();
+    let mut lifetimes = Vec::new();
+    for key in keys {
+        lifetimes.push(redis::cmd("TTL").arg(&key).query_async(redis).await.unwrap());
+    }
+    lifetimes
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_an_endpoint_watches_is_kept_in_redis_only_for_the_subscription_lifetime() {
+    let Some(url) = crate::support::redis_url() else { return };
+    let shared = url.clone();
+    let Trio {
+        server, a, b, a_token, ..
+    } = trio(|config| {
+        config.redis_url = Some(shared);
+        config.presence.subscription_ttl = 90;
+    })
+    .await;
+    let (mut ada, surl) = socket(&server, "wa@own.test", EPID).await;
+    let b_mri: &'static str = b.clone().leak();
+    let subscribe = Subscribe {
+        epid: EPID,
+        uri: format!("{surl}unifiedPresenceService"),
+        purge: true,
+        add: vec![b_mri],
+        remove: vec![],
+    };
+    assert_eq!(subscribe.send(&server, &a_token).await.0, 200);
+    pushed(&mut ada).await;
+
+    let mut redis = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let a_oid = a.strip_prefix("8:orgid:").unwrap();
+    for pattern in [
+        format!("ngts:presence:watching:{a_oid}|*"),
+        format!("ngts:presence:watchers:{b}"),
+    ] {
+        let lifetimes = lifetimes(&mut redis, &pattern).await;
+        assert_eq!(lifetimes.len(), 1, "{pattern}");
+        assert!((1..=90).contains(&lifetimes[0]), "{pattern} lives {lifetimes:?}");
+    }
+    server.stop().await;
+}
