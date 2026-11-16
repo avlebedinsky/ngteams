@@ -151,6 +151,7 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
 
+mod bots;
 pub mod channel;
 mod events;
 pub mod reactors;
@@ -300,6 +301,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("left", reactors::PreviousReaction, context),
         KeyBinding::new("space", reactors::PressReaction, context),
     ]);
+    // a bot card's input in the list takes its keys as text: the list's own keys are off there
+    let input = Some(crate::card_view::INPUT_CONTEXT);
+    cx.bind_keys(
+        [
+            "up", "down", "r", "a", "e", "delete", "escape", "enter", "1", "2", "3", "4", "5", "right", "left", "space",
+        ]
+        .map(|key| KeyBinding::new(key, gpui::NoAction, input)),
+    );
 }
 
 /// What can be done with a message.
@@ -1090,8 +1099,8 @@ pub struct ChatView {
     shown: Visibility,
     /// Rendered text of the pending message posts, per row id.
     pending_rendered: HashMap<i64, Arc<Rendered>>,
-    /// What each message's cards show besides what they say: toggled elements, opened cards ([`CardState`]).
-    card_states: HashMap<String, CardState>,
+    /// What each message's cards show besides what they say: toggled elements, opened cards, their bot state.
+    held_cards: bots::HeldCards,
     /// The newest message the account has read up to (its arrival time): the store's horizon, or the last receipt.
     read_upto: Option<i64>,
     /// The read receipt's wait, while one is due.
@@ -1262,7 +1271,7 @@ impl ChatView {
             stored_posts: HashSet::new(),
             shown: Visibility::Shown,
             pending_rendered: HashMap::new(),
-            card_states: HashMap::new(),
+            held_cards: bots::HeldCards::new(cx),
             read_upto: None,
             receipt: None,
             receipts: 0,
@@ -1552,14 +1561,19 @@ impl ChatView {
     }
 
     /// What message `id`'s cards are drawn with: their state, kept by the view, and their pictures' source.
-    fn card_hook(&self, id: &str, cx: &Context<Self>) -> CardHook {
+    fn card_hook(&self, item: &MessageItem, cx: &mut Context<Self>) -> CardHook {
         let view = cx.entity().downgrade();
+        let id = item.id.as_str();
         let key = id.to_owned();
         CardHook {
-            state: self.card_states.get(id).cloned().unwrap_or_default(),
+            // a link's app card asks no bot: its buttons open their link or Teams on the web
+            bot: matches!(item.body, Body::Cards(_))
+                .then(|| self.bot_hook(item, cx))
+                .flatten(),
+            state: self.held_cards.states.get(id).cloned().unwrap_or_default(),
             on_state: Rc::new(move |state, _, cx| {
                 let _ = view.update(cx, |this, cx| {
-                    this.card_states.insert(key.clone(), state);
+                    this.held_cards.states.insert(key.clone(), state);
                     cx.notify();
                 });
             }),
@@ -2849,8 +2863,13 @@ impl ChatView {
         if is_text_type(&message.message_type) {
             return Some(Body::Text(RenderedText(self.rendered(message))));
         }
+        let cards = if self.asks_bots() {
+            ShownCards::with_inputs
+        } else {
+            ShownCards::of
+        };
         if message.message_type == teams_proto::chat::card::CARD_TYPE
-            && let Some(cards) = ShownCards::of(&message.content)
+            && let Some(cards) = cards(&message.content)
         {
             return Some(Body::Cards(cards));
         }
@@ -3603,7 +3622,7 @@ impl ChatView {
                     quoted: Some(Self::quote_opener(cx)),
                     ring: self.flash_ring(item, palette, cx),
                     cards: (matches!(item.body, Body::Cards(_)) || item.app_cards.is_some())
-                        .then(|| self.card_hook(&item.id, cx)),
+                        .then(|| self.card_hook(item, cx)),
                     root: self.place.in_channel().then(|| self.root_of(&item.id)),
                     meeting: Self::meeting_view(item, palette, cx),
                     bots: self.core.capabilities().apps,
@@ -3896,6 +3915,7 @@ impl ChatView {
             .filter(|action| actions.contains(action))
             .map(|action| menu_entry(&message, action, palette, window, cx))
             .collect::<Vec<_>>();
+        entries.extend(self.refresh_entry(&message, palette, cx));
         // Teams' workflows run on any message of a chat that takes the account's writes
         let offers_workflows = self.core.capabilities().workflows
             && self
@@ -4902,6 +4922,7 @@ impl InChat<'_> {
 
 /// What a message's cards are drawn with in the chat ([`crate::card_view`]).
 struct CardHook {
+    bot: Option<crate::card_view::BotHook>,
     state: CardState,
     on_state: crate::card_view::OnState,
     source: rich_text::PictureSource,
@@ -4961,6 +4982,7 @@ fn cards_element(item: &MessageItem, cards: ShownCards, chat: &mut InChat<'_>, p
         .submits(chat.bots);
     match chat.cards.take() {
         Some(hook) => drawn
+            .bot(hook.bot.clone())
             .state(hook.state.clone(), Rc::clone(&hook.on_state))
             .source(Some(hook.source.clone()))
             .clock(hook.cycle),
@@ -5378,6 +5400,7 @@ impl Render for ChatView {
             .children(typing)
             .children(ChatTranslation::notice(&self.translation, palette, cx))
             .children(self.confirmation(palette, cx))
+            .children(self.suggested_actions(palette, cx))
             .child(self.compose.clone())
             .children(more)
             .children(reactors)

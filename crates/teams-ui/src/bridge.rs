@@ -60,6 +60,14 @@ pub trait Core: Send + Sync + 'static {
         let _ = (conversation, picture);
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
+    /// An app's bot asked through the account's chat service (`docs/protocol/bots.md`): one attempt, never sent
+    /// again; refused in read-only mode. A fake core reaches no bot.
+    fn bot_invoke(&self, ask: teams_core::bots::BotAsk) -> Reply<teams_proto::InvokeAnswer> {
+        let _ = ask;
+        Reply::ready(Err(teams_core::EngineError::BotNotReached {
+            why: "no engine".to_owned(),
+        }))
+    }
     /// Native Power Automate requests for this account. A fake without workflow support returns a connection error.
     fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
         let _ = request;
@@ -835,6 +843,10 @@ impl Core for EngineRequests {
 
     fn capabilities(&self) -> teams_core::Capabilities {
         EngineRequests::capabilities(self)
+    }
+
+    fn bot_invoke(&self, ask: teams_core::bots::BotAsk) -> Reply<teams_proto::InvokeAnswer> {
+        EngineRequests::bot_invoke(self, ask)
     }
 
     fn write(&self, action: Action) -> Reply<OutboxEntry> {

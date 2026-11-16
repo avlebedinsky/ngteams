@@ -78,6 +78,18 @@ What a card's buttons carry (`teams_proto::chat::card::BotAction`): an `Action.S
 button's type and `value`; and a card's `refresh` (its `Action.Execute` and the `userIds` it runs for by itself).
 `imBack` and `messageBack`'s `displayText` post a visible message as the user, through the ordinary message write.
 
+The answers go as Adaptive Cards gives them: a card's `Action.Submit` or `Action.Execute` sends the answers of its own
+card and of the cards a `ShowCard` opened it from, each input's by its `id`, merged into the action's `data` when that
+is an object (none becomes the answers; any other `data` goes as it is, without them). An input left empty goes as no
+key. Nothing goes while an answer fails its card's checks (`isRequired`, `regex`, `maxLength`, `min` and `max`); the
+input shows its `errorMessage`.
+
+**Suggested actions** (own design, unseen): a bot's message offers them in its activity's
+`suggestedActions.actions` (the Bot Framework's shape: `imBack`, `messageBack`, `postBack` buttons), carried in the
+`<Swift>` activity of its `RichText/Media_Card` message beside its `attachments`. In a 1:1 chat the newest message's
+are buttons over the compose box; `imBack` posts its `value` as the user's message, the others ask the bot as a
+card's button does. They go once anyone writes again.
+
 **Just-in-time install** (seen, Approvals, 2026-11-16): an app not yet in the chat answers a `submitAction` with a
 dialog card (`task` `continue`) that asks to add it, its `Action.Submit` `data` the submitted data plus
 `"msteams": {"justInTimeInstall": true}`. On that button Teams adds the app to the chat (`POST
@@ -113,4 +125,17 @@ An answer of another shape is kept as it came (`InvokeAnswer::Unknown`), never g
 An invoke is one attempt through the outbox (`Outbox::try_bot_invoke`), with no row: it may make the app act, so an
 unknown outcome is told to the asker and never sent again, and a later run sends nothing. Read-only mode sends none.
 The engine names the asker (`EngineHandle::bot_invoke`); no view builds the request. Until the bots feature leaves its
-flag (`NGTEAMS_BOTS=1`), no view calls it: cards' bot buttons still open the message in Teams on the web.
+flag (`NGTEAMS_BOTS=1`), only a build run with it asks a bot (`teams_ui::bot_card`):
+
+- a card's inputs are drawn and checked, and its buttons ask the bot (`message` for a plain submit, `messageBack`,
+  `invoke` and a hero card's `postBack`; `adaptiveCard/action` for `Action.Execute`), its message in `messageId`;
+- the answer shows on the card: a card in the pressed card's place (its answers start again), a message, the bot's
+  error or "the app didn't respond" under it, a sign-in request or a dialog as a line that opens the message in Teams
+  on the web (sign-in cards and the apps' dialogs come later);
+- a card's `refresh` runs by itself (`trigger` `automatic`) once while the chat is open when its `userIds` name the
+  account (its MRI or its object id), and by hand from the message's "More options" → "Refresh card" (`manual`);
+- a `task/fetch` button opens the message in Teams on the web until the apps' dialogs are built; `signin` opens its
+  page in the browser;
+- the bot's app id is the bot's own id until the engine knows each bot's app.
+
+Without the flag, or in read-only mode, a card's bot buttons open the message in Teams on the web, as before.

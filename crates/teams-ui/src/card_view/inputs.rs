@@ -1,0 +1,319 @@
+//! A bot card's inputs, drawn as Teams' cards draw them (behind `NGTEAMS_BOTS=1`): the label over the control, a red
+//! mark on a required one, the card's error under one that failed its check. Each control keeps its answer in the
+//! message's [`CardBot`].
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled, div, px,
+    rgb,
+};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::checkbox::Checkbox;
+use gpui_component::date_picker::DatePicker;
+use gpui_component::input::{Input as TextInput, InputState, Textarea};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::radio::Radio;
+use gpui_component::{Disableable as _, Sizable as _};
+use teams_proto::chat::card::{Choice, ChoiceStyle, Input, InputKind};
+
+use super::Draw;
+use crate::bot_card::{CardBot, Field, error_of, field_key};
+use crate::icons::{Glyph, icon_button, selected_by};
+use crate::theme::{self, Palette};
+
+/// How tall a multi-line text input is, px.
+const MULTILINE_HEIGHT: f32 = 72.0;
+/// How tall a choice list's menu grows before it scrolls, px.
+const MENU_HEIGHT: f32 = 280.0;
+
+/// What one input is drawn with.
+struct Place<'a> {
+    bot: &'a Entity<CardBot>,
+    key: String,
+    selector: String,
+    off: bool,
+    palette: Palette,
+}
+
+/// Input `input` of the card being drawn, at `path`.
+pub(super) fn view(draw: &Draw<'_>, input: &Input) -> AnyElement {
+    let Some(bot) = draw.bot else {
+        return div().into_any_element();
+    };
+    let key = field_key(draw.at, &input.id);
+    let place = Place {
+        bot: bot.entity,
+        selector: draw.selector(&format!("c{}-in-{}", draw.at, input.id)),
+        off: bot.read_only || bot.shown.busy.is_some(),
+        palette: draw.palette,
+        key,
+    };
+    let control = control(&place, input, bot.shown.fields.get(&place.key));
+    let invalid = bot.shown.invalid.contains(&place.key);
+    div()
+        .key_context(super::INPUT_CONTEXT)
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .when_some(input.label.clone(), |field, label| {
+            field.child(
+                div()
+                    .flex()
+                    .gap_0p5()
+                    .text_sm()
+                    .text_color(rgb(draw.palette.foreground))
+                    .child(label)
+                    .when(input.required, |label| {
+                        label.child(div().text_color(rgb(theme::DANGER)).child("*"))
+                    }),
+            )
+        })
+        .child(control)
+        .when(invalid, |field| {
+            let selector = format!("{}-error", place.selector);
+            field.child(
+                div()
+                    .debug_selector(move || selector)
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(rgb(theme::DANGER))
+                    .child(Glyph::CIRCLE_ALERT.icon().size(px(12.0)))
+                    .child(error_of(input)),
+            )
+        })
+        .into_any_element()
+}
+
+fn control(place: &Place<'_>, input: &Input, field: Option<&Field>) -> AnyElement {
+    let selector = place.selector.clone();
+    match (&input.kind, field) {
+        (InputKind::Time { .. }, Some(Field::Text(state))) => time_field(place, state),
+        (_, Some(Field::Text(state))) => selected_by(selector, TextInput::new(state).disabled(place.off))
+            .w_full()
+            .into_any_element(),
+        (_, Some(Field::Multiline(state))) => selected_by(
+            selector,
+            Textarea::new(state).h(px(MULTILINE_HEIGHT)).disabled(place.off),
+        )
+        .w_full()
+        .into_any_element(),
+        (InputKind::Date { placeholder, .. }, Some(Field::Date(state))) => selected_by(
+            selector,
+            DatePicker::new(state)
+                .placeholder(placeholder.clone().unwrap_or_else(|| "Select a date".to_owned()))
+                .w_full()
+                .disabled(place.off),
+        )
+        .w_full()
+        .into_any_element(),
+        (InputKind::Toggle { title, .. }, Some(Field::Toggle(on))) => toggle(place, title, *on),
+        (
+            InputKind::ChoiceSet {
+                choices,
+                multi,
+                style,
+                placeholder,
+                ..
+            },
+            Some(Field::Choice(chosen)),
+        ) => {
+            if *style == ChoiceStyle::Expanded {
+                expanded(place, choices, *multi, chosen)
+            } else {
+                compact(place, choices, *multi, chosen, placeholder.as_deref())
+            }
+        }
+        // its control is made on the next frame
+        _ => div().into_any_element(),
+    }
+}
+
+fn toggle(place: &Place<'_>, title: &str, on: bool) -> AnyElement {
+    let (bot, key) = (place.bot.clone(), place.key.clone());
+    selected_by(
+        place.selector.clone(),
+        Checkbox::new(SharedString::from(place.selector.clone()))
+            .label(title.to_owned())
+            .checked(on)
+            .disabled(place.off)
+            .on_click(move |checked: &bool, _, cx| {
+                let checked = *checked;
+                bot.update(cx, |bot, cx| bot.flip(&key, checked, cx));
+            }),
+    )
+    .into_any_element()
+}
+
+/// An expanded choice set: a radio button per choice, or a check box per choice when several may be chosen.
+fn expanded(place: &Place<'_>, choices: &[Choice], multi: bool, chosen: &[String]) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .children(choices.iter().map(|choice| {
+            let selector = format!("{}-{}", place.selector, choice.value);
+            let picked = chosen.contains(&choice.value);
+            let pick = picker(place, &choice.value, multi);
+            if multi {
+                selected_by(
+                    selector.clone(),
+                    Checkbox::new(SharedString::from(selector))
+                        .label(choice.title.clone())
+                        .checked(picked)
+                        .disabled(place.off)
+                        .on_click(move |_, _, cx| pick(cx)),
+                )
+            } else {
+                selected_by(
+                    selector.clone(),
+                    Radio::new(SharedString::from(selector))
+                        .label(choice.title.clone())
+                        .checked(picked)
+                        .disabled(place.off)
+                        .on_click(move |_, _, cx| pick(cx)),
+                )
+            }
+        }))
+        .into_any_element()
+}
+
+/// What a click on choice `value` does.
+fn picker(place: &Place<'_>, value: &str, multi: bool) -> impl Fn(&mut App) + Clone + 'static {
+    let (bot, key, value) = (place.bot.clone(), place.key.clone(), value.to_owned());
+    move |cx: &mut App| {
+        bot.update(cx, |bot, cx| bot.choose(&key, &value, multi, cx));
+    }
+}
+
+/// A compact choice set: a drop-down showing what is chosen, its choices in a menu, each chosen one checked.
+fn compact(
+    place: &Place<'_>,
+    choices: &[Choice],
+    multi: bool,
+    chosen: &[String],
+    placeholder: Option<&str>,
+) -> AnyElement {
+    let palette = place.palette;
+    let titles: Vec<String> = choices
+        .iter()
+        .filter(|choice| chosen.contains(&choice.value))
+        .map(|choice| choice.title.clone())
+        .collect();
+    let (face, faint) = if titles.is_empty() {
+        (placeholder.unwrap_or("Select").to_owned(), true)
+    } else {
+        (titles.join(", "), false)
+    };
+    let face = face_of(face, faint, palette);
+    let items: Vec<(String, String, bool)> = choices
+        .iter()
+        .map(|choice| {
+            (
+                choice.title.clone(),
+                choice.value.clone(),
+                chosen.contains(&choice.value),
+            )
+        })
+        .collect();
+    let (bot, key, selector) = (place.bot.clone(), place.key.clone(), place.selector.clone());
+    selected_by(
+        place.selector.clone(),
+        Button::new(SharedString::from(place.selector.clone()))
+            .outline()
+            .w_full()
+            .disabled(place.off)
+            .child(face)
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.scrollable(true).max_h(px(MENU_HEIGHT));
+                items.iter().fold(menu, |menu, (title, value, picked)| {
+                    let (bot, key, value) = (bot.clone(), key.clone(), value.clone());
+                    let row = format!("{selector}-{value}");
+                    let (title, picked) = (title.clone(), *picked);
+                    menu.item(
+                        PopupMenuItem::element(move |_, _| {
+                            let row = row.clone();
+                            div()
+                                .debug_selector(move || row.clone())
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .w(px(14.0))
+                                        .when(picked, |mark| mark.child(Glyph::CHECK.icon().size(px(14.0)))),
+                                )
+                                .child(title.clone())
+                        })
+                        .on_click(move |_, _, cx| {
+                            bot.update(cx, |bot, cx| bot.choose(&key, &value, multi, cx));
+                        }),
+                    )
+                })
+            }),
+    )
+    .w_full()
+    .into_any_element()
+}
+
+/// A drop-down's face: what is chosen (its placeholder, faint, when nothing is), and its chevron.
+fn face_of(face: String, faint: bool, palette: Palette) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_w_0()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .when(faint, |face| face.text_color(rgb(palette.muted_foreground)))
+                .child(face),
+        )
+        .child(
+            Glyph::CHEVRON_DOWN
+                .icon()
+                .size(px(14.0))
+                .text_color(rgb(palette.muted_foreground)),
+        )
+}
+
+/// A time: typed, or chosen from the half hours under its chevron, as Teams' time picker offers them.
+fn time_field(place: &Place<'_>, state: &Entity<InputState>) -> AnyElement {
+    let target = state.clone();
+    let times = format!("{}-times", place.selector);
+    selected_by(
+        place.selector.clone(),
+        TextInput::new(state).disabled(place.off).suffix(selected_by(
+            times.clone(),
+            icon_button(SharedString::from(times.clone()), Glyph::CHEVRON_DOWN, "Choose a time")
+                .ghost()
+                .xsmall()
+                .disabled(place.off)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for half in 0..48_u32 {
+                        let shown = crate::workflow_run::card::clock(half * 30);
+                        let (target, words) = (target.clone(), shown.clone());
+                        let row = format!("{times}-{}", shown.replace([' ', ':'], ""));
+                        menu = menu.item(
+                            PopupMenuItem::element(move |_, _| {
+                                let row = row.clone();
+                                div().debug_selector(move || row.clone()).child(shown.clone())
+                            })
+                            .on_click(move |_, window, cx| {
+                                target.update(cx, |state, cx| state.set_value(words.clone(), window, cx));
+                            }),
+                        );
+                    }
+                    menu.scrollable(true).max_h(px(240.0))
+                }),
+        )),
+    )
+    .w_full()
+    .into_any_element()
+}

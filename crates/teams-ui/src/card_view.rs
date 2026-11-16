@@ -16,44 +16,53 @@
 //! - **Actions**: `Action.OpenUrl` opens its link (GPUI's `open_url`); `Action.ShowCard` shows its card under the
 //!   buttons, and hides it again; `Action.ToggleVisibility` shows, hides or flips the elements it names. Both change
 //!   only what this view shows ([`CardState`], held by the view per message). `Action.Submit`/`Execute` are bot
-//!   invokes (`docs/protocol/bots.md`). No view sends one yet, so such a button opens the message in Teams on the
-//!   web, where it runs, and its tooltip says so. A `selectAction` does what its action does on a click anywhere on
-//!   its element.
+//!   invokes (`docs/protocol/bots.md`). Without the message's bot state ([`BotHook`], `NGTEAMS_BOTS=1`), or in
+//!   read-only mode, such a button opens the message in Teams on the web, where it runs, and its tooltip says so; with
+//!   it, the button asks the bot ([`crate::bot_card`]) and the bot's answer shows on the card. A `selectAction` does
+//!   what its action does on a click anywhere on its element.
+//! - **Inputs** are drawn with the bot state ([`inputs`]); without it a card read with an input says it has content
+//!   it can't show.
 //! - **A link's app card** (`properties.cards` of a text message, `card::message_cards`) is drawn under the message's
 //!   text, in its bubble: the app's icon and name over the card's body, as Teams draws a YouTube link's card.
 //! - **Media** (`Media`) is its picture (its poster, else YouTube's picture of its video), cropped to 16:9, with a play
 //!   mark; a click opens it in the browser, as the app's Open button (`ActionKind::OpenTab`) does. Teams plays it in
 //!   the card or in the app's view; this build has no web player for it.
-//! - **What it can't show** (an input, an element or action of a type no capture showed, an attachment that isn't a
-//!   card) is never guessed at: the card says the message has content that can't be shown here
+//! - **What it can't show** (an element or action of a type no capture showed, an attachment that isn't a card) is
+//!   never guessed at: the card says the message has content that can't be shown here
 //!   (`chat_view::UNSHOWN_CONTENT`), under what it does show.
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+mod inputs;
+
 use chrono::{DateTime, Local};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, FontWeight, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, Window, div, img, px, relative, rgb,
+    AnyElement, App, Entity, FontWeight, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, Window, div, img, px,
+    relative, rgb,
 };
 use gpui_component::button::Button;
-use gpui_component::{Selectable as _, Sizable as _};
+use gpui_component::{Disableable as _, Selectable as _, Sizable as _};
 use teams_proto::LinkPreviewPicture;
 use teams_proto::chat::card::{
-    self, Action, ActionKind, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle, DateFormat,
-    Element, Frame, HAlign, Image, ImageSize, Kind, Media, RichTextBlock, Spacing, Table, TextBlock, TextColor,
-    TextLook, TextPart, TextSize, TextWeight, VAlign, Width,
+    self, Action, ActionKind, BotAction, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle,
+    DateFormat, Element, Frame, HAlign, Image, ImageSize, Input, Kind, Media, RichTextBlock, Spacing, Table, TextBlock,
+    TextColor, TextLook, TextPart, TextSize, TextWeight, VAlign, Via, Width,
 };
 use teams_proto::chat::parse_html;
 
+use crate::bot_card::{self, CardBot, Line};
 use crate::clock::HourCycle;
-use crate::icons::Glyph;
+use crate::icons::{Glyph, Spinning as _};
 use crate::inline::{PictureSource, PictureState, picture};
 use crate::rich_text::{self, Mentions, Rendered, tint};
 use crate::theme::{self, Palette};
 
+/// The key context of a card's input: what types there is its text, never a key of the view around the card.
+pub const INPUT_CONTEXT: &str = "BotCardInput";
 /// The widest a card is drawn, px: Teams' card in a chat and in a channel.
 pub const CARD_WIDTH: f32 = 448.0;
 /// A card's padding, px (Teams' host config `spacing.padding`).
@@ -105,6 +114,14 @@ impl ShownCards {
         let properties = serde_json::from_str::<serde_json::Value>(properties?).ok()?;
         card::message_cards(properties.get("cards"))
             .filter(card::CardMessage::drawn)
+            .map(|message| Self(Arc::new(message)))
+    }
+
+    /// The cards of a card message's `content` for a view that draws inputs (the bots' cards, `NGTEAMS_BOTS=1`).
+    #[must_use]
+    pub fn with_inputs(content: &str) -> Option<Self> {
+        card::card_message_with_inputs(content)
+            .filter(|message| !message.cards.is_empty())
             .map(|message| Self(Arc::new(message)))
     }
 
@@ -168,6 +185,14 @@ type OnClick = Rc<dyn Fn(&mut Window, &mut App)>;
 /// What a card tells its view: its state as a click left it.
 pub type OnState = Rc<dyn Fn(CardState, &mut Window, &mut App)>;
 
+/// A message's bot state its cards are drawn with (`NGTEAMS_BOTS=1`): their answers, what their bot did, and whether
+/// the app is read-only (its buttons then open in Teams on the web, its inputs take nothing).
+#[derive(Clone)]
+pub struct BotHook {
+    pub bot: Entity<CardBot>,
+    pub read_only: bool,
+}
+
 /// A message's cards, drawn (see the module docs). `id` keeps its elements apart from another message's.
 #[derive(IntoElement)]
 pub struct CardsElement {
@@ -181,6 +206,7 @@ pub struct CardsElement {
     in_teams: Option<String>,
     /// Whether a button that sends to the bot is drawn: not where the account's cloud serves no bot invokes.
     submits: bool,
+    bot: Option<BotHook>,
 }
 
 impl CardsElement {
@@ -196,7 +222,15 @@ impl CardsElement {
             on_state: None,
             in_teams: None,
             submits: true,
+            bot: None,
         }
+    }
+
+    /// The message's bot state: its inputs drawn, its buttons asking the bot.
+    #[must_use]
+    pub fn bot(mut self, hook: Option<BotHook>) -> Self {
+        self.bot = hook;
+        self
     }
 
     /// What its toggles and shown cards stand at, and who is told when a click changes it.
@@ -237,9 +271,35 @@ impl CardsElement {
 }
 
 impl RenderOnce for CardsElement {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // the bot's card in a card's place, and each input's control made
+        let cards: Vec<Arc<Card>> = match &self.bot {
+            Some(hook) => self
+                .cards
+                .0
+                .cards
+                .iter()
+                .enumerate()
+                .map(|(at, original)| {
+                    let card = hook
+                        .bot
+                        .read(cx)
+                        .replaced(at)
+                        .unwrap_or_else(|| Arc::new(original.clone()));
+                    hook.bot.update(cx, |bot, cx| bot.make_fields(at, &card, window, cx));
+                    card
+                })
+                .collect(),
+            None => self.cards.0.cards.iter().cloned().map(Arc::new).collect(),
+        };
+        let shown = self.bot.as_ref().map(|hook| hook.bot.read(cx).shown());
+        let bot = self.bot.as_ref().zip(shown.as_ref()).map(|(hook, shown)| BotDraw {
+            entity: &hook.bot,
+            shown,
+            read_only: hook.read_only,
+        });
         let mut base = HashMap::new();
-        for card in &self.cards.0.cards {
+        for card in &cards {
             card_visibility(card, &mut base);
         }
         let draw = Draw {
@@ -252,6 +312,9 @@ impl RenderOnce for CardsElement {
             in_teams: self.in_teams.as_deref(),
             submits: self.submits,
             base: &base,
+            bot: bot.as_ref(),
+            at: 0,
+            inputs: Rc::new(Vec::new()),
         };
         let id = self.id.clone();
         // an attachment beside the cards that isn't one (`CardMessage::unshown`) is said under them
@@ -265,18 +328,18 @@ impl RenderOnce for CardsElement {
             .flex_col()
             .gap_2()
             .children(
-                self.cards
-                    .0
-                    .cards
+                cards
                     .iter()
                     .enumerate()
-                    .map(|(at, shown)| card_surface(&draw, &format!("c{at}"), shown, cx)),
+                    .map(|(at, shown)| card_surface(&draw, at, shown, cx)),
             )
             .children(unshown)
     }
 }
 
-/// What every element of one message's cards is drawn with.
+/// What every element of one message's cards is drawn with: of the card being drawn, its place (`at`) and the inputs
+/// a button there sends the answers of.
+#[derive(Clone)]
 struct Draw<'a> {
     id: &'a str,
     palette: Palette,
@@ -287,9 +350,36 @@ struct Draw<'a> {
     in_teams: Option<&'a str>,
     submits: bool,
     base: &'a HashMap<String, bool>,
+    bot: Option<&'a BotDraw<'a>>,
+    at: usize,
+    inputs: Rc<Vec<Input>>,
+}
+
+/// A message's bot state, as its cards are drawn this frame.
+struct BotDraw<'a> {
+    entity: &'a Entity<CardBot>,
+    shown: &'a bot_card::Shown,
+    read_only: bool,
+}
+
+impl BotDraw<'_> {
+    /// A button that sends asks the bot (else it opens in Teams on the web).
+    fn asks(&self, action: &BotAction) -> bool {
+        self.shown.reaches && !self.read_only && action.via != Via::TaskFetch
+    }
 }
 
 impl Draw<'_> {
+    /// The same, for a card whose own inputs (not those of the cards its `ShowCard`s open) join `inputs`.
+    fn within(&self, card: &Card) -> Self {
+        let mut inputs = self.inputs.as_ref().clone();
+        bot_card::card_inputs(card, false, &mut inputs);
+        Self {
+            inputs: Rc::new(inputs),
+            ..self.clone()
+        }
+    }
+
     fn selector(&self, path: &str) -> String {
         format!("card-{}-{path}", self.id)
     }
@@ -338,22 +428,85 @@ fn base_visibility(elements: &[Element], base: &mut HashMap<String, bool>) {
     }
 }
 
-/// One card on its own surface: bordered, rounded, padded, [`CARD_WIDTH`] wide at most.
-fn card_surface(draw: &Draw<'_>, path: &str, shown: &Card, cx: &mut App) -> AnyElement {
+/// Card `at` on its own surface: bordered, rounded, padded, [`CARD_WIDTH`] wide at most; under it what its bot
+/// answered.
+fn card_surface(draw: &Draw<'_>, at: usize, shown: &Card, cx: &mut App) -> AnyElement {
     let palette = draw.palette;
-    let selector = draw.selector(path);
-    div()
+    let path = format!("c{at}");
+    let draw = &Draw {
+        at,
+        inputs: Rc::new(Vec::new()),
+        ..draw.clone()
+    }
+    .within(shown);
+    let selector = draw.selector(&path);
+    let line = draw
+        .bot
+        .and_then(|bot| bot.shown.lines.get(&at))
+        .map(|line| answer_line(draw, &path, line));
+    // a card that asks for answers is as wide as a card is, as Teams draws a form
+    let form = draw.bot.is_some() && !draw.inputs.is_empty();
+    let surface = div()
         .debug_selector(move || selector)
         .w_full()
         .max_w(px(CARD_WIDTH))
+        .when(form, |surface| surface.w(px(CARD_WIDTH)))
         .rounded_lg()
         .border_1()
         .border_color(rgb(palette.border))
         .bg(rgb(palette.surface))
         .shadow_xs()
         .p(px(PADDING))
-        .children(shown.app.as_ref().map(|app| app_header(draw, path, app, cx)))
-        .child(card_body(draw, path, shown, cx))
+        .children(shown.app.as_ref().map(|app| app_header(draw, &path, app, cx)))
+        .child(card_body(draw, &path, shown, cx));
+    match line {
+        Some(line) => div()
+            .w_full()
+            .max_w(px(CARD_WIDTH))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(surface)
+            .child(line)
+            .into_any_element(),
+        None => surface.into_any_element(),
+    }
+}
+
+/// What a card's bot answered, under it: its message, its error, or a sign-in or dialog it asks for, which go on in
+/// Teams on the web.
+fn answer_line(draw: &Draw<'_>, path: &str, line: &Line) -> AnyElement {
+    let palette = draw.palette;
+    let (glyph, text, colour) = match line {
+        Line::Note(text) => (Glyph::INFO, text.clone(), palette.muted_foreground),
+        Line::Error(text) => (Glyph::CIRCLE_ALERT, text.clone(), theme::DANGER),
+        Line::SignIn => (Glyph::LOCK, bot_card::SIGN_IN_NEEDED.to_owned(), palette.foreground),
+        Line::Dialog => (
+            Glyph::OPEN_OUT,
+            bot_card::DIALOG_IN_TEAMS.to_owned(),
+            palette.foreground,
+        ),
+    };
+    let selector = draw.selector(&format!("{path}answer"));
+    let opens = matches!(line, Line::SignIn | Line::Dialog)
+        .then(|| draw.in_teams.map(str::to_owned))
+        .flatten();
+    div()
+        .debug_selector(move || selector)
+        .id(SharedString::from(draw.selector(&format!("{path}answer"))))
+        .flex()
+        .items_start()
+        .gap_1p5()
+        .px_1()
+        .text_xs()
+        .text_color(rgb(colour))
+        .child(div().pt_0p5().child(glyph.icon().size(px(12.0))))
+        .child(div().flex_1().min_w_0().child(text))
+        .when_some(opens, |row, opens| {
+            row.cursor_pointer()
+                .hover(Styled::underline)
+                .on_click(move |_, _, cx| cx.open_url(&opens))
+        })
         .into_any_element()
 }
 
@@ -518,8 +671,9 @@ fn unshown_line(palette: Palette) -> AnyElement {
 /// The visible ones of `items`, each after its spacing (and its line, for a separator); the first has no space above.
 fn elements(draw: &Draw<'_>, path: &str, items: &[Element], cx: &mut App) -> Vec<AnyElement> {
     let mut drawn = Vec::new();
-    // inputs aren't drawn yet (their card says it has content it can't show), and they take no place in the paths
-    let drawable = |element: &&Element| !matches!(element.kind, Kind::Input(_));
+    // without the bot state, inputs aren't drawn (their card says it has content it can't show), and they take no
+    // place in the paths
+    let drawable = |element: &&Element| draw.bot.is_some() || !matches!(element.kind, Kind::Input(_));
     for (at, element) in items.iter().filter(drawable).enumerate() {
         if !draw.state.shown(element.id.as_deref(), element.visible) {
             continue;
@@ -584,7 +738,7 @@ fn element_view(draw: &Draw<'_>, path: &str, element: &Element, cx: &mut App) ->
         }
         Kind::Table(table) => placed(draw, path, table_view(draw, path, table, cx)),
         Kind::Media(media) => placed(draw, path, media_view(draw, path, media, cx)),
-        Kind::Input(_) => div().into_any_element(),
+        Kind::Input(input) => placed(draw, path, inputs::view(draw, input)),
     }
 }
 
@@ -1098,7 +1252,7 @@ fn opened_card(draw: &Draw<'_>, path: &str, actions: &[Action], cx: &mut App) ->
                 .pt(px(spacing_px(Spacing::Default)))
                 .border_t_1()
                 .border_color(rgb(draw.palette.border))
-                .child(card_body(draw, &format!("{key}c"), shown, cx))
+                .child(card_body(&draw.within(shown), &format!("{key}c"), shown, cx))
                 .into_any_element()
         })
     })
@@ -1127,14 +1281,20 @@ fn action_button(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) ->
         .label(action.title.clone())
         .outline()
         .with_size(gpui_component::Size::Medium);
-    if let Some(glyph) = action_glyph(action) {
+    let asks = asks_bot(draw, action);
+    if let Some(glyph) = action_glyph(action, asks) {
         button = button.icon(glyph.icon());
     }
     if draw.state.is_open(key) {
         button = button.selected(true);
     }
-    if matches!(action.kind, ActionKind::Submit(_)) {
-        button = button.tooltip(RUNS_IN_TEAMS);
+    match (&action.kind, asks, draw.bot) {
+        (ActionKind::Submit(_), false, _) => button = button.tooltip(RUNS_IN_TEAMS),
+        (_, true, Some(bot)) => {
+            let busy = bot.shown.busy.as_deref();
+            button = button.spinning(busy == Some(key)).disabled(busy.is_some());
+        }
+        _ => {}
     }
     let click = click_of(draw, key, action, set);
     let button = button.on_click(move |_, window, cx| {
@@ -1150,11 +1310,20 @@ fn action_button(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) ->
         .into_any_element()
 }
 
-/// The glyph a button carries: Teams' own icon it names, a link out for one that opens in Teams on the web.
-fn action_glyph(action: &Action) -> Option<Glyph> {
+/// Whether `action` asks the card's bot (with the bot state, not read-only, a button that sends; see the module docs).
+fn asks_bot(draw: &Draw<'_>, action: &Action) -> bool {
+    match (&action.kind, draw.bot) {
+        (ActionKind::Submit(sent), Some(bot)) => bot.asks(sent),
+        _ => false,
+    }
+}
+
+/// The glyph a button carries: Teams' own icon it names, a link out for one that opens in Teams on the web (one that
+/// sends to the bot without asking it, `asks` false).
+fn action_glyph(action: &Action, asks: bool) -> Option<Glyph> {
     match (action.teams_icon(), &action.kind) {
         (Some("Open" | "OpenRegular" | "Open16Regular"), _) => Some(Glyph::EXTERNAL_LINK),
-        (_, ActionKind::Submit(_)) => Some(Glyph::OPEN_OUT),
+        (_, ActionKind::Submit(_)) if !asks => Some(Glyph::OPEN_OUT),
         _ => None,
     }
 }
@@ -1166,6 +1335,21 @@ fn click_of(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) -> OnCl
         ActionKind::OpenUrl(url) | ActionKind::OpenTab(url) => {
             let url = url.clone();
             Rc::new(move |_, cx| cx.open_url(&url))
+        }
+        ActionKind::Submit(pressed)
+            if asks_bot(draw, action)
+                && let Some(bot) = draw.bot =>
+        {
+            let (bot, at, key, pressed, inputs) = (
+                bot.entity.clone(),
+                draw.at,
+                key.to_owned(),
+                pressed.clone(),
+                Rc::clone(&draw.inputs),
+            );
+            Rc::new(move |_, cx| {
+                bot.update(cx, |bot, cx| bot.press(at, &key, &pressed, &inputs, cx));
+            })
         }
         ActionKind::Submit(_) => {
             let link = draw.in_teams.map(str::to_owned);

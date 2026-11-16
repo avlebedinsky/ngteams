@@ -11,7 +11,8 @@ use teams_proto::LinkPreviewPicture;
 use teams_proto::chat::card::{
     ADAPTIVE, ActionKind, ActionStyle, BotAction, CardMessage, ChoiceStyle, ContainerStyle, DateFormat, HAlign,
     ImageSize, InputKind, Kind, Spacing, TextColor, TextInputStyle, TextPart, TextSize, TextWeight, VAlign, Via, Width,
-    card_message, input, markdown_html, message_cards, plain_words, text_parts, youtube_picture,
+    adaptive_card_with_inputs, card_message, card_message_with_inputs, input, markdown_html, message_cards,
+    plain_words, text_parts, youtube_picture,
 };
 use teams_proto::chat::{Unshown, unshown_parts};
 
@@ -578,6 +579,72 @@ fn an_input_with_a_fallback_gets_its_fallback() {
         })
         .collect();
     assert_eq!(texts, ["Answer in Teams", "kept"]);
+}
+
+/// Read for a view that draws inputs, every input is read, one with a `fallback` too, and no input marks the card
+/// unshown; in a shown card as well. An input of a kind not read still gets its fallback.
+#[test]
+fn a_view_that_draws_inputs_reads_every_input() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [
+            {"type": "Input.Text", "id": "comment", "fallback": "drop"},
+            {"type": "Input.Toggle", "id": "agree", "title": "Agree",
+             "fallback": {"type": "TextBlock", "text": "Answer in Teams"}},
+            {"type": "Input.Rating", "id": "stars", "fallback": {"type": "TextBlock", "text": "No stars"}},
+        ],
+        "actions": [{"type": "Action.ShowCard", "title": "More", "card": {"type": "AdaptiveCard", "body": [
+            {"type": "Input.Date", "id": "due"}
+        ]}}]
+    });
+    let activity = json!({
+        "type": "message/card",
+        "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": card}],
+    });
+    let message = card_message_with_inputs(&content(&activity)).unwrap();
+    let read = &message.cards[0];
+    assert!(!read.unshown);
+    let ids: Vec<String> = read
+        .body
+        .iter()
+        .map(|element| match &element.kind {
+            Kind::Input(input) => input.id.clone(),
+            Kind::Text(text) => text.text.clone(),
+            other => panic!("not an input or a text: {other:?}"),
+        })
+        .collect();
+    assert_eq!(ids, ["comment", "agree", "No stars"]);
+    let ActionKind::ShowCard(shown) = &read.actions[0].kind else {
+        panic!("not a shown card");
+    };
+    assert!(matches!(shown.body[0].kind, Kind::Input(_)));
+    assert!(!shown.unshown);
+    assert_eq!(adaptive_card_with_inputs(&card), *read);
+    // read for a view that draws none, the input without a fallback (the shown card's) marks it unshown
+    assert!(adaptive(&card).cards[0].unshown);
+}
+
+/// A bot's suggested actions are read as a hero card's buttons; one of a kind not read is left out.
+#[test]
+fn reads_suggested_actions() {
+    let activity = json!({
+        "type": "message/card",
+        "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
+                         "content": {"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Pick one"}]}}],
+        "suggestedActions": {"actions": [
+            {"type": "imBack", "title": "Red", "value": "red"},
+            {"type": "messageBack", "title": "Blue", "text": "blue", "displayText": "Blue please", "value": {"c": 2}},
+            {"type": "showImage", "title": "Not read", "value": "https://example.invalid/i.png"},
+        ]}
+    });
+    let message = card_message(&content(&activity)).unwrap();
+    let titles: Vec<&str> = message.suggested.iter().map(|action| action.title.as_str()).collect();
+    assert_eq!(titles, ["Red", "Blue"]);
+    assert!(matches!(
+        &message.suggested[0].kind,
+        ActionKind::Submit(BotAction { via: Via::ImBack(text), .. }) if text == "red"
+    ));
+    assert!(adaptive(&json!({"type": "AdaptiveCard"})).suggested.is_empty());
 }
 
 /// An input without its id, or of a kind not read, isn't one; in a card it is unshown.

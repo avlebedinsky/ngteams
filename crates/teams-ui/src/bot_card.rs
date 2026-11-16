@@ -1,0 +1,614 @@
+//! A bot's card in a chat, behind `NGTEAMS_BOTS=1` ([`crate::bots_flag`]): what one message's cards hold besides
+//! what they say (`docs/protocol/bots.md`), as Teams' web client keeps it per card.
+//!
+//! - **Answers**: each input's control ([`Field`]), made when the card is first drawn, keyed by the card and the
+//!   input's id. A button that sends gathers the answers of its card (and of the cards a `ShowCard` opened it from),
+//!   checks them (required, `regex`, `maxLength`, `min`/`max`) and marks those that fail with the card's own
+//!   `errorMessage`; nothing goes until all pass.
+//! - **A button that sends**: `Action.Submit` (plain, `messageBack`, `invoke`, a hero card's `postBack`) and
+//!   `Action.Execute` ask the bot through the engine (`Core::bot_invoke`), its data merged with the answers by input id;
+//!   `imBack` and `messageBack`'s `displayText` post a message as the user, through the ordinary write. While one goes,
+//!   the card's buttons wait. `signin` opens its page in the browser. `task/fetch` (a dialog) opens the message in Teams
+//!   on the web until the app's dialogs are built.
+//! - **The answer**: a card takes the pressed card's place; a message, an error or a sign-in request shows as a line
+//!   under the card; a bot that wasn't reached is said there too, and nothing is sent again.
+//! - **Refresh**: a card's `refresh` runs by itself, once while the view lives, for a user it names
+//!   ([`CardBot::refreshes_for`]); anyone may run it by hand ("Refresh card").
+//!
+//! The view asks the engine; it builds no request ([`crate::bridge::Core`]).
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use chrono::NaiveDate;
+use gpui::{AppContext as _, Context, Entity, Subscription, Window};
+use gpui_component::date_picker::{DatePickerEvent, DatePickerState};
+use gpui_component::input::{InputEvent, InputState, TextareaState};
+use serde_json::{Map, Value};
+use teams_core::Action;
+use teams_core::bots::BotAsk;
+use teams_proto::chat::MessageText;
+use teams_proto::chat::card::{ActionKind, BotAction, Card, Element, Input, InputKind, Kind, Refresh, Via};
+use teams_proto::{CardInvoke, InvokeAnswer, InvokeKind, Mri};
+
+use crate::bridge::Core;
+
+/// The line under a card when its bot couldn't be reached.
+pub const NOT_REACHED: &str = "The app didn't respond. Try again.";
+/// The line under a card whose bot asks the user to sign in.
+pub const SIGN_IN_NEEDED: &str = "Sign-in needed. Open this message in Teams on the web to sign in to the app.";
+/// The line under a card whose bot answered with a dialog this build doesn't open yet.
+pub const DIALOG_IN_TEAMS: &str = "The app continues in a dialog. Open this message in Teams on the web to go on.";
+/// What a required input left empty says, when its card gives no words of its own.
+pub const REQUIRED: &str = "This is required.";
+/// What an input whose answer doesn't fit says, when its card gives no words of its own.
+pub const NOT_VALID: &str = "Enter a valid value.";
+/// What a button that opens a dialog says in its tooltip.
+pub const DIALOG_TIP: &str = "Opens in Teams on the web, where this app's dialog runs";
+
+/// The bot a card's buttons reach, and where.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    /// The bot, `28:<bot id>`.
+    pub bot: Mri,
+    /// Its app's id.
+    pub app_id: String,
+    /// The chat, or a channel post's `<channel>;messageid=<post>` chain: where the card is, and where a message the
+    /// user posts from it goes.
+    pub conversation: String,
+}
+
+impl Target {
+    /// The bot that sent a message, when one did (`28:`), in `conversation`. Its app's id is the bot's own until the
+    /// engine knows each bot's app.
+    #[must_use]
+    pub fn of_sender(sender: Option<&str>, conversation: &str) -> Option<Self> {
+        let bot = Mri::new(sender?);
+        let id = bot.as_str().strip_prefix("28:")?.to_owned();
+        (!id.is_empty()).then(|| Self {
+            bot,
+            app_id: id,
+            conversation: conversation.to_owned(),
+        })
+    }
+}
+
+/// What shows under a card after its bot answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// The bot's message.
+    Note(String),
+    /// The bot's error, or the bot not reached.
+    Error(String),
+    /// The bot asks the user to sign in.
+    SignIn,
+    /// The bot answered with a dialog: it goes on in Teams on the web.
+    Dialog,
+}
+
+/// An input's control.
+#[derive(Clone)]
+pub enum Field {
+    /// A text, a number or a time, typed.
+    Text(Entity<InputState>),
+    Multiline(Entity<TextareaState>),
+    Date(Entity<DatePickerState>),
+    Toggle(bool),
+    /// The values chosen.
+    Choice(Vec<String>),
+}
+
+/// One message's cards' answers and what their bot did (see the module docs).
+pub struct CardBot {
+    core: Arc<dyn Core>,
+    message: String,
+    target: Option<Target>,
+    fields: HashMap<String, Field>,
+    watched: Vec<Subscription>,
+    invalid: HashSet<String>,
+    replaced: HashMap<usize, Arc<Card>>,
+    lines: HashMap<usize, Line>,
+    busy: Option<String>,
+    refreshed: HashSet<usize>,
+}
+
+/// What a card is drawn with from its [`CardBot`], read once a frame.
+#[derive(Clone, Default)]
+pub struct Shown {
+    pub fields: HashMap<String, Field>,
+    pub invalid: HashSet<String>,
+    pub lines: HashMap<usize, Line>,
+    /// The key of the button whose ask is on its way.
+    pub busy: Option<String>,
+    /// The bot is known: a button that sends asks it.
+    pub reaches: bool,
+}
+
+impl CardBot {
+    /// The cards of `message`, whose buttons reach `target` (none: they open in Teams on the web).
+    #[must_use]
+    pub fn new(core: Arc<dyn Core>, message: String, target: Option<Target>) -> Self {
+        Self {
+            core,
+            message,
+            target,
+            fields: HashMap::new(),
+            watched: Vec::new(),
+            invalid: HashSet::new(),
+            replaced: HashMap::new(),
+            lines: HashMap::new(),
+            busy: None,
+            refreshed: HashSet::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn target(&self) -> Option<&Target> {
+        self.target.as_ref()
+    }
+
+    /// The card the bot put in the place of card `at`.
+    #[must_use]
+    pub fn replaced(&self, at: usize) -> Option<Arc<Card>> {
+        self.replaced.get(&at).cloned()
+    }
+
+    /// What its cards are drawn with.
+    #[must_use]
+    pub fn shown(&self) -> Shown {
+        Shown {
+            fields: self.fields.clone(),
+            invalid: self.invalid.clone(),
+            lines: self.lines.clone(),
+            busy: self.busy.clone(),
+            reaches: self.target.is_some(),
+        }
+    }
+
+    /// Whether an ask is on its way.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.busy.is_some()
+    }
+
+    /// The controls of card `at`'s inputs, made for those that have none yet.
+    pub fn make_fields(&mut self, at: usize, card: &Card, window: &mut Window, cx: &mut Context<Self>) {
+        let mut inputs = Vec::new();
+        card_inputs(card, true, &mut inputs);
+        for input in inputs {
+            let key = field_key(at, &input.id);
+            if !self.fields.contains_key(&key) {
+                let field = self.field(&key, &input, window, cx);
+                self.fields.insert(key, field);
+            }
+        }
+    }
+
+    fn field(&mut self, key: &str, input: &Input, window: &mut Window, cx: &mut Context<Self>) -> Field {
+        let start = input.initial_answer().unwrap_or_default();
+        match &input.kind {
+            InputKind::Text {
+                multiline: true,
+                placeholder,
+                ..
+            } => {
+                let placeholder = placeholder.clone().unwrap_or_default();
+                let state = cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .placeholder(placeholder)
+                        .default_value(start)
+                });
+                self.watch_text(key, &state, cx);
+                Field::Multiline(state)
+            }
+            InputKind::Text { placeholder, .. }
+            | InputKind::Number { placeholder, .. }
+            | InputKind::Time { placeholder, .. } => {
+                let masked = matches!(
+                    input.kind,
+                    InputKind::Text {
+                        style: teams_proto::chat::card::TextInputStyle::Password,
+                        ..
+                    }
+                );
+                let placeholder = placeholder.clone().unwrap_or_else(|| {
+                    if matches!(input.kind, InputKind::Time { .. }) {
+                        "Select a time".to_owned()
+                    } else {
+                        String::new()
+                    }
+                });
+                let state = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(placeholder)
+                        .default_value(start)
+                        .masked(masked)
+                });
+                self.watch_text(key, &state, cx);
+                Field::Text(state)
+            }
+            InputKind::Date { value, .. } => {
+                let state = cx.new(|cx| DatePickerState::new(window, cx).date_format("%-m/%-d/%Y"));
+                if let Some(day) = value.as_deref().and_then(parse_date) {
+                    state.update(cx, |state, cx| state.set_date(day, window, cx));
+                }
+                let key = key.to_owned();
+                self.watched
+                    .push(cx.subscribe(&state, move |this, _, _: &DatePickerEvent, cx| {
+                        this.invalid.remove(&key);
+                        cx.notify();
+                    }));
+                Field::Date(state)
+            }
+            InputKind::Toggle { on, .. } => Field::Toggle(*on),
+            InputKind::ChoiceSet { chosen, .. } => Field::Choice(chosen.clone()),
+        }
+    }
+
+    fn watch_text<T: gpui::EventEmitter<InputEvent>>(&mut self, key: &str, state: &Entity<T>, cx: &mut Context<Self>) {
+        let key = key.to_owned();
+        self.watched
+            .push(cx.subscribe(state, move |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) && this.invalid.remove(&key) {
+                    cx.notify();
+                }
+            }));
+    }
+
+    /// A switch flipped.
+    pub fn flip(&mut self, key: &str, on: bool, cx: &mut Context<Self>) {
+        self.fields.insert(key.to_owned(), Field::Toggle(on));
+        self.invalid.remove(key);
+        cx.notify();
+    }
+
+    /// A choice chosen (in a set of many, chosen or taken back).
+    pub fn choose(&mut self, key: &str, value: &str, multi: bool, cx: &mut Context<Self>) {
+        let mut chosen = match self.fields.get(key) {
+            Some(Field::Choice(chosen)) => chosen.clone(),
+            _ => Vec::new(),
+        };
+        if !multi {
+            chosen = vec![value.to_owned()];
+        } else if chosen.iter().any(|known| known == value) {
+            chosen.retain(|known| known != value);
+        } else {
+            chosen.push(value.to_owned());
+        }
+        self.fields.insert(key.to_owned(), Field::Choice(chosen));
+        self.invalid.remove(key);
+        cx.notify();
+    }
+
+    /// The answers of `inputs` (card `at`'s), by input id, each a string as the card sends it; `None` (each failing one
+    /// marked) when one doesn't pass its checks.
+    pub fn answers(&mut self, at: usize, inputs: &[Input], cx: &Context<Self>) -> Option<Map<String, Value>> {
+        let mut answers = Map::new();
+        let mut failed = HashSet::new();
+        for input in inputs {
+            let key = field_key(at, &input.id);
+            let answer = self.answer_of(&key, input, cx);
+            if !passes(input, answer.as_deref()) {
+                failed.insert(key);
+                continue;
+            }
+            if let Some(answer) = answer {
+                answers.insert(input.id.clone(), Value::String(answer));
+            }
+        }
+        self.invalid = failed;
+        self.invalid.is_empty().then_some(answers)
+    }
+
+    /// An input's answer as its control holds it (as the card starts it, before its control is made); `None` when
+    /// empty, or a time that can't be read as one.
+    fn answer_of(&self, key: &str, input: &Input, cx: &gpui::App) -> Option<String> {
+        let answer = match self.fields.get(key) {
+            Some(Field::Text(state)) => state.read(cx).value().trim().to_owned(),
+            Some(Field::Multiline(state)) => state.read(cx).value().trim().to_owned(),
+            Some(Field::Date(state)) => state
+                .read(cx)
+                .date()
+                .start()
+                .map(|day| day.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            Some(Field::Toggle(on)) => toggle_answer(input, *on),
+            Some(Field::Choice(chosen)) => chosen.join(","),
+            None => input.initial_answer().unwrap_or_default(),
+        };
+        if answer.is_empty() {
+            return None;
+        }
+        match input.kind {
+            // an unreadable time is an empty one that fails its check
+            InputKind::Time { .. } => crate::workflow_run::card::parse_time(&answer)
+                .map(|time| time.format("%H:%M").to_string())
+                .or(Some(String::new())),
+            _ => Some(answer),
+        }
+    }
+
+    /// `action`, a button of card `at` (the button `key`) pressed, its answers those of `inputs` (see the module docs).
+    pub fn press(&mut self, at: usize, key: &str, action: &BotAction, inputs: &[Input], cx: &mut Context<Self>) {
+        let Some(target) = self.target.clone() else {
+            return;
+        };
+        if self.busy.is_some() {
+            return;
+        }
+        let answers = if action.inputs {
+            let Some(answers) = self.answers(at, inputs, cx) else {
+                cx.notify();
+                return;
+            };
+            answers
+        } else {
+            Map::new()
+        };
+        let card = |data: Option<&Value>, verb: Option<String>| CardInvoke {
+            message: Some(self.message.clone()),
+            id: action.id.clone(),
+            verb,
+            data: merged(data, &answers),
+            automatic: false,
+        };
+        let kind = match &action.via {
+            Via::Execute { verb } => InvokeKind::Execute(card(action.data.as_ref(), verb.clone())),
+            Via::ImBack(text) => {
+                self.post(&target, text, cx);
+                return;
+            }
+            Via::MessageBack { display_text, .. } => {
+                if let Some(shown) = display_text.as_deref().filter(|shown| !shown.trim().is_empty()) {
+                    self.post(&target, shown, cx);
+                }
+                InvokeKind::Submit(card(action.data.as_ref(), None))
+            }
+            Via::Submit | Via::Invoke(_) | Via::PostBack(_) => InvokeKind::Submit(card(action.data.as_ref(), None)),
+            Via::SignIn(page) => {
+                if let Some(page) = page.as_deref().filter(|page| teams_proto::chat::card::is_link(page)) {
+                    cx.open_url(page);
+                }
+                return;
+            }
+            Via::TaskFetch => return,
+        };
+        self.ask(at, key, kind, false, cx);
+    }
+
+    /// Card `at`'s `refresh` run: by itself (`automatic`, once while the view lives) or by hand.
+    pub fn refresh(&mut self, at: usize, refresh: &Refresh, automatic: bool, cx: &mut Context<Self>) {
+        if self.target.is_none() || self.busy.is_some() || (automatic && !self.refreshed.insert(at)) {
+            return;
+        }
+        let kind = InvokeKind::Execute(CardInvoke {
+            message: Some(self.message.clone()),
+            id: refresh.action.id.clone(),
+            verb: match &refresh.action.via {
+                Via::Execute { verb } => verb.clone(),
+                _ => None,
+            },
+            data: refresh.action.data.clone().unwrap_or_else(|| Value::Object(Map::new())),
+            automatic,
+        });
+        self.ask(at, &format!("refresh-{at}"), kind, automatic, cx);
+    }
+
+    /// Whether a card's `refresh` runs by itself for the account `me`: the card names it, by its MRI or its object id.
+    #[must_use]
+    pub fn refreshes_for(refresh: &Refresh, me: &str) -> bool {
+        let object = teams_proto::object_id(me);
+        refresh
+            .user_ids
+            .iter()
+            .any(|user| user == me || Some(user.as_str()) == object)
+    }
+
+    fn ask(&mut self, at: usize, key: &str, kind: InvokeKind, quiet: bool, cx: &mut Context<Self>) {
+        let Some(target) = &self.target else {
+            return;
+        };
+        let reply = self.core.bot_invoke(BotAsk {
+            bot: target.bot.clone(),
+            app_id: target.app_id.clone(),
+            conversation: Some(target.conversation.clone()),
+            kind,
+        });
+        self.busy = Some(key.to_owned());
+        self.lines.remove(&at);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let answer = reply.await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = None;
+                this.apply(at, answer, quiet);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The bot's answer to an ask of card `at`, shown; a refresh that ran by itself (`quiet`) says nothing of a failure.
+    fn apply(&mut self, at: usize, answer: Result<InvokeAnswer, teams_core::EngineError>, quiet: bool) {
+        let line = match answer {
+            Ok(InvokeAnswer::Card(card)) => {
+                let card = teams_proto::chat::card::adaptive_card_with_inputs(&card);
+                let prefix = format!("{at}/");
+                self.fields.retain(|key, _| !key.starts_with(&prefix));
+                self.invalid.retain(|key| !key.starts_with(&prefix));
+                self.replaced.insert(at, Arc::new(card));
+                None
+            }
+            Ok(InvokeAnswer::Message(text)) => Some(Line::Note(text)),
+            Ok(InvokeAnswer::Error { message, .. }) if !quiet => Some(Line::Error(if message.trim().is_empty() {
+                NOT_REACHED.to_owned()
+            } else {
+                message
+            })),
+            Ok(InvokeAnswer::SignIn(_)) => Some(Line::SignIn),
+            Ok(InvokeAnswer::Dialog(_)) if !quiet => Some(Line::Dialog),
+            Ok(InvokeAnswer::Refused(_)) | Err(_) if !quiet => Some(Line::Error(NOT_REACHED.to_owned())),
+            _ => None,
+        };
+        if let Some(line) = line {
+            self.lines.insert(at, line);
+        }
+    }
+
+    /// `text` posted as the user's message where the card is.
+    fn post(&self, target: &Target, text: &str, cx: &mut Context<Self>) {
+        post_message(&self.core, &target.conversation, text, cx);
+    }
+}
+
+/// `text` posted as the user's message in `conversation`, through the outbox (a suggested action, an `imBack`).
+pub fn post_message<T>(core: &Arc<dyn Core>, conversation: &str, text: &str, cx: &mut Context<T>) {
+    let Ok(text) = MessageText::plain(text) else {
+        return;
+    };
+    let reply = core.write(Action::Send {
+        conversation: conversation.to_owned(),
+        text,
+    });
+    cx.background_spawn(async move {
+        let _ = reply.await;
+    })
+    .detach();
+}
+
+/// The key of card `at`'s input `id`.
+#[must_use]
+pub fn field_key(at: usize, id: &str) -> String {
+    format!("{at}/{id}")
+}
+
+/// The inputs of `card`'s body (inside its containers, columns and tables too), and those of the cards its `ShowCard`s
+/// open when `shown_cards`.
+pub fn card_inputs(card: &Card, shown_cards: bool, inputs: &mut Vec<Input>) {
+    element_inputs(&card.body, shown_cards, inputs);
+    if shown_cards {
+        action_inputs(&card.actions, inputs);
+    }
+}
+
+fn action_inputs(actions: &[teams_proto::chat::card::Action], inputs: &mut Vec<Input>) {
+    for action in actions {
+        if let ActionKind::ShowCard(shown) = &action.kind {
+            card_inputs(shown, true, inputs);
+        }
+    }
+}
+
+fn element_inputs(elements: &[Element], shown_cards: bool, inputs: &mut Vec<Input>) {
+    for element in elements {
+        match &element.kind {
+            Kind::Input(input) => inputs.push(input.clone()),
+            Kind::Container(container) => element_inputs(&container.items, shown_cards, inputs),
+            Kind::Columns(set) => {
+                for column in &set.columns {
+                    element_inputs(&column.items, shown_cards, inputs);
+                }
+            }
+            Kind::Table(table) => {
+                for cell in table.rows.iter().flatten() {
+                    element_inputs(cell, shown_cards, inputs);
+                }
+            }
+            Kind::Actions(actions) if shown_cards => action_inputs(actions, inputs),
+            _ => {}
+        }
+    }
+}
+
+/// A switch's answer: its `valueOn` or its `valueOff`.
+fn toggle_answer(input: &Input, on: bool) -> String {
+    match &input.kind {
+        InputKind::Toggle {
+            value_on, value_off, ..
+        } => if on { value_on } else { value_off }.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Whether `answer` passes `input`'s checks.
+fn passes(input: &Input, answer: Option<&str>) -> bool {
+    let Some(answer) = answer.filter(|answer| !answer.is_empty()) else {
+        return !input.required;
+    };
+    match &input.kind {
+        InputKind::Text { max_length, regex, .. } => {
+            max_length.is_none_or(|most| answer.chars().count() <= most as usize)
+                && regex.as_deref().is_none_or(|pattern| {
+                    regex::Regex::new(&format!("^(?:{pattern})$")).is_ok_and(|regex| regex.is_match(answer))
+                })
+        }
+        InputKind::Number { min, max, .. } => answer
+            .parse::<f64>()
+            .is_ok_and(|number| min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max)),
+        InputKind::Date { min, max, .. } | InputKind::Time { min, max, .. } => {
+            min.as_deref().is_none_or(|min| answer >= min) && max.as_deref().is_none_or(|max| answer <= max)
+        }
+        InputKind::Toggle { .. } | InputKind::ChoiceSet { .. } => true,
+    }
+}
+
+/// What a failing input says: its card's words, else ours.
+#[must_use]
+pub fn error_of(input: &Input) -> String {
+    input
+        .error_message
+        .clone()
+        .unwrap_or_else(|| if input.required { REQUIRED } else { NOT_VALID }.to_owned())
+}
+
+/// An action's data with the answers merged in by input id: an object gains them, none becomes them, any other data
+/// goes as it is.
+fn merged(data: Option<&Value>, answers: &Map<String, Value>) -> Value {
+    match data {
+        Some(Value::Object(object)) => {
+            let mut object = object.clone();
+            object.extend(answers.clone());
+            Value::Object(object)
+        }
+        None | Some(Value::Null) => Value::Object(answers.clone()),
+        Some(other) => other.clone(),
+    }
+}
+
+/// A card's date, `YYYY-MM-DD`.
+fn parse_date(text: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use teams_proto::chat::card::input;
+
+    use super::{merged, passes};
+
+    #[test]
+    fn answers_are_checked_as_the_card_says() {
+        let text = input(&json!({"type": "Input.Text", "id": "t", "regex": "[a-z]+", "maxLength": 4})).unwrap();
+        assert!(passes(&text, Some("abc")));
+        assert!(!passes(&text, Some("abcde")));
+        assert!(!passes(&text, Some("ab1")));
+        assert!(passes(&text, None));
+        let number =
+            input(&json!({"type": "Input.Number", "id": "n", "min": 1, "max": 5, "isRequired": true})).unwrap();
+        assert!(!passes(&number, None));
+        assert!(!passes(&number, Some("9")));
+        assert!(!passes(&number, Some("x")));
+        assert!(passes(&number, Some("3")));
+        let date = input(&json!({"type": "Input.Date", "id": "d", "min": "2026-01-01"})).unwrap();
+        assert!(!passes(&date, Some("2025-12-31")));
+        assert!(passes(&date, Some("2026-01-02")));
+    }
+
+    #[test]
+    fn answers_merge_into_the_data() {
+        let answers = json!({"a": "1"}).as_object().unwrap().clone();
+        assert_eq!(merged(Some(&json!({"k": 2})), &answers), json!({"k": 2, "a": "1"}));
+        assert_eq!(merged(None, &answers), json!({"a": "1"}));
+        assert_eq!(merged(Some(&json!("text")), &answers), json!("text"));
+    }
+}

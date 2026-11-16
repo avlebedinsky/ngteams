@@ -1,0 +1,499 @@
+//! A bot's card with the bots shown (`NGTEAMS_BOTS=1`, `teams_ui::bot_card`), on GPUI's test context over the fake
+//! engine: its inputs drawn, their checks, a button that asks the bot with the answers, each answer shown (a card in
+//! the card's place, a message, an error, a sign-in request, a bot not reached), `imBack` posting the user's message,
+//! the refresh by itself and by hand, the suggested actions over the compose box, and read-only mode, which asks
+//! nothing. Every card, bot and id here is synthetic.
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use gpui::{Bounds, Entity, Modifiers, Pixels, VisualTestContext, px, size};
+use serde_json::{Value, json};
+use teams_core::{Action, EngineError};
+use teams_proto::bot::TaskDialog;
+use teams_proto::{InvokeAnswer, InvokeKind};
+use teams_store::Message;
+use teams_ui::bots_flag::BotsFlag;
+use teams_ui::chat_view::ChatView;
+
+use super::common::{LAB_A, Rig};
+use super::{AB, NOON, chat_window, draw, message, rig_with, trace};
+
+/// A made-up bot.
+const BOT: &str = "28:00000000-0000-4000-8000-0000000000b0";
+const ID: &str = "601";
+
+/// A card message from the bot carrying `activity`'s attachments and suggested actions.
+fn bot_message(id: &str, activity: &Value) -> Message {
+    let b64 = STANDARD.encode(serde_json::to_vec(activity).unwrap());
+    let content = format!(
+        "<URIObject type=\"SWIFT.1\">Card - access it on <a href=\"https://go.skype.com/cards.unsupported\">\
+         https://go.skype.com/cards.unsupported</a>. <Title>Card</Title><Swift b64=\"{b64}\"></Swift></URIObject>"
+    );
+    let mut stored = message(id, BOT, &content, NOON);
+    stored.message_type = "RichText/Media_Card".to_owned();
+    stored.sender_name = Some("Synthetic Bot".to_owned());
+    stored
+}
+
+fn card_message(id: &str, card: &Value) -> Message {
+    bot_message(
+        id,
+        &json!({"type": "message/card", "attachments": [
+            {"contentType": "application/vnd.microsoft.card.adaptive", "content": card}
+        ]}),
+    )
+}
+
+/// The rig with `messages`, the bots shown.
+fn bots_rig(messages: Vec<Message>) -> Rig {
+    let rig = rig_with(messages);
+    rig.cx.update(|cx| cx.set_global(BotsFlag(true)));
+    rig
+}
+
+/// The chat view in a window tall enough for the whole order form.
+fn tall_window(rig: &Rig) -> (Entity<ChatView>, &'static mut VisualTestContext) {
+    let (written_trace, _) = trace();
+    let (view, cx) = chat_window(rig, written_trace);
+    cx.simulate_resize(size(px(800.0), px(1400.0)));
+    draw(cx);
+    (view, cx)
+}
+
+fn bounds(cx: &mut VisualTestContext, selector: &str) -> Option<Bounds<Pixels>> {
+    draw(cx);
+    cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+}
+
+fn click(cx: &mut VisualTestContext, selector: &str) {
+    let at = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is drawn"));
+    cx.simulate_click(at.center(), Modifiers::none());
+    draw(cx);
+}
+
+fn input(id: &str) -> String {
+    format!("card-{ID}-c0-in-{id}")
+}
+
+/// A card asking for a name (required) and more, with a plain submit and an `Action.Execute`.
+fn form_card() -> Value {
+    json!({
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": [
+            {"type": "TextBlock", "text": "Order lunch", "weight": "bolder"},
+            {"type": "Input.Text", "id": "name", "label": "Your name", "isRequired": true,
+             "errorMessage": "Enter your name"},
+            {"type": "Input.Text", "id": "note", "label": "Note", "isMultiline": true, "placeholder": "Anything else?"},
+            {"type": "Input.Number", "id": "count", "label": "How many", "min": 1, "max": 9, "value": 1},
+            {"type": "Input.Date", "id": "day", "label": "Day", "value": "2026-11-20"},
+            {"type": "Input.Time", "id": "at", "label": "Time"},
+            {"type": "Input.Toggle", "id": "veg", "title": "Vegetarian", "valueOn": "yes", "valueOff": "no"},
+            {"type": "Input.ChoiceSet", "id": "dish", "label": "Dish", "value": "soup", "choices": [
+                {"title": "Soup", "value": "soup"}, {"title": "Salad", "value": "salad"}
+            ]},
+            {"type": "Input.ChoiceSet", "id": "size", "label": "Size", "style": "expanded", "choices": [
+                {"title": "Small", "value": "s"}, {"title": "Large", "value": "l"}
+            ]},
+            {"type": "Input.ChoiceSet", "id": "extras", "label": "Extras", "style": "expanded",
+             "isMultiSelect": true, "choices": [
+                {"title": "Bread", "value": "bread"}, {"title": "Juice", "value": "juice"}
+            ]}
+        ],
+        "actions": [
+            {"type": "Action.Submit", "title": "Send", "data": {"form": "lunch"}},
+            {"type": "Action.Execute", "title": "Order", "verb": "order", "data": {"form": "lunch"}}
+        ]
+    })
+}
+
+#[test]
+fn with_the_bots_shown_each_input_of_a_card_is_drawn() {
+    let rig = bots_rig(vec![card_message(ID, &form_card())]);
+    let (_view, cx) = tall_window(&rig);
+    for id in [
+        "name",
+        "note",
+        "count",
+        "day",
+        "at",
+        "veg",
+        "dish",
+        "size-s",
+        "extras-juice",
+    ] {
+        assert!(bounds(cx, &input(id)).is_some(), "{id} is drawn");
+    }
+    // a text input takes the card's width, as Teams draws it
+    let card = bounds(cx, &format!("card-{ID}-c0")).unwrap();
+    let name = bounds(cx, &input("name")).unwrap();
+    assert!(name.size.width >= card.size.width - px(40.0), "{name:?} in {card:?}");
+    assert_eq!(card.size.width, px(teams_ui::card_view::CARD_WIDTH));
+    // the card says nothing of content it can't show, and its buttons ask the bot (no link out)
+    assert!(bounds(cx, &format!("card-{ID}-c0unshown")).is_none());
+    assert!(bounds(cx, &format!("card-{ID}-c0a0")).is_some());
+}
+
+#[test]
+fn a_required_input_left_empty_stops_the_send_and_says_why() {
+    let rig = bots_rig(vec![card_message(ID, &form_card())]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(bounds(cx, &format!("{}-error", input("name"))).is_some());
+    assert!(rig.core.bot_asks.lock().unwrap().is_empty(), "nothing goes");
+    click(cx, &input("name"));
+    cx.simulate_input("Ada");
+    draw(cx);
+    // typing takes the mark away
+    assert!(bounds(cx, &format!("{}-error", input("name"))).is_none());
+    click(cx, &input("veg"));
+    click(cx, &input("size-l"));
+    click(cx, &input("extras-juice"));
+    click(cx, &format!("card-{ID}-c0a0"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].bot.as_str(), BOT);
+    assert_eq!(asks[0].conversation.as_deref(), Some(AB));
+    let InvokeKind::Submit(sent) = &asks[0].kind else {
+        panic!("a plain submit: {:?}", asks[0].kind);
+    };
+    assert_eq!(sent.message.as_deref(), Some(ID));
+    assert_eq!(
+        sent.data,
+        json!({"form": "lunch", "name": "Ada", "count": "1", "day": "2026-11-20", "veg": "yes", "dish": "soup",
+               "size": "l", "extras": "juice"})
+    );
+}
+
+/// The chat list's own keys (`a` reacts, `1` picks a reaction, `r` replies) are text in a card's input.
+#[test]
+fn the_chat_lists_keys_are_text_in_a_cards_input() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Input.Text", "id": "said"}],
+        "actions": [{"type": "Action.Submit", "title": "Send"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &input("said"));
+    cx.simulate_input("a1 era");
+    click(cx, &format!("card-{ID}-c0a0"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert!(
+        matches!(&asks[..], [ask] if matches!(&ask.kind, InvokeKind::Submit(sent) if sent.data == json!({"said": "a1 era"}))),
+        "{asks:?}"
+    );
+}
+
+#[test]
+fn a_number_out_of_its_range_stops_the_send() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Input.Number", "id": "count", "min": 1, "max": 9}],
+        "actions": [{"type": "Action.Submit", "title": "Send"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &input("count"));
+    cx.simulate_input("12");
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(bounds(cx, &format!("{}-error", input("count"))).is_some());
+    assert!(rig.core.bot_asks.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_execute_puts_the_bots_card_in_the_cards_place() {
+    let rig = bots_rig(vec![card_message(ID, &form_card())]);
+    rig.core
+        .bot_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(InvokeAnswer::Card(json!({
+            "type": "AdaptiveCard",
+            "body": [{"type": "TextBlock", "text": "Ordered"}]
+        }))));
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &input("name"));
+    cx.simulate_input("Ada");
+    click(cx, &format!("card-{ID}-c0a1"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    let InvokeKind::Execute(sent) = &asks[0].kind else {
+        panic!("an execute: {:?}", asks[0].kind);
+    };
+    assert_eq!(sent.verb.as_deref(), Some("order"));
+    assert!(!sent.automatic);
+    // the card is the bot's now: one text, no input, no button
+    assert!(bounds(cx, &format!("card-{ID}-c0b0.")).is_some());
+    assert!(bounds(cx, &input("name")).is_none());
+    assert!(bounds(cx, &format!("card-{ID}-c0a0")).is_none());
+}
+
+#[test]
+fn the_bots_message_error_and_sign_in_request_show_under_the_card() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Ask"}],
+        "actions": [{"type": "Action.Execute", "title": "Go", "verb": "go"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let answers = [
+        Ok(InvokeAnswer::Message("Saved".to_owned())),
+        Ok(InvokeAnswer::Error {
+            code: Some("BadRequest".to_owned()),
+            message: "No lunch today".to_owned(),
+        }),
+        Ok(InvokeAnswer::SignIn(Value::Null)),
+        Ok(InvokeAnswer::Dialog(TaskDialog {
+            title: None,
+            card: None,
+            url: Some("https://example.invalid/dialog".to_owned()),
+            width: None,
+            height: None,
+        })),
+        Err(EngineError::BotNotReached {
+            why: "made up".to_owned(),
+        }),
+        Ok(InvokeAnswer::Done),
+    ];
+    rig.core.bot_answers.lock().unwrap().extend(answers);
+    let (_view, cx) = tall_window(&rig);
+    let line = format!("card-{ID}-c0answer");
+    for at in 0..5 {
+        click(cx, &format!("card-{ID}-c0a0"));
+        assert!(bounds(cx, &line).is_some());
+        // a sign-in request or a dialog goes on in Teams on the web
+        if at == 3 {
+            click(cx, &line);
+            assert_eq!(
+                cx.opened_url(),
+                Some(teams_proto::workflow::MessageRun::link_to(AB, ID, None))
+            );
+        }
+    }
+    // a bot that answers nothing leaves no line
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(bounds(cx, &line).is_none());
+    assert_eq!(rig.core.bot_asks.lock().unwrap().len(), 6);
+}
+
+#[test]
+fn an_im_back_posts_the_users_message_and_asks_nothing() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Pick"}],
+        "actions": [{"type": "Action.Submit", "title": "Red",
+                     "data": {"msteams": {"type": "imBack", "value": "red please"}}}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(rig.core.bot_asks.lock().unwrap().is_empty());
+    let actions = rig.core.actions.lock().unwrap().clone();
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            Action::Send { conversation, text } if conversation == AB && text.html().contains("red please")
+        )),
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn read_only_mode_asks_no_bot() {
+    let rig = bots_rig(vec![card_message(ID, &form_card())]);
+    *rig.core.read_only.lock().unwrap() = true;
+    let (_view, cx) = tall_window(&rig);
+    assert!(bounds(cx, &input("name")).is_some(), "the inputs show");
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(rig.core.bot_asks.lock().unwrap().is_empty());
+    // the button opens the message in Teams on the web, as without the bots
+    assert_eq!(
+        cx.opened_url(),
+        Some(teams_proto::workflow::MessageRun::link_to(AB, ID, None))
+    );
+}
+
+fn refresh_card(users: &[&str]) -> Value {
+    json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Status"}],
+        "refresh": {"action": {"type": "Action.Execute", "verb": "status", "data": {"k": 1}}, "userIds": users}
+    })
+}
+
+#[test]
+fn a_refresh_that_names_the_account_runs_by_itself_once() {
+    let rig = bots_rig(vec![card_message(ID, &refresh_card(&[LAB_A]))]);
+    let (_view, cx) = tall_window(&rig);
+    draw(cx);
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(
+        matches!(&asks[0].kind, InvokeKind::Execute(sent) if sent.automatic && sent.verb.as_deref() == Some("status"))
+    );
+}
+
+#[test]
+fn refresh_card_in_more_options_runs_it_by_hand() {
+    let rig = bots_rig(vec![card_message(ID, &refresh_card(&[]))]);
+    let (view, cx) = tall_window(&rig);
+    assert!(
+        rig.core.bot_asks.lock().unwrap().is_empty(),
+        "it names no one: nothing by itself"
+    );
+    view.update(cx, |view, cx| view.toggle_options(ID, cx));
+    click(cx, "action-refresh-card");
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert!(matches!(&asks[..], [ask] if matches!(&ask.kind, InvokeKind::Execute(sent) if !sent.automatic)));
+}
+
+#[test]
+fn without_the_bots_no_refresh_is_offered_or_run() {
+    let rig = rig_with(vec![card_message(ID, &refresh_card(&[LAB_A]))]);
+    let (view, cx) = tall_window(&rig);
+    view.update(cx, |view, cx| view.toggle_options(ID, cx));
+    assert!(bounds(cx, "action-refresh-card").is_none());
+    assert!(rig.core.bot_asks.lock().unwrap().is_empty());
+}
+
+#[test]
+fn where_the_cloud_serves_no_bots_a_card_asks_nothing() {
+    for card in [form_card(), refresh_card(&[LAB_A])] {
+        let rig = bots_rig(vec![card_message(ID, &card)]);
+        *rig.core.capabilities.lock().unwrap() = Some(teams_core::Capabilities {
+            apps: false,
+            ..teams_core::Capabilities::ALL
+        });
+        let (view, cx) = tall_window(&rig);
+        // the card is drawn as without the bots: no input, no button that sends to the bot, no refresh
+        assert!(bounds(cx, &input("name")).is_none());
+        assert!(bounds(cx, &format!("card-{ID}-c0a0")).is_none());
+        view.update(cx, |view, cx| view.toggle_options(ID, cx));
+        assert!(bounds(cx, "action-refresh-card").is_none());
+        assert!(rig.core.bot_asks.lock().unwrap().is_empty());
+    }
+}
+
+fn suggesting() -> Message {
+    bot_message(
+        ID,
+        &json!({
+            "type": "message/card",
+            "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
+                             "content": {"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Colour?"}]}}],
+            "suggestedActions": {"actions": [
+                {"type": "imBack", "title": "Red", "value": "red"},
+                {"type": "messageBack", "title": "Blue", "text": "blue", "value": {"c": "blue"}}
+            ]}
+        }),
+    )
+}
+
+#[test]
+fn suggested_actions_stand_over_the_compose_box_and_answer_the_bot() {
+    let rig = bots_rig(vec![suggesting()]);
+    let (_view, cx) = tall_window(&rig);
+    let compose = bounds(cx, "compose-toolbar").expect("the compose box");
+    let bar = bounds(cx, "suggested-actions").expect("the suggested actions");
+    assert!(bar.bottom() <= compose.top(), "{bar:?} over {compose:?}");
+    click(cx, "suggested-0");
+    assert!(rig.core.actions.lock().unwrap().iter().any(|action| matches!(
+        action,
+        Action::Send { text, .. } if text.html().contains("red")
+    )));
+    click(cx, "suggested-1");
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert!(
+        matches!(&asks[..], [ask] if matches!(&ask.kind, InvokeKind::Submit(sent) if sent.data == json!({"c": "blue"})))
+    );
+}
+
+#[test]
+fn suggested_actions_go_once_someone_writes_again() {
+    let rig = bots_rig(vec![
+        suggesting(),
+        message("602", super::common::LAB_B, "<p>later</p>", NOON + 1),
+    ]);
+    let (_view, cx) = tall_window(&rig);
+    assert!(bounds(cx, "suggested-actions").is_none());
+}
+
+#[test]
+fn a_choice_and_a_time_come_from_their_menus() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [
+            {"type": "Input.ChoiceSet", "id": "dish", "placeholder": "Pick a dish", "choices": [
+                {"title": "Soup", "value": "soup"}, {"title": "Salad", "value": "salad"}
+            ]},
+            {"type": "Input.ChoiceSet", "id": "sides", "isMultiSelect": true, "choices": [
+                {"title": "Bread", "value": "bread"}, {"title": "Juice", "value": "juice"}
+            ]},
+            {"type": "Input.Time", "id": "at"}
+        ],
+        "actions": [{"type": "Action.Submit", "title": "Send"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &input("dish"));
+    click(cx, &format!("{}-salad", input("dish")));
+    for side in ["bread", "juice"] {
+        click(cx, &input("sides"));
+        click(cx, &format!("{}-{side}", input("sides")));
+    }
+    click(cx, &format!("{}-times", input("at")));
+    click(cx, &format!("{}-times-130AM", input("at")));
+    click(cx, &format!("card-{ID}-c0a0"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert!(
+        matches!(&asks[..], [ask] if matches!(&ask.kind, InvokeKind::Submit(sent)
+            if sent.data == json!({"dish": "salad", "sides": "bread,juice", "at": "01:30"}))),
+        "{asks:?}"
+    );
+}
+
+#[test]
+fn a_message_back_posts_its_display_text_and_asks_the_bot() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Join?"}],
+        "actions": [{"type": "Action.Submit", "title": "Join", "data": {"msteams": {
+            "type": "messageBack", "displayText": "I'm in", "text": "join", "value": {"join": true}
+        }}}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(rig.core.actions.lock().unwrap().iter().any(|action| matches!(
+        action,
+        Action::Send { text, .. } if text.html().contains("in")
+    )));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert!(
+        matches!(&asks[..], [ask] if matches!(&ask.kind, InvokeKind::Submit(_))),
+        "{asks:?}"
+    );
+}
+
+#[test]
+fn a_sign_in_button_opens_its_page_and_a_dialog_button_teams_on_the_web() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Connect"}],
+        "actions": [
+            {"type": "Action.Submit", "title": "Sign in",
+             "data": {"msteams": {"type": "signin", "value": "https://example.invalid/sign-in"}}},
+            {"type": "Action.Submit", "title": "Details", "data": {"msteams": {"type": "task/fetch"}}}
+        ]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert_eq!(cx.opened_url().as_deref(), Some("https://example.invalid/sign-in"));
+    click(cx, &format!("card-{ID}-c0a1"));
+    assert_eq!(
+        cx.opened_url(),
+        Some(teams_proto::workflow::MessageRun::link_to(AB, ID, None))
+    );
+    assert!(rig.core.bot_asks.lock().unwrap().is_empty());
+}

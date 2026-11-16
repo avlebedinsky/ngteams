@@ -256,6 +256,9 @@ pub struct FakeCore {
     pub read_only: Mutex<bool>,
     /// The optional services the account's cloud serves, as `Core::capabilities` answers them: all when `None`.
     pub capabilities: Mutex<Option<teams_core::Capabilities>>,
+    /// Every bot ask, in order; each answered from `bot_answers`, else `Done`.
+    pub bot_asks: Mutex<Vec<teams_core::bots::BotAsk>>,
+    pub bot_answers: Mutex<VecDeque<Result<teams_proto::InvokeAnswer, EngineError>>>,
     /// The scheduling tests' calendar service; its defaults match Core's empty, unsaved calendar.
     pub calendar: Mutex<calendar::CalendarFake>,
     /// The meetings their chats' threads name, by chat; any other chat names none.
@@ -466,6 +469,15 @@ impl FakeCore {
 }
 
 impl Core for FakeCore {
+    fn bot_invoke(&self, ask: teams_core::bots::BotAsk) -> Reply<teams_proto::InvokeAnswer> {
+        locked(&self.bot_asks).push(ask);
+        Reply::ready(
+            locked(&self.bot_answers)
+                .pop_front()
+                .unwrap_or(Ok(teams_proto::InvokeAnswer::Done)),
+        )
+    }
+
     fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
         locked(&self.workflow_requests).push(request.clone());
         if matches!(request, teams_proto::WorkflowRequest::Catalog) && *locked(&self.hold_workflow_catalog) {

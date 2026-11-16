@@ -24,6 +24,8 @@ mod call_recap;
 #[path = "chat_view/blocked.rs"]
 mod blocked;
 // the files a message carries, as cards
+#[path = "chat_view/bot_cards.rs"]
+mod bot_cards;
 #[path = "chat_view/cards.rs"]
 mod cards;
 #[path = "chat_view/files.rs"]

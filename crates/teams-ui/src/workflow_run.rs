@@ -8,7 +8,7 @@
 //! The card is the workflow's own, read again when the dialog opens; its answers and the message go to the workflow's
 //! Logic Flows runtime as the Workflows bot sends them there (`teams_proto::MessageRun`). No account credential goes
 //! to the bot or any app.
-mod card;
+pub(crate) mod card;
 pub mod menu;
 
 use std::sync::Arc;

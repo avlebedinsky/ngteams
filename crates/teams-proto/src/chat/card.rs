@@ -9,13 +9,15 @@
 //! subtitle, text, pictures and buttons). What the model can't draw is never guessed at: an element or an action of a
 //! type it doesn't know (without a `fallback` to take its place), or an attachment of another kind marks the card
 //! [`Card::unshown`], and a view says the message has content it can't show. Inputs (`Input.*`, [`Input`]) are read
-//! into the model, and the same `Input` model serves a workflow's trigger card; a chat card with an input is still
-//! marked unshown, since the chat view doesn't draw inputs yet. An input with a `fallback` is not read: its fallback
-//! takes its place, as for an element of a type this build doesn't draw.
+//! into the model, and the same `Input` model serves a workflow's trigger card. A chat view that draws inputs reads a
+//! card with [`card_message_with_inputs`]: each input is read, even one with a `fallback`. Read for a view that draws
+//! none ([`card_message`]), a card with an input is marked unshown, and an input with a `fallback` is not read: its
+//! fallback takes its place, as for an element of a type this build doesn't draw.
 //!
 //! A button that sends to the bot ([`ActionKind::Submit`]) keeps what an invoke needs (`docs/protocol/bots.md`): its
 //! `data` as given, its `Action.Execute` `verb`, its `msteams` kind ([`Via`]) and whether the card's answers go with
-//! it; a card's `refresh` keeps its `Action.Execute` and the users it refreshes for by itself.
+//! it; a card's `refresh` keeps its `Action.Execute` and the users it refreshes for by itself. A bot's suggested
+//! actions (the activity's `suggestedActions`, [`CardMessage::suggested`]) are read as a hero card's buttons are.
 //!
 //! A link's app card (`properties.cards` of a text message, [`message_cards`]) is the card an app's link unfurling
 //! made for a link the compose box saw (`docs/protocol/chat.md`, "App cards"): each entry names its app and carries
@@ -55,6 +57,9 @@ pub struct CardMessage {
     pub cards: Vec<Card>,
     /// An attachment of a kind this build doesn't draw (not a card).
     pub unshown: bool,
+    /// The bot's suggested actions (`suggestedActions.actions`): buttons a 1:1 chat offers over its compose box
+    /// (`docs/protocol/bots.md`, own design, unseen).
+    pub suggested: Vec<Action>,
 }
 
 impl CardMessage {
@@ -608,9 +613,21 @@ pub enum DateFormat {
     Long,
 }
 
-/// The cards of a card message's `content` (see the module docs); `None` when it carries no card JSON.
+/// The cards of a card message's `content` (see the module docs), for a view that draws no input; `None` when it
+/// carries no card JSON.
 #[must_use]
 pub fn card_message(content: &str) -> Option<CardMessage> {
+    read_message(content, false)
+}
+
+/// The cards of a card message's `content`, for a view that draws inputs: each input is read, and an input marks no
+/// card unshown.
+#[must_use]
+pub fn card_message_with_inputs(content: &str) -> Option<CardMessage> {
+    read_message(content, true)
+}
+
+fn read_message(content: &str, inputs: bool) -> Option<CardMessage> {
     let encoded = swift_b64(content)?;
     if encoded.len() > MAX_SWIFT {
         return None;
@@ -620,11 +637,17 @@ pub fn card_message(content: &str) -> Option<CardMessage> {
     let attachments = activity.get("attachments")?.as_array()?;
     let mut message = CardMessage::default();
     for attachment in attachments {
-        match attachment_card(attachment) {
+        match attachment_card(attachment, inputs) {
             Some(card) => message.cards.push(card),
             None => message.unshown = true,
         }
     }
+    let mut read = Reader::default();
+    message.suggested = activity
+        .pointer("/suggestedActions/actions")
+        .and_then(Value::as_array)
+        .map(|actions| actions.iter().filter_map(|action| read.button(action)).collect())
+        .unwrap_or_default();
     Some(message)
 }
 
@@ -647,7 +670,7 @@ pub fn message_cards(value: Option<&Value>) -> Option<CardMessage> {
     }
     let mut message = CardMessage::default();
     for entry in list {
-        match attachment_card(entry) {
+        match attachment_card(entry, false) {
             Some(mut card) => {
                 card.app = Some(CardApp {
                     id: string_of(entry, "appId"),
@@ -662,11 +685,12 @@ pub fn message_cards(value: Option<&Value>) -> Option<CardMessage> {
     Some(message)
 }
 
-/// An attachment's card: an Adaptive Card, or a hero or thumbnail card as Teams draws it; `None` for another kind.
-fn attachment_card(attachment: &Value) -> Option<Card> {
+/// An attachment's card: an Adaptive Card (its inputs read where `inputs`), or a hero or thumbnail card as Teams draws
+/// it; `None` for another kind.
+fn attachment_card(attachment: &Value, inputs: bool) -> Option<Card> {
     let card = attachment.get("content")?;
     match str_of(attachment, "contentType")? {
-        ADAPTIVE => Some(adaptive_card(card)),
+        ADAPTIVE => Some(adaptive(card, 0, inputs)),
         HERO => Some(hero(card, ImageSize::Stretch)),
         THUMBNAIL => Some(hero(card, ImageSize::Medium)),
         _ => None,
@@ -715,15 +739,25 @@ fn swift_b64(content: &str) -> Option<&str> {
     Some(&value[..value.find('"')?])
 }
 
-/// An Adaptive Card's JSON (an attachment's `content`, a dialog's card, an `Action.Execute`'s answer), read.
+/// An Adaptive Card's JSON (an attachment's `content`, a dialog's card, an `Action.Execute`'s answer), read for a view
+/// that draws no input.
 #[must_use]
 pub fn adaptive_card(card: &Value) -> Card {
-    adaptive(card, 0)
+    adaptive(card, 0, false)
 }
 
-/// An Adaptive Card `card` at `depth` (a shown card's own depth).
-fn adaptive(card: &Value, depth: usize) -> Card {
-    let mut read = Reader::default();
+/// An Adaptive Card's JSON read for a view that draws inputs ([`card_message_with_inputs`]).
+#[must_use]
+pub fn adaptive_card_with_inputs(card: &Value) -> Card {
+    adaptive(card, 0, true)
+}
+
+/// An Adaptive Card `card` at `depth` (a shown card's own depth), its inputs read for a view that draws them.
+fn adaptive(card: &Value, depth: usize, inputs: bool) -> Card {
+    let mut read = Reader {
+        inputs,
+        ..Reader::default()
+    };
     let body = read.elements(card.get("body"), depth);
     let actions = read.actions(card.get("actions"), depth);
     let select_action = read.select(card, depth);
@@ -819,6 +853,8 @@ impl TextBlock {
 #[derive(Default)]
 struct Reader {
     unshown: bool,
+    /// The view draws inputs.
+    inputs: bool,
 }
 
 impl Reader {
@@ -900,8 +936,9 @@ impl Reader {
             "ActionSet" => Kind::Actions(self.actions(item.get("actions"), depth)),
             "Table" => Kind::Table(self.table(item, depth)),
             "Media" => Kind::Media(Self::media(item)?),
-            // the chat view doesn't draw inputs yet: an input with a `fallback` gets its fallback, as an element of a
-            // type this build doesn't draw does
+            kind if kind.starts_with("Input.") && self.inputs => Kind::Input(input(item)?),
+            // for a view that draws no input, an input with a `fallback` gets its fallback, as an element of a type
+            // this build doesn't draw does
             kind if kind.starts_with("Input.") && item.get("fallback").is_none() => {
                 let input = input(item)?;
                 // without a fallback, the card says it has content it can't show
@@ -1053,7 +1090,7 @@ impl Reader {
             },
             Some("Action.ShowCard") if depth + 1 < MAX_DEPTH => match action.get("card") {
                 Some(card) => {
-                    let card = adaptive(card, depth + 1);
+                    let card = adaptive(card, depth + 1, self.inputs);
                     self.unshown |= card.unshown;
                     ActionKind::ShowCard(Box::new(card))
                 }

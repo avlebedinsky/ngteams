@@ -261,7 +261,7 @@ impl Input {
 }
 
 /// A time as typed or chosen: `8:00 AM`, `8 am`, `20:00`.
-pub(super) fn parse_time(text: &str) -> Option<NaiveTime> {
+pub(crate) fn parse_time(text: &str) -> Option<NaiveTime> {
     let mut text = text.trim().to_uppercase().replace('.', "");
     // an hour alone ("8 pm") is on the hour
     if !text.contains(':') {
@@ -274,7 +274,7 @@ pub(super) fn parse_time(text: &str) -> Option<NaiveTime> {
 }
 
 /// A half hour as the time list names it: `8:30 AM`.
-fn clock(minutes: u32) -> String {
+pub(crate) fn clock(minutes: u32) -> String {
     let (hour, minute) = (minutes / 60, minutes % 60);
     let shown = if hour % 12 == 0 { 12 } else { hour % 12 };
     format!("{shown}:{minute:02} {}", if hour < 12 { "AM" } else { "PM" })
