@@ -710,7 +710,12 @@ impl AppsPage {
     fn store_body(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let query = self.query(cx);
         let body = div()
-            .id("apps-store")
+            // See all is a page of its own: it opens at its top, and the front page keeps its place for Back
+            .id(if self.see_all.is_some() {
+                "apps-store-all"
+            } else {
+                "apps-store"
+            })
             .debug_selector(|| "apps-store".to_owned())
             .flex_1()
             .min_h_0()
