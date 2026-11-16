@@ -11,6 +11,7 @@ use super::media::{MediaHome, Sources};
 use super::wire::{self, Links};
 
 mod group;
+mod meeting;
 
 /// The call's keep-alive interval, in seconds, as Teams hands it out.
 pub(crate) const KEEP_ALIVE: i64 = 2700;
@@ -70,6 +71,8 @@ pub(crate) enum Status {
     Declined,
     Missed,
     Left,
+    /// It waits in a meeting's lobby, its offer kept until someone lets it in.
+    Lobby,
 }
 
 /// A group call party's leg on the call's media node: its id there and the sources it sends as.
@@ -163,6 +166,9 @@ pub(crate) struct Party {
     /// Its share is the call's: the newest one started. The roster lists no other party's.
     #[serde(default)]
     pub presenting: bool,
+    /// While it waits in a meeting's lobby: the offer its join carried, which its leg is made with once it is let in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Value>,
 }
 
 /// What a group call party sends besides its audio: its camera, its screen.

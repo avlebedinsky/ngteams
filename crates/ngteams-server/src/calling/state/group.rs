@@ -41,19 +41,22 @@ impl Call {
         })
     }
 
-    /// The seats of the parties in the call.
-    fn in_call_seats(&self) -> Vec<Seat> {
-        (0..self.parties.len())
-            .map(Seat)
-            .filter(|seat| self.party(*seat).status == Status::InCall)
-            .collect()
-    }
-
-    /// The seats a whole roster lists: whoever is or was in the call.
+    /// The seats a whole roster lists: whoever is or was in the call, and whoever waits in its lobby.
     pub(crate) fn rostered(&self) -> Vec<Seat> {
         (0..self.parties.len())
             .map(Seat)
-            .filter(|seat| self.party(*seat).joined.is_some())
+            .filter(|seat| {
+                let party = self.party(*seat);
+                party.joined.is_some() || party.status == Status::Lobby
+            })
+            .collect()
+    }
+
+    /// The seats of the parties in the call, and of those waiting in its lobby: while any is, the call goes on.
+    fn present_seats(&self) -> Vec<Seat> {
+        (0..self.parties.len())
+            .map(Seat)
+            .filter(|seat| matches!(self.party(*seat).status, Status::InCall | Status::Lobby))
             .collect()
     }
 
@@ -168,11 +171,12 @@ impl Call {
             .and_then(Value::as_str)
             .filter(|own| *own != wire::ZERO_ENDPOINT);
         let lost_fork = matches!((named, own), (Some(named), Some(own)) if named != own);
-        if self.phase == Phase::Ended || party.status != Status::InCall || lost_fork {
+        let present = matches!(party.status, Status::InCall | Status::Lobby);
+        if self.phase == Phase::Ended || !present || lost_fork {
             return;
         }
         self.take_out(seat, out);
-        if self.in_call_seats().is_empty() {
+        if self.present_seats().is_empty() {
             let end = wire::end(487, "Call ended as everyone left.", None);
             self.end_group(at, &end, out);
         } else {
@@ -214,9 +218,10 @@ impl Call {
     }
 
     /// The party leaves the call: out of the roster, its leg let go.
-    fn take_out(&mut self, seat: Seat, out: &mut Out) {
+    pub(super) fn take_out(&mut self, seat: Seat, out: &mut Out) {
         let party = self.party_mut(seat);
         party.status = Status::Left;
+        party.waiting = None;
         party.active = None;
         party.endpoints.clear();
         party.answered = None;
@@ -245,7 +250,7 @@ impl Call {
         for seat in 0..self.parties.len() {
             let party = self.party_mut(Seat(seat));
             match party.status {
-                Status::InCall => out.call_back(at.origin, party.link("end"), end.clone()),
+                Status::InCall | Status::Lobby => out.call_back(at.origin, party.link("end"), end.clone()),
                 Status::Ringing => {
                     for known in &party.endpoints {
                         out.call_back(at.origin, known.links.get("end").map(String::as_str), rung.clone());
@@ -254,8 +259,9 @@ impl Call {
                 }
                 _ => {}
             }
-            if party.status == Status::InCall {
+            if matches!(party.status, Status::InCall | Status::Lobby) {
                 party.status = Status::Left;
+                party.waiting = None;
             }
             Self::let_go(party, out);
         }
@@ -400,6 +406,7 @@ impl Call {
         party.keep(endpoint, links);
         party.active = Some(endpoint.to_owned());
         party.status = Status::InCall;
+        party.waiting = None;
         party.ring_due = None;
         party.joined = Some(wire::iso(at.now));
         Self::settle(party, out);
@@ -543,7 +550,7 @@ impl Call {
         for (number, party) in self.parties.iter().enumerate() {
             let update = if whole == Some(Seat(number)) { &full } else { &delta };
             match party.status {
-                Status::InCall => out.call_back(origin, party.link("rosterUpdate"), update.clone()),
+                Status::InCall | Status::Lobby => out.call_back(origin, party.link("rosterUpdate"), update.clone()),
                 Status::Ringing => {
                     for known in &party.endpoints {
                         out.call_back(
@@ -567,7 +574,7 @@ impl Call {
 
     /// Tells each calling endpoint of every party in the call or ringing, but the one that changed, that `seat` came
     /// in or left (`evt` 115 or 116 at the endpoint's root).
-    fn tell_presence(&self, origin: &str, evt: u64, seat: Seat, out: &mut Out) {
+    pub(super) fn tell_presence(&self, origin: &str, evt: u64, seat: Seat, out: &mut Out) {
         let told = wire::presence(origin, self, evt);
         let changed = self.party(seat).active.as_deref();
         for party in &self.parties {

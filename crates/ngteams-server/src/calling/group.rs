@@ -70,7 +70,7 @@ pub(super) async fn seed_leg(app: &App, home: &MediaHome, call: &str, leg: &str,
     }
 }
 
-fn home_of(call: &Call) -> Result<&MediaHome, Failure> {
+pub(super) fn home_of(call: &Call) -> Result<&MediaHome, Failure> {
     call.media.as_ref().ok_or(Failure::Refused(Refusal::Gone))
 }
 
@@ -556,7 +556,7 @@ async fn ring_added(
 
 /// Undoes `reserved`, whose leg `leg` the node didn't make (or made late) or whose step wasn't stored; the leg is
 /// dropped once that is stored.
-async fn unreserve(app: &App, key: Key<'_>, reserved: &Reserved, leg: &str) {
+pub(super) async fn unreserve(app: &App, key: Key<'_>, reserved: &Reserved, leg: &str) {
     let undone = step_any(app, key, |call, _, out| {
         call.unreserve(reserved, leg, out);
         Ok(())

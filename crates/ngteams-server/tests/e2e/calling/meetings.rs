@@ -3,10 +3,13 @@
 //! hands, react, are muted by the organizer and see the meeting ended for all; a channel's meeting is posted to its
 //! channel, titled and joined the same way. Every account and meeting is synthetic.
 
-use teams_core::{CallAction, CallId, CallStatus, EventWrite};
+use reqwest::Method;
+use serde_json::json;
+use teams_core::engine::Event;
+use teams_core::{CallAction, CallId, CallStatus, End, EventWrite};
 use teams_media::tone::Tone;
 use teams_proto::chat::ChatReads;
-use teams_proto::{CalendarEvent, MeetingInfo};
+use teams_proto::{CalendarEvent, MIDDLE_TIER_AUDIENCE, MeetingInfo, Mri};
 
 use super::engines::{A_TONE, B_TONE, Engine};
 use super::group_media::{C_TONE, Mixed};
@@ -146,5 +149,93 @@ async fn three_join_a_scheduled_meeting_nobody_rings_and_its_chat_tells_its_star
             "{events:?}"
         );
         shut_down(vec![ada, bert, cora], mixed).await;
+    }
+}
+
+/// The meeting's lobby option (`AutoAdmittedUsers`) saved as `value` by its organizer, as Teams' meeting options page
+/// saves it (the native client opens that page in a browser).
+pub(super) async fn admit_automatically(mixed: &Mixed, organizer: &Person, event: &CalendarEvent, value: &str) {
+    let tenant = &event.meeting.as_ref().unwrap().tenant_id;
+    let chat = event.meeting_chat.as_ref().unwrap();
+    let path = format!(
+        "/api/mt/part/own-01/beta/meetings/v1/options/{tenant}/{}/{chat}/0/0",
+        organizer.id()
+    );
+    let token = crate::teams::security::token(mixed.server(), &organizer.upn, MIDDLE_TIER_AUDIENCE).await;
+    let options = json!({"options": [{"name": "AutoAdmittedUsers", "currentValue": value}]});
+    let (status, answer) =
+        crate::teams::security::call(mixed.server(), &token, Method::POST, &path, Some(options)).await;
+    assert_eq!(status, 200, "{answer}");
+}
+
+/// Until `person`'s lobby of `call` is told as `waiting` (by MRI).
+pub(super) async fn lobby_is(person: &mut Person, call: CallId, waiting: &[&str]) {
+    person
+        .engine
+        .next(|event| match event {
+            Event::Lobby {
+                call: of,
+                waiting: told,
+            } if *of == call => {
+                let told: Vec<&str> = told.iter().map(|person| person.mri.as_str()).collect();
+                (told == waiting).then_some(())
+            }
+            _ => None,
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_outsider_waits_in_the_lobby_until_the_organizer_admits_it_and_one_turned_away_never_comes_in() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let mut dan = Person::new(&mixed, "Dan", C_TONE).await;
+        let mut eve = Person::new(&mixed, "Eve", C_TONE).await;
+        let event = schedule(&ada, &[&bert]).await;
+        admit_automatically(&mixed, &ada, &event, "InvitedUsers").await;
+        let join = join_of(&event);
+        let a_call = joined(&mut ada, &join).await;
+        // an invited guest comes straight in
+        let b_call = joined(&mut bert, &join).await;
+        // someone the meeting doesn't invite waits, with no media, until let in
+        let d_call = dan.engine.call(join.clone()).await;
+        dan.engine.status(d_call, &CallStatus::Lobby).await;
+        let waiting = dan.engine.mri.clone();
+        lobby_is(&mut ada, a_call, &[&waiting]).await;
+        let id = mixed.open_call().await;
+        mixed.connected(&id, 2).await;
+        let admit = CallAction::Lobby {
+            call: a_call,
+            waiting: Mri::new(waiting.clone()),
+            admit: true,
+        };
+        ada.engine.call(admit).await;
+        dan.engine.status(d_call, &CallStatus::Connected).await;
+        lobby_is(&mut ada, a_call, &[]).await;
+        mixed.connected(&id, 3).await;
+        bert.engine
+            .view(b_call, |view| {
+                view.participants.iter().any(|party| party.mri == waiting)
+            })
+            .await;
+        // one turned away ends its call and never comes in
+        let e_call = eve.engine.call(join.clone()).await;
+        eve.engine.status(e_call, &CallStatus::Lobby).await;
+        let turned_away = eve.engine.mri.clone();
+        lobby_is(&mut ada, a_call, &[&turned_away]).await;
+        let deny = CallAction::Lobby {
+            call: a_call,
+            waiting: Mri::new(turned_away),
+            admit: false,
+        };
+        ada.engine.call(deny).await;
+        let end = eve.engine.ended(e_call).await;
+        assert!(matches!(end, End::Remote(_)), "{end:?}");
+        lobby_is(&mut ada, a_call, &[]).await;
+        mixed.connected(&id, 3).await;
+        leave_all(&mut [&mut dan, &mut bert, &mut ada], &[d_call, b_call, a_call]).await;
+        shut_down(vec![ada, bert, dan, eve], mixed).await;
     }
 }

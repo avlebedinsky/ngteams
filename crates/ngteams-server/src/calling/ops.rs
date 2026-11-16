@@ -300,6 +300,8 @@ pub(super) async fn conversation(
             }
         }
         "add" => return super::group::add(&app, &caller, key, &body).await,
+        "admit" => return super::meeting::admit(&app, &caller, key, &body).await,
+        "removeParticipant" => return super::meeting::remove(&app, &caller, key, &body).await,
         "updateEndpointMetadata" | "updateParticipantProperties" => {}
         _ => return Err(Refusal::Missing.into()),
     }

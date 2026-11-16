@@ -131,6 +131,11 @@ fn conversation_links(origin: &str, call: &Call) -> Value {
         links["addParticipant"] = json!(link("add"));
         links["addParticipantAndModality"] = json!(link("add"));
     }
+    if call.meeting.is_some() {
+        for op in ["admit", "removeParticipant"] {
+            links[op] = json!(link(op));
+        }
+    }
     links
 }
 
@@ -503,7 +508,15 @@ pub(crate) fn seed(parameters: &Value) -> Option<u64> {
 fn roster_entry(call: &Call, party: &Party, version: u64) -> Value {
     let kind = call.kind;
     let endpoint = party.participant["endpointId"].as_str().unwrap_or_default();
-    let endpoints = if party.active.is_some() {
+    let endpoints = if party.status == Status::Lobby && party.active.is_some() {
+        json!({endpoint: {
+            "lobby": {"mediaStreams": [
+                {"type": "audio", "label": "main-audio", "direction": "sendrecv", "serverMuted": true},
+            ]},
+            "modalityJoined": "Lobby",
+            "participantId": party.participant["participantId"],
+        }})
+    } else if party.active.is_some() {
         json!({endpoint: {
             "call": endpoint_call(kind, party),
             "modalityJoined": "Call",
