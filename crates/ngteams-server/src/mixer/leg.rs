@@ -241,11 +241,15 @@ impl Leg {
         Ok(ours(&written))
     }
 
-    /// The callee's answer to the mixer's offer. A leg whose exchange is done (every leg without the mixer's offer
-    /// waiting) takes an answer as a no-op: signaling sends a callee's answer again only as a retry.
+    /// The callee's answer to the mixer's offer. A leg whose exchange is done takes an answer as a no-op: signaling
+    /// sends a callee's answer again only as a retry. A leg whose offer an answer failed has no offer left to answer.
     pub(crate) fn accept(&mut self, answer: &Sdp, now: Instant) -> Result<(), LegError> {
         if self.pending.is_none() {
-            return Ok(());
+            return if self.health.exchanged.is_some() {
+                Ok(())
+            } else {
+                Err(LegError::NoOffer)
+            };
         }
         let read = self.dialect.read_answer(&standard(answer)?)?;
         let parsed = Str0mAnswer::from_sdp_string(&read.to_sdp_string())?;
@@ -532,6 +536,32 @@ mod tests {
         assert!(leg.health.exchanged.is_some());
         leg.accept(&answer, now).unwrap();
         assert_eq!(leg.first, offer, "a repeated make gets the same offer");
+    }
+
+    #[test]
+    fn a_leg_whose_answer_failed_refuses_the_next_answer() {
+        let now = Instant::now();
+        let mut leg = Leg::new(&making(), SOURCES, None, now).unwrap();
+        let offer = leg.first.clone();
+        let mut rtc = RtcConfig::new().build(now);
+        rtc.add_local_candidate(Candidate::host(SocketAddr::from(([192, 0, 2, 20], 50_000)), "udp").unwrap());
+        let mut dialect = NgcSession::mixer();
+        let theirs = dialect.read_offer(&standard(&offer).unwrap()).unwrap();
+        let theirs = Str0mOffer::from_sdp_string(&theirs.to_sdp_string()).unwrap();
+        let answer = rtc.sdp_api().accept_offer(theirs).unwrap();
+        let answer = ours(&dialect.write_answer(&SdpAnswer::new(answer.to_sdp_string())).unwrap());
+        let unsigned = Sdp {
+            blob: answer
+                .blob
+                .split_inclusive("\r\n")
+                .filter(|line| !line.starts_with("a=fingerprint"))
+                .collect(),
+            content_type: answer.content_type.clone(),
+        };
+        assert!(leg.accept(&unsigned, now).is_err());
+        assert!(leg.pending.is_none(), "the failed answer used the offer");
+        assert!(matches!(leg.accept(&answer, now), Err(LegError::NoOffer)));
+        assert!(leg.health.exchanged.is_none());
     }
 
     #[test]
