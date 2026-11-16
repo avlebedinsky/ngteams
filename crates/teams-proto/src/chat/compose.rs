@@ -329,11 +329,7 @@ impl TryFrom<Stored> for MessageText {
         if stored.files.iter().any(|file| file.site_in(&cloud).is_none()) {
             return Err(ComposeError::FileCloud);
         }
-        let bots = stored
-            .bots
-            .into_iter()
-            .map(|(bot, app)| (Mri::new(bot), app))
-            .collect();
+        let bots = stored.bots.into_iter().map(|(bot, app)| (Mri::new(bot), app)).collect();
         Self::build(
             &cloud,
             stored.text,

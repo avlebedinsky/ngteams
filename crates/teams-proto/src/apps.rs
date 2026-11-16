@@ -709,4 +709,44 @@ mod tests {
             assert!(!capability.name().is_empty() && capability.line().ends_with('.'));
         }
     }
+
+    #[test]
+    fn a_bot_people_can_mention_is_one_for_the_place_that_says_something() {
+        let app = full_definition();
+        assert_eq!(
+            app.mentionable_bot(true).map(|bot| bot.as_str().to_owned()),
+            Some("28:b1".to_owned())
+        );
+        assert_eq!(
+            app.mentionable_bot(false).map(|bot| bot.as_str().to_owned()),
+            Some("28:b1".to_owned())
+        );
+        let quiet = definition(&json!({"id": "q", "bots": [
+            {"id": "n", "scopes": ["team", "groupChat"], "isNotificationOnly": true},
+            {"id": "", "scopes": ["team"]},
+            {"id": "p", "scopes": ["personal"]},
+        ]}));
+        assert_eq!(quiet.mentionable_bot(true), None);
+        assert_eq!(quiet.mentionable_bot(false), None);
+    }
+
+    #[test]
+    fn every_app_the_account_s_answer_defines_is_read_whatever_its_entitlement() {
+        let body = json!({"value": {
+            "userEntitlements": {"00000000-0000-4000-8000-00000000000a": [{"id": "a", "state": "Installed"}]},
+            "definitions": {
+                "a": {"id": "a", "name": "Made-up Added"},
+                "o": {"id": "o", "name": "Made-up Offered", "bots": [{"id": "bo", "scopes": ["personal"]}]},
+                "x": {"id": "x"},
+            },
+        }});
+        let mut names: Vec<_> = UserApps::defined(body.to_string().as_bytes())
+            .into_iter()
+            .map(|app| app.app.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Made-up Added", "Made-up Offered"]);
+        assert!(UserApps::defined(b"nope").is_empty());
+        assert!(UserApps::defined(b"{}").is_empty());
+    }
 }

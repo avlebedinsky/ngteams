@@ -179,12 +179,15 @@ fn message(conversation: &str, id: i64, sender: &str, name: &str, content: &str)
 fn seed(core: &FakeCore) {
     let helper = format!("28:{HELPER_BOT}");
     let at = 1_767_268_800_000;
-    core.conversations.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend([
-        chat(HELPER_CHAT, ConversationKind::OneToOne, None, at + 120_000),
-        chat(GROUP, ConversationKind::Group, Some("Lunch crew"), at + 60_000),
-        chat(AB, ConversationKind::OneToOne, None, at),
-        chat(POLLS_CHAT, ConversationKind::OneToOne, None, at - 60_000),
-    ]);
+    core.conversations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend([
+            chat(HELPER_CHAT, ConversationKind::OneToOne, None, at + 120_000),
+            chat(GROUP, ConversationKind::Group, Some("Lunch crew"), at + 60_000),
+            chat(AB, ConversationKind::OneToOne, None, at),
+            chat(POLLS_CHAT, ConversationKind::OneToOne, None, at - 60_000),
+        ]);
     let mut messages = core.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     messages.insert(
         HELPER_CHAT.to_owned(),
@@ -206,15 +209,24 @@ fn seed(core: &FakeCore) {
             ),
         ],
     );
-    messages.insert(GROUP.to_owned(), vec![message(GROUP, at + 60_000, LAB_B, "Synthetic Bee", "<p>Lunch?</p>")]);
-    messages.insert(AB.to_owned(), vec![message(AB, at, LAB_B, "Synthetic Bee", "<p>See you there</p>")]);
+    messages.insert(
+        GROUP.to_owned(),
+        vec![message(GROUP, at + 60_000, LAB_B, "Synthetic Bee", "<p>Lunch?</p>")],
+    );
+    messages.insert(
+        AB.to_owned(),
+        vec![message(AB, at, LAB_B, "Synthetic Bee", "<p>See you there</p>")],
+    );
     drop(messages);
     let mut members = core.members.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     members.insert(
         GROUP.to_owned(),
         [LAB_A, LAB_B, LAB_C].iter().map(|mri| Member::new(mri, None)).collect(),
     );
-    members.insert(AB.to_owned(), [LAB_A, LAB_B].iter().map(|mri| Member::new(mri, None)).collect());
+    members.insert(
+        AB.to_owned(),
+        [LAB_A, LAB_B].iter().map(|mri| Member::new(mri, None)).collect(),
+    );
     drop(members);
     let mut names = core.names.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     names.insert(LAB_A.to_owned(), "Synthetic Ay".to_owned());
@@ -230,13 +242,16 @@ fn seed(core: &FakeCore) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(GROUP.to_owned(), vec![apps[1].clone()]);
-    core.app_pictures.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
-        TILE.to_owned(),
-        Arc::new(PastedPicture {
-            format: PastedFormat::Png,
-            bytes: TILE_PNG.to_vec(),
-        }),
-    );
+    core.app_pictures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            TILE.to_owned(),
+            Arc::new(PastedPicture {
+                format: PastedFormat::Png,
+                bytes: TILE_PNG.to_vec(),
+            }),
+        );
 }
 
 fn child(value: &str) -> SandboxResult {
@@ -326,7 +341,9 @@ fn then(shell: &Entity<Shell>, page: &str, window: &mut Window, cx: &mut App) {
             let compose = chat.read(cx).compose().clone();
             compose.update(cx, |compose, cx| {
                 compose.focus(window, cx);
-                compose.editor().update(cx, |editor, cx| editor.insert("Who's in? @", cx));
+                compose
+                    .editor()
+                    .update(cx, |editor, cx| editor.insert("Who's in? @", cx));
             });
         }
         "about" => shell.update(cx, |shell, cx| shell.open_bot_about(HELPER_CHAT, window, cx)),

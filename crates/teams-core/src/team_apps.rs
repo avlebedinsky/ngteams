@@ -126,42 +126,19 @@ where
             }),
             TeamAppsAsk::Store { reply } => {
                 let bots = Arc::clone(&self.bots);
-                self.spawn_read(reply, async move |client| {
-                    let ids = send_body(client, &AppStore)
-                        .await
-                        .map_or_else(Vec::new, |body| AppStore::read_answer(&body));
-                    bots.kept(definitions_of(client, &ids).await)
-                });
+                self.spawn_read(reply, async move |client| store(client, &bots).await);
             }
             TeamAppsAsk::Listing { reply } => {
                 let bots = Arc::clone(&self.bots);
-                self.spawn_read(reply, async move |client| {
-                    let sections = send_body(client, &AppStore)
-                        .await
-                        .map_or_else(StoreSections::default, |body| StoreSections::read(&body));
-                    let apps = bots.kept(definitions_of(client, &sections.ids()).await);
-                    AppListing { sections, apps }
-                });
+                self.spawn_read(reply, async move |client| listing(client, &bots).await);
             }
             TeamAppsAsk::UserApps { reply } => {
                 let bots = Arc::clone(&self.bots);
-                self.spawn_read(reply, async move |client| {
-                    let Some(body) = send_body(client, &UserApps).await else {
-                        return Vec::new();
-                    };
-                    bots.keep(&UserApps::defined(&body));
-                    UserApps::read_answer(&body)
-                });
+                self.spawn_read(reply, async move |client| user_apps(client, &bots).await);
             }
             TeamAppsAsk::ChatApps { chat, reply } => {
                 let bots = Arc::clone(&self.bots);
-                self.spawn_read(reply, async move |client| {
-                    bots.kept(
-                        read_body(client, &ChatApps { chat })
-                            .await
-                            .map_or_else(Vec::new, |body| ChatApps::read_answer(&body)),
-                    )
-                });
+                self.spawn_read(reply, async move |client| chat_apps(client, &bots, chat).await);
             }
             TeamAppsAsk::ChannelAnalytics {
                 group,
@@ -195,6 +172,54 @@ where
             }),
         }
     }
+}
+
+/// The store's apps with their definitions, kept in `bots`.
+async fn store<C: Credentials + 'static>(
+    client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    bots: &BotIndex,
+) -> Vec<StoreApp> {
+    let ids = send_body(client, &AppStore)
+        .await
+        .map_or_else(Vec::new, |body| AppStore::read_answer(&body));
+    bots.kept(definitions_of(client, &ids).await)
+}
+
+/// The store as the Apps page shows it, its apps kept in `bots`.
+async fn listing<C: Credentials + 'static>(
+    client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    bots: &BotIndex,
+) -> AppListing {
+    let sections = send_body(client, &AppStore)
+        .await
+        .map_or_else(StoreSections::default, |body| StoreSections::read(&body));
+    let apps = bots.kept(definitions_of(client, &sections.ids()).await);
+    AppListing { sections, apps }
+}
+
+/// The account's apps; every app the answer defines is kept in `bots`.
+async fn user_apps<C: Credentials + 'static>(
+    client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    bots: &BotIndex,
+) -> Vec<StoreApp> {
+    let Some(body) = send_body(client, &UserApps).await else {
+        return Vec::new();
+    };
+    bots.keep(&UserApps::defined(&body));
+    UserApps::read_answer(&body)
+}
+
+/// The apps added to `chat`, kept in `bots`.
+async fn chat_apps<C: Credentials + 'static>(
+    client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    bots: &BotIndex,
+    chat: String,
+) -> Vec<StoreApp> {
+    bots.kept(
+        read_body(client, &ChatApps { chat })
+            .await
+            .map_or_else(Vec::new, |body| ChatApps::read_answer(&body)),
+    )
 }
 
 /// The store as the Apps page shows it: its sections, and the definitions of the apps they list (an app without a
@@ -374,7 +399,13 @@ impl BotIndex {
         if let Some(app) = self.known(&key) {
             return Some(app);
         }
-        if known || !self.missed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone()) {
+        if known
+            || !self
+                .missed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key.clone())
+        {
             return None;
         }
         let body = send_body(client, &AppDefinitions { ids: vec![key.clone()] }).await?;

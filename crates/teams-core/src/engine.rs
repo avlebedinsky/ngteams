@@ -1640,14 +1640,26 @@ impl EngineRequests {
     /// as an app's (`team_apps`'s bot index); `None` when none names it.
     pub fn bot_app(&self, bot: impl Into<String>) -> Reply<Option<StoreApp>> {
         let bot = bot.into();
-        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::BotApp { bot, known: false, reply })))
+        self.ask(|reply| {
+            Request::TeamApps(Box::new(TeamAppsAsk::BotApp {
+                bot,
+                known: false,
+                reply,
+            }))
+        })
     }
 
     /// [`Self::bot_app`] for an id that may be a bot's or a person's (a 1:1 chat's other one): found only among the
     /// definitions read and the account's apps, never by reading the id as an app's.
     pub fn known_bot_app(&self, id: impl Into<String>) -> Reply<Option<StoreApp>> {
         let bot = id.into();
-        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::BotApp { bot, known: true, reply })))
+        self.ask(|reply| {
+            Request::TeamApps(Box::new(TeamAppsAsk::BotApp {
+                bot,
+                known: true,
+                reply,
+            }))
+        })
     }
 
     /// The apps added to `place` (a chat, or a team when `team`) whose bot people can mention there, read now.

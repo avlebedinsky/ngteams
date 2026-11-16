@@ -669,7 +669,12 @@ async fn a_bot_is_known_by_its_app_from_the_account_s_apps_and_the_definitions_r
         Some(PRE_CONSENTED.to_owned())
     );
     assert_eq!(
-        id_of(requests.known_bot_app("00000000-0000-4000-8000-00000000B006").await.unwrap()),
+        id_of(
+            requests
+                .known_bot_app("00000000-0000-4000-8000-00000000B006")
+                .await
+                .unwrap()
+        ),
         Some(PRE_CONSENTED.to_owned()),
         "a 1:1 chat's id names the bot bare, in any case"
     );
@@ -686,7 +691,11 @@ async fn a_bot_is_known_by_its_app_from_the_account_s_apps_and_the_definitions_r
             .filter(|request| body.is_none_or(|body| String::from_utf8_lossy(&request.body).contains(body)))
             .count()
     };
-    assert_eq!(posted("users/apps/aggregatedEntitlements", None), 1, "the account's apps once");
+    assert_eq!(
+        posted("users/apps/aggregatedEntitlements", None),
+        1,
+        "the account's apps once"
+    );
     assert_eq!(posted("users/apps/batchedDefinitions", Some("b004")), 1);
     assert_eq!(posted("users/apps/batchedDefinitions", Some(b)), 0);
     // the store's apps bring its app: found from then on
@@ -724,7 +733,13 @@ async fn the_bots_people_can_mention_are_those_of_the_chat_s_or_the_team_s_apps(
         ["00000000-0000-4000-8000-00000000a002"]
     );
     // what they read is known by its bots from then on, a failed read is nothing
-    assert!(requests.known_bot_app("00000000-0000-4000-8000-00000000b002").await.unwrap().is_some());
+    assert!(
+        requests
+            .known_bot_app("00000000-0000-4000-8000-00000000b002")
+            .await
+            .unwrap()
+            .is_some()
+    );
     rig.mock.refuse_next("GET", "chatentitlements", 500).await;
     assert!(requests.mentionable_bots(CHAT, false).await.unwrap().is_empty());
 }

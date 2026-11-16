@@ -181,7 +181,7 @@ pub struct ChatRow {
     /// A 1:1 chat's other member (the account itself for its notes), whose presence the row shows; never a bot.
     pub partner: Option<String>,
     /// A 1:1 chat's bot, when the other one is a bot or a service.
-    pub bot: Option<ChatBot>,
+    pub bot: Option<Box<ChatBot>>,
     /// A group chat's two members its avatar shows, half each (none for any other chat, or a group of one other).
     pub faces: Vec<HalfFace>,
     /// How many people the store lists in the chat, the account among them (0 when it lists none: a channel, the
@@ -246,14 +246,22 @@ pub fn others(conversation: &Conversation, members: &[Member], me: &str, bot: Op
         .filter(|mri| mri != me)
         .collect();
     if others.is_empty() && conversation.kind == ConversationKind::OneToOne {
-        others.extend(bot.map(str::to_owned).or_else(|| one_to_one_partner(&conversation.id, me)));
+        others.extend(
+            bot.map(str::to_owned)
+                .or_else(|| one_to_one_partner(&conversation.id, me)),
+        );
     }
     others
 }
 
 /// The bot a 1:1 chat is with, by its MRI (see the module docs): a `28:` member; with no other member stored, the one
 /// its id names when a message `page` holds came from them as a bot, or the engine knows them as an app's bot.
-async fn chat_bot(core: &dyn Core, conversation: &Conversation, members: &[Member], page: &[Message]) -> Option<String> {
+async fn chat_bot(
+    core: &dyn Core,
+    conversation: &Conversation,
+    members: &[Member],
+    page: &[Message],
+) -> Option<String> {
     if conversation.kind != ConversationKind::OneToOne {
         return None;
     }
@@ -393,7 +401,7 @@ struct Naming {
     picture: Option<Picture>,
     /// A 1:1 chat's other member, when they have a presence.
     partner: Option<String>,
-    bot: Option<ChatBot>,
+    bot: Option<Box<ChatBot>>,
     faces: Vec<HalfFace>,
     /// The members whose names the name or the avatar read.
     people: Vec<String>,
@@ -527,7 +535,7 @@ async fn bot_named(core: &dyn Core, mri: String, person: Option<Shown>, people: 
         name: name.unwrap_or_else(|| unnamed(&mri).into()),
         picture: app.as_ref().and_then(|app| app.picture.clone()),
         partner: None,
-        bot: Some(ChatBot { mri, app }),
+        bot: Some(Box::new(ChatBot { mri, app })),
         faces: Vec::new(),
         people,
         chat_with: None,

@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AsyncApp, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _, div, px, rgb,
+    AnyElement, AsyncApp, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _, div, px,
+    rgb,
 };
 
 use super::ChatView;
@@ -19,6 +20,14 @@ const INTRO_TILE: f32 = 72.0;
 
 /// What the intro says under the app's own words.
 pub const INTRO_HINT: &str = "Send a message to start chatting.";
+
+/// The bots a chat view shows: the apps of its bot senders and typers by MRI, and a 1:1 chat's own bot with its app
+/// once found (its intro shows while the chat holds no message).
+#[derive(Default)]
+pub(super) struct BotFaces {
+    pub(super) apps: std::collections::HashMap<String, BotApp>,
+    pub(super) chat: Option<(String, Option<BotApp>)>,
+}
 
 /// A bot as the view names it: by its app, with its icon.
 pub(super) fn shown(app: &BotApp) -> Shown {
@@ -48,7 +57,7 @@ impl ChatView {
             }
             let app = bot_face::bot_app(core.as_ref(), &bot).await;
             let _ = this.update(cx, |view, cx| {
-                view.chat_bot = Some((bot, app));
+                view.bot_faces.chat = Some((bot, app));
                 cx.notify();
             });
         })
@@ -58,7 +67,7 @@ impl ChatView {
     /// The bot this 1:1 chat is with, once found.
     #[must_use]
     pub fn chat_bot(&self) -> Option<&str> {
-        self.chat_bot.as_ref().map(|(bot, _)| bot.as_str())
+        self.bot_faces.chat.as_ref().map(|(bot, _)| bot.as_str())
     }
 
     /// The intro of a bot's chat while it holds no message.
@@ -66,7 +75,7 @@ impl ChatView {
         if !self.is_empty() {
             return None;
         }
-        let (_, app) = self.chat_bot.as_ref()?;
+        let (_, app) = self.bot_faces.chat.as_ref()?;
         let name = app.as_ref().map_or(crate::chat_list::BOT, BotApp::name).to_owned();
         let maker = app
             .as_ref()

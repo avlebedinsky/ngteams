@@ -1014,10 +1014,8 @@ pub struct ChatView {
     /// People as the engine has them, by MRI: the ask whose answer the entry takes, and that answer (`None`: asked,
     /// no answer yet or none).
     people: HashMap<String, (u64, Option<Shown>)>,
-    /// The apps of the bots among them, as the engine found them ([`crate::bot_face`]).
-    bot_apps: HashMap<String, crate::bot_face::BotApp>,
-    /// A 1:1 chat's bot and its app, once found: its intro shows while the chat holds no message.
-    chat_bot: Option<(String, Option<crate::bot_face::BotApp>)>,
+    /// The bots among them and the chat's own bot, with their apps ([`crate::bot_face`]).
+    bot_faces: bot_chat::BotFaces,
     /// The last ask's number: an answer to an earlier ask of someone asked again since is dropped.
     asks: u64,
     /// The models' revision the people were last asked at: someone renamed since is asked again.
@@ -1169,7 +1167,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(parts, channel, place, compose, window, cx)
+        Self::build(parts, channel, place, compose, window, cx).start(cx)
     }
 
     /// A new compose box for a view of `channel` in `place` ([`Self::in_place`]): the channel's posts' box, or a
@@ -1199,7 +1197,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Self {
         let compose = compose.unwrap_or_else(|| Self::compose_box(&parts, &conversation, window, cx));
-        Self::build(parts, conversation, Place::Chat, compose, window, cx)
+        Self::build(parts, conversation, Place::Chat, compose, window, cx).start(cx)
     }
 
     fn build(
@@ -1229,8 +1227,7 @@ impl ChatView {
             history: History::More,
             horizon: None,
             people: HashMap::new(),
-            bot_apps: HashMap::new(),
-            chat_bot: None,
+            bot_faces: bot_chat::BotFaces::default(),
             asks: 0,
             people_seen,
             rendered: HashMap::new(),
@@ -1291,7 +1288,6 @@ impl ChatView {
             quote: QuoteJump::default(),
             _subscriptions: subscriptions,
         }
-        .start(cx)
     }
 
     /// A new view's first reads: its messages, who types, its notes' outbox and its saved call transcripts.
@@ -2691,7 +2687,7 @@ impl ChatView {
                 return;
             }
             let _ = this.update(cx, |view, cx| {
-                view.bot_apps.extend(bots);
+                view.bot_faces.apps.extend(bots);
                 view.answered(ask, found, cx);
             });
         })
@@ -3565,7 +3561,7 @@ impl ChatView {
         {
             crate::workflows_app::bot_avatar(AVATAR, palette).into_any_element()
         } else if let Some(bot) = item.sender.as_deref().filter(|sender| crate::bot_face::is_bot(sender)) {
-            crate::bot_face::tile(self.bot_apps.get(bot), AVATAR, palette).into_any_element()
+            crate::bot_face::tile(self.bot_faces.apps.get(bot), AVATAR, palette).into_any_element()
         } else {
             item.face
                 .avatar(&item.sender_name, Size::Medium)
@@ -5298,6 +5294,27 @@ impl ChatView {
         })
     }
 
+    /// The message list's keys for the selected message: move, reply, react, edit, delete, let go.
+    fn selection_actions<E: gpui::InteractiveElement>(element: E, cx: &mut Context<Self>) -> E {
+        element
+            .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.step_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &ReplyToSelected, window, cx| {
+                this.act_on_selected(MessageAction::Reply, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReactToSelected, window, cx| {
+                this.act_on_selected(MessageAction::React, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &EditSelected, window, cx| {
+                this.act_on_selected(MessageAction::Edit, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
+                this.act_on_selected(MessageAction::Delete, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearSelection, window, cx| this.escape(window, cx)))
+            .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
+    }
+
     /// Who is typing, under the messages, while anyone is.
     fn typing_line(&self, palette: Palette, cx: &App) -> Option<gpui::Div> {
         self.typing_text(cx).map(|text| {
@@ -5372,23 +5389,8 @@ impl Render for ChatView {
             .track_focus(&self.focus)
             // a click in the messages leaves the focus where it is (the compose box, as in Teams): the list takes it
             // only from the keyboard (Escape in the box) and from the actions that need its keys
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.step_selection(-1, cx)))
-            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step_selection(1, cx)))
-            .on_action(cx.listener(|this, _: &ReplyToSelected, window, cx| {
-                this.act_on_selected(MessageAction::Reply, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ReactToSelected, window, cx| {
-                this.act_on_selected(MessageAction::React, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &EditSelected, window, cx| {
-                this.act_on_selected(MessageAction::Edit, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
-                this.act_on_selected(MessageAction::Delete, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ClearSelection, window, cx| this.escape(window, cx)))
-            .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default());
+        let messages = Self::selection_actions(messages, cx)
             .debug_selector(|| "chat-messages".to_owned())
             .relative()
             .flex_1()

@@ -479,6 +479,35 @@ mod tests {
     }
 
     #[test]
+    fn the_installed_apps_with_their_definitions_are_read_by_name() {
+        let team = "19:t@thread.tacv2";
+        let body = json!({"value": {
+            "teamsEntitlements": {team: [
+                {"id": "b", "state": "Installed"},
+                {"id": "a", "state": "Installed"},
+                {"id": "n", "state": "NotInstalled"},
+                {"id": "missing", "state": "Installed"},
+            ]},
+            "definitions": {
+                "a": {"id": "a", "name": "Zed", "bots": [{"id": "ba", "scopes": ["team"]}]},
+                "b": {"id": "b", "name": "Alpha"},
+                "n": {"id": "n", "name": "Offered"},
+            },
+        }});
+        let read = TeamApps { team: team.to_owned() };
+        let apps = read.read_defined(body.to_string().as_bytes());
+        let names: Vec<_> = apps.iter().map(|app| app.app.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "Zed"]);
+        assert!(apps[1].has_bot);
+        assert!(read.read_defined(b"nope").is_empty());
+        assert!(
+            TeamApps { team: "x".to_owned() }
+                .read_defined(body.to_string().as_bytes())
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn the_apps_read_is_a_post_naming_the_team() {
         let read = TeamApps {
             team: "19:t@thread.tacv2".to_owned(),

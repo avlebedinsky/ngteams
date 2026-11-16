@@ -622,6 +622,7 @@ pub fn mentioned(properties: Option<&str>) -> std::collections::HashMap<String, 
 
 /// The app of each bot a message's `properties.mentions` names (`mentionType` `bot` with its `appId`), by the bot's
 /// MRI: an edit of the message mentions them again.
+#[must_use]
 pub fn mentioned_bots(properties: Option<&str>) -> std::collections::BTreeMap<teams_proto::Mri, String> {
     read_mentions(properties)
         .into_iter()

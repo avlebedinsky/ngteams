@@ -749,7 +749,9 @@ async fn read_bots(core: Arc<dyn Core>, conversation: String) -> Vec<Candidate> 
     let place = if is_group_chat_id(&conversation) {
         Some((conversation, false))
     } else {
-        channel_team(core.as_ref(), &conversation).await.map(|team| (team, true))
+        channel_team(core.as_ref(), &conversation)
+            .await
+            .map(|team| (team, true))
     };
     let Some((place, team)) = place else {
         return Vec::new();
@@ -2194,11 +2196,12 @@ fn bot_row(name: &SharedString, app: &crate::bot_face::BotApp, palette: Palette)
         .gap_2()
         .child(crate::bot_face::tile(Some(app), EVERYONE_ICON, palette))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(name.clone())
-                .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(BOT_LABEL)),
+            div().flex().flex_col().child(name.clone()).child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(BOT_LABEL),
+            ),
         )
 }
 
