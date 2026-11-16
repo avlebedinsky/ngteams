@@ -11,20 +11,14 @@ use std::time::{Duration, Instant};
 use redis::aio::{ConnectionLike, ConnectionManager};
 use redis::{Cmd, ErrorKind, Pipeline, RedisError, RedisFuture, RedisResult, Value};
 
+const RESTING: &str = "Redis failed just now";
+
 /// The connection manager behind the timeout, and the moment until which commands fail without trying Redis.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Commands {
     manager: ConnectionManager,
     timeout: Duration,
     resting_until: Arc<Mutex<Option<Instant>>>,
-}
-
-impl std::fmt::Debug for Commands {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Commands")
-            .field("timeout", &self.timeout)
-            .finish_non_exhaustive()
-    }
 }
 
 impl Commands {
@@ -43,7 +37,7 @@ impl Commands {
 
     async fn bounded<T>(&self, command: impl Future<Output = RedisResult<T>>) -> RedisResult<T> {
         if self.resting_until().is_some_and(|until| Instant::now() < until) {
-            return Err(RedisError::from((ErrorKind::Io, "Redis failed just now")));
+            return Err(RedisError::from((ErrorKind::Io, RESTING)));
         }
         let result = within(self.timeout, command).await;
         if let Err(error) = &result
@@ -86,5 +80,33 @@ impl ConnectionLike for Commands {
 
     fn get_db(&self) -> i64 {
         self.manager.get_db()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn after_a_failure_the_next_command_fails_without_trying_redis() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let client = redis::Client::open(format!("redis://127.0.0.1:{closed}")).unwrap();
+        let config = redis::aio::ConnectionManagerConfig::new().set_number_of_retries(0);
+        let manager = ConnectionManager::new_lazy_with_config(client, config).unwrap();
+        let mut commands = Commands::new(manager, Duration::from_secs(5));
+        assert_eq!(commands.get_db(), 0);
+        let ping = || redis::cmd("PING");
+        let refused = ping().query_async::<()>(&mut commands).await.unwrap_err();
+        assert!(
+            refused.is_io_error() && !refused.to_string().contains(RESTING),
+            "{refused}"
+        );
+        let resting = ping().query_async::<()>(&mut commands).await.unwrap_err();
+        assert!(resting.to_string().contains(RESTING), "{resting}");
+        assert!(format!("{commands:?}").contains("Commands"));
     }
 }
