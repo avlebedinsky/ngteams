@@ -881,6 +881,23 @@ async fn talk(
 /// itself, and what it played is quiet in 2 % of the talk at most (a loaded host starves the clients, which all run
 /// in this process, for a moment now and then: so do three 1:1 calls without a media node). The media node's CPU
 /// is printed.
+/// Everyone hangs up, the callees first, and closes; when each hung up after `connected`, in `phones`' order (each
+/// recording ends at its hang-up, which says when it started).
+async fn hang_up_callees_first(phones: &mut [Phone], calls: &[CallId], connected: Instant) -> Vec<Duration> {
+    let mut ends = Vec::new();
+    let (first, rest) = phones.split_first_mut().unwrap();
+    for (phone, call) in rest.iter_mut().zip(&calls[1..]) {
+        hang_up(phone, *call).await;
+        ends.push(connected.elapsed());
+    }
+    hang_up(first, calls[0]).await;
+    ends.insert(0, connected.elapsed());
+    for phone in phones {
+        phone.close().await;
+    }
+    ends
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn six_people_talk_for_a_while_without_a_gap() {
     let seconds: u64 = std::env::var("NGTS_QA_LOAD_SECONDS")
@@ -913,18 +930,7 @@ async fn six_people_talk_for_a_while_without_a_gap() {
     let calls = start_and_answer(first, &mut answerers, &chat).await;
     let connected = Instant::now();
     let (received, report, average, peak, talked) = talk(&phones, &calls, group.media_pid(), seconds).await;
-    // everyone hangs up; each recording ends at its hang-up, which says when it started
-    let mut ends = Vec::new();
-    let (first, rest) = phones.split_first_mut().unwrap();
-    for (phone, call) in rest.iter_mut().zip(&calls[1..]) {
-        hang_up(phone, *call).await;
-        ends.push(connected.elapsed());
-    }
-    hang_up(first, calls[0]).await;
-    ends.insert(0, connected.elapsed());
-    for phone in &mut phones {
-        phone.close().await;
-    }
+    let ends = hang_up_callees_first(&mut phones, &calls, connected).await;
     group.stop().await;
     eprintln!("{report}");
     eprintln!(
