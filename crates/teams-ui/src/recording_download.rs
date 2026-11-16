@@ -234,29 +234,46 @@ impl RecordingDownload {
 
 /// The app's recording downloads, by the recording's sharing link: the last one of each.
 #[derive(Default)]
-pub struct Downloads(HashMap<String, Entity<RecordingDownload>>);
+pub struct Downloads {
+    latest: HashMap<String, Entity<RecordingDownload>>,
+    /// The ones still running that a later download of their link took the place of: kept until they end.
+    earlier: Vec<Entity<RecordingDownload>>,
+}
 
 impl Global for Downloads {}
 
 /// The download of the recording whose sharing link is `link`, when one was started this run (and not dismissed).
 #[must_use]
 pub fn download_of(link: &str, cx: &App) -> Option<Entity<RecordingDownload>> {
-    cx.try_global::<Downloads>()?.0.get(link).cloned()
+    cx.try_global::<Downloads>()?.latest.get(link).cloned()
 }
 
 /// Starts downloading the recording whose sharing link is `link` to `target`, in place of an earlier one of it that
-/// ended (one still running is kept and handed back).
+/// ended (one still running to the same place is kept and handed back).
 pub fn start(core: Arc<dyn Core>, link: String, target: PathBuf, cx: &mut App) -> Entity<RecordingDownload> {
     let opened = link.clone();
     let open: Opener = Arc::new(move |offset, len| core.file_stream(opened.clone(), offset, len));
     start_with(open, link, target, Then::Keep, cx)
 }
 
-/// As [`start`], the file's streams opened by `open`, and `then` done once it is saved.
+/// As [`start`], the file's streams opened by `open`, and `then` done once it is saved. A running download of the
+/// link is handed back only when it does the same (the same `then`, and for [`Then::Keep`] the same `target`); one
+/// that does another (an Open while a Download runs, or the reverse) runs on to its end beside the new one, which the
+/// card then shows.
 pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &mut App) -> Entity<RecordingDownload> {
-    if let Some(running) = download_of(&link, cx).filter(|download| download.read(cx).progress.running()) {
-        return running;
+    let running = download_of(&link, cx).filter(|download| download.read(cx).progress.running());
+    if let Some(running) = running.as_ref().filter(|download| {
+        let download = download.read(cx);
+        download.then == then && (then == Then::Open || download.target == target)
+    }) {
+        return running.clone();
     }
+    let mut earlier = cx
+        .try_global::<Downloads>()
+        .map(|downloads| downloads.earlier.clone())
+        .unwrap_or_default();
+    earlier.retain(|download| download.read(cx).progress.running());
+    earlier.extend(running);
     let download = cx.new(|cx| {
         let mut download = RecordingDownload {
             open,
@@ -269,7 +286,9 @@ pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &
         download.start(cx);
         download
     });
-    cx.default_global::<Downloads>().0.insert(link, download.clone());
+    let downloads = cx.default_global::<Downloads>();
+    downloads.earlier = earlier;
+    downloads.latest.insert(link, download.clone());
     download
 }
 
@@ -277,12 +296,12 @@ pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &
 pub fn dismiss(link: &str, cx: &mut App) {
     let Some(download) = cx
         .try_global::<Downloads>()
-        .and_then(|downloads| downloads.0.get(link).cloned())
+        .and_then(|downloads| downloads.latest.get(link).cloned())
     else {
         return;
     };
     download.update(cx, RecordingDownload::cancel);
-    cx.default_global::<Downloads>().0.remove(link);
+    cx.default_global::<Downloads>().latest.remove(link);
 }
 
 /// Where the file is written until it is whole: `<name>.part` beside it.

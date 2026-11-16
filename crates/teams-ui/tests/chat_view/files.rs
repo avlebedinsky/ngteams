@@ -261,40 +261,142 @@ fn own_file_message() -> Message {
     stored
 }
 
-/// The chat with the own server's document, the engine holding its bytes when `bytes`.
-fn own_file_chat(bytes: bool) -> (Rig, &'static mut VisualTestContext) {
-    let rig = rig_with(vec![own_file_message()]);
-    if bytes {
+/// The chat with the own server's document, the engine holding its bytes when `bytes`, Open in desktop app saving in
+/// the test's own folder (handed back), not the runtime folder the installed app uses.
+fn own_file_chat(bytes: bool) -> (Rig, tempfile::TempDir, &'static mut VisualTestContext) {
+    own_files_chat(own_file_message(), if bytes { &[(OWN_SHARE, OWN_BYTES)] } else { &[] })
+}
+
+/// The chat with `message`, the engine holding each file's bytes by its sharing link, as [`own_file_chat`].
+fn own_files_chat(
+    message: Message,
+    files: &[(&str, &[u8])],
+) -> (Rig, tempfile::TempDir, &'static mut VisualTestContext) {
+    let rig = rig_with(vec![message]);
+    for (share, bytes) in files {
         rig.core
             .file_bytes
             .lock()
             .unwrap()
-            .insert(OWN_SHARE.to_owned(), OWN_BYTES.to_vec());
+            .insert((*share).to_owned(), bytes.to_vec());
     }
+    let opened = tempfile::tempdir().unwrap();
+    let folder = opened.path().to_owned();
+    rig.cx
+        .update(|cx| cx.set_global(teams_ui::files::OpenedFilesFolder(folder)));
     let (written_trace, _) = trace();
     let (_view, cx) = chat_window(&rig, written_trace);
-    (rig, cx)
+    (rig, opened, cx)
+}
+
+/// Answers the streams the engine held with the whole file of `bytes`, in the order they were asked, and stops holding
+/// any more.
+fn answer_held(rig: &Rig, bytes: &[&[u8]]) {
+    *rig.core.hold_streams_from.lock().unwrap() = None;
+    let held: Vec<_> = rig.core.held_streams.lock().unwrap().drain(..).collect();
+    assert_eq!(held.len(), bytes.len(), "a stream held for each");
+    for (answer, bytes) in held.into_iter().zip(bytes) {
+        answer.send(Ok(teams_core::FileStream::of(0, bytes, bytes.len() as u64, 4096)));
+    }
+}
+
+/// The file the last `file://` link opened was of.
+fn opened_file(cx: &mut VisualTestContext) -> std::path::PathBuf {
+    let opened = cx.opened_url().expect("the file is opened");
+    assert!(opened.starts_with("file://"), "{opened}");
+    url::Url::parse(&opened).unwrap().to_file_path().unwrap()
 }
 
 #[test]
 fn a_click_on_an_own_servers_file_reads_it_through_the_engine_and_opens_it_in_its_app() {
-    let (rig, cx) = own_file_chat(true);
+    let (rig, opened, cx) = own_file_chat(true);
     assert!(bounds(cx, &format!("file-card-{ID}-0")).is_some(), "the file's card");
     click(cx, &format!("file-name-{ID}-0"));
     // never the server's link in a browser, which holds no token for it: the engine's bytes, opened as a local file
-    let opened = cx.opened_url().expect("the file is opened");
-    assert!(opened.starts_with("file://"), "{opened}");
-    let path = url::Url::parse(&opened).unwrap().to_file_path().unwrap();
+    let path = opened_file(cx);
+    assert_eq!(
+        path,
+        opened.path().join("1").join("made-up notes.pdf"),
+        "in a new folder, by its name"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), OWN_BYTES);
-    assert_eq!(path.file_name().unwrap(), "made-up notes.pdf");
     assert!(rig.core.asked().contains(&"file_stream"));
     assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
-    std::fs::remove_file(path).unwrap();
+}
+
+/// Starts an Open of the own server's document and a Download of it, the first while the second runs (`open_first`:
+/// the Open first): both end, the file opened and saved where chosen.
+fn an_open_and_a_download_both_end(open_first: bool) {
+    let (rig, opened, cx) = own_file_chat(true);
+    *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+    let chosen = tempfile::tempdir().unwrap();
+    let target = chosen.path().join("notes.pdf");
+    let open = |cx: &mut VisualTestContext| click(cx, &format!("file-name-{ID}-0"));
+    let download = |cx: &mut VisualTestContext| {
+        click(cx, &format!("file-more-{ID}-0"));
+        click(cx, &format!("file-menu-download-{ID}-0"));
+        cx.simulate_new_path_selection(|_| Some(target.clone()));
+        draw(cx);
+    };
+    if open_first {
+        open(cx);
+        assert!(bounds(cx, &format!("file-download-{ID}-0 running")).is_some());
+        download(cx);
+    } else {
+        download(cx);
+        assert!(bounds(cx, &format!("file-download-{ID}-0 running")).is_some());
+        open(cx);
+    }
+    answer_held(&rig, &[OWN_BYTES, OWN_BYTES]);
+    draw(cx);
+    assert_eq!(std::fs::read(&target).unwrap(), OWN_BYTES, "saved where chosen");
+    let path = opened_file(cx);
+    assert!(path.starts_with(opened.path()), "{}", path.display());
+    assert_eq!(std::fs::read(&path).unwrap(), OWN_BYTES);
+    assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+}
+
+#[test]
+fn a_download_of_an_own_servers_file_started_while_it_opens_still_saves_it() {
+    an_open_and_a_download_both_end(true);
+}
+
+#[test]
+fn an_open_of_an_own_servers_file_started_while_it_downloads_still_opens_it() {
+    an_open_and_a_download_both_end(false);
+}
+
+/// Another own server's sharing link of a document of the same name, in another folder of its drive.
+const OWN_SHARE_OTHER: &str = "https://chat.example:8443/sp/personal/lab_b/Documents/older/made-up%20notes.pdf";
+
+#[test]
+fn two_own_servers_files_of_one_name_opened_together_are_saved_apart() {
+    let entry = |share: &str| {
+        serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up notes.pdf",
+            "fileType": "pdf", "state": "active", "objectUrl": share, "fileInfo": {"shareUrl": share}})
+    };
+    let mut stored = message(ID, LAB_B, "<p>the notes, twice</p>", NOON);
+    stored.properties = Some(
+        serde_json::json!({"files": Value::Array(vec![entry(OWN_SHARE), entry(OWN_SHARE_OTHER)]).to_string()})
+            .to_string(),
+    );
+    let other: &[u8] = b"%PDF-1.7 the older made-up notes";
+    let (rig, opened, cx) = own_files_chat(stored, &[(OWN_SHARE, OWN_BYTES), (OWN_SHARE_OTHER, other)]);
+    *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+    click(cx, &format!("file-name-{ID}-0"));
+    click(cx, &format!("file-name-{ID}-1"));
+    answer_held(&rig, &[OWN_BYTES, other]);
+    draw(cx);
+    let saved = |folder: &str| std::fs::read(opened.path().join(folder).join("made-up notes.pdf")).unwrap();
+    assert_eq!(saved("1"), OWN_BYTES);
+    assert_eq!(saved("2"), other);
+    assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+    assert!(bounds(cx, &format!("file-download-{ID}-1 saved")).is_some());
 }
 
 #[test]
 fn more_options_of_an_own_servers_file_downloads_it_through_the_engine_where_chosen() {
-    let (_rig, cx) = own_file_chat(true);
+    let (_rig, _opened, cx) = own_file_chat(true);
     click(cx, &format!("file-more-{ID}-0"));
     assert!(
         bounds(cx, &format!("file-menu-open-{ID}-0")).is_some(),
@@ -318,7 +420,7 @@ fn more_options_of_an_own_servers_file_downloads_it_through_the_engine_where_cho
 
 #[test]
 fn an_own_servers_file_the_engine_cant_read_says_so_under_its_card() {
-    let (_rig, cx) = own_file_chat(false);
+    let (_rig, _opened, cx) = own_file_chat(false);
     click(cx, &format!("file-more-{ID}-0"));
     click(cx, &format!("file-menu-download-{ID}-0"));
     let folder = tempfile::tempdir().unwrap();

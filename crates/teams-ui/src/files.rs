@@ -18,13 +18,18 @@
 //!   that reaches nobody by itself (sharing it with people from the app would be a contacting write it doesn't make).
 //! - **An own server's file** ([`OwnFile`]) is read through its account's engine, never in a browser: the server has
 //!   no page that shows a file, and a browser holds no token for it. A click and "Open in desktop app" save it in a
-//!   folder of the user's alone and open it in the system's app for it (its `file://` link); "Download" saves it where the user chooses (the
-//!   downloads folder without a chooser) (`crate::recording_download`). A line under the card tells how far it got.
+//!   new folder in a folder of the user's alone and open it in the system's app for it (its `file://` link);
+//!   "Download" saves it where the user chooses (the downloads folder without a chooser)
+//!   (`crate::recording_download`). Each runs to its end, also when the other one starts while it runs. A line under
+//!   the card tells how far the last one got.
 //! - Colours come from the palette but for the file types' own, fixed in every theme as Teams' file icons are.
 
+use std::path::{Path, PathBuf};
+
 use gpui::{
-    AnyElement, App, ClipboardItem, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px, rgb,
+    AnyElement, App, ClipboardItem, Global, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px,
+    rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -493,21 +498,52 @@ pub struct OwnFile {
     source: PictureSource,
 }
 
+/// Where Open in desktop app saves an own server's files, in place of `ngteams-files` in the runtime folder (a test's
+/// own folder).
+pub struct OpenedFilesFolder(pub PathBuf);
+
+impl Global for OpenedFilesFolder {}
+
+/// A new folder in `folder` for one opened file: `1`, `2`, …, the first that is not there. It is made at once, so two
+/// files of one name opened together never write to one file.
+fn new_folder_in(folder: &Path) -> std::io::Result<PathBuf> {
+    for n in 1_u32.. {
+        let made = folder.join(n.to_string());
+        match std::fs::create_dir(&made) {
+            Ok(()) => return Ok(made),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::ErrorKind::AlreadyExists.into())
+}
+
 impl OwnFile {
-    /// Open in desktop app: saved in a folder of the user's alone (the runtime one, else the temporary one; the
-    /// downloads folder when it can't be had), then opened in the system's app for it.
+    /// Open in desktop app: saved in a new folder (see [`new_folder_in`]) in a folder of the user's alone (the
+    /// runtime one, else the temporary one, or [`OpenedFilesFolder`]; the downloads folder when it can't be had),
+    /// then opened in the system's app for it.
     pub fn open(&self, cx: &mut App) {
-        let base = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .filter(|dir| dir.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
-        let private = base.join("ngteams-files");
-        let folder = teams_platform::private::create_dir_all(&private)
+        let private = cx.try_global::<OpenedFilesFolder>().map_or_else(
+            || {
+                std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(PathBuf::from)
+                    .filter(|dir| dir.is_dir())
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("ngteams-files")
+            },
+            |folder| folder.0.clone(),
+        );
+        let name = safe_name(&self.name);
+        let target = teams_platform::private::create_dir_all(&private)
             .and_then(|()| teams_platform::private::restrict_dir(&private))
-            .map(|()| private)
-            .or_else(|_| crate::picture_viewer::downloads())
-            .unwrap_or_else(|_| std::env::temp_dir());
-        let target = crate::picture_viewer::free_name(&folder, &safe_name(&self.name));
+            .and_then(|()| new_folder_in(&private))
+            .map_or_else(
+                |_| {
+                    let folder = crate::picture_viewer::downloads().unwrap_or_else(|_| std::env::temp_dir());
+                    crate::picture_viewer::free_name(&folder, &name)
+                },
+                |folder| folder.join(&name),
+            );
         recording_download::start_with(
             self.source.file_opener(self.link.clone()),
             self.link.clone(),
