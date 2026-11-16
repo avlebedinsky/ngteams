@@ -17,7 +17,8 @@ use crate::team_apps::{StoreApp, store_app};
 /// The apps the account added for itself: `POST beta/users/apps/aggregatedEntitlements?appbarview=userpinned` on the
 /// middle tier with an empty list of teams, a read. Its answer holds the account's entitlements by state
 /// (`userEntitlements.<object id>`) and their definitions (`definitions.<app id>`); the account's own apps are those
-/// `Installed`, the rest being Teams' built-in ones (`InstalledAndPermanent`, `InstalledAndDeprecated`).
+/// `Installed` or `PreConsented`, as "Manage your apps" lists them, the rest being Teams' built-in ones
+/// (`InstalledAndPermanent`, `InstalledAndDeprecated`) or the store's offers (`Featured`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UserApps;
 
@@ -38,7 +39,7 @@ impl UserApps {
             .flatten()
             .collect();
         let definitions = value.get("definitions");
-        installed(entitlements, |id| {
+        listed(entitlements, &["Installed", "PreConsented"], |id| {
             definitions.and_then(|definitions| definitions.get(id))
         })
     }
@@ -90,7 +91,7 @@ impl ChatApps {
             .into_iter()
             .flatten()
             .collect();
-        installed(entitlements, |id| {
+        listed(entitlements, &["Installed"], |id| {
             definitions
                 .iter()
                 .copied()
@@ -109,12 +110,21 @@ impl Read for ChatApps {
     }
 }
 
-/// The apps `Installed` among `entitlements`, each with the definition `definition` finds for its id, by name; one
-/// without a readable definition is left out.
-fn installed<'a>(entitlements: Vec<&Value>, definition: impl Fn(&str) -> Option<&'a Value>) -> Vec<StoreApp> {
+/// The apps among `entitlements` in one of `states`, each with the definition `definition` finds for its id, by name;
+/// one without a readable definition is left out.
+fn listed<'a>(
+    entitlements: Vec<&Value>,
+    states: &[&str],
+    definition: impl Fn(&str) -> Option<&'a Value>,
+) -> Vec<StoreApp> {
     let mut apps: Vec<StoreApp> = entitlements
         .into_iter()
-        .filter(|entitlement| entitlement.get("state").and_then(Value::as_str) == Some("Installed"))
+        .filter(|entitlement| {
+            entitlement
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| states.contains(&state))
+        })
         .filter_map(|entitlement| store_app(definition(entitlement.get("id")?.as_str()?)?))
         .collect();
     apps.sort_by_key(|app| app.app.name.to_lowercase());
@@ -491,6 +501,27 @@ mod tests {
             UserApps.endpoint().segments(),
             ["beta", "users", "apps", "aggregatedEntitlements"]
         );
+    }
+
+    #[test]
+    fn the_account_s_apps_include_those_it_has_pre_consented() {
+        let body = json!({"value": {
+            "userEntitlements": {"00000000-0000-4000-8000-00000000000a": [
+                {"id": "c", "state": "Installed"},
+                {"id": "a", "state": "PreConsented", "installedVersion": "2.2.0"},
+                {"id": "f", "state": "Featured"},
+                {"id": "d", "state": "InstalledAndDeprecated"},
+            ]},
+            "definitions": {
+                "a": {"id": "a", "name": "Made-up Approvals"},
+                "c": {"id": "c", "name": "Made-up Copilot"},
+                "f": {"id": "f", "name": "Made-up News"},
+                "d": {"id": "d", "name": "Made-up Wiki"},
+            },
+        }});
+        let apps = UserApps::read_answer(body.to_string().as_bytes());
+        let names: Vec<_> = apps.iter().map(|app| app.app.name.as_str()).collect();
+        assert_eq!(names, ["Made-up Approvals", "Made-up Copilot"]);
     }
 
     #[test]

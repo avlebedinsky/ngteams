@@ -1,5 +1,5 @@
-//! What Manage team's Apps tab, "More create team options" and the Apps page read (`docs/protocol/teams.md`), made
-//! up: a team's installed apps, the store's apps and their definitions, Teams' templates and one template's channels
+//! What "More create team options" and the Apps page read (`docs/protocol/teams.md`), made
+//! up: the store's apps and their definitions, Teams' templates and one template's channels
 //! and apps, and no Microsoft 365 group to make a team of; and the tile Made-up Updates' definition names, on the CDN's
 //! path (Activity draws it for the app's items; Made-up Helper names the same one, the other apps none). Requests not implemented by these fixtures remain
 //! unmatched.
@@ -12,7 +12,6 @@ use crate::chatsvc::json;
 /// The answer to `method` on `segments` when it is one of these; `None` for any other path.
 pub(crate) fn serve(method: &str, segments: &[&str], body: &[u8]) -> Option<ResponseTemplate> {
     match (method, segments) {
-        ("POST", [.., "teams", "apps", "aggregatedEntitlements"]) => Some(json(200, &entitlements())),
         ("POST", [.., "users", "apps", "store"]) => Some(json(200, &store())),
         ("POST", [.., "users", "apps", "batchedDefinitions"]) => Some(json(200, &json!(requested_definitions(body)))),
         ("GET", [.., "teamtemplates", "v1.0", "en-us"]) => Some(json(200, &templates())),
@@ -85,7 +84,8 @@ fn requested_definitions(body: &[u8]) -> Vec<Value> {
 }
 
 /// Made-up apps: a tab app, one with a bot, one Teams keeps for itself; the organization's app, with a bot to chat
-/// with and a page of its own; and one for chats and teams, with a bot and a message extension.
+/// with and a page of its own; one for chats and teams, with a bot and a message extension; and one the account has
+/// pre-consented to.
 pub(crate) fn definitions() -> Vec<Value> {
     vec![
         json!({ "id": "00000000-0000-4000-8000-00000000a001", "name": "Made-up Planner", "developerName": "Made-up Maker",
@@ -110,23 +110,11 @@ pub(crate) fn definitions() -> Vec<Value> {
                 "bots": [{ "id": "00000000-0000-4000-8000-00000000b005", "scopes": ["groupChat", "team"] }],
                 "inputExtensions": [{ "botId": "00000000-0000-4000-8000-00000000b005", "scopes": ["personal", "groupChat", "team"] }],
                 "configurableTabs": [{ "scopes": ["groupChat", "team"] }] }),
+        json!({ "id": "00000000-0000-4000-8000-00000000a006", "name": "Made-up Approvals", "developerName": "Made-up Maker",
+                "shortDescription": "Approvals made up", "version": "2.2.0", "accentColor": "#5b5fc7",
+                "bots": [{ "id": "00000000-0000-4000-8000-00000000b006", "scopes": ["groupChat", "team"] }],
+                "staticTabs": [{ "entityId": "approvals", "scopes": ["personal"] }] }),
     ]
-}
-
-fn entitlements() -> Value {
-    let team = json!([
-        { "id": "00000000-0000-4000-8000-00000000a001", "state": "Installed" },
-        { "id": "00000000-0000-4000-8000-00000000a002", "state": "Installed", "isNewGlobalPreInstalledApp": true },
-        { "id": "00000000-0000-4000-8000-00000000a003", "state": "InstalledAndPermanent" },
-    ]);
-    let definitions: serde_json::Map<String, Value> = definitions()
-        .into_iter()
-        .filter_map(|definition| Some((definition.get("id")?.as_str()?.to_owned(), definition)))
-        .collect();
-    json!({ "value": {
-        "teamsEntitlements": { "19:channel0001@thread.tacv2": team },
-        "definitions": definitions,
-    }})
 }
 
 fn store() -> Value {

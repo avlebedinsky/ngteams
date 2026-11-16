@@ -124,7 +124,7 @@ use serde_json::Value;
 use wiremock::matchers::{any, method};
 use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 
-pub use apps::AppPlace;
+pub use apps::{AppPlace, PRE_CONSENTED};
 pub use bots::{BotInvokeRecord, BotReply, bot_answer};
 pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
 pub use channels::{ChannelWrite, NOT_ADDED};

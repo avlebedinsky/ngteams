@@ -464,6 +464,7 @@ async fn a_team_s_apps_the_store_and_templates_are_read() {
 
 const HELPER: &str = "00000000-0000-4000-8000-00000000a004";
 const POLLS: &str = "00000000-0000-4000-8000-00000000a005";
+const PRE_CONSENTED: &str = teams_mock::PRE_CONSENTED;
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 
 #[tokio::test]
@@ -481,7 +482,7 @@ async fn the_apps_page_reads_the_store_s_sections_and_what_was_added() {
     assert_eq!(helper.app.name, "Made-up Helper");
     assert!(helper.definition.places().personal);
     assert!(listing.app("not listed").is_none());
-    assert!(requests.user_apps().await.unwrap().is_empty());
+    assert_eq!(app_ids(&requests.user_apps().await.unwrap()), [PRE_CONSENTED]);
     assert!(requests.chat_apps(CHAT).await.unwrap().is_empty());
     rig.mock.refuse_next("POST", "apps/store", 403).await;
     assert_eq!(requests.app_listing().await.unwrap(), teams_core::AppListing::default());
@@ -501,7 +502,7 @@ async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again()
     .await
     .unwrap();
     let mine = requests.user_apps().await.unwrap();
-    assert_eq!(mine.iter().map(|app| app.app.id.as_str()).collect::<Vec<_>>(), [HELPER]);
+    assert_eq!(app_ids(&mine), [PRE_CONSENTED, HELPER], "by name");
     write(TeamWrite::AddChatApp {
         chat: CHAT.to_owned(),
         app: definition(POLLS),
@@ -523,6 +524,10 @@ async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again()
         rig.mock.apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned())),
         [POLLS]
     );
+    assert!(
+        team_app_ids(&rig).await.contains(&POLLS.to_owned()),
+        "the team lists it at once"
+    );
 
     write(TeamWrite::RemovePersonalApp { app: HELPER.to_owned() })
         .await
@@ -539,23 +544,17 @@ async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again()
     })
     .await
     .unwrap();
-    assert!(requests.user_apps().await.unwrap().is_empty());
+    assert_eq!(app_ids(&requests.user_apps().await.unwrap()), [PRE_CONSENTED]);
     assert!(requests.chat_apps(CHAT).await.unwrap().is_empty());
+    assert!(!team_app_ids(&rig).await.contains(&POLLS.to_owned()));
     assert!(
         rig.mock
             .apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned()))
             .is_empty()
     );
 
-    let writes = rig
-        .sent(|path| path.ends_with("/entitlements") || path.contains("/entitlements/"))
-        .await;
-    let writes: Vec<(String, String)> = writes
-        .into_iter()
-        .map(|(method, path, _)| (method, path.replace(MT_PATH, "")))
-        .collect();
     assert_eq!(
-        writes,
+        entitlement_writes(&rig).await,
         [
             ("POST".to_owned(), "/beta/users/apps/entitlements".to_owned()),
             ("POST".to_owned(), format!("/beta/chats/{CHAT}/apps/entitlements")),
@@ -587,7 +586,72 @@ async fn an_app_the_service_refuses_to_add_is_told_and_not_listed() {
         matches!(refused, Err(EngineError::TeamNotChanged { .. })),
         "{refused:?}"
     );
+    assert_eq!(app_ids(&requests.user_apps().await.unwrap()), [PRE_CONSENTED]);
+}
+
+#[tokio::test]
+async fn a_pre_consented_app_and_a_team_s_first_app_are_listed_and_removed() {
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    let mine = requests.user_apps().await.unwrap();
+    assert_eq!(app_ids(&mine), [PRE_CONSENTED], "as Teams lists Approvals");
+    assert_eq!(mine[0].app.name, "Made-up Approvals");
+    requests
+        .team_write(
+            TeamWrite::RemovePersonalApp {
+                app: PRE_CONSENTED.to_owned(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
     assert!(requests.user_apps().await.unwrap().is_empty());
+
+    let planner = requests.team_apps(TEAM).await.unwrap()[0].id.clone();
+    requests
+        .team_write(
+            TeamWrite::RemoveApp {
+                team: TEAM.to_owned(),
+                app: planner.clone(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let left = requests.team_apps(TEAM).await.unwrap();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left.iter().all(|app| app.id != planner));
+    let writes = rig.sent(|path| path.contains("/entitlements/")).await;
+    let writes: Vec<String> = writes
+        .into_iter()
+        .map(|(method, path, _)| format!("{method} {}", path.replace(MT_PATH, "")))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            format!("DELETE /beta/users/apps/entitlements/{PRE_CONSENTED}"),
+            format!("DELETE /beta/teams/{TEAM}/apps/entitlements/{planner}"),
+        ]
+    );
+}
+
+/// The entitlement writes the mock took, as method and path under the middle tier.
+async fn entitlement_writes(rig: &Rig) -> Vec<(String, String)> {
+    rig.sent(|path| path.ends_with("/entitlements") || path.contains("/entitlements/"))
+        .await
+        .into_iter()
+        .map(|(method, path, _)| (method, path.replace(MT_PATH, "")))
+        .collect()
+}
+
+/// The ids of the apps the team's Apps tab lists, read now.
+async fn team_app_ids(rig: &Rig) -> Vec<String> {
+    let apps = rig.handle.requests().team_apps(TEAM).await.unwrap();
+    apps.into_iter().map(|app| app.id).collect()
+}
+
+fn app_ids(apps: &[teams_proto::StoreApp]) -> Vec<&str> {
+    apps.iter().map(|app| app.app.id.as_str()).collect()
 }
 
 #[tokio::test]
