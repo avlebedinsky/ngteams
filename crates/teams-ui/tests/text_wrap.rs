@@ -2,7 +2,7 @@
 //! opening punctuation (UAX #14 LB14), as in Teams, in the drawn wrap, the line wrapper and the clamped label's
 //! truncation alike.
 
-use gpui::{IndentAdjustment, LineFragment, TestAppContext, TruncateFrom, px};
+use gpui::{IndentAdjustment, LineFragment, ParentElement as _, Styled as _, TestAppContext, TruncateFrom, px};
 
 const TEXT: &str = "Add it to an [[account]] entry: 彼は「こんにちは」と言った, 他说‘你好’, 【【注意】】 （ｘ） \
     „Zitat“ and ((nested (brackets))) as ((((((((((((((((((((((((((((((((((((((((";
@@ -117,4 +117,45 @@ fn a_clamped_label_is_cut_where_its_lines_wrap(cx: &mut TestAppContext) {
             );
         }
     }
+}
+
+const TITLE: &str = "A made-up video title, much longer than any card has room for on four lines, so that the card \
+    must cut it where its last line ends and mark the cut, as Teams does with every text that has maxLines";
+
+/// The text a card's text block draws `width` wide, with `wrap` and `max_lines` as the card gives them.
+fn clamped_text(cx: &mut TestAppContext, wrap: bool, max_lines: Option<u32>, width: f32) -> String {
+    let text = gpui::StyledText::new(TITLE);
+    let layout = text.layout().clone();
+    let cx = cx.add_empty_window();
+    cx.draw(
+        gpui::point(px(0.0), px(0.0)),
+        gpui::size(
+            gpui::AvailableSpace::Definite(px(width)),
+            gpui::AvailableSpace::Definite(px(600.0)),
+        ),
+        |_, _| teams_ui::card_view::clamped(gpui::div().w(px(width)), wrap, max_lines).child(text),
+    );
+    layout.text()
+}
+
+#[gpui::test]
+fn a_card_text_cut_by_its_max_lines_ends_with_an_ellipsis(cx: &mut TestAppContext) {
+    for width in [180.0, 273.0, 416.0] {
+        let shown = clamped_text(cx, true, Some(4), width);
+        assert!(
+            shown.ends_with('\u{2026}'),
+            "four lines {width} px wide end with '…': {shown:?}"
+        );
+        assert!(shown.len() < TITLE.len(), "cut: {shown:?}");
+        let one = clamped_text(cx, false, None, width);
+        assert!(
+            one.ends_with('\u{2026}'),
+            "a text that does not wrap ends with '…': {one:?}"
+        );
+    }
+    assert_eq!(
+        clamped_text(cx, true, Some(40), 416.0),
+        TITLE,
+        "a text that fits its lines is not cut"
+    );
 }

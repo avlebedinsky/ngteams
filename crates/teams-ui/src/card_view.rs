@@ -666,13 +666,20 @@ fn text_view(draw: &Draw<'_>, path: &str, text: &TextBlock) -> AnyElement {
     let selector = draw.selector(path);
     styled(look, text.align, draw.palette)
         .debug_selector(move || selector)
-        .map(|div| match (text.wrap, text.max_lines) {
-            (_, Some(lines)) if text.wrap => div.line_clamp(usize::try_from(lines).unwrap_or(1)),
-            (true, _) => div,
-            (false, _) => div.line_clamp(1).overflow_hidden(),
-        })
+        .map(|div| clamped(div, text.wrap, text.max_lines))
         .child(rich_text::render(&id, &rendered, draw.palette))
         .into_any_element()
+}
+
+/// `div` with a text's lines limited as the card gives them (its `maxLines` when it wraps, else one line), a cut
+/// text's last line ended with "…" as Teams ends it.
+#[must_use]
+pub fn clamped(div: gpui::Div, wrap: bool, max_lines: Option<u32>) -> gpui::Div {
+    match (wrap, max_lines) {
+        (true, Some(lines)) => div.line_clamp(usize::try_from(lines).unwrap_or(1)).text_ellipsis(),
+        (true, None) => div,
+        (false, _) => div.line_clamp(1).text_ellipsis(),
+    }
 }
 
 /// A rich text block: its runs as one paragraph, each in its marks (bold for a bolder run, a link for one that opens),
