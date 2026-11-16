@@ -87,13 +87,15 @@ impl Shell {
         self.finish_opening_new_chat(window, cx);
     }
 
-    /// Back, Forward or the chats' pane again at New message: the new chat last left, else New message.
+    /// Back, Forward or the chats' pane again at New message: the new chat last left, its box taking the keyboard,
+    /// else New message.
     pub(super) fn resume_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.main == Main::NewChat || self.kept_new.is_empty() || self.core.read_only() {
             self.open_new_chat(window, cx);
             return;
         }
-        self.show_new_chat(|kept, _| kept.len().checked_sub(1), window, cx);
+        let view = self.show_new_chat(|kept, _| kept.len().checked_sub(1), window, cx);
+        Self::focus_new_chat_box(&view, window, cx);
         self.finish_opening_new_chat(window, cx);
     }
 
@@ -127,9 +129,15 @@ impl Shell {
             return;
         }
         let view = self.show_new_chat(|kept, _| kept.iter().position(is), window, cx);
+        Self::focus_new_chat_box(&view, window, cx);
+        self.finish_opening_new_chat(window, cx);
+    }
+
+    /// A kept new chat shown again gives its box the keyboard: a focus left on the box of the place it replaced
+    /// would reach no handler, not even Back's or Forward's.
+    fn focus_new_chat_box(view: &Entity<NewChat>, window: &mut Window, cx: &mut Context<Self>) {
         let compose = view.read(cx).compose(cx);
         compose.update(cx, |compose, cx| compose.focus(window, cx));
-        self.finish_opening_new_chat(window, cx);
     }
 
     /// Deletes the kept new chat `id` (its entity's) and its draft: its row's "Discard".

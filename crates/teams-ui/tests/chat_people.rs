@@ -448,6 +448,68 @@ fn a_kept_new_group_chat_s_row_answers_the_keyboard_and_back_returns_to_it() {
     assert_eq!(main(&shell, cx), Main::Chat(AC.to_owned()));
 }
 
+/// The kept new group chat is shown, its box has the keyboard, and what the user types goes into its draft.
+fn shown_with_box_focused(shell: &Entity<Shell>, new_chat: &Entity<NewChat>, cx: &mut VisualTestContext, way: &str) {
+    assert_eq!(main(shell, cx), Main::NewChat, "{way}");
+    let shown = cx.update(|_, cx| shell.read(cx).new_chat().map(Entity::entity_id));
+    assert_eq!(shown, Some(new_chat.entity_id()), "{way}");
+    let compose = cx.update(|_, cx| new_chat.read(cx).compose(cx));
+    assert!(
+        cx.update(|window, cx| compose.read(cx).focused(window, cx)),
+        "{way}: its box has the keyboard"
+    );
+    let before = cx.update(|_, cx| compose.read(cx).value(cx)).trim().to_owned();
+    cx.simulate_input("+");
+    draw(cx);
+    let after = cx.update(|_, cx| compose.read(cx).value(cx)).trim().to_owned();
+    assert_eq!(after, format!("{before}+"), "{way}: typed text goes to its draft");
+}
+
+#[test]
+fn each_way_back_to_a_kept_new_group_chat_gives_its_box_the_keyboard() {
+    let rig = seeded();
+    let (shell, new_chat, cx) = group_draft_left(&rig);
+    let sidebar = cx.update(|_, cx| shell.read(cx).sidebar().clone());
+    click(cx, "chat-row-draft-0");
+    shown_with_box_focused(&shell, &new_chat, cx, "its row's click");
+    open(&shell, cx, AC);
+    cx.update(|window, cx| sidebar.update(cx, |sidebar, cx| sidebar.focus_list(window, cx)));
+    cx.simulate_keystrokes("home down enter");
+    draw(cx);
+    shown_with_box_focused(&shell, &new_chat, cx, "Enter on its row");
+    open(&shell, cx, AC);
+    shell.update_in(cx, Shell::go_back);
+    draw(cx);
+    shown_with_box_focused(&shell, &new_chat, cx, "the Back arrow");
+    // the keys of the history go on from its box
+    cx.simulate_keystrokes("alt-right");
+    draw(cx);
+    assert_eq!(main(&shell, cx), Main::Chat(AC.to_owned()), "Alt+Right from its box");
+    cx.simulate_keystrokes("alt-left");
+    draw(cx);
+    shown_with_box_focused(&shell, &new_chat, cx, "Alt+Left");
+    cx.simulate_keystrokes("alt-right");
+    draw(cx);
+    cx.simulate_keystrokes("alt-left");
+    draw(cx);
+    cx.simulate_keystrokes("alt-left");
+    draw(cx);
+    assert!(matches!(main(&shell, cx), Main::Chat(_)), "Alt+Left from its box");
+    cx.simulate_keystrokes("alt-right");
+    draw(cx);
+    shown_with_box_focused(&shell, &new_chat, cx, "Alt+Right");
+    shell.update_in(cx, Shell::open_settings);
+    draw(cx);
+    shell.update_in(cx, Shell::go_back);
+    draw(cx);
+    shown_with_box_focused(&shell, &new_chat, cx, "Back from Settings");
+    assert_eq!(
+        cx.update(|_, cx| new_chat.read(cx).compose(cx).read(cx).value(cx))
+            .trim(),
+        "half a thought++++++"
+    );
+}
+
 #[test]
 fn a_group_chat_s_add_people_sends_them_with_the_history_chosen() {
     let rig = seeded();
