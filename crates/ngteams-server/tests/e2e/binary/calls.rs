@@ -98,7 +98,12 @@ pub(super) async fn loudness(sides: &[(&Phone, teams_media::tone::Tone)]) -> Vec
 
 /// Each side's speaker played the other's tone in the last [`TALK`] of the call, or in a later one after a loaded
 /// host's dip ([`loudness`]).
-pub(super) async fn heard_each_other(a: &Phone, a_tone: teams_media::tone::Tone, b: &Phone, b_tone: teams_media::tone::Tone) {
+pub(super) async fn heard_each_other(
+    a: &Phone,
+    a_tone: teams_media::tone::Tone,
+    b: &Phone,
+    b_tone: teams_media::tone::Tone,
+) {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let heard = loudness(&[(a, b_tone), (b, a_tone)]).await;
     let (a_heard, b_heard) = (heard[0], heard[1]);

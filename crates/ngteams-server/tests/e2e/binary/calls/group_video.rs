@@ -47,7 +47,8 @@ const fn tone(hz: f32, amplitude: f32) -> Tone {
 }
 
 /// Four people's tones: none a low harmonic of another's (a clipped mix has odd harmonics).
-pub(in crate::binary) const TONES: [Tone; 4] = [tone(440.0, 0.5), tone(660.0, 0.5), tone(880.0, 0.5), tone(1170.0, 0.5)];
+pub(in crate::binary) const TONES: [Tone; 4] =
+    [tone(440.0, 0.5), tone(660.0, 0.5), tone(880.0, 0.5), tone(1170.0, 0.5)];
 
 const fn camera(width: u32, height: u32, fps: u32) -> PatternCamera {
     PatternCamera { width, height, fps }
@@ -300,7 +301,11 @@ pub(in crate::binary) async fn group_chat(first: &Phone, others: &[&Phone], quie
 }
 
 /// `caller` starts the call in `chat`; each of `answerers` answers its ring. Each one's call id, the caller's first.
-pub(in crate::binary) async fn start_and_answer(caller: &mut Phone, answerers: &mut [&mut Phone], chat: &str) -> Vec<CallId> {
+pub(in crate::binary) async fn start_and_answer(
+    caller: &mut Phone,
+    answerers: &mut [&mut Phone],
+    chat: &str,
+) -> Vec<CallId> {
     let marks: Vec<usize> = answerers.iter().map(|phone| phone.mark()).collect();
     let placed = caller.mark();
     let call = caller.act(CallAction::Call { chat: chat.to_owned() }).await;
