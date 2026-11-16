@@ -444,13 +444,21 @@ impl Talk {
 /// The chat tells the call: its start, and its end with both in it.
 async fn chat_tells_the_call(node: &TestServer, reader: &Account, chat: &str) {
     let reader = reader.client(node);
-    let page = ChatReads::new(&reader).messages(chat, 10).await.unwrap();
-    let events: Vec<&str> = page
-        .messages
-        .iter()
-        .filter(|message| message.message_type.as_str() == "Event/Call")
-        .map(|message| message.content.as_str())
-        .collect();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let events = loop {
+        let page = ChatReads::new(&reader).messages(chat, 10).await.unwrap();
+        let events: Vec<String> = page
+            .messages
+            .iter()
+            .filter(|message| message.message_type.as_str() == "Event/Call")
+            .map(|message| message.content.clone())
+            .collect();
+        // the server writes the end to the chat after it tells the parties the call ended
+        if events.len() >= 2 || tokio::time::Instant::now() > deadline {
+            break events;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
     assert_eq!(events.len(), 2, "{events:?}");
     assert!(
         events[0].contains("<ended/>") && events[0].contains("count=\"2\""),
