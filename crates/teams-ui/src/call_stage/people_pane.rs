@@ -173,6 +173,7 @@ impl CallStage {
                     &name,
                 ),
                 false,
+                palette,
             ))
             .child(div().flex_1().min_w_0().truncate().child(name))
             .child(
@@ -269,6 +270,7 @@ impl CallStage {
             .child(hand_ring(
                 faces::small_face(&self.faces, (&format!("call-roster-added-{index}"), &mri), &name),
                 false,
+                palette,
             ))
             .child(
                 div()
@@ -474,7 +476,12 @@ fn signs(signs: Signs, palette: Palette) -> gpui::Div {
                 .bg(rgb(palette.hover))
                 .text_xs()
                 .when(rank > 0, |chip| chip.child(SharedString::from(rank.to_string())))
-                .child(Glyph::HAND.icon().size(px(14.0)).text_color(rgb(gallery::HAND_COLOUR)))
+                .child(
+                    Glyph::HAND
+                        .icon()
+                        .size(px(14.0))
+                        .text_color(rgb(gallery::hand_colour(palette))),
+                )
         }))
         .child(if muted {
             Glyph::MIC_OFF
@@ -507,21 +514,21 @@ fn roster_row(
         .flex()
         .items_center()
         .gap_3()
-        .child(hand_ring(avatar, shown.hand.is_some()))
+        .child(hand_ring(avatar, shown.hand.is_some(), palette))
         .child(name_and_role(name, shown.organizer, palette))
         .child(signs(shown, palette))
         .into_any_element()
 }
 
 /// A row's avatar, ringed in Teams' raised-hand gold while `raised`.
-fn hand_ring(avatar: impl IntoElement, raised: bool) -> gpui::Div {
+fn hand_ring(avatar: impl IntoElement, raised: bool, palette: Palette) -> gpui::Div {
     div()
         .flex_none()
         .p(px(2.0))
         .rounded_full()
         .border_2()
         .border_color(if raised {
-            rgb(gallery::HAND_COLOUR)
+            rgb(gallery::hand_colour(palette))
         } else {
             gpui::transparent_black().into()
         })
@@ -597,7 +604,7 @@ fn self_row(
         .flex()
         .items_center()
         .gap_3()
-        .child(hand_ring(mark, shown.hand.is_some()))
+        .child(hand_ring(mark, shown.hand.is_some(), palette))
         .child(name_and_role(name, shown.organizer, palette))
         .child(signs(shown, palette))
         .into_any_element()

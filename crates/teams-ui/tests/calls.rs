@@ -18,6 +18,9 @@ pub mod common;
 /// The faces a call shows: pictures, else initials.
 #[path = "calls/faces.rs"]
 mod faces;
+/// Raised hands on the tiles, numbered as the People pane numbers them.
+#[path = "calls/hands.rs"]
+mod hands;
 /// The Call health pane, from More → Settings.
 #[path = "calls/health.rs"]
 mod health;

@@ -3,7 +3,8 @@
 //! (`common`), the people's profile pictures made-up portraits. Each scene is a call of its own: a 1:1 call with and
 //! without pictures (the other one's tile and the account's self view), ringing with the other one's picture, a group
 //! call whose participants have a picture or not (one speaking, one muted with a hand up), the same with People open,
-//! and the group call in Teams Dark. The test runs itself again inside the sandbox per scene; the parent screenshots
+//! the group call in Teams Dark, and three tiles with two hands raised in turn (Teams Light and Dark, and with the
+//! account's own hand). The test runs itself again inside the sandbox per scene; the parent screenshots
 //! each window into `target/ui-shots/call-faces-*.png`.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -55,7 +56,7 @@ const WAIT: Duration = Duration::from_secs(20);
 const READY_FRAMES: usize = 30;
 
 /// The scenes, each screenshotted as `call-faces-<name>.png`.
-const SCENES: [&str; 7] = [
+const SCENES: [&str; 10] = [
     "one-to-one-pictures",
     "one-to-one-initials",
     "ringing-picture",
@@ -63,6 +64,9 @@ const SCENES: [&str; 7] = [
     "group-people",
     "group-dark",
     "group-speaker",
+    "group-hands",
+    "group-hands-dark",
+    "group-hands-self",
 ];
 
 pub(super) fn main() -> ExitCode {
@@ -332,7 +336,9 @@ fn open(scene: String, cx: &mut App) {
             CallStatus::Connected
         };
         let _ = send.send(Event::Call { call, status });
-        if group {
+        if scene.starts_with("group-hands") {
+            hands(&send, call, scene.ends_with("-self"), cx).await;
+        } else if group {
             let view = CallView {
                 participants: vec![
                     participant(LAB_B, "Ben Bright", (false, false, false)),
@@ -350,6 +356,36 @@ fn open(scene: String, cx: &mut App) {
         mem::forget((bridge, send));
     })
     .detach();
+}
+
+/// Three tiles, the hands raised in turn: Dan's first, then Ben's (or, with `own`, the account's), each its own roster
+/// delivery so the line of hands has its order.
+async fn hands(send: &mpsc::UnboundedSender<Event>, call: CallId, own: bool, cx: &mut gpui::AsyncApp) {
+    let roster = |ben: bool| CallView {
+        participants: vec![
+            participant(LAB_B, "Ben Bright", (false, false, ben)),
+            participant(LAB_D, "Dan Dee", (false, true, true)),
+        ],
+        speaking: false,
+        hearing: true,
+    };
+    let _ = send.send(Event::CallParticipants {
+        call,
+        view: roster(false),
+    });
+    cx.background_executor().timer(Duration::from_millis(200)).await;
+    let _ = send.send(if own {
+        Event::CallOwn {
+            call,
+            hand_raised: true,
+            organizer: false,
+        }
+    } else {
+        Event::CallParticipants {
+            call,
+            view: roster(true),
+        }
+    });
 }
 
 /// The call window as `scene` shows it, then `ready` once it settled.

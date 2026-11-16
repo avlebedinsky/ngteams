@@ -1,7 +1,7 @@
 //! Calls of ten people and more, drawn on the real platform in the UI sandbox (`harness = false`: GPUI runs on the
 //! process's main thread), for their screenshots: the call window over the fake engine (`common`), a group call of
 //! 10, 16, 25 and 50 made-up participants, some with their camera on (a test pattern), the rest showing their
-//! initials; in the gallery, in the speaker view (alone and beside the People pane) and with someone's screen shared;
+//! initials, two with a hand up; in the gallery (also in Teams Dark), in the speaker view (alone and beside the People pane) and with someone's screen shared;
 //! on a small, a laptop's and a full HD screen. The test runs itself again inside the sandbox per scene; the parent screenshots each window into
 //! `target/ui-shots/call-large-<scene>.png`.
 //!
@@ -35,7 +35,7 @@ use teams_ui::call_window::CallWindows;
 use teams_ui::calls::{self, Ask};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::ShellParts;
-use teams_ui::theme::{Appearance, LIGHT_KEY};
+use teams_ui::theme::{Appearance, DARK_KEY, LIGHT_KEY};
 use teams_ui::video::VideoFeed;
 use teams_ui::window::KitRoot;
 use teams_ui::{Bridge, Core, Models, ViewTrace};
@@ -61,9 +61,10 @@ const SCREENS: [(&str, (u32, u32)); 3] = [("small", (800, 560)), ("laptop", (128
 
 /// The scenes, each screenshotted on each screen as `call-large-<scene>-<screen>.png`: how the stage is laid out and
 /// how many are in the call.
-const SCENES: [&str; 9] = [
+const SCENES: [&str; 10] = [
     "gallery-10",
     "gallery-16",
+    "gallery+dark-16",
     "gallery-25",
     "gallery-50",
     "speaker-25",
@@ -180,7 +181,7 @@ fn seed(core: &FakeCore, count: usize) {
 }
 
 /// The roster of `count` others: the first nine with their camera on, each on a line of its own, one speaking, a few
-/// muted, one with a hand up, the one sharing while `sharing`.
+/// muted, two with a hand up (one with its camera on, one without), the one sharing while `sharing`.
 fn roster(count: usize, sharing: bool) -> CallView {
     CallView {
         participants: (1..=count)
@@ -195,7 +196,7 @@ fn roster(count: usize, sharing: bool) -> CallView {
                 line: (n % 2 == 1 && n < 19).then_some(n / 2 + 1),
                 speaking: n == 3,
                 muted: n % 3 == 0,
-                hand_raised: n == 5,
+                hand_raised: n == 5 || n == 8,
                 organizer: n == 1,
                 joined: None,
                 sharing: sharing && n == 2,
@@ -272,9 +273,10 @@ fn open(scene: &str, cx: &mut App) {
     let models = Models::with_video_calls(Some(teams_proto::Mri::new(ECHO)), feed.clone(), cx);
     let shared: Arc<dyn Core> = core;
     let bridge = cx.new(|cx| Bridge::start(source, shared, models.clone(), cx));
+    let theme = if layout.ends_with("+dark") { DARK_KEY } else { LIGHT_KEY };
     let appearance = Appearance {
         follow_system: false,
-        theme: LIGHT_KEY,
+        theme,
         ..Appearance::default()
     };
     teams_ui::theme::set_appearance(&appearance, cx);

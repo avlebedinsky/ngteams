@@ -81,7 +81,7 @@ impl CallStage {
             None
         } else {
             let face = self.own_face(call, palette, cx);
-            Some(self_view(active, face, true, palette, cx))
+            Some(self_view(active, (face, self.own_hand(active)), true, palette, cx))
         };
         div()
             .debug_selector(|| "call-stage".to_owned())
@@ -214,7 +214,7 @@ impl CallStage {
         let mut strip: Vec<AnyElement> = self.page_tiles(tiles, page, (call, false), palette, cx);
         if own == 1 {
             let face = self.own_face(call, palette, cx);
-            strip.push(self_view(active, face, false, palette, cx));
+            strip.push(self_view(active, (face, self.own_hand(active)), false, palette, cx));
         }
         div()
             .debug_selector(|| "call-share-stage".to_owned())
@@ -278,7 +278,7 @@ impl CallStage {
         let mut drawn = self.page_tiles(tiles, page, (call, menus), palette, cx);
         if in_gallery {
             let face = self.own_face(call, palette, cx);
-            drawn.push(self_view(active, face, false, palette, cx));
+            drawn.push(self_view(active, (face, self.own_hand(active)), false, palette, cx));
         }
         let grid_height = if page.pages > 1 { height - PAGER_HEIGHT } else { height };
         let (columns, tile) = pages::arrange(drawn.len(), (width, grid_height));
@@ -318,7 +318,7 @@ impl CallStage {
         let mut others = self.page_tiles(tiles, page, (call, true), palette, cx);
         if in_strip {
             let face = self.own_face(call, palette, cx);
-            others.push(self_view(active, face, false, palette, cx));
+            others.push(self_view(active, (face, self.own_hand(active)), false, palette, cx));
         }
         speaker(
             selector,
@@ -446,7 +446,9 @@ impl CallStage {
                     name: participant_name(participant, people),
                     speaking: participant.speaking,
                     muted: participant.muted,
-                    hand: participant.hand_raised,
+                    hand: participant
+                        .hand_raised
+                        .then(|| self.hand_rank(&participant.mri).unwrap_or(0)),
                     video_on: participant.video_on,
                     video: participant.line.map(Tile::Line),
                 })
@@ -475,7 +477,7 @@ impl CallStage {
                 name: name.clone(),
                 speaking: false,
                 muted: false,
-                hand: false,
+                hand: None,
                 video_on: false,
                 video: one.then_some(Tile::REMOTE),
             })
@@ -571,6 +573,11 @@ impl CallStage {
                 self.hands.push(mri.to_owned());
             }
         }
+    }
+
+    /// Where the account's own hand stands in the line of hands up, as [`Self::hand_rank`] tells it.
+    fn own_hand(&self, active: &ActiveCall) -> Option<usize> {
+        active.hand_raised.then(|| self.hand_rank(self.core.me()).unwrap_or(0))
     }
 
     /// Where `mri`'s hand stands in the line of hands up, from 1; none while it is down.
@@ -706,9 +713,10 @@ fn pager(prefix: &'static str, page: Page, palette: Palette, cx: &mut Context<Ca
     )
 }
 
-/// One tile: `face` (its video when a line shows it, else its person's picture or initials); its name with its microphone muted and a raised
-/// hand; a border in the brand colour while it speaks (Teams' gold while its hand is up); its menu on hover when the
-/// stage has more than one (`menus`), its pin while `pinned`.
+/// One tile: `face` (its video when a line shows it, else its person's picture or initials); its name with its
+/// microphone muted; its raised hand with its place in the line at its top left and a border in Teams' gold, else a
+/// border in the brand colour while it speaks; its menu on hover when the stage has more than one (`menus`), its pin
+/// while `pinned`.
 fn tile_view(
     tile: StageTile,
     face: AnyElement,
@@ -730,13 +738,14 @@ fn tile_view(
     let menu = mri
         .filter(|_| menus)
         .map(|mri| tile_menu(&selector, mri, pinned, &group, palette, cx));
-    let border = if hand {
-        HAND_COLOUR
+    let border = if hand.is_some() {
+        hand_colour(palette)
     } else if speaking {
         palette.brand
     } else {
         palette.rail
     };
+    let chip = hand.map(|rank| hand_chip(&selector, rank, palette));
     let tile = div()
         .debug_selector(move || selector.clone())
         .group(group)
@@ -753,14 +762,59 @@ fn tile_view(
         .border_2()
         .border_color(rgb(border))
         .child(face)
-        .child(name_tag(name, (speaking, muted, hand, pinned), palette))
+        .child(name_tag(name, (speaking, muted, pinned), palette))
+        .children(chip)
         .children(menu);
     // while its person speaks, a glow in the brand colour swells and settles round it
     crate::motion::breathe(tile, glow_id, speaking, palette, cx)
 }
 
-/// Teams' raised hand's gold, px colour.
-pub(super) const HAND_COLOUR: u32 = 0x00f2_c94c;
+/// Teams' raised hand's gold in a light theme, px colour.
+const HAND_LIGHT: u32 = 0x00ea_a300;
+/// Teams' raised hand's gold in a dark theme, px colour.
+const HAND_DARK: u32 = 0x00ef_b839;
+
+/// Teams' raised hand's gold in `palette`: the border of a tile and the ring of a People row while a hand is up.
+pub(super) fn hand_colour(palette: Palette) -> u32 {
+    if theme::palette_is_dark(palette) {
+        HAND_DARK
+    } else {
+        HAND_LIGHT
+    }
+}
+
+/// A raised hand at a tile's top left, as Teams shows it: a pill with the hand's place in the line of hands (none
+/// while the line does not know it) and the hand.
+fn hand_chip(tile: &str, rank: usize, palette: Palette) -> AnyElement {
+    let dark = theme::palette_is_dark(palette);
+    let (ground, edge, text) = if dark {
+        (0x0024_2424, 0x0066_6666, 0x00ff_ffff)
+    } else {
+        (0x00fa_fafa, 0x00d1_d1d1, 0x0025_2423)
+    };
+    let selector = format!("{tile}-hand-{rank}");
+    div()
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .top(px(10.0))
+        .left(px(10.0))
+        .h(px(27.0))
+        .pl(px(7.0))
+        .pr(px(4.0))
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .rounded_full()
+        .bg(rgb(ground))
+        .border_1()
+        .border_color(rgb(edge))
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(text))
+        .when(rank > 0, |chip| chip.child(SharedString::from(rank.to_string())))
+        .child(Glyph::HAND.icon().size(px(16.0)).text_color(rgb(hand_colour(palette))))
+        .into_any_element()
+}
 
 /// A tile's "More options" at its top right, shown while the pointer is over the tile: Pin for me, or Unpin.
 fn tile_menu(
@@ -817,13 +871,9 @@ fn tile_menu(
         .into_any_element()
 }
 
-/// A tile's name at its bottom left: a pin while pinned, a raised hand, its name, a speaker while it speaks and its
-/// microphone while muted.
-fn name_tag(
-    name: SharedString,
-    (speaking, muted, hand, pinned): (bool, bool, bool, bool),
-    palette: Palette,
-) -> gpui::Div {
+/// A tile's name at its bottom left: a pin while pinned, its name, a speaker while it speaks and its microphone while
+/// muted.
+fn name_tag(name: SharedString, (speaking, muted, pinned): (bool, bool, bool), palette: Palette) -> gpui::Div {
     div()
         .absolute()
         .bottom_2()
@@ -838,9 +888,6 @@ fn name_tag(
         .bg(rgb(palette.surface))
         .text_xs()
         .when(pinned, |tag| tag.child(Glyph::PIN.icon().size(px(12.0))))
-        .when(hand, |tag| {
-            tag.child(Glyph::HAND.icon().size(px(12.0)).text_color(rgb(HAND_COLOUR)))
-        })
         .child(div().truncate().child(name))
         .when(speaking && !muted, |tag| {
             tag.child(Glyph::VOLUME.icon().size(px(12.0)).text_color(rgb(palette.brand)))
@@ -894,7 +941,7 @@ fn share_content(
                         .h(drawn.size.height),
                     None => corner.inset_0(),
                 })
-                .child(name_tag(sharer, (false, false, false, false), palette)),
+                .child(name_tag(sharer, (false, false, false), palette)),
         )
         .into_any_element()
 }
@@ -903,12 +950,18 @@ fn share_content(
 const SELF_TILE: &str = "call-participant-self";
 
 /// The account's own tile: floating at the stage's bottom right (`floating`), else filling its place in a strip;
-/// `face` (its self view while the camera sends, else its picture or initials, as Teams shows them); a border while it speaks; its microphone while muted and its hand
-/// while raised.
-fn self_view(active: &ActiveCall, face: AnyElement, floating: bool, palette: Palette, cx: &App) -> AnyElement {
+/// `face` (its self view while the camera sends, else its picture or initials, as Teams shows them); its raised `hand`
+/// with its place in the line and a gold border, else a border while it speaks; its microphone while muted.
+fn self_view(
+    active: &ActiveCall,
+    (face, hand): (AnyElement, Option<usize>),
+    floating: bool,
+    palette: Palette,
+    cx: &App,
+) -> AnyElement {
     let speaking = active.view.speaking && !active.muted;
-    let border = if active.hand_raised {
-        HAND_COLOUR
+    let border = if hand.is_some() {
+        hand_colour(palette)
     } else if speaking {
         palette.brand
     } else {
@@ -935,9 +988,10 @@ fn self_view(active: &ActiveCall, face: AnyElement, floating: bool, palette: Pal
         .child(face)
         .child(name_tag(
             SharedString::from("You"),
-            (speaking, active.muted, active.hand_raised, false),
+            (speaking, active.muted, false),
             palette,
-        ));
+        ))
+        .children(hand.map(|rank| hand_chip(SELF_TILE, rank, palette)));
     crate::motion::breathe(own, "call-self-speaking", speaking, palette, cx)
 }
 

@@ -175,18 +175,15 @@ pub struct StageParts {
 }
 
 /// One tile of the stage: its test selector, who (by MRI, when known), its name, whether it speaks, its microphone
-/// muted and its hand raised, and the video line showing it.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each is a sign of its own the tile shows of its person"
-)]
+/// muted, where its raised hand stands in the line of hands, and the video line showing it.
 struct StageTile {
     selector: String,
     mri: Option<String>,
     name: SharedString,
     speaking: bool,
     muted: bool,
-    hand: bool,
+    /// While its hand is up: its place in the line of hands, from 1 (0 while the line does not know it yet).
+    hand: Option<usize>,
     /// Its camera is on (View's Show videos first leads with these).
     video_on: bool,
     video: Option<Tile>,
