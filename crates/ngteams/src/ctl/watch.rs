@@ -197,7 +197,7 @@ pub fn ui_state<S: BuildHasher>(shown: &UiShown, upns: &HashMap<String, String, 
         Some(Main::Settings) => (View::Settings, None),
         Some(Main::Search) => (View::Search, None),
         Some(Main::TeamsPage | Main::ManageTeam(_) | Main::JoinTeam | Main::CreateTeamMore) => (View::Teams, None),
-        Some(Main::Nothing | Main::Workflows | Main::NewChat) | None => (View::Other, None),
+        Some(Main::Nothing | Main::Workflows | Main::Apps | Main::NewChat) | None => (View::Other, None),
     };
     UiState {
         shown: shown.account.as_ref().and_then(|mri| upns.get(mri).cloned()),

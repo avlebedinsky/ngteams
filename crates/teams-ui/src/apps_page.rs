@@ -737,7 +737,7 @@ impl AppsPage {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(self.picture(store, 18.0, palette))
+                .child(app_picture(store, self.picture_of(&store.app.id), 18.0, palette))
                 .child(div().flex_1().text_sm().child("Personal app"))
                 .when(!read_only, |line| {
                     line.child(selected_by(

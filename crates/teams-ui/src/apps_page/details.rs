@@ -266,13 +266,14 @@ impl AppDetailsDialog {
                 AppCapability::Tab => Glyph::FILE,
             };
             div()
-                .w(px(220.0))
+                .w(px(230.0))
                 .flex()
                 .gap_2()
-                .child(glyph.icon().size(px(16.0)))
+                .child(glyph.icon().size(px(16.0)).flex_none())
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .child(div().font_weight(gpui::FontWeight::BOLD).child(capability.name()))
@@ -398,11 +399,10 @@ impl AppDetailsDialog {
             .border_color(rgb(palette.border))
             .flex()
             .flex_wrap()
-            .gap_1()
             .text_sm()
-            .child(format!("By using {}, you agree to the", self.store.app.name))
+            .child(format!("By using {}, you agree to the\u{a0}", self.store.app.name))
             .child(link("app-details-privacy", "privacy policy", definition.privacy_url()))
-            .child(",")
+            .child(",\u{a0}")
             .child(link("app-details-terms-of-use", "terms of use", definition.terms_url()))
             .child(", and permissions.")
     }

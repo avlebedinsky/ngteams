@@ -2364,14 +2364,6 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
         if let Some(details) = details {
             details.update(cx, |details, cx| details.add_to(false, cx));
         }
-        let place = shell
-            .read(cx)
-            .team_dialog()
-            .cloned()
-            .and_then(|dialog| dialog.downcast::<teams_ui::apps_page::place::AddToPlaceDialog>().ok());
-        if let Some(place) = place {
-            place.update(cx, |place, cx| place.choose(AB_CHAT.to_owned(), cx));
-        }
     }),
     ("apps-place-added", |shell, _, cx| {
         let place = shell
@@ -2380,7 +2372,10 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
             .cloned()
             .and_then(|dialog| dialog.downcast::<teams_ui::apps_page::place::AddToPlaceDialog>().ok());
         if let Some(place) = place {
-            place.update(cx, teams_ui::apps_page::place::AddToPlaceDialog::go);
+            place.update(cx, |place, cx| {
+                place.choose(AB_CHAT.to_owned(), cx);
+                place.go(cx);
+            });
         }
     }),
     // "Manage your apps": the app added above, opened to where it is, and Remove's question
