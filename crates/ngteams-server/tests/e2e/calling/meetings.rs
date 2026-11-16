@@ -603,3 +603,115 @@ async fn a_meeting_is_joined_by_its_id_and_passcode_and_a_wrong_passcode_finds_n
         shut_down(vec![ada, bert, cora], mixed).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_who_comes_before_the_organizer_waits_until_it_comes_and_lets_it_in() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let event = schedule(&ada, &[&bert]).await;
+        admit_automatically(&mixed, &ada, &event, "OrganizerOnly").await;
+        let join = join_of(&event);
+        // nobody is in the meeting yet: the invited guest waits all the same
+        let b_call = bert.engine.call(join.clone()).await;
+        bert.engine.status(b_call, &CallStatus::Lobby).await;
+        let id = mixed.open_call().await;
+        let a_call = joined(&mut ada, &join).await;
+        assert_eq!(
+            mixed.open_call().await,
+            id,
+            "the organizer comes into the call the guest waits in"
+        );
+        let waiting = bert.engine.mri.clone();
+        let admit = CallAction::Lobby {
+            call: a_call,
+            waiting: Mri::new(waiting.clone()),
+            admit: true,
+        };
+        ada.engine.call(admit).await;
+        bert.engine.status(b_call, &CallStatus::Connected).await;
+        mixed.connected(&id, 2).await;
+        // the guest who waited and was let in leaves; the meeting goes on until the organizer leaves
+        leave_all(&mut [&mut bert, &mut ada], &[b_call, a_call]).await;
+        let calls = ngteams_server::calling::open_calls(&mixed.server().app.db)
+            .await
+            .unwrap();
+        assert!(calls.is_empty(), "{calls:?}");
+        shut_down(vec![ada, bert], mixed).await;
+    }
+}
+
+/// A raw calling request with `person`'s skypetoken.
+async fn raw(mixed: &Mixed, person: &Person, method: Method, path: &str, body: &serde_json::Value) -> u16 {
+    let session = mixed.server().session(&person.upn).await;
+    let token = session.skypetoken().await.unwrap();
+    reqwest::Client::new()
+        .request(method, mixed.server().url(path))
+        .header("x-skypetoken", token.token.expose())
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_meetings_hosts_let_in_or_mute_and_an_unknown_meeting_is_none() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let dan = Person::new(&mixed, "Dan", C_TONE).await;
+        let event = schedule(&ada, &[&bert]).await;
+        let join = join_of(&event);
+        let a_call = joined(&mut ada, &join).await;
+        let b_call = joined(&mut bert, &join).await;
+        ada.engine
+            .call(CallAction::MeetingOption {
+                call: a_call,
+                option: teams_proto::MeetingOption::Present(false),
+            })
+            .await;
+        meeting_is(&mut bert, b_call, |state| state.attendee).await;
+        let calls = ngteams_server::calling::open_calls(&mixed.server().app.db)
+            .await
+            .unwrap();
+        let conversation = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", calls[0].conversation);
+        let at = |op: &str| format!("{conversation}/{op}");
+        let to = |person: &Person| json!({"participants": {"from": {}, "to": [{"id": person.engine.mri}]}});
+        // someone who isn't in it finds no call; an attendee hosts nothing
+        assert_eq!(raw(&mixed, &dan, Method::POST, &at("admit"), &to(&bert)).await, 404);
+        assert_eq!(raw(&mixed, &bert, Method::POST, &at("admit"), &to(&dan)).await, 403);
+        assert_eq!(
+            raw(&mixed, &bert, Method::POST, &at("removeParticipant"), &to(&ada)).await,
+            403
+        );
+        let all = json!({"scope": "all", "muteParticipants": [], "mediaTypes": ["audio"]});
+        assert_eq!(raw(&mixed, &bert, Method::POST, &at("mute"), &all).await, 403);
+        assert_eq!(raw(&mixed, &ada, Method::POST, &at("admit"), &json!({})).await, 400);
+        // the organizer mutes one person by name (Teams' client offers only Mute all)
+        let one = json!({"scope": "specified", "muteParticipants": [{"id": bert.engine.mri}], "mediaTypes": ["audio"]});
+        assert_eq!(raw(&mixed, &ada, Method::POST, &at("mute"), &one).await, 202);
+        muted_by_organizer(&mut bert, b_call).await;
+        // a meeting chat no meeting has, and an id and passcode of none
+        let offer = json!({"blob": "v=0", "contentType": "application/sdp-ngc-1.0"});
+        let unknown = json!({
+            "participants": {"from": {"id": dan.engine.mri}, "to": []},
+            "groupChat": {"threadId": "19:meeting_none@thread.v2", "messageId": "0"},
+            "meetingInfo": {"organizerId": ada.id(), "tenantId": "t"},
+            "callInvitation": {"mediaContent": offer},
+        });
+        let start = "/flightproxy/api/v2/epconv";
+        assert_eq!(raw(&mixed, &dan, Method::POST, start, &unknown).await, 404);
+        let no_chat = json!({
+            "participants": {"from": {"id": dan.engine.mri}, "to": []},
+            "meetingInfo": {"organizerId": ada.id(), "tenantId": "t"},
+            "callInvitation": {"mediaContent": offer},
+        });
+        assert_eq!(raw(&mixed, &dan, Method::POST, start, &no_chat).await, 501);
+        leave_all(&mut [&mut ada, &mut bert], &[a_call, b_call]).await;
+        shut_down(vec![ada, bert, dan], mixed).await;
+    }
+}
