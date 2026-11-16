@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn someone_waits_with_its_offer_listed_in_the_lobby_and_turned_away_is_told_and_gone() {
+    fn someone_waits_with_its_offer_listed_in_the_lobby() {
         let mut call = meeting();
         let (d, out) = waits(&mut call, "d");
         assert_eq!(call.party(d).status, Status::Lobby);
@@ -461,6 +461,12 @@ mod tests {
         assert!(entry["endpoints"]["ep-d"]["lobby"].is_object());
         assert!(entry["endpoints"]["ep-d"].get("call").is_none());
         assert_eq!(out.deliveries[3].body["participants"].as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn one_turned_away_from_the_lobby_is_told_and_gone_and_may_try_again() {
+        let mut call = meeting();
+        let (d, _) = waits(&mut call, "d");
         // in the call already: no wait
         let refused = call.wait(
             &party("b"),
@@ -488,6 +494,14 @@ mod tests {
         assert!(out.deliveries.is_empty());
         // it may try again, in the same seat
         assert_eq!(waits(&mut call, "d").0, d);
+    }
+
+    #[test]
+    fn an_add_rings_nobody_who_waits_in_the_lobby() {
+        let mut call = meeting();
+        let (d, _) = waits(&mut call, "d");
+        assert_eq!(call.reserve_added(&party("d"), "leg-d"), Err(Refusal::Forbidden));
+        assert_eq!(call.party(d).status, Status::Lobby);
     }
 
     #[test]
@@ -708,7 +722,7 @@ mod tests {
         );
         // the same options again tell nothing
         let mut out = Out::default();
-        call.set_controls(restricted, at(1_004_000), &mut out);
+        call.set_controls(restricted.clone(), at(1_004_000), &mut out);
         assert!(out.deliveries.is_empty());
         // a conversation names the options in effect; a group call's names none
         let answered = wire::conversation(ORIGIN, "emea", &call);
@@ -727,6 +741,13 @@ mod tests {
         assert_eq!(call.party(B).mute_version, 4);
         call.meeting = None;
         assert!(wire::conversation(ORIGIN, "emea", &call)["meetingDetails"].is_null());
-        call.set_controls(Controls::default(), at(1_006_000), &mut out);
+        // a group call goes by no saved options
+        let mut out = Out::default();
+        call.set_controls(restricted, at(1_006_000), &mut out);
+        assert!(out.deliveries.is_empty());
+        assert_eq!(
+            (call.party(B).mute_version, call.party(Seat::CALLER).mute_version),
+            (4, 0)
+        );
     }
 }

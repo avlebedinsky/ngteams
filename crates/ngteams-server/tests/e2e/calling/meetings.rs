@@ -366,8 +366,14 @@ async fn the_organizer_mutes_everyone_else_who_see_it_and_may_unmute_themselves(
         ada.engine.call(CallAction::MuteAll { call: a_call }).await;
         muted_by_organizer(&mut bert, b_call).await;
         muted_by_organizer(&mut cora, c_call).await;
-        muted_shown(&mut ada, a_call, &b, true).await;
-        muted_shown(&mut ada, a_call, &c, true).await;
+        // one roster can show both muted: one wait for both, so the first doesn't eat the second's
+        ada.engine
+            .view(a_call, |view| {
+                [&b, &c]
+                    .iter()
+                    .all(|mri| view.participants.iter().any(|party| party.mri == **mri && party.muted))
+            })
+            .await;
         let a = ada.engine.mri.clone();
         muted_shown(&mut bert, b_call, &a, false).await;
         // a muted participant unmutes itself, as Teams' "You've been muted" card lets it
@@ -492,15 +498,13 @@ async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ende
             .find(|(kind, text, _)| kind == "Event/Call" && text.contains("callStarted"))
             .unwrap_or_else(|| panic!("{listed:?}"));
         assert_eq!(started.2.as_deref(), Some("Sprint review"), "{listed:?}");
-        let b_call = joined(
-            &mut bert,
-            &CallAction::JoinChannel {
+        let b_call = bert
+            .engine
+            .call(CallAction::JoinChannel {
                 channel: channel.clone(),
-            },
-        )
-        .await;
-        let id = mixed.open_call().await;
-        mixed.connected(&id, 2).await;
+            })
+            .await;
+        // the roster with the organizer can come before the join's status: waited for first, so no wait eats it
         let organizer = ada.engine.mri.clone();
         bert.engine
             .view(b_call, |view| {
@@ -509,6 +513,8 @@ async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ende
                     .any(|party| party.mri == organizer && party.organizer)
             })
             .await;
+        let id = mixed.open_call().await;
+        mixed.connected(&id, 2).await;
         leave_all(&mut [&mut bert, &mut ada], &[b_call, a_call]).await;
         let listed = posts(&mixed, &bert, &channel).await;
         let (_, ended, _) = &listed[0];
@@ -690,6 +696,7 @@ async fn only_a_meetings_hosts_let_in_or_mute_and_an_unknown_meeting_is_none() {
         );
         let all = json!({"scope": "all", "muteParticipants": [], "mediaTypes": ["audio"]});
         assert_eq!(raw(&mixed, &bert, Method::POST, &at("mute"), &all).await, 403);
+        assert_eq!(raw(&mixed, &bert, Method::POST, &at("add"), &to(&ada)).await, 403);
         assert_eq!(raw(&mixed, &ada, Method::POST, &at("admit"), &json!({})).await, 400);
         // the organizer mutes one person by name (Teams' client offers only Mute all)
         let one = json!({"scope": "specified", "muteParticipants": [{"id": bert.engine.mri}], "mediaTypes": ["audio"]});
@@ -711,7 +718,71 @@ async fn only_a_meetings_hosts_let_in_or_mute_and_an_unknown_meeting_is_none() {
             "callInvitation": {"mediaContent": offer},
         });
         assert_eq!(raw(&mixed, &dan, Method::POST, start, &no_chat).await, 501);
+        // an invited attendee's hand-made start in the meeting's chat is no meeting of its own: neither a Meet now
+        // nor a plain group call is made there
+        let chat = event.meeting_chat.clone().unwrap();
+        let meet_now = json!({
+            "participants": {"from": {"id": bert.engine.mri}, "to": []},
+            "groupChat": {"threadId": chat, "messageId": "0"},
+            "conversationRequest": {"properties": {"enableGroupCallMeetupGeneration": true}},
+        });
+        assert_eq!(raw(&mixed, &bert, Method::POST, start, &meet_now).await, 400);
+        let plain = json!({
+            "participants": {"from": {"id": bert.engine.mri}, "to": []},
+            "groupChat": {"threadId": chat, "messageId": "0"},
+            "callInvitation": {"mediaContent": offer},
+        });
+        assert_eq!(raw(&mixed, &bert, Method::POST, start, &plain).await, 400);
+        let calls = ngteams_server::calling::open_calls(&mixed.server().app.db)
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
         leave_all(&mut [&mut ada, &mut bert], &[a_call, b_call]).await;
         shut_down(vec![ada, bert, dan], mixed).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_first_joins_at_once_make_one_meeting_call_and_a_channels_one_post() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let event = schedule(&ada, &[&bert]).await;
+        admit_automatically(&mixed, &ada, &event, "OrganizerOnly").await;
+        let join = join_of(&event);
+        // the organizer and a guest the lobby holds start the meeting's call at once
+        let (a_call, b_call) = tokio::join!(ada.engine.call(join.clone()), bert.engine.call(join.clone()));
+        ada.engine.status(a_call, &CallStatus::Connected).await;
+        bert.engine.status(b_call, &CallStatus::Lobby).await;
+        let id = mixed.open_call().await;
+        // the guest waits in the organizer's call: let in, both are in it
+        let admit = CallAction::Lobby {
+            call: a_call,
+            waiting: Mri::new(bert.engine.mri.clone()),
+            admit: true,
+        };
+        ada.engine.call(admit).await;
+        bert.engine.status(b_call, &CallStatus::Connected).await;
+        mixed.connected(&id, 2).await;
+        leave_all(&mut [&mut bert, &mut ada], &[b_call, a_call]).await;
+        // two Meet nows in one channel at once: one meeting, posted once
+        let channel = channel_of(&mixed, &ada, &[&bert]).await;
+        let meet_now = CallAction::MeetNow {
+            channel: channel.clone(),
+        };
+        let (a_call, b_call) = tokio::join!(ada.engine.call(meet_now.clone()), bert.engine.call(meet_now.clone()));
+        ada.engine.status(a_call, &CallStatus::Connected).await;
+        bert.engine.status(b_call, &CallStatus::Connected).await;
+        let id = mixed.open_call().await;
+        mixed.connected(&id, 2).await;
+        let listed = posts(&mixed, &bert, &channel).await;
+        let started = listed
+            .iter()
+            .filter(|(kind, text, _)| kind == "Event/Call" && text.contains("callStarted"))
+            .count();
+        assert_eq!(started, 1, "{listed:?}");
+        leave_all(&mut [&mut bert, &mut ada], &[b_call, a_call]).await;
+        shut_down(vec![ada, bert], mixed).await;
     }
 }
