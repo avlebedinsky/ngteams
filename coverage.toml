@@ -102,7 +102,7 @@ sha256 = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "89689c1ce313583258aefa07fc10c4fab7433133d16e8af85c4c657e65906250"
+sha256 = "437d198cd79511af7fc408c3511c4b4f38a4a594fa44cbdb8efc96ccc2e99d98"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
@@ -114,7 +114,7 @@ sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "f80d82e4b143fe60e5e49425d395b8d3981ff2df4a976f08bbadd409bab20c58"
+sha256 = "054232c764946a96dcbc50c378b96392b81376eb3009410167bfdb3b8f3a8990"
 reason = "module declarations, re-exports, documentation and the `ctrl!` hint macro (a string literal per platform) only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe-client/src/event.rs"]
@@ -142,7 +142,7 @@ context = { "crates/proto-lab/src/action_targets.rs" = "624e25a8a896080702107574
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "fc4f64d121310a964744b565cd4d0efbd7874f3b5438692d6759a076cfd66c94"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "d500f9d3d135fb13d3418f323d755ff7e94e607b65c8ac04c1a7095152ac03d4" }
+context = { "crates/teams-proto/src/http.rs" = "799ea62729160fa5c0f3104397a97849a249f5300e5c727679fd8a7ce792257a" }
 
 [unmapped_sources."crates/teams-core/src/attachments_tests.rs"]
 sha256 = "9dd845ed73f53a7a32137d505c45018d56bf8529060c3cfdee1ebe7059968e96"
@@ -584,12 +584,12 @@ context = { "crates/teams-signin/src/lib.rs" = "a7b946e05829938c67d8c83c2f95877b
 [unmapped_sources_windows."crates/teams-ui/src/notify/linux.rs"]
 sha256 = "419bb65bc6b399c4234dfa1e46f79e0ecb65dfd33a9f4411d5c0b53b688229a1"
 reason = "Linux-only freedesktop notification D-Bus transport; notify.rs selects this module only under cfg(target_os = \"linux\"), so it is absent from native Windows compilation and remains required on Linux"
-context = { "crates/teams-ui/src/lib.rs" = "f80d82e4b143fe60e5e49425d395b8d3981ff2df4a976f08bbadd409bab20c58", "crates/teams-ui/src/notify.rs" = "9bd2a19d2ab55ccf6994a44372c710074d246edb8ae84b11e7356282c71e70bb" }
+context = { "crates/teams-ui/src/lib.rs" = "054232c764946a96dcbc50c378b96392b81376eb3009410167bfdb3b8f3a8990", "crates/teams-ui/src/notify.rs" = "9bd2a19d2ab55ccf6994a44372c710074d246edb8ae84b11e7356282c71e70bb" }
 
 [unmapped_sources_windows."crates/teams-ui/src/tray/linux.rs"]
 sha256 = "ceed6565f30d059be5e8b6c0901fcba714248fe4ba0998e40c912d90db539ade"
 reason = "Linux-only StatusNotifierItem, D-Bus menu and launcher unread transport; tray.rs selects this module only under cfg(target_os = \"linux\"), so it is absent from native Windows compilation and remains required on Linux"
-context = { "crates/teams-ui/src/lib.rs" = "f80d82e4b143fe60e5e49425d395b8d3981ff2df4a976f08bbadd409bab20c58", "crates/teams-ui/src/tray.rs" = "761e00a9301f59539a3edca854dfd467ac83a8f68dcd509ef18e4eaa07d7a1ab" }
+context = { "crates/teams-ui/src/lib.rs" = "054232c764946a96dcbc50c378b96392b81376eb3009410167bfdb3b8f3a8990", "crates/teams-ui/src/tray.rs" = "761e00a9301f59539a3edca854dfd467ac83a8f68dcd509ef18e4eaa07d7a1ab" }
 
 [unmapped_sources_windows."crates/ngteams/src/ctl/socket/unix.rs"]
 sha256 = "ea79c3378f2968223f72f282f2514e5cd6cb8ff57c9d0dc46b9130aa2b7bc50e"
@@ -643,7 +643,7 @@ context = { "crates/teams-ui/src/meeting_alert.rs" = "be5825947b396fe792bc9f0fe9
 [unmapped_sources."crates/teams-proto/src/http/cloud_tests.rs"]
 sha256 = "885613503f07f6fabe77ddea168bf3c4e7814f66caef61a3b0b9e338b6c74b40"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "d500f9d3d135fb13d3418f323d755ff7e94e607b65c8ac04c1a7095152ac03d4" }
+context = { "crates/teams-proto/src/http.rs" = "799ea62729160fa5c0f3104397a97849a249f5300e5c727679fd8a7ce792257a" }
 
 [unmapped_sources."crates/teams-sdp/src/lib.rs"]
 sha256 = "2dfe9b286b9ebca1a0c6c3ee22c751f4886f6f8bd7d397bc684c79a5eba33862"
