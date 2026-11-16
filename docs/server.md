@@ -139,7 +139,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `workflows.runs_kept` | `100` | runs kept per workflow for its run history |
 | `mixer.udp_listen` | `0.0.0.0:0` | the media node's one UDP socket: every group call's media goes through it. A free port unless set: set a fixed one where a firewall must let the relay's datagrams in |
 | `mixer.public_addrs` | the socket's address, else the host's outward one | the addresses clients' TURN relay reaches that socket at (its host candidates, each on the socket's port) |
-| `mixer.internal_listen`, `mixer.internal_url` | `127.0.0.1:0`, the listener's address | the internal API's listener (signaling → media node), on a private network; the URL the other nodes reach it at |
+| `mixer.internal_listen`, `mixer.internal_url` | `127.0.0.1:0`, the listener's address | the internal API's listener (signaling → media node), on a private network; the URL the other nodes reach it at. With Redis, the node logs a warning when this URL is a loopback address, because other hosts can't reach it |
 | `mixer.node_id` | a new one each start | the node's id in the registry |
 | `mixer.ice_lite` | `true` | on the legs whose offer the node answers, it only answers connectivity checks (it has a reachable address); where it offers (a callee's leg) it runs full ICE |
 | `mixer.max_rooms`, `mixer.max_legs_per_room` | `1000`, `50` | over them a start, a join or an add is refused (`503`) |

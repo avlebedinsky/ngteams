@@ -110,6 +110,19 @@ fn candidates(public: &[IpAddr], bound: SocketAddr) -> Vec<SocketAddr> {
     vec![SocketAddr::new(outward, bound.port())]
 }
 
+/// Whether the internal URL `url` names this host only (a loopback address or `localhost`): another host can't reach it.
+fn loopback(url: &str) -> bool {
+    match url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host().map(|host| host.to_owned()))
+    {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 fn registry_of(app: &App) -> Option<Registry> {
     let dead_after = Duration::from_secs(app.config.mixer.dead_after);
     app.redis.clone().map(|shared| Registry::new(shared, dead_after))
@@ -186,10 +199,7 @@ impl MediaNode {
         };
         node.tasks.push(tokio::spawn(take_out_lost(Arc::clone(app), losses)));
         node.tasks.push(tokio::spawn(node.reconciling(Arc::clone(app))));
-        if node.registry.is_some() {
-            node.tasks
-                .push(tokio::spawn(node.beating(Duration::from_secs(config.heartbeat))));
-        }
+        node.start_heartbeat(Duration::from_secs(config.heartbeat));
         tracing::info!(node = %node.home.node, internal = %internal, media = %udp, "media node up");
         Ok(node)
     }
@@ -216,6 +226,22 @@ impl MediaNode {
         let (reply, replied) = oneshot::channel();
         commands.send(Command::Load { reply }).ok()?;
         replied.await.ok()
+    }
+
+    /// Starts the heartbeat when there's a registry. A loopback URL there gets a warning: other hosts can't reach it.
+    fn start_heartbeat(&mut self, every: Duration) {
+        if self.registry.is_none() {
+            return;
+        }
+        if loopback(&self.home.url) {
+            tracing::warn!(
+                url = %self.home.url,
+                "the media node's internal URL is a loopback address, but Redis shares it with other hosts: they \
+                 can't reach this node. Set mixer.internal_listen to a private network's address, or set \
+                 mixer.internal_url"
+            );
+        }
+        self.tasks.push(tokio::spawn(self.beating(every)));
     }
 
     /// The heartbeat: what the node carries, in the registry.
@@ -347,4 +373,19 @@ async fn take_out_lost(app: Arc<App>, mut losses: tokio::sync::mpsc::UnboundedRe
 pub fn install(app: &Arc<App>, local: Option<&MediaNode>) -> Result<bool, MixerError> {
     let nodes = HttpNodes::new(app, registry_of(app), local.map(MediaNode::local)).map_err(MixerError::Client)?;
     Ok(app.mixers.install(Arc::new(nodes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loopback;
+
+    #[test]
+    fn only_a_loopback_host_is_loopback() {
+        assert!(loopback("http://127.0.0.1:4000"));
+        assert!(loopback("http://[::1]:4000"));
+        assert!(loopback("http://LocalHost:4000"));
+        assert!(!loopback("http://10.0.0.5:4000"));
+        assert!(!loopback("https://media-1.internal"));
+        assert!(!loopback("not a url"));
+    }
 }
