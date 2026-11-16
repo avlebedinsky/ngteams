@@ -247,6 +247,9 @@ fn one_to_one(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest) -
         user.shot_b(&format!("share-1to1-{round}-far-end.png"))?;
         user.holds(&format!("1:1 share {round}"), round)?;
         let presented = b.trace.presented_share();
+        say(&format!(
+            "1:1 share {round}: b presented {presented} of a's frames by the hold's end"
+        ));
         if presented < frames_of(&first) + PRESENTED {
             return Err(format!(
                 "1:1 share {round}: b presented only {presented} of a's frames by the hold's end (from {})",
