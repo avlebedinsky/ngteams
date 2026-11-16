@@ -127,8 +127,10 @@ impl Cloud {
         }
     }
 
-    /// `builder` waiting at most [`OWN_CONNECT_TIMEOUT`] for a connection to an own server; Microsoft's are as before.
-    pub fn connect_limit(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    /// The builder of every sign-in client of this cloud: it trusts the cloud's extra certificate authorities
+    /// ([`Cloud::trust`]), and for an own server it waits at most [`OWN_CONNECT_TIMEOUT`] for a connection.
+    pub fn sign_in_client(&self) -> reqwest::ClientBuilder {
+        let builder = self.trust(reqwest::Client::builder());
         match self {
             Self::Microsoft => builder,
             Self::Own { .. } => builder.connect_timeout(OWN_CONNECT_TIMEOUT),
@@ -262,5 +264,13 @@ mod tests {
                 .project(&url, "/flightproxy", "https://unused.example")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn only_an_own_servers_sign_in_clients_wait_a_short_time_for_a_connection() {
+        let limit = format!("connect_timeout: {OWN_CONNECT_TIMEOUT:?}");
+        let own = Cloud::own("https://chat.example").unwrap();
+        assert!(format!("{:?}", own.sign_in_client()).contains(&limit));
+        assert!(!format!("{:?}", Cloud::Microsoft.sign_in_client()).contains("connect_timeout"));
     }
 }

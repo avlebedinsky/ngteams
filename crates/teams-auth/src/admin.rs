@@ -223,7 +223,7 @@ impl AdminClient {
 
     fn build(origin: Url, cloud: &Cloud) -> Result<Self, AdminError> {
         let http = cloud
-            .trust(reqwest::Client::builder())
+            .sign_in_client()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)

@@ -300,7 +300,7 @@ impl AuthzClient {
             return Err(AuthzError::InvalidEndpoint);
         }
         let http = cloud
-            .connect_limit(cloud.trust(reqwest::Client::builder()))
+            .sign_in_client()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)
