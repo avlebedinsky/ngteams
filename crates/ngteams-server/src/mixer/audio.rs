@@ -168,7 +168,8 @@ pub(crate) struct Speakers {
 }
 
 impl Speakers {
-    /// The source `source`'s level this tick: one that starts to speak leads the history.
+    /// The source `source`'s level this tick: one that starts to speak leads the history, and a leader that stops
+    /// gives way to the newest one still speaking.
     pub(crate) fn hear(&mut self, source: u32, dbfs: f32) {
         let at = if let Some(at) = self.voices.iter().position(|(id, ..)| *id == source) {
             at
@@ -180,21 +181,40 @@ impl Speakers {
             return;
         };
         let now = voice.hear(dbfs);
-        if now && !*speaking {
-            self.history.retain(|id| *id != source);
-            self.history.insert(0, source);
+        let was = std::mem::replace(speaking, now);
+        if now && !was {
+            self.lead(source);
+        } else if was && !now && self.history.first() == Some(&source) {
+            self.give_way();
         }
-        *speaking = now;
     }
 
     /// The source `source` is gone from the room.
     pub(crate) fn forget(&mut self, source: u32) {
         self.voices.retain(|(id, ..)| *id != source);
         self.history.retain(|id| *id != source);
+        self.give_way();
     }
 
     pub(crate) fn history(&self) -> &[u32] {
         &self.history
+    }
+
+    fn lead(&mut self, source: u32) {
+        self.history.retain(|id| *id != source);
+        self.history.insert(0, source);
+    }
+
+    /// A leader that doesn't speak gives way to the newest one who does: the client marks the history's first as the
+    /// one speaking while it hears anything.
+    fn give_way(&mut self) {
+        let speaks = |source: &u32| self.voices.iter().any(|(id, _, speaking)| id == source && *speaking);
+        if self.history.first().is_none_or(speaks) {
+            return;
+        }
+        if let Some(next) = self.history.iter().copied().find(speaks) {
+            self.lead(next);
+        }
     }
 }
 
@@ -318,5 +338,44 @@ mod tests {
         assert_eq!(speakers.history(), [1020, 1000]);
         speakers.forget(1020);
         assert_eq!(speakers.history(), [1000]);
+    }
+
+    /// `ticks` ticks of the sources 1000, 1010 and 1020, those in `loud` speaking.
+    fn talk(speakers: &mut Speakers, ticks: usize, loud: &[u32]) {
+        for _ in 0..ticks {
+            for source in [1000, 1010, 1020] {
+                speakers.hear(source, if loud.contains(&source) { -20.0 } else { -90.0 });
+            }
+        }
+    }
+
+    #[test]
+    fn a_speaker_who_stops_while_another_talks_on_gives_the_head_to_the_one_who_talks() {
+        let mut speakers = Speakers::default();
+        talk(&mut speakers, 3, &[1000]);
+        talk(&mut speakers, 3, &[1000, 1010]);
+        assert_eq!(speakers.history(), [1010, 1000]);
+        // 1010 stops (or mutes) and 1000 talks on without a pause: the one who talks leads
+        talk(&mut speakers, 5, &[1000]);
+        assert_eq!(speakers.history(), [1000, 1010]);
+        // nobody talks: the last speaker stays first
+        talk(&mut speakers, 5, &[]);
+        assert_eq!(speakers.history(), [1000, 1010]);
+        // the newest who still talks leads, past one who stopped
+        talk(&mut speakers, 3, &[1020]);
+        talk(&mut speakers, 3, &[1020, 1010]);
+        talk(&mut speakers, 3, &[1020, 1010, 1000]);
+        assert_eq!(speakers.history(), [1000, 1010, 1020]);
+        talk(&mut speakers, 5, &[1020, 1000]);
+        assert_eq!(speakers.history(), [1000, 1010, 1020]);
+        talk(&mut speakers, 5, &[1020]);
+        assert_eq!(speakers.history(), [1020, 1000, 1010]);
+        // a head who leaves gives the head to one who talks, past one who doesn't
+        talk(&mut speakers, 3, &[1020, 1010]);
+        talk(&mut speakers, 3, &[1020, 1010, 1000]);
+        talk(&mut speakers, 5, &[1020, 1000]);
+        assert_eq!(speakers.history(), [1000, 1010, 1020]);
+        speakers.forget(1000);
+        assert_eq!(speakers.history(), [1020, 1010]);
     }
 }

@@ -806,7 +806,9 @@ with libopus: each party's audio is decoded into a buffer of its own (played onc
 active party (above −50 dBFS within 200 ms), soft-clipped and encoded (32 kb/s, in-band FEC, DTX). A party is never
 sent its own voice. The control plane on the data channel answers the client's `syn` with `ack` (it sends `dsh`, takes
 nothing, so the client asks for no video source) and tells the dominant speakers (`dsh`, the audio source ids, the
-newest speaker first, at most every 300 ms and to a party once its control plane is up). Video isn't served yet:
+newest speaker first, at most every 300 ms and to a party once its control plane is up). A party that stops
+speaking, or mutes, while another talks on gives the first place to the newest party still speaking: the client
+shows the first one as speaking while it hears anything. Video isn't served yet:
 every video line of an offer is answered rejected. The node writes its SDP in Teams' dialect with its host
 candidates (`mixer.public_addrs`); the client is relay-only, so its media reaches the node from the TURN relay's
 address, and **coturn must be allowed to send to the node's address** (a `denied-peer-ip` covering it, or coturn's

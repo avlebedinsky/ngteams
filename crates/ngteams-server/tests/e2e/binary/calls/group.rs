@@ -484,8 +484,7 @@ impl Four {
         }
     }
 
-    /// Everyone mutes, then a unmutes and speaks: a alone is heard, and shows as speaking at b and c (the speaker's
-    /// mark goes to whoever starts to speak: one who stops while another talks on keeps it, Q1 in the QA report).
+    /// Everyone mutes, then a unmutes and speaks: a alone is heard, and shows as speaking at b and c.
     async fn only_a_speaks(&mut self) {
         let [ta, tb, tc, _] = TONES;
         for who in 0..3 {

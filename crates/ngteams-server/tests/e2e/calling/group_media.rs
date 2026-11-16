@@ -251,6 +251,53 @@ async fn the_speaker_is_told_as_the_dominant_one() {
     }
 }
 
+/// Whether `view` shows `mri` muted and not speaking.
+fn muted_and_quiet(view: &CallView, mri: &str) -> bool {
+    view.participants
+        .iter()
+        .any(|party| party.mri == mri && party.muted && !party.speaking)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_who_mutes_while_another_talks_on_is_not_the_speaker_any_more() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut a = mixed.engine("Ada", A_TONE).await;
+        let mut b = mixed.engine("Bert", B_TONE).await;
+        let mut c = mixed.engine("Cora", SILENT).await;
+        let chat = group_chat(&a, &[&b, &c], &[]).await;
+        let calls = connect_all(&chat, &mut [&mut a, &mut b, &mut c]).await;
+        mixed.connected(&mixed.open_call().await, 3).await;
+        let (ada, bert) = (a.mri.clone(), b.mri.clone());
+        b.call(CallAction::Mute {
+            call: calls[1],
+            muted: true,
+        })
+        .await;
+        c.view(calls[2], |view| speaks(view, &ada) && muted_and_quiet(view, &bert))
+            .await;
+        // b speaks again and takes the head; then b mutes while a talks on without a pause
+        b.call(CallAction::Mute {
+            call: calls[1],
+            muted: false,
+        })
+        .await;
+        c.view(calls[2], |view| speaks(view, &bert)).await;
+        b.call(CallAction::Mute {
+            call: calls[1],
+            muted: true,
+        })
+        .await;
+        c.view(calls[2], |view| speaks(view, &ada) && muted_and_quiet(view, &bert))
+            .await;
+        hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
+        for engine in [a, b, c] {
+            engine.shut_down().await;
+        }
+        mixed.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_late_joiner_hears_the_call_and_is_heard() {
     for backend in backends() {
