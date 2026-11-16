@@ -14,12 +14,12 @@
 //! - **Paragraphs and line breaks**: Shift+Enter paragraphs in the box, Shift+Enter line breaks in the expanded box.
 //! - **Rich drafts**: a's own messages edited (a link showing its address, a mention, bold, a named link, line breaks,
 //!   a typed dot after a link); one edit saved, its PUT read on the mock.
-//! - **Other languages and ends**: Cyrillic, CJK, an emoji, ":)", "...", pasted where the keymap has no key. The CJK
-//!   full stop "。" added by the model is the opt-in check `cjk_full_stop_added` (a known issue).
+//! - **Other languages and ends**: Cyrillic, CJK, an emoji, ":)", "...", pasted where the keymap has no key. A CJK
+//!   full stop "。" that the model adds is no change either (`cjk_full_stop_added`).
 //! - **More options**: a narrow window, Correct by its row in More options, the proposal taken by the row again.
 //! - **Send corrected** (Ctrl+Enter): the POST on the mock has no added dot.
 //!
-//! `QA_FINAL_DOT_ONLY` (a comma list of check names) runs only those, the opt-in checks too. `QA_FINAL_DOT_EVIDENCE` names a directory that
+//! `QA_FINAL_DOT_ONLY` (a comma list of check names) runs only those. `QA_FINAL_DOT_EVIDENCE` names a directory that
 //! gets the screenshots, the tool's logs and the results too. Screenshots also go to `target/ui-shots/qa406-*.png`.
 //! Every name, id and text is made up.
 //!
@@ -177,16 +177,11 @@ fn wanted(name: &str) -> bool {
         .is_none_or(|list| list.split(',').map(str::trim).any(|one| one == name))
 }
 
-/// Whether `QA_FINAL_DOT_ONLY` names `name`.
-fn named(name: &str) -> bool {
-    std::env::var(ONLY_ENV).is_ok_and(|list| list.split(',').map(str::trim).any(|one| one == name))
-}
-
 // --- the parent ---
 
 type Check = (&'static str, fn(&mut User<'_>) -> SandboxResult);
 
-const CHECKS: [Check; 11] = [
+const CHECKS: [Check; 12] = [
     ("only_a_dot_is_no_change", only_a_dot_is_no_change),
     ("fix_kept_dot_dropped", fix_kept_dot_dropped),
     ("typed_marks_stay", typed_marks_stay),
@@ -195,13 +190,11 @@ const CHECKS: [Check; 11] = [
     ("rich_ends_in_an_edit", rich_ends_in_an_edit),
     ("edit_saved_without_dot", edit_saved_without_dot),
     ("other_languages", other_languages),
+    ("cjk_full_stop_added", cjk_full_stop_added),
     ("emoji_smiley_ellipsis", emoji_smiley_ellipsis),
     ("send_corrected", send_corrected),
     ("more_options_row", more_options_row),
 ];
-
-/// Checks that run only when `QA_FINAL_DOT_ONLY` names them: each fails until a known issue is fixed.
-const OPT_IN: [Check; 1] = [("cjk_full_stop_added", cjk_full_stop_added)];
 
 fn parent() -> SandboxResult {
     let options = SandboxOptions {
@@ -232,10 +225,7 @@ fn parent() -> SandboxResult {
     let mut user = User::start(&sandbox, running, &tool)?;
     let mut passed = Vec::new();
     let mut failed = Vec::new();
-    for (name, check) in CHECKS
-        .into_iter()
-        .chain(OPT_IN.into_iter().filter(|(name, _)| named(name)))
-    {
+    for (name, check) in CHECKS {
         if wanted(name) {
             user.run_check(name, check, &mut passed, &mut failed);
         }
@@ -976,8 +966,7 @@ fn other_languages(user: &mut User<'_>) -> SandboxResult {
     Ok(())
 }
 
-/// A CJK full stop "。" that the model adds where the writer typed none is no change either (QA 406 Q1: the app shows
-/// it as a correction; opt-in until that is fixed).
+/// A CJK full stop "。" that the model adds where the writer typed none is no change either (QA 406 Q1).
 fn cjk_full_stop_added(user: &mut User<'_>) -> SandboxResult {
     user.paste_draft("我们明天见")?;
     user.case(By::Key, &rules(&[FIX, CJK_STOP]), Want::Nothing, Some("cjk-stop"))?;

@@ -1,6 +1,6 @@
 //! A chat message often ends a line, a paragraph or the whole text with no final dot. A correction keeps that style:
 //! the instructions say so, and as a tool can ignore them, a dot that an answer only adds at such an end is taken out
-//! here, after the answer is decoded.
+//! here, after the answer is decoded. The full stop of another script, such as the CJK "。", counts as a dot.
 
 use std::ops::Range;
 
@@ -62,12 +62,27 @@ fn lines(text: &str) -> Vec<(usize, &str)> {
         .collect()
 }
 
-/// Where in `new` the dot is that it only adds at the end of `old`, a line with no final dot. A dot that takes the place
-/// of a final `?`, `!`, `,`, `;` or `:` is a correction and stays, as an ellipsis does.
+/// The sentence-final full stops that count as a dot: ASCII, CJK, full-width, Urdu, Devanagari and Armenian.
+const STOPS: [char; 6] = ['.', '。', '．', '۔', '।', '։'];
+
+/// The final marks that a dot can take the place of, in their ASCII, full-width and Arabic forms.
+const MARKS: [char; 13] = ['?', '!', ',', ';', ':', '？', '！', '，', '；', '：', '、', '؟', '،'];
+
+/// Where in `new` the dot is that it only adds at the end of `old`, a line with no final dot. Each full stop in
+/// [`STOPS`] counts as a dot. The answer adds a dot when its final run of full stops is the draft's run and one more:
+/// "ok" to "ok." and "好的。" to "好的。.". A dot that takes the place of a final mark in [`MARKS`] is a correction and
+/// stays, as an ellipsis does.
 fn added_dot(old: &str, new: &str) -> Option<usize> {
-    let before = new.trim_end().strip_suffix('.')?;
-    let last = old.trim_end().chars().next_back()?;
-    let replaces_mark = matches!(last, '?' | '!' | ',' | ';' | ':') && !before.ends_with(last);
-    let kept = matches!(last, '.' | '…') || before.ends_with('.') || before.trim().is_empty();
+    let (old, new) = (old.trim_end(), new.trim_end());
+    let before = new.strip_suffix(STOPS)?;
+    let last = old.chars().next_back()?;
+    let only_one_more = final_stops(before) == final_stops(old);
+    let replaces_mark = MARKS.contains(&last) && !before.ends_with(last);
+    let kept = !only_one_more || last == '…' || before.trim().is_empty();
     (!kept && !replaces_mark).then_some(before.len())
+}
+
+/// The run of full stops at the end of `text`.
+fn final_stops(text: &str) -> &str {
+    &text[text.trim_end_matches(STOPS).len()..]
 }

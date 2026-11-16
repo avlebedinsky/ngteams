@@ -525,6 +525,54 @@ fn a_final_dot_is_not_added_to_a_non_ascii_draft() {
 }
 
 #[test]
+fn a_final_full_stop_of_another_script_is_not_added() {
+    let cjk = Doc::new(vec![Block::paragraph("我们明天见")]);
+    assert_eq!(proposed(&cjk, "<x0>我们明天见。</x0>"), None);
+    let lines = Doc::new(vec![Block::paragraph("我门明天见\n好的")]);
+    assert_eq!(
+        proposed(&lines, "<x0>我们明天见。<x1/>好的。</x0>").as_deref(),
+        Some("我们明天见\n好的")
+    );
+    let full_width = Doc::new(vec![Block::paragraph("teh cat sat")]);
+    assert_eq!(
+        proposed(&full_width, "<x0>The cat sat．</x0>").as_deref(),
+        Some("The cat sat")
+    );
+    for (draft, answer) in [
+        ("हम कल मिलेंगे", "हम कल मिलेंगे।"),
+        ("ہم کل ملیں گے", "ہم کل ملیں گے۔"),
+        ("կտեսնվենք վաղը", "կտեսնվենք վաղը։"),
+    ] {
+        let doc = Doc::new(vec![Block::paragraph(draft)]);
+        assert_eq!(proposed(&doc, &format!("<x0>{answer}</x0>")), None, "{answer}");
+    }
+}
+
+#[test]
+fn a_full_stop_of_another_script_that_the_writer_typed_stays() {
+    let typed = Doc::new(vec![Block::paragraph("我门明天见。")]);
+    assert_eq!(
+        proposed(&typed, "<x0>我们明天见。</x0>").as_deref(),
+        Some("我们明天见。")
+    );
+    let doubled = Doc::new(vec![Block::paragraph("我门明天见。")]);
+    assert_eq!(
+        proposed(&doubled, "<x0>我们明天见。.</x0>").as_deref(),
+        Some("我们明天见。")
+    );
+    let ellipsis = Doc::new(vec![Block::paragraph("teh cat...")]);
+    assert_eq!(
+        proposed(&ellipsis, "<x0>The cat...</x0>").as_deref(),
+        Some("The cat...")
+    );
+    let asked = Doc::new(vec![Block::paragraph("我门明天见？")]);
+    assert_eq!(
+        proposed(&asked, "<x0>我们明天见。</x0>").as_deref(),
+        Some("我们明天见。")
+    );
+}
+
+#[test]
 fn an_answer_that_only_adds_a_final_dot_is_unchanged() {
     let doc = Doc::new(vec![Block::paragraph("the cat sat\nok")]);
     assert_eq!(proposed(&doc, "<x0>the cat sat.<x1/>ok.</x0>"), None);
@@ -562,4 +610,5 @@ fn the_dots_the_writer_typed_and_the_other_corrections_stay() {
 fn the_instructions_say_a_missing_final_dot_stays_missing() {
     let instructions = prompt::instructions();
     assert!(instructions.contains("final dot"), "{instructions}");
+    assert!(instructions.contains("full stop of any script"), "{instructions}");
 }
