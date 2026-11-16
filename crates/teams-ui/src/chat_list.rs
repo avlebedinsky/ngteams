@@ -872,6 +872,15 @@ impl ChatList {
         self.core.capabilities()
     }
 
+    /// The 1:1 chat with `mri`, when the list built its row: a bot's too, which the row's `partner` never is.
+    #[must_use]
+    pub fn one_to_one_with(&self, mri: &str) -> Option<&str> {
+        self.cache
+            .values()
+            .find(|cached| cached.row.kind == RowKind::OneToOne && cached.people == [mri])
+            .map(|cached| cached.row.id.as_str())
+    }
+
     /// Whether the stored chat identifies whom a call would ring, even while catch-up is still reading its roster.
     #[must_use]
     pub fn can_call(&self, id: &str) -> bool {

@@ -76,8 +76,13 @@ pub enum TeamDialogEvent {
     },
     /// An app was added or removed: the store reads the account's apps again; `words` go in a toast.
     AppsChanged { words: &'static str },
-    /// An app's "Add to a chat" (`team` false) or "Add to a team": the place's picker opens in the dialog's place.
-    AddAppTo { app: Box<teams_proto::StoreApp>, team: bool },
+    /// An app's "Add to a chat" (`team` false) or "Add to a team": the place's picker opens in the dialog's place;
+    /// `changed` when the details' Add went through first, so the store reads the account's apps again.
+    AddAppTo {
+        app: Box<teams_proto::StoreApp>,
+        team: bool,
+        changed: bool,
+    },
     /// A chat opens (an app's Open: its bot's chat).
     OpenChat(String),
     /// "Get more apps": the store opens.

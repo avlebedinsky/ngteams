@@ -20,16 +20,20 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 use serde_json::json;
 use teams_core::{AppListing, TeamWritten};
 use teams_proto::{StoreApp, StoreSections, TeamWrite};
-use teams_store::{Conversation, ConversationKind};
+use teams_store::{Conversation, ConversationKind, Member};
 use teams_ui::ViewTrace;
-use teams_ui::bots_flag::BotsFlag;
+use teams_ui::apps_page::AppsPage;
+use teams_ui::apps_page::chat_apps::ChatAppsDialog;
 use teams_ui::apps_page::details::AppDetailsDialog;
+use teams_ui::bots_flag::BotsFlag;
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
 
 const HELPER: &str = "00000000-0000-4000-8000-00000000a004";
 const POLLS: &str = "00000000-0000-4000-8000-00000000a005";
 const GROUP_CHAT: &str = "19:made-up-group@thread.v2";
+const POLLS_TILE: &str = "https://res.cdn.office.net/teamsappdata/evergreen-assets/apps/made-up-polls_largeImage.png";
+const BOT_CHAT: &str = "19:made-up-helper-chat@unq.gbl.spaces";
 
 fn apps() -> Vec<StoreApp> {
     teams_proto::AppDefinitions::read_answer(
@@ -38,6 +42,7 @@ fn apps() -> Vec<StoreApp> {
              "version": "1.0.0", "permissions": ["Identity"],
              "bots": [{"id": "b4", "scopes": ["personal"]}], "staticTabs": [{"entityId": "home"}]},
             {"id": POLLS, "name": "Made-up Polls", "developerName": "Made-up Maker", "shortDescription": "Polls",
+             "largeImageUrl": POLLS_TILE,
              "bots": [{"id": "b5", "scopes": ["groupChat", "team"]}]},
         ])
         .to_string()
@@ -58,21 +63,34 @@ fn listing() -> AppListing {
 }
 
 fn app(id: &str) -> StoreApp {
-    apps().into_iter().find(|store| store.app.id == id).expect("a made-up app")
+    apps()
+        .into_iter()
+        .find(|store| store.app.id == id)
+        .expect("a made-up app")
 }
 
 fn shell_window(rig: &Rig, bots: bool) -> (Entity<Shell>, &'static mut VisualTestContext) {
+    shell_window_with(rig, bots, Vec::new())
+}
+
+fn shell_window_with(
+    rig: &Rig,
+    bots: bool,
+    more: Vec<Conversation>,
+) -> (Entity<Shell>, &'static mut VisualTestContext) {
     rig.cx.update(teams_ui::window::init);
     rig.cx.update(|cx| cx.set_global(BotsFlag(bots)));
     *rig.core.app_listing.lock().unwrap() = listing();
     *rig.core.team_written.lock().unwrap() = Some(TeamWritten::default());
-    *rig.core.conversations.lock().unwrap() = vec![Conversation {
+    let mut conversations = vec![Conversation {
         id: GROUP_CHAT.to_owned(),
         kind: ConversationKind::Group,
         topic: Some("Made-up group".to_owned()),
         version: 1,
         last_activity: Some(100),
     }];
+    conversations.extend(more);
+    *rig.core.conversations.lock().unwrap() = conversations;
     let parts = ShellParts {
         core: rig.cx.read(|cx| rig.bridge.read(cx).core()),
         models: rig.models.clone(),
@@ -154,7 +172,10 @@ fn an_app_s_details_add_it_for_the_account_with_its_definition() {
     assert!(bounds(cx, "app-details-capabilities").is_some());
     assert!(bounds(cx, "app-details-permissions").is_some());
     assert!(bounds(cx, "app-details-stats").is_some(), "its rating");
-    assert!(bounds(cx, "app-details-add-chat").is_none(), "a personal app goes nowhere else");
+    assert!(
+        bounds(cx, "app-details-add-chat").is_none(),
+        "a personal app goes nowhere else"
+    );
     click(cx, "app-details-add");
     assert!(
         matches!(writes(&rig).as_slice(), [TeamWrite::AddPersonalApp { app }] if app.id() == HELPER),
@@ -165,7 +186,59 @@ fn an_app_s_details_add_it_for_the_account_with_its_definition() {
     *rig.core.user_apps.lock().unwrap() = vec![app(HELPER)];
     click(cx, "app-details-close");
     assert!(cx.update(|_, cx| shell.read(cx).team_dialog().is_none()));
-    assert!(bounds(cx, "apps-added-check").is_some(), "the store reads the account's apps again");
+    assert!(
+        bounds(cx, "apps-added-check").is_some(),
+        "the store reads the account's apps again"
+    );
+}
+
+#[test]
+fn an_added_bot_app_s_details_open_the_chat_with_its_bot() {
+    let rig = Rig::start();
+    *rig.core.user_apps.lock().unwrap() = vec![app(HELPER)];
+    rig.core.members.lock().unwrap().insert(
+        BOT_CHAT.to_owned(),
+        vec![Member::new(&rig.core.me, None), Member::new("28:b4", None)],
+    );
+    let bot_chat = Conversation {
+        id: BOT_CHAT.to_owned(),
+        kind: ConversationKind::OneToOne,
+        topic: None,
+        version: 1,
+        last_activity: Some(50),
+    };
+    let (shell, cx) = shell_window_with(&rig, true, vec![bot_chat]);
+    open_store(&shell, cx);
+    click(cx, "apps-org-0");
+    assert!(bounds(cx, "app-details-added").is_none());
+    click(cx, "app-details-open");
+    assert!(cx.update(|_, cx| shell.read(cx).team_dialog().is_none()));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).list().read(cx).selected().map(str::to_owned)),
+        Some(BOT_CHAT.to_owned())
+    );
+}
+
+#[test]
+fn an_add_before_add_to_a_chat_shows_the_app_added_in_the_store() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    open_store(&shell, cx);
+    click(cx, "apps-org-0");
+    click(cx, "app-details-add");
+    assert!(bounds(cx, "app-details-added").is_some());
+    *rig.core.user_apps.lock().unwrap() = vec![app(HELPER)];
+    let dialog = cx
+        .update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<AppDetailsDialog>().ok())
+        .expect("the details");
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.add_to(false, cx)));
+    cx.run_until_parked();
+    let page = cx.update(|_, cx| shell.read(cx).apps().cloned()).expect("the page");
+    assert!(
+        cx.update(|_, cx| page.read(cx).added(HELPER)),
+        "the store reads the account's apps again"
+    );
 }
 
 #[test]
@@ -174,7 +247,10 @@ fn add_to_a_chat_picks_a_chat_and_go_adds_the_app_there() {
     let (shell, cx) = shell_window(&rig, true);
     open_store(&shell, cx);
     click(cx, "apps-tile-popular-1");
-    assert!(bounds(cx, "app-details-add").is_none(), "an app for chats and teams only isn't added for oneself");
+    assert!(
+        bounds(cx, "app-details-add").is_none(),
+        "an app for chats and teams only isn't added for oneself"
+    );
     click(cx, "app-details-add-chat");
     assert!(bounds(cx, "app-place-dialog").is_some());
     click(cx, "app-place-0");
@@ -184,7 +260,10 @@ fn add_to_a_chat_picks_a_chat_and_go_adds_the_app_there() {
         "{:?}",
         writes(&rig)
     );
-    assert!(cx.update(|_, cx| shell.read(cx).team_dialog().is_none()), "the picker closes");
+    assert!(
+        cx.update(|_, cx| shell.read(cx).team_dialog().is_none()),
+        "the picker closes"
+    );
 }
 
 #[test]
@@ -246,12 +325,54 @@ fn a_chat_s_apps_are_removed_after_asking() {
 }
 
 #[test]
+fn a_chat_s_apps_show_their_pictures() {
+    let rig = Rig::start();
+    *rig.core.chat_apps.lock().unwrap() = vec![app(POLLS)];
+    let mut bytes = Vec::new();
+    image::RgbaImage::from_pixel(48, 48, image::Rgba([60, 90, 200, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    rig.core.app_pictures.lock().unwrap().insert(
+        POLLS_TILE.to_owned(),
+        Arc::new(teams_proto::PastedPicture {
+            format: teams_proto::PastedFormat::Png,
+            bytes,
+        }),
+    );
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat_apps(GROUP_CHAT.to_owned(), window, cx));
+    });
+    assert!(bounds(cx, "chat-apps-0").is_some());
+    let dialog = cx
+        .update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<ChatAppsDialog>().ok())
+        .expect("the chat's apps");
+    assert!(cx.update(|_, cx| dialog.read(cx).shows_picture(POLLS)));
+}
+
+#[test]
 fn the_read_only_mode_offers_nothing_that_adds_or_removes() {
     let rig = Rig::start();
     *rig.core.read_only.lock().unwrap() = true;
-    *rig.core.user_apps.lock().unwrap() = vec![app(HELPER)];
     let (shell, cx) = shell_window(&rig, true);
     open_store(&shell, cx);
+    click(cx, "apps-org-0");
+    assert!(bounds(cx, "app-details").is_some());
+    assert!(
+        bounds(cx, "app-details-add").is_none(),
+        "a personal app not added has no Add"
+    );
+    click(cx, "app-details-close");
+    *rig.core.user_apps.lock().unwrap() = vec![app(HELPER)];
+    cx.update(|_, cx| {
+        shell
+            .read(cx)
+            .apps()
+            .cloned()
+            .expect("the page")
+            .update(cx, AppsPage::refresh);
+    });
     click(cx, "apps-tile-popular-1");
     assert!(bounds(cx, "app-details-add-chat").is_none());
     assert!(bounds(cx, "app-details-add-team").is_none());

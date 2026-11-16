@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use teams_proto::{
-    AnalyticsPeriod, AppDefinitions, AppStore, ChatApps, StoreSections, UserApps, ChannelAnalyticsRead, Credentials, DEFINITIONS_PAGE, DefaultTeamPicture,
-    HttpError, InstalledApp, OwnedGroups, StoreApp, TeamAnalytics, TeamApps, TeamTemplateCard, TeamTemplateDetails,
-    TeamTemplateRead, TeamTemplates, Transport, UserGraphSettingsRead,
+    AnalyticsPeriod, AppDefinitions, AppStore, ChannelAnalyticsRead, ChatApps, Credentials, DEFINITIONS_PAGE,
+    DefaultTeamPicture, HttpError, InstalledApp, OwnedGroups, StoreApp, StoreSections, TeamAnalytics, TeamApps,
+    TeamTemplateCard, TeamTemplateDetails, TeamTemplateRead, TeamTemplates, Transport, UserApps, UserGraphSettingsRead,
 };
 
 use crate::channels::Channels;

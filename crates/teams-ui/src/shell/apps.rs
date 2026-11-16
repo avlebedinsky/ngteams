@@ -25,11 +25,13 @@ impl Shell {
         } else {
             let core = Arc::clone(&self.core);
             let page = cx.new(|cx| AppsPage::new(core, window, cx));
-            let events = cx.subscribe_in(&page, window, |this: &mut Self, _, event: &AppsPageEvent, window, cx| {
-                match event {
+            let events = cx.subscribe_in(
+                &page,
+                window,
+                |this: &mut Self, _, event: &AppsPageEvent, window, cx| match event {
                     AppsPageEvent::Details(store) => this.open_app_details(store.as_ref().clone(), window, cx),
-                }
-            });
+                },
+            );
             self.apps = Some(page.clone());
             self.apps_events = Some(events);
             page
@@ -68,12 +70,7 @@ impl Shell {
     /// The 1:1 chat with the bot of `store` that a person chats with, when the chat list has it.
     fn bot_chat(&self, store: &teams_proto::StoreApp, cx: &App) -> Option<String> {
         let bot = store.definition.personal_bot()?;
-        self.list
-            .read(cx)
-            .rows()
-            .iter()
-            .find(|row| row.partner.as_deref() == Some(bot.as_str()))
-            .map(|row| row.id.clone())
+        self.list.read(cx).one_to_one_with(bot.as_str()).map(str::to_owned)
     }
 
     /// An app's details over the window.
@@ -149,7 +146,16 @@ impl Shell {
 
     /// The rail's Store item, behind `NGTEAMS_BOTS=1`.
     pub(super) fn store_rail(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        bots_on(cx).then(|| Self::rail_button("rail-apps", STORE, self.main == Main::Apps, palette, cx, Self::open_apps))
+        bots_on(cx).then(|| {
+            Self::rail_button(
+                "rail-apps",
+                STORE,
+                self.main == Main::Apps,
+                palette,
+                cx,
+                Self::open_apps,
+            )
+        })
     }
 
     /// A chat header's "Apps in this chat", behind `NGTEAMS_BOTS=1`.
@@ -161,9 +167,8 @@ impl Shell {
         Some(
             crate::icons::selected_by(
                 "chat-apps",
-                crate::icons::icon_button("chat-apps", crate::icons::Glyph::PLUS, "Apps in this chat").on_click(
-                    cx.listener(move |this, _, window, cx| this.open_chat_apps(chat.clone(), window, cx)),
-                ),
+                crate::icons::icon_button("chat-apps", crate::icons::Glyph::PLUS, "Apps in this chat")
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_chat_apps(chat.clone(), window, cx))),
             )
             .into_any_element(),
         )

@@ -1829,7 +1829,12 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
 
 fn on_base_in(cloud: &Cloud, service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
     // an own server's tiles are on its own origin (`AppPicture::of_in`); the other public pictures are Microsoft's
-    if cloud.is_microsoft() || matches!(service, Service::Emoticons | Service::Giphy | Service::StaticAppPictures) {
+    if cloud.is_microsoft()
+        || matches!(
+            service,
+            Service::Emoticons | Service::Giphy | Service::StaticAppPictures
+        )
+    {
         return on_base(service, base, url, endpoint);
     }
     if !cloud.contains(base) || !cloud.contains(url) || base.origin() != url.origin() {

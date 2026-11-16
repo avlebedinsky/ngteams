@@ -197,7 +197,7 @@ impl AppDefinition {
 
     /// The value its definition holds under `key`.
     #[must_use]
-    pub fn field(&self, key: &str) -> Option<&Value> {
+    pub(crate) fn field(&self, key: &str) -> Option<&Value> {
         self.0.get(key)
     }
 
@@ -1139,14 +1139,18 @@ mod tests {
 
     #[test]
     fn an_app_is_added_for_oneself_and_to_a_chat_with_its_definition_and_removed_by_id() {
-        const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+        const CHAT: &str =
+            "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
         let app = || definition(&json!({"id": "app-3", "name": "App", "bots": [{"id": "b3"}]}));
         let (service, method, path, body) = sent(&TeamWrite::AddPersonalApp { app: app() });
         assert_eq!(
             (service, method, path.as_str()),
             (Service::MiddleTier, "POST", "beta/users/apps/entitlements")
         );
-        assert_eq!(body, Some(json!({"id": "app-3", "name": "App", "bots": [{"id": "b3"}]})));
+        assert_eq!(
+            body,
+            Some(json!({"id": "app-3", "name": "App", "bots": [{"id": "b3"}]}))
+        );
         let (_, method, path, body) = sent(&TeamWrite::RemovePersonalApp {
             app: "app-3".to_owned(),
         });

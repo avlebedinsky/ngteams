@@ -473,7 +473,10 @@ async fn the_apps_page_reads_the_store_s_sections_and_what_was_added() {
     let listing = requests.app_listing().await.unwrap();
     assert_eq!(listing.sections.org, [HELPER]);
     assert_eq!(listing.sections.popular.len(), 2);
-    assert_eq!(listing.sections.ratings.get(HELPER).map(|rating| rating.tenths), Some(43));
+    assert_eq!(
+        listing.sections.ratings.get(HELPER).map(|rating| rating.tenths),
+        Some(43)
+    );
     let helper = listing.app(HELPER).expect("the org's app is defined");
     assert_eq!(helper.app.name, "Made-up Helper");
     assert!(helper.definition.places().personal);
@@ -492,7 +495,11 @@ async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again()
     let definition = |id: &str| listing.app(id).expect("defined").definition.clone();
     let write = |write: TeamWrite| requests.team_write(write, None);
 
-    write(TeamWrite::AddPersonalApp { app: definition(HELPER) }).await.unwrap();
+    write(TeamWrite::AddPersonalApp {
+        app: definition(HELPER),
+    })
+    .await
+    .unwrap();
     let mine = requests.user_apps().await.unwrap();
     assert_eq!(mine.iter().map(|app| app.app.id.as_str()).collect::<Vec<_>>(), [HELPER]);
     write(TeamWrite::AddChatApp {
@@ -502,16 +509,24 @@ async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again()
     .await
     .unwrap();
     let in_chat = requests.chat_apps(CHAT).await.unwrap();
-    assert_eq!(in_chat.iter().map(|app| app.app.name.as_str()).collect::<Vec<_>>(), ["Made-up Polls"]);
+    assert_eq!(
+        in_chat.iter().map(|app| app.app.name.as_str()).collect::<Vec<_>>(),
+        ["Made-up Polls"]
+    );
     write(TeamWrite::AddApp {
         team: TEAM.to_owned(),
         app: definition(POLLS),
     })
     .await
     .unwrap();
-    assert_eq!(rig.mock.apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned())), [POLLS]);
+    assert_eq!(
+        rig.mock.apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned())),
+        [POLLS]
+    );
 
-    write(TeamWrite::RemovePersonalApp { app: HELPER.to_owned() }).await.unwrap();
+    write(TeamWrite::RemovePersonalApp { app: HELPER.to_owned() })
+        .await
+        .unwrap();
     write(TeamWrite::RemoveChatApp {
         chat: CHAT.to_owned(),
         app: POLLS.to_owned(),
@@ -526,7 +541,11 @@ async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again()
     .unwrap();
     assert!(requests.user_apps().await.unwrap().is_empty());
     assert!(requests.chat_apps(CHAT).await.unwrap().is_empty());
-    assert!(rig.mock.apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned())).is_empty());
+    assert!(
+        rig.mock
+            .apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned()))
+            .is_empty()
+    );
 
     let writes = rig
         .sent(|path| path.ends_with("/entitlements") || path.contains("/entitlements/"))
@@ -542,8 +561,14 @@ async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again()
             ("POST".to_owned(), format!("/beta/chats/{CHAT}/apps/entitlements")),
             ("POST".to_owned(), format!("/beta/teams/{TEAM}/apps/entitlements")),
             ("DELETE".to_owned(), format!("/beta/users/apps/entitlements/{HELPER}")),
-            ("DELETE".to_owned(), format!("/beta/chats/{CHAT}/apps/entitlements/{POLLS}")),
-            ("DELETE".to_owned(), format!("/beta/teams/{TEAM}/apps/entitlements/{POLLS}")),
+            (
+                "DELETE".to_owned(),
+                format!("/beta/chats/{CHAT}/apps/entitlements/{POLLS}")
+            ),
+            (
+                "DELETE".to_owned(),
+                format!("/beta/teams/{TEAM}/apps/entitlements/{POLLS}")
+            ),
         ]
     );
 }
@@ -558,7 +583,10 @@ async fn an_app_the_service_refuses_to_add_is_told_and_not_listed() {
     let refused = requests
         .team_write(TeamWrite::AddPersonalApp { app: helper }, None)
         .await;
-    assert!(matches!(refused, Err(EngineError::TeamNotChanged { .. })), "{refused:?}");
+    assert!(
+        matches!(refused, Err(EngineError::TeamNotChanged { .. })),
+        "{refused:?}"
+    );
     assert!(requests.user_apps().await.unwrap().is_empty());
 }
 

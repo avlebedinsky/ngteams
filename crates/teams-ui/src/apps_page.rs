@@ -19,10 +19,11 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, img, px, rgb,
+    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, img, px, rgb,
 };
+use gpui_component::Disableable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use teams_core::AppListing;
@@ -72,6 +73,8 @@ pub struct AppsPage {
     /// The app whose Remove asks first.
     removing: Option<StoreApp>,
     remove_failed: bool,
+    /// The Remove sent and not answered yet: kept apart from the reads, which a refresh replaces.
+    removing_now: Option<Task<()>>,
     pictures: BTreeMap<String, Option<Arc<RenderImage>>>,
     reading: Vec<Task<()>>,
     focus: FocusHandle,
@@ -99,6 +102,7 @@ impl AppsPage {
             expanded: None,
             removing: None,
             remove_failed: false,
+            removing_now: None,
             pictures: BTreeMap::new(),
             reading: Vec::new(),
             focus: cx.focus_handle(),
@@ -293,6 +297,9 @@ impl AppsPage {
 
     /// The question's Remove: the app off the account, gone from the list once the service took it.
     pub fn remove(&mut self, cx: &mut Context<Self>) {
+        if self.removing_now.is_some() {
+            return;
+        }
         let Some(store) = self.removing.clone() else {
             return;
         };
@@ -300,13 +307,17 @@ impl AppsPage {
         let reply = self
             .core
             .team_write(TeamWrite::RemovePersonalApp { app: id.clone() }, None);
-        self.reading.push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        cx.notify();
+        self.removing_now = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
             let _ = this.update(cx, |this, cx| {
+                this.removing_now = None;
                 if answer.is_ok() {
                     this.removing = None;
                     this.remove_failed = false;
-                    this.mine.iter_mut().for_each(|mine| mine.retain(|listed| listed.app.id != id));
+                    this.mine
+                        .iter_mut()
+                        .for_each(|mine| mine.retain(|listed| listed.app.id != id));
                 } else {
                     this.remove_failed = true;
                 }
@@ -389,12 +400,10 @@ impl AppsPage {
                     .text_color(rgb(palette.muted_foreground))
                     .child("Discover agents and apps that can help you tackle any task."),
             )
-            .child(
-                div().pt_4().w(px(560.0)).max_w_full().child(selected_by(
-                    "apps-search",
-                    Input::new(&self.search).prefix(Glyph::SEARCH.icon().size(px(14.0))),
-                )),
-            )
+            .child(div().pt_4().w(px(560.0)).max_w_full().child(selected_by(
+                "apps-search",
+                Input::new(&self.search).prefix(Glyph::SEARCH.icon().size(px(14.0))),
+            )))
     }
 
     fn picture(&self, store: &StoreApp, side: f32, palette: Palette) -> gpui::Div {
@@ -510,12 +519,7 @@ impl AppsPage {
             .flex_col()
             .gap_1()
             .child(div().text_xl().font_weight(gpui::FontWeight::BOLD).child(title.into()))
-            .children(caption.map(|caption| {
-                div()
-                    .text_sm()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(caption)
-            }))
+            .children(caption.map(|caption| div().text_sm().text_color(rgb(palette.muted_foreground)).child(caption)))
             .child(div().pt_2().flex().flex_wrap().gap_2().children(tiles))
     }
 
@@ -617,7 +621,13 @@ impl AppsPage {
             ))
         })
         .when(!popular.is_empty(), |body| {
-            body.child(Self::section_view("Popular on Teams", None, "apps-popular", popular, palette))
+            body.child(Self::section_view(
+                "Popular on Teams",
+                None,
+                "apps-popular",
+                popular,
+                palette,
+            ))
         })
         .into_any_element()
     }
@@ -669,16 +679,30 @@ impl AppsPage {
                             Button::new("apps-remove-confirm")
                                 .primary()
                                 .label("Remove")
+                                .disabled(self.removing_now.is_some())
                                 .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
                         )),
                 ),
         )
     }
 
+    /// A row's chevron, which opens or closes it to where its app is added.
+    fn expand_button(at: usize, id: String, open: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let (glyph, tip) = if open {
+            (Glyph::CHEVRON_DOWN, "Hide where it's added")
+        } else {
+            (Glyph::CHEVRON_RIGHT, "Show where it's added")
+        };
+        selected_by(
+            format!("apps-mine-{at}-expand"),
+            icon_button(SharedString::from(format!("apps-mine-{at}-expand")), glyph, tip)
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_row(&id, cx))),
+        )
+    }
+
     fn manage_row(&self, at: usize, store: &StoreApp, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let id = store.app.id.clone();
         let open = self.expanded.as_deref() == Some(id.as_str());
-        let toggled = id.clone();
         let removed = store.clone();
         let detailed = store.clone();
         let read_only = self.core.read_only();
@@ -689,15 +713,7 @@ impl AppsPage {
             .flex()
             .items_center()
             .gap_3()
-            .child(selected_by(
-                format!("apps-mine-{at}-expand"),
-                icon_button(
-                    SharedString::from(format!("apps-mine-{at}-expand")),
-                    if open { Glyph::CHEVRON_DOWN } else { Glyph::CHEVRON_RIGHT },
-                    if open { "Hide where it's added" } else { "Show where it's added" },
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_row(&toggled, cx))),
-            ))
+            .child(Self::expand_button(at, id, open, cx))
             .child(self.picture(store, 36.0, palette))
             .child(
                 div()
@@ -742,8 +758,12 @@ impl AppsPage {
                 .when(!read_only, |line| {
                     line.child(selected_by(
                         format!("apps-mine-{at}-remove"),
-                        icon_button(SharedString::from(format!("apps-mine-{at}-remove")), Glyph::TRASH, "Remove")
-                            .on_click(cx.listener(move |this, _, _, cx| this.ask_remove(removed.clone(), cx))),
+                        icon_button(
+                            SharedString::from(format!("apps-mine-{at}-remove")),
+                            Glyph::TRASH,
+                            "Remove",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.ask_remove(removed.clone(), cx))),
                     ))
                 })
         });
@@ -778,12 +798,10 @@ impl AppsPage {
                     .on_click(cx.listener(|this, _, window, cx| this.show(AppsView::Store, window, cx))),
             ))
             .child(div().flex_1())
-            .child(
-                div().w(px(240.0)).child(selected_by(
-                    "apps-find",
-                    Input::new(&self.find).suffix(Glyph::SEARCH.icon().size(px(14.0))),
-                )),
-            );
+            .child(div().w(px(240.0)).child(selected_by(
+                "apps-find",
+                Input::new(&self.find).suffix(Glyph::SEARCH.icon().size(px(14.0))),
+            )));
         let list: AnyElement = match &self.mine {
             None => crate::team_dialogs::waiting("apps-mine-loading", "Loading…", palette).into_any_element(),
             Some(mine) if mine.is_empty() => note("apps-mine-none", "You haven't added any apps yet.", palette),
@@ -842,11 +860,7 @@ pub(crate) fn app_picture(
     side: f32,
     palette: Palette,
 ) -> gpui::Div {
-    let face = div()
-        .relative()
-        .size(px(side))
-        .flex_none()
-        .rounded_md();
+    let face = div().relative().size(px(side)).flex_none().rounded_md();
     match picture {
         Some(picture) => face
             .border_1()
@@ -890,11 +904,7 @@ fn rating_line(rating: Option<Rating>, palette: Palette) -> gpui::Div {
     match rating.filter(|rating| rating.count > 0 || rating.tenths > 0) {
         Some(rating) => line
             .child(Glyph::STAR.icon().size(px(12.0)).text_color(rgb(palette.brand)))
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child(stars(rating)),
-            )
+            .child(div().font_weight(gpui::FontWeight::BOLD).child(stars(rating)))
             .child(format!("({})", ratings_count(rating.count))),
         None => line
             .text_color(rgb(palette.muted_foreground))

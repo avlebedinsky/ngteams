@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AsyncApp, Context, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Task, WeakEntity, Window, div, px, rgb,
+    AnyElement, AsyncApp, Context, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
+    ParentElement as _, Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
+    WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Disableable as _, FocusTrapElement as _};
@@ -119,6 +119,7 @@ impl AppDetailsDialog {
         cx.emit(TeamDialogEvent::AddAppTo {
             app: Box::new(self.store.clone()),
             team,
+            changed: self.changed,
         });
     }
 
@@ -214,7 +215,10 @@ impl AppDetailsDialog {
                     )
                     .child(div().pt_2().child(self.actions(cx)))
                     .when(self.failed, |head| {
-                        head.child(problem("app-details-problem", "The app wasn't added. Please try again."))
+                        head.child(problem(
+                            "app-details-problem",
+                            "The app wasn't added. Please try again.",
+                        ))
                     }),
             )
             .child(selected_by(
@@ -233,12 +237,7 @@ impl AppDetailsDialog {
                 .flex_col()
                 .items_center()
                 .child(div().font_weight(gpui::FontWeight::BOLD).child(big))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette.muted_foreground))
-                        .child(small),
-                )
+                .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(small))
         };
         Some(
             div()
@@ -348,12 +347,7 @@ impl AppDetailsDialog {
                 .flex()
                 .gap_4()
                 .text_sm()
-                .child(
-                    div()
-                        .w(px(120.0))
-                        .text_color(rgb(palette.muted_foreground))
-                        .child(name),
-                )
+                .child(div().w(px(120.0)).text_color(rgb(palette.muted_foreground)).child(name))
                 .child(div().flex_1().child(value))
         };
         let languages = match definition.language_count() {

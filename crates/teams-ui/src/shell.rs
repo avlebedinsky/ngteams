@@ -101,13 +101,13 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
+mod apps;
 mod channel_management;
 mod chat_people;
 mod meeting_tabs;
 mod new_chat;
 mod profile_card;
 mod title_bar;
-mod apps;
 mod workflows;
 
 pub use meeting_tabs::ChatTab;
@@ -2105,7 +2105,12 @@ impl Shell {
                         }
                     }
                     TeamDialogEvent::AppsChanged { words } => this.apps_changed(words, cx),
-                    TeamDialogEvent::AddAppTo { app, team } => this.open_add_app_to(app.as_ref().clone(), *team, window, cx),
+                    TeamDialogEvent::AddAppTo { app, team, changed } => {
+                        if *changed {
+                            this.apps_changed("App added", cx);
+                        }
+                        this.open_add_app_to(app.as_ref().clone(), *team, window, cx);
+                    }
                     TeamDialogEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
                     TeamDialogEvent::ShowStore => this.open_apps(window, cx),
                     TeamDialogEvent::Gone { team, words } => {
@@ -2872,7 +2877,10 @@ impl Shell {
     }
 
     fn rail_view(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let place = !matches!(self.main, Main::Settings | Main::Calendar | Main::Workflows | Main::Apps);
+        let place = !matches!(
+            self.main,
+            Main::Settings | Main::Calendar | Main::Workflows | Main::Apps
+        );
         let chats = place && self.list_place == ListPlace::Chats;
         let activity = place && self.list_place == ListPlace::Activity;
         let unseen = self.activity.0.read(cx).unseen();

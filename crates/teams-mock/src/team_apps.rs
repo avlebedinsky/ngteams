@@ -1,7 +1,7 @@
-//! What Manage team's Apps tab and "More create team options" read (`docs/protocol/teams.md`), made up: a team's
-//! installed apps, the store's apps and their definitions, Teams' templates and one template's channels and apps, and no
-//! Microsoft 365 group to make a team of; and the tile Made-up Updates' definition names, on the CDN's path (Activity
-//! draws it for the app's items; the other apps name none). Requests not implemented by these fixtures remain
+//! What Manage team's Apps tab, "More create team options" and the Apps page read (`docs/protocol/teams.md`), made
+//! up: a team's installed apps, the store's apps and their definitions, Teams' templates and one template's channels
+//! and apps, and no Microsoft 365 group to make a team of; and the tile Made-up Updates' definition names, on the CDN's
+//! path (Activity draws it for the app's items; Made-up Helper names the same one, the other apps none). Requests not implemented by these fixtures remain
 //! unmatched.
 
 use serde_json::{Value, json};

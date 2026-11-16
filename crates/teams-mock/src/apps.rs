@@ -78,7 +78,12 @@ fn add(state: &mut State, place: AppPlace, body: &[u8]) -> Option<ResponseTempla
 }
 
 fn remove(state: &mut State, place: &AppPlace, app: &str) -> ResponseTemplate {
-    state.apps.added.entry(place.clone()).or_default().retain(|id| id != app);
+    state
+        .apps
+        .added
+        .entry(place.clone())
+        .or_default()
+        .retain(|id| id != app);
     ResponseTemplate::new(200)
 }
 

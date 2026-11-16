@@ -38,7 +38,9 @@ impl UserApps {
             .flatten()
             .collect();
         let definitions = value.get("definitions");
-        installed(entitlements, |id| definitions.and_then(|definitions| definitions.get(id)))
+        installed(entitlements, |id| {
+            definitions.and_then(|definitions| definitions.get(id))
+        })
     }
 }
 
@@ -188,7 +190,10 @@ impl StoreSections {
 
 fn rating(app: &Value) -> Option<Rating> {
     let rating = app.get("rating")?;
-    let average = rating.get("average")?.as_f64().filter(|average| (0.0..=5.0).contains(average))?;
+    let average = rating
+        .get("average")?
+        .as_f64()
+        .filter(|average| (0.0..=5.0).contains(average))?;
     // 0..=50 by the filter above
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..=50")]
     let tenths = (average * 10.0).round() as u16;
@@ -309,7 +314,10 @@ impl AppDefinition {
         let has = |key: &str| self.listed(key).next().is_some();
         [
             (AppCapability::Bot, has("bots")),
-            (AppCapability::Messaging, has("inputExtensions") || has("composeExtensions")),
+            (
+                AppCapability::Messaging,
+                has("inputExtensions") || has("composeExtensions"),
+            ),
             (AppCapability::PersonalApp, self.has_personal_page()),
             (AppCapability::Tab, has("configurableTabs") || has("galleryTabs")),
         ]
@@ -326,7 +334,14 @@ impl AppDefinition {
             personal: self.has_personal_page(),
             ..AppPlaces::default()
         };
-        let lists = ["bots", "inputExtensions", "composeExtensions", "configurableTabs", "galleryTabs", "staticTabs"];
+        let lists = [
+            "bots",
+            "inputExtensions",
+            "composeExtensions",
+            "configurableTabs",
+            "galleryTabs",
+            "staticTabs",
+        ];
         let scopes = lists
             .iter()
             .flat_map(|list| self.listed(list))
@@ -346,13 +361,14 @@ impl AppDefinition {
 
     /// Whether it has a page of its own: a `staticTabs` entry with no scopes, or with `personal` among them.
     fn has_personal_page(&self) -> bool {
-        self.listed("staticTabs").any(|tab| match tab.get("scopes").and_then(Value::as_array) {
-            None => true,
-            Some(scopes) => scopes
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|scope| scope.eq_ignore_ascii_case("personal")),
-        })
+        self.listed("staticTabs")
+            .any(|tab| match tab.get("scopes").and_then(Value::as_array) {
+                None => true,
+                Some(scopes) => scopes
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|scope| scope.eq_ignore_ascii_case("personal")),
+            })
     }
 
     /// The permissions it asks for, as its definition names them: its manifest's (`permissions`: `Identity`,
@@ -384,12 +400,18 @@ impl AppDefinition {
         let bots = self.listed("bots").next().is_some();
         let identity = self.field("webApplicationInfo").is_some()
             || self.listed("permissions").any(|name| name.as_str() == Some("Identity"));
-        let specific = self.permissions().iter().any(|name| name != "Identity" && name != "MessageTeamMembers");
-        let activities = self
-            .field("activities")
-            .is_some_and(|activities| ["activityTypes", "activityItems"].iter().any(|key| {
-                activities.get(*key).and_then(Value::as_array).is_some_and(|items| !items.is_empty())
-            }));
+        let specific = self
+            .permissions()
+            .iter()
+            .any(|name| name != "Identity" && name != "MessageTeamMembers");
+        let activities = self.field("activities").is_some_and(|activities| {
+            ["activityTypes", "activityItems"].iter().any(|key| {
+                activities
+                    .get(*key)
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty())
+            })
+        });
         let mut overview = PermissionOverview::default();
         if identity {
             overview.reads.push("Information related to you");
@@ -574,7 +596,10 @@ mod tests {
         assert_eq!(
             app.permission_overview(),
             PermissionOverview {
-                reads: vec!["Information related to you", "Information in your chats, channels, and meetings"],
+                reads: vec![
+                    "Information related to you",
+                    "Information in your chats, channels, and meetings"
+                ],
                 actions: vec!["Send and receive messages and notifications"],
             }
         );
@@ -590,7 +615,11 @@ mod tests {
         assert_eq!(notifier.language_count(), 2);
         let polls = definition(&json!({"id": "p", "staticTabs": [{"scopes": ["GroupChat", "Team"]}],
             "galleryTabs": [{"scopes": ["GroupChat"]}]}));
-        assert_eq!(polls.capabilities(), [AppCapability::Tab], "a page only for chats isn't a personal app");
+        assert_eq!(
+            polls.capabilities(),
+            [AppCapability::Tab],
+            "a page only for chats isn't a personal app"
+        );
         assert_eq!(
             polls.places(),
             AppPlaces {
@@ -599,7 +628,8 @@ mod tests {
                 team: true
             }
         );
-        let bare = definition(&json!({"id": "t", "bots": [{"id": "n", "scopes": ["personal"], "isNotificationOnly": true}]}));
+        let bare =
+            definition(&json!({"id": "t", "bots": [{"id": "n", "scopes": ["personal"], "isNotificationOnly": true}]}));
         assert_eq!(bare.capabilities(), [AppCapability::Bot]);
         assert_eq!(bare.personal_bot(), None, "a notification-only bot isn't chatted with");
         assert!(bare.permissions().is_empty());

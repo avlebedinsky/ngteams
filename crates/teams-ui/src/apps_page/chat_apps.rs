@@ -2,23 +2,24 @@
 //! added to the chat ([`Core::chat_apps`]) with Remove, which asks "Remove <app>" / "Are you sure you want to remove
 //! <app>?" first, then takes it off the chat (`DELETE beta/chats/<chat>/apps/entitlements/<app>`).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity,
-    Window, div, px, rgb,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, RenderImage, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::FocusTrapElement as _;
+use gpui_component::{Disableable as _, FocusTrapElement as _};
 use teams_proto::{StoreApp, TeamWrite};
 
-use super::app_picture;
+use super::{DECODED_SIDE, app_picture};
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
+use crate::inline::decode_app_tile;
 use crate::team_dialogs::{TeamDialogEvent, problem, surface, title, waiting};
 use crate::theme::{self, Palette};
 
@@ -31,7 +32,11 @@ pub struct ChatAppsDialog {
     removing: Option<StoreApp>,
     failed: bool,
     changed: bool,
-    working: Vec<Task<()>>,
+    _reading: Task<()>,
+    /// The Remove sent and not answered yet.
+    removing_now: Option<Task<()>>,
+    /// The apps' pictures, by app id, once drawable.
+    pictures: BTreeMap<String, Arc<RenderImage>>,
     focus: FocusHandle,
     _typed: Subscription,
 }
@@ -48,6 +53,7 @@ impl ChatAppsDialog {
         let reading = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let apps = reply.await.unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
+                this.ask_pictures(&apps, cx);
                 this.apps = Some(apps);
                 cx.notify();
             });
@@ -60,7 +66,9 @@ impl ChatAppsDialog {
             removing: None,
             failed: false,
             changed: false,
-            working: vec![reading],
+            _reading: reading,
+            pictures: BTreeMap::new(),
+            removing_now: None,
             focus: cx.focus_handle(),
             _typed: typed,
         }
@@ -78,6 +86,36 @@ impl ChatAppsDialog {
             .collect()
     }
 
+    /// Asks for the picture of each app listed, as the store does for its tiles.
+    fn ask_pictures(&self, apps: &[StoreApp], cx: &mut Context<Self>) {
+        for store in apps {
+            let Some(url) = store.definition.large_image_url() else {
+                continue;
+            };
+            let id = store.app.id.clone();
+            let reply = self.core.app_picture(url.to_owned());
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let Ok(Some(bytes)) = reply.await else { return };
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move { decode_app_tile(&bytes, DECODED_SIDE) })
+                    .await;
+                let Some((image, _)) = decoded else { return };
+                let _ = this.update(cx, |this, cx| {
+                    this.pictures.insert(id, Arc::new(image));
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// Whether the app with `id` is drawn with its picture (else its initials on its colour).
+    #[must_use]
+    pub fn shows_picture(&self, id: &str) -> bool {
+        self.pictures.contains_key(id)
+    }
+
     /// A row's Remove: asks first.
     pub fn ask_remove(&mut self, store: StoreApp, cx: &mut Context<Self>) {
         self.removing = Some(store);
@@ -87,6 +125,9 @@ impl ChatAppsDialog {
 
     /// The question's Remove: the app off the chat, gone from the list once the service took it.
     pub fn remove(&mut self, cx: &mut Context<Self>) {
+        if self.removing_now.is_some() {
+            return;
+        }
         let Some(store) = self.removing.clone() else {
             return;
         };
@@ -98,13 +139,17 @@ impl ChatAppsDialog {
             },
             None,
         );
-        self.working.push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        cx.notify();
+        self.removing_now = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
             let _ = this.update(cx, |this, cx| {
+                this.removing_now = None;
                 if answer.is_ok() {
                     this.removing = None;
                     this.changed = true;
-                    this.apps.iter_mut().for_each(|apps| apps.retain(|listed| listed.app.id != id));
+                    this.apps
+                        .iter_mut()
+                        .for_each(|apps| apps.retain(|listed| listed.app.id != id));
                 } else {
                     this.failed = true;
                 }
@@ -131,7 +176,12 @@ impl ChatAppsDialog {
             .gap_3()
             .border_b_1()
             .border_color(rgb(palette.border))
-            .child(app_picture(store, None, 36.0, palette))
+            .child(app_picture(
+                store,
+                self.pictures.get(&store.app.id).cloned(),
+                36.0,
+                palette,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -155,8 +205,12 @@ impl ChatAppsDialog {
             .when(!self.core.read_only(), |row| {
                 row.child(selected_by(
                     format!("chat-apps-{at}-remove"),
-                    icon_button(SharedString::from(format!("chat-apps-{at}-remove")), Glyph::TRASH, "Remove")
-                        .on_click(cx.listener(move |this, _, _, cx| this.ask_remove(removed.clone(), cx))),
+                    icon_button(
+                        SharedString::from(format!("chat-apps-{at}-remove")),
+                        Glyph::TRASH,
+                        "Remove",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.ask_remove(removed.clone(), cx))),
                 ))
             })
             .into_any_element()
@@ -175,7 +229,11 @@ impl ChatAppsDialog {
                 .rounded_lg()
                 .border_1()
                 .border_color(rgb(palette.border))
-                .child(div().font_weight(gpui::FontWeight::BOLD).child(format!("Remove {name}")))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(format!("Remove {name}")),
+                )
                 .when(self.failed, |question| {
                     question.child(problem(
                         "chat-apps-problem",
@@ -203,6 +261,7 @@ impl ChatAppsDialog {
                             Button::new("chat-apps-confirm")
                                 .primary()
                                 .label("Remove")
+                                .disabled(self.removing_now.is_some())
                                 .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
                         )),
                 ),

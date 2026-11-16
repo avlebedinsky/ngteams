@@ -92,6 +92,7 @@
 //! `capabilities` among them) with the `uniquerosterthread` the conversation list gives the chat; its `fixedRoster`
 //! and its own capabilities aren't known, so they aren't made up.
 
+mod apps;
 mod bots;
 mod calendar;
 mod calling;
@@ -100,7 +101,6 @@ mod chatsvc;
 mod csa;
 mod fixtures;
 mod front;
-mod apps;
 mod loki;
 #[cfg(feature = "media")]
 pub mod media;

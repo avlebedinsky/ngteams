@@ -252,7 +252,8 @@ impl<C: Credentials + 'static> Pictures<C> {
     }
 
     /// Answers `reply` with the app tile `url` names (a definition's `largeImageUrl`), as [`Self::picture`] does; a
-    /// URL off the CDN's app folders is answered `None`.
+    /// URL off the account's tile origin (the CDN's app folders, or an own server's `/teamsappdata/`) is answered
+    /// `None`.
     pub(crate) fn app_picture(&self, url: &str, reply: Responder<Option<PictureBytes>>) {
         match AppPicture::of_in(self.client.transport().cloud(), url) {
             Some(picture) => self.ask(&self.apps, picture, reply),

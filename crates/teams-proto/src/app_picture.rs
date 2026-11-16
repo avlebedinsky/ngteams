@@ -28,7 +28,7 @@ const MAX_SEGMENT: usize = 128;
 /// The longest version taken (`1.2.25`).
 const MAX_VERSION: usize = 64;
 
-/// `GET` of an app's tile on Microsoft's CDN. Its answer is read with [`AppPicture::read_answer`].
+/// `GET` of an app's tile on Microsoft's CDN or an own server's origin. Its answer is read with [`AppPicture::read_answer`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AppPicture {
     /// The own server's host and port, for an own-server account's tile; `None` on Microsoft's CDN.

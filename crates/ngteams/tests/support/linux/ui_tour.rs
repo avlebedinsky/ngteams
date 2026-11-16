@@ -2327,9 +2327,14 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
     }),
     // the organization's app's details: what it does, its permissions, Add
     ("apps-details", |shell, window, cx| {
-        let Some(page) = shell.read(cx).apps().cloned() else { return };
+        let Some(page) = shell.read(cx).apps().cloned() else {
+            return;
+        };
         page.update(cx, |page, cx| page.set_search("", window, cx));
-        let helper = page.read(cx).listing().and_then(|listing| listing.app(APPS_HELPER).cloned());
+        let helper = page
+            .read(cx)
+            .listing()
+            .and_then(|listing| listing.app(APPS_HELPER).cloned());
         if let Some(helper) = helper {
             shell.update(cx, |shell, cx| shell.open_app_details(helper, window, cx));
         }
@@ -2352,8 +2357,13 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
     // "Add to a chat" of the chats-and-teams app: the a–b chat picked
     ("apps-place", |shell, window, cx| {
         shell.update(cx, Shell::close_team_dialog);
-        let Some(page) = shell.read(cx).apps().cloned() else { return };
-        let polls = page.read(cx).listing().and_then(|listing| listing.app(APPS_POLLS).cloned());
+        let Some(page) = shell.read(cx).apps().cloned() else {
+            return;
+        };
+        let polls = page
+            .read(cx)
+            .listing()
+            .and_then(|listing| listing.app(APPS_POLLS).cloned());
         let Some(polls) = polls else { return };
         shell.update(cx, |shell, cx| shell.open_app_details(polls, window, cx));
         let details = shell
@@ -2381,7 +2391,9 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
     // "Manage your apps": the app added above, opened to where it is, and Remove's question
     ("apps-manage", |shell, window, cx| {
         shell.update(cx, Shell::close_team_dialog);
-        let Some(page) = shell.read(cx).apps().cloned() else { return };
+        let Some(page) = shell.read(cx).apps().cloned() else {
+            return;
+        };
         page.update(cx, |page, cx| {
             page.refresh(cx);
             page.show(teams_ui::apps_page::AppsView::Manage, window, cx);
@@ -2390,7 +2402,9 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
     }),
     ("apps-manage-remove-dark", |shell, _, cx| {
         fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
-        let Some(page) = shell.read(cx).apps().cloned() else { return };
+        let Some(page) = shell.read(cx).apps().cloned() else {
+            return;
+        };
         let helper = page.read(cx).mine_shown(cx).into_iter().next();
         if let Some(helper) = helper {
             page.update(cx, |page, cx| page.ask_remove(helper, cx));

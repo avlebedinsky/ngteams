@@ -4,7 +4,8 @@
 //! the service has none of isn't cached, so the next run reads it again; the cache is a private file beside the store.
 //! A GIF and a link preview's picture are cached by what they are of; asks that come while a read runs wait for it; a
 //! file Graph lists no thumbnail for has none; a cache that can't be opened leaves every run reading. An app's tile on
-//! the CDN is read once per version and cached alike; a URL off the CDN's app folders is never read. A banner's ask for
+//! the CDN is read once per version and cached alike; a URL off the CDN's app folders is never read. An own-server
+//! account reads a tile on its own origin, with no token, and never on the CDN. A banner's ask for
 //! a tile answers only what the run keeps or the cache holds, and reads nothing. Concurrent asks for one app's
 //! definition share one read, and a banner's ask for another app's cached definition doesn't wait for it.
 //!
@@ -479,6 +480,52 @@ async fn an_app_s_tile_is_read_once_cached_by_its_version_and_refused_off_the_cd
     );
     second.shutdown();
     assert_eq!(requests_to(&server, TILE).await, 2);
+}
+
+#[tokio::test]
+async fn an_own_server_account_reads_an_app_s_tile_on_its_own_origin_with_no_token() {
+    const TILE: &str = "/teamsappdata/apps/made-up/icon.png";
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(TILE))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(PNG.to_vec(), "image/png"))
+        .mount(&server)
+        .await;
+    let cloud = teams_proto::Cloud::own("https://chat.example:8443").unwrap();
+    let transport = || {
+        HttpTransport::for_cloud_with_mock_origin(
+            Arc::new(FakeTokens),
+            "https://chat.example:8443/api/chatsvc/amer",
+            cloud.clone(),
+            &server.uri(),
+        )
+        .unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let handle = engine::start(Parts {
+        calls: None,
+        store: Store::open(&store_file(&dir)).unwrap(),
+        client: Arc::new(Client::new(transport())),
+        outbox: Outbox::new(Arc::new(transport()), Author::new(Mri::new(LAB_A), "lab-a")),
+        push: None,
+        options: EngineOptions::default(),
+        known_names: Vec::new(),
+    })
+    .unwrap();
+    let requests = handle.requests();
+    let tile = requests
+        .app_picture(format!("https://chat.example:8443{TILE}"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((tile.format, tile.bytes.as_slice()), (PastedFormat::Png, PNG));
+    // Microsoft's CDN is not this account's tile origin
+    let cdn = "https://res.cdn.office.net/teamsappdata/evergreen-assets/apps/made-up_largeImage.png".to_owned();
+    assert!(requests.app_picture(cdn).await.unwrap().is_none());
+    handle.shutdown();
+    let read = server.received_requests().await.unwrap();
+    assert_eq!(read.len(), 1, "only the own origin's tile is read");
+    assert!(read[0].headers.get("authorization").is_none());
 }
 
 #[tokio::test]

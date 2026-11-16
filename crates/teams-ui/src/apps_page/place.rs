@@ -111,7 +111,11 @@ impl AddToPlaceDialog {
         } else {
             TeamWrite::AddChatApp { chat: place, app }
         };
-        let words = if self.team { "App added to the team" } else { "App added to the chat" };
+        let words = if self.team {
+            "App added to the team"
+        } else {
+            "App added to the chat"
+        };
         let reply = self.core.team_write(write, None);
         self.working = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
@@ -144,11 +148,7 @@ impl AddToPlaceDialog {
             .when(chosen, |row| row.bg(rgb(palette.selected)))
             .hover(move |row| row.bg(rgb(palette.hover)))
             .on_click(cx.listener(move |this, _, _, cx| this.choose(id.clone(), cx)))
-            .child(
-                if self.team { Glyph::USERS } else { Glyph::CHAT }
-                    .icon()
-                    .size(px(16.0)),
-            )
+            .child(if self.team { Glyph::USERS } else { Glyph::CHAT }.icon().size(px(16.0)))
             .child(div().flex_1().min_w_0().truncate().child(place.name.clone()))
             .when(chosen, |row| row.child(Glyph::CHECK.icon().size(px(14.0))))
             .into_any_element()
