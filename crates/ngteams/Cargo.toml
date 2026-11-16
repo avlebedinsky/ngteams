@@ -143,6 +143,10 @@ name = "share_window"
 harness = false
 
 [[test]]
+name = "own_group_video_window"
+harness = false
+
+[[test]]
 name = "reactors_window"
 harness = false
 

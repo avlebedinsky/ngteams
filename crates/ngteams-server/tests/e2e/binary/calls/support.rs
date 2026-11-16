@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -16,7 +17,7 @@ use teams_core::{
     Relay, VideoOutput,
 };
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
-use teams_media::devices::{VideoSink, wav};
+use teams_media::devices::{DeviceError, VideoFrame, VideoSink, wav};
 use teams_media::processing::ProcessingConfig;
 use teams_media::session::SessionConfig;
 use teams_media::stun::{Attribute, Class, IntegrityKey, Message, Method, TRANSPORT_UDP, TransactionId};
@@ -247,16 +248,61 @@ fn append(config: &Path, tables: &str) {
     writeln!(file, "{tables}").unwrap();
 }
 
-/// What a client's calls showed: the far end's decoded frames and its own camera's.
+/// What a client's calls showed: the far end's decoded frames (all lines together, and each line apart) and its own
+/// camera's.
 #[derive(Clone, Default)]
 pub struct Shown {
     pub remote: FrameCounter,
     pub preview: FrameCounter,
+    lines: Arc<Mutex<BTreeMap<usize, Seen>>>,
+}
+
+/// What one video line showed: how many frames, and the last one's size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    pub frames: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Shown {
+    /// What line `line` showed so far.
+    pub fn line(&self, line: usize) -> Seen {
+        let lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        lines.get(&line).copied().unwrap_or_default()
+    }
+
+    /// What each line showed so far, by line.
+    pub fn lines(&self) -> BTreeMap<usize, Seen> {
+        self.lines.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+/// One line's sink: counted with all the others, and apart.
+struct LineSink {
+    all: FrameCounter,
+    line: usize,
+    lines: Arc<Mutex<BTreeMap<usize, Seen>>>,
+}
+
+impl VideoSink for LineSink {
+    fn show(&mut self, frame: &VideoFrame) -> Result<(), DeviceError> {
+        let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let seen = lines.entry(self.line).or_default();
+        seen.frames += 1;
+        (seen.width, seen.height) = (frame.width, frame.height);
+        drop(lines);
+        self.all.show(frame)
+    }
 }
 
 impl VideoOutput for Shown {
-    fn remote(&self, _line: usize) -> Box<dyn VideoSink> {
-        Box::new(self.remote.clone())
+    fn remote(&self, line: usize) -> Box<dyn VideoSink> {
+        Box::new(LineSink {
+            all: self.remote.clone(),
+            line,
+            lines: Arc::clone(&self.lines),
+        })
     }
 
     fn preview(&self) -> Option<Box<dyn VideoSink>> {
@@ -306,6 +352,8 @@ pub struct Phone {
     pub log: Vec<Event>,
     pub recording: PathBuf,
     pub video: Shown,
+    /// The camera's picture: its shape tells this client's video apart at the others.
+    pub camera: PatternCamera,
     name: String,
     tone: Tone,
     engine: Option<EngineHandle>,
@@ -341,6 +389,7 @@ impl Phone {
             log: Vec::new(),
             recording: dir.path().join("heard.wav"),
             video: Shown::default(),
+            camera: PatternCamera::default(),
             name: name.into(),
             tone,
             engine: None,
@@ -402,7 +451,7 @@ impl Phone {
             devices: Arc::new(FileDevices {
                 input: AudioInput::Tone(self.tone),
                 recording: Some(self.recording.clone()),
-                camera: PatternCamera::default(),
+                camera: self.camera,
                 pacing: Pacing::RealTime,
             }),
             // as a shipped client's: an own-server account's media goes through the relay its server names

@@ -56,6 +56,11 @@ pub struct BinaryServer {
 impl BinaryServer {
     /// Writes the certificates and the configuration, then starts `serve` and waits until it listens.
     pub fn start(binary: &Path) -> TestResult<Self> {
+        Self::start_with(binary, "")
+    }
+
+    /// [`Self::start`] with `tables` added to its configuration (a group call's relay and media node, say).
+    pub fn start_with(binary: &Path, tables: &str) -> TestResult<Self> {
         let dir = tempfile::tempdir()?;
         let ca_file = write_certificates(dir.path())?;
         let port = free_port()?;
@@ -65,7 +70,7 @@ impl BinaryServer {
             &config,
             format!(
                 "listen = \"127.0.0.1:{port}\"\npublic_origin = \"{origin}\"\ndatabase_url = \"sqlite://{}\"\n\n\
-                 [tls]\ncert = \"{}\"\nkey = \"{}\"\n",
+                 [tls]\ncert = \"{}\"\nkey = \"{}\"\n{tables}",
                 dir.path().join("server.sqlite").display(),
                 dir.path().join("cert.pem").display(),
                 dir.path().join("key.pem").display(),
