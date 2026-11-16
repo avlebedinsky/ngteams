@@ -446,6 +446,11 @@ fn a_first_message_given_back_while_new_message_was_left_is_there_when_it_opens_
     let actions = rig.core.actions.lock().unwrap().clone();
     assert!(matches!(actions.as_slice(), [Action::CreateChat { .. }]), "{actions:?}");
     assert!(matches!(main(&shell, cx), Main::Chat(_)));
+    // its text is in its box again, but it has no row: New message shows it
+    assert!(
+        cx.debug_bounds("chat-row-draft-0").is_none(),
+        "a first message given back has no row"
+    );
     cx.simulate_keystrokes("ctrl-n");
     draw(cx);
     assert_eq!(new_chat(&shell, cx).entity_id(), view.entity_id());
@@ -508,6 +513,10 @@ fn a_new_chat_with_a_draft_left_for_another_chat_keeps_its_row_and_comes_back_wi
         cx.debug_bounds("chat-row-draft-0").is_none(),
         "the empty New message isn't kept"
     );
+    assert!(
+        cx.update(|_, cx| shell.read(cx).kept_new_chats(cx).is_empty()),
+        "the empty New message isn't kept"
+    );
     assert!(rig.core.actions.lock().unwrap().is_empty(), "nothing written");
 }
 
@@ -536,6 +545,81 @@ fn a_draft_typed_to_the_chat_new_message_found_stays_with_that_chat() {
     let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).unwrap();
     let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
     assert_eq!(cx.update(|_, cx| compose.read(cx).value(cx)).trim(), "for bee");
+}
+
+/// What the box of the chat shown holds.
+fn chat_typed(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> String {
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).unwrap();
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    cx.update(|_, cx| compose.read(cx).value(cx)).trim().to_owned()
+}
+
+/// Types `text` into the box of the chat shown.
+fn type_in_chat(shell: &Entity<Shell>, cx: &mut VisualTestContext, text: &str) {
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).unwrap();
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input(text);
+    draw(cx);
+}
+
+/// Ctrl+N, Bee on To: (New message finds the a–b chat), and `text` typed in the box of that chat.
+fn draft_to_found_ab(shell: &Entity<Shell>, cx: &mut VisualTestContext, text: &str) {
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let view = new_chat(shell, cx);
+    add(cx, "Bee");
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).found().map(str::to_owned)),
+        Some(AB.to_owned())
+    );
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input(text);
+}
+
+#[test]
+fn a_draft_typed_to_the_chat_new_message_found_is_there_when_that_chat_opens_at_once() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    draft_to_found_ab(&shell, cx, "for bee");
+    // no drawing between: the chat opens before the shell sets New message aside
+    open(&shell, cx, AB);
+    assert_eq!(chat_typed(&shell, cx), "for bee");
+    open(&shell, cx, TALK);
+    open(&shell, cx, AB);
+    assert_eq!(chat_typed(&shell, cx), "for bee", "the draft stays with the chat");
+}
+
+#[test]
+fn a_draft_typed_to_the_found_chat_is_there_when_that_chat_was_open_before_new_message() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    draft_to_found_ab(&shell, cx, "for bee");
+    draw(cx);
+    // the chat open before New message is the one found: its view has a box of its own
+    open(&shell, cx, AB);
+    assert_eq!(chat_typed(&shell, cx), "for bee");
+    open(&shell, cx, TALK);
+    open(&shell, cx, AB);
+    assert_eq!(chat_typed(&shell, cx), "for bee", "the draft stays with the chat");
+}
+
+#[test]
+fn a_draft_typed_to_the_found_chat_does_not_replace_the_draft_that_chat_had() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    type_in_chat(&shell, cx, "foo");
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "bar");
+    draw(cx);
+    open(&shell, cx, AC);
+    open(&shell, cx, AB);
+    let typed = chat_typed(&shell, cx);
+    assert!(typed.contains("foo"), "the earlier draft stays: {typed:?}");
+    assert!(typed.contains("bar"), "the new draft is added: {typed:?}");
 }
 
 /// A made-up picture, `width` by `height`, as PNG bytes.

@@ -265,10 +265,16 @@ impl NewChat {
         }
     }
 
-    /// Gives the To: box the keyboard, its suggestions open.
+    /// Gives the To: box the keyboard, its suggestions open; a new group chat, which has no To: line, gives it to its
+    /// box.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.outcome == Outcome::GivenBack {
             self.outcome = Outcome::None;
+        }
+        if self.kind == Kind::GroupDraft {
+            let compose = self.compose(cx);
+            compose.update(cx, |compose, cx| compose.focus(window, cx));
+            return;
         }
         self.to.update(cx, |to, cx| to.focus(window, cx));
         self.suggesting = true;
@@ -398,10 +404,11 @@ impl NewChat {
 
     /// Its row in the chats while the shell keeps it out of sight, as Teams lists a chat not made yet: a new group
     /// chat's ([`Self::draft_row`]), or New message's while it names people and holds a draft for a chat not made
-    /// yet, named by its group name, else by its people. None while its first message is on its way.
+    /// yet, named by its group name, else by its people. None while its first message is on its way or given back
+    /// ([`Self::keeps_going`]: New message opened again shows it).
     #[must_use]
     pub fn kept_row(&self, cx: &gpui::App) -> Option<ChatRow> {
-        if self.is_starting() || self.outcome == Outcome::Made || self.found.is_some() {
+        if self.keeps_going() || self.outcome == Outcome::Made || self.found.is_some() {
             return None;
         }
         if self.kind == Kind::GroupDraft {

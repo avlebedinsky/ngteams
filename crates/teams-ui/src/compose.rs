@@ -813,9 +813,10 @@ impl Compose {
     }
 
     /// The doc the box holds, and what it is a draft of, moved to `other` (New message's box and an existing chat's
-    /// as the To: line finds that chat or leaves it): what was typed stays typed. Its pasted pictures stay behind: each
-    /// was uploaded for this box's chat alone (only its members may read it), and `other`'s editor holds no picture of
-    /// that id, so a block of one moved there would show nothing and hold every send back as not yet uploaded.
+    /// as the To: line finds that chat or leaves it): what was typed stays typed. A draft that `other` holds already
+    /// stays, and the text moved comes after it. Its pasted pictures stay behind: each was uploaded for this box's chat
+    /// alone (only its members may read it), and `other`'s editor holds no picture of that id, so a block of one moved
+    /// there would show nothing and hold every send back as not yet uploaded.
     pub fn hand_text_to(&mut self, other: &Entity<Self>, cx: &mut Context<Self>) {
         if self.editor.read(cx).is_empty() {
             return;
@@ -832,7 +833,16 @@ impl Compose {
             return;
         }
         other.update(cx, |other, cx| {
-            other.editor.update(cx, |editor, cx| editor.set_doc(doc, cx));
+            other.editor.update(cx, |editor, cx| {
+                let doc = if editor.is_empty() {
+                    doc
+                } else {
+                    let mut held = editor.doc().clone();
+                    held.blocks.extend(doc.blocks);
+                    held
+                };
+                editor.set_doc(doc, cx);
+            });
             cx.notify();
         });
         cx.notify();

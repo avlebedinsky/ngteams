@@ -356,6 +356,48 @@ fn a_new_group_chat_left_for_another_chat_keeps_its_row_and_draft_and_its_first_
 }
 
 #[test]
+fn a_new_group_chat_s_first_message_given_back_while_it_was_left_has_no_row_and_ctrl_n_shows_it_typing() {
+    let rig = seeded();
+    rig.core.write_answers.lock().unwrap().push_back(common::outbox_row(
+        41,
+        OutboxKind::CreateChat,
+        OutboxState::Pending,
+    ));
+    rig.core.outbox_answers.lock().unwrap().push_back(common::outbox_row(
+        41,
+        OutboxKind::CreateChat,
+        OutboxState::Failed,
+    ));
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    click(cx, "chat-header-people");
+    click(cx, "chat-people-start-group");
+    take(cx, "Dee");
+    click(cx, "chat-people-confirm");
+    let new_chat = cx.update(|_, cx| shell.read(cx).new_chat().cloned()).unwrap();
+    let compose = cx.update(|_, cx| new_chat.read(cx).compose(cx));
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input("hello both");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    open(&shell, cx, AC);
+    cx.executor().advance_clock(std::time::Duration::from_secs(1));
+    draw(cx);
+    assert!(cx.update(|_, cx| new_chat.read(cx).keeps_going()), "given back");
+    assert!(
+        cx.debug_bounds("chat-row-draft-0").is_none(),
+        "a first message given back has no row"
+    );
+    // New message shows it again, its box (it has no To: line) taking the keyboard
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let shown = cx.update(|_, cx| shell.read(cx).new_chat().cloned()).unwrap();
+    assert_eq!(shown.entity_id(), new_chat.entity_id());
+    assert_eq!(cx.update(|_, cx| compose.read(cx).value(cx)).trim(), "hello both");
+    assert!(cx.update(|window, cx| compose.read(cx).focused(window, cx)));
+}
+
+#[test]
 fn a_new_group_chat_s_discard_takes_its_row_and_draft_away() {
     let rig = seeded();
     let (shell, new_chat, cx) = group_draft_left(&rig);

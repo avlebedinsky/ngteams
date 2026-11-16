@@ -10,8 +10,8 @@
 //!   draft. Its first message makes the chat, as from New message.
 //! - New message with its first message on its way, or given back, or with a draft for nobody yet, has no row: New
 //!   message shows it again. A chat made while it is out of sight isn't opened over the place shown.
-//! - a draft typed to the chat that the people already have goes to that chat's kept drafts, as Teams opens that chat
-//!   with it.
+//! - a draft typed to the chat that the people already have goes to that chat, as Teams opens that chat with it. It
+//!   comes after a draft that the chat holds already.
 //!
 //! The kept new chats live as long as the window: a restart does not keep them, nor the drafts of other chats.
 
@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use super::{Main, Shell};
 use crate::chat_list::{ChatList, ChatRow};
+use crate::compose::Compose;
 use crate::models::Models;
 use crate::new_chat::{NewChat, NewChatEvent, Recipient};
 use crate::sidebar::{Sidebar, SidebarEvent};
@@ -193,18 +194,44 @@ impl Shell {
     }
 
     /// Keeps the new chat shown, if it is worth keeping, or gives the draft it typed to a chat the people have to
-    /// that chat's kept drafts.
-    fn set_new_chat_aside(&mut self, cx: &App) {
+    /// that chat ([`Self::hand_found_draft`]).
+    pub(super) fn set_new_chat_aside(&mut self, cx: &mut App) {
         if let Some(held) = self.new_chat.take() {
             self.keep_new_chat(held, cx);
         }
     }
 
-    fn keep_new_chat(&mut self, (view, events): Held, cx: &App) {
+    fn keep_new_chat(&mut self, (view, events): Held, cx: &mut App) {
         if view.read(cx).worth_keeping(cx) {
             self.kept_new.push((view, events));
         } else if let Some((chat, compose)) = view.read(cx).found_draft(cx) {
-            self.drafts.insert(chat, compose);
+            self.hand_found_draft(chat, &compose, cx);
+        }
+    }
+
+    /// The draft typed to `chat` in New message goes to the box of that chat: the box of its view while that view is
+    /// shown or holds a draft, else its kept draft. The text comes after a draft that box holds, so no draft is lost.
+    /// With no draft there, `compose` becomes the kept draft of the chat, and the chat opens with it.
+    fn hand_found_draft(&mut self, chat: String, compose: &Entity<Compose>, cx: &mut App) {
+        let shown = self.main == Main::Chat(chat.clone());
+        let own = self
+            .chat
+            .as_ref()
+            .map(|view| view.read(cx))
+            .filter(|view| view.conversation() == chat)
+            .map(|view| view.compose().clone())
+            .filter(|own| shown || own.read(cx).has_draft(cx))
+            .or_else(|| {
+                self.drafts
+                    .get(&chat)
+                    .filter(|kept| kept.read(cx).has_draft(cx))
+                    .cloned()
+            });
+        match own {
+            Some(own) if own != *compose => compose.update(cx, |compose, cx| compose.hand_text_to(&own, cx)),
+            _ => {
+                self.drafts.insert(chat, compose.clone());
+            }
         }
     }
 

@@ -2462,7 +2462,15 @@ impl Shell {
         self.people.open = None;
         self.hide_calendar(window, cx);
         self.reset_meeting_tabs(&id, cx);
-        let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
+        // New message left for this chat gives its draft to it before the chat's view is chosen
+        if self.main == Main::NewChat {
+            self.set_new_chat_aside(cx);
+        }
+        // the view kept of this chat is used again, unless New message gave the chat a box of its own
+        let shown = self.chat.as_ref().map(|chat| {
+            let chat = chat.read(cx);
+            chat.conversation() == id && self.drafts.get(&id).is_none_or(|kept| kept == chat.compose())
+        });
         if shown != Some(true) {
             self.keep_draft(cx);
             let parts = self.parts();
@@ -2532,10 +2540,9 @@ impl Shell {
         if let Some(chat) = &self.chat {
             let chat = chat.read(cx);
             let compose = chat.compose();
+            // a box with no draft isn't kept; a different box that New message gave the chat stays
             if compose.read(cx).has_draft(cx) {
                 self.drafts.insert(chat.conversation().to_owned(), compose.clone());
-            } else {
-                self.drafts.remove(chat.conversation());
             }
         }
     }
