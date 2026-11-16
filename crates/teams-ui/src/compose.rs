@@ -67,7 +67,7 @@ mod draft_translation;
 mod pictures;
 mod translated;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::ops::Range;
@@ -78,8 +78,8 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EventEmitter, Global, InteractiveElement as _,
     IntoElement, KeyBinding, ParentElement as _, PathPromptOptions, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, actions, anchored, deferred, div,
-    prelude::FluentBuilder as _, px, relative, rgb,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, actions, anchored, deferred,
+    div, prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::Disableable as _;
 use gpui_component::tooltip::Tooltip;
@@ -535,6 +535,10 @@ pub const NO_APPS: &str = "Actions and apps aren't available in this app";
 pub const READ_ONLY_APP: &str = "Read-only: this window sends nothing";
 /// What the box says when a reply or an edit is started while the message sent is translated.
 pub const TRANSLATING_FIRST: &str = "Wait for your message to be translated and sent first.";
+/// Over the box of a chat when its draft from New message met an edit of a message there ([`Compose::hand_draft_to`]):
+/// the edit is called off, the draft stays.
+pub const EDIT_CALLED_OFF: &str =
+    "Editing was cancelled to keep your draft for this chat. Edit the message again to change it.";
 
 /// What a channel's box says while it is empty ([`Compose::in_channel`]): "Message in <channel>", as Teams' does.
 #[must_use]
@@ -596,6 +600,22 @@ struct Draft {
     attachments: Vec<attachments::Attachment>,
 }
 
+/// Where the answer of a request on its way goes: the box that holds what it is for now, and what the answer needs
+/// there. A draft that moves to another box ([`Compose::hand_draft_to`]) points its answers to that box, so a file or
+/// a picture is not sent two times and a refused send comes back to where the draft is.
+type Route<T> = Rc<RefCell<(WeakEntity<Compose>, T)>>;
+
+/// The answers that a box waits for.
+#[derive(Default)]
+struct Routes {
+    /// Uploads of files, by the id of the attachment.
+    files: HashMap<u64, Route<u64>>,
+    /// Uploads of pasted pictures, by the id of the picture in the editor.
+    pictures: HashMap<u64, Route<u64>>,
+    /// Sends: with `true`, a refused draft comes back after the draft that its box holds (it moved there).
+    sends: Vec<Route<bool>>,
+}
+
 /// What a compose box is made of.
 #[derive(Clone)]
 pub struct ComposeParts {
@@ -624,6 +644,8 @@ pub struct Compose {
     next_attachment: u64,
     /// Kept across navigation until the engine has queued or refused the file send.
     sending_files: usize,
+    /// Where the answers on their way go ([`Routes`]).
+    routes: Routes,
     picker: Option<Picker>,
     /// The chat's members the picker offers, once read.
     candidates: Option<Vec<Candidate>>,
@@ -749,6 +771,7 @@ impl Compose {
             attachments: Vec::new(),
             next_attachment: 0,
             sending_files: 0,
+            routes: Routes::default(),
             picker: None,
             candidates: None,
             reading: None,
@@ -806,7 +829,7 @@ impl Compose {
             return;
         };
         if let Err(problem) = outcome {
-            self.give_back(draft, window, cx);
+            self.give_back(draft, false, window, cx);
             self.show_problem(problem, cx);
         }
         cx.notify();
@@ -849,12 +872,21 @@ impl Compose {
     }
 
     /// The full draft of the box moves to `other`, a box of the same chat (New message's box for the chat that it
-    /// found, and the own box of that chat): the text, the pictures, the files, and the reply or edit. With `first`,
-    /// the draft goes before the draft that `other` holds, else after it. `other` sends again a picture or a file that
-    /// was still on its way. `other` keeps its own reply or edit; it takes the reply or edit of this box only when it
-    /// has none. A file send on its way stays with this box, so the caller keeps the box that has one
-    /// ([`Compose::is_sending_files`]).
-    pub fn hand_draft_to(&mut self, other: &Entity<Self>, first: bool, cx: &mut Context<Self>) {
+    /// found, and the own box of that chat): the text, the pictures, the files, and the reply or edit. The draft comes
+    /// after the draft that `other` holds. The answers on their way (an upload of a file or a picture, a send) go to
+    /// `other` from now on ([`Routes`]). `other` keeps its own reply or edit; it takes the reply or edit of this box
+    /// only when it has none. An edit carries no other draft: when an edit and a draft meet, the edit is called off
+    /// (as Esc does), the draft stays, and `other` tells it ([`EDIT_CALLED_OFF`]).
+    pub fn hand_draft_to(&mut self, other: &Entity<Self>, cx: &mut Context<Self>) {
+        let called_off = if self.editing() && other.read(cx).holds_draft(cx) {
+            self.call_off(cx);
+            true
+        } else if other.read(cx).editing() && self.holds_draft(cx) {
+            other.update(cx, Self::call_off);
+            true
+        } else {
+            false
+        };
         let own = self.editor.read(cx);
         // an empty box hands no blocks
         let doc = if own.is_empty() {
@@ -872,19 +904,36 @@ impl Compose {
             .collect();
         let files = std::mem::take(&mut self.attachments);
         let mode = std::mem::replace(&mut self.mode, Mode::New);
+        let mut routes = std::mem::take(&mut self.routes);
+        let sending_files = std::mem::take(&mut self.sending_files);
         self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         other.update(cx, |other, cx| {
-            let sending = other
-                .editor
-                .update(cx, |editor, cx| editor.take_doc(doc, pictures, first, cx));
-            for id in sending {
-                other.send_picture(id, cx);
+            let to = cx.weak_entity();
+            let sending = other.editor.update(cx, |editor, cx| editor.take_doc(doc, pictures, cx));
+            for (old, id) in sending {
+                match routes.pictures.remove(&old) {
+                    Some(route) => {
+                        *route.borrow_mut() = (to.clone(), id);
+                        other.routes.pictures.insert(id, route);
+                    }
+                    None => other.send_picture(id, cx),
+                }
             }
             for file in files {
-                other.take_attachment(file, cx);
+                let route = routes.files.remove(&file.id);
+                other.take_attachment(file, route, cx);
             }
+            for route in routes.sends {
+                route.borrow_mut().0 = to.clone();
+                route.borrow_mut().1 = true;
+                other.routes.sends.push(route);
+            }
+            other.sending_files += sending_files;
             if other.mode == Mode::New {
                 other.mode = mode;
+            }
+            if called_off {
+                other.show_problem(EDIT_CALLED_OFF, cx);
             }
             other.fit_pictures(cx);
             cx.notify();
@@ -893,10 +942,18 @@ impl Compose {
         cx.notify();
     }
 
-    /// Whether a send with files from this box is on its way: its answer comes back to this box.
-    #[must_use]
-    pub fn is_sending_files(&self) -> bool {
-        self.sending_files > 0
+    /// Whether the box edits a message.
+    fn editing(&self) -> bool {
+        matches!(self.mode, Mode::Edit { .. })
+    }
+
+    /// Whether the box holds a draft that an edit can not carry: text, files (also files of a send on its way), or a
+    /// reply.
+    fn holds_draft(&self, cx: &App) -> bool {
+        !self.editor.read(cx).is_empty()
+            || !self.attachments.is_empty()
+            || self.sending_files > 0
+            || matches!(self.mode, Mode::Reply(_))
     }
 
     /// A chat keeps its editor alive while a local draft or upload remains, including across chat navigation.
@@ -1101,15 +1158,20 @@ impl Compose {
 
     /// Cancels a reply (its text stays) or an edit (its text goes).
     pub fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = window;
+        self.call_off(cx);
+    }
+
+    /// Calls off a reply (its text stays) or an edit (its text goes).
+    fn call_off(&mut self, cx: &mut Context<Self>) {
         if self.mode == Mode::New {
             return;
         }
-        if matches!(self.mode, Mode::Edit { .. }) {
+        if self.editing() {
             self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         }
         // the reply or the edit being translated is called off with it: nothing of it is sent
         self.drop_translation_of(&self.mode.clone(), cx);
-        let _ = window;
         self.mode = Mode::New;
         self.picker = None;
         self.trace
@@ -1299,13 +1361,17 @@ impl Compose {
     ) {
         let files = !draft.attachments.is_empty();
         self.sending_files += usize::from(files);
-        cx.spawn_in(window, async move |this, cx| {
+        let route: Route<bool> = Rc::new(RefCell::new((cx.weak_entity(), false)));
+        self.routes.sends.push(Rc::clone(&route));
+        cx.spawn_in(window, async move |_, cx| {
             let answer = reply.await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let (to, after) = route.borrow().clone();
+            let _ = to.update_in(cx, |this, window, cx| {
+                this.routes.sends.retain(|held| !Rc::ptr_eq(held, &route));
                 this.sending_files = this.sending_files.saturating_sub(usize::from(files));
                 match answer {
                     Err(error) => {
-                        this.give_back(draft, window, cx);
+                        this.give_back(draft, after, window, cx);
                         this.show_problem(format!("Not sent: {error}"), cx);
                     }
                     Ok(row) => this.sent_post(row.client_message_id, post.as_ref(), cx),
@@ -1316,8 +1382,10 @@ impl Compose {
         .detach();
     }
 
-    /// Restores a refused file send, retaining any newer text typed while its share was pending.
-    fn give_back(&mut self, mut draft: Draft, _: &mut Window, cx: &mut Context<Self>) {
+    /// Restores a refused file send, retaining any newer text typed while its share was pending, and a reply or edit
+    /// started since. With `after` (the send moved here with a draft), the text given back comes after the text that
+    /// the box holds, else before it.
+    fn give_back(&mut self, mut draft: Draft, after: bool, _: &mut Window, cx: &mut Context<Self>) {
         // files attached since stay beside the text given back (a translated send's text left the box once it went),
         // but never beside an edit, which carries no files
         let edit_beside_files = matches!(draft.mode, Mode::Edit { .. }) && !self.attachments.is_empty();
@@ -1327,11 +1395,21 @@ impl Compose {
             return;
         }
         if !self.editor.read(cx).is_empty() {
-            draft.doc.blocks.push(crate::editor::doc::Block::default());
-            draft.doc.blocks.extend(self.editor.read(cx).doc().blocks.clone());
+            let held = self.editor.read(cx).doc().blocks.clone();
+            if after {
+                draft
+                    .doc
+                    .blocks
+                    .splice(0..0, held.into_iter().chain([Block::default()]));
+            } else {
+                draft.doc.blocks.push(Block::default());
+                draft.doc.blocks.extend(held);
+            }
         }
         self.editor.update(cx, |editor, cx| editor.set_doc(draft.doc, cx));
-        self.mode = draft.mode;
+        if self.mode == Mode::New {
+            self.mode = draft.mode;
+        }
         for file in draft.attachments {
             if !self.attachments.iter().any(|current| current.path == file.path) {
                 self.attachments.push(file);

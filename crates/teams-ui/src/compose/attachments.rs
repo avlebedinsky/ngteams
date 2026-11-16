@@ -1,6 +1,8 @@
 //! Local files staged in the editor. A drop never changes the text or sends a message.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
@@ -127,18 +129,35 @@ impl Compose {
         &self.attachments
     }
 
-    /// Takes `file` from another box of the same chat ([`Compose::hand_draft_to`]), unless the box has that file: an
-    /// upload still on its way starts again here.
-    pub(super) fn take_attachment(&mut self, mut file: Attachment, cx: &mut Context<Self>) {
+    /// Takes `file` from another box of the same chat ([`Compose::hand_draft_to`]), unless the box has that file. The
+    /// answer of an upload still on its way (`route`) comes here; with no route, the upload starts again here. A box
+    /// that takes no files (it edits a message) keeps the file out and says so.
+    pub(super) fn take_attachment(
+        &mut self,
+        mut file: Attachment,
+        route: Option<super::Route<u64>>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accepts_files() {
+            self.show_problem(format!("{} can't be attached here.", file.name), cx);
+            return;
+        }
         if self.attachments.iter().any(|held| held.path == file.path) {
             return;
         }
         self.next_attachment += 1;
-        file.id = self.next_attachment;
+        let id = self.next_attachment;
+        file.id = id;
         let uploading = file.state == AttachmentState::Uploading;
         self.attachments.push(file);
         if uploading {
-            self.upload_attachment(self.next_attachment, cx);
+            match route {
+                Some(route) => {
+                    *route.borrow_mut() = (cx.weak_entity(), id);
+                    self.routes.files.insert(id, route);
+                }
+                None => self.upload_attachment(id, cx),
+            }
         }
         cx.notify();
     }
@@ -149,9 +168,16 @@ impl Compose {
         };
         file.state = AttachmentState::Uploading;
         let reply = self.core.upload_file(file.path.clone());
-        cx.spawn(async move |this, cx| {
+        let route: super::Route<u64> = Rc::new(RefCell::new((cx.weak_entity(), id)));
+        self.routes.files.insert(id, Rc::clone(&route));
+        cx.spawn(async move |_, cx| {
             let answer = reply.await;
-            let _ = this.update(cx, |this, cx| {
+            // the file may have moved to another box meanwhile ([`Compose::hand_draft_to`])
+            let (to, id) = route.borrow().clone();
+            let _ = to.update(cx, |this, cx| {
+                if this.routes.files.get(&id).is_some_and(|held| Rc::ptr_eq(held, &route)) {
+                    this.routes.files.remove(&id);
+                }
                 if let Some(file) = this.attachments.iter_mut().find(|file| file.id == id) {
                     file.complete(answer);
                     cx.notify();

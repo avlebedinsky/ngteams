@@ -761,12 +761,40 @@ fn a_picture_pasted_in_a_found_chat_s_draft_moves_to_the_draft_that_chat_had_and
     assert_eq!(text.pictures().len(), 1);
 }
 
+/// The names of the files that `compose` holds.
+fn file_names(compose: &Entity<teams_ui::compose::Compose>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|_, cx| {
+        compose
+            .read(cx)
+            .attachments()
+            .iter()
+            .map(|file| file.name.clone())
+            .collect()
+    })
+}
+
+/// Starts in `compose` an edit of message 1 of the a–b chat, its text "hello" loaded.
+fn edit_hello(compose: &Entity<teams_ui::compose::Compose>, cx: &mut VisualTestContext) {
+    use teams_ui::editor::doc::{Block, Doc};
+    let loaded = teams_ui::compose::Loaded {
+        doc: Doc::new(vec![Block::paragraph("hello")]),
+        quotes: Vec::new(),
+    };
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.edit("1".to_owned(), loaded, window, cx)));
+    draw(cx);
+    assert!(cx.update(|_, cx| matches!(compose.read(cx).mode(), teams_ui::compose::Mode::Edit { .. })));
+}
+
 #[test]
-fn a_file_send_from_a_found_chat_that_fails_gives_its_draft_back_to_that_chat_with_its_own_draft() {
+fn a_file_send_from_a_found_chat_that_fails_gives_its_draft_back_after_the_reply_that_chat_had() {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig);
     open(&shell, cx, AB);
     type_in_chat(&shell, cx, "foo");
+    let own = chat_box(&shell, cx);
+    let replied = message(AB, "1", LAB_B, "RichText/Html", "<p>hi a</p>", NOON);
+    let quoted = teams_ui::compose::Quoted::of(&replied, "Lab Bee").unwrap();
+    cx.update(|window, cx| own.update(cx, |compose, cx| compose.reply_to(quoted, window, cx)));
     open(&shell, cx, TALK);
     draft_to_found_ab(&shell, cx, "bar");
     let view = new_chat(&shell, cx);
@@ -783,18 +811,110 @@ fn a_file_send_from_a_found_chat_that_fails_gives_its_draft_back_to_that_chat_wi
     cx.simulate_keystrokes("enter");
     draw(cx);
     assert_eq!(main(&shell, cx), Main::Chat(AB.to_owned()));
-    let own = chat_box(&shell, cx);
-    assert_eq!(own, found, "the box whose send was on its way is the chat's box");
+    assert_eq!(chat_box(&shell, cx), own, "the chat keeps its box");
     let typed = chat_typed(&shell, cx);
-    assert!(typed.contains("foo"), "the earlier draft stays: {typed:?}");
-    assert!(typed.contains("bar"), "the refused draft comes back: {typed:?}");
-    assert_eq!(
-        cx.update(|_, cx| own
-            .read(cx)
-            .attachments()
-            .iter()
-            .map(|file| file.name.clone())
-            .collect::<Vec<_>>()),
-        ["plan.txt"]
+    let (foo, bar) = (typed.find("foo"), typed.find("bar"));
+    assert!(
+        foo.is_some() && bar.is_some() && foo < bar,
+        "the draft of the chat, then the refused draft: {typed:?}"
     );
+    assert!(
+        cx.update(|_, cx| matches!(own.read(cx).mode(), teams_ui::compose::Mode::Reply(_))),
+        "the reply of the chat stays"
+    );
+    assert_eq!(file_names(&own, cx), ["plan.txt"]);
+}
+
+#[test]
+fn a_draft_with_a_file_from_new_message_calls_off_the_edit_in_the_found_chat_s_box() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    let own = chat_box(&shell, cx);
+    edit_hello(&own, cx);
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "bar");
+    let view = new_chat(&shell, cx);
+    let found = cx.update(|_, cx| view.read(cx).compose(cx));
+    let (_dir, file) = temp_file("plan.txt");
+    cx.update(|window, cx| found.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    open(&shell, cx, AB);
+    let own = chat_box(&shell, cx);
+    assert_eq!(chat_typed(&shell, cx), "bar", "the edit's text goes, the draft stays");
+    assert_eq!(file_names(&own, cx), ["plan.txt"]);
+    cx.update(|_, cx| {
+        assert_eq!(*own.read(cx).mode(), teams_ui::compose::Mode::New);
+        assert_eq!(
+            own.read(cx).problem().cloned(),
+            Some(teams_ui::compose::EDIT_CALLED_OFF.into())
+        );
+    });
+    own.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    let [Action::Send { conversation, .. }] = actions.as_slice() else {
+        panic!("one new message, no edit: {actions:?}");
+    };
+    assert_eq!(conversation, AB);
+}
+
+#[test]
+fn an_edit_in_new_message_s_box_is_called_off_and_never_takes_the_draft_of_the_found_chat() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    type_in_chat(&shell, cx, "foo");
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "");
+    let view = new_chat(&shell, cx);
+    let found = cx.update(|_, cx| view.read(cx).compose(cx));
+    edit_hello(&found, cx);
+    open(&shell, cx, AC);
+    open(&shell, cx, AB);
+    let own = chat_box(&shell, cx);
+    assert_eq!(chat_typed(&shell, cx), "foo");
+    cx.update(|_, cx| {
+        assert_eq!(*own.read(cx).mode(), teams_ui::compose::Mode::New);
+        assert_eq!(
+            own.read(cx).problem().cloned(),
+            Some(teams_ui::compose::EDIT_CALLED_OFF.into())
+        );
+    });
+}
+
+#[test]
+fn a_file_still_uploading_when_its_draft_moves_to_the_found_chat_is_uploaded_once() {
+    use teams_ui::compose::attachments::AttachmentState;
+    let rig = seeded();
+    *rig.core.hold_uploads.lock().unwrap() = true;
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    type_in_chat(&shell, cx, "foo");
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "bar");
+    let view = new_chat(&shell, cx);
+    let found = cx.update(|_, cx| view.read(cx).compose(cx));
+    let (_dir, file) = temp_file("plan.txt");
+    cx.update(|window, cx| found.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    open(&shell, cx, AC);
+    open(&shell, cx, AB);
+    let own = chat_box(&shell, cx);
+    assert_eq!(file_names(&own, cx), ["plan.txt"]);
+    assert_eq!(rig.core.uploads.lock().unwrap().len(), 1, "no second upload");
+    rig.core
+        .held_uploads
+        .lock()
+        .unwrap()
+        .remove(0)
+        .send(Ok(common::uploaded_file("plan 1.txt")));
+    draw(cx);
+    cx.update(|_, cx| {
+        let files = own.read(cx).attachments();
+        assert!(matches!(files[0].state, AttachmentState::Ready(_)), "{files:?}");
+        assert_eq!(files[0].name, "plan 1.txt", "the answer of the first upload");
+    });
+    assert_eq!(rig.core.uploads.lock().unwrap().len(), 1);
 }

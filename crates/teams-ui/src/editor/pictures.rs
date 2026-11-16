@@ -210,22 +210,20 @@ impl Editor {
     }
 
     /// Takes `doc`, the draft of another box of the same chat, with `pictures`, the pictures of its blocks by their
-    /// ids there: before what the editor holds with `first`, else after it. This is a load, not an edit
-    /// ([`Editor::set_doc`]), and the owner gets no event. Gives the new ids of the pictures still being sent: the owner
-    /// sends them again.
+    /// ids there: after what the editor holds. This is a load, not an edit ([`Editor::set_doc`]), and the owner gets no
+    /// event. Gives the pictures still being sent, each as its id there and its new id here: their answers come here.
     pub fn take_doc(
         &mut self,
         mut doc: super::doc::Doc,
         pictures: Vec<(u64, Picture)>,
-        first: bool,
         cx: &mut Context<Self>,
-    ) -> Vec<u64> {
+    ) -> Vec<(u64, u64)> {
         let mut sending = Vec::new();
         let mut ids = std::collections::HashMap::new();
         for (old, picture) in pictures {
             self.next_picture += 1;
             if picture.state == PictureState::Sending {
-                sending.push(self.next_picture);
+                sending.push((old, self.next_picture));
             }
             self.pictures.insert(self.next_picture, picture);
             ids.insert(old, self.next_picture);
@@ -242,11 +240,7 @@ impl Editor {
         }
         if !self.is_empty() {
             let held = std::mem::take(&mut self.doc.blocks);
-            if first {
-                doc.blocks.extend(held);
-            } else {
-                doc.blocks.splice(0..0, held);
-            }
+            doc.blocks.splice(0..0, held);
         }
         self.set_doc(doc, cx);
         sending

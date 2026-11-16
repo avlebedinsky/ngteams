@@ -2,7 +2,9 @@
 //! conversation alone (`Core::upload_picture`, through the engine's outbox), while it shows in the box; the message
 //! then names it ([`crate::editor::pictures`]). Files a paste brings that aren't pictures are attached as a drop's are.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{Context, Window};
 
@@ -19,13 +21,27 @@ impl Compose {
             return;
         }
         let reply = self.core.upload_picture(self.conversation.clone(), (*picture).clone());
-        let editor = self.editor.clone();
+        let route: super::Route<u64> = Rc::new(RefCell::new((cx.weak_entity(), id)));
+        self.routes.pictures.insert(id, Rc::clone(&route));
         cx.spawn(async move |_, cx| {
             let state = match reply.await {
                 Ok(object) => PictureState::Sent(object),
                 Err(error) => PictureState::Failed(error.to_string().into()),
             };
-            editor.update(cx, |editor, cx| editor.set_picture_state(id, state, cx));
+            // the picture may have moved to another box meanwhile ([`Compose::hand_draft_to`])
+            let (to, id) = route.borrow().clone();
+            let _ = to.update(cx, |this, cx| {
+                if this
+                    .routes
+                    .pictures
+                    .get(&id)
+                    .is_some_and(|held| Rc::ptr_eq(held, &route))
+                {
+                    this.routes.pictures.remove(&id);
+                }
+                this.editor
+                    .update(cx, |editor, cx| editor.set_picture_state(id, state, cx));
+            });
         })
         .detach();
     }
