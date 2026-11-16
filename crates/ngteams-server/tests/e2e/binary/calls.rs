@@ -8,6 +8,7 @@ mod accounts;
 mod call_log;
 mod coturn_log;
 mod flows;
+mod group;
 mod nodes;
 mod own_relay;
 mod qa_net;

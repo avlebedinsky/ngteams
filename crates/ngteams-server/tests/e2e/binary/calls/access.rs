@@ -1,5 +1,6 @@
 //! Who a call is for: a third account touches nothing of it, a callee already in a call isn't disturbed, and the
-//! calls this server doesn't serve (a group call, a meeting, the test call) are refused without harm.
+//! calls this server doesn't serve (a meeting, the test call) are refused without harm. Group calls are served
+//! (`group.rs`).
 
 use std::time::Duration;
 
@@ -220,8 +221,8 @@ async fn refused(a: &mut Phone, others: &mut [&mut Phone], what: &str, action: C
     }
 }
 
-/// The starts of the kinds this server doesn't serve, as a's own, through every node: each is answered 501 and
-/// leaves no call behind.
+/// The starts of the kinds this server doesn't serve, as a's own, through every node: each is answered 501 (a group
+/// call in a chat that doesn't exist 404) and leaves no call behind.
 async fn not_served(rig: &Rig, a: &Phone, b_mri: &str, c_mri: &str) {
     let token = a.skypetoken().await;
     let callbacks = format!("{}/trouter/v4/f/AnyEndpoint000000000000/callAgent/x/", rig.origin);
@@ -240,21 +241,21 @@ async fn not_served(rig: &Rig, a: &Phone, b_mri: &str, c_mri: &str) {
     echo["participants"]["to"] = json!([]);
     let epconv = format!("{PROXY}/epconv");
     for node in [&rig.first, rig.other()] {
-        for (what, body) in [
-            ("a group call", &group),
-            ("two callees", &two),
-            ("a meeting", &meeting),
-            ("the test call", &echo),
+        for (what, body, refusal) in [
+            ("a group call in a chat that doesn't exist", &group, 404),
+            ("two callees", &two, 501),
+            ("a meeting", &meeting, 501),
+            ("the test call", &echo, 501),
         ] {
             let (status, _) = raw(node, &token, Method::POST, &epconv, body).await;
-            assert_eq!(status, 501, "{what}");
+            assert_eq!(status, refusal, "{what}");
         }
     }
     assert!(rig.open_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_group_call_a_meeting_and_the_test_call_are_refused_and_the_next_call_works() {
+async fn a_meeting_and_the_test_call_are_refused_and_the_next_call_works() {
     for backend in backends() {
         let Some(rig) = Rig::start(backend, "refused", 30, Turn::Coturn).await else {
             return;
@@ -270,8 +271,6 @@ async fn a_group_call_a_meeting_and_the_test_call_are_refused_and_the_next_call_
         let group = row.message_id.unwrap();
         a.sync().await;
 
-        let group_call = CallAction::Call { chat: group.clone() };
-        refused(&mut a, &mut [&mut b, &mut c], "a group call", group_call).await;
         let meeting = CallAction::JoinMeeting {
             chat: group.clone(),
             meeting: MeetingInfo {

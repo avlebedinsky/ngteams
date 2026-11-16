@@ -73,9 +73,10 @@ impl Deployment {
             config,
             endpoint,
             binary: PathBuf::from(env!("CARGO_BIN_EXE_ngteams-server")),
-            log_filter: "warn".into(),
+            log_filter: std::env::var("NGTS_QA_SERVER_LOG").unwrap_or_else(|_| "warn".to_owned()),
             process: None,
             http: http_client(),
+            role: None,
             _port: own,
         }
     }
@@ -86,10 +87,13 @@ pub struct Node {
     pub endpoint: String,
     /// The server binary the node and its commands run: this build's, unless a test runs another version.
     pub binary: PathBuf,
-    /// The node's `NGTEAMS_SERVER_LOG` filter: `warn` unless a test reads a fuller log.
+    /// The node's `NGTEAMS_SERVER_LOG` filter: `NGTS_QA_SERVER_LOG`, else `warn`, unless a test reads a fuller log.
     pub log_filter: String,
     process: Option<Child>,
     pub http: reqwest::Client,
+    /// What `serve --role` runs, and for `media` (no public listener) the internal API's address it is ready at; the
+    /// default role when unset.
+    pub role: Option<(&'static str, Option<std::net::SocketAddr>)>,
     _port: Option<Port>,
 }
 
@@ -155,9 +159,13 @@ impl Node {
 
     async fn start_with_log(&mut self, log: Stdio) {
         assert!(self.process.is_none());
+        let mut command = self.command();
+        command.arg("serve");
+        if let Some((role, _)) = self.role {
+            command.args(["--role", role]);
+        }
         self.process = Some(
-            self.command()
-                .arg("serve")
+            command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(log)
@@ -170,7 +178,7 @@ impl Node {
                 self.process.as_mut().unwrap().try_wait().unwrap().is_none(),
                 "binary exited before ready"
             );
-            if self.status("/health/ready").await == Some(204) {
+            if self.ready().await {
                 // a node that couldn't take its port exits; the answer was then another's
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 assert!(
@@ -182,6 +190,26 @@ impl Node {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("binary never became ready");
+    }
+
+    async fn ready(&self) -> bool {
+        match self.role {
+            Some((_, Some(internal))) => tokio::net::TcpStream::connect(internal).await.is_ok(),
+            _ => self.status("/health/ready").await == Some(204),
+        }
+    }
+
+    /// The running process's id.
+    pub fn pid(&self) -> Option<u32> {
+        self.process.as_ref().map(Child::id)
+    }
+
+    /// Kills the process at once (`SIGKILL`), as a crash or a lost machine ends it.
+    pub fn kill(&mut self) {
+        if let Some(mut process) = self.process.take() {
+            process.kill().unwrap();
+            process.wait().unwrap();
+        }
     }
 
     pub async fn stop(&mut self) {
