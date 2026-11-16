@@ -204,7 +204,7 @@ impl Leg {
         }
         let mut dialect = NgcSession::mixer();
         dialect.set_stream_ids(stream_ids(sources));
-        dialect.set_slot_stream_ids(sources.first_slot());
+        dialect.set_slot_stream_ids(sources.first_slot(), Sources::SLOTS);
         dialect.set_video(VIDEO);
         let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)?;
         encoder.set_bitrate(opus::Bitrate::Bits(BITRATE))?;
@@ -465,11 +465,13 @@ impl Leg {
         self.video.iter().find(|line| line.mid == mid).map(|line| line.kind)
     }
 
-    /// The stream id of the receiving line `mid`.
+    /// The stream id of the line `mid` that the leg receives video on: a receiving line, or its sharing line (under
+    /// its sharing source, as the room keeps that line). The main line receives nothing.
     fn slot_of(&self, mid: Mid) -> Option<u32> {
         match self.line(mid)? {
             LineKind::Slot(stream) => Some(stream),
-            LineKind::Main | LineKind::Sharing => None,
+            LineKind::Sharing => Some(self.sources.sharing),
+            LineKind::Main => None,
         }
     }
 
@@ -788,8 +790,15 @@ pub(super) mod tests {
         assert!(leg.request_keyframe(SOURCES.video));
         assert!(leg.request_keyframe(SOURCES.sharing));
         assert!(!leg.request_keyframe(1021));
+    }
+
+    #[test]
+    fn a_decoders_wish_names_the_receiving_line_or_the_sharing_line_it_came_on() {
+        let leg = Leg::new(&making(), SOURCES, Some(&group_client()), Instant::now()).unwrap();
         assert_eq!(leg.slot_of(leg.video[1].mid), Some(1004));
-        assert_eq!(leg.slot_of(main), None);
+        assert_eq!(leg.slot_of(leg.video[0].mid), None, "the main line receives nothing");
+        let sharing = leg.video.last().unwrap().mid;
+        assert_eq!(leg.slot_of(sharing), Some(SOURCES.sharing));
     }
 
     #[test]

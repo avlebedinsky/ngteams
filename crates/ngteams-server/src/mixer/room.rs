@@ -234,6 +234,15 @@ mod tests {
         };
         room.driven("b", wish, later);
         assert!(!room.asked.due(1001, later));
+        // b's sharing line shows a's screen; a wish on that line reaches a's screen
+        room.driven("b", requested(B.sharing, 1002), now);
+        assert_eq!(shows(&room, "b", B.sharing), Some(1002));
+        let wish = Driven {
+            keyframes: vec![B.sharing],
+            ..Driven::default()
+        };
+        room.driven("b", wish, later);
+        assert!(!room.asked.due(1002, later), "a was asked for its screen's keyframe");
     }
 
     #[test]
