@@ -10,7 +10,9 @@ use serde_json::Value;
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_call::{Identity, RemoteEnd, Tracker};
-use teams_core::account::{CALL_LANGUAGE, web_client_info};
+use teams_core::account::{
+    CALL_LANGUAGE, CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM, USER_PROFILE_GTM, web_client_info,
+};
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts, Push, Source};
 use teams_core::{
     CallAction, CallFloor, CallId, CallMedia, CallParts, CallStatus, CallVideo, CallView, End, IncomingCall, Outbox,
@@ -364,6 +366,8 @@ pub struct Phone {
     socket: Option<String>,
     /// Its engine's `catch_up_retry`: 2 s unless set ([`Self::catch_up_as_the_app`]).
     catch_up_retry: Duration,
+    /// Its requests also reach the calendar, CSA, provisioning and the profiles ([`Self::served`]).
+    served: bool,
     dir: TempDir,
 }
 
@@ -398,6 +402,7 @@ impl Phone {
             http: node.endpoint.clone(),
             socket: None,
             catch_up_retry: Duration::from_secs(2),
+            served: false,
             dir,
         }
     }
@@ -405,6 +410,12 @@ impl Phone {
     /// Its engine waits as long as the app's for a catch-up a delivery made due, from its next start on.
     pub fn catch_up_as_the_app(&mut self) {
         self.catch_up_retry = EngineOptions::default().catch_up_retry;
+    }
+
+    /// Its requests reach every service the app's reach (the calendar and meetings, CSA, teams), at the bases authz
+    /// names, from its next start on.
+    pub fn served(&mut self) {
+        self.served = true;
     }
 
     /// Its push sockets connect to `socket` (`ws://127.0.0.1:<port>`) from its next start on.
@@ -438,7 +449,7 @@ impl Phone {
     }
 
     fn transport(&self, tracker: &Arc<Tracker>) -> Transport {
-        HttpTransport::for_cloud_with_mock_origin(
+        let chats = HttpTransport::for_cloud_with_mock_origin(
             Arc::clone(&self.session),
             &format!("{}/api/chatsvc/own", self.origin),
             Cloud::own(&self.origin).unwrap(),
@@ -446,7 +457,24 @@ impl Phone {
         )
         .unwrap()
         .for_account(Mri::new(self.mri.clone()))
-        .with_call_state(tracker.clone())
+        .with_call_state(tracker.clone());
+        if !self.served {
+            return chats;
+        }
+        let base = |gtm: &str| {
+            self.session
+                .service_base(gtm)
+                .unwrap_or_else(|| panic!("authz names no {gtm}"))
+        };
+        chats
+            .with_middle_tier(&base(MIDDLE_TIER_GTM))
+            .unwrap()
+            .with_csa(&base(CSA_GTM))
+            .unwrap()
+            .with_provisioning(&base(PROVISIONING_GTM))
+            .unwrap()
+            .with_user_profile(&base(USER_PROFILE_GTM))
+            .unwrap()
     }
 
     /// A typed client of the account, for a read the tests make themselves.

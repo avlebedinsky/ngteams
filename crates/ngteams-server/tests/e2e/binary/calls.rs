@@ -10,6 +10,7 @@ mod coturn_log;
 mod flows;
 mod group;
 mod group_video;
+mod meetings;
 mod nodes;
 mod own_relay;
 mod qa_net;
