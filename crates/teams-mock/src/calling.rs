@@ -183,6 +183,9 @@ pub(crate) struct Calling {
     /// The next call operation whose path ends with this segment is answered this much later, the world changed at
     /// once ([`crate::ChatServiceMock::delay_next_call_op`]).
     pub(crate) delay_next: Option<(String, std::time::Duration)>,
+    /// The next call operation whose path ends with this segment is answered with this status and no body, the world
+    /// changed as it is for its usual answer ([`crate::ChatServiceMock::refuse_next_call_op`]).
+    pub(crate) refuse_next: Option<(String, u16)>,
 }
 
 /// The skypetoken the mock takes as `mri`'s.
@@ -311,6 +314,11 @@ pub(crate) fn serve(state: &mut State, request: &Request) -> Option<ResponseTemp
         _ => None,
     };
     let answer = answer.unwrap_or_else(|| status(404));
+    let refusal = state
+        .calling
+        .refuse_next
+        .take_if(|(segment, _)| segments.last() == Some(&segment.as_str()));
+    let answer = refusal.map_or(answer, |(_, code)| status(code));
     let delay = state
         .calling
         .delay_next

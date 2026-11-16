@@ -13,6 +13,7 @@ mod group_video;
 mod nodes;
 mod own_relay;
 mod qa_net;
+mod qa_ring_cancel;
 mod relay;
 mod support;
 

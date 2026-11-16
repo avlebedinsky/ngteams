@@ -412,6 +412,15 @@ impl Phone {
         self.socket = Some(socket.to_owned());
     }
 
+    /// Its HTTP requests go to `http` (`http://127.0.0.1:<port>`, a proxy in front of its node) from its next start
+    /// on; its push sockets stay on the node unless [`Self::connect_through`] says otherwise.
+    pub fn http_through(&mut self, http: &str) {
+        if self.socket.is_none() {
+            self.socket = Some(self.http.replacen("http://", "ws://", 1));
+        }
+        http.clone_into(&mut self.http);
+    }
+
     /// The account's object id.
     pub fn oid(&self) -> &str {
         self.mri.strip_prefix("8:orgid:").unwrap()

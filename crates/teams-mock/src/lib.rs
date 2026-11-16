@@ -760,6 +760,12 @@ impl ChatServiceMock {
         self.lock().calling.delay_next = Some((segment.to_owned(), delay));
     }
 
+    /// The next call operation whose path ends with `segment` (`progress`, `accept`, …) is answered `code` with no
+    /// body, as a service that refuses it; the world changes as it does for the usual answer.
+    pub fn refuse_next_call_op(&self, segment: &str, code: u16) {
+        self.lock().calling.refuse_next = Some((segment.to_owned(), code));
+    }
+
     /// The peer of call `id` renegotiates its media with `account`, which answered the call (the media on, see
     /// [`ChatServiceMock::start_media`]). `false` without such a call, answer or peer.
     #[must_use = "false says nothing was renegotiated"]

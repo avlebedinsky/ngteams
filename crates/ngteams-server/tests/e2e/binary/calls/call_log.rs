@@ -35,7 +35,7 @@ const LIVE: Duration = Duration::from_secs(15);
 
 /// One call log entry as the stored message's `call-log` property tells it.
 #[derive(Debug)]
-struct Logged {
+pub(super) struct Logged {
     call_id: String,
     direction: String,
     state: String,
@@ -80,7 +80,7 @@ async fn call_log(phone: &Phone) -> Vec<Logged> {
 
 /// Waits (no catch-up asked, only what the client does by itself) until the stored call log holds `count` entries;
 /// how long it took.
-async fn log_holds(phone: &mut Phone, count: usize, within: Duration) -> (Vec<Logged>, Duration) {
+pub(super) async fn log_holds(phone: &mut Phone, count: usize, within: Duration) -> (Vec<Logged>, Duration) {
     let start = Instant::now();
     loop {
         let log = call_log(phone).await;
@@ -100,7 +100,7 @@ async fn log_holds(phone: &mut Phone, count: usize, within: Duration) -> (Vec<Lo
 }
 
 /// The missed calls in `feed`, by their titles.
-fn missed(feed: &ActivityFeed) -> Vec<String> {
+pub(super) fn missed(feed: &ActivityFeed) -> Vec<String> {
     missed_items(feed).map(ActivityItem::title).collect()
 }
 
@@ -109,7 +109,7 @@ fn missed_items(feed: &ActivityFeed) -> impl Iterator<Item = &ActivityItem> {
 }
 
 /// Waits (as [`log_holds`]) until the client's feed holds `count` missed calls.
-async fn feed_holds(phone: &mut Phone, count: usize, within: Duration) -> ActivityFeed {
+pub(super) async fn feed_holds(phone: &mut Phone, count: usize, within: Duration) -> ActivityFeed {
     let start = Instant::now();
     loop {
         let feed = phone.engine().activity().await.unwrap();
@@ -199,7 +199,7 @@ async fn while_b_runs(rig: &Rig, a: &mut Phone, b: &mut Phone, b2: &mut Phone, c
     rig.no_open_calls().await;
 }
 
-fn states(log: &[Logged]) -> Vec<(&str, &str)> {
+pub(super) fn states(log: &[Logged]) -> Vec<(&str, &str)> {
     log.iter()
         .map(|entry| (entry.direction.as_str(), entry.state.as_str()))
         .collect()
