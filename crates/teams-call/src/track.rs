@@ -386,6 +386,17 @@ impl Tracker {
             offer.end();
         }
     }
+    /// Whether `url` is a link of an offered invitation whose ring's end was delivered already. A write to it that was
+    /// not sent is then [`crate::Outcome::RingOver`]: that end, on its way to the machine, says how the ring ended.
+    #[must_use]
+    pub fn ring_ended(&self, url: &str) -> bool {
+        let inner = self.lock();
+        inner.offers.iter().any(|offer| offer.ended_with(url))
+            && !inner
+                .offers
+                .iter()
+                .any(|offer| offer.state != offer::OfferState::Ended && offer.links.iter().any(|(_, link)| link == url))
+    }
     /// Whether this write enters a call, for the cross-account floor.
     #[must_use]
     pub fn enters<R: Request>(request: &R) -> bool {
@@ -540,7 +551,7 @@ impl Tracker {
             .iter_mut()
             .find(|offer| offer.state != offer::OfferState::Ended && offer.ends_at(&delivery.path))
         {
-            offer.end();
+            offer.end_delivered();
             return Observed::RingEnded;
         }
         if is_transfer_callback(&delivery.path) {

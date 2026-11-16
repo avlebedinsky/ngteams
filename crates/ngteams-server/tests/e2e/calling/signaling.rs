@@ -144,6 +144,33 @@ async fn a_cancel_that_comes_before_the_callees_progress_ends_its_ring_as_cancel
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_whose_end_reaches_the_callee_before_its_progress_goes_ends_its_ring_as_cancelled() {
+    for backend in backends() {
+        let mut pair = Pair::start(backend).await;
+        let held = pair.b.hold_progress();
+        pair.a.call(&mri(&pair.b_id));
+        let call = pair.a.state(CallState::Ringing).await;
+        tokio::time::timeout(WAIT, held.reached)
+            .await
+            .expect("the callee's progress never went")
+            .unwrap();
+        // Ada cancels while Bert's progress waits, and the cancel's end reaches Bert's client before it goes
+        pair.a.hang_up(call);
+        assert_eq!(pair.a.ended().await, End::HungUp);
+        pair.b.ring_end_seen().await;
+        held.release.send(()).unwrap();
+        tokio::time::timeout(WAIT, held.answered)
+            .await
+            .expect("the progress was never tried")
+            .unwrap();
+        pair.b.incoming().await;
+        let end = pair.b.ring_ended().await;
+        assert_eq!(end.code, Some(487), "{end:?}");
+        pair.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_ring_nobody_answers_times_out_at_both_ends() {
     for backend in backends() {
         let mut pair = Pair::start_with(backend, |config| config.calling.ring_timeout = 5).await;

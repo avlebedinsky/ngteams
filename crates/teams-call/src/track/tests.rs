@@ -657,6 +657,45 @@ fn bound_offer(tracker: &Tracker) -> (Delivery, String, Value) {
     tracker.answered(pending, &Response::new(200, fixture["attach_answer"].to_string()));
     (invited, attach, fixture)
 }
+#[test]
+fn a_ring_ended_only_by_its_end_s_delivery_says_so_for_its_links() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_B));
+    let (_, attach, fixture) = bound_offer(&tracker);
+    let progress = fixture["attach_answer"]["callInvitation"]["links"]["progress"]
+        .as_str()
+        .unwrap();
+    let progress_url = Url::parse(progress).unwrap();
+    assert!(
+        tracker.call_allowed(&progress_url, None),
+        "it rings: its progress may go"
+    );
+    assert!(!tracker.ring_ended(progress), "it still rings");
+
+    let (_, body) = attach_case().unwrap();
+    let end = callbacks(&body)
+        .into_iter()
+        .find(|url| url.ends_with("/call/end/"))
+        .unwrap();
+    assert_eq!(
+        tracker.observe_delivery(&delivery(3, Url::parse(&end).unwrap().path(), b"{}".to_vec())),
+        Observed::RingEnded
+    );
+    assert!(
+        !tracker.call_allowed(&progress_url, None),
+        "nothing passes on a ring that ended"
+    );
+    assert!(tracker.ring_ended(progress));
+    assert!(tracker.ring_ended(&attach));
+    assert!(!tracker.ring_ended("https://api.flightproxy.teams.microsoft.com/api/v2/ep/elsewhere/progress"));
+
+    // a ring the client let go ended by no delivery: no end comes to say how it ended
+    let tracker = Tracker::new(Mri::new(LAB_B));
+    let (_, attach, _) = bound_offer(&tracker);
+    tracker.let_go(&attach);
+    assert!(!tracker.call_allowed(&progress_url, None));
+    assert!(!tracker.ring_ended(progress));
+}
 fn callee_negotiation(fixture: &Value, index: usize) -> Delivery {
     let callbacks = callbacks(&fixture["cases"][1]["body"]);
     let agent = callbacks

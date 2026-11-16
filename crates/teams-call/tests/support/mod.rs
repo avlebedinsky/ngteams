@@ -122,6 +122,7 @@ struct Sink {
 impl WriteSink for Sink {
     fn submit<R: teams_proto::Request + Clone + Send + 'static>(&mut self, id: WriteId, write: R) {
         let (tracker, transport) = (Arc::clone(&self.tracker), Arc::clone(&self.transport));
+        let url = write.call_url().map(ToString::to_string);
         self.queued.push((
             id,
             Box::pin(async move {
@@ -133,6 +134,11 @@ impl WriteSink for Sink {
                             status: answer.status(),
                             body: answer.body().to_vec(),
                         }
+                    }
+                    Err(teams_proto::HttpError::Refused(_))
+                        if url.as_deref().is_some_and(|url| tracker.ring_ended(url)) =>
+                    {
+                        Outcome::RingOver
                     }
                     Err(_) => Outcome::Failed,
                 }

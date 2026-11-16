@@ -13,8 +13,8 @@ use serde_json::Value;
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_call::{
-    CallEvent, CallId, CallState, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity, Incoming, Outcome,
-    Participant, Placement, RemoteEnd, Tracker, WriteId, WriteSink,
+    CallEvent, CallId, CallState, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity, Incoming, Observed,
+    Outcome, Participant, Placement, RemoteEnd, Tracker, WriteId, WriteSink,
 };
 use teams_proto::{CallLink, ClientInfo, Cloud, HttpTransport, MediaContent, Mri, Transport as _};
 use teams_trouter::{CallResponder, CallResponse, CallStack, Options, PushEvent, RegistrationReport, Trouter};
@@ -69,6 +69,8 @@ pub struct Client {
     /// How many deliveries came at the endpoint's root (invitations, each redelivery too).
     invitations: Arc<AtomicUsize>,
     progress: Gate,
+    /// Told each time the tracker saw a ring's end on the socket, before the machine is handed it.
+    ring_ends: Arc<tokio::sync::Notify>,
     task: JoinHandle<()>,
 }
 
@@ -101,6 +103,7 @@ struct Sink {
 impl WriteSink for Sink {
     fn submit<R: teams_proto::Request + Clone + Send + 'static>(&mut self, id: WriteId, write: R) {
         let (tracker, transport) = (Arc::clone(&self.tracker), Arc::clone(&self.transport));
+        let url = write.call_url().map(ToString::to_string);
         let held = write
             .call_url()
             .is_some_and(|url| url.path().ends_with("/progress"))
@@ -129,6 +132,11 @@ impl WriteSink for Sink {
                             status: answer.status(),
                             body: answer.body().to_vec(),
                         }
+                    }
+                    Err(teams_proto::HttpError::Refused(_))
+                        if url.as_deref().is_some_and(|url| tracker.ring_ended(url)) =>
+                    {
+                        Outcome::RingOver
                     }
                     Err(_) => Outcome::Failed,
                 }
@@ -189,10 +197,18 @@ impl Client {
         let cloud = Cloud::own(ORIGIN).unwrap();
         let tracker = Arc::new(Tracker::for_cloud(Mri::new(account.mri.clone()), cloud.clone()));
         let transport = Arc::new(account.transport(http).with_call_state(tracker.clone()));
+        let ring_ends = Arc::new(tokio::sync::Notify::new());
+        let (watched, seen) = (Arc::clone(&tracker), Arc::clone(&ring_ends));
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&account.session), socket)
             .unwrap()
             .with_options(options())
-            .for_calls(CallStack::new(Arc::clone(&tracker)));
+            .for_calls(CallStack::new(Arc::clone(&tracker)).observing(move |delivery| {
+                let observed = watched.observe_delivery(delivery);
+                if observed == Observed::RingEnded {
+                    seen.notify_one();
+                }
+                observed
+            }));
         let tenant = ngteams_server::db::meta::tenant(&http.app.db).await.unwrap();
         let identity = identity(&account.mri, name, &tenant, trouter.endpoint_id());
         let (commands, commanded) = mpsc::unbounded_channel();
@@ -229,8 +245,16 @@ impl Client {
             participants: Vec::new(),
             invitations,
             progress,
+            ring_ends,
             task,
         }
+    }
+
+    /// Waits until the client's tracker saw a ring's end on its socket; fails after [`WAIT`].
+    pub async fn ring_end_seen(&self) {
+        tokio::time::timeout(WAIT, self.ring_ends.notified())
+            .await
+            .expect("no ring's end reached the client's socket");
     }
 
     /// Holds the client's next `progress` write until `release` is used: `reached` is told when the write is reached,

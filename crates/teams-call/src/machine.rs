@@ -289,6 +289,10 @@ pub enum Outcome {
     /// It wasn't sent (call admission or the transport refused it) or its outcome isn't known (a timeout, a broken
     /// connection). It is never sent again.
     Failed,
+    /// It wasn't sent: the ring of the invitation it is for ended already ([`crate::Tracker::ring_ended`]). A ring's
+    /// `progress` then fails nothing: the end's delivery ends the ring as it says. Any other write fails as
+    /// [`Self::Failed`] does.
+    RingOver,
 }
 
 impl Outcome {
@@ -1515,6 +1519,8 @@ impl Calls {
                 | Step::Properties,
                 None,
             ) => {}
+            // the ring's end came before its progress could go: that end, still on its way here, ends the ring
+            (Step::Ringing, None) if *outcome == Outcome::RingOver => {}
             (step, None) => self.fail(step, now),
         }
     }

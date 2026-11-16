@@ -25,7 +25,9 @@
 //!   machine's events and delivery responses go at once, its next writes wait in its own queue (so a call that ends
 //!   drops them); a write refused without being acted on goes again only within `CallRetries`' allowance and only if
 //!   the machine still wants it once its wait is over (`Calls::may_send_again`, asked again then: a hang-up during the
-//!   wait fails it unsent); its answer (any status, with its body) goes back to the machine. The outbox and calling
+//!   wait fails it unsent); its answer (any status, with its body) goes back to the machine. A write not sent for a
+//!   ring whose end the tracker saw already goes back as `Outcome::RingOver`: that end comes to the machine after it,
+//!   on the socket, and says how the ring ended (cancelled, answered elsewhere). The outbox and calling
 //!   socket feed the call tracker: a start's answer records its call, a definite failure retires its pending attempt,
 //!   and an acceptance binds its links. The core's shared floor admits one call or ring across the app's accounts.
 //! - **A renegotiation of the account's** begins in the machine (`Calls::begin_renegotiation`) before the media session
@@ -417,6 +419,7 @@ type Again = Box<dyn FnMut() -> Attempt>;
 struct Writing {
     id: WriteId,
     name: &'static str,
+    url: Option<String>,
     flight: Flight,
     again: Again,
     retries: CallRetries,
@@ -606,17 +609,18 @@ pub(crate) struct Calling<C, T> {
 /// The engine's sink for one call write: it keeps the write (to try again) and makes each attempt through the outbox.
 struct Sink<T> {
     outbox: Arc<Outbox<T>>,
-    made: Option<(Attempt, Again)>,
+    made: Option<(Attempt, Again, Option<String>)>,
 }
 
 impl<T: Transport<Error = HttpError> + 'static> WriteSink for Sink<T> {
     fn submit<R: Request + Clone + Send + 'static>(&mut self, _id: WriteId, write: R) {
+        let url = write.call_url().map(ToString::to_string);
         let outbox = Arc::clone(&self.outbox);
         let mut again: Again = Box::new(move || {
             let (outbox, write) = (Arc::clone(&outbox), write.clone());
             Box::pin(async move { outbox.try_call(write).await })
         });
-        self.made = Some((again(), again));
+        self.made = Some((again(), again, url));
     }
 }
 
@@ -847,11 +851,12 @@ where
             made: None,
         };
         write.submit_to(id, &mut sink);
-        if let Some((attempt, again)) = sink.made {
+        if let Some((attempt, again, url)) = sink.made {
             log::info!("call write {name} ({})", id.get());
             self.writing = Some(Writing {
                 id,
                 name,
+                url,
                 flight: Flight::Attempt(attempt),
                 again,
                 retries: CallRetries::default(),
@@ -889,6 +894,14 @@ where
                 status: answer.status(),
                 body: answer.body().to_vec(),
             },
+            CallTried::NotSent(_)
+                if writing
+                    .url
+                    .as_ref()
+                    .is_some_and(|url| self.outbox.tracker().ring_ended(url)) =>
+            {
+                Outcome::RingOver
+            }
             _ => Outcome::Failed,
         };
         self.calls.on_outcome(writing.id, &outcome, now);

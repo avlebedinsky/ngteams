@@ -56,6 +56,8 @@ pub(crate) struct Offer {
     ends: Vec<Callback>,
     /// When it was offered: an offer never attached holds the call floor only for [`UNATTACHED_RING`].
     offered: Instant,
+    /// Its ring ended by its end's delivery, not because the client let it go.
+    end_delivered: bool,
 }
 
 /// How long an offered invitation no attach bound (so its ring's end is never seen) holds the call floor: longer
@@ -78,6 +80,7 @@ impl Offer {
             agent: None,
             ends: Vec::new(),
             offered: Instant::now(),
+            end_delivered: false,
         }
     }
 
@@ -109,6 +112,17 @@ impl Offer {
     /// Ends the ring for good.
     pub(crate) fn end(&mut self) {
         self.state = OfferState::Ended;
+    }
+
+    /// Ends the ring for good, by its end's delivery.
+    pub(crate) fn end_delivered(&mut self) {
+        self.end();
+        self.end_delivered = true;
+    }
+
+    /// Whether its ring ended by its end's delivery, and `url` is one of its links.
+    pub(crate) fn ended_with(&self, url: &str) -> bool {
+        self.end_delivered && self.links.iter().any(|(_, link)| link == url)
     }
 
     /// Whether it holds exactly `url` for `operation`.

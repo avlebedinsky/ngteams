@@ -1069,6 +1069,12 @@ fn group_invitation(callee: &str, chat: &str, n: u8) -> Value {
 
 /// b's machine with a's invitation offered (its `attach` answered): it rings here.
 fn offered_call(now: Instant) -> (Calls, CallId) {
+    let (calls, call, _) = rung_call(now);
+    (calls, call)
+}
+
+/// [`offered_call`], with its ring's `progress` write.
+fn rung_call(now: Instant) -> (Calls, CallId, WriteId) {
     let mut calls = Calls::new(identity(B));
     calls.set_push_url(PUSH).unwrap();
     calls.on_delivery(
@@ -1090,7 +1096,56 @@ fn offered_call(now: Instant) -> (Calls, CallId) {
     let [CallEvent::Incoming(incoming)] = &events(&ringing)[..] else {
         panic!("{ringing:#?}");
     };
-    (calls, incoming.call)
+    let [(progress, "progress")] = sent(&ringing)[..] else {
+        panic!("{ringing:#?}");
+    };
+    (calls, incoming.call, progress)
+}
+
+#[test]
+fn a_progress_not_sent_because_the_ring_ended_leaves_the_ring_to_its_end() {
+    let now = Instant::now();
+    let (mut calls, call, progress) = rung_call(now);
+    let end = callback(&calls, "end");
+    calls.on_outcome(progress, &Outcome::RingOver, now);
+    let early = effects(&mut calls);
+    assert!(early.is_empty(), "the ring's end is still on its way: {early:#?}");
+    assert_eq!(
+        calls.current(),
+        Some((call, Some(CallState::Offered))),
+        "it still rings"
+    );
+
+    let body = json!({"callEnd": {"code": 487, "subCode": 0, "phrase": "Call cancelled by the caller."}});
+    calls.on_delivery(&delivery(&end, &body), Observed::RingEnded, now);
+    let ended = effects(&mut calls);
+    assert_eq!(
+        events(&ended),
+        [CallEvent::RingEnded {
+            call,
+            end: crate::read::remote_end(&body.to_string().into_bytes())
+        }]
+    );
+    assert!(sent(&ended).is_empty());
+    assert_eq!(calls.current(), None);
+}
+
+#[test]
+fn a_progress_that_failed_on_a_live_ring_still_fails_the_ring() {
+    for outcome in [Outcome::Failed, failed()] {
+        let now = Instant::now();
+        let (mut calls, call, progress) = rung_call(now);
+        calls.on_outcome(progress, &outcome, now);
+        let gone = effects(&mut calls);
+        assert!(
+            events(&gone).contains(&CallEvent::Ended {
+                call,
+                end: End::Failed("progress")
+            }),
+            "{outcome:?}: {gone:#?}"
+        );
+        assert_eq!(calls.current(), None);
+    }
 }
 
 #[test]
