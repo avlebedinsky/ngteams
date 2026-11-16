@@ -1,7 +1,13 @@
 //! Lab startup locations and sandbox reach. The agent checks account traffic before each live run.
+//!
+//! An alias on an own server (the lab runner's `srv-*` aliases: synthetic users on a server it runs on loopback) is
+//! signed in outside its UI sandbox by [`sign_in_own`], the password handed over on standard input by the runner,
+//! never typed into the window.
 
 #[cfg(target_os = "linux")]
 use std::ffi::OsStr;
+
+use teams_auth::secrets::{Secret, SecretStore};
 
 use crate::accounts_file::{PersonalAccount, PersonalLocations, PersonalPaths, overlapping};
 
@@ -68,6 +74,33 @@ pub fn account(paths: &PersonalPaths) -> Result<PersonalAccount, String> {
         [account] => Ok(account.clone()),
         _ => Err("a lab alias needs exactly one account in its accounts.toml".into()),
     }
+}
+
+/// Signs the alias's own server account (its one account, `paths`) in with the password on `input`'s first line, its
+/// tokens put in `store` under the account's id as its broker serves them; what to print once it went through.
+///
+/// # Errors
+/// What the user is told: an alias without exactly one account, or a sign-in that stored nothing (a Microsoft 365
+/// account's, which signs in in its window; a wrong password; a server that can't be reached).
+pub async fn sign_in_own<S: SecretStore>(
+    paths: PersonalPaths,
+    input: &mut dyn std::io::BufRead,
+    store: &S,
+) -> Result<String, String> {
+    // room for any password at once, so no copy is left behind when the line grows; zeroed once it is a secret
+    let mut line = String::with_capacity(1024);
+    let read = input.read_line(&mut line);
+    let line = Secret::new(line);
+    read.map_err(|error| format!("the password can't be read: {error}"))?;
+    let password = Secret::new(line.expose().trim_end_matches(['\r', '\n']));
+    let setup = crate::setup::Setup::new(paths).map_err(|error| error.to_string())?;
+    let account = account(&setup.paths)?;
+    let signed = crate::signin::sign_in_own_again(&setup, &account, &password, store).await?;
+    Ok(format!(
+        "signed in {} on {}",
+        signed.upn,
+        signed.server.unwrap_or_default()
+    ))
 }
 
 /// Refuses lab files that would open or change the user's own app files, resolving existing symlinks.

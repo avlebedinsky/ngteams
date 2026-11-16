@@ -493,7 +493,6 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
             .args(["--exact", "startup_tests::child", "--nocapture", "--test-threads", "1"])
             .env_clear()
             .env(CASE, case)
-            .envs(case.contains("own").then_some((ngteams::setup::OWN_SERVER_ENV, "1")))
             .env("HOME", root.path().join("home"))
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("XDG_DATA_HOME", root.path().join("data"))

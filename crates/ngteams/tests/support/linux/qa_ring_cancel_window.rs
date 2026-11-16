@@ -584,10 +584,7 @@ struct Caller {
 
 impl Caller {
     fn sign_in(server: &own_server_binary::BinaryServer, root: &Path) -> SandboxResult<Self> {
-        let setup = support::runner(root)?
-            .setup
-            .with_secrets(AppSecrets::in_memory())
-            .with_own_servers(true);
+        let setup = support::runner(root)?.setup.with_secrets(AppSecrets::in_memory());
         let own = OwnServer::parse(&server.origin, &server.ca_file.to_string_lossy())?;
         let pending = PersonalAccount::pending_on("a@own.test", &own)?;
         pending.save(&setup.paths)?;
@@ -954,10 +951,7 @@ fn child_own() -> SandboxResult {
     app_log("own")?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(env(TRACE_FD_ENV)?.parse()?)?);
     let dir = PathBuf::from(env(DIR_ENV)?);
-    let setup = support::runner(&dir)?
-        .setup
-        .with_secrets(AppSecrets::in_memory())
-        .with_own_servers(true);
+    let setup = support::runner(&dir)?.setup.with_secrets(AppSecrets::in_memory());
     let server = OwnServer::parse(&env(OWN_ORIGIN_ENV)?, &env(OWN_CA_ENV)?)?;
     let password = fs::read_to_string(env(OWN_PASSWORD_ENV)?)?;
     let pending = PersonalAccount::pending_on("b@own.test", &server)?;

@@ -57,8 +57,7 @@ can retry. A lab alias selects its one provisioned account directly and cannot a
 
 ### Own-server accounts
 
-Behind `NGTEAMS_OWN_SERVER=1` while it is being built, the window that asks for an account first asks where the
-account is: **Microsoft 365** (the default; the flow above, unchanged) or **Own server**
+The window that asks for an account first asks where the account is: **Microsoft 365** (the default; the flow above, unchanged) or **Own server**
 ([docs/server.md](server.md)). An own server's account is asked for the server's address, the user name and the
 password. The app signs in with the password grant on that server alone: Microsoft's sign-in window never opens for
 it, and the password is sent once and kept nowhere.
@@ -105,8 +104,7 @@ asked for it; an own server's account that is no administrator has none either. 
 opens it for an account that has it.
 
 An own server's account that is signed out is asked for its password again. Each "Sign in" on that screen reads the account's entry again, so a `ca_file` written while
-the screen is open is used at once; the password goes only to the server the screen shows. Settings > General names the account's server, and `ngteamsctl accounts` lists it. Without
-`NGTEAMS_OWN_SERVER=1`, own-server entries stay in the file and are not started, and none is asked for its password.
+the screen is open is used at once; the password goes only to the server the screen shows. Settings > General names the account's server, and `ngteamsctl accounts` lists it.
 An account whose server serves no chats (an older or partial server) is signed in but can't be shown: its sign-in
 screen says so and stays open. Each start asks that server again with the account's saved session, and the account
 opens with no password once the server serves chats. Until then it is left out beside the accounts that can be

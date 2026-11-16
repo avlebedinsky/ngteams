@@ -40,9 +40,7 @@ type Signed = Rc<RefCell<Option<PersonalAccount>>>;
 fn dana_must_change(dir: &tempfile::TempDir) -> TestResult<(OwnServer, Setup)> {
     let server = OwnServer::start()?;
     let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
-    let setup = Setup::new(paths)?
-        .with_secrets(AppSecrets::in_memory())
-        .with_own_servers(true);
+    let setup = Setup::new(paths)?.with_secrets(AppSecrets::in_memory());
     let entry = accounts_file::OwnServer::parse(&server.origin, &server.ca_file.display().to_string())?;
     server.add_admin(ADMIN, "Ada Admin")?;
     let admin = accounts::add_own(&setup, ADMIN, &entry, &Secret::new(PASSWORD))?;

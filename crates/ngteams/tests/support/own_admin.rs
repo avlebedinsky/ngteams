@@ -29,10 +29,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn setup_in(dir: &tempfile::TempDir) -> Setup {
     let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
-    Setup::new(paths)
-        .unwrap()
-        .with_secrets(AppSecrets::in_memory())
-        .with_own_servers(true)
+    Setup::new(paths).unwrap().with_secrets(AppSecrets::in_memory())
 }
 
 fn at(server: &OwnServer) -> accounts_file::OwnServer {

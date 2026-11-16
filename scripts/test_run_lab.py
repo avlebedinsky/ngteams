@@ -71,6 +71,45 @@ with pathlib.Path(os.environ['SYNTHETIC_CARGO_LOG']).open('a') as log:
 sys.exit(int(os.environ.get('SYNTHETIC_BUILD_FAIL', '0')))
 '''
 
+# ngteams-server: its users in a JSON file beside its config; `serve` runs until SIGTERM. Passwords are kept as hashes.
+SERVER = r'''#!/usr/bin/env python3
+import hashlib, json, os, pathlib, signal, sys, time
+args = sys.argv[1:]
+config = pathlib.Path(args[1])
+command = args[2:]
+users_file = config.parent / 'synthetic-users.json'
+users = json.loads(users_file.read_text()) if users_file.exists() else {}
+with pathlib.Path(os.environ['SYNTHETIC_SERVER_LOG']).open('a') as log:
+    log.write(json.dumps({'config': str(config), 'command': command}) + '\n')
+def password():
+    return hashlib.sha256(sys.stdin.readline().rstrip('\n').encode()).hexdigest()
+if command[:2] == ['user', 'list']:
+    for upn, user in users.items():
+        print(f"{upn}\t00000000-0000-4000-8000-000000000000\tenabled\t{user['name']}\tuser")
+elif command[:2] == ['user', 'add']:
+    users[command[2]] = {'name': command[command.index('--name') + 1], 'password': password()}
+elif command[:2] == ['user', 'reset-password']:
+    users[command[2]]['password'] = password()
+elif command == ['serve']:
+    stopped = []
+    signal.signal(signal.SIGTERM, lambda *unused: stopped.append(True))
+    while not stopped:
+        time.sleep(0.05)
+users_file.write_text(json.dumps(users))
+'''
+
+# ngteams: only `sign-in` answers, recording the hash of the password it read
+SIGN_IN = r'''#!/usr/bin/env python3
+import hashlib, json, os, sys
+if sys.argv[1:2] != ['sign-in']:
+    sys.exit(99)
+line = sys.stdin.readline().rstrip('\n')
+with open(os.environ['SYNTHETIC_SIGN_IN_LOG'], 'a') as log:
+    log.write(json.dumps({'args': sys.argv[1:], 'password': hashlib.sha256(line.encode()).hexdigest(),
+                          'data': os.environ.get('XDG_DATA_HOME')}) + '\n')
+print('signed in synthetic')
+'''
+
 
 class Launcher(unittest.TestCase):
     def setUp(self):
@@ -85,11 +124,12 @@ class Launcher(unittest.TestCase):
         self.bin.mkdir(parents=True)
         self.executable(self.bin / "ui-sandbox-run", RUNNER)
         self.executable(self.bin / "ngteams", "#!/bin/sh\nexit 99\n")
-        tools = self.root / "tools"
+        tools = self.tools = self.root / "tools"
         tools.mkdir()
         self.executable(tools / "cargo", CARGO)
         self.env = os.environ.copy()
-        self.env.pop("NGTEAMS_OWN_SERVER", None)
+        for name in ["NGTEAMS_LAB_SERVER", "NGTEAMS_LAB_SERVER_CA", "NGTEAMS_LAB_SERVER_CONFIG"]:
+            self.env.pop(name, None)
         self.env.update(
             PATH=f"{tools}:{self.env['PATH']}",
             XDG_STATE_HOME=str(self.root / "state"),
@@ -185,18 +225,80 @@ class Launcher(unittest.TestCase):
         self.assertTrue(self.exclusive_available())
         self.assertIn("not running", self.invoke("b", "--status").stdout)
 
-    def test_own_server_switch_reaches_the_app_only_when_the_caller_set_it(self):
-        def app_args(alias):
-            args = json.loads((self.run_dir(alias) / "serve.json").read_text())
-            return [args[index + 1] for index, value in enumerate(args) if value == "--app-arg"]
-        self.started.add("a")
-        self.invoke("a", extra={"NGTEAMS_OWN_SERVER": "1"})
-        args = app_args("a")
-        # among env's assignments, before the program it runs
-        self.assertEqual(args[2:4], ["NGTEAMS_OWN_SERVER=1", str(self.bin / "ngteams")])
-        self.started.add("b")
-        self.invoke("b", extra={"NGTEAMS_OWN_SERVER": ""})
-        self.assertFalse([arg for arg in app_args("b") if arg.startswith("NGTEAMS_OWN_SERVER")])
+    def srv_fakes(self):
+        self.executable(self.bin / "ngteams-server", SERVER)
+        self.executable(self.bin / "ngteams", SIGN_IN)
+        # the server's readiness, as curl asks it
+        self.executable(self.tools / "curl", "#!/bin/sh\nexit 0\n")
+        self.env.update(SYNTHETIC_SERVER_LOG=str(self.root / "server.jsonl"),
+                        SYNTHETIC_SIGN_IN_LOG=str(self.root / "sign-in.jsonl"))
+
+    def jsonl(self, name):
+        path = self.root / name
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_srv_aliases_share_the_runners_server_and_sign_in_without_typing(self):
+        self.srv_fakes()
+        started = self.start("srv-a")
+        self.assertIn("own server:", started.stdout)
+        builds = self.jsonl("cargo.jsonl")
+        self.assertIn(["-p", "ngteams-server"], [builds[-1]["args"][i:i + 2] for i in range(len(builds[-1]["args"]))])
+        home = self.root / "state/ngteams-lab/.srv-server"
+        port = (home / "port").read_text().strip()
+        commands = [call["command"] for call in self.jsonl("server.jsonl")]
+        self.assertEqual(commands[0], ["migrate"])
+        self.assertEqual(sorted(command[2] for command in commands if command[:2] == ["user", "add"]),
+                         ["srv-a@srv.lab.test", "srv-b@srv.lab.test", "srv-c@srv.lab.test"])
+        self.assertEqual(commands.count(["serve"]), 1)
+        config = (home / "server.toml").read_text()
+        self.assertIn(f'listen = "127.0.0.1:{port}"', config)
+        self.assertIn(f'database_url = "sqlite://{home}/server.sqlite"', config)
+        for secret in ["passwords/srv-a", "passwords/srv-b", "key.pem", "ca.key"]:
+            self.assertEqual((home / secret).stat().st_mode & 0o077, 0, secret)
+        account = (self.root / "data/ngteams-lab/srv-a/accounts.toml").read_text()
+        self.assertEqual(account, f'[[account]]\nupn = "srv-a@srv.lab.test"\nserver = "https://127.0.0.1:{port}"\n'
+                                  f"ca_file = '{home}/ca.pem'\n")
+        password = (home / "passwords/srv-a").read_text().strip()
+        signed = self.jsonl("sign-in.jsonl")
+        import hashlib
+        self.assertEqual(signed, [{"args": ["sign-in", "--lab", "srv-a"],
+                                   "password": hashlib.sha256(password.encode()).hexdigest(),
+                                   "data": self.env["XDG_DATA_HOME"]}])
+        self.assertNotIn(password, started.stdout + started.stderr)
+
+        # b shares that server: none started again, no user made again
+        self.start("srv-b")
+        commands = [call["command"] for call in self.jsonl("server.jsonl")]
+        self.assertEqual(commands.count(["serve"]), 1)
+        self.assertEqual(len([command for command in commands if command[:2] == ["user", "add"]]), 3)
+        server = int((home / "server.pid").read_text())
+        self.invoke("srv-a", "--stop")
+        os.kill(server, 0)
+        stopped = self.invoke("srv-b", "--stop")
+        self.assertIn("stopped the srv server", stopped.stdout)
+        with self.assertRaises(ProcessLookupError):
+            for _ in range(100):
+                os.kill(server, 0)
+                threading.Event().wait(0.05)
+
+    def test_a_srv_alias_on_a_server_the_caller_names_starts_none(self):
+        self.srv_fakes()
+        config = self.root / "node.toml"
+        config.write_text("synthetic = true\n")
+        ca = self.root / "ca.pem"
+        ca.write_text("synthetic\n")
+        self.env.update(NGTEAMS_LAB_SERVER="https://ngts.example.test:8443/", NGTEAMS_LAB_SERVER_CA=str(ca),
+                        NGTEAMS_LAB_SERVER_CONFIG=str(config))
+        self.start("srv-c")
+        calls = self.jsonl("server.jsonl")
+        self.assertEqual({call["config"] for call in calls}, {str(config)})
+        self.assertNotIn(["serve"], [call["command"] for call in calls])
+        account = (self.root / "data/ngteams-lab/srv-c/accounts.toml").read_text()
+        self.assertIn('server = "https://ngts.example.test:8443"', account)
+        self.assertIn(f"ca_file = '{ca}'", account)
+        self.assertNotIn("stopped the srv server", self.invoke("srv-c", "--stop").stdout)
+        missing = self.invoke("srv-a", check=False, extra={"NGTEAMS_LAB_SERVER_CONFIG": ""})
+        self.assertIn("NGTEAMS_LAB_SERVER_CONFIG", missing.stderr)
 
     def test_build_or_startup_failure_releases_alias_and_live_locks(self):
         result = self.invoke("a", check=False, extra={"SYNTHETIC_BUILD_FAIL": "17"})

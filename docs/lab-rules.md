@@ -49,7 +49,9 @@ Use `scripts/run-lab.sh <alias>` for `ngteams`, with `--pipewire` when the test 
 in `target/lab` with the lab marker, starts its credential broker outside the UI sandbox and opens its window inside
 it. Each alias has its own data/config under the XDG data home's `ngteams-lab/<alias>/` and uses only the
 `ngteams-lab` credential namespace. Several aliases can run together; each holds an exclusive alias lock and a shared
-live lock for its lifetime. The runner applies an outer shutdown deadline and keeps diagnostics after stop.
+live lock for its lifetime. The runner applies an outer shutdown deadline and keeps diagnostics after stop. The `srv-*`
+aliases are synthetic users on an own server the runner runs on loopback (or one `NGTEAMS_LAB_SERVER` names) and
+reach no Microsoft tenant, so their lab-contact check is local: only the srv users on that server.
 
 The user's account is only someone the lab may reach; it is never the identity an agent signs into the lab client.
 Agents run that account only through `scripts/run-personal-read-only.sh`, and install its client only on an explicit

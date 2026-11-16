@@ -10,7 +10,8 @@
 //! snapshot of the user's files it runs on) and `ngteams secrets --account <UPN> --fd <n>` (its credential broker,
 //! `get` only, run outside the sandbox).
 //! Lab mode is `ngteams --lab <alias> --secrets-fd <n> [--trace-fd <n>]`, with writable lab credentials served by
-//! `ngteams secrets --lab <alias> --fd <n>` outside its UI sandbox.
+//! `ngteams secrets --lab <alias> --fd <n>` outside its UI sandbox; `ngteams sign-in --lab <alias>` signs an alias on an
+//! own server in there with the password on standard input (`crate::lab::sign_in_own`).
 //! `--ctl-socket <path>` names where `ngteamsctl`'s control socket is served (`crate::ctl`). The personal app falls
 //! back to `$XDG_RUNTIME_DIR/ngteams/ctl.sock`; a lab or read-only app serves only where its runner tells it (its
 //! state dir, `teams_ctl::Mode`), and none without it.
@@ -117,6 +118,13 @@ pub enum Command {
         #[arg(long, value_name = "N")]
         fd: RawDescriptor,
     },
+    /// Signs a lab alias's own-server account in with the password on standard input's first line, outside the UI
+    /// sandbox (the lab runner's srv aliases); its tokens go to the alias's ngteams-lab items. Prints no token.
+    SignIn {
+        /// The lab alias, whose one account (an own server's) is read from its isolated accounts.toml.
+        #[arg(long, value_name = "ALIAS", value_parser = crate::lab::alias)]
+        lab: String,
+    },
 }
 
 /// The read-only mode, as the command line gives it.
@@ -157,7 +165,11 @@ impl Cli {
     /// Whether either the app or the credential-broker subcommand explicitly selects lab mode.
     #[must_use]
     pub fn lab_requested(&self) -> bool {
-        self.lab.is_some() || matches!(&self.command, Some(Command::Secrets { lab: Some(_), .. }))
+        self.lab.is_some()
+            || matches!(
+                &self.command,
+                Some(Command::Secrets { lab: Some(_), .. } | Command::SignIn { .. })
+            )
     }
 
     /// The lab mode and its inherited descriptors; its paths cannot be overridden with --data.

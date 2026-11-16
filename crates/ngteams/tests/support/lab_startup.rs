@@ -9,7 +9,7 @@ use clap::Parser as _;
 use ngteams::accounts_file::PersonalAccount;
 use ngteams::cli::Cli;
 
-use super::{Outcome, lab_broker, run_lab};
+use super::{Outcome, lab_broker, lab_sign_in, run_lab};
 
 const CASE: &str = "NGTEAMS_LAB_STARTUP_CASE";
 const OID: &str = "00000000-0000-4000-8000-0000000000ff";
@@ -26,7 +26,7 @@ fn lab_startup_and_broker_use_alias_files_and_preserve_restart_descriptors() {
         "pending-shortcut-closed",
         "pending-shortcut-failed",
         "wrong-account",
-        "own-off",
+        "own-ready",
         "no-sandbox",
         "broker",
     ] {
@@ -88,8 +88,8 @@ fn lab_child() {
     let pending = PersonalAccount::pending("pending@example.test").unwrap();
     let account = if case.starts_with("pending") {
         pending.clone()
-    } else if case == "own-off" {
-        // an alias on an own server, signed in before, started without NGTEAMS_OWN_SERVER
+    } else if case == "own-ready" {
+        // an alias on an own server (the runner's srv aliases), signed in before
         let server = ngteams::accounts_file::OwnServer::parse("https://chat.example.test", "").unwrap();
         PersonalAccount::pending_on("ready@example.test", &server)
             .unwrap()
@@ -98,18 +98,7 @@ fn lab_child() {
     } else {
         PersonalAccount::new("ready@example.test", OID, TID).unwrap()
     };
-    account.save(&paths).unwrap();
-    if let Some(region) = paths.region_file(&account) {
-        fs::create_dir_all(region.parent().unwrap()).unwrap();
-        fs::write(
-            region,
-            format!(
-                r#"{{"region":"amer","partition":null,"regionGtms":{{"chatServiceAfd":"{}"}}}}"#,
-                teams_mock::CHAT_BASE
-            ),
-        )
-        .unwrap();
-    }
+    saved(&paths, &account);
     if case == "broker" {
         broker_cases(&paths, &pending);
         return;
@@ -119,6 +108,11 @@ fn lab_child() {
         return;
     }
     let (peer, socket) = private_pair().unwrap();
+    let (peer, _serving) = if case == "own-ready" {
+        (None, Some(answer_broker(peer, &account)))
+    } else {
+        (Some(peer), None)
+    };
     let mut args = vec![
         "ngteams".to_owned(),
         "--lab".into(),
@@ -165,6 +159,43 @@ fn lab_child() {
     drop(peer);
 }
 
+/// `account` saved as the alias's one account, its region beside it.
+fn saved(paths: &ngteams::accounts_file::PersonalPaths, account: &PersonalAccount) {
+    account.save(paths).unwrap();
+    if let Some(region) = paths.region_file(account) {
+        // an own server's chat service is its own
+        let chat = account.server.as_ref().map_or_else(
+            || teams_mock::CHAT_BASE.to_owned(),
+            |server| format!("{server}/api/chatsvc/own"),
+        );
+        fs::create_dir_all(region.parent().unwrap()).unwrap();
+        fs::write(
+            region,
+            format!(r#"{{"region":"amer","partition":null,"regionGtms":{{"chatServiceAfd":"{chat}"}}}}"#),
+        )
+        .unwrap();
+    }
+}
+
+/// The alias's broker as its runner serves it, from an empty store: an own server's account asks it whether it may
+/// ask its server for Manage users, and asks nothing more (a broker that never answers would hold the run). Left
+/// serving: the process ends with the case.
+fn answer_broker(peer: teams_auth::broker::BrokerStream, account: &PersonalAccount) -> std::thread::JoinHandle<()> {
+    let scope = ngteams::secrets::lab_broker_scope(&account.id());
+    std::thread::spawn(move || {
+        let store = teams_auth::secrets::MemorySecretStore::new();
+        let served = ngteams::accounts::runtime()
+            .unwrap()
+            .block_on(ngteams::read_only::serve_broker(
+                peer,
+                &scope,
+                &store,
+                &mut std::io::sink(),
+            ));
+        served.unwrap();
+    })
+}
+
 fn check_outcome(
     case: &str,
     outcome: Result<Outcome, String>,
@@ -172,21 +203,11 @@ fn check_outcome(
     account: &PersonalAccount,
 ) {
     match (case, outcome) {
-        ("ready" | "ready-ctl", Ok(Outcome::Quit)) => assert!(paths.store_file(account).unwrap().exists()),
+        ("ready" | "ready-ctl" | "own-ready", Ok(Outcome::Quit)) => {
+            assert!(paths.store_file(account).unwrap().exists());
+        }
         ("pending", Ok(Outcome::LabRestart(descriptors))) => assert!(descriptors.socket().is_ok()),
         ("wrong-account", Err(error)) => assert!(error.contains("configured for")),
-        // no password form, and never a sign-in that "stored nothing"
-        ("own-off", Err(error)) => {
-            assert_eq!(
-                error,
-                format!(
-                    "ready@example.test is an own server's account. {}",
-                    ngteams::signin::OWN_SERVERS_OFF
-                )
-            );
-            let asked = crate::startup_tests::calls().lock().unwrap().clone();
-            assert!(asked.iter().all(|call| !call.contains("sign-in")), "{asked:?}");
-        }
         ("no-sandbox", Err(error)) => {
             assert!(error.contains(if cfg!(windows) { "VM console opt-in" } else { "DISPLAY" }));
         }
@@ -275,6 +296,9 @@ fn broker_cases(paths: &ngteams::accounts_file::PersonalPaths, pending: &Persona
         lab_broker("a", handles::socket(socket))
     };
     assert_eq!(lab_broker("a", handles::INVALID), ExitCode::FAILURE);
+    // a Microsoft 365 alias signs in in its window: refused before any store is opened
+    assert_eq!(lab_sign_in("a", &mut "made-up\n".as_bytes()), ExitCode::FAILURE);
+    assert_eq!(lab_sign_in("../a", &mut "made-up\n".as_bytes()), ExitCode::FAILURE);
     assert_eq!(closed_broker(), ExitCode::SUCCESS, "EOF opens no lazy keyring");
     pending.save(paths).unwrap();
     assert_eq!(

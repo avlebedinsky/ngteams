@@ -102,7 +102,7 @@ impl OwnPrompt {
     }
 
     fn ask_server(&self, typed: &str, ca_file: &str, prompt: Entity<AccountPrompt>, cx: &mut App) {
-        let (Ok(server), true) = (OwnServer::parse(typed, ca_file), self.setup.own_servers()) else {
+        let Ok(server) = OwnServer::parse(typed, ca_file) else {
             return;
         };
         let typed = typed.to_owned();

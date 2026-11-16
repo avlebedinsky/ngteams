@@ -689,12 +689,10 @@ pub fn password_change_at_480(dark: bool) -> SandboxResult {
     ensure(status.success(), || format!("the app exited {status}: {stderr}"))
 }
 
-/// The app's files in `dir`, own servers on, a credential store of this process alone.
+/// The app's files in `dir`, a credential store of this process alone.
 fn setup_in(dir: &tempfile::TempDir) -> SandboxResult<Setup> {
     let paths = PersonalPaths::new(dir.path().join("ngteams-config"), dir.path().join("ngteams-data"));
-    Ok(Setup::new(paths)?
-        .with_secrets(ngteams::secrets::AppSecrets::in_memory())
-        .with_own_servers(true))
+    Ok(Setup::new(paths)?.with_secrets(ngteams::secrets::AppSecrets::in_memory()))
 }
 
 /// The window asking for an account as `offer` says, its own-server asks done as the app does them (`handler`).

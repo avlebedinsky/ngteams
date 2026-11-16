@@ -3,7 +3,6 @@
 # Start: ./scripts/run-lab.ps1 a -TimeoutSeconds 1800 (after the agent's lab-contact check).
 # Provision the alias's accounts.toml with exactly one lab account first; credentials never go through this script.
 # Stop/status: ./scripts/run-lab.ps1 a -Stop / -Status. Logs and account data are retained.
-# NGTEAMS_OWN_SERVER is handed to the app as run-lab.sh does (unset is off): an alias on an own server needs it.
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
@@ -29,5 +28,4 @@ if (!$Stop -and !$Status -and !$Serve) {
 $directory = Join-Path $env:LOCALAPPDATA "ngteams-lab/$Alias"
 Invoke-NgteamsRunner -Root $root -Directory $directory -ScopeName Alias -Scope $Alias `
     -App (Join-Path $root 'target/lab/debug/ngteams.exe') -TimeoutSeconds $TimeoutSeconds `
-    -Stop:$Stop -Status:$Status -Serve:$Serve -Script $PSCommandPath `
-    -Environment @{ NGTEAMS_OWN_SERVER = "$env:NGTEAMS_OWN_SERVER" }
+    -Stop:$Stop -Status:$Status -Serve:$Serve -Script $PSCommandPath

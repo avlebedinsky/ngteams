@@ -92,8 +92,6 @@ pub enum SignInError {
     Hosts(#[from] HostRefused),
     #[error("the account signs in another way: Microsoft 365 in Microsoft's window, an own server's with its password")]
     WrongCloud,
-    #[error("{OWN_SERVERS_OFF}")]
-    OwnServersOff,
 }
 
 /// What an own server's sign-in gives when the server took the password only to have it replaced: the sign-in screen
@@ -131,9 +129,6 @@ fn transport(error: &SignInError) -> Option<&(dyn std::error::Error + 'static)> 
         _ => None,
     }
 }
-
-/// What the user is told about an own server's account while own servers are off.
-pub const OWN_SERVERS_OFF: &str = "Own servers are turned off. Set NGTEAMS_OWN_SERVER=1 and start ngteams again.";
 
 /// How `ca_file` is written in `accounts.toml`, in a form the platform's paths survive: a TOML literal string, which
 /// keeps a Windows path's backslashes.
@@ -270,7 +265,7 @@ pub async fn sign_in<S: SecretStore>(
 /// Its tokens are stored under the account qualified by its server ([`PersonalAccount::id`]).
 ///
 /// # Errors
-/// [`SignInError`]: own servers are off or the account isn't an own server's, its CA file can't be read, the server
+/// [`SignInError`]: the account isn't an own server's, its CA file can't be read, the server
 /// refused the user name or password or named another account (nothing stored then), authz refused, or a file
 /// couldn't be written.
 pub async fn sign_in_own<S: SecretStore>(
@@ -281,9 +276,6 @@ pub async fn sign_in_own<S: SecretStore>(
 ) -> Result<PersonalAccount, SignInError> {
     if account.server.is_none() {
         return Err(SignInError::WrongCloud);
-    }
-    if !setup.own_servers() {
-        return Err(SignInError::OwnServersOff);
     }
     let cloud = account.cloud()?;
     let clients = SignInClients::for_cloud(&cloud)?;
@@ -354,7 +346,7 @@ async fn save_authz<S: SecretStore>(
 /// password is needed while the account's refresh token is good.
 ///
 /// # Errors
-/// [`SignInError`]: the account isn't an own server's or own servers are off, its server can't be reached or refused
+/// [`SignInError`]: the account isn't an own server's, its server can't be reached or refused
 /// the stored token, or a file couldn't be written; the region saved before stays then.
 pub async fn region_again<S: SecretStore>(
     setup: &Setup,
@@ -363,9 +355,6 @@ pub async fn region_again<S: SecretStore>(
 ) -> Result<(), SignInError> {
     if account.server.is_none() {
         return Err(SignInError::WrongCloud);
-    }
-    if !setup.own_servers() {
-        return Err(SignInError::OwnServersOff);
     }
     let clients = SignInClients::for_cloud(&account.cloud()?)?;
     save_authz(setup, account, &clients, store, AuthzKind::TokenRefresh).await
@@ -527,7 +516,6 @@ pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError
                 ),
             }
         }
-        SignInError::OwnServersOff => OWN_SERVERS_OFF.to_owned(),
         error => format!("the sign-in stored nothing: {error}"),
     }
 }

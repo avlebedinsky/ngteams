@@ -318,6 +318,24 @@ ordered TERM shutdown. A stuck holder keeps its locks and diagnostic state until
 account files, stores and logs. `--shot` captures a window, `--screen <name>` the whole output; `--key`, `--type`,
 `--click`, `--windows` and `--status` address only that alias. Never type credentials through `--type`.
 
+**Own-server aliases** (`srv-a`, `srv-b`, `srv-c`) are synthetic users on an own server: `scripts/run-lab.sh srv-a`
+builds `ngteams-server` into `target/lab` too, starts one on loopback unless it runs (SQLite, stored files and a CA
+of its own under `<state>/ngteams-lab/.srv-server/`), creates the srv users with passwords kept `0600` there, and
+signs the alias in before its window opens (`ngteams sign-in --lab <alias>`, the password on standard input, its
+tokens in the alias's `ngteams-lab` items as the broker keeps them), so no password is typed. `NGTEAMS_LAB_SERVER`
+(an https origin) with `NGTEAMS_LAB_SERVER_CONFIG` (a node's config, for `user add`) and optionally
+`NGTEAMS_LAB_SERVER_CA` use a server that already runs instead, such as a deployment of several nodes. `--stop` of the
+last running srv alias stops the server the runner started; its data stays. No Microsoft tenant is reached, so the
+lab-contact check for a srv run is local: the srv users on that server.
+
+```sh
+scripts/run-lab.sh srv-a
+scripts/run-lab.sh srv-b
+scripts/run-lab.sh srv-a --shot chats
+scripts/run-lab.sh srv-a --stop
+scripts/run-lab.sh srv-b --stop    # the last srv alias: the server stops too
+```
+
 ### Personal accounts
 
 The user installs and runs their own app:

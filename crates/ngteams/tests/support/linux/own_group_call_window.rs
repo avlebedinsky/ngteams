@@ -826,7 +826,6 @@ impl AppUnderTest {
                 (CHAT_ENV, chat),
                 (DIR_ENV, &own_text),
                 (CTL_ENV, &socket_text),
-                ("NGTEAMS_OWN_SERVER", "1"),
             ],
             &[writer.as_fd()],
         )?;

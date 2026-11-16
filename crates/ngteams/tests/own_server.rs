@@ -1,8 +1,8 @@
 //! An own server's account, signed in and kept beside a Microsoft 365 one: the password grant against an in-process
 //! `ngteams-server` over TLS (its certificate authority in the account's `ca_file`), the refresh token and skypetoken
 //! stored under the account's server and UPN together, its region saved from the server's authz, its entry in
-//! `accounts.toml` naming the server; what a wrong password, an untrusted certificate and own servers switched off
-//! leave behind; the forget. And the server's account management as the app asks it (`support/own_admin.rs`), and a
+//! `accounts.toml` naming the server; what a wrong password and an untrusted certificate leave behind; the forget; a
+//! lab alias on an own server signed in with the password its runner hands over (`ngteams::lab::sign_in_own`). And the server's account management as the app asks it (`support/own_admin.rs`), and a
 //! password that must change replaced from the sign-in screen (`support/own_prompt.rs`). Every value is made up and
 //! nothing leaves loopback.
 
@@ -38,7 +38,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn setup_in(dir: &tempfile::TempDir) -> Setup {
     let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
-    Setup::new(paths).unwrap().with_own_servers(true)
+    Setup::new(paths).unwrap()
 }
 
 fn at(server: &OwnServer, trusted: bool) -> accounts_file::OwnServer {
@@ -291,10 +291,7 @@ fn a_region_without_a_chat_service_is_asked_again_without_a_password() -> TestRe
     std::fs::write(&region, NO_CHATS)?;
     assert!(ngteams::accounts::unserved(&setup, &signed).is_some());
 
-    // not asked while own servers are off, nor of Microsoft for an account of theirs: the saved region stays
-    let off = Setup::new(setup.paths.clone())?;
-    let refused = block_on(signin::region_again(&off, &signed, &store));
-    assert!(matches!(refused, Err(SignInError::OwnServersOff)), "{refused:?}");
+    // not asked of Microsoft for an account of theirs: the saved region stays
     let microsoft = PersonalAccount::new(UPN, MICROSOFT_OID, TENANT)?;
     let refused = block_on(signin::region_again(&setup, &microsoft, &store));
     assert!(matches!(refused, Err(SignInError::WrongCloud)), "{refused:?}");
@@ -382,16 +379,7 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() 
     );
     assert!(PersonalAccount::load_all(&setup.paths)?.is_empty());
 
-    // own servers switched off: nothing is added, signed in or started
-    let off = Setup::new(setup.paths.clone())?;
-    let refused = block_on(signin::add_own(
-        &off,
-        UPN,
-        &at(&server, true),
-        &Secret::new(PASSWORD),
-        &store,
-    ));
-    assert!(refused.unwrap_err().contains("NGTEAMS_OWN_SERVER"));
+    // the right password then: the account is added, signed in and started
     let signed = block_on(signin::add_own(
         &setup,
         UPN,
@@ -399,14 +387,42 @@ fn a_sign_in_that_stores_nothing_says_why_and_leaves_only_what_the_user_wrote() 
         &Secret::new(PASSWORD),
         &store,
     ))?;
-    assert!(
-        off.signed_in_accounts()?.is_empty(),
-        "an own server's account isn't started while they are off"
-    );
     assert_eq!(setup.signed_in_accounts()?, std::slice::from_ref(&signed));
-    // said plainly, never as a sign-in that "stored nothing"
-    let again = block_on(signin::sign_in_own(&off, &signed, &Secret::new(PASSWORD), &store)).unwrap_err();
-    assert!(matches!(again, SignInError::OwnServersOff), "{again:?}");
-    assert_eq!(signin::own_failure(&off, &signed, &again), signin::OWN_SERVERS_OFF);
+    Ok(())
+}
+
+/// A lab alias on an own server (the lab runner's srv aliases) is signed in with the password on the runner's input:
+/// its entry named, its tokens stored under its server and UPN; a wrong password, or an alias of two accounts, store
+/// nothing and say why.
+#[test]
+fn a_lab_alias_on_an_own_server_signs_in_with_the_password_handed_over() -> TestResult {
+    let server = OwnServer::start()?;
+    let oid = server.add_user(UPN, NAME)?;
+    let dir = tempfile::tempdir()?;
+    let paths = PersonalPaths::new(dir.path().join("srv-a"), dir.path().join("srv-a"));
+    let pending = PersonalAccount::pending_on(UPN, &at(&server, true))?;
+    pending.save(&paths)?;
+    let store = MemorySecretStore::new();
+
+    let wrong = block_on(ngteams::lab::sign_in_own(
+        paths.clone(),
+        &mut "not it\n".as_bytes(),
+        &store,
+    ));
+    assert_eq!(wrong.unwrap_err(), "The user name or password isn't right.");
+    assert!(!ngteams::lab::account(&paths)?.is_signed_in());
+
+    let input = format!("{PASSWORD}\r\n");
+    let said = block_on(ngteams::lab::sign_in_own(paths.clone(), &mut input.as_bytes(), &store))?;
+    assert_eq!(said, format!("signed in {UPN} on {}", server.origin));
+    let signed = ngteams::lab::account(&paths)?;
+    assert_eq!(signed.oid.as_deref(), Some(oid.as_str()));
+    assert!(paths.region_file(&signed).is_some_and(|region| region.is_file()));
+    assert!(block_on(store.get(&refresh_token_key(&signed.id())))?.is_some());
+    assert!(block_on(store.get(&skypetoken_key(&signed.id())))?.is_some());
+
+    PersonalAccount::pending("other@own.example.test")?.save(&paths)?;
+    let two = block_on(ngteams::lab::sign_in_own(paths, &mut input.as_bytes(), &store));
+    assert!(two.unwrap_err().contains("exactly one account"));
     Ok(())
 }

@@ -74,7 +74,6 @@ pub(super) fn parent() -> SandboxResult {
             (ORIGIN_ENV, server.origin.as_str()),
             (ENDPOINT_ENV, server.endpoint.as_str()),
             (REFRESH_ENV, world.a_refresh.as_str()),
-            ("NGTEAMS_OWN_SERVER", "1"),
         ];
         let waits = [("calling", "registered")];
         let mut app = AppUnderTest::start(&sandbox, ("own", &extra), dir.path(), &world.topic_group, &waits)?;

@@ -142,6 +142,7 @@ fn main() -> ExitCode {
                 _ => failed("secrets", &"give exactly one of --account or --lab"),
             };
         }
+        Some(Subcommand::SignIn { lab }) => return lab_sign_in(lab, &mut std::io::stdin().lock()),
         Some(Subcommand::Snapshot { to }) => return take_snapshot(to),
         None => {}
     }
@@ -300,9 +301,7 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     {
         return handed;
     }
-    let setup = Setup::from_env()
-        .map_err(|error| error.to_string())?
-        .with_own_servers(ngteams::setup::own_servers_from_env());
+    let setup = Setup::from_env().map_err(|error| error.to_string())?;
     // the user's own app, installed from a release, updates itself; no other mode does
     let updater = ngteams::update::for_this_run(&setup.paths);
     run_setup(cli, reach, setup, ViewTrace::off(), ctl, updater)
@@ -581,8 +580,7 @@ fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
     let store = secrets::AppSecrets::lab(socket).map_err(|error| format!("the lab broker's socket: {error}"))?;
     let setup = Setup::new(paths)
         .map_err(|error| error.to_string())?
-        .with_secrets(store)
-        .with_own_servers(ngteams::setup::own_servers_from_env());
+        .with_secrets(store);
     let account = lab::account(&setup.paths)?;
     for requested in [cli.account.as_deref(), cli.forget.as_deref()].into_iter().flatten() {
         if !requested.eq_ignore_ascii_case(&account.upn) {
@@ -621,6 +619,23 @@ fn lab_broker(alias: &str, fd: RawDescriptor) -> ExitCode {
     }
 }
 
+/// The alias's own server account signed in with the password on `input`, outside the UI sandbox
+/// ([`lab::sign_in_own`]), its tokens in its lab namespace as its broker keeps them.
+fn lab_sign_in(alias: &str, input: &mut dyn std::io::BufRead) -> ExitCode {
+    let signed = lab::paths_from_env(alias).and_then(|paths| {
+        let runtime = ngteams::accounts::runtime()?;
+        let store = LazyKeyring::new(lab::LAB_KEYRING_APPLICATION);
+        runtime.block_on(lab::sign_in_own(paths, input, &store))
+    });
+    match signed {
+        Ok(said) => {
+            println!("{said}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => failed("sign-in", &error),
+    }
+}
+
 /// The read-only mode (`ngteams::read_only`): its descriptors taken over first, then the sandbox check, the snapshot
 /// (apart from the user's own files), the account, its engine (read-only, no push channel, no calls) over the broker's
 /// store, and the window; nothing adds, removes or signs in an account.
@@ -633,11 +648,8 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     read_only::window_allowed_here()?;
     let mine = PersonalPaths::from_env().map_err(|error| error.to_string())?;
     let paths = read_only::snapshot_paths(&mode.data, &mine)?;
-    // own servers' accounts too (the runner's sandbox clears the variable that turns them on): the mode never signs
-    // in, and its broker serves an account's own keys only
-    let setup = Setup::new(paths)
-        .map_err(|error| error.to_string())?
-        .with_own_servers(true);
+    // own servers' accounts too: the mode never signs in, and its broker serves an account's own keys only
+    let setup = Setup::new(paths).map_err(|error| error.to_string())?;
     let signed_in = setup.signed_in_accounts().map_err(|error| error.to_string())?;
     // named as the broker reads it: an id, or a bare UPN
     let account = PersonalAccount::named(&signed_in, &mode.account)
@@ -783,12 +795,13 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
     let application = platform::application().with_assets(teams_ui::AppAssets);
     application.run(move |cx: &mut App| {
-        let own = if setup.own_servers() {
-            OwnOffer::Choice
-        } else {
-            OwnOffer::No
-        };
-        match account_prompt::open_offering(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref(), &own) {
+        match account_prompt::open_offering(
+            cx,
+            PERSONAL_APP_ID,
+            app::TITLE.into(),
+            held.as_deref(),
+            &OwnOffer::Choice,
+        ) {
             Ok((_, prompt)) => cx
                 .subscribe(&prompt, move |prompt, event, cx| {
                     let (setup, restart) = (setup.clone(), Rc::clone(&restart_in_app));
@@ -927,14 +940,6 @@ fn own_screen(setup: Setup, account: PersonalAccount, said: Option<String>) -> O
 /// sign it in as an existing account so closing or failing its first window leaves it available for another try.
 fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, String> {
     if account.server.is_some() {
-        // no password is asked for a sign-in that own servers being off would refuse
-        if !setup.own_servers() {
-            return Err(format!(
-                "{} is an own server's account. {}",
-                account.upn,
-                ngteams::signin::OWN_SERVERS_OFF
-            ));
-        }
         return Ok(own_screen(setup, account, None));
     }
     let restart = Rc::new(Cell::new(false));

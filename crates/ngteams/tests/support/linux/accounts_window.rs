@@ -8,7 +8,7 @@
 //! connected; screenshots the window (the rail's avatars above Settings; kept under `target/ui-shots/`); switches to b
 //! with the sandbox's virtual keyboard (Ctrl+Alt+Down) and screenshots it again; then c posts on the mock to a's chat
 //! with c while b is shown: a's notification reaches the sandbox's fake server naming no account, and activating it
-//! shows a again with that chat open. Then an own server's account is added beside the two (own servers on): the
+//! shows a again with that chat open. Then an own server's account is added beside the two: the
 //! rail's "+" opens the window asking for an account, "Own server" shows its fields, and the server's address, the user
 //! name and the password typed sign it in on an in-process `ngteams-server` over TLS (its certificate authority in the
 //! account's `ca_file`); its tokens are kept under its server and UPN, its region is the server's own, and its engine
@@ -222,13 +222,12 @@ const QA_PREFIX: &str = "qa_";
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 38] = [
+const SCENES: [Scene; 37] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
     ),
     ("own_servers_form_in_teams_dark", own_form_in_dark),
-    ("without_own_servers_microsoft_alone", without_own_servers),
     ("signed_out_own_account_password_again", |sandbox| {
         password_again(sandbox, false)
     }),
@@ -824,7 +823,7 @@ fn each_accounts_requests_stay_on_its_services(
     )
 }
 
-/// Teams Dark, own servers on: the window asking for an account, the own server's form, and what it says of an empty
+/// Teams Dark: the window asking for an account, the own server's form, and what it says of an empty
 /// address and of a user name that isn't one, nothing sent.
 fn own_form_in_dark(sandbox: &Sandbox) -> SandboxResult {
     let (mut running, mut trace, _) = start(sandbox, "dark")?;
@@ -865,36 +864,6 @@ fn own_form_in_dark(sandbox: &Sandbox) -> SandboxResult {
     prompt_line(&running, WAIT, "a user name that isn't one", |line| {
         line.contains(&format!("problem={}", teams_ui::account_prompt::NOT_A_USER))
     })?;
-    quit_and_finish(sandbox, &mut trace, running)
-}
-
-/// Own servers off: an own server's account in `accounts.toml` stays there unstarted, and the window the rail's "+"
-/// opens asks for a Microsoft 365 account alone, as before: no choice to click, and Enter on what isn't an account
-/// says so without opening anything.
-fn without_own_servers(sandbox: &Sandbox) -> SandboxResult {
-    let (mut running, mut trace, said) = start(sandbox, "off")?;
-    ensure(
-        said.iter().any(|line| line == "off-accounts entries=3 started=2"),
-        || format!("the own server's entry isn't kept unstarted: {said:?}"),
-    )?;
-    accounts_shown(&mut trace, &mut running, &[LAB_A, LAB_B])?;
-    let mut input = sandbox.input()?;
-    input.click(RAIL_ADD_AT.0, RAIL_ADD_AT.1, keys::BTN_LEFT)?;
-    let asked = prompt_now(sandbox, &running)?;
-    ensure(asked.contains("kind=microsoft"), || format!("the window: {asked}"))?;
-    shot(sandbox, "ngteams-accounts-add-flag-off.png")?;
-    input.type_text("someone")?;
-    input.key(keys::ENTER)?;
-    prompt_line(&running, WAIT, "what isn't an account", |line| {
-        line.contains("account=someone ")
-            && line.contains(&format!("problem={}", teams_ui::account_prompt::NOT_AN_ACCOUNT))
-    })?;
-    input.click(OWN_SEGMENT_AT.0, OWN_SEGMENT_AT.1, keys::BTN_LEFT)?;
-    let clicked = prompt_now(sandbox, &running)?;
-    ensure(clicked.contains("kind=microsoft"), || {
-        format!("a choice of place is there without own servers: {clicked}")
-    })?;
-    shot(sandbox, "ngteams-accounts-add-flag-off-refused.png")?;
     quit_and_finish(sandbox, &mut trace, running)
 }
 
@@ -1406,15 +1375,13 @@ impl MockLab {
 /// How the app's child runs (the scenes of [`SCENES`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Own servers on, an own server running for the account the window adds, the app's requests on record.
+    /// An own server running for the account the window adds, the app's requests on record.
     Window,
-    /// Own servers on, in Teams Dark.
+    /// In Teams Dark.
     Dark,
-    /// Own servers on, in Teams Light, no own server running.
+    /// In Teams Light, no own server running.
     Keys,
-    /// Own servers off.
-    Off,
-    /// Own servers on, a third account that is on an own server shown beside a and b, the control socket served.
+    /// A third account that is on an own server shown beside a and b, the control socket served.
     Shown,
     /// [`Mode::Shown`] in Teams Dark.
     ShownDark,
@@ -1430,12 +1397,12 @@ enum Mode {
     AdminLight,
     /// [`Mode::AdminLight`] with the parent's server's user [`admin_qa::RUNNING`] signed in beside its administrator.
     AdminTwo,
-    /// Own servers on, the parent's server's seeded account signed in beside a and b, its colleagues' chats written
+    /// The parent's server's seeded account signed in beside a and b, its colleagues' chats written
     /// beforehand, the mock serving Loki (the profile card QA scenes).
     Card,
     /// [`Mode::Card`] in Teams Dark.
     CardDark,
-    /// Own servers on, the parent's server's seeded account signed in beside a and b, its team, channel and meeting
+    /// The parent's server's seeded account signed in beside a and b, its team, channel and meeting
     /// made beforehand, the parent's steps answered (the hidden services QA scenes).
     Hidden,
     /// [`Mode::Hidden`] in Teams Dark.
@@ -1448,7 +1415,6 @@ impl Mode {
             "window" => Some(Self::Window),
             "dark" => Some(Self::Dark),
             "keys" => Some(Self::Keys),
-            "off" => Some(Self::Off),
             "shown" => Some(Self::Shown),
             "shown-dark" => Some(Self::ShownDark),
             "restart" => Some(Self::Restart),
@@ -1480,11 +1446,6 @@ impl Mode {
             Self::HiddenDark => "hidden-dark",
             _ => "first",
         }
-    }
-
-    /// Own servers on (`NGTEAMS_OWN_SERVER=1`, as the setup takes it).
-    fn own_servers(self) -> bool {
-        self != Self::Off
     }
 
     /// Teams Dark, whatever the system says.
@@ -1715,23 +1676,16 @@ fn dead_origin() -> SandboxResult<String> {
     Ok(dead)
 }
 
-/// The app's runner with a credential store of this process alone (the sandbox has no Secret Service) and own
-/// servers as `mode` says. The accounts the window starts with (`held`) are in `accounts.toml` as accounts signed in
+/// The app's runner with a credential store of this process alone (the sandbox has no Secret Service). The accounts the window starts with (`held`) are in `accounts.toml` as accounts signed in
 /// before. With an own server running, its certificate authority is written into the account's entry beforehand, as
 /// a user of a self-signed deployment writes it; started again ([`Mode::Restart`]), the entry is the first run's.
-/// Without own servers, an own server's account signed in before is in the file too, and stays unstarted: said as
-/// `off-accounts entries=<n> started=<n>`.
 fn runner_of(
     root: &Path,
     mode: Mode,
     held: &[ngteams::accounts_file::PersonalAccount],
     server: Option<&ngteams::accounts_file::OwnServer>,
 ) -> SandboxResult<ngteams::accounts::Runner> {
-    use ngteams::accounts_file::{OwnServer, PersonalAccount};
-    let setup = support::runner(root)?
-        .setup
-        .with_secrets(AppSecrets::in_memory())
-        .with_own_servers(mode.own_servers());
+    let setup = support::runner(root)?.setup.with_secrets(AppSecrets::in_memory());
     for account in held.iter().filter(|account| account.server.is_none()) {
         account.save(&setup.paths)?;
     }
@@ -1739,20 +1693,6 @@ fn runner_of(
         server.filter(|_| matches!(mode, Mode::Window | Mode::AdminDark | Mode::AdminLight | Mode::AdminTwo))
     {
         setup.ask_for_on(OWN_UPN, server)?;
-    }
-    if !mode.own_servers() {
-        PersonalAccount::pending_on(OWN_UPN, &OwnServer::parse(SHOWN_SERVER, "")?)?
-            .signed_in_as(
-                "00000000-0000-4000-8000-0000000000a1",
-                "00000000-0000-4000-8000-000000000001",
-                None,
-            )?
-            .save(&setup.paths)?;
-        say(&format!(
-            "off-accounts entries={} started={}",
-            setup.accounts()?.len(),
-            setup.signed_in_accounts()?.len()
-        ));
     }
     Ok(ngteams::accounts::Runner {
         setup,

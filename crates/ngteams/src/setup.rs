@@ -22,16 +22,6 @@ pub enum SetupError {
 pub struct Setup {
     pub paths: PersonalPaths,
     secrets: AppSecrets,
-    own_servers: bool,
-}
-
-/// The variable that turns own-server accounts on (`NGTEAMS_OWN_SERVER=1`) while they are being built.
-pub const OWN_SERVER_ENV: &str = "NGTEAMS_OWN_SERVER";
-
-/// Whether this process was started with own-server accounts on ([`OWN_SERVER_ENV`]).
-#[must_use]
-pub fn own_servers_from_env() -> bool {
-    std::env::var_os(OWN_SERVER_ENV).is_some_and(|value| value == "1")
 }
 
 impl Setup {
@@ -52,21 +42,7 @@ impl Setup {
         Ok(Self {
             paths,
             secrets: AppSecrets::personal(),
-            own_servers: false,
         })
-    }
-
-    /// Whether own-server accounts are offered, signed in and started (off unless asked for).
-    #[must_use]
-    pub fn with_own_servers(mut self, own_servers: bool) -> Self {
-        self.own_servers = own_servers;
-        self
-    }
-
-    /// Whether own-server accounts are on ([`Self::with_own_servers`]).
-    #[must_use]
-    pub fn own_servers(&self) -> bool {
-        self.own_servers
     }
 
     /// Uses the startup-selected credential backend for every account operation.
@@ -97,8 +73,7 @@ impl Setup {
     /// As [`Self::accounts`].
     pub fn signed_in_accounts(&self) -> Result<Vec<PersonalAccount>, SetupError> {
         let mut accounts = self.accounts()?;
-        // an own server's account stays in the file, unstarted, while own servers are off
-        accounts.retain(|account| account.is_signed_in() && (self.own_servers || account.server.is_none()));
+        accounts.retain(PersonalAccount::is_signed_in);
         Ok(accounts)
     }
 
@@ -149,12 +124,8 @@ impl Setup {
     /// the others without an object id.
     ///
     /// # Errors
-    /// [`SetupError::Personal`] while own servers are off, for a bad UPN or server, or a file that can't be read or
-    /// written.
+    /// [`SetupError::Personal`] for a bad UPN or server, or a file that can't be read or written.
     pub fn ask_for_on(&self, upn: &str, server: &OwnServer) -> Result<PersonalAccount, SetupError> {
-        if !self.own_servers {
-            return Err(PersonalError::Account(format!("own servers are off (set {OWN_SERVER_ENV}=1)")).into());
-        }
         let pending = PersonalAccount::pending_on(upn, server)?;
         match self.held(&pending)? {
             Some(held) if server.ca_file.is_none() || held.ca_file == server.ca_file => Ok(held),

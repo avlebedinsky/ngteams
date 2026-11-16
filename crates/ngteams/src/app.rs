@@ -8,7 +8,7 @@
 //!
 //! **Adding an account** (the rail's "+"): the window asking for the account opens (the first sign-in's), the account
 //! is signed in through the sign-in window off GPUI's foreground ([`crate::accounts::add`]), and once that goes through
-//! its engine starts ([`Runner::start`]) and the window shows it; nothing else restarts. With own servers on, the
+//! its engine starts ([`Runner::start`]) and the window shows it; nothing else restarts. The
 //! window asks first where the account is: an own server's is signed in with its password on that server alone
 //! ([`crate::own_prompt`]) and runs beside the Microsoft 365 accounts, its tokens, store and services its own; one
 //! that is an administrator of its server gets Manage users in its settings ([`offer_user_admin`]). **Removing one** ("Sign out
@@ -371,7 +371,7 @@ fn admin_answer<S: SecretStore + 'static>(
 /// region saved and its refresh token stored, so its session has a token to ask with). A question that gets no answer
 /// is logged (its kind alone) and asked again later; a "no" is final for the run. Once the server says the account is
 /// no administrator any more (the page asked it), Manage users goes. A Microsoft 365 account is asked nothing and
-/// offered nothing; neither is any account while own servers are off.
+/// offered nothing.
 fn offer_user_admin<S: SecretStore + 'static>(
     setup: &crate::setup::Setup,
     (account, session, sessions): (&PersonalAccount, &Arc<Session<S>>, tokio::runtime::Handle),
@@ -379,9 +379,6 @@ fn offer_user_admin<S: SecretStore + 'static>(
     desktop: &Entity<Desktop>,
     cx: &mut App,
 ) {
-    if !setup.own_servers() {
-        return;
-    }
     let Some(service) = AdminService::of(account, Arc::clone(session), sessions) else {
         return;
     };
@@ -614,12 +611,8 @@ impl Running {
         {
             return;
         }
-        let own = if self.runner.setup.own_servers() {
-            OwnOffer::Choice
-        } else {
-            OwnOffer::No
-        };
-        let opened = account_prompt::open_offering(cx, PERSONAL_APP_ID, "Add an account".into(), None, &own);
+        let opened =
+            account_prompt::open_offering(cx, PERSONAL_APP_ID, "Add an account".into(), None, &OwnOffer::Choice);
         let (window, prompt) = match opened {
             Ok(opened) => opened,
             Err(error) => {

@@ -169,7 +169,7 @@ fn own_account(
     media: CallMedia,
 ) -> SandboxResult<(PersonalAccount, AccountEngine<MemorySecretStore>)> {
     let paths = PersonalPaths::new(dir.join("config"), dir.join("data"));
-    let setup = Setup::new(paths)?.with_own_servers(true);
+    let setup = Setup::new(paths)?;
     let server = accounts_file::OwnServer::parse(origin, ca_file)?;
     let store = MemorySecretStore::new();
     let runtime = ngteams::accounts::runtime()?;

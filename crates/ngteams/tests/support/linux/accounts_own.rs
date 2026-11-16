@@ -425,9 +425,7 @@ pub fn child_again(is_dark: bool) -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let dir = tempfile::tempdir()?;
     let paths = PersonalPaths::new(dir.path().join("ngteams-config"), dir.path().join("ngteams-data"));
-    let setup = Setup::new(paths)?
-        .with_secrets(ngteams::secrets::AppSecrets::in_memory())
-        .with_own_servers(true);
+    let setup = Setup::new(paths)?.with_secrets(ngteams::secrets::AppSecrets::in_memory());
     let own = Own::start()?;
     own.add_user(AGAIN_UPN, AGAIN_NAME)?;
     PersonalAccount::new(AGAIN_UPN, MICROSOFT_OID, TENANT)?.save(&setup.paths)?;
@@ -487,9 +485,7 @@ pub fn child_said(is_dark: bool) -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let dir = tempfile::tempdir()?;
     let paths = PersonalPaths::new(dir.path().join("ngteams-config"), dir.path().join("ngteams-data"));
-    let setup = Setup::new(paths)?
-        .with_secrets(ngteams::secrets::AppSecrets::in_memory())
-        .with_own_servers(true);
+    let setup = Setup::new(paths)?.with_secrets(ngteams::secrets::AppSecrets::in_memory());
     let own = Own::start()?;
     own.add_user(AGAIN_UPN, AGAIN_NAME)?;
     let account = accounts::add_own(&setup, AGAIN_UPN, &own.entry()?, &Secret::new(PASSWORD))?;
@@ -575,9 +571,7 @@ pub fn child_first(is_dark: bool) -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let dir = tempfile::tempdir()?;
     let paths = PersonalPaths::new(dir.path().join("ngteams-config"), dir.path().join("ngteams-data"));
-    let setup = Setup::new(paths)?
-        .with_secrets(ngteams::secrets::AppSecrets::in_memory())
-        .with_own_servers(true);
+    let setup = Setup::new(paths)?.with_secrets(ngteams::secrets::AppSecrets::in_memory());
     let own = Own::start()?;
     own.add_user(AGAIN_UPN, AGAIN_NAME)?;
     let account = PersonalAccount::pending_on(AGAIN_UPN, &accounts_file::OwnServer::parse(own.origin(), "")?)?;

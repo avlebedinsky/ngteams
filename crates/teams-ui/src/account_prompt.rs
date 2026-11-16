@@ -45,8 +45,8 @@ use crate::user_admin::MIN_PASSWORD;
 use crate::window::{KitRoot, init};
 use crate::{app_icon, theme};
 
-/// The window's size: a small dialog of its own.
-const SIZE: (f32, f32) = (480.0, 400.0);
+/// The window's width: a small dialog of its own.
+const WIDTH: f32 = 480.0;
 
 /// The app's icon over the title, as Teams' own sign-in shows its logo.
 const LOGO: f32 = 48.0;
@@ -60,8 +60,8 @@ pub const NOT_AN_ACCOUNT: &str = "Enter your work account, like name@company.com
 /// What the screen says while Microsoft's sign-in window is open.
 pub const SIGNING_IN: &str = "Finish signing in in Microsoft's window that opened.";
 
-/// The window's height with the choice of where the account is and an own server's fields.
-const OWN_HEIGHT: f32 = 740.0;
+/// The window's height, for the choice of where the account is and an own server's fields.
+const HEIGHT: f32 = 740.0;
 
 /// What the certificate authority's field asks for when it is empty.
 pub const CA_PLACEHOLDER: &str = if cfg!(windows) {
@@ -252,12 +252,9 @@ enum OwnAsk {
     },
 }
 
-/// Whether, and how, the screen asks for an own server's account.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// How the screen asks for an own server's account.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnOffer {
-    /// Microsoft 365 alone, as before own servers.
-    #[default]
-    No,
     /// The choice between Microsoft 365 and an own server.
     Choice,
     /// This own server's account: its password alone is asked.
@@ -1172,8 +1169,7 @@ pub fn open_offering(
     account: Option<&str>,
     own: &OwnOffer,
 ) -> gpui::Result<(WindowHandle<KitRoot>, Entity<AccountPrompt>)> {
-    let height = if *own == OwnOffer::No { SIZE.1 } else { OWN_HEIGHT };
-    let bounds = Bounds::centered(None, size(px(SIZE.0), px(height)), cx);
+    let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
@@ -1190,7 +1186,6 @@ pub fn open_offering(
         let view = cx.new(|cx| {
             let mut prompt = AccountPrompt::new(account, window, cx).following(following);
             match own {
-                OwnOffer::No => {}
                 OwnOffer::Choice => prompt.offer_own_server(cx),
                 OwnOffer::Again { server, user } => prompt.ask_own_again(server, user, window, cx),
                 OwnOffer::First { server, user } => prompt.ask_own_first(server, user, window, cx),
