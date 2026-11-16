@@ -119,8 +119,12 @@ fn missed(call: &Call, to: &str, at: i64) -> Value {
 }
 
 /// Writes what the ended call `call` leaves each party: its call log entry, and a missed call's activity item for
-/// each callee who never took it. One not written is logged: the call itself is over either way.
+/// each callee who never took it. One not written is logged: the call itself is over either way. A meeting's call
+/// leaves neither, as in Teams: no lab account's call log has an entry for the meetings it was in.
 pub(super) async fn tell(app: &App, call: &Call) {
+    if call.meeting.is_some() {
+        return;
+    }
     let logged = log(app, call).await;
     let fed = tell_missed(app, call).await;
     for (what, written) in [("the call log", logged), ("a missed call's activity", fed)] {

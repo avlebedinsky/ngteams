@@ -424,6 +424,67 @@ async fn the_organizer_ends_the_meeting_for_everyone_in_it_and_its_chat_tells_th
     }
 }
 
+/// What `reader`'s own streams hold of calls: its call log's entries and its activity feed's missed calls.
+async fn call_traces(mixed: &Mixed, reader: &Person) -> Vec<String> {
+    assert!(reader.engine.handle.sync().await.unwrap().failed.is_empty());
+    let client = reader.engine.account.client(mixed.server());
+    let reads = ChatReads::new(&client);
+    let log = reads.messages("48:calllogs", 20).await.unwrap();
+    let feed = reads.messages("48:notifications", 20).await.unwrap();
+    let missed = feed.messages.into_iter().filter(|item| {
+        item.properties
+            .get("activity")
+            .is_some_and(|activity| activity["activitySubtype"] == "missedCall")
+    });
+    log.messages
+        .into_iter()
+        .chain(missed)
+        .map(|message| message.content)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_meeting_leaves_no_call_log_entry_and_no_missed_call_as_in_teams() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let mut eve = Person::new(&mixed, "Eve", C_TONE).await;
+        let event = schedule(&ada, &[&bert]).await;
+        admit_automatically(&mixed, &ada, &event, "InvitedUsers").await;
+        let join = join_of(&event);
+        let a_call = joined(&mut ada, &join).await;
+        let b_call = joined(&mut bert, &join).await;
+        // one turned away from the lobby never took the call, but no one rang it either
+        let e_call = eve.engine.call(join.clone()).await;
+        eve.engine.status(e_call, &CallStatus::Lobby).await;
+        let turned_away = eve.engine.mri.clone();
+        lobby_is(&mut ada, a_call, &[&turned_away]).await;
+        let deny = CallAction::Lobby {
+            call: a_call,
+            waiting: Mri::new(turned_away),
+            admit: false,
+        };
+        ada.engine.call(deny).await;
+        eve.engine.ended(e_call).await;
+        ada.engine.call(CallAction::EndMeeting { call: a_call }).await;
+        bert.engine.ended(b_call).await;
+        ada.engine.ended(a_call).await;
+        let chat = event.meeting_chat.clone().unwrap();
+        assert!(call_events(&mixed, &bert, &chat).await[0].contains("callEnded"));
+        // a call's end is told in its chat just before it is written to the parties' streams
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            for person in [&ada, &bert, &eve] {
+                let traces = call_traces(&mixed, person).await;
+                assert!(traces.is_empty(), "{}: {traces:?}", person.name);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        shut_down(vec![ada, bert, eve], mixed).await;
+    }
+}
+
 /// A team `organizer` makes with `others` in it, and a channel of it, once each person's engine has them: the channel.
 async fn channel_of(mixed: &Mixed, organizer: &Person, others: &[&Person]) -> String {
     let id = organizer.id().to_owned();

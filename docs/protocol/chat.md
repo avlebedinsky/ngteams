@@ -1174,7 +1174,9 @@ Read from a lab account's synced store of 2026-11-16 (84 call entries from the l
 and transcript records); no value is copied here. `48:calllogs` (`threadType` `streamofcalllogs`) holds one `Text`
 message per call the account was in or rang for. Its sender is the call's caller (its `from`), its content reads
 "Call Logs for Call <call id>", its arrival is the call's end (within a few seconds), and its `properties` are
-`call-log` (the call, a JSON object as text) and `s2spartnername` `concore_gvc`. The call:
+`call-log` (the call, a JSON object as text) and `s2spartnername` `concore_gvc`. A meeting's call leaves no entry:
+one lab account's log, which holds every call around them, has none for the three meetings (`19:meeting_…` chats)
+whose calls it joined from 2026-11-06 to 2026-11-11. The call:
 
 - `callId`, `startTime`, `connectTime` (null for a call the account never took), `endTime` (ISO times, 7 digits).
 - `callDirection` `outgoing` (the account placed it) or `incoming`; `callType` `twoParty` or `multiParty`;

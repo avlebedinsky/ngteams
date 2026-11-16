@@ -1074,7 +1074,8 @@ for a meeting locked by its organizer, Spotlight, the meeting's timer, notes and
 When a 1:1 or group call ends, each of its parties gets an entry in its own call log (`48:calllogs`, one of [the
 account's own streams](#the-accounts-own-streams)), and each callee who never took it gets a missed call in its
 activity feed. No capture shows the service writing either; both take the shapes a lab account's synced streams
-hold (`docs/protocol/chat.md`, "The call log"), and the client's catch-up and push store them as any stream's.
+hold (`docs/protocol/chat.md`, "The call log"), and the client's catch-up and push store them as any stream's. A
+[meeting's](#meetings) call leaves neither, as in Teams.
 
 - **An entry** is a `Text` message from the caller, "Call Logs for Call <call id>", whose `properties.call-log`
   (JSON as text) tells the call: its id and times (`connectTime` when the party came into it, else null), the
